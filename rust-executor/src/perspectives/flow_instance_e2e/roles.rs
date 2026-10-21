@@ -1,4 +1,8 @@
 use super::*;
+use crate::perspectives::interpretation_test_support::{setup_perspective_no_llm, TASK_SDNA};
+use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::shacl_parser::{parse_flow_to_links, CONSENSUS_RULE_PREDICATE};
+use crate::types::{LinkInput, LinkMutations};
 // ---------------------------------------------------------------------------
 // Roles
 // ---------------------------------------------------------------------------
@@ -380,6 +384,193 @@ async fn a_revocation_from_outside_the_grants_authority_is_ignored() {
         "the admin's own tombstone ends the grant"
     );
     assert_eq!(f.derived().await.state, "review");
+}
+
+/// #1144, the role gates under test. `grantedByFlow` is the key #1076 renamed
+/// to `producedByFlow`. Dropped, it leaves the plain `owner` gate.
+const PLAIN_GATE: &str = r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#;
+const RENAMED_KEY_GATE: &str = r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner","grantedByFlow":{"flow":"ns://GrantFlow","state":"Granted"}}}"#;
+const DUPLICATE_KEY_GATE: &str =
+    r#"{"n":1,"n":2,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#;
+
+/// Deliver a state's `consensusRule` as sync does: a peer's signed link,
+/// through `diff_from_link_language`. The local write paths refuse a rule the
+/// reader could not read before storing it (#1144, the test below); sync
+/// stores what the peer wrote, so this is how such a rule reaches a graph.
+async fn sync_consensus_rule(f: &mut Fixture, state_uri: &str, rule: &str) {
+    let peer = TestSigner::generate();
+    let link = peer.sign(
+        Link {
+            source: state_uri.to_string(),
+            predicate: Some(CONSENSUS_RULE_PREDICATE.to_string()),
+            target: literal(rule),
+        }
+        .normalize(),
+    );
+    f.perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(vec![LinkExpression::from(
+            link,
+        )]))
+        .await
+        .expect("sync a peer's consensusRule");
+    // A rule is part of the definition, so this queued a sweep. Wait it out,
+    // or it can record an edge before the test's own pass does.
+    f.perspective.settle_flow_passes().await;
+}
+
+/// #1144, the read side. A role gate carrying a key the reader does not know
+/// is refused, not read as the gate without that key. The rule arrives by
+/// sync, past the write-time check: a definition a peer wrote, or one stored
+/// before the check existed, must still fail closed.
+///
+/// Dropped, `grantedByFlow` leaves the plain `owner` gate, which the voter
+/// below passes, so the edge settled on a vote the author meant to require a
+/// flow receipt for. The first run is the positive control: the same fixture,
+/// grant and vote under the rule without the stale key settle the edge, so the
+/// refusal is the key's.
+///
+/// Killing mutation: drop the `role_gate_key_errors` check from
+/// `decode_consensus_rule`. The rule then decodes as the plain `owner` gate and
+/// the second run settles to `scoped`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_role_gate_with_an_unknown_key_refuses_the_edge() {
+    for (rule, expected, why) in [
+        (
+            PLAIN_GATE,
+            "scoped",
+            "control: the voter holds the plain role, so the edge settles",
+        ),
+        (
+            RENAMED_KEY_GATE,
+            "identified",
+            "an unknown key must refuse the edge, not fall back to the plain role",
+        ),
+    ] {
+        let mut f = seed_satisfied_fixture(None).await;
+        sync_consensus_rule(&mut f, "delivery://Delivery.scoped", rule).await;
+        f.link(
+            TASK,
+            "ns://owner",
+            &literal(&acting_did(&f)),
+            LinkStatus::Local,
+        )
+        .await;
+        f.mint_one().await;
+        consensus_pass(&mut f).await;
+        assert_eq!(f.derived().await.state, expected, "{why}");
+    }
+}
+
+/// #1144, the write side. A flow definition whose `consensusRule` the reader
+/// would refuse (an unknown key, or a key written twice) is refused by the
+/// write paths `addFlow` (`link_mutations`) and `addSdna` (`add_links`) use,
+/// with an error naming the state and the key, and nothing of it is stored.
+/// The same definition with the rule spelt right adds through the same path.
+///
+/// The definition is built as `SHACLFlow.toLinks` / `parse_flow_to_links`
+/// emit it, with the state's rule literal swapped for the one under test:
+/// `parse_flow_to_links` decodes through serde, which would already drop the
+/// unknown key.
+///
+/// Killing mutation: drop the `check_consensus_rule_links` call from
+/// `link_mutations` or `add_links`. The definition is stored and no error
+/// comes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flow_definition_with_an_unreadable_role_gate_is_refused_before_it_is_stored() {
+    const NAMESPACE: &str = "gated://";
+    const STATE_URI: &str = "gated://Delivery.scoped";
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+    let definition = |rule: &str| -> Vec<Link> {
+        let valid: serde_json::Value = serde_json::from_str(PLAIN_GATE).expect("valid rule");
+        let flow = serde_json::json!({
+            "name": "Delivery",
+            "namespace": NAMESPACE,
+            "states": [
+                { "name": "identified", "value": 0.0 },
+                { "name": "scoped", "value": 1.0, "consensusRule": valid }
+            ],
+            "transitions": [
+                { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
+            ],
+        });
+        parse_flow_to_links(&flow.to_string(), "Delivery")
+            .expect("parse_flow_to_links")
+            .into_iter()
+            .map(|mut link| {
+                if link.predicate.as_deref() == Some(CONSENSUS_RULE_PREDICATE) {
+                    assert_eq!(link.source, STATE_URI, "the rule sits on the state");
+                    link.target = literal(rule);
+                }
+                link
+            })
+            .collect()
+    };
+    let as_mutations = |links: &[Link]| LinkMutations {
+        additions: links
+            .iter()
+            .map(|l| LinkInput {
+                source: l.source.clone(),
+                predicate: l.predicate.clone(),
+                target: l.target.clone(),
+            })
+            .collect(),
+        removals: vec![],
+    };
+    async fn stored(perspective: &PerspectiveInstance, namespace: &str) -> usize {
+        perspective
+            .get_links(&LinkQuery::default())
+            .await
+            .expect("get_links")
+            .into_iter()
+            .filter(|l| l.data.source.starts_with(namespace))
+            .count()
+    }
+
+    for (what, rule, names) in [
+        (
+            "an unknown key",
+            RENAMED_KEY_GATE,
+            "unknown key `fromRole.grantedByFlow` (renamed to `producedByFlow` in #1076)",
+        ),
+        ("a duplicate key", DUPLICATE_KEY_GATE, "duplicate key `n`"),
+    ] {
+        let links = definition(rule);
+        let via_add_flow = perspective
+            .link_mutations(as_mutations(&links), LinkStatus::Local, &ctx)
+            .await
+            .map(|_| ());
+        let via_add_sdna = perspective
+            .add_links(links.clone(), LinkStatus::Local, None, &ctx)
+            .await
+            .map(|_| ());
+        for (path, result) in [
+            ("link_mutations", via_add_flow),
+            ("add_links", via_add_sdna),
+        ] {
+            let err = result
+                .err()
+                .unwrap_or_else(|| panic!("{path} stored a definition with {what}"))
+                .to_string();
+            assert!(
+                err.contains(STATE_URI) && err.contains(names),
+                "{path}, {what}: the error names the state and the key; got: {err}"
+            );
+        }
+        assert_eq!(
+            stored(&perspective, NAMESPACE).await,
+            0,
+            "{what}: nothing of the definition is stored"
+        );
+    }
+
+    let links = definition(PLAIN_GATE);
+    perspective
+        .link_mutations(as_mutations(&links), LinkStatus::Local, &ctx)
+        .await
+        .expect("a definition whose rule reads adds");
+    assert_eq!(stored(&perspective, NAMESPACE).await, links.len());
 }
 
 /// Register `ns://Task` again with its `owner` property declared

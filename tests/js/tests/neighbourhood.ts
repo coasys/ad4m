@@ -57,11 +57,13 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 expect(perspective?.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
                 expect(perspective?.neighbourhood!.data.meta.links.length).to.be.equal(1);
                 
-                // The perspective should have left Private state. It may still be in
-                // NeighbourhoodCreationInitiated, or may have already reached Synced if
-                // the link-language startup completed before this poll returned — both are valid.
+                // The perspective should have left Private state. A publish wakes the
+                // attach at once, so this poll can see any step on the way to Synced:
+                // NeighbourhoodCreationInitiated, the link language installed but not
+                // yet synced, or Synced.
                 expect([
                     PerspectiveState.NeighboudhoodCreationInitiated,
+                    PerspectiveState.LinkLanguageInstalledButNotSynced,
                     PerspectiveState.Synced,
                 ]).to.include(perspective?.state);
                 

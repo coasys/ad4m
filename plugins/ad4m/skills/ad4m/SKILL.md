@@ -22,7 +22,7 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 - `get_documentation` — the executor's own docs (`overview` / `usage` / `flux` / `models` / `architecture`) as markdown, no auth needed — the cold-start entry point (see below)
 - `describe_perspective` — the schema of every registered class, as data
 - `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` — read/write any subject class by name
-- `instance_transcript` — the newest N instances of one class under a parent as a readable transcript (the way to read a channel, see Rule 6)
+- `instance_transcript` — the newest N children under a parent that carry text (any class with a `text` property or one aliased to `text`, read through the built-in TextContent; no `class_name`) as a readable transcript (the way to read a channel, see Rule 6)
 - `add_child` / `get_children` — the raw `ad4m://has_child` tree, class-agnostic (`get_children` takes `parent`, not `id` — see `ad4m_get_documentation(topic="usage")`)
 - `add_link` / `query_links` — raw link access (rarely needed, see Rule 4)
 - `neighbourhood_join_from_url` / `neighbourhood_publish_from_perspective`
@@ -236,7 +236,7 @@ Model instance ids and the `ad4m://has_child` tree (`add_child` / `get_children`
 
 **If you were woken by the AD4M waker** (wake message mentions "AD4M neighbourhood", a perspective UUID, or a channel address) — follow this procedure.
 
-The waker POSTs to your `/hooks/wake` endpoint. Parse `Agent DID`, `Perspective`, `Event type`, and for mentions the `Item`/`Parents` list.
+The waker POSTs to your `/hooks/wake` endpoint. Parse `Agent DID`, `Perspective`, `Event type`, and for mentions the `Item`/`Parents`/`Ancestors` list.
 
 **Use `/hooks/wake`, NOT `/hooks/agent`** — `/hooks/wake` enqueues into your main session (with this skill loaded); `/hooks/agent` spawns an isolated sub-agent without it.
 
@@ -244,7 +244,7 @@ The waker POSTs to your `/hooks/wake` endpoint. Parse `Agent DID`, `Perspective`
 
 ### The wake event hands you addresses, not types
 
-`Item` is the address of whatever instance carried your name — the mention query matches links, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under. Nothing in the event tells you what any of them are; the space's own ontology does.
+`Item` is the address of whatever instance carried your name — the mention query matches links, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under, and `Ancestors` everything above them, nearest first — the thread, the conversation, the space the item sits in, a few levels up. Nothing in the event tells you what any of them are; the space's own ontology does.
 
 ### Step 1: work out what you are looking at
 
@@ -252,7 +252,7 @@ The waker POSTs to your `/hooks/wake` endpoint. Parse `Agent DID`, `Perspective`
 
 ### Step 2: gather just enough context
 
-Type the parent the same way, then read what else is under it — `ad4m_instance_transcript(class_name=…, parent=<Parent>)` for a text-bearing class, `ad4m_instance_query(class_name=…, parent=<Parent>)` for full property maps, `ad4m_get_children(parent=<Parent>)` when you don't yet know the classes. The sibling instances are usually what makes the mention intelligible. Walk further up (`query_links(target=<Parent>, predicate="ad4m://has_child")`) or down only when the ask is still unclear. The full procedure, including when each hop is worth its call: `references/waker.md`.
+Type the parent the same way, then read what else is under it — `ad4m_instance_transcript(parent=<Parent>)` for the children that carry text, `ad4m_instance_query(class_name=…, parent=<Parent>)` for full property maps, `ad4m_get_children(parent=<Parent>)` when you don't yet know the classes. The sibling instances are usually what makes the mention intelligible. Then read as far up the `Ancestors` as the request reaches — by default, not only when it is unclear: "what did we decide" or "summarise this" is about the conversation, so read the ancestor that holds the conversation, not just the item's siblings; a question about the item itself needs only its own level. The full procedure: `references/waker.md`.
 
 ### Step 3: answer in the shape the ontology allows
 

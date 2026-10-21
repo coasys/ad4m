@@ -1074,12 +1074,23 @@ export class Ad4mModel {
    * Shape resolution happens server-side from the perspective's SHACL triples.
    * @internal
    */
+  /**
+   * The name the executor knows this class by: its class name, or a
+   * built-in abstract class's URI (`ad4m://TextContent`, #1446). The URI is
+   * the class's own static only: a subclass is a class of its own.
+   * @internal
+   */
+  static queriedAs(): string {
+    const builtinUri = Object.prototype.hasOwnProperty.call(this, 'builtinUri') ? (this as any).builtinUri : undefined;
+    return builtinUri || this.getModelMetadata().className;
+  }
+
   static prepareModelQueryParams(
     query: Query = {},
     classNameOverride?: string | null,
   ): { className: string; queryJson: string; metadata: ModelMetadata } {
     const metadata = this.getModelMetadata();
-    const className = classNameOverride || metadata.className;
+    const className = classNameOverride || this.queriedAs();
 
     // Expand includeAll: true to a full IncludeMap covering every forward relation.
     if (query.includeAll) {
@@ -1181,6 +1192,185 @@ export class Ad4mModel {
     return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
   }
 
+
+  // ── One query over several classes (#1238) ────────────────────────────────
+
+  /**
+   * Build the wire parameters for one query over several classes.
+   *
+   * Each class normalises the query as it would for itself — its polymorphic
+   * include defaults, its `$` projections, its parent predicate — and the
+   * results are merged: includes and projections by key (the first class that
+   * declares a key decides its form; a projection two classes tag with
+   * different target classes is refused), the parent scope only when every
+   * class that can resolve it resolves it to the same predicate.
+   * @internal
+   */
+  static prepareUnionQueryParams(
+    classes: (typeof Ad4mModel)[],
+    query: Query = {},
+  ): { classNames: string[]; queryJson: string } {
+    if (!classes.length) throw new Error('A query over several classes needs at least one class');
+    const { parent, preferClasses, ...rest } = query;
+    const inputs = classes.map((c) => JSON.parse(c.prepareModelQueryParams(rest).queryJson));
+    // A projection is tagged with its relation's target class, at every depth,
+    // and the executor hydrates a list projection (and resolves its `where`)
+    // as that class. Two classes that tag the same key differently cannot share
+    // one form of it, so the key is refused rather than read as the first's.
+    const tags = new Map<string, string>();
+    const collectTags = (node: any, path: string) => {
+      if (!node || typeof node !== 'object') return;
+      for (const [k, v] of Object.entries(node)) {
+        if (k === 'targetClassName' && typeof v === 'string') {
+          const seen = tags.get(path);
+          if (seen !== undefined && seen !== v) {
+            throw new Error(
+              `projection '${path}': the classes resolve it to different target classes ` +
+              `(${seen}, ${v}); query those classes separately`,
+            );
+          }
+          tags.set(path, v);
+        } else {
+          collectTags(v, path ? `${path}.${k}` : k);
+        }
+      }
+    };
+    for (const input of inputs) {
+      collectTags(input.include, 'include');
+      collectTags(input.projections, 'projections');
+    }
+    const merged: any = { ...inputs[0] };
+    if (preferClasses) merged.preferClasses = preferClasses;
+    for (const key of ['include', 'projections'] as const) {
+      const combined = Object.assign({}, ...inputs.map((i) => i[key] ?? {}).reverse());
+      if (Object.keys(combined).length) merged[key] = combined;
+      else delete merged[key];
+    }
+    if (parent) {
+      // A model-form scope names its predicate through the relation that
+      // targets the queried class, so each class may resolve it differently
+      // or not at all. One query has one scope.
+      const scopes: string[] = [];
+      let firstError: unknown;
+      for (const c of classes) {
+        try {
+          scopes.push(JSON.stringify(JSON.parse(c.prepareModelQueryParams({ parent }).queryJson).parent));
+        } catch (e) {
+          firstError ??= e;
+        }
+      }
+      if (!scopes.length) throw firstError;
+      if (new Set(scopes).size > 1) {
+        throw new Error(
+          'parent(): the classes resolve the parent scope to different predicates; ' +
+          'pass the predicate itself (or a `field`) so they share one scope',
+        );
+      }
+      merged.parent = JSON.parse(scopes[0]);
+    }
+    return {
+      classNames: classes.map((c) => c.queriedAs()),
+      queryJson: JSON.stringify(merged),
+    };
+  }
+
+  /**
+   * Build each row of a union result as the class the executor hydrated it as
+   * (`__subjectClass`). A row of a class not in `classes` stays plain JSON.
+   * @internal
+   */
+  static parseUnionResult(
+    classes: (typeof Ad4mModel)[],
+    perspective: PerspectiveProxy,
+    raw: any,
+    include?: IncludeMap,
+    properties?: string[],
+  ): Ad4mModel[] {
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const arr = data.instances || data;
+    if (!Array.isArray(arr)) return [];
+    const byName = new Map(classes.map((c) => [c.getModelMetadata().className, c]));
+    return arr.map((json: any) => {
+      const cls = byName.get(json?.[SUBJECT_CLASS_KEY]);
+      return cls ? jsonToModelInstance(cls as any, perspective, json, include, properties) : json;
+    });
+  }
+
+  /** @internal */
+  static async executeUnionQuery(
+    perspective: PerspectiveProxy,
+    classes: (typeof Ad4mModel)[],
+    query: Query = {},
+    options?: CallOptions,
+  ): Promise<ResultsWithTotalCount<Ad4mModel>> {
+    const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
+    const result = await perspective.modelQuery(classNames, queryJson, options);
+    const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
+    const snapshotRelations = query.include
+      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
+      : undefined;
+    for (const inst of results) {
+      (inst as any).takeSnapshot?.(
+        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
+      );
+    }
+    return { results, totalCount: result.totalCount };
+  }
+
+  /**
+   * One query over several model classes (#1238).
+   *
+   * `where`, `order`, `limit` and `offset` apply once, over the union. Each
+   * result is an instance of the class the executor hydrated it as: the first
+   * `preferClasses` entry it conforms to, otherwise the most specific of
+   * `classes` it conforms to. A record that is several of them is returned
+   * once; `__subjectClasses` on it names every class it conforms to.
+   *
+   * - `where` on a property a class does not declare excludes that class's rows.
+   * - `order` on such a property sorts those rows last, in both directions,
+   *   then by id.
+   *
+   * @example
+   * ```typescript
+   * const items = await Ad4mModel.findAllOf(perspective, [Placement, EdgeRoute], {
+   *   parent: { id: canvas.id, predicate: "canvas://item" },
+   *   order: { zIndex: "ASC" },
+   *   limit: 50,
+   * });
+   * for (const item of items) {
+   *   if (item instanceof Placement) { ... }
+   * }
+   * ```
+   */
+  static async findAllOf<C extends (typeof Ad4mModel)[]>(
+    perspective: PerspectiveProxy,
+    classes: [...C],
+    query?: Query,
+    options?: CallOptions,
+  ): Promise<InstanceType<C[number]>[]> {
+    const { results } = await Ad4mModel.executeUnionQuery(perspective, classes, query ?? {}, options);
+    return results as InstanceType<C[number]>[];
+  }
+
+  /**
+   * A {@link ModelQueryBuilder} over several model classes: the builder form of
+   * {@link findAllOf}. `subscribe()` registers one subscription, which re-runs
+   * when any of the classes changes.
+   *
+   * @example
+   * ```typescript
+   * const builder = Ad4mModel.queryOf(perspective, [Placement, EdgeRoute])
+   *   .parent(canvas.id, "canvas://item");
+   * await builder.subscribe((items) => render(items));
+   * ```
+   */
+  static queryOf<C extends (typeof Ad4mModel)[]>(
+    perspective: PerspectiveProxy,
+    classes: [...C],
+    query?: Query,
+  ): ModelQueryBuilder<InstanceType<C[number]>> {
+    return new ModelQueryBuilder<InstanceType<C[number]>>(perspective, Ad4mModel, query, classes);
+  }
 
   // instancesFromQueryResult — removed (superseded by Rust executeModelQuery pipeline)
 
@@ -1429,10 +1619,30 @@ export class Ad4mModel {
     return String(value);
   }
 
+  /** A relation write on a row read through an abstract class (#1435). The
+   *  relation's predicate is the abstract class's, which no record's class
+   *  reads: the executor runs the adder, remover or setter of each of the
+   *  record's classes for the relation answering to `key`. */
+  private async relationThroughAbstract(
+    abstractName: string,
+    key: string,
+    action: 'adder' | 'remover' | 'setter',
+    value: any,
+    batchId?: string
+  ) {
+    const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
+    await this._perspective.updateSubject(abstractName, this._baseExpression, { [key]: { action, value: ids } }, batchId);
+  }
+
   private async setRelationValues(key: string, value: any, batchId?: string) {
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
+      return;
+    }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'setter', value, batchId);
       return;
     }
 
@@ -1459,6 +1669,11 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'adder', value, batchId);
+      return;
+    }
 
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generateRelationAction(key, 'adder');
@@ -1480,6 +1695,11 @@ export class Ad4mModel {
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
+      return;
+    }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'remover', value, batchId);
       return;
     }
 
@@ -1528,7 +1748,12 @@ export class Ad4mModel {
   async save(batchId?: string) {
     // Existing instance → update path (has been fetched / hydrated before)
     if (this._snapshot) {
-      await this.innerUpdate(true, batchId);
+      const abstractName = this.abstractName();
+      if (abstractName) {
+        await this.perspective.updateSubject(abstractName, this._baseExpression, this.changedValuesForDispatch(), batchId);
+      } else {
+        await this.innerUpdate(true, batchId);
+      }
       if (batchId) {
         // Batch hasn't been committed yet — getData() would fetch stale data
         // and overwrite in-memory values. Just refresh the snapshot so further
@@ -1540,7 +1765,15 @@ export class Ad4mModel {
       return;
     }
 
-    // New instance → create path
+    // New instance → create path. The executor refuses an abstract class
+    // too; refusing here keeps the error ahead of the batch.
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      throw new Error(
+        `'${abstractName}' is an abstract class and cannot be created. Create an instance of ` +
+        `a class that has its properties; querying '${abstractName}' reads it.`
+      );
+    }
     let batchCreatedHere = false;
     if(!batchId) {
       batchId = await this.perspective.createBatch()
@@ -1607,6 +1840,38 @@ export class Ad4mModel {
       // links (e.g. two competing "title" values).
       this.takeSnapshot();
     }
+  }
+
+  /** The name the executor knows the class by when it is abstract (#1435):
+   *  a built-in's URI (#1446). Through an abstract class, the executor
+   *  writes to the record's own classes. */
+  private abstractName(): string | undefined {
+    const ctor = this.constructor as typeof Ad4mModel & { isAbstract?: boolean };
+    return ctor.isAbstract ? ctor.queriedAs() : undefined;
+  }
+
+  private changedValues(): Record<string, any> {
+    return Object.fromEntries(this.changedFields().map((key) => [key, (this as any)[key]]));
+  }
+
+  /** `changedValues()` with each relation's members as IDs, as the relation
+   *  helpers send them: a member may be a model instance. An action envelope
+   *  (`{ action: "adder", value }`) keeps its action, as `innerUpdate()` runs
+   *  it; an action it does not know is a setter there, so it is one here. */
+  private changedValuesForDispatch(): Record<string, any> {
+    const relations = (this.constructor as typeof Ad4mModel).getModelMetadata().relations;
+    const ids = (value: any) =>
+      Array.isArray(value) ? value.map((v) => this.resolveRelationId(v)) : this.resolveRelationId(value);
+    return Object.fromEntries(
+      Object.entries(this.changedValues()).map(([key, value]) => {
+        if (!relations[key] || value == null) return [key, value];
+        if (value.action) {
+          const action = ["adder", "remover", "setter"].includes(value.action) ? value.action : "setter";
+          return [key, { action, value: ids(value.value) }];
+        }
+        return [key, ids(value)];
+      })
+    );
   }
 
   private cleanCopy() {
@@ -1869,7 +2134,9 @@ export class Ad4mModel {
    */
   async delete(batchId?: string) {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    const hasDestructor = Object.values(metadata.properties).some(
+    // Through an abstract class (#1435), `removeSubject` runs the destructors
+    // of the record's own classes.
+    const hasDestructor = !!this.abstractName() || Object.values(metadata.properties).some(
       (p) => p.required || p.flag || p.initial !== undefined
     );
 

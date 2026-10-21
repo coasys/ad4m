@@ -340,7 +340,7 @@ async fn local_grant_under_declared(
     )
 }
 
-/// PR A's removal_status rule holds for a declared predicate too: the store
+/// PR A's stored-status rule holds for a declared predicate too: the store
 /// decides in both directions. A Shared-labelled removal (the JS client's
 /// default) of a Local link under it goes; one of a link this store does not
 /// hold is still refused.

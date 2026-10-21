@@ -34,7 +34,18 @@ pub fn generate_jwt(
         name
     ))?;
 
-    let payload = Claims::new(did_document.id, audience, expiration_time, capabilities);
+    // A token for a user acts as the user's managed agent, which `sub` names by its DID.
+    let sub = match &capabilities.user_email {
+        Some(email) => Some(crate::agent::AgentService::did_for_email(email)?),
+        None => None,
+    };
+    let payload = Claims::new(
+        did_document.id,
+        audience,
+        expiration_time,
+        sub,
+        capabilities,
+    );
 
     let token = encode(
         &Header::default(),

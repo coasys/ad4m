@@ -20,8 +20,18 @@ use tokio::sync::RwLock;
 
 pub const DEFAULT_TOKEN_VALID_PERIOD: u64 = 180 * 24 * 60 * 60; // 180 days in seconds
 
+/// Wrong codes a capability request may receive before it stops accepting any code.
+/// The code has six digits, so without a limit anyone who learned a request id could
+/// try every code.
+pub const MAX_CODE_ATTEMPTS: u32 = 5;
+
+lazy_static! {
+    static ref FAILED_CODE_ATTEMPTS: std::sync::Mutex<HashMap<String, u32>> =
+        std::sync::Mutex::new(HashMap::new());
+}
+
 // Cache for last_seen timestamps to avoid repeated database lookups
-// Maps user_email -> (last_checked_timestamp, last_seen_value)
+// Maps agent DID -> (last_checked_timestamp, last_seen_value)
 #[derive(Clone)]
 struct LastSeenCacheEntry {
     last_checked: i64,    // When we last checked the database
@@ -53,7 +63,7 @@ pub enum ListenerReach {
     /// proxy or tunnel running here. The API reads a request that carries a `Forwarded`,
     /// `X-Forwarded-For` or `X-Real-IP` header as `Network` (`api::auth::listener_reach`). A
     /// proxy that sets none of them (a raw TCP forward, `ssh -R`) still reads as `Loopback`,
-    /// so its remote clients are the operator: a node behind a proxy needs an admin credential.
+    /// so its remote clients are the operator: an executor behind a proxy needs an admin credential.
     Loopback,
     /// Bound to any other address: whoever can route to it connects.
     Network,
@@ -94,210 +104,179 @@ pub fn check_capability(
     capabilities: &Result<Vec<Capability>, String>,
     expected: &Capability,
 ) -> Result<(), String> {
-    let capabilities = capabilities.clone()?;
-    let custom_cap_match = |cap: &Capability, expected: &Capability| -> bool {
-        if cap.with.domain != WILD_CARD && cap.with.domain != expected.with.domain {
-            return false;
-        }
+    require_capability(capabilities.as_ref().map_err(|e| e.clone())?, expected)
+}
 
-        if !cap.with.pointers.contains(&WILD_CARD.to_string())
-            && expected
-                .with
-                .pointers
-                .iter()
-                .any(|p| !cap.with.pointers.contains(p))
-        {
-            return false;
-        }
-
-        if !cap.can.contains(&WILD_CARD.to_string())
-            && expected.can.iter().any(|c| !cap.can.contains(c))
-        {
-            return false;
-        }
-
-        true
-    };
-
-    if !capabilities
-        .iter()
-        .any(|cap| custom_cap_match(cap, expected))
-    {
+/// `Ok` if any of `capabilities` covers `expected`; otherwise the error a refused call reports.
+pub fn require_capability(
+    capabilities: &[Capability],
+    expected: &Capability,
+) -> Result<(), String> {
+    if !capability_matches(capabilities, expected) {
         return Err(format!(
             "Capability is not matched, you have capabilities: {:?}, expected: {:?}",
             capabilities, expected
         ));
     }
-
     Ok(())
 }
 
-pub fn check_token_revoked(token: &String) -> Result<(), String> {
-    // Use constant-time comparison to prevent timing attacks
-    if let Some(app) = apps_map::get_apps()
-        .iter()
-        .find(|app| constant_time_eq(&app.token, token))
+/// Whether any of `capabilities` covers `expected`: the same domain, every pointer and every
+/// action, each of which `*` matches.
+pub fn capability_matches(capabilities: &[Capability], expected: &Capability) -> bool {
+    capabilities.iter().any(|cap| {
+        (cap.with.domain == WILD_CARD || cap.with.domain == expected.with.domain)
+            && (cap.with.pointers.contains(&WILD_CARD.to_string())
+                || expected
+                    .with
+                    .pointers
+                    .iter()
+                    .all(|p| cap.with.pointers.contains(p)))
+            && (cap.can.contains(&WILD_CARD.to_string())
+                || expected.can.iter().all(|c| cap.can.contains(c)))
+    })
+}
+
+pub fn check_token_revoked(token: &str) -> Result<(), String> {
+    if apps_map::is_revoked(token) {
+        return Err("Unauthorized access".to_string());
+    }
+    Ok(())
+}
+
+/// Seconds of clock skew that JWT validation allows (jsonwebtoken's default leeway).
+pub(crate) const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
+
+/// Update the last_seen timestamp of the account that owns the managed agent `agent_did`, the
+/// agent the caller's session acts as.
+/// Throttled to one write per [`LAST_SEEN_WRITE_THROTTLE_S`] to reduce database writes
+/// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
+pub async fn track_last_seen(agent_did: &str) {
+    use crate::db::Ad4mDb;
+
+    let agent_did = agent_did.to_string();
+    let now = chrono::Utc::now().timestamp();
+
+    // Check cache first (non-blocking read)
     {
-        if app.revoked.unwrap_or(false) {
-            return Err("Unauthorized access".to_string());
+        let cache = LAST_SEEN_CACHE.read().await;
+        if let Some(entry) = cache.get(&agent_did) {
+            let cache_age = now - entry.last_checked;
+            if cache_age < CACHE_TTL_SECONDS {
+                // Cache is fresh, check if update is needed based on cached value
+                let time_since_last_seen = now - entry.last_seen_value;
+                if time_since_last_seen < LAST_SEEN_WRITE_THROTTLE_S {
+                    // Still inside the throttle period, no need to update
+                    log::trace!(
+                        "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
+                        agent_did, entry.last_seen_value, time_since_last_seen
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    // Cache miss or stale - need to check database
+    // Use spawn_blocking to avoid blocking the async runtime
+    let agent_did_clone = agent_did.clone();
+    let should_update = tokio::task::spawn_blocking(move || {
+        Ad4mDb::with_global_instance(|db| {
+            if let Ok(Some(user)) = db.get_user_by_did(&agent_did_clone) {
+                if let Some(last_seen) = user.last_seen {
+                    let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
+
+                    // Handle unrealistic future timestamps by treating them as stale
+                    // (allow some clock skew tolerance of 1 minute)
+                    let should_update = if last_seen > now + 60 {
+                        log::warn!(
+                            "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
+                            agent_did_clone, last_seen
+                        );
+                        true
+                    } else {
+                        last_seen < throttle_cutoff
+                    };
+
+                    log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
+                        agent_did_clone, last_seen, throttle_cutoff, should_update);
+                    (should_update, Some(last_seen))
+                } else {
+                    log::debug!(
+                        "last_seen tracking for {}: never seen before, updating now",
+                        agent_did_clone
+                    );
+                    (true, None) // Never updated, do it now
+                }
+            } else {
+                log::warn!(
+                    "last_seen tracking: no user owns the agent {}",
+                    agent_did_clone
+                );
+                (false, None) // User not found
+            }
+        })
+    })
+    .await;
+
+    let (should_update, last_seen_value) = match should_update {
+        Ok((update, value)) => (update, value),
+        Err(e) => {
+            log::error!(
+                "Failed to check last_seen status (spawn_blocking join error): {:?}",
+                e
+            );
+            return;
         }
     };
 
-    Ok(())
-}
-
-pub fn user_email_from_token(token: String) -> Option<String> {
-    if token.is_empty() {
-        return None;
+    // Update cache with the value we got from DB
+    if let Some(last_seen_val) = last_seen_value {
+        let mut cache = LAST_SEEN_CACHE.write().await;
+        cache.insert(
+            agent_did.clone(),
+            LastSeenCacheEntry {
+                last_checked: now,
+                last_seen_value: last_seen_val,
+            },
+        );
     }
 
-    // Check if multi-user mode is enabled - if not, never return a user context
-    use crate::db::Ad4mDb;
-    let multi_user_enabled =
-        Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+    if should_update {
+        log::debug!("Updating last_seen for agent: {}", agent_did);
 
-    if !multi_user_enabled {
-        return None;
-    }
-
-    // Try to decode JWT and extract user email from sub field
-    if let Ok(claims) = decode_jwt(token) {
-        claims.sub
-    } else {
-        None
-    }
-}
-
-/// Update last_seen timestamp for the user from the auth token
-/// Throttled to one write per [`LAST_SEEN_WRITE_THROTTLE_S`] to reduce database writes
-/// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
-pub async fn track_last_seen_from_token(token: String) {
-    use crate::db::Ad4mDb;
-
-    if let Some(user_email) = user_email_from_token(token) {
-        let now = chrono::Utc::now().timestamp();
-
-        // Check cache first (non-blocking read)
-        {
-            let cache = LAST_SEEN_CACHE.read().await;
-            if let Some(entry) = cache.get(&user_email) {
-                let cache_age = now - entry.last_checked;
-                if cache_age < CACHE_TTL_SECONDS {
-                    // Cache is fresh, check if update is needed based on cached value
-                    let time_since_last_seen = now - entry.last_seen_value;
-                    if time_since_last_seen < LAST_SEEN_WRITE_THROTTLE_S {
-                        // Still inside the throttle period, no need to update
-                        log::trace!(
-                            "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
-                            user_email, entry.last_seen_value, time_since_last_seen
-                        );
-                        return;
-                    }
-                }
-            }
-        }
-
-        // Cache miss or stale - need to check database
-        // Use spawn_blocking to avoid blocking the async runtime
-        let user_email_clone = user_email.clone();
-        let should_update = tokio::task::spawn_blocking(move || {
-            Ad4mDb::with_global_instance(|db| {
-                if let Ok(user) = db.get_user(&user_email_clone) {
-                    if let Some(last_seen) = user.last_seen {
-                        let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
-
-                        // Handle unrealistic future timestamps by treating them as stale
-                        // (allow some clock skew tolerance of 1 minute)
-                        let should_update = if last_seen > now + 60 {
-                            log::warn!(
-                                "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
-                                user_email_clone, last_seen
-                            );
-                            true
-                        } else {
-                            last_seen < throttle_cutoff
-                        };
-
-                        log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
-                            user_email_clone, last_seen, throttle_cutoff, should_update);
-                        (should_update, Some(last_seen))
-                    } else {
-                        log::debug!(
-                            "last_seen tracking for {}: never seen before, updating now",
-                            user_email_clone
-                        );
-                        (true, None) // Never updated, do it now
-                    }
-                } else {
-                    log::warn!(
-                        "last_seen tracking: user {} not found in database",
-                        user_email_clone
-                    );
-                    (false, None) // User not found
-                }
-            })
+        // Perform the update in spawn_blocking
+        let agent_did_for_update = agent_did.clone();
+        let update_result = tokio::task::spawn_blocking(move || {
+            Ad4mDb::with_global_instance(|db| db.update_agent_last_seen(&agent_did_for_update))
         })
         .await;
 
-        let (should_update, last_seen_value) = match should_update {
-            Ok((update, value)) => (update, value),
-            Err(e) => {
+        match update_result {
+            Ok(Ok(())) => {
+                // Update succeeded, refresh cache with new timestamp
+                let mut cache = LAST_SEEN_CACHE.write().await;
+                cache.insert(
+                    agent_did,
+                    LastSeenCacheEntry {
+                        last_checked: now,
+                        last_seen_value: now,
+                    },
+                );
+            }
+            Ok(Err(e)) => {
                 log::error!(
-                    "Failed to check last_seen status (spawn_blocking join error): {:?}",
+                    "Failed to update last_seen for agent {}: {:?}",
+                    agent_did,
                     e
                 );
-                return;
             }
-        };
-
-        // Update cache with the value we got from DB
-        if let Some(last_seen_val) = last_seen_value {
-            let mut cache = LAST_SEEN_CACHE.write().await;
-            cache.insert(
-                user_email.clone(),
-                LastSeenCacheEntry {
-                    last_checked: now,
-                    last_seen_value: last_seen_val,
-                },
-            );
-        }
-
-        if should_update {
-            log::debug!("Updating last_seen for user: {}", user_email);
-
-            // Perform the update in spawn_blocking
-            let user_email_for_update = user_email.clone();
-            let update_result = tokio::task::spawn_blocking(move || {
-                Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email_for_update))
-            })
-            .await;
-
-            match update_result {
-                Ok(Ok(())) => {
-                    // Update succeeded, refresh cache with new timestamp
-                    let mut cache = LAST_SEEN_CACHE.write().await;
-                    cache.insert(
-                        user_email,
-                        LastSeenCacheEntry {
-                            last_checked: now,
-                            last_seen_value: now,
-                        },
-                    );
-                }
-                Ok(Err(e)) => {
-                    log::error!(
-                        "Failed to update last_seen for user {}: {:?}",
-                        user_email,
-                        e
-                    );
-                }
-                Err(e) => {
-                    log::error!(
-                        "Failed to update last_seen for user {} (spawn_blocking join error): {:?}",
-                        user_email,
-                        e
-                    );
-                }
+            Err(e) => {
+                log::error!(
+                    "Failed to update last_seen for agent {} (spawn_blocking join error): {:?}",
+                    agent_did,
+                    e
+                );
             }
         }
     }
@@ -315,6 +294,29 @@ pub fn capabilities_from_token(
     capabilities_on(token, admin_credential, ListenerReach::Loopback)
 }
 
+/// What a caller without a token may do: request a capability and read whether multi-user
+/// mode is on, plus sign up, log in and verify an email when it is. Reading users is left out,
+/// so anonymous callers cannot list them.
+pub fn anonymous_capabilities() -> Vec<Capability> {
+    use crate::db::Ad4mDb;
+    let multi_user_enabled =
+        Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+    if multi_user_enabled {
+        vec![
+            AGENT_AUTH_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
+        ]
+    } else {
+        vec![
+            AGENT_AUTH_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
+        ]
+    }
+}
+
 /// The capabilities of a caller that presents `token` on a listener with this reach.
 pub fn capabilities_on(
     token: String,
@@ -327,28 +329,9 @@ pub fn capabilities_on(
     }
 
     if token.is_empty() {
-        // An anonymous caller: the node has an admin credential, or the listener is on the
-        // network. For empty tokens, check if multi-user mode is enabled
-        // If so, allow user creation (registration), login, and checking enabled status
-        // READ capability is intentionally excluded to prevent unauthenticated user enumeration
-        use crate::db::Ad4mDb;
-        let multi_user_enabled =
-            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
-
-        if multi_user_enabled {
-            return Ok(vec![
-                AGENT_AUTH_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
-            ]);
-        }
-
-        return Ok(vec![
-            AGENT_AUTH_CAPABILITY.clone(),
-            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
-        ]);
+        // An anonymous caller: the executor has an admin credential, or the listener is on the
+        // network.
+        return Ok(anonymous_capabilities());
     }
 
     check_token_revoked(&token)?;
@@ -402,7 +385,33 @@ pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String,
 pub async fn generate_capability_token(request_id: String, rand: String) -> Result<String, String> {
     let auth_key = gen_request_key(&request_id, &rand);
 
-    let auth = get_request(&auth_key)?.ok_or("Can't find permitted request")?;
+    let auth = {
+        let mut attempts = FAILED_CODE_ATTEMPTS.lock().map_err(|e| e.to_string())?;
+        match get_request(&auth_key)? {
+            Some(auth) => {
+                attempts.remove(&request_id);
+                auth
+            }
+            // Callers without a token reach this, so only ids with a permitted request get an
+            // entry, and the entry goes when the request does. A made-up id records nothing.
+            None if !requests_map::has_requests_for(&request_id)? => {
+                attempts.remove(&request_id);
+                return Err("Can't find permitted request".to_string());
+            }
+            None => {
+                let count = attempts.entry(request_id.clone()).or_insert(0);
+                *count += 1;
+                if *count >= MAX_CODE_ATTEMPTS {
+                    requests_map::remove_requests_for(&request_id)?;
+                    attempts.remove(&request_id);
+                    return Err(
+                        "Too many wrong codes for this request; request access again".to_string(),
+                    );
+                }
+                return Err("Can't find permitted request".to_string());
+            }
+        }
+    };
 
     let cap_token = token::generate_jwt(
         auth.app_name.clone(),
@@ -424,11 +433,12 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
         cap_token.clone(),
     )?;
 
+    // The event reaches every session that can approve apps; the token goes only to the caller.
     let apps_changed = Apps {
         auth: auth_for_publish,
         request_id: request_id.clone(),
         revoked: Some(false),
-        token: cap_token.clone(),
+        token: String::new(),
     };
     get_global_pubsub()
         .await
@@ -598,7 +608,7 @@ mod tests {
     }
 
     // #1059: without an admin credential, an empty token is the operator only on loopback.
-    // On the network it gets what an anonymous caller gets on a node with a credential:
+    // On the network it gets what an anonymous caller gets on an executor with a credential:
     // enough to request a capability, nothing to read with.
     #[test]
     fn without_a_credential_an_empty_token_is_the_operator_only_on_loopback() {
@@ -678,5 +688,156 @@ mod tests {
 
         // Note: We can't easily test the multi-user mode grant of LOGIN and CREATE capabilities
         // without setting up the database, but the logic is tested by integration tests
+    }
+}
+
+#[cfg(test)]
+mod app_token_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn test_auth_info() -> AuthInfo {
+        AuthInfo {
+            app_name: "Test app".to_string(),
+            app_desc: "An app for tests".to_string(),
+            app_domain: Some("test.example".to_string()),
+            app_url: Some("https://test.example".to_string()),
+            app_icon_path: None,
+            capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+            user_email: None,
+        }
+    }
+
+    async fn permitted_request() -> (String, String) {
+        let request_id = request_capability(test_auth_info()).await;
+        let code = permit_capability(AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: test_auth_info(),
+        })
+        .unwrap();
+        (request_id, code)
+    }
+
+    // The code has six digits. Without a limit, anyone who learned a request id could try
+    // every code and receive the app's token.
+    #[tokio::test]
+    async fn a_request_stops_accepting_codes_after_too_many_wrong_ones() {
+        let (request_id, code) = permitted_request().await;
+        let wrong = if code == "100000" { "100001" } else { "100000" };
+        let mut last_err = String::new();
+        for _ in 0..MAX_CODE_ATTEMPTS {
+            last_err = generate_capability_token(request_id.clone(), wrong.to_string())
+                .await
+                .unwrap_err();
+        }
+        assert!(last_err.contains("Too many wrong codes"), "{}", last_err);
+        assert!(generate_capability_token(request_id.clone(), code)
+            .await
+            .is_err());
+    }
+
+    // `agent.generateJwt` needs no token, so anyone can send made-up request ids. They must
+    // not leave entries behind, or repeated calls fill memory.
+    #[tokio::test]
+    async fn made_up_request_ids_leave_no_attempt_entries() {
+        for i in 0..10_000 {
+            let _ = generate_capability_token(format!("made-up-{}", i), "100000".to_string()).await;
+        }
+        let left = FAILED_CODE_ATTEMPTS
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|id| id.starts_with("made-up-"))
+            .count();
+        assert_eq!(left, 0);
+    }
+
+    // The entry for a real request goes once its codes are gone.
+    #[tokio::test]
+    async fn a_locked_out_request_leaves_no_attempt_entry() {
+        let (request_id, code) = permitted_request().await;
+        let wrong = if code == "100000" { "100001" } else { "100000" };
+        for _ in 0..MAX_CODE_ATTEMPTS {
+            let _ = generate_capability_token(request_id.clone(), wrong.to_string()).await;
+        }
+        assert!(!FAILED_CODE_ATTEMPTS
+            .lock()
+            .unwrap()
+            .contains_key(&request_id));
+    }
+
+    // Request ids are UUIDs, which contain dashes, and the stored keys are `{id}-{code}`.
+    // Wrong codes sent for only the start of someone else's id must not lock that request out.
+    #[tokio::test]
+    async fn wrong_codes_for_a_prefix_of_an_id_leave_that_request_alone() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let (request_id, code) = permitted_request().await;
+        let prefix = request_id.split('-').next().unwrap().to_string();
+        assert_ne!(prefix, request_id);
+        for _ in 0..MAX_CODE_ATTEMPTS {
+            let _ = generate_capability_token(prefix.clone(), "100000".to_string()).await;
+        }
+        assert!(generate_capability_token(request_id, code).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_correct_code_after_a_few_wrong_ones_still_works() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let (request_id, code) = permitted_request().await;
+        let wrong = if code == "100000" { "100001" } else { "100000" };
+        for _ in 0..MAX_CODE_ATTEMPTS - 1 {
+            assert!(
+                generate_capability_token(request_id.clone(), wrong.to_string())
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(generate_capability_token(request_id, code).await.is_ok());
+    }
+
+    // The `apps-changed` event and the app list reach sessions other than the app, so
+    // neither may carry the token. The executor still knows the token for revocation.
+    #[tokio::test]
+    async fn app_events_and_the_client_app_list_carry_no_token() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let mut events = get_global_pubsub().await.subscribe(&APPS_CHANGED).await;
+
+        let (request_id, code) = permitted_request().await;
+        let token = generate_capability_token(request_id.clone(), code)
+            .await
+            .unwrap();
+        assert!(!token.is_empty());
+
+        let event = loop {
+            let msg = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("an apps-changed event arrives")
+                .unwrap();
+            if let Ok(Some(app)) = serde_json::from_str::<Option<Apps>>(&msg) {
+                if app.request_id == request_id {
+                    break app;
+                }
+            }
+        };
+        assert!(event.token.is_empty(), "the event carried the app token");
+
+        let listed = apps_map::client_view()
+            .into_iter()
+            .find(|app| app.request_id == request_id)
+            .expect("the app appears in the list");
+        assert!(
+            listed.token.is_empty(),
+            "the app list carried the app token"
+        );
+
+        assert!(check_token_revoked(&token).is_ok());
+        apps_map::revoke_app(&request_id).unwrap();
+        assert!(check_token_revoked(&token).is_err());
     }
 }

@@ -2,6 +2,8 @@ use crate::types::Link;
 use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
+mod role_gate_keys;
+
 /// AD4M Action - represents a link operation (e.g., addLink, removeLink, setSingleTarget)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AD4MAction {
@@ -37,7 +39,25 @@ pub struct SHACLShape {
     /// link per parent on the shape node.
     #[serde(default)]
     pub parent_shapes: Vec<String>,
+    /// An abstract class (#1435): queried as the union of every concrete
+    /// class that has its property names, never created, never chosen when a
+    /// record is classified. Emitted as one [`ABSTRACT_PREDICATE`] link on
+    /// the shape node. See `model_query::abstract_classes`.
+    #[serde(
+        default,
+        rename = "abstract",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub is_abstract: bool,
 }
+
+/// Marks a node shape as an abstract class (#1435).
+pub const ABSTRACT_PREDICATE: &str = "ad4m://abstract";
+
+/// A property's names for abstract classes (#1435): one link on the property
+/// shape, targeting `literal:string:` + the URL-encoded JSON map
+/// `{ abstractClassName: name }`.
+pub const ALIAS_PREDICATE: &str = "ad4m://alias";
 
 /// A single structured conformance condition for relation filtering.
 /// DB-agnostic representation that can be translated to any query language.
@@ -154,6 +174,11 @@ pub struct PropertyShape {
     pub min_inclusive: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_inclusive: Option<f64>,
+    /// The name this property answers to when the class is read through an
+    /// abstract class (#1435), keyed by the abstract class's name:
+    /// `{ "TextContent": "text" }`. Emitted as one [`ALIAS_PREDICATE`] link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<std::collections::BTreeMap<String, String>>,
 }
 
 // ============================================================================
@@ -841,6 +866,59 @@ fn find_links<'a>(links: &'a [Link], source: &str, predicate: &str) -> Vec<&'a L
         .collect()
 }
 
+/// Decode one `consensusRule` literal. A key the reader does not know is an
+/// error, the same as a missing required field: serde would drop it, and on a
+/// role gate a dropped key widens the gate or removes it (#1144). See
+/// [`role_gate_keys`].
+///
+/// The rule is decoded from the string, not from the checked `Value`: a
+/// `Value` keeps only the last of duplicate keys, so decoding from it would
+/// read a rule the author did not write. The key check parses its own `Value`
+/// with duplicates refused at every level.
+fn decode_consensus_rule(target: &str) -> Result<ConsensusRule, String> {
+    let s = decode_literal_string(target)
+        .ok_or_else(|| "target is not a url-decodable `literal:string:`".to_string())?;
+    let value = role_gate_keys::parse_refusing_duplicate_keys(&s)?;
+    let errors = role_gate_keys::role_gate_key_errors(&value);
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    serde_json::from_str(&s).map_err(|e| e.to_string())
+}
+
+/// The predicate a flow definition's `consensusRule` is written on, at the
+/// flow URI and at each state URI (`parse_flow_to_links`, `SHACLFlow.toLinks`).
+pub const CONSENSUS_RULE_PREDICATE: &str = "ad4m://consensusRule";
+
+/// Refuse, before anything is written, a `consensusRule` link this replica
+/// could not read back (#1144): a key the reader does not know, a key written
+/// twice, or a literal that does not decode. The reader fails closed on such
+/// a rule ([`read_consensus_rule`]), so storing it would leave a gate that
+/// refuses every edge it governs and names the key only in the executor log.
+/// Every local write path (`add_link`, `add_links`, `link_mutations`,
+/// `update_link`) runs this on its additions, so `addFlow` gets the error
+/// instead, naming the state or flow URI and the key. Sync is not checked: a
+/// definition arriving from a peer is stored as written and still refused
+/// when it is read.
+pub fn check_consensus_rule_links<'a>(
+    links: impl IntoIterator<Item = &'a Link>,
+) -> Result<(), AnyError> {
+    for link in links {
+        if link.predicate.as_deref() != Some(CONSENSUS_RULE_PREDICATE) {
+            continue;
+        }
+        if let Err(e) = decode_consensus_rule(&link.target) {
+            return Err(anyhow::anyhow!(
+                "flow definition refused: the `consensusRule` on `{}` cannot be read ({e}). \
+                 Nothing was stored. A stored rule with an unknown or duplicate key would \
+                 refuse every edge it governs (#1144).",
+                link.source
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Read the `consensusRule` at ONE scope — a flow URI, or one state URI —
 /// into the `(rule, unreadable)` pair the parser stores. Both scopes go
 /// through here so that one place decides what an unreadable rule is.
@@ -915,7 +993,7 @@ fn read_consensus_rule(links: &[Link], source: &str, scope: &str) -> (Option<Con
 
         // Exactly one authored rule. Unchanged #1079 behaviour: decode it,
         // and record a decode failure rather than erasing it.
-        [only] => match decode_json_literal::<ConsensusRule>(only) {
+        [only] => match decode_consensus_rule(only) {
             Ok(rule) => (Some(rule), false),
             Err(e) => {
                 log::warn!(
@@ -1421,6 +1499,67 @@ fn propagate_property_local(shape: &mut SHACLShape) {
     }
 }
 
+/// The name a property is stored under: its `name`, or its path's local part.
+fn property_name(prop: &PropertyShape) -> String {
+    prop.name
+        .clone()
+        .unwrap_or_else(|| extract_local_name(&prop.path))
+}
+
+/// Refuse what an abstract class or an alias cannot mean (#1435).
+///
+/// - An abstract class with no property or relation would match every class.
+/// - An alias must name something. It must not be a reserved name, and it
+///   must not be a name the class already uses: queried through the abstract
+///   class, both would answer to it.
+/// - Two properties of one class cannot take the same alias for the same
+///   abstract class.
+fn refuse_abstract_misuse(shape: &SHACLShape, class_name: &str) -> Result<(), AnyError> {
+    if shape.is_abstract && shape.properties.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Abstract class '{class_name}' declares no property and no relation: it would \
+             match every class. Declare the names a class must have."
+        ));
+    }
+    let names: Vec<String> = shape.properties.iter().map(property_name).collect();
+    let mut taken: std::collections::BTreeMap<(&str, &str), &str> = Default::default();
+    for (prop, own_name) in shape.properties.iter().zip(&names) {
+        for (abstract_class, alias) in prop.alias.iter().flatten() {
+            if abstract_class.is_empty() || alias.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': property '{own_name}' has an empty alias \
+                     {abstract_class:?}: {alias:?}. Name the abstract class and the name."
+                ));
+            }
+            if alias == own_name {
+                continue;
+            }
+            if RESERVED_PROPERTY_NAMES.contains(&alias.as_str()) {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': property '{own_name}' has alias '{alias}' for \
+                     '{abstract_class}', a name every instance already carries ({}).",
+                    RESERVED_PROPERTY_NAMES.join(", ")
+                ));
+            }
+            if names.contains(alias) {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': property '{own_name}' has alias '{alias}' for \
+                     '{abstract_class}', but the class already has a property named \
+                     '{alias}'. Read through '{abstract_class}', both would answer to it: \
+                     drop the alias or rename one of them."
+                ));
+            }
+            if let Some(other) = taken.insert((abstract_class, alias), own_name) {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': properties '{other}' and '{own_name}' both have \
+                     alias '{alias}' for '{abstract_class}'."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
 pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
     let mut shape: SHACLShape = serde_json::from_str(shacl_json)
@@ -1483,6 +1622,8 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             literal_and_instance,
         ));
     }
+
+    refuse_abstract_misuse(&shape, class_name)?;
 
     let mut links = Vec::new();
 
@@ -1564,6 +1705,14 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         });
     }
 
+    if shape.is_abstract {
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some(ABSTRACT_PREDICATE.to_string()),
+            target: "literal:true".to_string(),
+        });
+    }
+
     // Constructor and destructor actions (JSON in a literal). Written even
     // when empty: `create_subject` needs the constructor link to know the
     // class exists, and an empty list is a valid no-op.
@@ -1621,6 +1770,15 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://interpretation_hint".to_string()),
                 target: format!("literal:string:{}", hint),
+            });
+        }
+
+        if let Some(alias) = prop.alias.as_ref().filter(|a| !a.is_empty()) {
+            let json = serde_json::to_string(alias).unwrap_or_else(|_| "{}".to_string());
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some(ALIAS_PREDICATE.to_string()),
+                target: format!("literal:string:{}", urlencoding::encode(&json)),
             });
         }
 
@@ -2306,7 +2464,8 @@ mod tests {
 
     /// Contract with the SDK: `fixtures/shacl_writer_golden.json` holds
     /// shapes (one using every field `SHACLShape.toJSON()` sends, one with
-    /// empty action lists) and the exact links this writer stores for each.
+    /// empty action lists, one abstract class) and the exact links this
+    /// writer stores for each.
     /// The SDK test "decodes the executor's golden links back to the shape it
     /// sent" reads the same file through `SHACLShape.fromLinks`, so a field
     /// this writer drops fails one side.

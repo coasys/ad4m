@@ -21,6 +21,26 @@ pub fn set_global_config(config: Ad4mConfig) {
     *global_config = Some(config);
 }
 
+/// The admin credential the executor runs with, if a global config exists. Never panics.
+pub fn configured_admin_credential() -> Option<String> {
+    GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|config| config.admin_credential.clone())
+}
+
+/// Whether the executor permits capability requests without the operator (development
+/// only). `false` without a global config. Never panics.
+pub fn auto_permit_cap_requests() -> bool {
+    GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|config| config.auto_permit_cap_requests)
+        .unwrap_or(false)
+}
+
 /// Get a clone of the global Ad4mConfig.
 /// Recovers from a poisoned mutex (see `set_global_config` for rationale).
 pub fn get_global_config() -> Ad4mConfig {
@@ -115,6 +135,39 @@ pub struct Ad4mConfig {
     pub dynamic_class_tools: Option<bool>,
     /// Path to write PID file (for test harness cleanup)
     pub pid_file: Option<String>,
+    /// Local DID for this SFU node in a cascade cluster.  Required if
+    /// any cascade options are set; otherwise the SFU runs single-node.
+    pub sfu_local_did: Option<String>,
+    /// Capacity hint published by this SFU node in every cascade
+    /// announce.  Defaults to `8` if cascade is configured without
+    /// an explicit value.
+    pub sfu_max_participants_per_node: Option<u32>,
+    /// TCP address where this node binds its cascade gossip listener,
+    /// formatted as `host:port`.  When unset, cascade is disabled.
+    pub sfu_cascade_listen: Option<String>,
+    /// Peer SFU nodes in the cascade cluster, each `did=host:port`.
+    /// Empty list = standalone SFU.
+    pub sfu_cascade_peers: Option<Vec<String>>,
+    /// IP address the SFU media server binds to (e.g. `203.0.113.5`).
+    /// str0m rejects `0.0.0.0` as a candidate, so this must be a real
+    /// interface IP.  When unset, the SFU follows `localhost`: loopback
+    /// by default, the machine's outbound IP with `localhost: false`.
+    pub sfu_bind_addr: Option<String>,
+    /// STUN server (`host:port`) the SFU asks once at startup, from its own
+    /// socket, for its public address. Unset: no probe, and reachability is
+    /// "unknown" unless the bind address is private. A loopback bind is
+    /// never probed.
+    pub sfu_stun_server: Option<String>,
+    /// UDP port the SFU binds. Unset (or 0): a free port, chosen at each
+    /// start. Fixed, a router can forward it; startup fails when it is taken.
+    pub sfu_udp_port: Option<u16>,
+    /// Public IP the SFU offers callers as a server-reflexive candidate,
+    /// with the bound port. Unset: the STUN probe's reflexive IP, when the
+    /// bind address is private.
+    pub sfu_public_addr: Option<String>,
+    /// DID of the cascade node that takes redirected joins first. Unset:
+    /// the least-loaded node.
+    pub sfu_preferred_node: Option<String>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -439,6 +492,15 @@ impl Ad4mConfig {
             mcp_port: None,
             dynamic_class_tools: None,
             pid_file: None,
+            sfu_local_did: None,
+            sfu_max_participants_per_node: None,
+            sfu_cascade_listen: None,
+            sfu_cascade_peers: None,
+            sfu_bind_addr: None,
+            sfu_stun_server: None,
+            sfu_udp_port: None,
+            sfu_public_addr: None,
+            sfu_preferred_node: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,

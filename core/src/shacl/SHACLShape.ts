@@ -66,6 +66,19 @@ function parseTransform(json: string, propShapeId: string): NodeExpression {
   return parsed;
 }
 
+/** The `ad4m://alias` payload: URL-encoded JSON `{ abstractClass: name }`.
+ *  One that does not decode to a map of strings is dropped. */
+function parseAlias(raw: string): Record<string, string> | undefined {
+  try {
+    const parsed = JSON.parse(decodeURIComponent(raw));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        && Object.values(parsed).every(v => typeof v === 'string')) {
+      return parsed;
+    }
+  } catch {}
+  return undefined;
+}
+
 /** Whether the executor stores a property as a collection (`ad4m://CollectionShape`). */
 function isCollection(p: SHACLPropertyShape): boolean {
   return p.collection ?? (p.relationKind === 'hasMany' || p.relationKind === 'belongsToMany');
@@ -264,6 +277,12 @@ export interface SHACLPropertyShape {
    *  for the generic LLM interpreter. Emitted as an `ad4m://identity` link
    *  (`literal:string:true`) and read back on `ShapeProperty.identity`. */
   identity?: boolean;
+
+  /** AD4M-specific: the name this property answers to when its class is read
+   *  through an abstract class, keyed by the abstract class's name:
+   *  `{ TextContent: "text" }`. Emitted as one `ad4m://alias` link
+   *  (`literal:string:` + the URL-encoded JSON map). */
+  alias?: Record<string, string>;
 }
 
 /**
@@ -294,6 +313,11 @@ export class SHACLShape {
    *  `ad4m://interpretation_hint` link on the shape node itself and surfaced
    *  on `ModelShape.interpretation_hint` by the Rust model query. */
   interpretationHint?: string;
+
+  /** AD4M-specific: an abstract class. Querying it reads every concrete class
+   *  that has its property names; it is never created. Emitted as one
+   *  `ad4m://abstract` link on the shape node. */
+  isAbstract?: boolean;
 
   /**
    * Create a new SHACL Shape
@@ -449,6 +473,14 @@ export class SHACLShape {
         source: this.nodeShapeUri,
         predicate: "ad4m://interpretation_hint",
         target: `literal:string:${this.interpretationHint}`
+      });
+    }
+
+    if (this.isAbstract) {
+      links.push({
+        source: this.nodeShapeUri,
+        predicate: "ad4m://abstract",
+        target: "literal:true"
       });
     }
 
@@ -718,6 +750,14 @@ export class SHACLShape {
           target: `literal:string:true`
         });
       }
+
+      if (prop.alias && Object.keys(prop.alias).length > 0) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://alias",
+          target: `literal:string:${encodeURIComponent(JSON.stringify(prop.alias))}`
+        });
+      }
     }
 
     return links;
@@ -758,6 +798,7 @@ export class SHACLShape {
     shape.constructor_actions = json(shapeUri, "ad4m://constructor");
     shape.destructor_actions = json(shapeUri, "ad4m://destructor");
     shape.interpretationHint = str(shapeUri, "ad4m://interpretation_hint");
+    if (bool(shapeUri, "ad4m://abstract")) shape.isAbstract = true;
 
     for (const propLink of links.filter(l => l.source === shapeUri && l.predicate === "sh://property")) {
       const id = propLink.target;
@@ -772,6 +813,7 @@ export class SHACLShape {
       const hasValue = target(id, "sh://hasValue");
       const identity = str(id, "ad4m://identity");
       const transform = str(id, "ad4m://transform");
+      const alias = str(id, "ad4m://alias");
 
       const prop: SHACLPropertyShape = {
         name,
@@ -808,6 +850,7 @@ export class SHACLShape {
         interpretationHint: str(id, "ad4m://interpretation_hint"),
         identity: identity === undefined ? undefined : identity === 'true',
         transform: transform === undefined ? undefined : parseTransform(transform, id),
+        alias: alias === undefined ? undefined : parseAlias(alias),
       };
       shape.addProperty(Object.fromEntries(Object.entries(prop).filter(([, v]) => v !== undefined)) as SHACLPropertyShape);
     }
@@ -827,6 +870,7 @@ export class SHACLShape {
       target_class: this.targetClass,
       parent_shapes: this.parentShapes.length > 0 ? this.parentShapes : undefined,
       interpretation_hint: this.interpretationHint,
+      abstract: this.isAbstract || undefined,
       properties: this.properties.map(p => ({
         path: p.path,
         name: p.name,
@@ -858,6 +902,7 @@ export class SHACLShape {
         transform: p.transform,
         interpretation_hint: p.interpretationHint,
         identity: p.identity,
+        alias: p.alias,
         // The backend reads the ordering declaration back from the
         // `ad4m://ordering` link that `parse_shacl_to_links` writes from this
         // field. `ensureSubjectClass` ships `toJSON()`, so omitting it here
@@ -918,6 +963,7 @@ export class SHACLShape {
         interpretationHint: p.interpretation_hint,
         identity: p.identity,
         ordering: p.ordering,
+        alias: p.alias,
       });
     }
 
@@ -934,6 +980,9 @@ export class SHACLShape {
     }
     if (json.interpretation_hint) {
       shape.interpretationHint = json.interpretation_hint;
+    }
+    if (json.abstract) {
+      shape.isAbstract = true;
     }
 
     return shape;

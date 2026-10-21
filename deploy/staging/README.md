@@ -20,7 +20,8 @@ from there.
 |---|---|
 | Public URL | `https://staging.ad4m.dev` (nginx, `*.ad4m.dev` certificate) → `127.0.0.1:12400` |
 | Deployed commit | `https://staging.ad4m.dev/status.json` |
-| Ports, all on 127.0.0.1 | RPC 12400, Holochain admin 12401, Holochain app 12402, MCP 3003 (not proxied) |
+| Ports, all on 127.0.0.1 | RPC 12400, Holochain admin 12401, Holochain app 12402, MCP 12403 (not proxied) |
+| SFU media | UDP 40000 on the LAN address, forwarded by the router (see "SFU") |
 | Units | `ad4m-staging.service`, `ad4m-staging-update.service`, `ad4m-staging-update.timer` |
 | Config | `~/.config/ad4m-staging/executor-config.json` |
 | Secrets | `~/.config/ad4m-staging/secrets/admin-credential`, `…/unlock-passphrase` |
@@ -36,7 +37,7 @@ from there.
 | `ad4m-staging-update.timer` | `~/.config/systemd/user/` | Starts the update 10 minutes after the last one finished |
 | `update.sh` | `~/.local/share/ad4m-staging/bin/` | Fetch, build, snapshot, swap, gate, roll back; writes `status.json`. `update.sh rollback` goes back one build by hand |
 | `agent.mjs` | `~/.local/share/ad4m-staging/bin/` | `status` / `generate` over the WebSocket RPC, secrets read from files |
-| `executor-config.json` | `~/.config/ad4m-staging/` | Ports 12400/12401/12402, MCP 3003, all on 127.0.0.1; multi-user on; no SMTP; no dapp server |
+| `executor-config.json` | `~/.config/ad4m-staging/` | Ports 12400/12401/12402, MCP 12403, all on 127.0.0.1; multi-user on; no SMTP; no dapp server; SFU on `MARVIN_LAN_IP`, UDP 40000 |
 | `nginx.conf.example` | `/etc/nginx/sites-available/staging-ad4m-dev` (root) | TLS vhost proxying to 127.0.0.1:12400, `/status.json` from `/var/www/ad4m-staging` |
 | `test/update.test.sh` | — | Runs `update.sh` against a throwaway remote with stubbed build and systemd |
 
@@ -65,6 +66,13 @@ does not get there, the script stops it, restores the snapshot, points
 between the stop and the start fails (a full disk during the snapshot, say),
 the build that ran before is started again. A commit that failed to build or
 failed that check is not tried again until `staging` moves on.
+
+The build is the CircleCI build job plus `--features cuda` on
+`cargo build --release` in `cli`. The in-process candle models need that
+feature; CircleCI does not pass it. The link adds an rpath to
+`${AD4M_STAGING_CUDA_ROOT:-/usr/local/cuda}/lib64`, because cudarc links
+`libcudart` and does not set one, and that library is not on the default
+linker path.
 
 Anyone who can merge to `staging` can run code on this box as `marvin`.
 `staging` is protected (one approving review) for that reason. As of this
@@ -132,11 +140,13 @@ service user without root.
    changes.
 
 6. **Executor config.** The file sets the data directory, the ports,
-   multi-user on, no SMTP, no TLS and no dapp server. Its `app_data_path` is
-   `/home/marvin/.ad4m-staging`; the `sed` makes it the current user's:
+   multi-user on, no SMTP, no TLS, no dapp server and the SFU (see "SFU").
+   Its `app_data_path` is `/home/marvin/.ad4m-staging` and its
+   `sfu_bind_addr` the placeholder `MARVIN_LAN_IP`; the `sed` makes them the
+   current user's and the box's LAN address:
 
    ```bash
-   sed "s|/home/marvin|$HOME|" deploy/staging/executor-config.json > ~/.config/ad4m-staging/executor-config.json
+   sed -e "s|/home/marvin|$HOME|" -e "s|MARVIN_LAN_IP|<LAN IP>|" deploy/staging/executor-config.json > ~/.config/ad4m-staging/executor-config.json
    ```
 
    Expected: no output.
@@ -267,7 +277,7 @@ service user without root.
 5. Nothing listens beyond loopback:
 
    ```bash
-   ss -ltnH '( sport = :12400 or sport = :12401 or sport = :12402 or sport = :3003 )' | awk '{print $4}' | sort -u
+   ss -ltnH '( sport = :12400 or sport = :12401 or sport = :12402 or sport = :12403 )' | awk '{print $4}' | sort -u
    ```
 
    Expected: only `127.0.0.1:…` and `[::1]:…` addresses.
@@ -330,6 +340,88 @@ systemd-run --user --wait --collect --pipe -p EnvironmentFile="$HOME/.config/ad4
 
 Expected, at the end: `update: deployed <sha>` and
 `Finished with result: success`.
+
+## SFU
+
+Calls in a space set to SFU send audio and video to this executor's SFU over
+UDP, not through nginx. The SFU offers callers the address it binds; a caller
+outside the box's LAN can only reach a public one. The box sits behind a
+router, so the SFU binds the LAN address on a fixed port, the router forwards
+that port, and the SFU also offers the router's public address on it, learnt
+from a STUN server at startup.
+
+1. **Check for NAT.** Compare the box's own addresses with the public one:
+
+   ```bash
+   ip -4 -o addr show scope global | awk '{print $2, $4}'
+   dig +short staging.ad4m.dev
+   ```
+
+   If an interface has the address `dig` prints, there is no NAT: use that
+   address as `sfu_bind_addr` below and skip the router step. Otherwise note
+   the LAN address of the interface the router reaches (`<LAN IP>`).
+
+2. **Deploy a build with the SFU settings first.** A build from before
+   coasys/ad4m#1448 refuses the `sfu_*` keys ("unknown key") and does not
+   start, so add them only once the deployed build knows them (see
+   "Update"):
+
+   ```bash
+   ~/.local/share/ad4m-staging/current/ad4m-executor run --help | grep -q -- --sfu-udp-port && echo ready
+   ```
+
+   Expected: `ready`. Before a rollback to an older build, take the four
+   `sfu_*` keys out of the config again.
+
+3. **Config.** Add to `~/.config/ad4m-staging/executor-config.json`:
+
+   ```json
+   "sfu_bind_addr": "<LAN IP>",
+   "sfu_udp_port": 40000,
+   "sfu_stun_server": "stun.l.google.com:19302"
+   ```
+
+   Add `"sfu_public_addr": "<public IP>"` only if step 6 shows the wrong
+   public address. Check the file:
+
+   ```bash
+   jq '{sfu_bind_addr, sfu_udp_port, sfu_stun_server, sfu_public_addr}' ~/.config/ad4m-staging/executor-config.json
+   ```
+
+   Expected: the values above (`sfu_public_addr: null` unless set).
+
+4. **Router.** Forward UDP port 40000 on the public side to `<LAN IP>`, port
+   40000. UDP only, the same port on both sides.
+
+5. **Host firewall (root).** Allow inbound UDP 40000:
+
+   ```bash
+   sudo ufw allow 40000/udp comment 'ad4m staging SFU'
+   ```
+
+   Expected: `Rule added` (and `Rule added (v6)`).
+
+6. **Restart and check:**
+
+   ```bash
+   systemctl --user restart ad4m-staging.service
+   journalctl --user -u ad4m-staging --since -5min | grep 'SFU media:'
+   ```
+
+   Expected, one line: `SFU media: bind <LAN IP>:40000 (fixed port);
+   advertised <public IP>:40000 (from STUN); reachability public (reflexive
+   <public IP>:40000)`. `<public IP>` is what `dig +short staging.ad4m.dev`
+   prints. If startup stops with `SFU UDP port 40000 on <LAN IP> is not
+   available`, another process holds the port, or `<LAN IP>` is not an
+   address of this box.
+
+The public address is read at startup only. The box's public IP is dynamic:
+when it changes, restart `ad4m-staging.service` so the SFU offers the new
+one. Until then callers outside the LAN cannot reach the SFU.
+
+Callers join the SFU of the executor they are signed in to. Everyone in a
+call must sign in to staging itself: someone on another executor (a local
+one, or the team node) is in a separate call with the same name.
 
 ## Rotate secrets
 

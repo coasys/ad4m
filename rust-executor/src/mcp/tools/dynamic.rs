@@ -44,18 +44,28 @@ impl Ad4mMcpHandler {
                     continue;
                 }
 
-                tools.push(Self::make_create_tool(&class.name, &class.properties));
+                // An abstract class (#1435): only its reads (see
+                // `handle_dynamic_tool`). If the index does not load, the
+                // writes are listed and refused when called.
+                let writable = !perspective.is_abstract_class(&class.name).unwrap_or(false);
+                if writable {
+                    tools.push(Self::make_create_tool(&class.name, &class.properties));
+                }
                 tools.push(Self::make_query_tool(&class.name));
                 tools.push(Self::make_list_tool(&class.name));
                 tools.push(Self::make_get_tool(&class.name));
-                tools.push(Self::make_delete_tool(&class.name));
+                if writable {
+                    tools.push(Self::make_delete_tool(&class.name));
+                }
                 // Per-property set tools and collection tools
                 for prop in &class.properties {
                     if prop.is_collection {
                         tools.push(Self::make_collection_get_tool(&class.name, &prop.name));
-                        tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
-                        tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
-                    } else {
+                        if writable {
+                            tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
+                            tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
+                        }
+                    } else if writable {
                         tools.push(Self::make_set_property_tool(&class.name, &prop.name));
                     }
                 }
@@ -341,7 +351,7 @@ impl Ad4mMcpHandler {
                     ))]));
                 }
             };
-            match shacl::find_class_name(&perspective, class_name_lower).await {
+            let name = match shacl::find_class_name(&perspective, class_name_lower).await {
                 Some(name) => name,
                 None => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -349,7 +359,28 @@ impl Ad4mMcpHandler {
                         class_name_lower, perspective_id
                     ))]));
                 }
+            };
+            // The generated tools of an abstract class (#1435) only read: the
+            // write tools write links at one class's predicates.
+            let writes = matches!(
+                operation,
+                "create" | "update" | "set" | "add" | "remove" | "delete"
+            );
+            let refusal = match writes.then(|| perspective.is_abstract_class(&name)) {
+                Some(Ok(true)) => Some(format!(
+                    "'{name}' is an abstract class: its generated tools only read, and it \
+                     cannot be created. instance_update and instance_remove write a record \
+                     through it, to the record's own classes."
+                )),
+                Some(Err(e)) => Some(e.to_string()),
+                _ => None,
+            };
+            if let Some(refusal) = refusal {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Error: {refusal}"
+                ))]));
             }
+            name
         };
 
         let result = match operation {

@@ -45,6 +45,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::model_query::utils::looks_like_absolute_iri;
+use super::shacl_parser::ABSTRACT_PREDICATE;
 use super::sparql_store::SparqlStore;
 
 /// Every subject class registered in this perspective.
@@ -71,7 +72,34 @@ pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error
     Ok(names)
 }
 
-fn local_name(uri: &str) -> String {
+/// Every registered class that is not abstract (#1435): the classes a record
+/// can be classified as. An abstract class names what a record has, not what
+/// it is, so it is never one of a record's classes.
+pub fn concrete_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error> {
+    let query = format!(
+        r#"
+        SELECT ?targetClass WHERE {{
+            ?targetClass <rdf://type> <ad4m://SubjectClass> .
+            FILTER NOT EXISTS {{
+                ?targetClass <ad4m://shape> ?shape .
+                ?shape <{ABSTRACT_PREDICATE}> ?marker .
+            }}
+        }}
+    "#
+    );
+    let rows: Vec<Value> = serde_json::from_str(&store.query(&query)?)?;
+    let mut names: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r["targetClass"].as_str())
+        .map(local_name)
+        .filter(|n| !n.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+pub(crate) fn local_name(uri: &str) -> String {
     if let Some(p) = uri.rfind('#') {
         return uri[p + 1..].to_string();
     }
@@ -205,7 +233,7 @@ pub fn subject_classes_of_with_pending(
 
     // Load every class's shape once. Shapes are cached per perspective, so this
     // is a map lookup after the first call.
-    let class_names = all_subject_class_names(store)?;
+    let class_names = concrete_subject_class_names(store)?;
     let mut shapes: Vec<(String, Vec<(String, Option<String>)>)> = Vec::new();
     for name in class_names {
         match resolver.get_shape(&name) {

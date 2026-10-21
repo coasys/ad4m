@@ -60,7 +60,8 @@ impl std::error::Error for InvalidDefaultModel {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentRequest {
     pub id: i64,
-    pub user_email: String,
+    /// The agent that asked to pay: the DID of a managed agent.
+    pub agent_did: String,
     pub amount_hot: String,
     pub proposal_action_hash: Option<String>,
     pub status: String,
@@ -80,6 +81,46 @@ pub struct ComputeLogEntry {
     pub credits_after: f64,
 }
 
+/// One `flow_replica_state` row. `current_state` is `None` for a row seeded
+/// at mint and not derived yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowReplicaStateRow {
+    pub instance: String,
+    pub current_state: Option<String>,
+    pub derived_at: Option<String>,
+}
+
+/// One agent's `flow_replica_state` row for one instance: the whole primary
+/// key, so a single index lookup.
+const FLOW_REPLICA_ROW_SQL: &str =
+    "SELECT instance, current_state, derived_at FROM flow_replica_state
+     WHERE perspective = ?1 AND agent_did = ?2 AND instance = ?3";
+
+/// One agent's rows on a perspective, ordered by instance: all of them
+/// (`instances: None`), or the `n` instances bound as `?3…` (`Some(n)`, n > 0).
+fn flow_replica_rows_sql(instances: Option<usize>) -> String {
+    let narrow = match instances {
+        None => String::new(),
+        Some(n) => {
+            let slots: Vec<String> = (3..3 + n).map(|i| format!("?{i}")).collect();
+            format!(" AND instance IN ({})", slots.join(", "))
+        }
+    };
+    format!(
+        "SELECT instance, current_state, derived_at FROM flow_replica_state
+         WHERE perspective = ?1 AND agent_did = ?2{narrow} ORDER BY instance"
+    )
+}
+
+fn flow_replica_row(row: &rusqlite::Row) -> rusqlite::Result<FlowReplicaStateRow> {
+    Ok(FlowReplicaStateRow {
+        instance: row.get(0)?,
+        current_state: row.get(1)?,
+        derived_at: row.get(2)?,
+    })
+}
+
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 lazy_static! {
@@ -103,6 +144,7 @@ impl Ad4mDb {
 
     fn new(db_path: &str) -> Ad4mDbResult<Self> {
         let conn = Connection::open(db_path)?;
+        Self::refuse_data_from_before_did_keys(&conn)?;
 
         // Create tables if they don't exist
 
@@ -230,7 +272,7 @@ impl Ad4mDb {
                 perspective_ids TEXT NOT NULL,
                 webhookUrl TEXT NOT NULL,
                 webhookAuth TEXT NOT NULL,
-                user_email TEXT
+                owner_did TEXT NOT NULL
              )",
             [],
         )?;
@@ -373,9 +415,9 @@ impl Ad4mDb {
             }
         };
 
-        // Add user_email column to notifications table for multi-user support
-        // This column tracks which user created the notification (NULL for main agent)
-        alter_add_column("ALTER TABLE notifications ADD COLUMN user_email TEXT")?;
+        // Notifications used to name their owner by `user_email` (NULL for the main agent).
+        // `migrate_notification_owners` moves them to `owner_did` once the agent's DID is known.
+        alter_add_column("ALTER TABLE notifications ADD COLUMN owner_did TEXT")?;
 
         // Add hosting columns to users table
         alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
@@ -406,7 +448,7 @@ impl Ad4mDb {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS payment_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_email TEXT NOT NULL,
+                agent_did TEXT NOT NULL,
                 amount_hot TEXT NOT NULL,
                 proposal_action_hash TEXT UNIQUE,
                 status TEXT NOT NULL DEFAULT 'pending',
@@ -448,7 +490,7 @@ impl Ad4mDb {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS compute_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_email TEXT NOT NULL,
+                agent_did TEXT NOT NULL,
                 timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                 operation TEXT NOT NULL,
                 summary TEXT,
@@ -456,11 +498,74 @@ impl Ad4mDb {
                 credits_after REAL NOT NULL
             )",
         )?;
+
+        // `users.did` is the key of a managed agent: one user per DID. Users without an agent
+        // (an empty DID) stay out of the index.
         conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_compute_log_user_time ON compute_log(user_email, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_compute_log_agent_time ON compute_log(agent_did, timestamp);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_did ON users(did) WHERE did != '';",
+        )?;
+
+        // The flow engine's per-replica bookkeeping (#1424): what each agent's
+        // consensus pass last derived for an instance, and which proposals it
+        // has already recorded as fired. Never synced, never links, never an
+        // input to the fold — see `perspectives::flow_instance::replica_state`.
+        //
+        // `current_state` is NULL for a row seeded at mint ("minted by this
+        // agent here, not derived yet"): the row's presence is what makes the
+        // next pass an ordinary one rather than a silent catch-up.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS flow_replica_state (
+                perspective TEXT NOT NULL,
+                agent_did TEXT NOT NULL,
+                instance TEXT NOT NULL,
+                current_state TEXT,
+                derived_at TEXT,
+                PRIMARY KEY (perspective, agent_did, instance)
+            )",
+        )?;
+        // `instance` is not part of the key — a proposal belongs to exactly one
+        // instance — but it lets `flowFired` list one instance's history
+        // without walking the proposals' links.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS flow_fired_mark (
+                perspective TEXT NOT NULL,
+                agent_did TEXT NOT NULL,
+                proposal TEXT NOT NULL,
+                instance TEXT NOT NULL,
+                marked_at TEXT NOT NULL,
+                PRIMARY KEY (perspective, agent_did, proposal)
+            )",
+        )?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_flow_fired_mark_instance
+             ON flow_fired_mark(perspective, agent_did, instance)",
         )?;
 
         Ok(Self { conn })
+    }
+
+    /// Refuses a database that a `dev` build wrote before agents were keyed by DID (D16):
+    /// its billing tables name users by `user_email`. No migration exists, so it stops here
+    /// with a message instead of failing later on a missing `agent_did` column.
+    fn refuse_data_from_before_did_keys(conn: &Connection) -> Ad4mDbResult<()> {
+        for table in ["compute_log", "payment_requests"] {
+            let has_user_email: bool = conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('{table}') WHERE name = 'user_email'"
+                ),
+                [],
+                |row| row.get(0),
+            )?;
+            if has_user_email {
+                return Err(anyhow!(
+                    "This data folder was written by a dev build from before agents were keyed \
+                     by DID ({table}.user_email). It cannot be upgraded: start the executor with \
+                     a fresh data folder."
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn create_or_update_model_status(
@@ -763,7 +868,8 @@ impl Ad4mDb {
     pub fn add_notification(
         &self,
         notification: NotificationInput,
-        user_email: Option<String>,
+        owner_did: &str,
+        granted: bool,
     ) -> Result<String, rusqlite::Error> {
         // Validate the trigger query before storing
         if let Err(e) = Self::validate_notification_query(&notification.trigger) {
@@ -775,10 +881,10 @@ impl Ad4mDb {
 
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, user_email) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, owner_did) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
-                false,
+                granted,
                 notification.description,
                 notification.app_name,
                 notification.app_url,
@@ -787,121 +893,109 @@ impl Ad4mDb {
                 serde_json::to_string(&notification.perspective_ids).unwrap(),
                 notification.webhook_url,
                 notification.webhook_auth,
-                user_email,
+                owner_did,
             ],
         )?;
         Ok(id)
     }
 
-    pub fn get_notifications(&self) -> Result<Vec<Notification>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare("SELECT * FROM notifications")?;
-        let notification_iter = stmt.query_map([], |row| {
-            Ok(Notification {
-                id: row.get(0)?,
-                granted: row.get(1)?,
-                description: row.get(2)?,
-                app_name: row.get(3)?,
-                app_url: row.get(4)?,
-                app_icon_path: row.get(5)?,
-                trigger: row.get(6)?,
-                perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
-                webhook_url: row.get(8)?,
-                webhook_auth: row.get(9)?,
-                user_email: row.get(10)?,
-            })
-        })?;
-
-        let mut notifications = Vec::new();
-        for notification in notification_iter {
-            notifications.push(notification?);
-        }
-        Ok(notifications)
+    /// Reads a row of `NOTIFICATION_COLUMNS`, in that order.
+    fn notification_from_row(row: &rusqlite::Row) -> Result<Notification, rusqlite::Error> {
+        Ok(Notification {
+            id: row.get(0)?,
+            granted: row.get(1)?,
+            description: row.get(2)?,
+            app_name: row.get(3)?,
+            app_url: row.get(4)?,
+            app_icon_path: row.get(5)?,
+            trigger: row.get(6)?,
+            perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
+            webhook_url: row.get(8)?,
+            webhook_auth: row.get(9)?,
+            owner_did: row.get(10)?,
+        })
     }
 
-    pub fn get_notifications_for_user(
+    const NOTIFICATION_COLUMNS: &str = "id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, owner_did";
+
+    fn query_notifications(
         &self,
-        user_email: Option<String>,
+        filter: &str,
+        params: impl rusqlite::Params,
     ) -> Result<Vec<Notification>, rusqlite::Error> {
-        let notifications = if let Some(email) = user_email {
-            // Query for specific user's notifications
-            let mut stmt = self
-                .conn
-                .prepare("SELECT * FROM notifications WHERE user_email = ?1")?;
-            let notification_iter = stmt.query_map(params![email], |row| {
-                Ok(Notification {
-                    id: row.get(0)?,
-                    granted: row.get(1)?,
-                    description: row.get(2)?,
-                    app_name: row.get(3)?,
-                    app_url: row.get(4)?,
-                    app_icon_path: row.get(5)?,
-                    trigger: row.get(6)?,
-                    perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
-                    webhook_url: row.get(8)?,
-                    webhook_auth: row.get(9)?,
-                    user_email: row.get(10)?,
-                })
-            })?;
+        self.conn
+            .prepare(&format!(
+                "SELECT {} FROM notifications WHERE owner_did IS NOT NULL {filter}",
+                Self::NOTIFICATION_COLUMNS
+            ))?
+            .query_map(params, Self::notification_from_row)?
+            .collect()
+    }
 
-            let mut result = Vec::new();
-            for notification in notification_iter {
-                result.push(notification?);
-            }
-            result
-        } else {
-            // Query for main agent's notifications (user_email IS NULL)
-            let mut stmt = self
-                .conn
-                .prepare("SELECT * FROM notifications WHERE user_email IS NULL")?;
-            let notification_iter = stmt.query_map([], |row| {
-                Ok(Notification {
-                    id: row.get(0)?,
-                    granted: row.get(1)?,
-                    description: row.get(2)?,
-                    app_name: row.get(3)?,
-                    app_url: row.get(4)?,
-                    app_icon_path: row.get(5)?,
-                    trigger: row.get(6)?,
-                    perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
-                    webhook_url: row.get(8)?,
-                    webhook_auth: row.get(9)?,
-                    user_email: row.get(10)?,
-                })
-            })?;
+    pub fn get_notifications(&self) -> Result<Vec<Notification>, rusqlite::Error> {
+        self.query_notifications("", [])
+    }
 
-            let mut result = Vec::new();
-            for notification in notification_iter {
-                result.push(notification?);
-            }
-            result
-        };
-
-        Ok(notifications)
+    pub fn get_notifications_for_owner(
+        &self,
+        owner_did: &str,
+    ) -> Result<Vec<Notification>, rusqlite::Error> {
+        self.query_notifications("AND owner_did = ?1", params![owner_did])
     }
 
     pub fn get_notification(&self, id: String) -> Result<Option<Notification>, rusqlite::Error> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM notifications WHERE id = ?")?;
-        let mut rows = stmt.query(params![id])?;
+        Ok(self
+            .query_notifications("AND id = ?1", params![id])?
+            .into_iter()
+            .next())
+    }
 
-        if let Some(row) = rows.next()? {
-            Ok(Some(Notification {
-                id: row.get(0)?,
-                granted: row.get(1)?,
-                description: row.get(2)?,
-                app_name: row.get(3)?,
-                app_url: row.get(4)?,
-                app_icon_path: row.get(5)?,
-                trigger: row.get(6)?,
-                perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
-                webhook_url: row.get(8)?,
-                webhook_auth: row.get(9)?,
-                user_email: row.get(10)?,
-            }))
-        } else {
-            Ok(None)
+    /// Gives every notification of an older executor an `owner_did`: a managed
+    /// user's DID from `users` for a `user_email`, else `main_agent_did`. Rows
+    /// of a user who no longer exists go: nobody owns them. Needs the main
+    /// agent's DID, so it runs once the agent has loaded. Until then
+    /// `query_notifications` skips rows without an owner.
+    pub fn migrate_notification_owners(&self, main_agent_did: &str) -> Result<(), AnyError> {
+        let has_user_email: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('notifications') WHERE name = 'user_email'",
+            [],
+            |row| row.get(0),
+        )?;
+        let tx = self.conn.unchecked_transaction()?;
+        if has_user_email {
+            tx.execute(
+                "UPDATE notifications SET owner_did = (SELECT NULLIF(did, '') FROM users WHERE username = user_email)
+                 WHERE owner_did IS NULL AND user_email IS NOT NULL",
+                [],
+            )?;
+            let ownerless: Vec<String> = tx
+                .prepare(
+                    "SELECT id FROM notifications WHERE owner_did IS NULL AND user_email IS NOT NULL",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            if !ownerless.is_empty() {
+                log::warn!(
+                    "Deleting {} notification(s) whose user no longer exists or has no DID: {:?}",
+                    ownerless.len(),
+                    ownerless
+                );
+            }
+            tx.execute(
+                "DELETE FROM notifications WHERE owner_did IS NULL AND user_email IS NOT NULL",
+                [],
+            )?;
         }
+        // Rows of executors from before `user_email` belong to the main agent.
+        tx.execute(
+            "UPDATE notifications SET owner_did = ?1 WHERE owner_did IS NULL",
+            params![main_agent_did],
+        )?;
+        if has_user_email {
+            tx.execute("ALTER TABLE notifications DROP COLUMN user_email", [])?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn remove_notification(&self, id: String) -> Result<(), rusqlite::Error> {
@@ -924,7 +1018,7 @@ impl Ad4mDb {
         }
 
         let result = self.conn.execute(
-            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10, user_email = ?11 WHERE id = ?1",
+            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10, owner_did = ?11 WHERE id = ?1",
             params![
                 id,
                 updated_notification.description,
@@ -936,7 +1030,7 @@ impl Ad4mDb {
                 updated_notification.webhook_url,
                 updated_notification.webhook_auth,
                 updated_notification.granted,
-                updated_notification.user_email,
+                updated_notification.owner_did,
             ],
         )?;
         Ok(result > 0)
@@ -1275,6 +1369,47 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// Register `user_did` as a member of the neighbourhood at
+    /// `neighbourhood_url`.  Creates a synthetic perspective_handle if
+    /// none with that `shared_url` exists yet (needed by test harnesses
+    /// that use synthetic neighbourhood URLs).
+    ///
+    /// **Caller must enforce authorization.** This method trusts
+    /// that the caller already verified the DID matches the
+    /// authenticated identity (or holds admin privileges).
+    /// The `sfu.ensureMembership` WS handler allows only the executor's
+    /// operator (`RequestContext::is_operator`).
+    pub fn ensure_neighbourhood_member(
+        &self,
+        neighbourhood_url: &str,
+        user_did: &str,
+    ) -> Ad4mDbResult<()> {
+        let perspective_exists: bool = self
+            .conn
+            .prepare("SELECT EXISTS(SELECT 1 FROM perspective_handle WHERE shared_url = ?1)")?
+            .query_row([neighbourhood_url], |row| row.get(0))
+            .map_err(|e| anyhow!("Failed to check if perspective exists: {}", e))?;
+
+        if !perspective_exists {
+            let uuid = uuid::Uuid::new_v4().to_string();
+            let owners_json = serde_json::to_string(&vec![user_did])?;
+            self.conn.execute(
+                "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state, owners)
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
+                params![
+                    format!("sfu-membership-{}", neighbourhood_url),
+                    uuid,
+                    neighbourhood_url,
+                    "\"Synced\"",
+                    owners_json,
+                ],
+            )?;
+            return Ok(());
+        }
+
+        self.add_owner_to_neighbourhood(neighbourhood_url, user_did)
+    }
+
     pub fn get_neighbourhood_owners(&self, neighbourhood_url: &str) -> Ad4mDbResult<Vec<String>> {
         let owners: Vec<String> = self
             .conn
@@ -1303,7 +1438,174 @@ impl Ad4mDb {
             [uuid],
         )?;
 
+        self.remove_flow_replica_rows(uuid)?;
+
         Ok(())
+    }
+
+    /// Every flow-bookkeeping row of `perspective`, for every agent. Part of
+    /// [`remove_perspective`](Self::remove_perspective); exposed for the flow
+    /// service's own `remove_perspective`.
+    pub fn remove_flow_replica_rows(&self, perspective: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "DELETE FROM flow_replica_state WHERE perspective = ?1",
+            [perspective],
+        )?;
+        self.conn.execute(
+            "DELETE FROM flow_fired_mark WHERE perspective = ?1",
+            [perspective],
+        )?;
+        Ok(())
+    }
+
+    /// `agent_did`'s rows on `perspective`, optionally narrowed to
+    /// `instances`. A seeded row (minted here, not derived yet) comes back
+    /// with `current_state: None`.
+    ///
+    /// The narrowing is in the query (`instance IN (…)`), so a read of a few
+    /// instances costs a few key lookups, not a scan of every row the agent
+    /// has here.
+    pub fn get_flow_replica_states(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        instances: Option<&[String]>,
+    ) -> Ad4mDbResult<Vec<FlowReplicaStateRow>> {
+        if instances.is_some_and(<[String]>::is_empty) {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self
+            .conn
+            .prepare(&flow_replica_rows_sql(instances.map(<[String]>::len)))?;
+        let keys = [perspective, agent_did]
+            .into_iter()
+            .chain(instances.unwrap_or_default().iter().map(String::as_str));
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(keys), flow_replica_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// `agent_did`'s row for one instance — a primary-key lookup. `None`
+    /// when there is no row; `current_state: None` for a seeded one.
+    pub fn get_flow_replica_state(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        instance: &str,
+    ) -> Ad4mDbResult<Option<FlowReplicaStateRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                FLOW_REPLICA_ROW_SQL,
+                params![perspective, agent_did, instance],
+                flow_replica_row,
+            )
+            .optional()?)
+    }
+
+    /// Insert a NULL-state row unless one exists: "minted by this agent here".
+    /// Returns whether a row was inserted.
+    pub fn seed_flow_replica_state(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        instance: &str,
+    ) -> Ad4mDbResult<bool> {
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO flow_replica_state (perspective, agent_did, instance)
+             VALUES (?1, ?2, ?3)",
+            params![perspective, agent_did, instance],
+        )?;
+        Ok(inserted > 0)
+    }
+
+    /// Record one pass over one instance in a single transaction: set the
+    /// state (when `state` is `Some`) and add the fired marks. Returns the
+    /// row as it was before — `None` when there was no row at all — and the
+    /// marks this call inserted, in `fired` order. A mark already present is
+    /// not in that list: another pass recorded it first.
+    ///
+    /// One transaction, so a crash can never leave marks recorded with the
+    /// state not advanced: the next pass would see the marks, find nothing
+    /// new, and never report the edge.
+    pub fn record_flow_replica_pass(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        instance: &str,
+        state: Option<&str>,
+        fired: &[String],
+        at: &str,
+    ) -> Ad4mDbResult<(Option<FlowReplicaStateRow>, Vec<String>)> {
+        let tx = self.conn.unchecked_transaction()?;
+        let before = tx
+            .query_row(
+                FLOW_REPLICA_ROW_SQL,
+                params![perspective, agent_did, instance],
+                flow_replica_row,
+            )
+            .optional()?;
+        if let Some(state) = state {
+            tx.execute(
+                "INSERT INTO flow_replica_state (perspective, agent_did, instance, current_state, derived_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (perspective, agent_did, instance)
+                 DO UPDATE SET current_state = excluded.current_state, derived_at = excluded.derived_at",
+                params![perspective, agent_did, instance, state, at],
+            )?;
+        }
+        let mut inserted = Vec::new();
+        for proposal in fired {
+            let added = tx.execute(
+                "INSERT OR IGNORE INTO flow_fired_mark (perspective, agent_did, proposal, instance, marked_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![perspective, agent_did, proposal, instance, at],
+            )?;
+            if added > 0 {
+                inserted.push(proposal.clone());
+            }
+        }
+        tx.commit()?;
+        Ok((before, inserted))
+    }
+
+    /// The subset of `proposals` that `agent_did` has marked fired on
+    /// `perspective`.
+    pub fn get_flow_fired_among(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        proposals: &[String],
+    ) -> Ad4mDbResult<HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT 1 FROM flow_fired_mark
+             WHERE perspective = ?1 AND agent_did = ?2 AND proposal = ?3",
+        )?;
+        let mut fired = HashSet::new();
+        for proposal in proposals {
+            if stmt.exists(params![perspective, agent_did, proposal])? {
+                fired.insert(proposal.clone());
+            }
+        }
+        Ok(fired)
+    }
+
+    /// Every proposal of `instance` that `agent_did` has marked fired, sorted.
+    pub fn get_flow_fired_for_instance(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        instance: &str,
+    ) -> Ad4mDbResult<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT proposal FROM flow_fired_mark
+             WHERE perspective = ?1 AND agent_did = ?2 AND instance = ?3 ORDER BY proposal",
+        )?;
+        let proposals = stmt
+            .query_map(params![perspective, agent_did, instance], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(proposals)
     }
 
     /// Helper function to normalize predicate values from the database.
@@ -2137,7 +2439,7 @@ impl Ad4mDb {
 
         // Export notifications
         let notifications: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, user_email FROM notifications"
+            "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, owner_did FROM notifications"
         )?.query_map([], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -2150,7 +2452,7 @@ impl Ad4mDb {
                 "webhook_url": row.get::<_, String>(7)?,
                 "webhook_auth": row.get::<_, String>(8)?,
                 "granted": row.get::<_, bool>(9)?,
-                "user_email": row.get::<_, Option<String>>(10)?
+                "owner_did": row.get::<_, String>(10)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert(
@@ -2295,11 +2597,11 @@ impl Ad4mDb {
         // Export payment_requests
         let payment_requests: Vec<serde_json::Value> = self
             .conn
-            .prepare("SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests")?
+            .prepare("SELECT id, agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests")?
             .query_map([], |row| {
                 Ok(serde_json::json!({
                     "id": row.get::<_, i64>(0)?,
-                    "user_email": row.get::<_, String>(1)?,
+                    "agent_did": row.get::<_, String>(1)?,
                     "amount_hot": row.get::<_, String>(2)?,
                     "proposal_action_hash": row.get::<_, Option<String>>(3)?,
                     "status": row.get::<_, String>(4)?,
@@ -2337,7 +2639,11 @@ impl Ad4mDb {
         Ok(serde_json::Value::Object(export_data))
     }
 
-    pub fn import_from_json(&self, data: serde_json::Value) -> Ad4mDbResult<ImportResult> {
+    pub fn import_from_json(
+        &self,
+        data: serde_json::Value,
+        main_agent_did: Option<&str>,
+    ) -> Ad4mDbResult<ImportResult> {
         log::info!("Importing DB data from JSON");
         let data = data
             .as_object()
@@ -2555,54 +2861,6 @@ impl Ad4mDb {
                         .errors
                         .push(format!("Failed to parse perspective diffs: {}", e));
                     log::warn!("Failed to parse perspective diffs: {}", e)
-                }
-            }
-        }
-
-        // Import notifications
-        if let Some(notifications) = data.get("notifications") {
-            match serde_json::from_value::<Vec<serde_json::Value>>(notifications.clone()) {
-                Ok(notifications) => {
-                    result.notifications.total = notifications.len() as i32;
-                    log::debug!("Importing {} notifications", notifications.len());
-                    for notification in notifications {
-                        let id = notification
-                            .get("id")
-                            .and_then(|id| id.as_str())
-                            .unwrap_or("<unknown>");
-                        match self.conn.execute(
-                            "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, user_email)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                            params![
-                                notification["id"].as_str().unwrap_or(""),
-                                notification["description"].as_str().unwrap_or(""),
-                                notification["app_name"].as_str().unwrap_or(""),
-                                notification["app_url"].as_str().unwrap_or(""),
-                                notification["app_icon_path"].as_str().unwrap_or(""),
-                                notification["trigger"].as_str().unwrap_or(""),
-                                notification["perspective_ids"].as_str().unwrap_or(""),
-                                notification["webhook_url"].as_str().unwrap_or(""),
-                                notification["webhook_auth"].as_str().unwrap_or(""),
-                                notification["granted"].as_bool().unwrap_or(false),
-                                notification["user_email"].as_str()
-                            ],
-                        ) {
-                            Ok(_) => result.notifications.imported += 1,
-                            Err(e) => {
-                                result.notifications.failed += 1;
-                                result.notifications.errors.push(format!("Failed to import notification {}: {}", id, e));
-                                log::warn!("Failed to import notification {}: {}", id, e)
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    result.notifications.failed = 1;
-                    result
-                        .notifications
-                        .errors
-                        .push(format!("Failed to parse notifications: {}", e));
-                    log::warn!("Failed to parse notifications: {}", e)
                 }
             }
         }
@@ -2830,6 +3088,74 @@ impl Ad4mDb {
             }
         }
 
+        // Import notifications (after users: older exports name their owner by email)
+        if let Some(notifications) = data.get("notifications") {
+            match serde_json::from_value::<Vec<serde_json::Value>>(notifications.clone()) {
+                Ok(notifications) => {
+                    result.notifications.total = notifications.len() as i32;
+                    log::debug!("Importing {} notifications", notifications.len());
+                    for notification in notifications {
+                        let id = notification
+                            .get("id")
+                            .and_then(|id| id.as_str())
+                            .unwrap_or("<unknown>");
+                        // Exports of older executors name the owner by email (null: the main agent).
+                        let owner = match (
+                            notification["owner_did"].as_str(),
+                            notification["user_email"].as_str(),
+                        ) {
+                            (Some(did), _) => Some(did.to_string()),
+                            (None, Some(email)) => self
+                                .get_user(email)
+                                .ok()
+                                .map(|u| u.did)
+                                .filter(|d| !d.is_empty()),
+                            (None, None) => main_agent_did.map(str::to_string),
+                        };
+                        let Some(owner) = owner else {
+                            result.notifications.failed += 1;
+                            let error = format!("Failed to import notification {}: no owner", id);
+                            log::warn!("{}", error);
+                            result.notifications.errors.push(error);
+                            continue;
+                        };
+                        match self.conn.execute(
+                            "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, owner_did)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                            params![
+                                notification["id"].as_str().unwrap_or(""),
+                                notification["description"].as_str().unwrap_or(""),
+                                notification["app_name"].as_str().unwrap_or(""),
+                                notification["app_url"].as_str().unwrap_or(""),
+                                notification["app_icon_path"].as_str().unwrap_or(""),
+                                notification["trigger"].as_str().unwrap_or(""),
+                                notification["perspective_ids"].as_str().unwrap_or(""),
+                                notification["webhook_url"].as_str().unwrap_or(""),
+                                notification["webhook_auth"].as_str().unwrap_or(""),
+                                notification["granted"].as_bool().unwrap_or(false),
+                                owner,
+                            ],
+                        ) {
+                            Ok(_) => result.notifications.imported += 1,
+                            Err(e) => {
+                                result.notifications.failed += 1;
+                                result.notifications.errors.push(format!("Failed to import notification {}: {}", id, e));
+                                log::warn!("Failed to import notification {}: {}", id, e)
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    result.notifications.failed = 1;
+                    result
+                        .notifications
+                        .errors
+                        .push(format!("Failed to parse notifications: {}", e));
+                    log::warn!("Failed to parse notifications: {}", e)
+                }
+            }
+        }
+
         // Import friends
         if let Some(friends) = data.get("friends") {
             match serde_json::from_value::<Vec<String>>(friends.clone()) {
@@ -2963,14 +3289,22 @@ impl Ad4mDb {
                 log::debug!("Importing {} payment_requests", requests.len());
                 for req in requests {
                     if let Err(e) = self.conn.execute(
-                        "INSERT OR IGNORE INTO payment_requests (user_email, amount_hot, proposal_action_hash, status, created_at, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        // Exports from before agents were keyed by DID name the user by
+                        // email; `users` was imported above, so it resolves to the agent.
+                        "INSERT OR IGNORE INTO payment_requests (agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at)
+                         SELECT did, ?2, ?3, ?4, ?5, ?6 FROM (
+                             SELECT ?1 AS did WHERE ?1 IS NOT NULL
+                             UNION ALL
+                             SELECT NULLIF(did, '') FROM users WHERE ?1 IS NULL AND username = ?7
+                         ) WHERE did IS NOT NULL",
                         params![
-                            req["user_email"].as_str().unwrap_or(""),
+                            req["agent_did"].as_str(),
                             req["amount_hot"].as_str().unwrap_or("0"),
                             req["proposal_action_hash"].as_str(),
                             req["status"].as_str().unwrap_or("pending"),
                             req["created_at"].as_str().unwrap_or(""),
-                            req["completed_at"].as_str()
+                            req["completed_at"].as_str(),
+                            req["user_email"].as_str()
                         ],
                     ) {
                         log::warn!("Failed to import payment_request: {}", e);
@@ -3084,12 +3418,22 @@ impl Ad4mDb {
     pub fn get_username_by_did(&self, did: &str) -> Ad4mDbResult<Option<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT username FROM users WHERE did = ?1")?;
+            .prepare("SELECT username FROM users WHERE did = ?1 AND did != ''")?;
         match stmt.query_row([did], |row| row.get::<_, String>(0)) {
             Ok(username) => Ok(Some(username)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Points the user `username` at the agent `did` (tests build stale or mismatched rows).
+    #[cfg(test)]
+    pub fn set_user_did(&self, username: &str, did: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE users SET did = ?2 WHERE username = ?1",
+            params![username, did],
+        )?;
+        Ok(())
     }
 
     pub fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()> {
@@ -3099,6 +3443,34 @@ impl Ad4mDb {
             params![timestamp, email],
         )?;
         Ok(())
+    }
+
+    /// Records that the managed agent `agent_did` was just active (its account's last_seen).
+    pub fn update_agent_last_seen(&self, agent_did: &str) -> Ad4mDbResult<()> {
+        let timestamp = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "UPDATE users SET last_seen = ?1 WHERE did = ?2 AND did != ''",
+            params![timestamp, agent_did],
+        )?;
+        Ok(())
+    }
+
+    /// The account that owns the managed agent `agent_did`.
+    pub fn get_user_by_did(&self, agent_did: &str) -> Ad4mDbResult<Option<UserInfo>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT username, did, last_seen FROM users WHERE did = ?1 AND did != ''",
+                [agent_did],
+                |row| {
+                    Ok(UserInfo {
+                        username: row.get(0)?,
+                        did: row.get(1)?,
+                        last_seen: row.get(2).ok(),
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn list_users(&self) -> Ad4mDbResult<Vec<UserInfo>> {
@@ -3221,6 +3593,21 @@ impl Ad4mDb {
         Self::require_user_row(rows, email)
     }
 
+    /// Adds credits to the account that owns the agent `agent_did`; returns the account's email.
+    pub fn add_agent_credits(&self, agent_did: &str, amount: f64) -> Ad4mDbResult<String> {
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
+            "UPDATE users SET remaining_credits = COALESCE(remaining_credits, 0) + ?1 WHERE did = ?2 AND did != ''",
+            params![amount, agent_did],
+        )?;
+        Self::require_user_row(rows, agent_did)?;
+        Ok(self.conn.query_row(
+            "SELECT username FROM users WHERE did = ?1",
+            [agent_did],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn deduct_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
         Self::validate_credit_amount(amount)?;
         let rows = self.conn.execute(
@@ -3254,106 +3641,138 @@ impl Ad4mDb {
         Ok(())
     }
 
-    /// Atomically deduct credits AND insert a compute log entry in a single transaction.
-    /// Returns the credits_after value on success.
+    /// [`Ad4mDb::deduct_user_credits_if_available`] for the account that owns the agent
+    /// `agent_did`; returns the account's email.
+    pub fn deduct_agent_credits_if_available(
+        &self,
+        agent_did: &str,
+        amount: f64,
+    ) -> Ad4mDbResult<String> {
+        let email = self
+            .get_username_by_did(agent_did)?
+            .filter(|_| !agent_did.is_empty())
+            .ok_or_else(|| anyhow!("User not found: {}", agent_did))?;
+        self.deduct_user_credits_if_available(&email, amount)?;
+        Ok(email)
+    }
+
+    /// Atomically deduct credits from the account that owns the agent `agent_did` AND insert a
+    /// compute log entry for the agent, in a single transaction.
+    /// Returns the log row id, the credits left, and the account's email (whose hosting info
+    /// changed).
     pub fn deduct_credits_and_log(
         &self,
-        email: &str,
+        agent_did: &str,
         amount: f64,
         operation: &str,
         summary: Option<&str>,
-    ) -> Ad4mDbResult<(i64, f64)> {
+    ) -> Ad4mDbResult<(i64, f64, String)> {
         Self::validate_credit_amount(amount)?;
         let tx = self.conn.unchecked_transaction()?;
 
         // Deduct credits, clamped to 0 (never negative).
         // Any user with credits > 0 is charged; the balance floors at 0.
         let rows = tx.execute(
-            "UPDATE users SET remaining_credits = MAX(remaining_credits - ?1, 0) WHERE username = ?2 AND COALESCE(remaining_credits, 0) > 0",
-            params![amount, email],
+            "UPDATE users SET remaining_credits = MAX(remaining_credits - ?1, 0) WHERE did = ?2 AND did != '' AND COALESCE(remaining_credits, 0) > 0",
+            params![amount, agent_did],
         )?;
         if rows == 0 {
             let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1)",
-                [email],
+                "SELECT EXISTS(SELECT 1 FROM users WHERE did = ?1 AND did != '')",
+                [agent_did],
                 |row| row.get(0),
             )?;
             // tx is dropped here → auto-rollback
             if !exists {
-                return Err(anyhow!("User not found: {}", email));
+                return Err(anyhow!("User not found: {}", agent_did));
             }
             return Err(anyhow!("Insufficient compute credits"));
         }
 
         // Read the resulting balance within the same transaction
-        let credits_after: f64 = tx.query_row(
-            "SELECT COALESCE(remaining_credits, 0) FROM users WHERE username = ?1",
-            [email],
-            |row| row.get(0),
+        let (credits_after, email): (f64, String) = tx.query_row(
+            "SELECT COALESCE(remaining_credits, 0), username FROM users WHERE did = ?1",
+            [agent_did],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
 
         // Insert the audit log entry
         tx.execute(
-            "INSERT INTO compute_log (user_email, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![email, operation, summary, amount, credits_after],
+            "INSERT INTO compute_log (agent_did, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![agent_did, operation, summary, amount, credits_after],
         )?;
         let row_id = tx.last_insert_rowid();
 
         tx.commit()?;
-        Ok((row_id, credits_after))
+        Ok((row_id, credits_after, email))
+    }
+
+    /// The credits of the account that owns the agent `agent_did`.
+    pub fn get_agent_credits(&self, agent_did: &str) -> Ad4mDbResult<f64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(remaining_credits, 0) FROM users WHERE did = ?1 AND did != ''",
+            [agent_did],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Whether the account that owns the agent `agent_did` computes for free.
+    pub fn get_agent_free_access(&self, agent_did: &str) -> Ad4mDbResult<bool> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(free_access, 0) FROM users WHERE did = ?1 AND did != ''",
+            [agent_did],
+            |row| row.get(0),
+        )?)
     }
 
     // ── Compute activity log ────────────────────────────────────────────
 
-    /// Insert a compute log entry after a billing event.
+    /// Insert a compute log entry after a billing event of the agent `agent_did`.
     pub fn insert_compute_log(
         &self,
-        email: &str,
+        agent_did: &str,
         operation: &str,
         summary: Option<&str>,
         cost: f64,
         credits_after: f64,
     ) -> Ad4mDbResult<i64> {
         self.conn.execute(
-            "INSERT INTO compute_log (user_email, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![email, operation, summary, cost, credits_after],
+            "INSERT INTO compute_log (agent_did, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![agent_did, operation, summary, cost, credits_after],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Query compute log entries for a user, ordered newest-first.
+    /// The columns of a `ComputeLogEntry`. `userEmail` names the account that owns the agent,
+    /// for display; the row itself names the agent by DID.
+    const COMPUTE_LOG_SELECT: &'static str = "SELECT c.id, COALESCE(u.username, c.agent_did), c.timestamp, c.operation, c.summary, c.cost, c.credits_after FROM compute_log c LEFT JOIN users u ON u.did = c.agent_did";
+
+    fn compute_log_entry(row: &rusqlite::Row) -> rusqlite::Result<ComputeLogEntry> {
+        Ok(ComputeLogEntry {
+            id: row.get(0)?,
+            user_email: row.get(1)?,
+            timestamp: row.get(2)?,
+            operation: row.get(3)?,
+            summary: row.get(4)?,
+            cost: row.get(5)?,
+            credits_after: row.get(6)?,
+        })
+    }
+
+    /// Query compute log entries of the agent `agent_did`, ordered newest-first.
     /// If `since` is provided (ISO 8601), only entries after that timestamp are returned.
     pub fn get_compute_log(
         &self,
-        email: &str,
+        agent_did: &str,
         since: Option<&str>,
         limit: i64,
     ) -> Ad4mDbResult<Vec<ComputeLogEntry>> {
-        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match since {
-            Some(ts) => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE user_email = ?1 AND timestamp > ?2 ORDER BY id DESC LIMIT ?3",
-                vec![Box::new(email.to_string()), Box::new(ts.to_string()), Box::new(limit)],
-            ),
-            None => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE user_email = ?1 ORDER BY id DESC LIMIT ?2",
-                vec![Box::new(email.to_string()), Box::new(limit)],
-            ),
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&format!(
+            "{} WHERE c.agent_did = ?1 AND (?2 IS NULL OR c.timestamp > ?2) ORDER BY c.id DESC LIMIT ?3",
+            Self::COMPUTE_LOG_SELECT
+        ))?;
         let entries = stmt
-            .query_map(params_refs.as_slice(), |row| {
-                Ok(ComputeLogEntry {
-                    id: row.get(0)?,
-                    user_email: row.get(1)?,
-                    timestamp: row.get(2)?,
-                    operation: row.get(3)?,
-                    summary: row.get(4)?,
-                    cost: row.get(5)?,
-                    credits_after: row.get(6)?,
-                })
-            })?
+            .query_map(params![agent_did, since, limit], Self::compute_log_entry)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(entries)
     }
@@ -3364,31 +3783,12 @@ impl Ad4mDb {
         since: Option<&str>,
         limit: i64,
     ) -> Ad4mDbResult<Vec<ComputeLogEntry>> {
-        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match since {
-            Some(ts) => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE timestamp > ?1 ORDER BY id DESC LIMIT ?2",
-                vec![Box::new(ts.to_string()), Box::new(limit)],
-            ),
-            None => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log ORDER BY id DESC LIMIT ?1",
-                vec![Box::new(limit)],
-            ),
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&format!(
+            "{} WHERE (?1 IS NULL OR c.timestamp > ?1) ORDER BY c.id DESC LIMIT ?2",
+            Self::COMPUTE_LOG_SELECT
+        ))?;
         let entries = stmt
-            .query_map(params_refs.as_slice(), |row| {
-                Ok(ComputeLogEntry {
-                    id: row.get(0)?,
-                    user_email: row.get(1)?,
-                    timestamp: row.get(2)?,
-                    operation: row.get(3)?,
-                    summary: row.get(4)?,
-                    cost: row.get(5)?,
-                    credits_after: row.get(6)?,
-                })
-            })?
+            .query_map(params![since, limit], Self::compute_log_entry)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(entries)
     }
@@ -3488,13 +3888,13 @@ impl Ad4mDb {
 
     pub fn create_payment_request(
         &self,
-        email: &str,
+        agent_did: &str,
         amount_hot: &str,
         action_hash: &str,
     ) -> Ad4mDbResult<i64> {
         let rows = self.conn.execute(
-            "INSERT OR IGNORE INTO payment_requests (user_email, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
-            params![email, amount_hot, action_hash],
+            "INSERT OR IGNORE INTO payment_requests (agent_did, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
+            params![agent_did, amount_hot, action_hash],
         )?;
         if rows > 0 {
             Ok(self.conn.last_insert_rowid())
@@ -3529,13 +3929,13 @@ impl Ad4mDb {
         action_hash: &str,
     ) -> Ad4mDbResult<Option<PaymentRequest>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE proposal_action_hash = ?1",
+            "SELECT id, agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE proposal_action_hash = ?1",
         )?;
         let mut requests = stmt
             .query_map(params![action_hash], |row| {
                 Ok(PaymentRequest {
                     id: row.get(0)?,
-                    user_email: row.get(1)?,
+                    agent_did: row.get(1)?,
                     amount_hot: row.get(2)?,
                     proposal_action_hash: row.get(3)?,
                     status: row.get(4)?,
@@ -3549,13 +3949,13 @@ impl Ad4mDb {
 
     pub fn get_pending_payment_requests(&self) -> Ad4mDbResult<Vec<PaymentRequest>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE status = 'pending'",
+            "SELECT id, agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE status = 'pending'",
         )?;
         let requests = stmt
             .query_map([], |row| {
                 Ok(PaymentRequest {
                     id: row.get(0)?,
-                    user_email: row.get(1)?,
+                    agent_did: row.get(1)?,
                     amount_hot: row.get(2)?,
                     proposal_action_hash: row.get(3)?,
                     status: row.get(4)?,
@@ -3648,7 +4048,7 @@ impl Ad4mDb {
     /// Get all payment requests (for transaction history display)
     pub fn get_all_payment_requests(&self) -> Ad4mDbResult<Vec<(String, String, String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT user_email, amount_hot, status, created_at FROM payment_requests ORDER BY created_at DESC",
+            "SELECT agent_did, amount_hot, status, created_at FROM payment_requests ORDER BY created_at DESC",
         )?;
         let requests = stmt
             .query_map([], |row| {
@@ -3658,13 +4058,17 @@ impl Ad4mDb {
         Ok(requests)
     }
 
-    pub fn get_user_by_hot_wallet_address(&self, address: &str) -> Ad4mDbResult<Option<String>> {
+    /// The account whose mHOT wallet is `address`: its email and its agent's DID.
+    pub fn get_user_by_hot_wallet_address(
+        &self,
+        address: &str,
+    ) -> Ad4mDbResult<Option<(String, String)>> {
         let result = self
             .conn
             .query_row(
-                "SELECT username FROM users WHERE hot_wallet_address = ?1",
+                "SELECT username, did FROM users WHERE hot_wallet_address = ?1",
                 [address],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
         Ok(result)
@@ -4124,7 +4528,9 @@ mod tests {
             webhook_url: "http://test.webhook".to_string(),
             webhook_auth: "test-auth".to_string(),
         };
-        let notification_id = db.add_notification(notification, None).unwrap();
+        let notification_id = db
+            .add_notification(notification, "did:key:main", false)
+            .unwrap();
 
         // Add tasks
         let task = AIPromptExamples {
@@ -4169,7 +4575,7 @@ mod tests {
         let import_db = Ad4mDb::new(":memory:").unwrap();
 
         // 4. Import the data
-        import_db.import_from_json(exported_data).unwrap();
+        import_db.import_from_json(exported_data, None).unwrap();
 
         // 5. Verify imported data
         // Verify trusted agents
@@ -4284,7 +4690,7 @@ mod tests {
                 None => model.remove("api_max_num_ctx"),
             };
             let import_db = Ad4mDb::new(":memory:").unwrap();
-            let result = import_db.import_from_json(data).unwrap();
+            let result = import_db.import_from_json(data, None).unwrap();
             let models = import_db.get_models().unwrap();
             (result.models, models)
         };
@@ -4516,6 +4922,162 @@ mod tests {
         assert_eq!(diff.removals.len(), 0);
     }
 
+    /// The notifications table of executors that named the owner by email.
+    fn legacy_notifications_db() -> Ad4mDb {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.conn
+            .execute_batch(
+                "DROP TABLE notifications;
+                 CREATE TABLE notifications (
+                    id TEXT PRIMARY KEY, granted BOOLEAN NOT NULL, description TEXT NOT NULL,
+                    appName TEXT NOT NULL, appUrl TEXT NOT NULL, appIconPath TEXT,
+                    trigger TEXT NOT NULL, perspective_ids TEXT NOT NULL,
+                    webhookUrl TEXT NOT NULL, webhookAuth TEXT NOT NULL, user_email TEXT,
+                    owner_did TEXT);
+                 INSERT INTO users (username, did, password_hash) VALUES ('alice@test', 'did:key:alice', 'x');
+                 INSERT INTO users (username, did, password_hash) VALUES ('nodid@test', '', 'x');
+                 INSERT INTO notifications VALUES ('main', 1, '', '', '', '', '', '[]', '', '', NULL, NULL);
+                 INSERT INTO notifications VALUES ('alice', 1, '', '', '', '', '', '[]', '', '', 'alice@test', NULL);
+                 INSERT INTO notifications VALUES ('gone', 1, '', '', '', '', '', '[]', '', '', 'gone@test', NULL);
+                 INSERT INTO notifications VALUES ('nodid', 1, '', '', '', '', '', '[]', '', '', 'nodid@test', NULL);",
+            )
+            .unwrap();
+        db
+    }
+
+    fn owners(db: &Ad4mDb) -> Vec<(String, String)> {
+        let mut owners: Vec<_> = db
+            .get_notifications()
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.id, n.owner_did))
+            .collect();
+        owners.sort();
+        owners
+    }
+
+    #[test]
+    fn migration_moves_notification_owners_from_email_to_did() {
+        let db = legacy_notifications_db();
+        db.migrate_notification_owners("did:key:main").unwrap();
+        assert_eq!(
+            owners(&db),
+            vec![
+                ("alice".to_string(), "did:key:alice".to_string()),
+                ("main".to_string(), "did:key:main".to_string()),
+            ],
+            "a user's row takes the user's DID, a NULL email the main agent's; rows of a deleted user or one without a DID go"
+        );
+
+        // The email column is gone, so a second run changes nothing.
+        db.migrate_notification_owners("did:key:other").unwrap();
+        assert_eq!(owners(&db).len(), 2);
+        assert_eq!(owners(&db)[1].1, "did:key:main");
+    }
+
+    /// A data folder from a `dev` build before D16 names billing rows by `user_email`. No
+    /// migration exists: start-up stops with a message that says so, not with a missing
+    /// column error from a later statement.
+    #[test]
+    fn a_data_folder_from_before_did_keys_is_refused_with_a_message() {
+        for table in ["compute_log", "payment_requests"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("ad4m.db");
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch(&format!(
+                    "CREATE TABLE {table} (id INTEGER PRIMARY KEY, user_email TEXT NOT NULL)"
+                ))
+                .unwrap();
+            let err = Ad4mDb::new(path.to_str().unwrap())
+                .err()
+                .expect(table)
+                .to_string();
+            assert!(
+                err.contains("fresh data folder") && err.contains(table),
+                "{table}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_did_names_one_user() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.add_user("a@test", "did:key:same", "pw").unwrap();
+        assert!(db.add_user("b@test", "did:key:same", "pw").is_err());
+        // Users without an agent are not indexed.
+        db.add_user("c@test", "", "pw").unwrap();
+        db.add_user("d@test", "", "pw").unwrap();
+    }
+
+    #[test]
+    fn migration_gives_rows_from_before_user_email_to_the_main_agent() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.conn
+            .execute_batch(
+                "DROP TABLE notifications;
+                 CREATE TABLE notifications (
+                    id TEXT PRIMARY KEY, granted BOOLEAN NOT NULL, description TEXT NOT NULL,
+                    appName TEXT NOT NULL, appUrl TEXT NOT NULL, appIconPath TEXT,
+                    trigger TEXT NOT NULL, perspective_ids TEXT NOT NULL,
+                    webhookUrl TEXT NOT NULL, webhookAuth TEXT NOT NULL, owner_did TEXT);
+                 INSERT INTO notifications VALUES ('old', 1, '', '', '', '', '', '[]', '', '', NULL);",
+            )
+            .unwrap();
+        assert_eq!(owners(&db), vec![], "a row without an owner is never read");
+        db.migrate_notification_owners("did:key:main").unwrap();
+        assert_eq!(
+            owners(&db),
+            vec![("old".to_string(), "did:key:main".to_string())]
+        );
+    }
+
+    #[test]
+    fn import_names_legacy_notification_owners_by_did() {
+        // A migrated table, whose `owner_did` column accepts NULL.
+        let db = legacy_notifications_db();
+        db.conn.execute("DELETE FROM notifications", []).unwrap();
+        db.migrate_notification_owners("did:key:main").unwrap();
+        let notification = |id: &str, owner: serde_json::Value| {
+            let mut n = serde_json::json!({
+                "id": id, "description": "", "app_name": "", "app_url": "", "app_icon_path": "",
+                "trigger": "", "perspective_ids": "[]", "webhook_url": "", "webhook_auth": "",
+                "granted": true,
+            });
+            n.as_object_mut()
+                .unwrap()
+                .extend(owner.as_object().unwrap().clone());
+            n
+        };
+        let data = serde_json::json!({
+            "users": [{ "username": "alice@test", "did": "did:key:alice", "password_hash": "x" }],
+            "notifications": [
+                notification("current", serde_json::json!({ "owner_did": "did:key:bob" })),
+                notification("alice", serde_json::json!({ "user_email": "alice@test" })),
+                notification("main", serde_json::json!({ "user_email": null })),
+                notification("gone", serde_json::json!({ "user_email": "gone@test" })),
+            ],
+        });
+        let result = db.import_from_json(data, Some("did:key:main")).unwrap();
+        assert_eq!(
+            result.notifications.failed, 1,
+            "nobody owns the deleted user's row"
+        );
+        let stored: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM notifications", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, 3, "the ownerless row is not stored");
+        assert_eq!(
+            owners(&db),
+            vec![
+                ("alice".to_string(), "did:key:alice".to_string()),
+                ("current".to_string(), "did:key:bob".to_string()),
+                ("main".to_string(), "did:key:main".to_string()),
+            ]
+        );
+    }
+
     #[test]
     fn can_handle_notifications() {
         let db = Ad4mDb::new(":memory:").unwrap();
@@ -4533,7 +5095,9 @@ mod tests {
         };
 
         // Add the test notification
-        let notification_id = db.add_notification(notification, None).unwrap();
+        let notification_id = db
+            .add_notification(notification, "did:key:main", false)
+            .unwrap();
         // Get all notifications
         let notifications = db.get_notifications().unwrap();
 
@@ -4572,7 +5136,7 @@ mod tests {
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
             webhook_auth: "Test Webhook Auth".to_string(),
-            user_email: None,
+            owner_did: "did:key:main".to_string(),
         };
 
         // Update the test notification
@@ -4617,7 +5181,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result1 = db.add_notification(notification1, None);
+        let result1 = db.add_notification(notification1, "did:key:main", false);
         assert!(result1.is_ok(), "Should allow DELETE inside string literal");
 
         // Should reject: actual DELETE operation
@@ -4632,7 +5196,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result2 = db.add_notification(notification2, None);
+        let result2 = db.add_notification(notification2, "did:key:main", false);
         assert!(result2.is_err(), "Should reject actual DELETE operation");
         assert!(result2.unwrap_err().to_string().contains("DELETE"));
 
@@ -4648,7 +5212,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result3 = db.add_notification(notification3, None);
+        let result3 = db.add_notification(notification3, "did:key:main", false);
         assert!(result3.is_ok(), "Should allow DELETE inside escaped string");
     }
 
@@ -5554,14 +6118,14 @@ mod tests {
 
         // Create payment request
         let id = db
-            .create_payment_request("alice@example.com", "100.5", "uhCAkABC123")
+            .create_payment_request("did:test:alice", "100.5", "uhCAkABC123")
             .unwrap();
         assert!(id > 0);
 
         // Should appear in pending list
         let pending = db.get_pending_payment_requests().unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].user_email, "alice@example.com");
+        assert_eq!(pending[0].agent_did, "did:test:alice");
         assert_eq!(pending[0].amount_hot, "100.5");
         assert_eq!(
             pending[0].proposal_action_hash.as_deref(),
@@ -5602,7 +6166,13 @@ mod tests {
 
         // Should find alice
         let result = db.get_user_by_hot_wallet_address("uhCAkXYZ").unwrap();
-        assert_eq!(result, Some("alice@example.com".to_string()));
+        assert_eq!(
+            result,
+            Some((
+                "alice@example.com".to_string(),
+                "did:test:alice".to_string()
+            ))
+        );
 
         // Bob's wallet not set
         let result = db.get_user_by_hot_wallet_address("uhCAkOther").unwrap();
@@ -5619,11 +6189,11 @@ mod tests {
             .unwrap();
 
         // Create multiple requests
-        db.create_payment_request("alice@example.com", "50", "hash1")
+        db.create_payment_request("did:test:alice", "50", "hash1")
             .unwrap();
-        db.create_payment_request("alice@example.com", "75", "hash2")
+        db.create_payment_request("did:test:alice", "75", "hash2")
             .unwrap();
-        db.create_payment_request("alice@example.com", "100", "hash3")
+        db.create_payment_request("did:test:alice", "100", "hash3")
             .unwrap();
 
         let pending = db.get_pending_payment_requests().unwrap();
@@ -5639,5 +6209,98 @@ mod tests {
             .all(|r| r.proposal_action_hash.as_deref() != Some("hash2")));
 
         println!("✅ Multiple payment requests tests passed");
+    }
+
+    /// SQLite's plan for `sql`, one detail line per step.
+    fn query_plan(db: &Ad4mDb, sql: &str, keys: &[&str]) -> Vec<String> {
+        let mut stmt = db
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        stmt.query_map(rusqlite::params_from_iter(keys), |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    }
+
+    /// The pass reads one instance's row per instance it sweeps. Those reads,
+    /// and the narrowed batch read, must be key lookups on `instance` too:
+    /// filtering after a read of every row the agent has here made one sweep
+    /// O(instances²) (Marvin, #1425).
+    #[test]
+    fn flow_replica_reads_look_up_the_instance_by_key() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let key = "(perspective=? AND agent_did=? AND instance=?)";
+        // Control: the read of every row the agent has here — the statement
+        // both one-instance reads ran before — plans without `instance=?`,
+        // so the checks below tell the two shapes apart.
+        let all = query_plan(&db, &flow_replica_rows_sql(None), &["p", "a"]);
+        assert!(
+            !all.iter().any(|step| step.contains(key)),
+            "the unnarrowed read scans the agent's rows: {all:?}"
+        );
+        let one = query_plan(&db, FLOW_REPLICA_ROW_SQL, &["p", "a", "i"]);
+        assert!(
+            one.len() == 1 && one[0].starts_with("SEARCH") && one[0].contains(key),
+            "the one-instance read is a primary-key lookup: {one:?}"
+        );
+        let some = query_plan(&db, &flow_replica_rows_sql(Some(2)), &["p", "a", "i", "j"]);
+        assert!(
+            some.iter().any(|step| step.contains(key)),
+            "the narrowed read looks each instance up: {some:?}"
+        );
+    }
+
+    #[test]
+    fn flow_replica_reads_return_only_the_named_instances() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        for (agent, instance, state) in [
+            ("alice", "a", Some("x")),
+            ("alice", "b", None),
+            ("alice", "c", Some("z")),
+            ("bob", "a", Some("y")),
+        ] {
+            db.seed_flow_replica_state("p", agent, instance).unwrap();
+            if let Some(state) = state {
+                db.record_flow_replica_pass("p", agent, instance, Some(state), &[], "t")
+                    .unwrap();
+            }
+        }
+        db.seed_flow_replica_state("q", "alice", "a").unwrap();
+
+        let row = |instance: &str, state: Option<&str>| FlowReplicaStateRow {
+            instance: instance.to_string(),
+            current_state: state.map(str::to_string),
+            derived_at: state.map(|_| "t".to_string()),
+        };
+        assert_eq!(
+            db.get_flow_replica_state("p", "alice", "a").unwrap(),
+            Some(row("a", Some("x")))
+        );
+        assert_eq!(
+            db.get_flow_replica_state("p", "alice", "b").unwrap(),
+            Some(row("b", None)),
+            "a seeded row is a row, with no state"
+        );
+        assert_eq!(db.get_flow_replica_state("p", "alice", "zz").unwrap(), None);
+        assert_eq!(db.get_flow_replica_state("p", "carol", "a").unwrap(), None);
+
+        let named = ["c".to_string(), "a".into(), "zz".into(), "a".into()];
+        assert_eq!(
+            db.get_flow_replica_states("p", "alice", Some(&named))
+                .unwrap(),
+            vec![row("a", Some("x")), row("c", Some("z"))],
+            "ordered by instance, each once, unknown names skipped"
+        );
+        assert_eq!(
+            db.get_flow_replica_states("p", "alice", Some(&[])).unwrap(),
+            vec![]
+        );
+        assert_eq!(
+            db.get_flow_replica_states("p", "alice", None).unwrap(),
+            vec![row("a", Some("x")), row("b", None), row("c", Some("z"))]
+        );
     }
 }

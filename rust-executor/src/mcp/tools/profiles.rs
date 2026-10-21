@@ -4,7 +4,6 @@
 //! Uses native Rust agent service calls (no JS runtime required).
 
 use super::Ad4mMcpHandler;
-use crate::agent::capabilities::user_email_from_token;
 use crate::agent::{create_signed_expression, AgentContext, AgentService};
 use crate::languages::LanguageController;
 use crate::types::domain::Perspective;
@@ -68,17 +67,16 @@ pub struct SetAgentPublicPerspectiveParams {
 // ============================================================================
 
 /// Get the current agent, handling both multi-user and single-user modes.
-fn get_current_agent(auth_token: &str) -> Result<Agent, String> {
-    let context = AgentContext::from_auth_token(auth_token.to_string());
-    match AgentService::get_agent_for_context(&context) {
+fn get_current_agent(context: &AgentContext) -> Result<Agent, String> {
+    match AgentService::get_agent_for_context(context) {
         Ok(agent) => Ok(agent),
-        Err(_) if context.user_email.is_some() => {
+        Err(_) if context.managed_did().is_some() => {
             // Multi-user fallback: user exists in wallet but has no profile yet
-            let user_email = context.user_email.as_ref().unwrap();
-            let agent_data = AgentService::get_user_agent_data(user_email)
+            let did = context.managed_did().unwrap_or_default().to_string();
+            AgentService::wallet_key_for_did(&did)
                 .map_err(|e| format!("User agent not available: {}", e))?;
             Ok(Agent {
-                did: agent_data.did,
+                did,
                 direct_message_language: None,
                 perspective: Some(Perspective { links: vec![] }),
             })
@@ -89,28 +87,28 @@ fn get_current_agent(auth_token: &str) -> Result<Agent, String> {
 
 /// Update the current agent's public perspective, handling both multi-user and single-user modes.
 async fn update_agent_perspective(
-    auth_token: &str,
+    context: &AgentContext,
     links: Vec<DecoratedLinkExpression>,
 ) -> Result<Agent, String> {
-    let context = AgentContext::from_auth_token(auth_token.to_string());
-
-    if let Some(user_email) = user_email_from_token(auth_token.to_string()) {
+    if let Some(did) = context.managed_did().map(str::to_string) {
         // Multi-user mode
-        let agent_data = AgentService::get_user_agent_data(&user_email)
+        AgentService::wallet_key_for_did(&did)
             .map_err(|e| format!("User agent not available: {}", e))?;
 
+        // Keep the user's DM language: this call updates only the perspective.
+        let direct_message_language = AgentService::load_managed_agent_profile(&did)
+            .map_err(|e| format!("Failed to load user profile: {}", e))?
+            .and_then(|profile| profile.direct_message_language);
         let agent = Agent {
-            did: agent_data.did,
-            direct_message_language: None,
+            did: did.clone(),
+            direct_message_language,
             perspective: Some(Perspective { links }),
         };
 
-        AgentService::with_global_instance(|agent_service| {
-            agent_service.store_user_agent_profile(&user_email, &agent)
-        })
-        .map_err(|e| format!("Failed to store user profile: {}", e))?;
+        AgentService::store_managed_agent_profile(&did, &agent)
+            .map_err(|e| format!("Failed to store user profile: {}", e))?;
 
-        if let Err(e) = AgentService::publish_agent_to_language(&context).await {
+        if let Err(e) = AgentService::publish_agent_to_language(context).await {
             log::warn!("Failed to publish user profile to agent language: {}", e);
         }
 
@@ -175,8 +173,12 @@ impl Ad4mMcpHandler {
             Some(t) => t,
             None => return json!({"error": "Failed to get auth token"}).to_string(),
         };
+        let context = match self.agent_context_for(&token) {
+            Ok(context) => context,
+            Err(e) => return json!({"error": e}).to_string(),
+        };
 
-        let agent = match get_current_agent(&token) {
+        let agent = match get_current_agent(&context) {
             Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
@@ -190,8 +192,12 @@ impl Ad4mMcpHandler {
     )]
     pub async fn get_agent_profile(&self, _params: Parameters<GetAgentProfileParams>) -> String {
         let token = self.get_auth_token().await.unwrap_or_default();
+        let context = match self.agent_context_for(&token) {
+            Ok(context) => context,
+            Err(e) => return json!({"error": e}).to_string(),
+        };
 
-        let agent = match get_current_agent(&token) {
+        let agent = match get_current_agent(&context) {
             Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
@@ -236,13 +242,16 @@ impl Ad4mMcpHandler {
         };
 
         let token = self.get_auth_token().await.unwrap_or_default();
+        let context = match self.agent_context_for(&token) {
+            Ok(context) => context,
+            Err(e) => return json!({"error": e}).to_string(),
+        };
 
-        let agent = match get_current_agent(&token) {
+        let agent = match get_current_agent(&context) {
             Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
 
-        let context = AgentContext::from_auth_token(token.clone());
         let current_links = agent
             .perspective
             .as_ref()
@@ -298,7 +307,7 @@ impl Ad4mMcpHandler {
             }
         }
 
-        match update_agent_perspective(&token, all_links).await {
+        match update_agent_perspective(&context, all_links).await {
             Ok(_) => {
                 let mut updated = json!({"success": true});
                 if let Some(u) = p.username.as_ref() {
@@ -336,6 +345,10 @@ impl Ad4mMcpHandler {
         };
 
         let token = self.get_auth_token().await.unwrap_or_default();
+        let context = match self.agent_context_for(&token) {
+            Ok(context) => context,
+            Err(e) => return json!({"error": e}).to_string(),
+        };
         let mime = params.0.mime_type.as_deref().unwrap_or("image/png");
 
         // Find the file-storage language via the LanguageController
@@ -370,9 +383,8 @@ impl Ad4mMcpHandler {
             "name": "profile-image",
             "file_type": mime,
         });
-        let agent_context = crate::agent::AgentContext::from_auth_token(token.clone());
         let profile_img = match controller
-            .expression_create(&file_storage_addr, content, &agent_context)
+            .expression_create(&file_storage_addr, content, &context)
             .await
         {
             Ok(addr) => addr,
@@ -382,12 +394,11 @@ impl Ad4mMcpHandler {
         };
 
         // Get current agent and rebuild links with the new profile image
-        let agent = match get_current_agent(&token) {
+        let agent = match get_current_agent(&context) {
             Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
 
-        let context = AgentContext::from_auth_token(token.clone());
         let current_links = agent
             .perspective
             .as_ref()
@@ -430,7 +441,7 @@ impl Ad4mMcpHandler {
         all_links.push(image_link);
         all_links.push(thumb_link);
 
-        match update_agent_perspective(&token, all_links).await {
+        match update_agent_perspective(&context, all_links).await {
             Ok(_) => json!({
                 "success": true,
                 "profile_image": profile_img,
@@ -483,7 +494,11 @@ impl Ad4mMcpHandler {
             }
         } else {
             // Get own agent
-            match get_current_agent(&token) {
+            let context = match self.agent_context_for(&token) {
+                Ok(context) => context,
+                Err(e) => return json!({"error": e}).to_string(),
+            };
+            match get_current_agent(&context) {
                 Ok(agent) => serde_json::to_string(&agent).unwrap_or_else(|_| "null".into()),
                 Err(e) => {
                     json!({"error": format!("Failed to get agent perspective: {}", e)}).to_string()
@@ -500,19 +515,17 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<SetAgentPublicPerspectiveParams>,
     ) -> String {
-        let _agent_context = match self.get_agent_context().await {
+        let agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
             Err(e) => return format!("Authentication error: {}", e),
         };
-
-        let token = self.get_auth_token().await.unwrap_or_default();
 
         let links: Vec<DecoratedLinkExpression> = match serde_json::from_str(&params.0.links_json) {
             Ok(l) => l,
             Err(e) => return json!({"error": format!("Invalid links JSON: {}", e)}).to_string(),
         };
 
-        match update_agent_perspective(&token, links).await {
+        match update_agent_perspective(&agent_context, links).await {
             Ok(agent) => serde_json::to_string(&agent).unwrap_or_else(|_| "null".into()),
             Err(e) => {
                 json!({"error": format!("Failed to update agent perspective: {}", e)}).to_string()

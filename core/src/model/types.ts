@@ -335,6 +335,13 @@ export type Query = {
    * Individual relations can still be overridden via `include` (explicit entries take precedence).
    */
   includeAll?: boolean;
+  /**
+   * For a query over several classes (`Ad4mModel.findAllOf` / `queryOf`):
+   * the class names a record that conforms to several of them is read as,
+   * most wanted first. Without it the most specific requested class wins.
+   * Ranks, never excludes. Ignored by a single-class query.
+   */
+  preferClasses?: string[];
   where?: Where;
   order?: Order;
   offset?: number;
