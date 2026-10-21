@@ -31,6 +31,7 @@ pub mod init;
 pub mod languages;
 pub mod logging;
 mod neighbourhoods;
+#[cfg(unix)]
 mod open_files;
 mod pubsub;
 use rustls::crypto::aws_lc_rs;

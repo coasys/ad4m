@@ -39,7 +39,7 @@ pub fn raise_open_file_limit() {
     // SAFETY: getrlimit writes only into the rlimit it is given.
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
         log::warn!(
-            "Could not read the open-file limit: {}",
+            "⚠️ Could not read the open-file limit: {}",
             std::io::Error::last_os_error()
         );
         return;
@@ -53,7 +53,7 @@ pub fn raise_open_file_limit() {
     // SAFETY: setrlimit only reads the rlimit it is given.
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
         log::warn!(
-            "Could not raise the open-file limit from {} to {} (hard {}): {}",
+            "⚠️ Could not raise the open-file limit from {} to {} (hard {}): {}",
             soft,
             target,
             show(hard),
@@ -62,7 +62,7 @@ pub fn raise_open_file_limit() {
         return;
     }
     log::info!(
-        "Raised the open-file limit from {} to {} (hard {})",
+        "✅ Raised the open-file limit from {} to {} (hard {})",
         soft,
         target,
         show(hard)
