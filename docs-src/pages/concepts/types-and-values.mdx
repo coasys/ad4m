@@ -1,0 +1,192 @@
+---
+title: Types and values
+description: Properties versus relations, cardinality, and the three ways a value is stored - as a typed literal in the link, as a signed expression, or through a custom language.
+---
+
+import { Callout } from "nextra/components";
+
+# Types and values
+
+What is a property, a relation, a literal, a signed expression, and which one am I choosing when I write `@Property`?
+
+A model has two kinds of fields. A **property** holds a value: a string, a number, a boolean, a JSON object. A **relation** holds other records: the targets of its links are node URIs, and the model can hydrate them into instances. Both are links from the instance's node; what differs is what sits in the link's target and what the executor does with it.
+
+## One value, stored three ways
+
+```typescript
+import { Ad4mModel, Model, Property, fileToDataUri } from "@coasys/ad4m";
+
+@Model({ name: "Note" })
+class Note extends Ad4mModel {
+  // 1. Default: a typed literal in the link target.
+  @Property({ through: "note://title" })
+  title: string = "";
+
+  // 2. "literal": the value gets its own signed envelope.
+  @Property({ through: "note://body", resolveLanguage: "literal" })
+  body: string = "";
+
+  // 3. A language address: the value is an expression of that language.
+  @Property({ through: "note://image", resolveLanguage: FILE_STORAGE_LANGUAGE, transform: fileToDataUri })
+  image?: string;
+}
+```
+
+After `Note.create(perspective, { title: "Hi", body: "Hello", image: fileData })` the three links look like this:
+
+```
+<id>  note://title  literal:string:Hi
+<id>  note://body   literal:json:%7B%22author%22%3A%22did%3Akey%3A…%22%2C%22timestamp%22%3A…%2C%22data%22%3A%22Hello%22%2C%22proof%22%3A%7B…%7D%7D
+<id>  note://image  <file-storage address>://Qm…
+```
+
+| `resolveLanguage` | Target of the link | Who signed what | Use for |
+|---|---|---|---|
+| unset (the default) | `literal:string:…`, `literal:number:…`, `literal:boolean:…` or `literal:json:…`, stored as an XSD-typed RDF literal | The link is signed by its author; the value has no signature of its own | Most fields. Fast to filter and order on. |
+| `"literal"` | A `literal:json:…` URL that encodes a signed expression `{ author, timestamp, data, proof }` | The link is signed, and the value is a signed expression with its own author and timestamp | A value whose provenance must survive on its own, such as a message body |
+| A language address | `<language>://<address>` returned by that language's `expressionCreate` | The link is signed; the language stores the data and the executor signs the expression | Files, large content, data in another protocol |
+
+`resolveLanguage` is not defaulted to `"literal"`. Leaving it unset and setting it to `"literal"` are different storage modes. In every mode the link itself is signed by the agent who wrote it, so `author` filtering and signature checks work on all three ([Unverified links](./queries.mdx#unverified-links)).
+
+```
+ unset                       "literal"                          <language address>
+ ┌────────────┐              ┌──────────────────────────┐       ┌────────────────────┐
+ │ link       │ signed       │ link                      │ signed│ link               │ signed
+ │  target =  │              │  target = literal:json:   │       │  target = lang://a │
+ │  "Hi"^^xsd │              │   { author, timestamp,    │       └────────┬───────────┘
+ └────────────┘              │     data: "Hello", proof }│                ▼
+                             └──────────────────────────┘        the language resolves
+                                                                 lang://a → expression
+```
+
+## Literals for simple values
+
+A literal is a value encoded in a URL so it can be a link target without any language: `literal:` followed by a kind and a percent-encoded payload.
+
+```typescript
+import { Literal } from "@coasys/ad4m";
+
+Literal.from("Write the guide").toUrl(); // "literal:string:Write%20the%20guide"
+Literal.from(42).toUrl();                // "literal:number:42"
+Literal.from(true).toUrl();              // "literal:boolean:true"
+Literal.from({ a: 1 }).toUrl();          // "literal:json:%7B%22a%22%3A1%7D"
+Literal.fromUrl("literal:string:Write%20the%20guide").get(); // "Write the guide"
+```
+
+The payload is percent-encoded with the RFC 3986 component set (so `-_.~` stay bare and `!'()*` are escaped). The store keeps a `literal:` target as a typed RDF literal (`"Write the guide"^^xsd:string`, `42` as a decimal, and so on), which is what makes `where: { count: { gt: 5 } }` and `order` cheap. An old `literal://` form is rejected.
+
+A property with unset `resolveLanguage` stores exactly this. Empty strings, `null` and `undefined` are not written at all.
+
+## Expressions: signed values
+
+An **expression** is data signed by the agent who created it, addressed as `<language>://<address>`. Its envelope is:
+
+```typescript
+{
+  author: "did:key:z6Mk…",       // who created it
+  timestamp: "2026-10-21T…Z",    // when
+  data: …,                       // the content, as the language stores it
+  proof: { key: "…", signature: "…", valid?: boolean, invalid?: boolean }
+}
+```
+
+`valid` and `invalid` are not stored; the executor computes them when it resolves the expression, by checking the signature against the author's DID. Every link in a perspective is itself an expression of this shape whose `data` is `{ source, predicate, target }`.
+
+For `resolveLanguage: "literal"` the whole envelope is percent-encoded into the URL (`literal:json:…`); the "literal" language stores nothing elsewhere. For a custom language the URL names an address the language resolves, which may be a hash in a DHT, a file id, or a key in some other system. How to write such a language is in [Language protocols](./language-protocols.mdx).
+
+## Properties
+
+A property is declared with `@Property({ through })` (or `@Optional`, `@ReadOnly`). It holds one value: the shape gets `sh:maxCount 1`, and setting it replaces the previous link (`setSingleTarget`). The pieces of a property declaration:
+
+| Option | Effect |
+|---|---|
+| `through` | The predicate. Required unless the value comes from a `getter`. |
+| `required` | `sh:minCount 1`; a placeholder link is written on create so the node is recognized before the value is set. |
+| `initial` | Written on create. A required property without one gets `literal:string:uninitialized`. |
+| `readOnly` | No setter; `save()` never writes it. |
+| `resolveLanguage` | The storage mode above. |
+| `datatype` | Explicit `sh:datatype` (`xsd://string`, `xsd://decimal`, `xsd://boolean`). Inferred from the field's default value when unset and the property stores literals. |
+| `options` | Allowed values with labels; emitted as `sh:in`. |
+| `local` | Links stay on this executor and are not shared with a neighbourhood. |
+| `getter` | A SPARQL `SELECT` that computes the value instead of reading a link; `<Base>` stands for the instance. |
+| `transform` | A SHACL-AF node expression applied to the resolved value in the executor (`concat`, `coalesce`, `fileToDataUri`, ...). |
+| `alias`, `identity`, `interpretationHint` | Names for abstract classes, and hints for the interpretation harness. |
+
+Every option, with its exact type, is in [Decorators](../reference/decorators.mdx#property).
+
+## Relations
+
+A relation holds node URIs. Four decorators say which way the link points and how many there are:
+
+| Decorator | Link direction | Count | Writes |
+|---|---|---|---|
+| `@HasMany` | from this instance to the targets | many | `add<Name>`, `remove<Name>`, `set<Name>`, or assign the array and `save()` |
+| `@HasOne` | from this instance to the target | one (`sh:maxCount 1`) | `set<Name>` (also `add`/`remove`), or assign and `save()` |
+| `@BelongsToOne` | from the target to this instance | one | read-only |
+| `@BelongsToMany` | from the targets to this instance | many | read-only |
+
+```typescript
+@Model({ name: "Board" })
+class Board extends Ad4mModel {
+  @HasMany(() => Task, { through: "board://item" })
+  tasks: string[] = [];
+}
+
+@Model({ name: "Task" })
+class Task extends Ad4mModel {
+  @BelongsToOne(() => Board, { through: "board://item" })
+  board: Board | null = null;
+}
+```
+
+A relation's shape gets `sh:nodeKind sh:IRI` and, when it names a `target`, `sh:class` pointing at the target's shape. Naming the target does two things: `include` knows what to hydrate, and reads filter to targets that are instances of that class (its flag and required properties), so a stray link to an unrelated node is not returned as a `Task`. `filter: false` turns the second part off; `where` narrows it further.
+
+When `through` is omitted a relation uses `ad4m://has_child`, the canonical containment predicate ([Containment](./containment.mdx)).
+
+### Relations of plain values
+
+A `@HasMany` whose targets are strings rather than records must say so with `datatype`, so the executor decodes the `literal:` targets on read:
+
+```typescript
+@HasMany({ through: "note://tag", datatype: "xsd:string" })
+tags: string[] = [];
+```
+
+`datatype` and `target` exclude each other: a relation holds literals or records, not both.
+
+### Cardinality and order
+
+A `@HasMany` is a set of links. Reads come back oldest link first, or in no stated order when the relation is read through a type-checking query. To make a chosen sequence part of the data, declare `ordering: { strategy: "linkedList" }`; assigning the array then writes ordering entries (`ad4m://collection_order` links on the holder) beside the member links, and concurrent reorders by different agents merge. Members with no entry are returned after the positioned ones.
+
+### Polymorphic relations
+
+A relation whose targets are of several classes can hydrate each as the class it is: `@HasMany({ through, polymorphic: true, instantiateAs: () => [TextBlock, ImageBlock] })`. The executor classifies each target from its flags and required properties; `instantiateAs` only names the classes this code can construct and never excludes a target.
+
+## Flags
+
+A flag is a property with a fixed value, declared with `@Flag({ through, value })`. It is required, read-only and written on create. Its job is recognition: a class with a flag matches exactly the nodes that carry the flag's link, and nothing else ([How a node is recognized](./models-and-identity.mdx#how-a-node-is-recognized-as-an-instance)). In the shape it appears as `sh:minCount 1` plus `sh:hasValue`.
+
+```typescript
+@Flag({ through: "board://type", value: "board://task" })
+type = "board://task";
+```
+
+## Transforms and getters
+
+Two ways to compute a field rather than read it as stored:
+
+- A **transform** rewrites the resolved value in the executor: `concat(literal("@"), focus())`, `coalesce(focus(), literal("UTC"))`, or the shipped `fileToDataUri` that turns file-storage data into a `data:` URI. It sees only the property's own value.
+- A **getter** is a SPARQL `SELECT` the executor runs per instance, with `<Base>` replaced by the instance URI. It can read any link in the graph. A getter runs as written: it does not inherit the query's signature or status filters, so join `ad4m://ontology/proofValid` yourself when that matters ([Unverified links](./queries.mdx#unverified-links)).
+
+The builder functions for transforms are listed in [Decorators](../reference/decorators.mdx#transform-builders).
+
+## How it is built
+
+Storage mode is decided in `core/src/model/query-sparql.ts` (`effectiveLiteralStorage`) and applied in `core/src/model/Ad4mModel.ts` (`setProperty`). Literal URLs are `core/src/Literal.ts`; the executor's typed-literal storage is `rust-executor/src/perspectives/sparql_store.rs`; the literal language's envelope is built in `rust-executor/src/languages/mod.rs` (`expression_create`).
+
+## Next
+
+- [Queries and live results](./queries.mdx): filter, order and page over these fields.
+- [Abstract classes and aliases](./abstract-classes-and-aliases.mdx): names that work across apps.
+- [Define a model](../how-to/define-a-model.mdx); [Include relations](../how-to/include-relations.mdx).
+- Reference: [Decorators](../reference/decorators.mdx), [SHACL vocabulary](../reference/shacl-vocabulary.mdx).

@@ -1,0 +1,190 @@
+---
+title: Query a perspective with SPARQL
+description: Write SPARQL against the triples the executor really stores, read link metadata through rdf:reifies, traverse, aggregate, and keep a query live.
+---
+
+import { Callout } from "nextra/components";
+
+# Query a perspective with SPARQL
+
+Every perspective has an Oxigraph store, and `perspective.querySparql(query)` runs a read-only SPARQL query against it on the executor. This page shows the triple layout the store writes, so that your patterns match something, and gives one example per job: filter, read author and timestamp, traverse, aggregate, paginate, subscribe. For the model-level alternative see [Queries and live results](../concepts/queries.mdx).
+
+## What the store writes
+
+For every link the executor writes three things into the default graph (`rust-executor/src/perspectives/sparql_store.rs`, `insert_link_triples`):
+
+```text
+1. the direct triple        <source>  <predicate>  target .
+2. a reifier for it         <link:HASH>  rdf:reifies  <<( <source> <predicate> target )>> .
+3. metadata on the reifier  <link:HASH>  <ad4m://ontology/author>     "did:key:…" .
+                            <link:HASH>  <ad4m://ontology/timestamp>  "2026-10-21T18:02:11.935Z" .
+                            <link:HASH>  <ad4m://ontology/proofKey>   "…" .
+                            <link:HASH>  <ad4m://ontology/proofSignature> "…" .
+                            <link:HASH>  <ad4m://ontology/proofValid> "true" .
+                            <link:HASH>  <ad4m://ontology/status>     "Shared" .
+```
+
+Four consequences for your queries:
+
+- **Plain triple patterns work.** `?task <todo://state> ?state` matches the direct triple. You only need the reifier when you want author, timestamp, signature or status.
+- **Metadata hangs off the reifier**, reached through an RDF 1.2 triple term: `?r rdf:reifies <<( ?s ?p ?o )>>`. There is no `rdf:Statement`, `rdf:subject` or `rdf:predicate` anywhere in the store.
+- **The executor adds no prefixes.** Declare every `PREFIX` you use, or write full IRIs. The predicate IRIs are `<ad4m://ontology/author>`, `<ad4m://ontology/timestamp>`, `<ad4m://ontology/proofValid>`, `<ad4m://ontology/status>`.
+- **Targets of the form `literal:string:…`, `literal:number:…`, `literal:boolean:…`, `literal:json:…` are stored as typed RDF literals** (`xsd:string`, `xsd:integer`/`xsd:decimal`, `xsd:boolean`, `ad4m://json`), decoded from their percent-encoding. Match them as literals (`"Buy milk"`, `5`, `true`), not as `<literal:string:Buy%20milk>`. Every other target is an IRI.
+- **Timestamps and the author are plain string literals**, not `xsd:dateTime`. Compare them as strings; ISO-8601 sorts lexically.
+
+<Callout type="info">
+  Queries and results travel as text. `querySparql` returns the parsed JSON: for `SELECT`, an array of rows keyed by variable name, every value a string (an IRI as written, a literal by its lexical form); for `ASK`, a boolean; for `CONSTRUCT` and `DESCRIBE`, rows of `{ subject, predicate, object }`. Only `SELECT`, `ASK`, `CONSTRUCT` and `DESCRIBE` parse; any update form is refused before it runs (`validate_readonly_query`).
+</Callout>
+
+## 1. Filter on a predicate
+
+Who does Alice follow? Only the direct triple is needed:
+
+```typescript
+const follows = await perspective.querySparql<{ target: string }[]>(`
+  SELECT ?target WHERE {
+    <did:key:alice> <social://follows> ?target .
+  }
+`);
+// [{ target: "did:key:bob" }, …]
+```
+
+Reverse it (who follows Alice) by binding the subject instead: `?source <social://follows> <did:key:alice>`.
+
+## 2. Read author and timestamp
+
+Messages in a channel, with who signed each link and when. The body is a `literal:string:` target, so it comes back as its text:
+
+```typescript
+const rows = await perspective.querySparql<{ id: string; text: string; author: string; timestamp: string }[]>(`
+  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+  SELECT ?id ?text ?author ?timestamp WHERE {
+    <channel://main> <ad4m://has_child> ?id .
+    ?id <chat://body> ?text .
+    ?r rdf:reifies <<( ?id <chat://body> ?text )>> .
+    ?r <ad4m://ontology/author> ?author .
+    ?r <ad4m://ontology/timestamp> ?timestamp .
+  }
+  ORDER BY ?timestamp
+`);
+```
+
+This is the shape the executor's own auto-processor tests use to read a transcript (`tests/js/tests/model/auto-processor.test.ts`, `SCOPE_QUERY`): the speaker is the DID that signed the body link, read from the reifier, not an app-level `author` predicate.
+
+Restrict to one author by binding it: `?r <ad4m://ontology/author> "did:key:bob" .` (a string literal, not an IRI). Restrict to a time window with a string comparison:
+
+```sparql
+FILTER(?timestamp > "2026-10-01T00:00:00Z")
+```
+
+### Only verified links
+
+Model queries drop links whose signature does not verify unless you pass `includeUnverified`. Raw SPARQL does not. To apply the same rule, add the verdict the store wrote on the reifier:
+
+```sparql
+?r <ad4m://ontology/proofValid> "true" .
+```
+
+`<ad4m://ontology/status>` is `"Shared"` or `"Local"`; a local link never leaves the executor (see [Perspectives and links](../concepts/perspectives-and-links.mdx#local-and-shared-links)).
+
+## 3. Traverse
+
+Friends of friends, two hops over the same predicate, excluding Alice herself:
+
+```typescript
+const fof = await perspective.querySparql<{ fof: string }[]>(`
+  SELECT DISTINCT ?fof WHERE {
+    <did:key:alice> <social://follows> ?friend .
+    ?friend <social://follows> ?fof .
+    FILTER(?fof != <did:key:alice>)
+  }
+`);
+```
+
+Any depth: SPARQL property paths work on the direct triples. Everything reachable from a board through `ad4m://has_child`, one or more hops:
+
+```sparql
+SELECT ?node WHERE {
+  <board://sprint-3> <ad4m://has_child>+ ?node .
+}
+```
+
+For containment with a bound depth and direction, the model query's `parent` scope does this with the class resolved for you; see [Containment and navigation](../concepts/containment.mdx).
+
+## 4. Aggregate
+
+Count links per predicate across the perspective. Count the direct triples and skip the reifier's own predicates, otherwise `rdf:reifies` and the `ad4m://ontology/*` rows are counted too:
+
+```typescript
+const stats = await perspective.querySparql<{ predicate: string; total: string }[]>(`
+  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+  SELECT ?predicate (COUNT(*) AS ?total) WHERE {
+    ?s ?predicate ?o .
+    FILTER(?predicate != rdf:reifies && !STRSTARTS(STR(?predicate), "ad4m://ontology/"))
+  }
+  GROUP BY ?predicate
+  ORDER BY DESC(?total)
+`);
+// totals arrive as strings: [{ predicate: "social://follows", total: "42" }, …]
+```
+
+Reactions on one post, grouped by reaction:
+
+```sparql
+SELECT ?reaction (COUNT(*) AS ?count) WHERE {
+  <post://abc123> <social://reaction> ?reaction .
+}
+GROUP BY ?reaction
+```
+
+## 5. Sort and paginate
+
+`ORDER BY`, `LIMIT` and `OFFSET` are plain SPARQL. To page the newest links first, order by the reifier's timestamp:
+
+```sparql
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?s ?p ?o ?timestamp WHERE {
+  ?s ?p ?o .
+  ?r rdf:reifies <<( ?s ?p ?o )>> .
+  ?r <ad4m://ontology/timestamp> ?timestamp .
+}
+ORDER BY DESC(?timestamp)
+LIMIT 20 OFFSET 20
+```
+
+## 6. Keep a query live
+
+`subscribeQuery` opens the same query on the executor and delivers a new result each time the perspective's links change it:
+
+```typescript
+const subscription = await perspective.subscribeQuery(`
+  SELECT ?task WHERE { ?task <todo://state> <todo://done> . }
+`);
+console.log(subscription.result);           // the first result is already in
+const stop = subscription.onResult((rows) => render(rows));
+// later
+subscription.dispose();
+```
+
+Each subscriber has its own executor-side subscription; disposing one does not touch another, and the executor ends every subscription of a connection when it closes. `subscribeQuery` refuses a Prolog query. Model queries subscribe through `Ad4mModel`'s `subscribe` (see [Subscribe to a query](./subscribe.mdx)).
+
+## Two helper functions
+
+The evaluator registers two custom functions (`SparqlStore::sparql_evaluator`):
+
+| Function | Does |
+|---|---|
+| `<ad4m://fn/strip_html>(?x)` | returns `?x` with HTML tags removed |
+| `<ad4m://fn/parse_literal>(?x)` | unwraps a signed-expression envelope stored as `ad4m://json` to its `data`, and decodes a legacy `literal:string:` / `literal:json:` IRI to its value |
+
+```sparql
+SELECT (<ad4m://fn/strip_html>(?body) AS ?plain) WHERE { <msg://1> <chat://body> ?body . }
+```
+
+## Prolog
+
+`perspective.infer(query)` runs a one-shot Prolog query against the same links (`triple(S, P, O)`, `link(S, P, O, Timestamp, Author)`, and the predicates Social DNA registers). It is kept for existing Social DNA rules; there are no live Prolog queries. New code should use SPARQL or model queries.
+
+## When to write SPARQL at all
+
+Use a [model query](../reference/model-query.mdx) when you want instances of a class: it adds the class recognition, the verified-link filter, relation hydration and pagination for you, and `Ad4mModel` gives you typed results. `perspective.modelQuery(className, queryJson)` is that same engine as a raw RPC: it takes the query as a JSON string and returns `{ instances, totalCount }`; it does not build queries for you. Write SPARQL for aggregates, for traversals the model query cannot express, and for reading link metadata directly.

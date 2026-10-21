@@ -1,0 +1,74 @@
+---
+title: Publish a neighbourhood
+description: Turn a perspective into a shared neighbourhood: template a link language, publish, and hand out the URL.
+---
+
+import { Callout } from "nextra/components";
+
+# Publish a neighbourhood
+
+You have a perspective and want other agents to see and write the same links. Three calls: template a link language, publish the perspective through it, share the URL. Background: [Neighbourhoods and trust](../concepts/neighbourhoods.mdx).
+
+## 1. Pick a link language template
+
+```typescript
+const templates = await ad4m.runtime.knownLinkLanguageTemplates();
+// ["Qm…", …] — the bootstrap seed's known link languages plus any you added
+const template = templates[0];
+```
+
+`knownLinkLanguageTemplates()` returns addresses (`core/src/runtime/RuntimeClient.ts`). The default seed lists the Holochain-backed perspective-diff-sync template. On an executor started with the local bootstrap languages (`--run-holochain false`, Docker, tests) the list holds that seed's link language instead.
+
+## 2. Create this neighbourhood's own instance
+
+```typescript
+const linkLanguage = await ad4m.languages.applyTemplateAndPublish(
+  template,
+  JSON.stringify({ uid: crypto.randomUUID(), name: "Team space sync" }),
+);
+linkLanguage.address;   // the new Language's address
+linkLanguage.name;      // "Team space sync"
+```
+
+The second argument is a **JSON string**, not an object (`LanguageClient.applyTemplateAndPublish(sourceLanguageHash, templateData: string)`, `core/src/language/LanguageClient.ts`). `uid` must be unique per neighbourhood: it is the network seed that separates this neighbourhood from every other one made from the same template (`rust-executor/src/languages/mod.rs`). `name` is what members see as the Language's name. The integration tests build exactly this string (`tests/js/utils/linkLangConfig.ts`, `holochainLinkLang`).
+
+<Callout type="warning">
+  Reusing a `uid` puts two neighbourhoods on one network. Generate a fresh one every time.
+</Callout>
+
+## 3. Publish the perspective
+
+```typescript
+import { Perspective } from "@coasys/ad4m";
+
+const url = await ad4m.neighbourhood.publishFromPerspective(
+  perspective.uuid,
+  linkLanguage.address,
+  new Perspective(),
+);
+// "neighbourhood://Qm…"
+```
+
+`publishFromPerspective(perspectiveUuid, linkLanguage, meta)` returns the neighbourhood URL (`core/src/neighbourhood/NeighbourhoodClient.ts`). `meta` is a `Perspective` whose links every joiner receives with the neighbourhood expression itself, before any sync; an empty `new Perspective()` is fine. To carry signed links in it, pass `new Perspective([linkExpression, …])` with `LinkExpression`s you read back from a perspective (`tests/js/tests/neighbourhood.ts`, "can publish and join locally").
+
+The perspective's links that were already there are committed to the link language; new shared links follow as you add them. Links added with status `"local"` stay on your executor.
+
+## 4. Check the state and share the URL
+
+```typescript
+const p = await ad4m.perspective.byUUID(perspective.uuid);
+p.sharedUrl;            // the neighbourhood URL
+p.neighbourhood?.data.linkLanguage === linkLanguage.address;   // true
+p.state;                // "NEIGHBOURHOOD_CREATION_INITIATED" → "SYNCED"
+```
+
+Give the URL to the people who should join: [Join a neighbourhood](./join-neighbourhood.mdx). Anyone who has it and whose executor trusts the template's author can join; there is no further access control at this layer. Rules about what counts inside the neighbourhood are [Social DNA](../concepts/social-dna-and-flows.mdx).
+
+## From the CLI
+
+```bash
+ad4m languages apply-template-and-publish <template-address> '{"uid":"<uuid>","name":"Team space sync"}'
+ad4m neighbourhoods create <perspective-uuid> <link-language-address>
+```
+
+`cli/src/languages.rs` (`ApplyTemplateAndPublish { source, template_data }`) and `cli/src/neighbourhoods.rs` (`Create { perspective_id, link_language }`, which publishes with an empty `meta`).

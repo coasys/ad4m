@@ -1,0 +1,179 @@
+---
+title: Decorators and model API
+description: Every option of @Model, @Property, @Optional, @ReadOnly, @Flag, @HasMany, @HasOne, @BelongsToOne and @BelongsToMany, the transform builders, the static and instance methods of Ad4mModel, fromSHACL, fromJSONSchema and the PerspectiveProxy introspection calls.
+---
+
+# Decorators and model API
+
+All names are exported from `@coasys/ad4m`. Behaviour is explained in [Models and identity](../concepts/models-and-identity.mdx) and [Types and values](../concepts/types-and-values.mdx); this page lists options and signatures.
+
+## @Model
+
+`@Model(config: ModelConfig)` on a class that extends `Ad4mModel`.
+
+| Option | Type | Default | Effect |
+|---|---|---|---|
+| `name` | `string` | required | Class name; the shape is `<ns><name>Shape`, the target class `<ns><name>`, where `<ns>` is the scheme of the first property's `through` (`ad4m://` if none) |
+| `abstract` | `boolean` | `false` | An abstract class: reads every class with its names; cannot be created. Emits `ad4m://abstract` |
+| `implements` | `Ad4mModelLike[]` | `[]` | Abstract classes this class must answer to; checked when the class is declared, throws on a missing name or alias. Not sent to the executor |
+| `interpretationHint` | `string` | | Natural-language hint for the interpretation harness; emitted as `ad4m://interpretation_hint` on the shape |
+
+Schema generation constructs the class once without a perspective to read field defaults; keep constructors free of side effects. `@Model` injects the static methods `generateSHACL()` and `generateSDNA()` and sets `className` and `isAbstract` on the class.
+
+## @Property
+
+`@Property(opts: PropertyOptions)`. One of `through`, `getter` or `prologGetter` is required.
+
+| Option | Type | Default | Effect |
+|---|---|---|---|
+| `through` | `string` | | Predicate URI of the value link. Required for a stored property; on a getter property it is still the shape's path |
+| `required` | `boolean` | `false` | `sh:minCount 1`; adds the property to instance recognition. Without `initial`, `@Property` supplies `"literal:string:uninitialized"` as a placeholder written on create |
+| `initial` | `string` | | Written on create as a constructor action |
+| `readOnly` | `boolean` | `false` | No setter is generated; `save()` never writes it. `ad4m://writable false` |
+| `resolveLanguage` | `string` | unset | Storage mode: unset = typed literal in the link target; `"literal"` = the value becomes a signed expression of the literal language; a language address = `expressionCreate` on that language |
+| `local` | `boolean` | | Link stored with status Local; not shared with a neighbourhood. Reads return only Local links |
+| `getter` | `string` | | SPARQL `SELECT` returning one binding; `<Base>` is replaced by the instance URI. Runs as written (no signature or status filter) |
+| `transform` | `NodeExpression` | | SHACL-AF node expression applied in the executor to the resolved value; see [Transform builders](#transform-builders) |
+| `datatype` | `string` | inferred | Explicit `sh:datatype` (`"xsd://string"`, `"xsd://decimal"`, `"xsd://boolean"`). Inferred from the field's default value when the property stores literals and has no `getter`. Needed on a `getter` property whose values are literals |
+| `options` | `Array<{ value: string; label?: string }>` | | Allowed values; emitted as `sh:in` (values) plus `ad4m:in` (with labels) |
+| `alias` | `Record<string, string>` | | Name this property answers to through an abstract class, keyed by its name: `{ TextContent: "text" }`. Registration fails if the class already uses that name |
+| `identity` | `boolean` | | Dedup key for the interpretation harness; `ad4m://identity`. At most one per class |
+| `interpretationHint` | `string` | | Hint for the harness; `ad4m://interpretation_hint` on the property shape |
+| `prologGetter`, `prologSetter` | `string` | | Prolog code. Prolog is disabled in the current executor and `prologSetter` is not supported by SHACL generation (a warning is logged) |
+
+`@Optional(opts)` is `@Property` with `required` defaulting to `false` and no automatic `initial`. `@ReadOnly(opts)` is `@Property` with `readOnly: true`. Setting a property to `""`, `null` or `undefined` writes nothing.
+
+## @Flag
+
+`@Flag({ through: string; value: string })`. A required, read-only property with a fixed value, written on create and never updated (`save()` skips it). Emitted as `sh:minCount 1`, `sh:maxCount 1` and `sh:hasValue <value>`; the strongest signal for instance recognition.
+
+## Relation decorators
+
+`@HasMany`, `@HasOne`, `@BelongsToOne`, `@BelongsToMany`. Two call forms:
+
+```typescript
+@HasMany({ through: "board://item", target: () => Task })
+@HasMany(() => Task, { through: "board://item" })
+```
+
+| Decorator | Direction | `sh:maxCount` | Generated methods |
+|---|---|---|---|
+| `@HasMany` | forward (this → target) | none | `add<Name>(idOrInstance, batchId?)`, `remove<Name>(...)`, `set<Name>(ids[], batchId?)` |
+| `@HasOne` | forward | 1 | the same three; `set<Name>` replaces, `set<Name>([])` clears |
+| `@BelongsToOne` | reverse (target → this) | 1 | none (read-only) |
+| `@BelongsToMany` | reverse | none | none (read-only) |
+
+The methods are added at runtime; declare them with `HasManyMethods<"tasks" | "owner">` on an interface merged with the class so TypeScript knows them.
+
+### RelationOptions
+
+| Option | Type | Default | Effect |
+|---|---|---|---|
+| `through` | `string` | `"ad4m://has_child"` | Predicate of the member links. Cannot be combined with `getter` unless `readOnly: true` |
+| `target` | `() => Ad4mModelLike` | | Target class. Enables `include` hydration and, unless `filter: false`, a conformance filter so only instances of the target are returned. Emits `sh:class` and `ad4m://targetClassName`. Excludes `datatype` |
+| `getter` | `string` | | SPARQL `SELECT ?target` with `<Base>`; replaces link-based reading, relation becomes read-only. Combines with `target` (hydration) and `where` (post-getter filter) |
+| `readOnly` | `boolean` | `false` | No `add`/`remove`/`set` methods and no adder or remover actions. With `getter`, `through` names the predicate the getter reads so subscriptions re-run on it |
+| `filter` | `boolean` | `true` when `target` set | `false` turns off the conformance filter but keeps hydration. Contradicts `where` |
+| `where` | `Where` | derived from target | Filter on the targets' properties, same DSL as queries; overrides the derived flag/required filter |
+| `datatype` | `string` | | `sh:datatype` for a relation of literal values, e.g. `"xsd:string"` for `string[]` that stores plain strings; emits `sh:nodeKind sh:Literal`. Excludes `target` |
+| `local` | `boolean` | | Member links stored Local |
+| `polymorphic` | `boolean` | | Hydrate each target as the class it is, classified by the executor |
+| `instantiateAs` | `() => Ad4mModelLike[]` | | Classes this code can construct for a polymorphic read; advisory, never excludes a target (an unlisted class arrives as plain JSON with its class name) |
+| `ordering` | `{ strategy: "linkedList" }` | | User-controlled order that survives concurrent edits; assigning the array writes `ad4m://collection_order` entries. Implemented end to end (the JSDoc still says "declaration only") |
+| `alias` | `Record<string, string>` | | Name this relation answers to through an abstract class: `{ Container: "children" }` |
+| `interpretationHint` | `string` | | Hint for the harness; `ad4m://interpretation_hint` on the property shape |
+
+Refused combinations: `where` with `filter: false`; `datatype` with `target`; `getter` with a writable `through`.
+
+## Transform builders
+
+Exported from the package root; each returns a `NodeExpression` that the executor evaluates.
+
+| Builder | Produces |
+|---|---|
+| `focus()` | the property's own resolved value |
+| `literal(v)` | a constant string, number or boolean |
+| `path("pred://uri")` | the value one hop along a predicate from the focus node |
+| `exists(expr)` | whether `expr` resolves to a non-empty value |
+| `ifExpr(cond).then(a).else(b)` | conditional |
+| `concat(a, b, ...)` | string concatenation |
+| `coalesce(a, b, ...)` | first non-null argument |
+| `fn(iri, args)` | an executor-side function by IRI |
+| `fileToDataUri` | the shipped transform that decodes file-storage data into a `data:` URI |
+
+## Ad4mModel static methods
+
+| Method | Signature | Notes |
+|---|---|---|
+| `register` | `register(perspective)` | Installs the shape (`ensureSDNASubjectClass`); once per perspective |
+| `registerAll` | `Ad4mModel.registerAll(perspective, [A, B, ...])` | One RPC for several classes |
+| `create` | `create(perspective, data?, { parent?: Scope, batchId? }?)` | New instance, saved. `parent` writes the holder link in the same batch |
+| `update` | `update(perspective, id, data)` | Fetch, assign, save |
+| `delete` | `delete(perspective, id)` | Runs the destructor (or removes declared links for an all-optional class) and incoming links. `remove` is a deprecated alias |
+| `findAll` | `findAll(perspective, query?)` | `T[]` |
+| `findOne` | `findOne(perspective, query?)` | `T \| null` |
+| `findAllAndCount` | `findAllAndCount(perspective, query?)` | `{ results, totalCount }` |
+| `paginate` | `paginate(perspective, pageSize, pageNumber, query?)` | `{ results, totalCount, pageSize, pageNumber }` |
+| `count` | `count(perspective, query?)` | `number`; runs the query with `limit: 0` |
+| `query` | `query(perspective, query?)` | A `ModelQueryBuilder` |
+| `findAllOf` | `Ad4mModel.findAllOf(perspective, [A, B], query?)` | One query over several classes |
+| `queryOf` | `Ad4mModel.queryOf(perspective, [A, B], query?)` | Builder over several classes |
+| `transaction` | `Ad4mModel.transaction(perspective, async (tx) => ...)` | Batch; see [Model query](./model-query.mdx#transactions) |
+| `getModelMetadata` | `getModelMetadata()` | `{ className: string; properties: Record<string, PropertyMetadata>; relations: Record<string, RelationMetadata> }` |
+| `generateSHACL` | `generateSHACL()` | `{ shape: SHACLShape; name }` |
+| `generateSDNA` | `generateSDNA()` | `{ sdna: string; name }` (Prolog; unused by the executor) |
+| `fromSHACL` | `Ad4mModel.fromSHACL(shape, name, classResolver?)` | A model class from a `SHACLShape`; `classResolver(localName)` wires `sh:class` targets lazily |
+| `fromJSONSchema` | `Ad4mModel.fromJSONSchema(schema, options)` | See below |
+
+Instance methods: `save(batchId?)`, `get(options?)` where options is `{ include?, properties? }` or a bare `IncludeMap`, `delete(batchId?)`, `isDirty()`, `changedFields()`. Fields: `id`, `author`, `createdAt`, `updatedAt`, `timestamp` (deprecated), `__links`, `__subjectClass`, `__subjectClasses`.
+
+## fromJSONSchema
+
+`Ad4mModel.fromJSONSchema(schema: JSONSchema, options: JSONSchemaToModelOptions)`. `options.name` is required; an empty name throws. Register the class before use like any other.
+
+| Option | Type | Effect |
+|---|---|---|
+| `name` | `string` | required; the class name |
+| `namespace` | `string` | predicate namespace; see the cascade |
+| `propertyMapping` | `Record<string, string>` | property → predicate |
+| `predicateTemplate` | `string` | template with `${scheme}`, `${namespace}` or `${ns}`, `${title}`, `${property}` |
+| `predicateGenerator` | `(title, property) => string` | callback |
+| `resolveLanguage` | `string` | default storage mode for every property |
+| `local` | `boolean` | default `local` for every property |
+| `propertyOptions` | `Record<string, Partial<PropertyOptions>>` | per-property overrides |
+
+Cascades (first match wins):
+
+| Setting | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| namespace | `options.namespace` | `x-ad4m.namespace` | `<title lowercased>://` | last path segment of `$id` | error |
+| predicate | `propertyMapping[name]` | property `x-ad4m.through` | `predicateTemplate` | `predicateGenerator` | `<namespace><property>` |
+| per-property option | `propertyOptions[name]` | property `x-ad4m.<option>` | the global option | default | |
+
+`x-ad4m` extensions: on the schema, `namespace` and `className` (`className` is not used by the SDK; `name` is required); on a property, `through`, `resolveLanguage`, `local`, `writable`, `initial`.
+
+Type mapping:
+
+| JSON Schema | Model |
+|---|---|
+| `string`, `number`, `integer`, `boolean` | property (typed literal) |
+| `object` | property stored as a JSON literal (`literal:json:`), with a warning; no field-level querying |
+| `array` | `@HasMany`-style relation with `add`/`remove`/`set` methods |
+| `required: [...]` | `required: true`; a required object gets `initial: "literal:json:{}"`, other required properties `initial: "ad4m://undefined"` |
+
+A schema may be all-optional; no type flag is generated, and recognition then falls back to structure. A top-level property named `author` throws, because `Ad4mModel` already exposes `author`.
+
+## PerspectiveProxy: shapes and classes
+
+| Method | Returns |
+|---|---|
+| `ensureSDNASubjectClass(Class)` / `ensureSubjectClasses([A, B])` | installs shapes; what `register` / `registerAll` call |
+| `addShacl(name, shape)` | installs a `SHACLShape` without a decorated class |
+| `getAllShacl()` | `Array<{ name, shape: SHACLShape }>` for every shape in the perspective |
+| `getClassShape(className)` | `{ className, shapeUri, properties: Array<{ name, predicate, datatype?, required, collection, writable, options? }> } \| null` |
+| `listRegisteredClasses()` | `string[]` of class names (`?class rdf://type ad4m://SubjectClass`) |
+| `subjectClassesOf(uris)` | `Record<uri, className[]>`: every class each node is an instance of |
+| `createSubject(className, id, values?, batchId?)`, `updateSubject(className, id, values, batchId?)`, `removeSubject(className, id, batchId?)` | the raw subject calls the model methods use; dispatch through abstract classes |
+| `addSdna(name, sdnaCode, "subject_class" \| "flow" \| "custom", shaclJson?)` | the low-level install RPC |
+
+There is no `getClassOptions`; `sh:in` options are returned on each property of `getClassShape`.

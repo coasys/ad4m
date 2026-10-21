@@ -1,0 +1,104 @@
+---
+title: Built-in interfaces
+description: The two abstract classes the executor ships - TextContent and Container - with their URIs, shapes, matching rules, SDK mirrors, how an app class maps onto them, and the MCP tools that read through them.
+---
+
+# Built-in interfaces
+
+The executor declares two abstract classes in `rust-executor/src/perspectives/hardwired_sdna/` and compiles them in (`rust-executor/src/perspectives/model_query/builtin_classes.rs`). They are never written into a perspective, are read by URI so an app class with the same name cannot replace them, and are keyed for aliases by their local name. The SDK exports a mirror of each (`core/src/perspectives/TextContent.ts`, `Container.ts`); `register()` on a mirror writes nothing. Concepts: [Abstract classes and aliases](../concepts/abstract-classes-and-aliases.mdx), [Containment](../concepts/containment.mdx).
+
+## TextContent
+
+| | |
+|---|---|
+| URI | `ad4m://TextContent` |
+| Alias key | `TextContent` |
+| Shape | `{ "target_class": "ad4m://TextContent", "abstract": true, "properties": [{ "path": "ad4m://text", "name": "text", "max_count": 1 }] }` |
+| Property | `text`: one value, may contain HTML or Markdown |
+| Reads | every installed class with a property named `text`, or a property aliased `{ TextContent: "text" }` |
+| Own rows | none: a node is a `TextContent` row only through a conforming class |
+| SDK | `import { TextContent } from "@coasys/ad4m"`; `TextContent.builtinUri === "ad4m://TextContent"` |
+| Interpretation hint | "Text a view or an LLM can read: a message, a note, a block of a document. It may contain HTML or Markdown." |
+
+Mapping an app class onto it:
+
+```typescript
+import { Ad4mModel, Model, Property, TextContent } from "@coasys/ad4m";
+
+@Model({ name: "Message", implements: [TextContent] })
+class Message extends Ad4mModel {
+  @Property({ through: "flux://body", resolveLanguage: "literal", alias: { TextContent: "text" } })
+  body: string = "";
+}
+
+const texts = await TextContent.findAll(perspective, { parent: { id: channelId } });
+texts[0].text;             // the Message's body, as stored
+texts[0].__subjectClass;   // "Message"
+```
+
+A class whose field is already named `text` needs no alias. `implements: [TextContent]` is optional and only checks at declaration that the name or alias exists. Writing `text` on a row read through `TextContent` runs the record's own class's setter.
+
+## Container
+
+| | |
+|---|---|
+| URI | `ad4m://Container` |
+| Alias key | `Container` |
+| Shape | `{ "target_class": "ad4m://Container", "abstract": true, "properties": [{ "path": "ad4m://has_child", "name": "children", "node_kind": "IRI", "relation_kind": "hasMany", "collection": true }] }` |
+| Relation | `children`: untyped forward relation; the canonical predicate is `ad4m://has_child` |
+| Reads | every installed class with a forward relation named `children` or aliased `{ Container: "children" }`, and any node that holds something by `ad4m://has_child` |
+| Own rows | yes: a node no class describes (`ad4m://self`, a neighbourhood root, a plain-string id) is a row when it has at least one `has_child` link |
+| SDK | `import { Container } from "@coasys/ad4m"`; `Container.builtinUri === "ad4m://Container"` |
+| Interpretation hint | "Something that holds other records as its children: a channel, a thread, a post, a call, a document, a board." |
+
+Containment rules, as the executor evaluates them (`model_query/containment.rs`):
+
+| Rule | Holds when |
+|---|---|
+| (a) | `P ad4m://has_child X` exists, whatever `P` is |
+| (b) | `P` is an instance of a class conforming to `Container`, and `P p X` exists for `p` the predicate of that class's `children` relation (own name or alias) |
+
+A class whose `children` predicate is `ad4m://has_child` adds nothing beyond rule (a). A class with nothing that marks its instances (no flag, required property or initial value) adds no edge and is logged; its `has_child` links still count. The child's class never decides containment.
+
+Mapping an app class onto it:
+
+```typescript
+import { Ad4mModel, Model, Flag, HasMany, Container } from "@coasys/ad4m";
+
+@Model({ name: "Block", implements: [Container] })
+class Block extends Ad4mModel {
+  @Flag({ through: "we://kind", value: "we://block" })
+  kind = "we://block";
+
+  @HasMany({ through: "we://child", alias: { Container: "children" } })
+  blocks: string[] = [];
+}
+```
+
+What goes through `Container`:
+
+| Call | Behaviour |
+|---|---|
+| `Model.findAll(p, { parent: { id } })` | rows contained in `id` by rule (a) or (b) |
+| `Model.findAll(p, { parent: { ids, transitive?, maxDepth?, direction? } })` with no predicate | a containment traversal; `levels` refused, `limitPerAnchor` refused with `transitive` |
+| `Container.findAll(p, { where: { id } })` | one row whose `children` is everything `id` holds, merged across its classes |
+| `Container.findAll(p, { where: { children: x } })` | the holders of `x` |
+| `Container.findAll(p, { parent: { ids: [x], direction: "in" } })` | the holders of `x`, as rows |
+| `Model.create(p, data, { parent: { id } })` | writes the holder's own `children` relation when it is an instance of a class that has one, else one `ad4m://has_child` link |
+
+Scope every `Container` query; unscoped it reads every holder in the perspective.
+
+## MCP tools that read through them
+
+Defined in `rust-executor/src/mcp/tools/instances/` (`children.rs`, `transcript.rs`, `create.rs`, `query.rs`, `describe.rs`). Full parameter tables: [MCP tools](./mcp-tools.mdx).
+
+| Tool | Through | Does |
+|---|---|---|
+| `instance_transcript(perspective_id, parent, limit?)` | `TextContent` + `Container` | the most recent contained records that carry text, as a chronological transcript with timestamp, author and the text as stored; children of other classes are omitted |
+| `get_children(perspective_id, parent, limit?)` | `Container` | id, timestamp and author of each child link, oldest first, whatever the child's class; works for `ad4m://self` |
+| `add_child(perspective_id, parent, child)` | `Container` | the holder's own `children` adder when it has one, else an `ad4m://has_child` link; neither node needs to be an instance |
+| `instance_create(..., parent)` | `Container` | creates, then attaches the same way |
+| `instance_query(class_name, parent?)` | `Container` | `parent` is the `{ id }` scope |
+| `describe_perspective` | | reports which property of each class answers to `TextContent.text` |
+
+The MCP documentation topics compiled into the executor describe the same surface for an agent at runtime: [overview](./mcp-topics/overview.md), [usage](./mcp-topics/usage.md).

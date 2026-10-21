@@ -1,0 +1,200 @@
+---
+title: Queries and live results
+description: Model queries, SPARQL, where operators, author filters, include, parent scopes, subscriptions, and how links whose signature did not verify are filtered out.
+---
+
+import { Callout } from "nextra/components";
+
+# Queries and live results
+
+How do I get exactly the rows I want, and keep them fresh?
+
+A **model query** is a JSON description of what you want from one class: `where`, `order`, `limit`, `include`, a `parent` scope. The SDK sends it to the executor, which compiles it to SPARQL over the perspective's store, runs it, and hands back hydrated rows. The same JSON can be subscribed to, in which case the executor re-runs it when a write could change the result and pushes the difference. **SPARQL** is the layer underneath; you can also write it directly when a question does not fit the model shape. Prolog is disabled on the current executor.
+
+## The example
+
+```typescript
+const builder = Task.query(perspective)
+  .where({ status: ["open", "doing"], priority: { gte: 2 } })
+  .order({ createdAt: "DESC" })
+  .limit(20)
+  .include({ assignee: true });
+
+const page = await builder.get();          // Task[] with assignee hydrated
+
+// Keep it fresh: the callback runs on every change; dispose() when the view goes away.
+const initial = await builder.subscribe((tasks) => render(tasks));
+builder.dispose();
+```
+
+The same selection as a model query object (`findAll`, `findOne`, `count`, `paginate` and `findAllAndCount` all take one):
+
+```typescript
+await Task.findAll(perspective, {
+  where: { status: ["open", "doing"], priority: { gte: 2 } },
+  order: { createdAt: "DESC" },
+  limit: 20,
+  include: { assignee: true },
+});
+```
+
+And roughly what the executor runs for it, written by hand with `perspective.querySparql`:
+
+```sparql
+SELECT ?task ?title WHERE {
+  ?task <board://type> <board://task> ;
+        <board://status> ?status ;
+        <board://priority> ?priority ;
+        <board://title> ?title .
+  FILTER(?status IN ("open", "doing") && ?priority >= 2)
+}
+```
+
+Values are typed RDF literals in the store, so `"open"` and `2` compare directly. The model query adds what this hand-written form lacks: it checks each link's signature verdict, hydrates `assignee`, and pages consistently. [SPARQL how-to](../how-to/sparql.mdx) covers traversal and aggregation.
+
+```
+  Task.query(...).where(...).include(...)
+          │  JSON  (perspective.modelQuery / modelSubscribe)
+          ▼
+  executor: shape from the perspective ─▶ SPARQL ─▶ store (oxigraph)
+          │                                  │
+          │   only links whose signature     │  rows: id, values,
+          │   verified pass the guard        │  relation targets
+          ▼                                  ▼
+  hydrate rows ─▶ include / projections / getters ─▶ back to the SDK as instances
+```
+
+## Where operators
+
+A `where` is an object keyed by property or relation name. A bare value means equality; an array means any of; an operator object refines it.
+
+| Form | Meaning |
+|---|---|
+| `title: "Write the guide"` | equal |
+| `status: ["open", "doing"]` | any of |
+| `{ eq: v }` | equality as an operator, so a value can sit beside `author` |
+| `{ not: v }`, `{ not: [v1, v2] }` | not equal, not any of |
+| `{ gt, gte, lt, lte }` | numeric comparison |
+| `{ between: [lo, hi] }` | inclusive range |
+| `{ contains: "guide" }` | substring (or element, on a collection) |
+| `{ author: did }` | who wrote the link; see below |
+| `comments: { some: { body: "yes" } }` | a relation target satisfies the sub-clause |
+| `comments: { none: {} }` | no relation target satisfies it |
+| `id: [...]` | restrict by instance URI |
+| `OR: [...]`, `AND: [...]`, `NOT: {...}` | combinators; each entry is a `where` |
+| `producedByFlow: { flow, state? }` | only instances a completed flow run produced, verified by receipt; top level only ([Flows](./flows.mdx)) |
+
+`some` and `none` are not in the SDK's `WhereOps` type yet, so they need `as any` in TypeScript. `eq` cannot be combined with the other value operators.
+
+## Filtering by author
+
+Every link records who wrote it. Where you put `author` decides what it asks:
+
+| Form | Example | Matches when |
+|---|---|---|
+| Nested, per link | `{ agent: { eq: did, author: admin } }` | admin wrote an `agent → did` link |
+| Bare, per instance | `{ author: admin }` | admin wrote the instance's earliest link (its `.author`) |
+| Side by side | `{ agent: did, author: admin }` | both: admin created the instance and wrote an `agent → did` link |
+
+The nested form is the one to use for authority checks. Anyone can add a link to a record someone else created; `{ agent: { eq: peer, author: admin } }` only passes when admin signed that link, and only links whose signature verified are considered. The author value can be a DID, a list of DIDs, `{ not: ... }` or `{ contains: ... }`. A per-link `author` on a getter property, on `timestamp` or on `id` is an error, since there is no link to check. The complete rules are in [Filter by author](../how-to/filter-by-author.mdx).
+
+## Order, limit and offset
+
+`order: { createdAt: "DESC" }` sorts by a property or by `createdAt` / `updatedAt`. Two more key forms exist:
+
+- A dotted relation path, `order: { "pinnedComment.body": "ASC" }`, sorts by a property of a to-one relation's target. It needs `as any` in TypeScript.
+- A projection key, `order: { $commentCount: "DESC" }`, sorts by a `$` projection declared in `include`.
+
+The executor resolves these two key forms only in the paged plan, so pair them with `limit` or `offset`; without a page a dotted order is ignored. `limit: 0` is how `count()` asks for the total alone. [Paginate](../how-to/paginate.mdx) shows `paginate(pageSize, page)` and `findAllAndCount`.
+
+## Eager loading with include
+
+Relations hydrate to id strings by default. `include` turns them into instances, one level or nested, with an optional sub-query (`where`, `order`, `limit`, `offset`, `include`, `properties`, `links`):
+
+```typescript
+await Task.findAll(perspective, {
+  include: {
+    assignee: true,
+    comments: { order: { createdAt: "DESC" }, limit: 5, include: { author: true } },
+  },
+});
+```
+
+A key that starts with `$` is a **projection**: a count or a short list computed per row without hydrating the whole relation.
+
+```typescript
+const posts = await Post.findAll(perspective, {
+  include: {
+    $commentCount: { from: "comments", count: true },
+    $replies:      { from: "comments", count: true, transitive: true }, // whole thread
+    $latest:       { from: "comments", order: { createdAt: "DESC" }, limit: 1 },
+  },
+  order: { $commentCount: "DESC" },
+  limit: 20,
+});
+posts[0].$commentCount; // number
+posts[0].$latest;       // one id or null (limit 1 unwraps)
+```
+
+`includeAll: true` includes every forward relation one level deep. [Include relations](../how-to/include-relations.mdx) has the patterns.
+
+## Sparse fields with properties
+
+`properties: ["title"]` hydrates only the listed fields. Unrequested fields are removed from the row, including `author`, `createdAt` and `updatedAt`, not left at defaults. `properties: []` throws. See [Sparse fields](../how-to/sparse-fields.mdx).
+
+## Per-link rows with links
+
+Hydration folds an instance's links into one object. `links: ["comments", "app://revoked"]` adds the stored links behind each requested entry under `instance.__links`, each with its own `author`, `timestamp` and `proof` verdict. Entries are declared names or absolute predicate IRIs, including ones the class does not declare. Reverse relations and unknown names are errors. The rows come from a second read, so they are not one snapshot with the instance.
+
+## Parent-scoped queries
+
+`parent` restricts the rows to records linked from one or more nodes:
+
+| Scope | Reads |
+|---|---|
+| `{ id }` | Everything `id` contains, through the built-in `Container`: its `ad4m://has_child` targets plus the targets of its class's own `children` relation ([Containment](./containment.mdx)) |
+| `{ id, predicate }` | The targets of `id`'s links on that predicate |
+| `{ model: Board, id, field? }` | The predicate resolved from `Board`'s relation to the queried class |
+| `{ ids, predicate \| model \| nothing, ... }` | A traversal from several anchors; see below |
+
+The traversal form takes `ids` (one or many), names its predicate literally, by model, or not at all (containment), and bounds the walk:
+
+- `transitive: true` follows the predicate to any depth, flat; `maxDepth` caps it.
+- `levels: [10, 5, 2]` walks level by level keeping that many per anchor at each depth.
+- `limitPerAnchor: 5` keeps the top five under each anchor (pair it with `order`).
+- `direction: "in"` searches what points at the anchors.
+
+Rows come back flat and breadth-first; the anchors are excluded from their own result. `levels` with `transitive` or `limitPerAnchor` is refused. The builder form is `.parent(idOrInstance, modelOrPredicate?)`. The full option table is in [Model query](../reference/model-query.mdx#parent-scopes).
+
+## Several classes at once
+
+`Ad4mModel.findAllOf(perspective, [Placement, EdgeRoute], query)` and `Ad4mModel.queryOf(...)` run one query, one page and one subscription over several classes. Each row is an instance of the class it was read as and carries `__subjectClass` and `__subjectClasses`. A `where` on a property a class lacks excludes that class's rows; an `order` on one sorts them last. Querying an abstract class is the same kind of union ([Abstract classes](./abstract-classes-and-aliases.mdx)).
+
+## Unverified links
+
+The executor checks every link's signature when it stores the link and records the verdict. A query reads only links whose signature verified: both the links that **hydrate** a row (values, relation targets, `author`, `updatedAt`) and the links that **select** it (`where`, the class's flag, counts, the order behind a page, a `parent` scope, a `$` projection). A forged or tampered link therefore cannot make a node an instance, satisfy an author check, change a count or push a genuine row off a page.
+
+`includeUnverified: true` opts in, for a UI that wants to show a claim and mark it unverified. Never use it for anything you act on. A hand-written `getter` is the exception: it runs as written and sees unverified links unless it joins the link's `ad4m://ontology/proofValid` itself.
+
+## Link status
+
+Every link is Shared (gossiped to the neighbourhood) or Local (kept on this executor). A query reads both; a property declared `local: true` reads only its Local links. `linkStatus: "shared"` reads an instance as the neighbourhood sees it and is the setting for anything shown to another user; `"local"` is the converse. The status filter and the signature filter apply to the same link, so a Local link whose signature failed is read only with both `linkStatus: "local"` and `includeUnverified: true`.
+
+## Real-time subscriptions
+
+`subscribe(callback)` returns the initial rows and then calls back on every change; `countSubscribe` and `paginateSubscribe` do the same for a count and a page. The executor re-runs the query when a write could change its result. That includes writes beyond the queried class: an edit to an included record, a related record that starts or stops satisfying a `some` quantifier or a typed relation's filter, and a link on any requested `links` entry. It does not include unrelated classes: creating a `Note` does not re-run a `Task` subscription. When the result changes the executor sends only the records added, updated and removed, with the new total, and the builder applies that before calling you.
+
+Each builder holds one executor subscription, tied to its connection; a second `subscribe()` on the same builder ends the first. `dispose()` ends it on both sides. Two builders on the same query are two subscriptions, so disposing one never stops the other. The executor ends every subscription of a connection when the connection closes. [Subscribe](../how-to/subscribe.mdx) shows the React and Vue hooks on top of this.
+
+## Query engine
+
+The path is: SDK (`prepareModelQueryParams`) → `perspective.modelQuery(className, queryJson)` or `modelSubscribe` → executor loads the class's shape from the perspective → `sparql_builder` compiles recognition, `where`, scope and order into SPARQL → the per-perspective oxigraph store answers → hydration, includes, projections and getters run in the executor → rows return as JSON and become instances. The raw RPC accepts the same JSON ([Model query reference](../reference/model-query.mdx#raw-rpc)), which is what the MCP `instance_query` tool uses.
+
+## How it is built
+
+Query types are `core/src/model/types.ts`; the builder is `core/src/model/ModelQueryBuilder.ts`. The executor side is `rust-executor/src/perspectives/model_query/` (`query.rs` orchestrates, `sparql_builder.rs` compiles, `hydration.rs` and `projection.rs` fill rows) and the store is `rust-executor/src/perspectives/sparql_store.rs`.
+
+## Next
+
+- How-to: [Filter by author](../how-to/filter-by-author.mdx), [Paginate](../how-to/paginate.mdx), [Subscribe](../how-to/subscribe.mdx), [Include relations](../how-to/include-relations.mdx), [Sparse fields](../how-to/sparse-fields.mdx), [SPARQL](../how-to/sparql.mdx).
+- Reference: [Model query](../reference/model-query.mdx).

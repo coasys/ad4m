@@ -1,0 +1,73 @@
+---
+title: Run the MCP server
+description: Enable the executor's MCP server, choose how callers authenticate, connect a client, and know which tools are the executor's and which belong to the OpenClaw plugin.
+---
+
+import { Callout } from "nextra/components";
+
+# Run the MCP server
+
+The executor ships a [Model Context Protocol](https://modelcontextprotocol.io/) server. Any MCP client that speaks Streamable HTTP can connect to it and use the tools listed on [MCP tools](../reference/mcp-tools.mdx).
+
+## 1. Enable it
+
+**Launcher:** Settings, the "MCP" toggle and port (default 3001).
+
+**CLI:**
+
+```bash
+ad4m-executor run --enable-mcp true --mcp-port 3001
+```
+
+or `AD4M_ENABLE_MCP=true` and `AD4M_MCP_PORT`, or `"mcp_enabled": true` and `"mcp_port"` in the [config file](../reference/executor-config.mdx). The server listens at `http://<host>:<port>/mcp`.
+
+### Where it binds
+
+| Admin credential set | `MCP_HOST` | Plain listener binds | TLS listener |
+|---|---|---|---|
+| no | unset | `127.0.0.1`; every caller on loopback is treated as the node's owner | not started |
+| yes | unset | `0.0.0.0` | `0.0.0.0:<mcp-port + 1>` when the executor has TLS; the plain listener then narrows to `127.0.0.1` |
+| either | `<ip>` | that IP, as given | as above, without the narrowing |
+
+`MCP_HOST` is an environment variable, not a flag, and takes an IP literal (`localhost` does not parse). Setting it beyond loopback on a node without a credential logs a warning: every caller that can reach the address is then authenticated. Credentials a caller presents are checked in every mode.
+
+The TLS listener uses the certificate and key the RPC port uses (`--tls-cert-file`, `--tls-key-file`); there is no separate MCP certificate. It is not started without an admin credential, when `--mcp-port + 1` is the RPC TLS port, or when that port is taken; each case logs why.
+
+### Per-class tools (opt-in)
+
+By default the tool list is fixed and does not change with the classes a perspective carries. The generic `instance_*` tools take `class_name` as a parameter and get the schema from `describe_perspective`. Per-class tools (`channel_create`, `message_set_body`, …) are generated for every class but exposed only with:
+
+```bash
+ad4m-executor run --enable-mcp true --dynamic-class-tools true   # or AD4M_DYNAMIC_CLASS_TOOLS=true
+```
+
+This is a flag and an environment variable only; there is no config-file key for it. Calling a per-class tool while it is hidden returns an error naming the `instance_*` equivalent.
+
+## 2. Authenticate
+
+Eight tools need no authentication: `get_documentation`, `auth_status`, `request_capability`, `generate_jwt`, `login_email`, `signup`, `request_login_verification`, `verify_email_code`. Everything else needs one of:
+
+| Mode | How |
+|---|---|
+| **Admin credential** (the node's operator) | Send it as `Authorization: Bearer <credential>` on each call. The first protected call with a matching header stores it in the session. |
+| **Capability token** (a local, single-user node) | `request_capability(app_name, app_desc)` returns `request_id` and, when the caller may permit (no admin credential set, or the session already holds admin rights), the `code`; `generate_jwt(request_id, code)` stores the JWT in the session. On a node with an admin credential and no such session, the request is created but the code must come from the operator (the Launcher dialog, or the executor's stdout with `AD4M_LOG_SECRETS=1`). |
+| **Multi-user account** (a hosted node) | `signup(email, password)` once, then `login_email(email, password)`; `verify_email_code(email, code, verification_type)` only if the host enforces email verification. |
+
+`auth_status()` reports the session token only. With header authentication it answers `authenticated: false` until the first protected call has carried the header; that is not a wrong credential. Both JWT paths need an unlocked executor: after a restart, `login_email` and `generate_jwt` fail with a "key not found" error until the operator runs `ad4m agent unlock`.
+
+## 3. Connect a client
+
+Point any Streamable HTTP MCP client at `http://localhost:3001/mcp`. Configuration snippets for OpenClaw and Claude are on [Connect an agent framework](../how-to/connect-an-agent-framework.mdx). Then read the executor's own documentation from inside the session: `get_documentation(topic)` with `overview`, `usage`, `models`, `architecture` or `flux`. The same five texts are rendered here: [overview](../reference/mcp-topics/overview.md), [usage](../reference/mcp-topics/usage.md), [models](../reference/mcp-topics/models.md), [architecture](../reference/mcp-topics/architecture.md), [flux](../reference/mcp-topics/flux.md).
+
+## Who owns which tool
+
+| Owner | Tools | Where they run |
+|---|---|---|
+| **Executor** | `describe_perspective`, the `instance_*` tools, `add_child`/`get_children`, `add_model`, perspectives, neighbourhoods, profiles, flows, auth, `get_documentation`, `generate_waker_query`/`get_mention_waker_config` | In the executor's MCP server; a host may bridge them under a prefix (OpenClaw: `ad4m_describe_perspective`) |
+| **OpenClaw plugin** | `ad4m_subscribe_to_mentions`, `ad4m_subscribe_to_children`, `ad4m_unsubscribe_from_*`, `ad4m_list_waker_subscriptions` | In the plugin. They register a SPARQL subscription over the executor's WebSocket API and deliver wake events; the executor only provides the query builders |
+
+The complete list, one row per tool, is on [MCP tools](../reference/mcp-tools.mdx).
+
+<Callout type="info">
+Raw `curl` does not work against the MCP endpoint: it speaks Streamable HTTP and needs a session. Use an MCP client, or a CLI such as `mcporter`.
+</Callout>

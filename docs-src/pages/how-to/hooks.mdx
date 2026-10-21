@@ -1,0 +1,146 @@
+---
+title: React and Vue hooks
+description: Read live model queries, the current agent, other agents' profiles and the perspective list from React or Vue components with @coasys/ad4m-react-hooks and @coasys/ad4m-vue-hooks.
+---
+
+import { Callout } from "nextra/components";
+
+# React and Vue hooks
+
+Two packages wrap the SDK for UI frameworks: `@coasys/ad4m-react-hooks` and `@coasys/ad4m-vue-hooks`. They export the same five hooks: `useLiveQuery`, `useMe`, `useAgent`, `usePerspectives` and `usePerspective`. The React package also exports `toCustomElement`. There is no `useClient` hook: you get the client from `@coasys/ad4m-connect` ([Build an app](../start/build-an-app.mdx)) and pass it in.
+
+## 1. Install
+
+```bash
+pnpm add @coasys/ad4m @coasys/ad4m-connect @coasys/ad4m-react-hooks   # React (peer: react, preact)
+pnpm add @coasys/ad4m @coasys/ad4m-connect @coasys/ad4m-vue-hooks     # Vue (peer: vue ^3.2.47)
+```
+
+## 2. Register your models once
+
+The hooks query models; they do not register them. Register each class in the perspective once, at startup, before the first component renders:
+
+```typescript
+import { getAd4mClient } from "@coasys/ad4m-connect";
+
+const client = await getAd4mClient({ appInfo, capabilities });
+const perspective = await client.perspective.byUUID(uuid);
+await Channel.register(perspective!);
+await Message.register(perspective!);
+```
+
+## 3. Read a live query: `useLiveQuery`
+
+`useLiveQuery(model, perspective, options?)` runs a model query, subscribes to it, and re-renders when the result changes. It disposes the subscription when the component unmounts or the inputs change.
+
+```tsx
+import { useLiveQuery } from "@coasys/ad4m-react-hooks";
+
+function Messages({ perspective, channelId }) {
+  const { data, loading, error, totalCount, loadMore } = useLiveQuery(Message, perspective, {
+    parent: { model: Channel, id: channelId },
+    query: { order: { createdAt: "DESC" } },
+    pageSize: 30,
+  });
+
+  if (error) return <p>{error}</p>;
+  return (
+    <>
+      {data.map((m) => <p key={m.id}>{m.body}</p>)}
+      {data.length < totalCount && <button onClick={loadMore} disabled={loading}>More</button>}
+    </>
+  );
+}
+```
+
+| Option | Effect |
+|---|---|
+| `query` | A model query object (`where`, `order`, `include`, …), as on [Model query](../reference/model-query.mdx). |
+| `parent` | A parent scope. `{ model: Channel, id }` resolves the predicate from `Channel`'s relation metadata; `{ id, predicate }` names it; `{ id }` alone reads what `id` contains ([Containment](../concepts/containment.mdx)). While `parent.id` is empty the hook returns no rows and does not query. |
+| `pageSize` | Load-more mode: the hook queries `pageSize × page` rows and `loadMore()` increases the page. Without it there is no limit and `loadMore` does nothing. |
+| `id` | Single-instance mode: the hook filters on `where.id` and returns one record. |
+| `preserveReferences` | Keep the existing object for a record whose `id` is still in the new result, so memoised children do not re-render. Default `false`. |
+
+What it returns:
+
+| Mode | Fields |
+|---|---|
+| Collection (no `id`) | `data: T[]`, `loading: boolean`, `error: string`, `totalCount: number`, `loadMore(): void` |
+| Single instance (`id` set) | `data: T \| null`, `loading`, `error` |
+
+`totalCount` is filled in load-more mode only. `model` may also be a class name string instead of a class, for generic browsers that do not import the app's classes; an empty string returns no rows.
+
+```tsx
+const { data: message } = useLiveQuery(Message, perspective, { id: messageId });
+```
+
+## 4. The current agent: `useMe`
+
+```tsx
+import { useMe } from "@coasys/ad4m-react-hooks";
+
+const { me, status, profile, error, reload } = useMe(client, (links) => ({
+  name: links.find((l) => l.data.predicate === "sioc://has_username")?.data.target,
+}));
+```
+
+`useMe(client, formatter)` calls `agent.status()` and `agent.me()`, then follows the `agent-status-changed` and `agent-updated` events. `profile` is `formatter(me.perspective.links)`, or `null` when the agent has no public perspective. `status.isUnlocked` tells you whether the executor can sign yet.
+
+## 5. Another agent: `useAgent`
+
+```tsx
+import { useAgent } from "@coasys/ad4m-react-hooks";
+
+const { agent, profile, error, reload } = useAgent({
+  client: client.agent,          // an AgentClient, not the Ad4mClient
+  did: author,
+  formatter: (links) => ({ name: links.find((l) => l.data.predicate === "sioc://has_username")?.data.target }),
+});
+```
+
+It resolves the DID with `agent.byDID` and caches the result per DID, so many components showing the same author share one fetch.
+
+## 6. Perspectives: `usePerspectives` and `usePerspective`
+
+```tsx
+import { usePerspectives, usePerspective } from "@coasys/ad4m-react-hooks";
+
+const { perspectives, neighbourhoods, onLinkAdded, onLinkRemoved } = usePerspectives(client);
+const { data } = usePerspective(client, uuid);   // data.perspective: PerspectiveProxy | null
+```
+
+`perspectives` and `neighbourhoods` are objects keyed by UUID; `neighbourhoods` holds those with a `sharedUrl`. The hook follows `perspective-added`, `perspective-updated` and `perspective-removed`. `onLinkAdded(cb)` and `onLinkRemoved(cb)` register a callback `(perspective, link)` for links added to or removed from any perspective; there is no call to unregister one, so register them once.
+
+<Callout type="info">
+`usePerspective` returns `data.synced`, but nothing in the hook sets it: it is always `false`. Do not gate UI on it.
+</Callout>
+
+## 7. Vue
+
+The Vue hooks take the same arguments and return Vue refs:
+
+```typescript
+import { useLiveQuery, useMe } from "@coasys/ad4m-vue-hooks";
+
+const { data, loading, totalCount, loadMore } = useLiveQuery(Message, perspective, { pageSize: 30 });
+// data.value: Message[]
+```
+
+The differences:
+
+- `useLiveQuery` also accepts a `ComputedRef<PerspectiveProxy | null>` and re-subscribes when it changes. Results are `shallowRef`s, because Vue's deep proxies break the private fields of the SDK objects inside a model instance.
+- `useAgent(agentClient, did, formatter)` takes positional arguments and returns `{ agent, profile }`; the profile gets a `did` field added.
+- `useMe(client, formatter)` returns `{ status, me, profile }`. `usePerspectives` keeps one shared state for the whole app: the first component that calls it fetches.
+
+## 8. Web components (React package)
+
+`toCustomElement(Component, propNames, options?)` wraps a Preact component as a custom element class; `{ shadow: true }` renders into a shadow root. Define it with `customElements.define("my-tag", toCustomElement(MyComponent, ["perspective"]))`.
+
+## How it is built
+
+The hooks are in `ad4m-hooks/react/src` and `ad4m-hooks/vue/src`; both delegate to `ModelQueryBuilder.subscribe` and `paginateSubscribe` in `core/src/model/ModelQueryBuilder.ts`.
+
+## Next
+
+- [Queries and live results](../concepts/queries.mdx): what a subscription re-runs and when.
+- [Subscribe](./subscribe.mdx) without a framework.

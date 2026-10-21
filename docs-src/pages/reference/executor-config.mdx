@@ -1,0 +1,118 @@
+---
+title: Executor config
+description: The JSON config file of ad4m-executor run, every key with its type, default and flag, the environment variables the executor reads, and how the three sources combine.
+---
+
+import { Callout } from "nextra/components";
+
+# Executor config
+
+`ad4m-executor run` takes its settings from three sources, merged per setting: the config file, then `AD4M_*` environment variables, then flags. A later source wins. `ad4m-executor config print` shows the merged result with secrets redacted. The flags themselves are on [CLI](./cli.mdx#run-flags).
+
+## The config file
+
+```bash
+ad4m-executor run --config /etc/ad4m/config.json     # or AD4M_CONFIG=/etc/ad4m/config.json
+```
+
+There is no default path: without `--config` or `AD4M_CONFIG` no file is read. The file is JSON with snake_case keys (`ExecutorConfigFile`, `rust-executor/src/config_file.rs`). Every key is optional; a missing key keeps the default.
+
+```json
+{
+  "app_data_path": "/var/lib/ad4m",
+  "port": 12000,
+  "localhost": true,
+  "run_dapp_server": false,
+  "mcp_enabled": true,
+  "mcp_port": 3001,
+  "multi_user_config": {
+    "enabled": true,
+    "tls_config": {
+      "enabled": true,
+      "cert_file_path": "/etc/ad4m/tls/fullchain.pem",
+      "key_file_path": "/etc/ad4m/tls/privkey.pem"
+    }
+  },
+  "log_config": { "rust_executor": "info", "holochain": "warn" }
+}
+```
+
+| Key | Type | Default | Flag | Meaning |
+|---|---|---|---|---|
+| `app_data_path` | string | `~/.ad4m` | `--app-data-path` | Data directory. |
+| `port` | u16 | `12000` | `--port` | RPC port. |
+| `hc_admin_port` | u16 | first free from 2000 | `--hc-admin-port` | Accepted; the conductor opens no admin interface. |
+| `hc_app_port` | u16 | `1337` | `--hc-app-port` | Holochain conductor app interface port. |
+| `localhost` | bool | `true` | `--localhost` | Bind the plain RPC port to `127.0.0.1`. With TLS on, the plain port stays on loopback either way. |
+| `run_dapp_server` | bool | `true` | `--run-dapp-server` | Serve the bundled dapp on `127.0.0.1:8080`. |
+| `auto_permit_cap_requests` | bool | `false` when a file is used | `--auto-permit-cap-requests` | Grant capability requests without the user confirming them. Without any file the CLI defaults this to `true`. |
+| `mcp_enabled` | bool | `false` | `--enable-mcp` | Run the MCP server. |
+| `mcp_port` | u16 | `3001` | `--mcp-port` | MCP port. |
+| `multi_user_config.enabled` | bool, required in the object | | `--enable-multi-user` | Multi-user host mode. |
+| `multi_user_config.tls_config.enabled` | bool, required in the object | | set to `true` by `--tls-cert-file`/`--tls-key-file` | HTTPS/WSS listener on `0.0.0.0`. |
+| `multi_user_config.tls_config.cert_file_path` | string, required in the object | | `--tls-cert-file` | PEM certificate. |
+| `multi_user_config.tls_config.key_file_path` | string, required in the object | | `--tls-key-file` | PEM key. |
+| `multi_user_config.tls_config.tls_port` | u16 | `port + 1` | `--tls-port` | HTTPS/WSS port. |
+| `multi_user_config.smtp_config.enabled` | bool, required in the object | | none | Send verification emails. |
+| `multi_user_config.smtp_config.host`, `.port`, `.username`, `.from_address` | string, u16, string, string; required in the object | | none | Mail account. |
+| `multi_user_config.smtp_config.password_file` | string | | none | Password file (mode `0600` or `0400`). `AD4M_SMTP_PASSWORD` or `AD4M_SMTP_PASSWORD_FILE` override it. An enabled SMTP config without a password is an error. |
+| `log_config` | map of crate name to level | `holochain`, `wasmer_compiler_cranelift`: `warn`; `rust_executor`, `warp::server`: `info` | none | Log levels (`trace`, `debug`, `info`, `warn`, `error`). Ignored entirely when `RUST_LOG` is set. |
+| `sfu_bind_addr` | string (IP) | `127.0.0.1`; outbound interface with `localhost: false` | `--sfu-bind-addr` | SFU UDP bind address. |
+| `sfu_udp_port` | u16 | a free port at each start | `--sfu-udp-port` | Fixed SFU UDP port; startup fails when it is taken. |
+| `sfu_public_addr` | string (IP) | the STUN probe's answer | `--sfu-public-addr` | Public address advertised behind NAT. Read at startup; an IP change needs a restart. |
+| `sfu_stun_server` | `host:port` | none (no probe) | `--sfu-stun-server` | STUN server asked once at startup. |
+
+What the parser refuses (`ExecutorConfigFile::parse`):
+
+- **Unknown keys, at any depth.** The error names the dotted key (`unknown key `multi_user_config.foo``). A build that predates a key refuses it too.
+- **Secrets inline.** `admin_credential` and `smtp_config.password` are refused with a message pointing at the environment variable.
+- **Empty or whitespace-only strings**, anywhere; the error names the key. Because the TLS paths are required in a `tls_config` object, a disabled one still needs non-empty paths.
+- TLS enabled without both a certificate and a key.
+
+Settings with no config key are flag or variable only: `--dynamic-class-tools`, `--run-holochain` and the other `--hc-*` network flags, `--network-bootstrap-seed`, `--language-language-only`, `--pid-file`, `--insecure-no-admin-credential`, `--admin-credential`, and the SFU cascade flags (`--sfu-local-did`, `--sfu-cascade-listen`, `--sfu-cascade-peers`, `--sfu-max-participants-per-node`, `--sfu-preferred-node`).
+
+## Environment variables
+
+**Flag variables.** Every `run` flag has one: `AD4M_` plus the flag in upper snake case (`AD4M_PORT`, `AD4M_ENABLE_MCP`, `AD4M_DYNAMIC_CLASS_TOOLS`, `AD4M_CONFIG`, …), 39 in all (`cli/src/run_config.rs`). A variable beats the file and loses to its flag.
+
+**Secrets.** These have no flag (except the admin credential) and no config key:
+
+| Variable | Meaning |
+|---|---|
+| `AD4M_ADMIN_CREDENTIAL_FILE` | File holding the admin credential. Mode `0600` or `0400`; one trailing newline is dropped; must not be empty. |
+| `AD4M_ADMIN_CREDENTIAL` | The admin credential as a value. Setting both this and `_FILE` is an error. `--admin-credential` beats both. |
+| `AD4M_UNLOCK_PASSPHRASE_FILE` | File holding the agent passphrase; `run` unlocks the agent with it after startup. No agent yet: a warning. A wrong passphrase: the executor stays up, locked. There is no value variant. |
+| `AD4M_SMTP_PASSWORD_FILE`, `AD4M_SMTP_PASSWORD` | SMTP password; beat `smtp_config.password_file`. |
+
+**Read directly by the executor:**
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `MCP_HOST` | Bind address of the plain MCP listener, an IP literal (`localhost` does not parse). There is no `--mcp-host` flag. | `0.0.0.0` with an admin credential, `127.0.0.1` without; `127.0.0.1` while the HTTPS MCP listener runs |
+| `AD4M_LOG_SECRETS` | `1` logs capability codes, the auto-permit code and email verification codes, which are redacted otherwise. Development only. | unset |
+| `RUST_LOG` | Log filter; replaces `log_config` completely. | from `log_config` |
+| `AD4M_MEMORY_DIAGNOSTICS` | `1` or `true` logs the periodic memory statistics at `info` instead of `debug`. | unset |
+| `WALLET_BACKEND`, `WALLET_BACKEND_URL`, `WALLET_SIGNING_KEY_NAME` | Key storage: `local` (default) or `shared`, an external wallet service at the URL (required for `shared`). | local |
+| `DB_BACKEND`, `DB_BACKEND_URL` | Database backend for a shared deployment. | local |
+| `SNAPSHOT_INTERVAL_SECS` | Perspective snapshot interval in shared mode; `0` disables. | `300` |
+| `INTERNAL_API_TOKEN` | Token for a hosting platform's internal calls; with `WALLET_BACKEND=shared` it must differ from the admin credential, or startup fails. Redacted by `config print`. | unset |
+
+## What `config print` shows
+
+```bash
+AD4M_ADMIN_CREDENTIAL_FILE=/etc/ad4m/secrets/admin ad4m-executor config print --config /etc/ad4m/config.json
+```
+
+The merged settings as the executor's own camelCase structure (`Ad4mConfig`, `rust-executor/src/config.rs`), not the file's snake_case keys, with defaults filled in. `adminCredential`, `internalApiToken`, `smtpConfig.password` and `unlockPassphrase` are `"<redacted>"` when set and `null` when not. The Holochain ports are `null`: `run` chooses them at startup. `config print` does not check that an admin credential is present.
+
+## The Launcher's settings file
+
+The Launcher keeps its own state in `~/.ad4m/launcher-state.json` (`LauncherState`, `ui/src-tauri/src/app_state.rs`). It is not a config file for `--config`: it holds the agent list and the selected agent, `log_config`, `multi_user_config`, `mcp_enabled`, `mcp_port` and host registration. The Launcher builds the executor's settings from it at each start: the selected agent's data path, the first free RPC port from 12000, a fresh admin credential, and `localhost` off when TLS is on. Auto-permit, the Holochain ports, the SFU and the other flag-only settings cannot be set from the Launcher.
+
+<Callout type="warning">
+When `run` refuses to start for lack of an admin credential, its error mentions `adminCredential` "in the config". The config file refuses that key; use `AD4M_ADMIN_CREDENTIAL_FILE`.
+</Callout>
+
+## How it is built
+
+The file format and its validation are `rust-executor/src/config_file.rs`; the flags, variables and merge order are `cli/src/run_config.rs`; the executor's runtime struct and its defaults (`Ad4mConfig::prepare`) are `rust-executor/src/config.rs`.

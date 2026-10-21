@@ -1,0 +1,96 @@
+---
+title: Neighbourhoods and trust
+description: How two agents see the same graph: a perspective published through a link language, joined by URL, with signed links, presence and signals between members.
+---
+
+import { Callout } from "nextra/components";
+
+# Neighbourhoods and trust
+
+How do two people see the same graph? A **neighbourhood** is a [perspective](./perspectives-and-links.mdx) that is shared: its links travel through a **link language**, a Language whose job is to carry link diffs between agents. Every member holds a full copy, writes signed links into it, and reads what the others wrote.
+
+## The idea
+
+A neighbourhood is a group's shared graph, not an app's database. The same neighbourhood can be a chat to one app, a task board to another and a document to a third, because every app reads the same links and brings its own [models](./models-and-identity.mdx) to recognize what it cares about.
+
+```text
+   Alice's executor                                    Bob's executor
+   ┌──────────────────────────┐                        ┌──────────────────────────┐
+   │ perspective (neighbourhood)                        │ perspective (neighbourhood)
+   │  shared links  ◀────────── link language ──────────▶  shared links
+   │  local links   (stay here)        ▲                │  local links   (stay here)
+   └──────────────────────────┘        │                └──────────────────────────┘
+                                       │
+            neighbourhood://Qm…  ──▶  { linkLanguage: "Qm…", meta: { links } }
+            (the neighbourhood expression: which language, plus shared metadata)
+```
+
+Three objects make it work:
+
+1. **The link language instance.** A Language that exports the perspective capabilities (`perspectiveCommit`, `perspectiveSyncSync`, `perspectiveSyncRender`, `perspectiveSyncCurrentRevision`, `peersRemote`, see [Language protocols](./language-protocols.mdx)). Each neighbourhood gets its own instance, made from a template with a fresh `uid`, so each neighbourhood is its own network.
+2. **The neighbourhood expression.** `{ linkLanguage, meta }`, signed by the creator and published through the built-in neighbourhood language. Its address is the neighbourhood URL, `neighbourhood://…`. `meta` is a small `Perspective` of links the creator wants every joiner to see before syncing, a name or a description (`core/src/neighbourhood/Neighbourhood.ts`).
+3. **The members' perspectives.** Each member's executor holds a perspective bound to that link language. `perspective.sharedUrl` is the neighbourhood URL, `perspective.neighbourhood` the expression, `perspective.state` the sync state.
+
+## Publishing and joining
+
+```typescript
+// Alice: make a link language instance from a trusted template, then publish.
+const [template] = await ad4m.runtime.knownLinkLanguageTemplates();
+const linkLanguage = await ad4m.languages.applyTemplateAndPublish(
+  template,
+  JSON.stringify({ uid: crypto.randomUUID(), name: "Team space sync" }),
+);
+const url = await ad4m.neighbourhood.publishFromPerspective(
+  perspective.uuid,
+  linkLanguage.address,
+  new Perspective(),             // meta: empty, or a few signed links
+);
+// "neighbourhood://Qm…"
+
+// Bob: join by URL; the executor installs the link language and syncs.
+const handle = await ad4m.neighbourhood.joinFromUrl(url);
+const shared = await ad4m.perspective.byUUID(handle.uuid);
+```
+
+`applyTemplateAndPublish(sourceLanguageHash, templateData)` takes the template parameters as a **JSON string** and returns a `LanguageRef` (`address`, `name`) (`core/src/language/LanguageClient.ts`). The parameter that isolates the network is `uid`: for a Holochain-backed template it becomes the DNA's `network_seed` (`rust-executor/src/languages/mod.rs`, `read_and_template_holochain_dna`); for other templates it fills the `//!@ad4m-template-variable` slot in the source. `publishFromPerspective(perspectiveUuid, linkLanguage, meta)` returns the URL; `joinFromUrl(url)` returns a `PerspectiveHandle` (`core/src/neighbourhood/NeighbourhoodClient.ts`). The step-by-step versions are [Publish a neighbourhood](../how-to/publish-neighbourhood.mdx) and [Join a neighbourhood](../how-to/join-neighbourhood.mdx).
+
+### Sync state
+
+A perspective's `state` moves through `PRIVATE`, `NEIGHBOURHOOD_CREATION_INITIATED` or `NEIGHBOURHOOD_JOIN_INITIATED`, `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED`, `SYNCED`, with `LINK_LANGUAGE_FAILED_TO_INSTALL` as the failure state (`PerspectiveState`, `core/src/perspectives/PerspectiveHandle.ts`). `perspective.on("sync-state-change", ({ state }) => …)` reports changes. A just-joined perspective is usable before it reaches `SYNCED`; it fills in as diffs arrive.
+
+## What sync does and does not check
+
+Links arrive as diffs from the link language and are stored as they come (`rust-executor/src/perspectives/perspective_instance.rs`, `diff_from_link_language`): duplicates are dropped, every incoming link is marked shared, and the executor computes each link's signature verdict from its `proof` when it writes it. Nothing is rejected for its content. What protects a reader is the verdict: model queries only count links whose signature verifies (`includeUnverified` turns that off), and flows only count self-signed facts. Membership in the link language decides who can write at all; a link's `author` and `proof` decide whether anyone believes it. [Social DNA and flows](./social-dna-and-flows.mdx) draws that boundary in full.
+
+Your **local** links (`perspective.add(link, "local")`) are split off before a commit and never reach the link language.
+
+## Trust and templates
+
+An executor installs a Language only when it can trust it (`rust-executor/src/languages/mod.rs`, `language_by_ref`):
+
+- the Language's author is in the executor's trusted agents (the bootstrap seed ships Coasys's DIDs; `ad4m.runtime.getTrustedAgents()` / `addTrustedAgents()`), or the author is this agent; or
+- the Language is **templated** from a source Language whose author is trusted. The executor fetches the source, re-applies the recorded template parameters itself, and compares the result with the published bundle. A bundle that differs from "trusted source plus these parameters" is refused.
+
+This is why neighbourhoods are made from templates: a member joining Alice's neighbourhood does not have to trust Alice, only the author of the template Alice used. The list of template addresses an executor offers is `ad4m.runtime.knownLinkLanguageTemplates()`: the seed's `knownLinkLanguages` plus any added with `addKnownLinkLanguageTemplates` (`rust-executor/src/runtime_service/mod.rs`).
+
+The default template is **perspective-diff-sync**, Holochain-backed, one DHT per neighbourhood (`bootstrap-languages/p-diff-sync`). The repository also ships `server-link-language`, which syncs through a self-hosted link server, and the `local` set, which keeps everything on one executor for tests and single-host deployments (`bootstrap-languages/local/README.md`).
+
+## Presence, signals and calls
+
+A neighbourhood also carries ephemeral traffic that is never stored as links. The entry point is `perspective.getNeighbourhoodProxy()` (`core/src/neighbourhood/NeighbourhoodProxy.ts`, over `NeighbourhoodClient`):
+
+| Call | What |
+|---|---|
+| `otherAgents()` | DIDs of the other members the link language knows |
+| `onlineAgents()` | members currently online, each with the status `Perspective` they set |
+| `setOnlineStatus(perspective)` | publish your own presence payload (a small `Perspective` of links) |
+| `sendSignal(did, perspective)` / `sendBroadcast(perspective)` | a signed payload to one member or to all; received through `addSignalHandler(handler)` |
+| `createSession(roomName)` | an audio/video call: peer-to-peer mesh, or through the executor's SFU when every member is hosted on it (`sfuServesAllMembers`). `sfuStartRoom`, `callJoin` and friends are the lower-level room API |
+
+Signals and status payloads are `Perspective`s, so apps exchange the same link vocabulary live that they store. The call layer (`MeshManager`, `Session`, the `sfu*` methods) is a topic of its own; the SDK exports its types from `core/src/neighbourhood/`.
+
+## How it is built
+
+The join and publish flows are in `rust-executor/src/neighbourhoods.rs`; the per-perspective sync loop, the pending-diff queue and the shared/local split are in `rust-executor/src/perspectives/perspective_instance.rs`; the trust check for templated languages is `language_by_ref` in `rust-executor/src/languages/mod.rs`. The capabilities a link language exports are specified in the [Language interface spec](../reference/language-interface-spec.mdx).
+
+Next: [Publish a neighbourhood](../how-to/publish-neighbourhood.mdx), [Join a neighbourhood](../how-to/join-neighbourhood.mdx), then [Social DNA and flows](./social-dna-and-flows.mdx) for the rules a group shares inside one.

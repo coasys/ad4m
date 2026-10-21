@@ -1,0 +1,179 @@
+---
+title: Model query
+description: Every option of a model query - where operators, author conditions, order, paging, include and $ projections, properties, links, parent scopes, link status, unverified links, the builder, subscriptions, transactions and the raw RPC.
+---
+
+# Model query
+
+The `Query` type (`core/src/model/types.ts`) is accepted by `findAll`, `findOne`, `findAllAndCount`, `paginate`, `count`, `findAllOf` and as the initial argument of `query()`. The builder has one method per field. Concepts: [Queries and live results](../concepts/queries.mdx).
+
+## Query fields
+
+| Field | Type | Effect |
+|---|---|---|
+| `where` | `Where` | selection; see [Where operators](#where-operators) |
+| `order` | `{ [key]: "ASC" \| "DESC" }` | sort; see [Order](#order) |
+| `limit`, `offset` | `number` | page; `limit: 0` returns the count only |
+| `include` | `IncludeMap` | hydrate relations; `$` keys are projections |
+| `includeAll` | `boolean` | include every forward relation one level deep; explicit `include` entries win |
+| `properties` | `string[]` | hydrate only these fields; the rest, `author`/`createdAt`/`updatedAt` included, are removed. `[]` throws |
+| `links` | `string[]` | per-link rows under `__links`; names or absolute predicate IRIs |
+| `parent` | `Scope` | restrict to records linked from a node; see [Parent scopes](#parent-scopes) |
+| `preferClasses` | `string[]` | for a query over several classes: which class a multi-class record is read as, most wanted first |
+| `linkStatus` | `"shared" \| "local"` | read only links of that status (also for selection) |
+| `includeUnverified` | `boolean` | also read links whose signature did not verify |
+| `deepQuery` | `boolean` | `false` skips SPARQL `getter` properties during hydration (default `true`) |
+
+## Where operators
+
+`Where = { [property]: condition; OR?; AND?; NOT?; producedByFlow? }`. A condition is a bare value (equal), an array (any of), or an operator object:
+
+| Operator | Value | Meaning |
+|---|---|---|
+| `eq` | value or array | equality as an operator; cannot combine with other value operators |
+| `not` | value or array | not equal / not any of |
+| `gt`, `gte`, `lt`, `lte` | number | comparison |
+| `between` | `[lo, hi]` | inclusive range |
+| `contains` | string or number | substring, or element of a collection |
+| `author` | `AuthorCondition` | per-link author on this property's link; see below |
+| `some` | `Where` | on a relation: a target satisfies the sub-clause (not yet in `WhereOps`; use `as any`) |
+| `none` | `Where` | on a relation: no target satisfies it |
+
+Top-level keys: `id` (instance URI, value or array), `author` (bare: creator of the instance), `OR: Where[]`, `AND: Where[]`, `NOT: Where`, `producedByFlow: { flow: string; state?: string }` (verified flow receipts, top level only, applied before paging).
+
+`AuthorCondition = string | string[] | { not?: string | string[]; contains?: string }`.
+
+| Placement | Reads as |
+|---|---|
+| `{ prop: { eq: v, author: A } }` | A wrote a `prop → v` link (any author's link may hold the current value) |
+| `{ prop: { author: A } }` | A wrote some `prop` link |
+| `{ author: A }` alone, or beside only getter properties / `timestamp` | A wrote the instance's earliest link (`.author`) |
+| `{ prop: v, author: A }` | both the bare reading and `prop: { eq: v, author: A }` for each link-backed property in the object; a `none` beside it is not scoped |
+| inside `OR`/`AND`/`NOT` | scope stays within that sub-object |
+
+A per-link `author` is refused on a getter property, `timestamp` or `id`, and when another part of the query can only run after hydration (`timestamp`, a getter property, a `some`/`none` the store cannot express).
+
+## Order
+
+| Key | Example | Notes |
+|---|---|---|
+| property | `{ title: "ASC" }` | scalar properties of the class |
+| timestamp | `{ createdAt: "DESC" }`, `updatedAt`, `timestamp` | |
+| projection | `{ $commentCount: "DESC" }` | the `$` key must be declared in `include`; pair with `limit` |
+| relation path | `{ "pinnedComment.body": "ASC" }` | to-one relation then a scalar of its target; pair with `limit`; `as any` in TypeScript |
+
+Rows without a value sort last in both directions; ties break by id. In a traversal with `limitPerAnchor` or `levels`, `order` must be a single key the store can sort by, or the query is refused.
+
+## Include and projections
+
+`IncludeMap = { [relation]: true | RelationSubQuery | IncludeProjection }`.
+
+`RelationSubQuery` is `Query` without `parent` and `count`: `where`, `order`, `limit`, `offset`, `include`, `properties`, `links`, `linkStatus`, `includeUnverified`. Included relations inherit `linkStatus` and `includeUnverified` unless they set their own.
+
+`IncludeProjection`, under a key starting with `$`:
+
+| Field | Type | Effect |
+|---|---|---|
+| `from` | `string` | the relation to project over (required) |
+| `count` | `true` | attach an integer count instead of a list |
+| `transitive` | `boolean` | everything reachable through `from`, not one step; cannot combine with an author or timestamp filter |
+| `where` | `Where` | filter on the targets |
+| `order` | `Order` | before `limit` |
+| `limit` | `number` | `1` unwraps the value to a single id or `null` |
+
+A relation declared `polymorphic` is included as such by default.
+
+## Parent scopes
+
+| Form | Shape | Reads |
+|---|---|---|
+| Containment | `{ id }` | what `id` contains through `Container`: its `ad4m://has_child` targets plus the targets of its class's own `children` relation. Any extra key is an error |
+| Raw | `{ id, predicate }` | targets of `id`'s links on `predicate` |
+| Model | `{ model, id, field? }` | predicate resolved from `model`'s relation to the queried class; `field` disambiguates |
+| Traverse | `{ ids, ...TraverseOptions }` plus `predicate`, or `model` (+ `field`), or neither (containment) | a walk from one or more anchors |
+
+`TraverseOptions`:
+
+| Option | Type | Effect |
+|---|---|---|
+| `ids` | `string \| string[]` | the anchors; excluded from their own result |
+| `transitive` | `boolean` | follow to any depth; flat result. Refused with `levels` |
+| `maxDepth` | `number` | with `transitive`: stop after this many hops |
+| `direction` | `"out" \| "in"` | `"in"` matches `result → anchor` |
+| `limitPerAnchor` | `number` | keep at most N per anchor, sliced in the store before hydration. Without `order` the N are whichever the store returns first; with one, it must be a single key the store can sort by. Refused with `levels` and, for containment, with `transitive` |
+| `levels` | `number[]` | breadth per depth, e.g. `[10, 5, 2]`; results flat, breadth-first; each record once. Refused with `transitive` and `limitPerAnchor`, and on containment |
+
+`count()` and `findAllAndCount` total a walk by the walk. A global `limit`/`offset` applies after the per-anchor slices.
+
+Builder: `.parent(instance)`, `.parent(id, Model)`, `.parent(id, Model, { field })`, `.parent(id, "pred://uri")`.
+
+## Several classes
+
+`Ad4mModel.findAllOf(perspective, classes, query)` and `queryOf(...)`: one query over the union. `where` on a property a class lacks excludes that class; `order` on one sorts those rows last; `limit`/`offset` apply once over the union; a `$` projection or `include` over a relation a class lacks is skipped for that class. Refused: `limitPerAnchor` or `levels` in `parent`, a relation-path `order`, a `parent` given as a model that resolves to different predicates per class, a `$` projection declared with different target classes. An abstract class is queried on its own, not in the list.
+
+## Link rows
+
+`links: string[]` adds `instance.__links: Record<entry, LinkRow[]>`, oldest first:
+
+```typescript
+interface LinkRow {
+  author: string;
+  timestamp: string;
+  data: { source: string; predicate: string; target: string };
+  proof: { key: string; signature: string; valid: boolean; invalid: boolean };
+}
+```
+
+Every requested entry is present (as `[]` when empty). Unknown names and reverse relations throw. `data.target` is the target as signed. Rows obey `linkStatus` and `includeUnverified`; by default every row has `valid: true`.
+
+## Link status and verification
+
+| `linkStatus` | `includeUnverified` | A Local link with a failed signature is |
+|---|---|---|
+| unset | unset | withheld |
+| unset | `true` | read |
+| `"local"` | unset | withheld |
+| `"local"` | `true` | read |
+| `"shared"` | any | withheld (it is Local) |
+
+Both filters apply to hydration and to selection (`where`, flags, counts, the order behind a page, `parent`, `$` projections). A hand-written `getter` runs as written and obeys neither.
+
+## Builder
+
+`Model.query(perspective, query?)` returns a `ModelQueryBuilder<T>`; `Ad4mModel.queryOf(perspective, classes)` returns one over several classes.
+
+| Method | Effect |
+|---|---|
+| `where(w)`, `order(o)`, `limit(n)`, `offset(n)`, `include(map)`, `properties(names)`, `links(keys)`, `parent(...)`, `linkStatus(s)`, `includeUnverified(bool = true)`, `deepQuery(bool = true)` | set the field; chainable |
+| `get()` | `Promise<T[]>` |
+| `first()` | `Promise<T \| null>` |
+| `count()` | `Promise<number>` |
+| `paginate(pageSize, pageNumber)` | `Promise<PaginationResult<T>>` |
+| `subscribe(cb)` | initial `T[]`; `cb(results)` on every change |
+| `countSubscribe(cb)` | initial `number`; `cb(count)` on change |
+| `paginateSubscribe(pageSize, pageNumber, cb)` | initial page; `cb(page)` on change |
+| `dispose()` | end the current subscription on client and executor |
+
+A builder holds one subscription; `subscribe`, `countSubscribe` and `paginateSubscribe` end the previous one. Updates arrive as the records added, updated and removed plus the new total; a callback whose parsed result equals the last one is suppressed. The executor ends a connection's subscriptions when it closes. The `getSparql`, `subscribeSparql`, `countSparql`, `countSubscribeSparql` and `paginateSparql` methods are deprecated aliases.
+
+## Transactions
+
+```typescript
+await Ad4mModel.transaction(perspective, async (tx) => {
+  const post = await Post.create(perspective, { title: "Hi" }, { batchId: tx.batchId });
+  const c = new Comment(perspective);
+  c.body = "First";
+  await c.save(tx.batchId);
+  await post.addComments(c, tx.batchId);
+});
+```
+
+`transaction(perspective, fn)` calls `perspective.createBatch()`, runs `fn({ batchId })`, then `perspective.commitBatch(batchId)` and returns `fn`'s result. Every write path takes the id: `save(batchId)`, `delete(batchId)`, `create(..., { batchId })`, `update` through `save`, the relation methods, and the raw link calls `perspective.add(link, status?, batchId)`, `addLinks(links, status?, batchId)`, `remove(link, batchId)`, `removeLinks(links, batchId)`, `update(oldLink, newLink, batchId)`. `commitBatch` returns `{ additions, removals }`. Indexes, subscriptions and the neighbourhood's link language see one commit per batch.
+
+If `fn` throws, `commitBatch` is not called and nothing is written, but the executor is not told to drop the batch: `transaction` does not discard it. The RPC method `perspective.discardBatch` exists; the SDK has no wrapper for it yet. Steps and patterns: [Batch writes](../how-to/batch-writes.mdx).
+
+## Raw RPC
+
+`perspective.modelQuery(className: string | string[], queryJson: string)` returns `{ instances: any[], totalCount: number }`; `perspective.modelSubscribe(className, queryJson)` opens a subscription (the `LiveQuery` class wraps it). `className` may be a class name, an array of names (a union), or a built-in's URI such as `ad4m://TextContent`.
+
+`queryJson` is the `Query` object as JSON after `Ad4mModel.prepareModelQueryParams` has normalized it: `includeAll` is expanded, `$` keys are moved from `include` to a `projections` map, a Model-form `parent` is resolved to `{ id, predicate }`, and `polymorphic` relations are flagged. A client in another language sends the same shape. The MCP tool `instance_query` is a thin front on this call ([MCP tools](./mcp-tools.mdx)).

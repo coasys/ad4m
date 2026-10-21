@@ -1,0 +1,84 @@
+---
+title: Join a neighbourhood
+description: Join a shared graph by URL, wait for it to sync, read and write it, and listen for the others' changes.
+---
+
+import { Callout } from "nextra/components";
+
+# Join a neighbourhood
+
+Someone gave you a `neighbourhood://…` URL. Joining creates a perspective on your executor that syncs with the others. Background: [Neighbourhoods and trust](../concepts/neighbourhoods.mdx).
+
+## 1. Join by URL
+
+```typescript
+const handle = await ad4m.neighbourhood.joinFromUrl(url);
+handle.uuid;        // the new perspective's id on your executor
+handle.sharedUrl;   // the URL you joined
+handle.state;       // "NEIGHBOURHOOD_JOIN_INITIATED" at first
+```
+
+`joinFromUrl(url)` returns a `PerspectiveHandle` (`core/src/neighbourhood/NeighbourhoodClient.ts`; `core/src/perspectives/PerspectiveHandle.ts`). Behind it the executor fetches the neighbourhood expression, installs its link language (trust check included, see [Trust and templates](../concepts/neighbourhoods.mdx#trust-and-templates)) and starts syncing.
+
+## 2. Get the perspective and wait for sync
+
+```typescript
+const shared = await ad4m.perspective.byUUID(handle.uuid);
+
+const release = shared.on("sync-state-change", ({ state }) => {
+  if (state === "SYNCED") console.log("caught up");
+});
+```
+
+`state` is one of `PRIVATE`, `NEIGHBOURHOOD_JOIN_INITIATED`, `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED`, `SYNCED`, `LINK_LANGUAGE_FAILED_TO_INSTALL`. You can read and write before `SYNCED`; links the others wrote appear as the diffs arrive. The tests poll `perspective.byUUID(uuid).state` for `SYNCED` or `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED` before asserting on shared content (`tests/js/tests/neighbourhood.ts`).
+
+<Callout type="info">
+  `LINK_LANGUAGE_FAILED_TO_INSTALL` means your executor refused or could not fetch the link language: the template's author is not trusted, or the language-language could not serve the bundle. The `exception-occurred` event on the client carries the reason.
+</Callout>
+
+## 3. Read and write like any perspective
+
+```typescript
+import { LinkQuery } from "@coasys/ad4m";
+
+const links = await shared.get(new LinkQuery({ predicate: "chat://posted" }));
+
+await shared.add({
+  source: "channel://general",
+  predicate: "chat://posted",
+  target: "msg://1",
+});                         // shared: reaches every member
+
+await shared.add({ source: "msg://1", predicate: "app://read", target: "literal:boolean:true" }, "local");
+                            // local: stays on your executor
+```
+
+Models work the same way: register your classes on `shared` and use `findAll` / `create`; a class another member registered is recognized the moment its SHACL links arrive ([Models and identity](../concepts/models-and-identity.mdx)).
+
+## 4. Follow the others' changes
+
+```typescript
+shared.on("link-added", ({ link }) => {
+  if (link.author !== myDid) console.log("from", link.author, link.data);
+});
+```
+
+`link-added`, `link-removed` and `link-updated` fire for your own writes and for synced ones alike; filter on `link.author` (`await ad4m.agent.me()` gives your DID). For a query that stays current, use a model subscription or `subscribeQuery` ([Queries and live results](../concepts/queries.mdx)).
+
+## 5. Who else is here
+
+```typescript
+const nh = shared.getNeighbourhoodProxy();
+await nh.otherAgents();     // DIDs the link language knows
+await nh.onlineAgents();    // who is online now, with their status payload
+```
+
+`core/src/neighbourhood/NeighbourhoodProxy.ts`.
+
+## From the CLI
+
+```bash
+ad4m neighbourhoods join 'neighbourhood://Qm…'
+```
+
+`cli/src/neighbourhoods.rs`, `Join { url }`; prints the handle.

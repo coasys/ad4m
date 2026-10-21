@@ -1,0 +1,111 @@
+---
+title: Agent, executor and capabilities
+description: Who you are in AD4M (a DID held by your executor), what the executor box contains, and how an app is granted a capability token to act on your behalf.
+---
+
+import { Callout } from "nextra/components";
+
+# Agent, executor and capabilities
+
+Who am I, and what may an app do on my behalf? You are an **agent**: a DID whose keys your **executor** holds. An app never holds your keys; it holds a **capability token** that lets it ask your executor to do specific things for you.
+
+## Who am I: the agent and its DID
+
+Every agent is identified by a [DID](https://en.wikipedia.org/wiki/Decentralized_identifier), `did:key:z6Mk...`, that resolves to the public keys the executor signs with. Every link an agent writes, every expression it creates, carries that signature, so anyone reading the data knows who claimed what and when.
+
+```typescript
+const me = await client.agent.me();
+me.did;                     // "did:key:z6Mk..."
+me.perspective;             // the agent's public perspective (profile links), if set
+me.directMessageLanguage;   // address of the language that delivers DMs to this agent
+```
+
+`agent.me()` returns an `Agent`. The public `perspective` is the agent's profile: a small set of links (name, bio, picture) that the bundled agent language serves to anyone who resolves the DID with `agent.byDID(did)`. `agent.updatePublicPerspective(perspective)` replaces it. A new agent is created with `agent.generate(passphrase)` and unlocked after every executor start with `agent.unlock(passphrase)`; while locked, the executor cannot sign.
+
+Signing is implicit: `expression.create(content, languageAddress)` returns the address of a new expression signed by you; `runtime.friendSendMessage(did, perspective)` delivers a signed perspective to another agent through their direct-message language.
+
+## The executor box
+
+```
+┌─ executor (one per agent) ─────────────────────────────────┐
+│ keys for did:key:z6Mk…      (unlocked with the passphrase) │
+│ perspectives: local graphs; some published as neighbourhoods│
+│ languages: literal, link sync, agent, your protocols        │
+│ models, flows, AI service                                   │
+├────────────────────────────────────────────────────────────┤
+│ RPC  http(s)://host:12000  /api/v1/ws   apps, SDK, CLI      │
+│ MCP  http(s)://host:3001   /mcp         AI agents           │
+└────────────────────────────────────────────────────────────┘
+```
+
+Both ports serve the same agent and the same data. The RPC port speaks the SDK's typed method set (`@coasys/ad4m` calls `agent.me`, `perspective.queryLinks`, …); the MCP port speaks the Model Context Protocol with tools such as `describe_perspective` and `instance_create` ([Agents](./agents.mdx)). Ports, flags and the data directory: [Run an executor](../start/run-an-executor.mdx).
+
+## Capabilities
+
+A capability says what a caller may do, in which domain, on which objects:
+
+```typescript
+{ with: { domain: "perspective", pointers: ["<perspective uuid>"] }, can: ["READ", "SUBSCRIBE"] }
+{ with: { domain: "agent",       pointers: ["*"] },                  can: ["READ"] }
+{ with: { domain: "*",           pointers: ["*"] },                  can: ["*"] }      // everything
+```
+
+- `domain` is one of the executor's fixed names (table below), or `"*"`.
+- `pointers` narrows the domain, typically to perspective UUIDs; `["*"]` means all.
+- `can` is a list of uppercase verbs: `READ`, `CREATE`, `UPDATE`, `DELETE`, `SUBSCRIBE`, plus `PROMPT` and `TRANSCRIBE` for AI and a few agent-specific ones (`AUTHENTICATE`, `SIGN`, `LOCK`, `UNLOCK`, `PERMIT`); `"*"` means all.
+
+### Request, permit, token
+
+An app does not hold capabilities; it holds a JWT that encodes the capabilities the agent granted. The flow, which `@coasys/ad4m-connect` runs for you in the browser:
+
+1. **Request.** `agent.requestCapability({ appName, appDesc, appDomain, appUrl?, appIconPath?, capabilities })` returns a `requestId`. The executor raises a capability-request event the Launcher listens for.
+2. **Permit.** The agent approves the request in the Launcher, which calls `agent.permitCapability(...)` and shows a six-digit code. With `--auto-permit-cap-requests` (the default when `ad4m-executor run` has no `--config`; `false` with one) the executor permits every request itself; it prints the code to stdout only when started with `AD4M_LOG_SECRETS=1`, otherwise it logs where to find it.
+3. **Token.** The app sends the code back: `agent.generateJwt(requestId, code)` returns the JWT. Every later call carries it (`new Ad4mClient(baseUrl, token)` puts it on the WebSocket URL).
+
+The agent can list and revoke what was granted: `agent.getApps()` returns `Apps[]` (`requestId`, `token`, `revoked`, `auth` with the app info and capabilities), `agent.revokeToken(requestId)` invalidates one token, `agent.removeApp(requestId)` forgets the app.
+
+### The admin credential
+
+The executor's operator holds one more credential: whoever presents the admin credential has every capability and skips the handshake. `ad4m-executor run` requires one (`AD4M_ADMIN_CREDENTIAL_FILE=/path`, mode `0600`, or `AD4M_ADMIN_CREDENTIAL=<value>`) unless started with `--insecure-no-admin-credential` for tests; the Launcher generates one for itself at each start. Scripts and tests use it as the token: `new Ad4mClient("http://localhost:12000", adminCredential)`.
+
+<Callout type="warning">
+The admin credential is the executor. Never ship it in client-side code or a public repository; pass it as a file or an environment variable, not a flag.
+</Callout>
+
+## Local or hosted
+
+Against a local executor the app and the agent are the same person, and the capability handshake above is the whole story. Against a hosted multi-user executor the app signs the user up or logs them in (email and password; `agent.createUser`, `agent.loginUser`), gets a JWT scoped to that user's own DID and perspectives, and then uses the same SDK; see [Hosted deployment](./hosted-deployment.mdx).
+
+## How it is built
+
+Capability definitions are the constants in `rust-executor/src/agent/capabilities/defs.rs`; the check that every RPC method runs is `check_capability` in `rust-executor/src/agent/capabilities/mod.rs`. The SDK side is `core/src/agent/AgentClient.ts`; the browser handshake is `connect/src/core.ts`.
+
+## Next
+
+- [Build an app](../start/build-an-app.mdx) runs the handshake with `@coasys/ad4m-connect`.
+- [Run an executor](../start/run-an-executor.mdx) covers the admin credential and the flags.
+- [Perspectives and links](./perspectives-and-links.mdx): what the signature on a link means.
+
+## Reference: domains and verbs
+
+Domain names and verbs as defined in `defs.rs`. Which RPC method requires which capability is decided per method in the executor and is not listed here.
+
+| Domain | Verbs defined |
+|---|---|
+| `agent` | `AUTHENTICATE`, `READ`, `CREATE`, `UPDATE`, `LOCK`, `UNLOCK`, `PERMIT`, `SUBSCRIBE`, `SIGN` |
+| `expression` | `READ`, `CREATE`, `UPDATE` |
+| `language` | `READ`, `CREATE`, `UPDATE`, `DELETE` |
+| `perspective` | `CREATE`, `READ`, `UPDATE`, `DELETE`, `SUBSCRIBE` (`READ`/`UPDATE`/`DELETE` take perspective UUIDs as pointers) |
+| `neighbourhood` | `CREATE`, `READ`, `UPDATE` |
+| `runtime` | `QUIT` |
+| `runtime.trusted_agents`, `runtime.known_link_languages`, `runtime.friends` | `READ`, `CREATE`, `DELETE` |
+| `runtime.friend_status` | `READ` |
+| `runtime.my_status` | `UPDATE` |
+| `runtime.hc_agent_info` | `READ`, `CREATE` |
+| `runtime.messages` | `READ`, `CREATE`, `SUBSCRIBE` |
+| `runtime.exception` | `SUBSCRIBE` |
+| `runtime.user_management` | `READ` (pointer `enabled` for everyone; `*` is admin), `LOGIN`, `CREATE`, `VERIFY` |
+| `runtime.hosting` | `READ`, `UPDATE` |
+| `artificial intelligence` | `READ`, `CREATE`, `UPDATE`, `DELETE`, `PROMPT`, `TRANSCRIBE` |
+
+A multi-user host grants each user a default set (`get_user_default_capabilities`): everything above except `agent` `LOCK`/`UNLOCK`/`PERMIT`, `runtime` `QUIT`, AI `UPDATE`/`DELETE`, and `runtime.user_management` `READ` on `*`.

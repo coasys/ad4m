@@ -1,0 +1,211 @@
+---
+title: CLI
+description: Every subcommand, argument and flag of the ad4m-executor runtime binary and the ad4m client binary, as defined in cli/src.
+---
+
+import { Callout } from "nextra/components";
+
+# CLI
+
+The `cli/` crate builds two binaries (`cli/Cargo.toml`): `ad4m-executor`, the runtime (`cli/src/ad4m_executor.rs`), and `ad4m`, a client that talks to a running executor over RPC (`cli/src/ad4m.rs`). Build both with `cd cli && cargo build --release`. Every command prints `--help`.
+
+## `ad4m-executor`
+
+| Subcommand | What it does |
+|---|---|
+| `init [-d, --data-path <path>] [-n, --network-bootstrap-seed <file>]` | Creates the data directory (default `~/.ad4m`) and writes the bootstrap seed `mainnet_seed.seed` into it. |
+| `run [flags]` | Starts the executor. Flags below. |
+| `config print [flags]` | Prints the settings `run` would start with, merged from config file, `AD4M_*` variables and flags, as JSON with every secret replaced by `"<redacted>"`. Takes the flags of `run`. Holochain ports are still `null` here: `run` picks them at startup. |
+| `dev generate-bootstrap <agent_path> <passphrase> <seed_proto>` | Publishes the languages a seed prototype JSON names and writes `./mainnet_seed.json`. For maintainers building a seed. |
+| `dev publish-and-test-expression-language <language_path> <data>` | Publishes an expression language to a throwaway executor and creates one expression with it. |
+| `log` | Listed, but has no handler: it prints nothing. `run` logs to stdout. |
+
+### `run` flags
+
+Every flag also reads an environment variable: `AD4M_` plus the flag in upper snake case (`--mcp-port` reads `AD4M_MCP_PORT`). A flag beats its variable, and both beat the [config file](./executor-config.mdx). An empty or whitespace-only value is an error that names the flag or variable. Boolean flags take an explicit value (`--enable-mcp true`); only `--dynamic-class-tools` and `--insecure-no-admin-credential` also work bare.
+
+**Core**
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--config <file>` | none | JSON [config file](./executor-config.mdx). There is no default path. |
+| `-a, --app-data-path <path>` | `~/.ad4m` | Data directory. |
+| `-p, --port <u16>` | `12000` | RPC port (HTTP and WebSocket). |
+| `--localhost <bool>` | `true` | Bind the RPC port to `127.0.0.1`; `false` binds `0.0.0.0`. |
+| `--run-dapp-server <bool>` | `true` | Serve the bundled web dapp on `127.0.0.1:8080`. |
+| `--admin-credential <value>` | none | Full-capability credential. `run` refuses to start without one unless `--insecure-no-admin-credential` is set. Prefer `AD4M_ADMIN_CREDENTIAL_FILE` or `AD4M_ADMIN_CREDENTIAL`: a flag value shows in `ps`. Beats both variables. |
+| `--insecure-no-admin-credential [bool]` | `false` | Tests and local development only: start without an admin credential. An empty token then has full admin access on a loopback listener. The variable accepts only `true`, or `false`/`0`/`no`/`off`. |
+| `--auto-permit-cap-requests <bool>` | `true` without `--config`, `false` with it | Grant capability requests without the user confirming them. |
+| `--pid-file <path>` | none | Write the executor PID to this file; removed on clean shutdown. |
+| `-l, --language-language-only <bool>` | `false` | Start only the language language; skip link and installed languages. |
+| `-n, --network-bootstrap-seed <file>` | `<data>/mainnet_seed.seed` | Accepted, but `run` reads the seed from the data directory; set the seed with `init`. |
+
+**TLS and multi-user**
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--tls-cert-file <path>` / `--tls-key-file <path>` | none | PEM certificate and key. Setting them turns on an HTTPS/WSS listener on `0.0.0.0`; the plain RPC port then stays on `127.0.0.1`. Both are required together. |
+| `--tls-port <u16>` | RPC port + 1 | HTTPS/WSS port. Alone it does not turn TLS on. |
+| `--enable-multi-user <bool>` | off | Multi-user host mode ([Hosted deployment](../concepts/hosted-deployment.mdx)). |
+
+**MCP**
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--enable-mcp <bool>` | off | Start the MCP server. |
+| `--mcp-port <u16>` | `3001` | MCP port; the HTTPS MCP listener, when it starts, is on this + 1. |
+| `--dynamic-class-tools [bool]` | `false` | Also expose per-class MCP tools ([MCP tools](./mcp-tools.mdx#per-class-tools-opt-in)). |
+
+The MCP bind address has no flag: it is the `MCP_HOST` environment variable ([Run the MCP server](../how-to/mcp-server.mdx#where-it-binds)).
+
+**Holochain**
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--run-holochain <bool>` | `true` | Start the bundled Holochain conductor. `false` means no p2p link languages and no bootstrap traffic. |
+| `--hc-app-port <u16>` | `1337` | Conductor app interface port. |
+| `--hc-admin-port <u16>` | first free from `2000` | Accepted; the conductor opens no admin interface. |
+| `--hc-use-bootstrap <bool>` | `true` | Use the bootstrap service. |
+| `--hc-bootstrap-url <url>` | `http://bootstrap.ad4m.dev:4433` | Bootstrap service. |
+| `--hc-use-proxy <bool>` | `true` | Use a relay proxy. |
+| `--hc-proxy-url <url>` | `ws://bootstrap.ad4m.dev:4433` | Relay proxy. With the proxy on and this set, it is the relay. |
+| `--hc-relay-url <url>` | none | Relay used when the proxy is off or has no URL. |
+| `--hc-use-local-proxy <bool>` | `false` | Local proxy. |
+| `--hc-use-mdns <bool>` | `false` | mDNS discovery. |
+| `-c, --connect-holochain <bool>` | `false` | Accepted; no effect at this revision. |
+| `--log-holochain-metrics <bool>` | `true` | Accepted; no effect at this revision. |
+
+**SFU (calls)**
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--sfu-bind-addr <ip>` | `127.0.0.1`; with `--localhost false`, the outbound interface | IP the SFU's UDP socket binds. |
+| `--sfu-udp-port <u16>` | a free port at each start | Fixed UDP port; startup fails when it is taken. |
+| `--sfu-public-addr <ip>` | what the STUN probe reports | Public IP advertised to callers, behind NAT. |
+| `--sfu-stun-server <host:port>` | none (no probe) | STUN server asked once at startup. |
+| `--sfu-local-did <did>` | none | This node's DID in a cascade cluster; needed with `--sfu-cascade-listen`. |
+| `--sfu-cascade-listen <host:port>` | none (no cascade) | Cascade gossip listener. |
+| `--sfu-cascade-peers <did=host:port,…>` | none | Cascade peers; connections are accepted only from these hosts. |
+| `--sfu-max-participants-per-node <u32>` | `8` | Capacity this node announces. |
+| `--sfu-preferred-node <did>` | the least-loaded node | Cascade node that takes redirected joins first. |
+
+Secrets have variables only: `AD4M_ADMIN_CREDENTIAL_FILE`, `AD4M_UNLOCK_PASSPHRASE_FILE`, `AD4M_SMTP_PASSWORD(_FILE)`. The full list is on [Executor config](./executor-config.mdx#environment-variables).
+
+## `ad4m`
+
+```bash
+ad4m [-a <admin credential>] [-e <executor url>] [-n] <subcommand>
+```
+
+| Global flag | Meaning |
+|---|---|
+| `-e, --executor-url <url>` | Executor to talk to. Default: `http://127.0.0.1:<port>` with the port read from `~/.ad4m/executor-port`, which only the Launcher writes; without it, port `12000`. |
+| `-a, --admin-credential <value>` | Send the admin credential instead of a capability token. |
+| `-n, --no-capability` | Send an empty token. |
+
+The global flags go before the subcommand. Without `-a` or `-n`, the client uses the capability token in `~/.ad4m-cli/cap_token`. When it is missing or no longer valid, the client requests a capability for "AD4M cli" with full rights and asks for the six-digit code ("Enter the 6-digit 2FA number from AD4M UI"): the Launcher shows it; a headless executor with auto-permit logs it only with `AD4M_LOG_SECRETS=1`, so against a headless executor use `-a`. `agent lock`, `agent unlock`, `agent generate` and `log` send an empty token.
+
+### `ad4m agent`
+
+| Subcommand | Arguments |
+|---|---|
+| `me` | The agent's DID, public perspective and direct-message language. |
+| `status` | Whether the agent exists and is unlocked. |
+| `generate [-p, --passphrase <p>]` | Create the agent. Prompts twice without `-p`. |
+| `unlock [-p, --passphrase <p>] [--holochain <bool>]` | Unlock the keys; prompts without `-p`. `--holochain` defaults to `true`. |
+| `lock` | Lock the keys; always prompts for the passphrase. |
+| `by-did <did>` | Resolve another agent. |
+| `generate-jwt <request_id> <rand>` | Exchange a capability request id and code for a JWT. |
+| `watch` | Print agent status events until interrupted. |
+| `add-entanglement-proof`, `delete-entanglement-proof` | `<device_key> <device_key_signed_by_did> <device_key_type> [did] <did_signed_by_device_key> [did_signing_key_id]` |
+| `entanglement-proof-pre-flight` | `<device_key> <device_key_type>` |
+
+### `ad4m perspectives`
+
+Without a subcommand, `ad4m perspectives` opens a selector (arrow keys or j/k, Enter opens the REPL, q quits).
+
+| Subcommand | Arguments |
+|---|---|
+| `add <name>` | Create a perspective; prints its UUID. |
+| `remove <id>` | Delete a perspective. |
+| `add-link <id> <source> <target> [predicate] [status]` | Add a link. Note the order: target before predicate. `status` is accepted and ignored. |
+| `query-links <id> [source] [target] [predicate] [-f, --from-date <d>] [-u, --until-date <d>] [-l, --limit <n>]` | Positional filters; `_` means any source or target. Dates as `%Y-%m-%dT%H:%M:%S%.fZ`. |
+| `snapshot <id>` | Print all links. |
+| `watch <id>` | Print link additions and removals until interrupted. |
+| `repl <id>` | Interactive shell (below). |
+| `infer <id> <query>` | Run a Prolog query. |
+| `add-dna <id> <name> <file> <dna_type>` | Add social DNA from a file; `dna_type` is `subject_class`, `flow`, or anything else for custom. |
+| `subject-classes <id>` | List registered classes. |
+| `subject-construct <id> <class> <base>` | Create an instance of `class` at `base`. |
+| `subject-get-property <id> <base> <property>` | Read a property. |
+| `subject-set-property <id> <base> <property> <value>` | Write a property. |
+| `subject-add-collection <id> <base> <collection> <value>` | Add to a collection. |
+
+### `ad4m neighbourhoods`
+
+| Subcommand | Arguments |
+|---|---|
+| `create <perspective_id> <link_language>` | Publish a perspective with a link language address; prints the neighbourhood URL. |
+| `join <url>` | Join a neighbourhood. |
+
+### `ad4m languages`
+
+Without a subcommand it lists every installed language with its address and settings.
+
+| Subcommand | Arguments |
+|---|---|
+| `all` | List languages. |
+| `by-address <address>`, `meta <address>`, `source <address>` | One language; its meta; its source code. |
+| `by-filter <filter>` | Languages that implement an interface. |
+| `write-settings <address> <settings_json>` | Set a language's settings. |
+| `apply-template-and-publish <source> <template_data_json>` | Clone a language with template parameters and publish the clone. |
+| `publish <path> [-n, --name] [-d, --description] [-p, --possible-template-params a,b] [-s, --source-code-link]` | Publish a language bundle; prompts for missing fields. |
+| `remove <address>` | Uninstall a language. |
+
+### `ad4m expression`
+
+| Subcommand | Arguments |
+|---|---|
+| `create <language_address> <content>` | Create an expression; `content` is sent as JSON when it parses as JSON, else as a string. |
+| `get <url>` | Author, timestamp and data. |
+| `get-raw <url>` | Data only. |
+
+### `ad4m runtime`
+
+| Subcommand | Arguments |
+|---|---|
+| `info` | Executor version and state. |
+| `quit` | Stop the executor. |
+| `trusted-agents`, `add-trusted-agents [did…]`, `delete-trusted-agents [did…]` | Trusted agents. |
+| `link-language-templates`, `add-link-language-templates [address…]`, `remove-link-language-templates [address…]` | Known link-language templates. |
+| `friends`, `add-friends [did…]`, `remove-friends [did…]` | Friends. |
+| `hc-agent-infos`, `hc-add-agent-infos [file]` | Holochain agent infos (the second prompts for JSON without a file). |
+| `network-metrics` | Holochain network metrics. |
+| `verify-signature <did> <data> <signed_data>` | Check a signature. |
+| `set-status <status>` | Set this agent's status. |
+| `message-inbox [filter]`, `message-outbox [filter]` | Direct messages. |
+
+### `ad4m log`
+
+Prints `~/.ad4m/ad4m.log`. The Launcher writes that file; `ad4m-executor run` logs to stdout, so against a headless executor this fails.
+
+## The REPL
+
+`ad4m perspectives repl <id>` reads one command per line. Anything that matches none of these is run as a Prolog query.
+
+| Input | Effect |
+|---|---|
+| `add_link(<source>, <predicate>, <status>, <target>)` | Add a link. Four arguments, in this order (unlike `add-link`); `_` leaves predicate or status out. |
+| `get_links(<source>, <predicate>, <target>)` | Query; every argument optional, `_` for any. |
+| `all-links` | Every link. |
+| `classes` | Registered classes. |
+| `sdna [class]`, `sdna-authors` | Social DNA code and who wrote it. |
+| `new <class>(<base>)` | Create an instance. |
+| `subject(<base>)` | Print an instance. |
+| `subject(<base>)[<property>] = <value>` | Set a property. |
+| `subject(<base>)[<collection>] <= <value>` | Add to a collection. |
+| `help` or `?`, `version`, `clear`, `exit` | |
+
+<Callout type="info">
+`cli/src/main.rs` is not compiled into either binary (`cli/Cargo.toml` maps `ad4m` to `src/ad4m.rs`). Subcommands that appear only there, such as `ad4m run`, do not exist.
+</Callout>

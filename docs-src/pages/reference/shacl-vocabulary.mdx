@@ -1,0 +1,199 @@
+---
+title: SHACL vocabulary
+description: The sh: subset and the ad4m:// predicates a model shape uses, the datatypes, the JSON and Turtle wire formats, and how a shape is stored as links in a perspective.
+---
+
+# SHACL vocabulary
+
+A model's schema is a SHACL node shape with AD4M extensions. The SDK generates it (`core/src/model/shacl-gen.ts`, serialized by `core/src/shacl/SHACLShape.ts`); the executor stores it as links (`rust-executor/src/perspectives/shacl_parser.rs`, `parse_shacl_to_links`) and reads it back for every query. Prefixes: `sh:` is `http://www.w3.org/ns/shacl#` in Turtle and `sh://` in stored links; `ad4m:` is `ad4m://`; `rdf:type` is stored as `rdf://type`.
+
+## Shape-level
+
+| Predicate | Target | Meaning |
+|---|---|---|
+| `rdf://type` | `sh://NodeShape` | the shape |
+| `sh://targetClass` | `<ns><Name>` | the class URI |
+| `sh://node` | parent shape URI | model inheritance; one per parent |
+| `sh://property` | `<ns><Name>.<prop>` | one per property shape |
+| `ad4m://constructor` | `literal:string:<JSON array of actions>` | links written on create; always present, `[]` when empty |
+| `ad4m://destructor` | `literal:string:<JSON array of actions>` | links removed on delete; always present |
+| `ad4m://abstract` | `literal:true` | an abstract class |
+| `ad4m://interpretation_hint` | `literal:string:<text>` | hint for the interpretation harness |
+
+Shape URI: `<ns><Name>Shape`, where `<ns>` is the scheme of the first property's predicate. The executor refuses a `node_shape_uri` that does not end in `<Name>Shape`.
+
+## Property-level
+
+Property shape URI: `<ns><Name>.<propertyName>`.
+
+| Predicate | Target | Set by |
+|---|---|---|
+| `rdf://type` | `sh://PropertyShape` or `ad4m://CollectionShape` | single value vs collection (`hasMany`, `belongsToMany`) |
+| `sh://path` | predicate URI | `through`; a getter-only relation gets `ad4m://getter/<Name>/<rel>` |
+| `sh://datatype` | `xsd://string` \| `xsd://decimal` \| `xsd://boolean`, or the value of `datatype` | inferred for literal properties from the field default (number → decimal); explicit `datatype` passes through |
+| `sh://nodeKind` | `sh://IRI` or `sh://Literal` | every relation: `IRI`, or `Literal` when it declares `datatype` |
+| `sh://minCount` | `literal:1^^xsd:integer` | `required`, flags |
+| `sh://maxCount` | `literal:1^^xsd:integer` | every property; `hasOne` and `belongsToOne` relations |
+| `sh://hasValue` | the flag's value | `@Flag` |
+| `sh://class` | target class's shape URI | relation `target` |
+| `sh://in` | `literal:string:<JSON [{value,label}]>` | `options` |
+| `ad4m://writable` | `literal:true` \| `literal:false` | `readOnly` inverted; `false` on read-only relations |
+| `ad4m://local` | `literal:true` | `local` |
+| `ad4m://resolveLanguage` | `literal:string:<"literal" or address>` | `resolveLanguage`; emitted only when set |
+| `ad4m://setter` | `literal:string:<JSON actions>` | `[{ action: "setSingleTarget", source: "this", predicate, target: "value" }]` on writable properties |
+| `ad4m://adder`, `ad4m://remover` | `literal:string:<JSON actions>` | `addLink` / `removeLink` on writable relations |
+| `ad4m://getter` | `literal:string:<SPARQL>` | an explicit `getter`, or the conformance getter derived from a relation's `target` |
+| `ad4m://conformanceConditions` | `literal:string:<JSON>` | structured form of the derived filter (flag matches, required predicates) |
+| `ad4m://relationKind` | `hasMany` \| `hasOne` \| `belongsToOne` \| `belongsToMany` | relation decorators |
+| `ad4m://targetClassName` | class name | relation `target` |
+| `ad4m://whereFilter`, `ad4m://wherePredicates` | JSON | relation `where` and its name → predicate map |
+| `ad4m://filter` | `literal:false` | relation `filter: false` |
+| `ad4m://ordering` | `literal:string:linkedList` | relation `ordering` |
+| `ad4m://transform` | JSON node expression | `transform` |
+| `ad4m://alias` | `literal:string:<URL-encoded JSON { AbstractName: name }>` | `alias` |
+| `ad4m://identity` | `literal:string:true` | `identity` |
+| `ad4m://interpretation_hint` | `literal:string:<text>` | `interpretationHint` |
+
+There is no `ad4m://initial` and no `ad4m://readOnly`: an initial value is an `addLink` entry in `ad4m://constructor`, and read-only is `ad4m://writable false`.
+
+## Datatypes and literal targets
+
+| Form | Where |
+|---|---|
+| `xsd://string`, `xsd://decimal`, `xsd://boolean` | `sh:datatype` as the SDK infers it |
+| `xsd:string` | also accepted; the test models use it for `@HasMany({ datatype: "xsd:string" })` |
+| `literal:<n>^^xsd:integer` | counts in stored links |
+| `literal:true`, `literal:false` | booleans in stored links |
+| `literal:string:<text>` | strings and JSON payloads in stored links |
+
+Value links of instances use `literal:string:` / `number:` / `boolean:` / `json:` targets ([Types and values](../concepts/types-and-values.mdx#literals-for-simple-values)).
+
+## Registry links
+
+Written when a class is installed, beside the shape:
+
+| Source | Predicate | Target |
+|---|---|---|
+| `ad4m://self` | `ad4m://has_shacl` | `literal:string:shacl://<Name>` |
+| `literal:string:shacl://<Name>` | `ad4m://shacl_shape_uri` | `<ns><Name>Shape` |
+| `<ns><Name>` | `rdf://type` | `ad4m://SubjectClass` |
+| `<ns><Name>` | `ad4m://shape` | `<ns><Name>Shape` |
+| `ad4m://self` | `ad4m://has_subject_class` | written by `addSdna`, not by the shape writer |
+
+`listRegisteredClasses()` reads the `ad4m://SubjectClass` marker; `getClassShape()` follows `ad4m://shape`.
+
+## JSON wire format
+
+`shape.toJSON()`; the string `addSdna` and `addShacl` send, and what `instance`-level tools accept. Snake case. Optional keys are omitted when unset.
+
+```json
+{
+  "node_shape_uri": "board://TaskShape",
+  "target_class": "board://Task",
+  "parent_shapes": ["board://NoteShape"],
+  "interpretation_hint": "...",
+  "abstract": true,
+  "properties": [
+    {
+      "path": "board://title", "name": "title",
+      "datatype": "xsd://string", "node_kind": "Literal",
+      "min_count": 1, "max_count": 1, "has_value": "...",
+      "min_inclusive": 0, "max_inclusive": 10, "pattern": "...",
+      "local": false, "writable": true,
+      "resolve_language": "literal",
+      "setter": [{ "action": "setSingleTarget", "source": "this", "predicate": "board://title", "target": "value" }],
+      "adder": [], "remover": [],
+      "getter": "SELECT ...", "conformance_conditions": [],
+      "class": "board://CommentShape", "in": [{ "value": "...", "label": "..." }],
+      "relation_kind": "hasMany", "collection": true, "target_class_name": "Comment",
+      "where_filter": {}, "where_predicates": {}, "filter": false,
+      "transform": {}, "interpretation_hint": "...", "identity": true,
+      "alias": { "TextContent": "text" }, "ordering": "linkedList"
+    }
+  ],
+  "constructor_actions": [{ "action": "addLink", "source": "this", "predicate": "board://type", "target": "board://task" }],
+  "destructor_actions": [{ "action": "removeLink", "source": "this", "predicate": "board://type", "target": "*" }]
+}
+```
+
+`node_shape_uri` may be omitted; the executor derives `<ns><Name>Shape`. `SHACLShape.fromJSON(json)` is the inverse. An abstract class with no properties, or a class whose aliases collide, is refused at install.
+
+## Turtle
+
+`shape.toTurtle()`, export only (there is no `fromTurtle`). One statement per stored link; `sh:in` becomes an RDF list plus `ad4m:in` with the labels; booleans and counts are bare. Abridged output for the `Task` class of [Models and identity](../concepts/models-and-identity.mdx), with a `comments` relation added:
+
+```turtle
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix ad4m: <ad4m://> .
+
+<board://TaskShape>
+  a sh:NodeShape ;
+  sh:targetClass <board://Task> ;
+  ad4m:constructor "[{\"action\":\"addLink\",\"source\":\"this\",\"predicate\":\"board://type\",\"target\":\"board://task\"}, …]" ;
+  ad4m:destructor "[…]" ;
+  sh:property [
+    a sh:PropertyShape ;
+    sh:name "type" ;
+    sh:path <board://type> ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:hasValue <board://task> ;
+    ad4m:writable false
+  ] ;
+  sh:property [
+    a sh:PropertyShape ;
+    sh:name "title" ;
+    sh:path <board://title> ;
+    sh:datatype <xsd://string> ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    ad4m:writable true ;
+    ad4m:setter "[{\"action\":\"setSingleTarget\",\"source\":\"this\",\"predicate\":\"board://title\",\"target\":\"value\"}]"
+  ] ;
+  sh:property [
+    a ad4m:CollectionShape ;
+    sh:name "comments" ;
+    sh:path <board://comment> ;
+    sh:nodeKind sh:IRI ;
+    sh:class <board://CommentShape> ;
+    ad4m:relationKind "hasMany" ;
+    ad4m:targetClassName "Comment" ;
+    ad4m:adder "[…]" ;
+    ad4m:remover "[…]" ;
+    ad4m:getter "SELECT ?target WHERE { <Base> <board://comment> ?target . … }"
+  ] .
+```
+
+A relation gets `sh:nodeKind sh:IRI`, not `sh:datatype`. `ad4m:resolveLanguage` appears only on a property that sets it. Property shapes are blank nodes in Turtle and named `<ns><Name>.<prop>` nodes in the stored links.
+
+## Stored as links
+
+The same `Task` shape as the executor writes it (abridged):
+
+```
+ad4m://self                  ad4m://has_shacl         literal:string:shacl://Task
+literal:string:shacl://Task  ad4m://shacl_shape_uri   board://TaskShape
+board://Task                 rdf://type               ad4m://SubjectClass
+board://Task                 ad4m://shape             board://TaskShape
+board://TaskShape            rdf://type               sh://NodeShape
+board://TaskShape            sh://targetClass         board://Task
+board://TaskShape            ad4m://constructor       literal:string:[{"action":"addLink",…}]
+board://TaskShape            ad4m://destructor        literal:string:[{"action":"removeLink",…}]
+board://TaskShape            sh://property            board://Task.title
+board://Task.title           rdf://type               sh://PropertyShape
+board://Task.title           sh://path                board://title
+board://Task.title           sh://datatype            xsd://string
+board://Task.title           sh://minCount            literal:1^^xsd:integer
+board://Task.title           sh://maxCount            literal:1^^xsd:integer
+board://Task.title           ad4m://writable          literal:true
+board://Task.title           ad4m://setter            literal:string:[{"action":"setSingleTarget",…}]
+board://TaskShape            sh://property            board://Task.comments
+board://Task.comments        rdf://type               ad4m://CollectionShape
+board://Task.comments        sh://nodeKind            sh://IRI
+board://Task.comments        sh://class               board://CommentShape
+board://Task.comments        ad4m://relationKind      hasMany
+```
+
+Because the schema is links, it syncs with a neighbourhood like any other data and any client can read it with `getAllShacl()` or a SPARQL query. The SDNA flow vocabulary (`ad4m://hasState`, `ad4m://hasTransition`, `ad4m://requires`, ...) is written by the same parser and described in [Flows](../concepts/flows.mdx).
