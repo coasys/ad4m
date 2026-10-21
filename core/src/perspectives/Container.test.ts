@@ -6,6 +6,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Container } from "./Container";
+import { Ad4mModel } from "../model/Ad4mModel";
+import { HasMany, Model } from "../model/decorators";
 
 const SDNA = JSON.parse(
   fs.readFileSync(
@@ -26,6 +28,28 @@ describe("Container", () => {
 
   it("is queried by its URI", () => {
     expect((Container as any).prepareModelQueryParams({}).className).toBe("ad4m://Container");
+  });
+
+  it("is implemented through a class's own relation, aliased to children", () => {
+    @Model({ name: "ImplBlock", implements: [Container] })
+    class ImplBlock extends Ad4mModel {
+      @HasMany({ through: "we://child", alias: { Container: "children" } })
+      blocks: string[] = [];
+    }
+    // The executor finds the relation by the alias in the shape, not by `implements`.
+    const { shape } = (ImplBlock as any).generateSHACL();
+    const blocks = shape.properties.find((p: any) => p.name === "blocks");
+    expect([blocks.path, blocks.alias]).toEqual(["we://child", { Container: "children" }]);
+  });
+
+  it("is not implemented by a relation that answers to another name", () => {
+    expect(() => {
+      @Model({ name: "UnaliasedBlock", implements: [Container] })
+      class UnaliasedBlock extends Ad4mModel {
+        @HasMany({ through: "we://child" })
+        blocks: string[] = [];
+      }
+    }).toThrow("UnaliasedBlock implements Container but has no relation or alias named `children`");
   });
 
   it("register() writes nothing", async () => {

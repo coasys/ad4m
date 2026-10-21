@@ -11,7 +11,7 @@ import { HasMany, Model } from "../model/decorators";
  * relation (by name, or aliased to `children`) links X:
  *
  * ```typescript
- * @Model({ name: "Block" })
+ * @Model({ name: "Block", implements: [Container] })
  * class Block extends Ad4mModel {
  *   @HasMany({ through: "we://child", alias: { Container: "children" } })
  *   blocks: string[] = [];
