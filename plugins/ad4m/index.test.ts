@@ -56,6 +56,7 @@ import {
   withTimeout,
   insecureEndpointReason,
   closeWakerClient,
+  restoreSavedSubscription,
   hasLiveCredential,
   redactForDisplay,
   isLoopbackEndpoint,
@@ -4099,6 +4100,73 @@ describe("closeWakerClient", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("already gone"));
     // A client that was never created is not an error.
     expect(() => closeWakerClient(null)).not.toThrow();
+  });
+});
+
+describe("restoreSavedSubscription", () => {
+  const legacy: WakerSubscription = {
+    id: "mention-persp-legacy",
+    type: "mention",
+    perspective: "persp-legacy",
+    channel: "",
+    query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . }",
+  };
+
+  it("asks the executor again for a mention subscription saved without its class or terms", async () => {
+    for (const saved of [legacy, { ...legacy, className: "ad4m://TextContent" }]) {
+      const rederive = vi.fn().mockResolvedValue("Subscribed");
+      const createLive = vi.fn().mockResolvedValue(undefined);
+      await restoreSavedSubscription(saved, rederive, createLive, { warn: vi.fn() });
+      expect(rederive).toHaveBeenCalledWith("persp-legacy");
+      expect(createLive).not.toHaveBeenCalled();
+    }
+  });
+
+  it("opens a current subscription as saved", async () => {
+    const current = { ...legacy, className: "ad4m://TextContent", terms: ["bot"] };
+    const children: WakerSubscription = { id: "c", type: "children", perspective: "p", channel: "chan", query: "q" };
+    for (const saved of [current, children]) {
+      const rederive = vi.fn();
+      const createLive = vi.fn().mockResolvedValue(undefined);
+      await restoreSavedSubscription(saved, rederive, createLive, { warn: vi.fn() });
+      expect(rederive).not.toHaveBeenCalled();
+      expect(createLive).toHaveBeenCalledWith(saved);
+    }
+  });
+
+  it("keeps a legacy mention subscription running, and saved, when the executor cannot re-derive it", async () => {
+    // Before, a failed re-derive only logged: the subscription was in neither
+    // the active nor the pending set, so the next persist deleted it.
+    const persisted: { subs: WakerSubscription[] } = { subs: [] };
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: { querySparql: vi.fn() },
+      logger: makeMockLogger(),
+      QuerySubscriptionProxy: vi.fn(function () {
+        return {
+          initialized: Promise.resolve(),
+          subscribe: vi.fn(() => Promise.resolve()),
+          dispose: vi.fn(),
+          onResult: vi.fn(),
+        };
+      }),
+      debounceMs: 10,
+      onWake: () => {},
+      onPersist: (subs: WakerSubscription[]) => { persisted.subs = subs; },
+    });
+    const warn = vi.fn();
+    try {
+      await restoreSavedSubscription(
+        legacy,
+        () => Promise.reject(new Error("Perspective not accessible")),
+        (sub) => manager.subscribe(sub),
+        { warn },
+      );
+      expect(manager.getActive().map((s) => s.id)).toEqual(["mention-persp-legacy"]);
+      expect(persisted.subs.map((s) => s.id)).toEqual(["mention-persp-legacy"]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("Perspective not accessible"));
+    } finally {
+      manager.disposeAll();
+    }
   });
 });
 
