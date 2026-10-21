@@ -36,7 +36,7 @@
 //! - [`update`] — `instance_update` + `instance_remove`
 //! - [`collections`] — `instance_add_to_collection` + `instance_remove_from_collection`
 //! - [`children`] — class-agnostic `add_child` / `get_children` on the
-//!   `ad4m://has_child` tree
+//!   containment tree (the built-in `Container`)
 //! - [`transcript`] — `instance_transcript`, a compact chronological reading
 //!   of the children under a node that carry text, through the built-in
 //!   TextContent
@@ -92,11 +92,6 @@ pub(crate) const MAX_QUERY_LIMIT: usize = 500;
 /// How long class resolution waits for a class's SHACL to arrive over
 /// p-diff-sync on a freshly joined neighbourhood before reporting it as
 pub(super) const CLASS_SYNC_WAIT: Duration = Duration::from_secs(5);
-
-/// Predicate used for the optional `parent` argument on `instance_create` /
-/// `instance_query` — the same child link the per-class `{class}_create` /
-/// `{class}_list` tools use.
-pub(super) const HAS_CHILD: &str = "ad4m://has_child";
 
 // ============================================================================
 // Schema projection — SHACL shape → data an agent can read
