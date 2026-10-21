@@ -80,9 +80,13 @@ pub struct IceRestart {
     /// `since + ICE_RESTART_GRACE`.
     pub since: Instant,
     /// The offer that carries the restart, once made, with its track
-    /// mapping. `None` while it waits behind another pending offer. A
-    /// second request republishes it rather than making another.
+    /// mapping. `None` until the post-poll sweep makes it, after any other
+    /// pending offer is answered.
     pub offer: Option<(String, Vec<crate::sfu::TrackMapEntry>)>,
+    /// The client asked again while the offer waited: it moved again, or
+    /// lost the answer. The offer is republished, and a fresh restart
+    /// follows its answer, so the newest network gets new credentials.
+    pub again: bool,
     /// Candidates trickled while the offer waits for its answer. The
     /// restart clears the remote candidates when the answer lands, so they
     /// are added after it.
@@ -151,31 +155,34 @@ impl SfuPeer {
     }
 
     /// The client asked for an ICE restart: new ICE credentials, offered
-    /// with the SFU's candidates. Returns the offer to publish, or `None`
-    /// while another offer of the SFU's waits for its answer; the restart
-    /// then follows that answer, as deferred tracks do. Asked again while
-    /// its offer waits, it returns the same offer.
+    /// with the SFU's candidates. The offer is made in the post-poll sweep,
+    /// once str0m has processed any answer accepted in this tick, so this
+    /// only records the request. Asked again while its offer waits, it
+    /// returns that offer to republish and restarts again after its answer.
     pub fn restart_ice(
         &mut self,
         now: Instant,
     ) -> Option<(String, Vec<crate::sfu::TrackMapEntry>)> {
-        match &self.ice_restart {
+        match &mut self.ice_restart {
             Some(IceRestart {
-                offer: Some(offer), ..
-            }) => return Some(offer.clone()),
-            Some(_) => {}
+                offer: Some(offer),
+                again,
+                ..
+            }) => {
+                *again = true;
+                Some(offer.clone())
+            }
+            Some(_) => None,
             None => {
                 self.ice_restart = Some(IceRestart {
                     since: now,
                     offer: None,
+                    again: false,
                     candidates: Vec::new(),
-                })
+                });
+                None
             }
         }
-        if self.pending_offer.is_some() {
-            return None;
-        }
-        apply_deferred_tracks(self)
     }
 
     /// Whether a change waits for the next offer: deferred tracks, or an
@@ -199,7 +206,7 @@ impl SfuPeer {
 
     /// Apply the client's answer to the SFU's pending offer. An answer to
     /// an ICE restart's offer ends the restart and adds the candidates
-    /// trickled meanwhile.
+    /// trickled meanwhile, then starts the next restart if one was asked for.
     pub fn accept_server_answer(&mut self, sdp_answer_json: &str) -> Result<(), String> {
         let Some(pending) = self.pending_offer.take() else {
             return Err("no pending offer".to_string());
@@ -230,6 +237,14 @@ impl SfuPeer {
             if let Some(restart) = self.ice_restart.take() {
                 for candidate in restart.candidates {
                     self.rtc.add_remote_candidate(candidate);
+                }
+                if restart.again {
+                    self.ice_restart = Some(IceRestart {
+                        since: Instant::now(),
+                        offer: None,
+                        again: false,
+                        candidates: Vec::new(),
+                    });
                 }
             }
         }
@@ -1910,7 +1925,8 @@ mod tests {
     /// switch): from then on everything to or from the old address is lost.
     /// The SFU's peer is driven as the event loop drives it: ICE states
     /// through `on_ice_state`, the drop through `stayed_disconnected`. A
-    /// restart goes through `restart_ice`; the caller applies the offer
+    /// restart goes through `restart_ice` and the post-poll sweep
+    /// (`apply_deferred_tracks`); the caller applies the offer
     /// with its new address as a candidate, as a browser gathers one after
     /// a restart, and the SFU applies the answer, each `signalling` later.
     fn network_change(restart: Restart, signalling: Duration) -> NetworkChange {
@@ -1966,7 +1982,8 @@ mod tests {
             };
             if due && restarted_at.is_none() {
                 restarted_at = Some(t);
-                let (json, _) = peer.restart_ice(now).expect("no other offer is pending");
+                assert!(peer.restart_ice(now).is_none(), "offered after the poll");
+                let (json, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
                 offer_due = Some((t + signalling, serde_json::from_str(&json).unwrap()));
             }
             if offer_due.as_ref().is_some_and(|(at, _)| t >= *at) {
@@ -2137,6 +2154,70 @@ mod tests {
         assert!(offer.contains("ice-ufrag"), "{offer}");
         assert!(!peer.has_deferred_changes());
         assert_eq!(peer.restart_ice(now).map(|(o, _)| o), Some(offer));
+    }
+
+    /// A second request while the restart's offer waits gets that offer
+    /// again (its answer may have been lost), and once the answer lands a
+    /// fresh restart follows, with new ICE credentials for the newest
+    /// network.
+    #[test]
+    fn a_second_request_during_a_restart_restarts_again_after_its_answer() {
+        let bind: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let mut caller = Rtc::builder().build(Instant::now());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        let (offer, pending) = change.apply().unwrap();
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind, None).unwrap();
+        caller
+            .sdp_api()
+            .accept_answer(pending, serde_json::from_str(&answer).unwrap())
+            .unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:caller".to_string(),
+            rtc,
+            false,
+        );
+        let ufrag = |offer: &str| {
+            let offer: SdpOffer = serde_json::from_str(offer).unwrap();
+            offer
+                .to_sdp_string()
+                .lines()
+                .find_map(|l| l.strip_prefix("a=ice-ufrag:").map(str::to_string))
+                .unwrap()
+        };
+
+        let now = Instant::now();
+        assert!(peer.restart_ice(now).is_none(), "offered after the poll");
+        let (first, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
+        assert_eq!(peer.restart_ice(now).map(|(o, _)| o), Some(first.clone()));
+        assert!(!peer.has_deferred_changes());
+
+        let answer = caller
+            .sdp_api()
+            .accept_offer(serde_json::from_str(&first).unwrap())
+            .unwrap();
+        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+            .unwrap();
+        assert!(peer.has_deferred_changes(), "the second request is pending");
+        let (second, _) = apply_deferred_tracks(&mut peer).expect("a fresh restart");
+        assert_ne!(ufrag(&second), ufrag(&first));
+
+        let answer = caller
+            .sdp_api()
+            .accept_offer(serde_json::from_str(&second).unwrap())
+            .unwrap();
+        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+            .unwrap();
+        assert!(peer.ice_restart.is_none());
+        assert!(!peer.has_deferred_changes());
     }
 
     /// A fixed port is bound exactly; the STUN probe runs on that socket and

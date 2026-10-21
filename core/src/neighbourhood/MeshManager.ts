@@ -1316,6 +1316,12 @@ export class MeshManager {
      * now, all at once — an ICE restart is one offer per pair, and waiting
      * for each to time out costs seconds of silence. Pairs still negotiating
      * have nothing to restart; the sweep keeps looking after them.
+     *
+     * It skips the sweep's guards (`outstanding`, one pair per sweep) on
+     * purpose. They stop the sweep reading a slow send as a lost one and
+     * escalating every pair at once. Here nothing is judged lost, and the
+     * rung is the first one: one offer per pair, each to a different peer.
+     * A restart offer that is lost falls to the sweep, guards and all.
      */
     private restartAll(): void {
         if (this.closed) return

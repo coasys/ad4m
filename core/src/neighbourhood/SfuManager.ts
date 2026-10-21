@@ -421,9 +421,11 @@ export class SfuManager {
 
         // A network change: the path ICE uses is likely gone, though ICE may
         // not have noticed yet. Restart it now, on the socket the change
-        // reconnected. A restart already in flight went out over the old
-        // network and may never have arrived, so this one replaces it, with
-        // its own timeout. Listened to once per call, not per rebuild.
+        // reconnected, with its own timeout. If a restart's offer is still
+        // unanswered (it went out over the old network and may never have
+        // arrived), the executor sends it again and, once it is answered,
+        // restarts again for this network. Listened to once per call, not
+        // per rebuild.
         if (!this.networkUnsubscribe) {
             this.networkUnsubscribe = this.neighbourhood.onNetworkChange(() => {
                 const current = this.state.peerConnection

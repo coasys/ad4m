@@ -607,13 +607,31 @@ describe('ApiClient on a network change', () => {
         await expect(read).resolves.toEqual(['p'])
     })
 
-    it('treats a change of navigator.connection the same way', () => {
+    it('checks the socket on a change of navigator.connection: one that answers stays, as on a bandwidth estimate update', () => {
         const changed = jest.fn()
         client.onNetworkChange(changed)
         open()
         socket(0).open()
 
         connection.dispatchEvent(new Event('change'))
+        expect(socket(0).sent.at(-1)?.type).toBe('ping')
+        socket(0).reply({ type: 'pong' })
+        jest.advanceTimersByTime(5_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(changed).not.toHaveBeenCalled()
+    })
+
+    it('redials on a change of navigator.connection when the socket stays silent', () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+
+        connection.dispatchEvent(new Event('change'))
+        connection.dispatchEvent(new Event('change'))
+        expect(TestSocket.instances).toHaveLength(1)
+        jest.advanceTimersByTime(2_000)
         expect(TestSocket.instances).toHaveLength(2)
         socket(1).open()
         expect(changed).toHaveBeenCalledTimes(1)

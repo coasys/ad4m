@@ -285,9 +285,10 @@ export class ApiClient {
 
     /**
      * Hear of network changes where the platform says so: `online` on the
-     * global object (browsers, Deno) and `change` on `navigator.connection`
-     * (Chromium). Elsewhere, e.g. Node, nothing is heard and the ping
-     * deadline notices a dead socket on its own.
+     * global object (browsers, Deno) redials at once, and `change` on
+     * `navigator.connection` (Chromium) runs `checkConnection`. Elsewhere,
+     * e.g. Node, nothing is heard and the ping deadline notices a dead
+     * socket on its own.
      */
     private _listenForNetworkChanges(): void {
         if (this._unlistenNetwork) return
@@ -300,8 +301,11 @@ export class ApiClient {
         }
         const connection = (globalThis as { navigator?: { connection?: Partial<EventTarget> } }).navigator?.connection
         if (typeof connection?.addEventListener === 'function') {
-            connection.addEventListener('change', handler)
-            removers.push(() => connection.removeEventListener?.('change', handler))
+            // `change` also fires when Chromium's downlink or rtt estimate
+            // moves, as a busy call makes it do: probe rather than drop.
+            const probe = () => this.checkConnection()
+            connection.addEventListener('change', probe)
+            removers.push(() => connection.removeEventListener?.('change', probe))
         }
         this._unlistenNetwork = () => { for (const remove of removers) remove() }
     }
@@ -630,7 +634,7 @@ export class ApiClient {
     }
 
     /** Register a callback that fires after the network changed (`online`,
-     *  or a `navigator.connection` change), once the socket dialled for the
+     *  or a socket that failed `checkConnection`), once the socket dialled for the
      *  new network is open and its event watch sent. Calls made from it go
      *  out on that socket. Returns an unsubscribe function. */
     onNetworkChange(callback: () => void): () => void {

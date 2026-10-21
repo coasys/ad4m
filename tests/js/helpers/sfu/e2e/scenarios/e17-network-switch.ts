@@ -47,6 +47,7 @@ export const e17NetworkSwitch = e2eScenario({
         await call.eventually(call.seesEveryone(CAMERA), 60_000, "video");
       });
 
+      const departuresBefore = (await call.who("u2").snapshot()).departures;
       metric("network_switch_recovery_ms", await step(`u2 switches networks: everyone hears and sees everyone again within ${RECOVERY_MS / 1000} s`, async () => {
         const old = socketPorts(call.who("u2").pid);
         // Both must go dark: the executor connection (TCP) and the media path (UDP).
@@ -64,6 +65,12 @@ export const e17NetworkSwitch = e2eScenario({
         await call.eventually(call.seesEveryone(), left(), "video after the switch");
         return Date.now() - switched;
       }));
+      // A rebuilt call drops and re-adds every participant; an ICE restart keeps them.
+      const rebuilds = (await call.who("u2").snapshot()).departures - departuresBefore;
+      metric("u2_rebuilds", rebuilds);
+      await step("u2's call came back in place, not rebuilt", async () => {
+        if (rebuilds !== 0) throw new Error(`u2's call was rebuilt ${rebuilds} time(s)`);
+      });
 
       await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
     } finally {
