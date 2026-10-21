@@ -1145,7 +1145,7 @@ mod audience_matrix_tests {
     #[tokio::test]
     async fn perspective_lifecycle_events_reach_exactly_the_owners_streams() {
         use crate::perspectives::{
-            add_perspective, get_perspective, remove_perspective, update_perspective,
+            add_perspective, get_perspective, remove_perspective, update_perspective_with,
         };
         use crate::types::{PerspectiveHandle, PerspectiveState};
         crate::test_utils::setup_wallet();
@@ -1166,11 +1166,9 @@ mod audience_matrix_tests {
         };
         for handle in [&owned, &unowned] {
             add_perspective(handle.clone(), None).await.unwrap();
-            let renamed = PerspectiveHandle {
-                name: Some("renamed".into()),
-                ..handle.clone()
-            };
-            update_perspective(&renamed).await.unwrap();
+            update_perspective_with(&handle.uuid, |h| h.name = Some("renamed".into()))
+                .await
+                .unwrap();
             // Publishes `perspective-updated` too: the state change updates the handle.
             get_perspective(&handle.uuid)
                 .unwrap()
