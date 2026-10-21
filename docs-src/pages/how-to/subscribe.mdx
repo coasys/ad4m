@@ -57,7 +57,7 @@ pager.dispose();
 
 - `subscribe` resolves to `Task[]`; later calls pass the whole new `Task[]`, already merged from the change the executor sent (records added, updated and removed, plus the new total).
 - `countSubscribe` resolves to a `number`; `paginateSubscribe` to `{ results, totalCount, pageSize, pageNumber }`.
-- `subscribe` skips a callback whose result equals the previous one, so a write that changes nothing you read does not re-render your list. `countSubscribe` and `paginateSubscribe` call back on every update.
+- `subscribe` skips a callback whose result equals the previous one, so a write that changes nothing you read does not re-render your list. `countSubscribe` and `paginateSubscribe` call back on every update, including a reconnect or resync that brings back the same result, and `paginateSubscribe` on any change to the whole result set even when the page you show did not change. Make their callbacks cheap or compare before re-rendering.
 
 ## What triggers an update
 

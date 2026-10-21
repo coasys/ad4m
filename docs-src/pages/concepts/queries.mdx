@@ -127,16 +127,16 @@ const posts = await Post.findAll(perspective, {
   include: {
     $commentCount: { from: "comments", count: true },
     $replies:      { from: "comments", count: true, transitive: true }, // whole thread
-    $latest:       { from: "comments", order: { createdAt: "DESC" }, limit: 1 },
+    $first:        { from: "comments", limit: 1 }, // first member, as a plain object
   },
   order: { $commentCount: "DESC" },
   limit: 20,
 });
 posts[0].$commentCount; // number
-posts[0].$latest;       // one id or null (limit 1 unwraps)
+posts[0].$first;        // a plain object with Comment's fields, or null (limit 1 unwraps)
 ```
 
-`includeAll: true` includes every forward relation one level deep. [Include relations](../how-to/include-relations.mdx) has the patterns.
+A projection's `order` honors only `id` on this executor (issue #1417); for "the newest comment" include the relation with a sub-query, `comments: { order: { createdAt: "DESC" }, limit: 1 }`. `includeAll: true` includes every forward relation one level deep. [Include relations](../how-to/include-relations.mdx) has the patterns.
 
 ## Sparse fields with properties
 

@@ -16,7 +16,7 @@ The `Query` type (`core/src/model/types.ts`) is accepted by `findAll`, `findOne`
 | `limit`, `offset` | `number` | page; `limit: 0` returns the count only |
 | `include` | `IncludeMap` | hydrate relations; `$` keys are projections |
 | `includeAll` | `boolean` | include every forward relation one level deep; explicit `include` entries win |
-| `properties` | `string[]` | hydrate only these fields; the rest, `author`/`createdAt`/`updatedAt` included, are removed. `[]` throws |
+| `properties` | `string[]` | hydrate only these fields; the rest, `author`/`createdAt`/`updatedAt` included, are removed. `[]` throws in `findAll`/`findOne` |
 | `links` | `string[]` | per-link rows under `__links`; names or absolute predicate IRIs |
 | `parent` | `Scope` | restrict to records linked from a node; see [Parent scopes](#parent-scopes) |
 | `preferClasses` | `string[]` | for a query over several classes: which class a multi-class record is read as, most wanted first |
@@ -68,7 +68,7 @@ Rows without a value sort last in both directions; ties break by id. In a traver
 
 `IncludeMap = { [relation]: true | RelationSubQuery | IncludeProjection }`.
 
-`RelationSubQuery` is `Query` without `parent` and `count`: `where`, `order`, `limit`, `offset`, `include`, `properties`, `links`, `linkStatus`, `includeUnverified`. Included relations inherit `linkStatus` and `includeUnverified` unless they set their own.
+`RelationSubQuery` is `Query` without `parent` and `count`: `where`, `order`, `limit`, `offset`, `include`, `properties`, `links`, `linkStatus`, `includeUnverified`. The sub-query runs once over the targets of all rows together, so `limit` and `offset` apply to that total, not per row. Included relations inherit `linkStatus` and `includeUnverified` unless they set their own.
 
 `IncludeProjection`, under a key starting with `$`:
 
@@ -78,8 +78,8 @@ Rows without a value sort last in both directions; ties break by id. In a traver
 | `count` | `true` | attach an integer count instead of a list |
 | `transitive` | `boolean` | everything reachable through `from`, not one step; cannot combine with an author or timestamp filter |
 | `where` | `Where` | filter on the targets |
-| `order` | `Order` | before `limit` |
-| `limit` | `number` | `1` unwraps the value to a single id or `null` |
+| `order` | `Order` | before `limit`; honors only `id` today (issue #1417) |
+| `limit` | `number` | `1` unwraps the value to a single member or `null`; a typed relation's member is a plain object with the class's fields, an untyped one an id |
 
 A relation declared `polymorphic` is included as such by default.
 

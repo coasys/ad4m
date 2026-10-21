@@ -13,7 +13,7 @@ An abstract class names fields that records of several classes share. You read t
 
 1. **Declare the abstract class** with `@Model({ name, abstract: true })` and the properties and relations it promises. Its `through` predicates are never written.
 2. **Make concrete classes conform.** A class conforms when it has a property (or relation) with each of the abstract class's names, or an `alias` for it keyed by the abstract class's name: `alias: { Readable: "text" }`.
-3. **Optionally add `implements: [Readable]`** to the concrete class. This is a check in the SDK only: the decorator throws at declaration time if a name is missing (`Message implements Readable but has no property or alias named 'text'`). The executor matches by names whether or not you list it.
+3. **Optionally add `implements: [Readable]`** to the concrete class. This is a check in the SDK only: the decorator throws at declaration time if a name is missing (``Message implements Readable but has no property or alias named `text` ``). The executor matches by names whether or not you list it.
 4. **Register all of them**, the abstract class included.
 5. **Read through the abstract class** with `findAll`, `query` or `subscribe`. Each row carries `__subjectClass` (its real class) and `__subjectClasses`.
 6. **Write through the row**: set the abstract name and `save()`, call a relation's `addX` / `removeX` / `setX`, or `delete()`.

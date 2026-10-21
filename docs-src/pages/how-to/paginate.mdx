@@ -81,6 +81,8 @@ const byPinned = await Post.findAll(perspective, {
 
 The same holds for ordering by a `$` projection count (`order: { $commentCount: "DESC" }` with `include: { $commentCount: { from: "comments", count: true } }`): pair it with `limit`.
 
+The paged plan also needs a `where` the store can evaluate whole. A condition that is checked after hydration (a bare `author`, `timestamp`, a getter property, an operator the store cannot express) sends the query to the fallback sort, and a dotted or `$` order key is ignored again even with a `limit`.
+
 <Callout type="warning">
 Use a dotted path as the only order key. With a second key the executor sorts the hydrated rows instead, where the relation is still an id, and the dotted key is ignored again.
 </Callout>

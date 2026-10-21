@@ -13,7 +13,7 @@ A relation field holds ids by default. `include` asks the executor to hydrate th
 
 1. **Declare the relation** with a target class: `@HasMany(() => Comment, { through })`, `@HasOne(...)`, or the reverse forms `@BelongsToOne` / `@BelongsToMany` on the other side.
 2. **Name it in `include`**: `include: { comments: true }`.
-3. **Shape the included rows** if needed: replace `true` with a sub-query (`where`, `order`, `limit`, `offset`, `include`).
+3. **Shape the included rows** if needed: replace `true` with a sub-query (`where`, `order`, `limit`, `offset`, `include`, `properties`, `links`). The sub-query runs once over the targets of all rows together, so its `limit` caps the total, not the number per row: `comments: { limit: 5 }` on twenty posts returns five comments in all.
 4. **Nest** by putting `include` inside the sub-query, one object per level.
 5. **Count instead of loading** with a `$` key: `include: { $commentCount: { from: "comments", count: true } }`.
 
@@ -112,13 +112,13 @@ await again.get({ comments: true });
 | `@HasMany`, `@BelongsToMany` | `string[]` of ids | instances of the target class; `[]` when there are none |
 | `@HasOne`, `@BelongsToOne` | one id | one instance, or `null` |
 
-- A target that does not conform to the target class (a stray link to a literal, a node of another class) is dropped from the included list, not returned as an id.
+- A target that does not conform to the target class (a stray link to a literal, a node of another class) is dropped from the included list (a to-one relation becomes `null`), not returned as an id.
 - An included relation inherits the query's `linkStatus` and `includeUnverified` unless its sub-query sets its own.
 - The same forms work on the builder (`.include({...})`), on `findOne`, `paginate`, `findAllAndCount`, and on an instance with `instance.get({ comments: true })`.
 
 ## Depth
 
-Each nested `include` is one more level. The executor stops at 8 levels: a deeper include resolves to an empty list and logs a warning, which also cuts a cycle such as Post → Comment → Post. Leaf relations you do not name stay ids.
+Each nested `include` is one more level. The executor stops at 8 levels: a deeper include resolves to an empty list (`null` for a to-one relation) and logs a warning, which also cuts a cycle such as Post → Comment → Post. Leaf relations you do not name stay ids.
 
 ## Polymorphic relations
 
@@ -133,11 +133,11 @@ A relation whose members are of several classes has no single target class. Decl
 children: string[] = [];
 ```
 
-`include: { children: true }` then hydrates each child as the class it actually is; you do not repeat `polymorphic` at the call site. A child whose class is not in `instantiateAs` still comes back, with its data and `__subjectClass` naming its class, but not as an instance of that class. Including an untyped relation that is not declared `polymorphic` is an error that names the relation. Details: [Polymorphic relations](../concepts/types-and-values.mdx#polymorphic-relations).
+`include: { children: true }` then hydrates each child as the class it actually is; you do not repeat `polymorphic` at the call site. A polymorphic include refuses `limit` and `offset`, because it runs one read per class. A child whose class is not in `instantiateAs` still comes back, with its data and `__subjectClass` naming its class, but not as an instance of that class. Including an untyped relation that is not declared `polymorphic` is an error that names the relation. Details: [Polymorphic relations](../concepts/types-and-values.mdx#polymorphic-relations).
 
 ## Projections: counts and short lists
 
-A key that starts with `$` adds a computed field per row without hydrating the relation: `{ from, count: true }` for a number, `{ from, limit: 1 }` for one id or `null`, `transitive: true` to count a whole thread. A projection's `where` and `order` are listed in [Include and projections](../reference/model-query.mdx#include-and-projections).
+A key that starts with `$` adds a computed field per row without hydrating the relation: `{ from, count: true }` for a number, `{ from, limit: 1 }` for the first member or `null`, `transitive: true` to count a whole thread. When the relation has a target class the members come back as plain objects with that class's fields, not as ids and not as class instances. A projection's `where` and `order` are listed in [Include and projections](../reference/model-query.mdx#include-and-projections).
 
 <Callout type="warning">
 On this executor a projection's `order` honors only `id`. `{ from: "comments", order: { createdAt: "DESC" }, limit: 1 }` does not return the newest comment; it returns whichever member the store yields first (issue #1417). For "the newest one", include the relation with a sub-query instead: `comments: { order: { createdAt: "DESC" }, limit: 1 }`.
