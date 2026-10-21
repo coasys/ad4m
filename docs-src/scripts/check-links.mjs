@@ -33,10 +33,19 @@ function idsOf(file) {
 }
 
 let checked = 0;
+let skippedGenerated = 0;
 for (const file of htmlFiles) {
   const rel = path.relative(OUT_DIR, file).replace(/\\/g, "/");
   const isRedirect = rel !== "404.html" && /meta http-equiv="refresh"/.test(fs.readFileSync(file, "utf8").slice(0, 400));
   if (isRedirect) continue;
+  // Links typedoc writes inside the generated jsdoc/ tree are not ours to fix: typedoc emits
+  // dotted member anchors (#agent.addTrustedAgents) that Nextra's slugger renders as
+  // id="agentaddtrustedagents", and it links to source files that are not in the site.
+  // Links from content pages INTO jsdoc/ are still checked, because we wrote those.
+  if (rel.startsWith("jsdoc/")) {
+    skippedGenerated++;
+    continue;
+  }
   const html = fs.readFileSync(file, "utf8");
   // Only the page body: Next's data scripts repeat hrefs; the anchors in the rendered body are what readers click.
   const body = html.split(/<script id="__NEXT_DATA__"/)[0];
@@ -68,5 +77,5 @@ for (const file of htmlFiles) {
   }
 }
 
-console.log(`checked ${checked} links in ${htmlFiles.length} pages`);
+console.log(`checked ${checked} links in ${htmlFiles.length - skippedGenerated} pages (${skippedGenerated} generated jsdoc pages skipped)`);
 fail(problems, "link check");
