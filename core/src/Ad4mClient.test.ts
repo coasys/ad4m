@@ -174,7 +174,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'expression.interact': 'interaction-result',
 
     // ── Runtime ──
-    'runtime.info': { ad4mExecutorVersion: '0.1.0', isUnlocked: true, isInitialized: true },
+    'runtime.info': { ad4mExecutorVersion: '0.1.0', ad4mExecutorCommit: null, isUnlocked: true, isInitialized: true },
     'runtime.tlsDomain': 'test.domain.com',
     'runtime.quit': true,
     'runtime.openLink': true,
