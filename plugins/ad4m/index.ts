@@ -219,6 +219,18 @@ export function closeWakerClient(client: any, logger?: any): void {
 }
 
 /**
+ * The `@coasys/ad4m` module the waker builds its client and query proxies
+ * from. Loaded lazily to avoid load-time issues with @holochain/client
+ * transitive deps; build.mjs bundles it from core source.
+ */
+export function loadWakerClientModule(): {
+  Ad4mClient: any;
+  QuerySubscriptionProxy: any;
+} {
+  return require("@coasys/ad4m");
+}
+
+/**
  * Name the executor the waker is talking to in a subscribe failure, so a
  * wrong `executorUrl` (the waker's own key, separate from `mcpEndpoint`) is
  * visible in the tool result rather than only in startup logs (#1016).
@@ -1281,9 +1293,8 @@ Notes:
     generation: number,
   ): Promise<boolean> {
     const stale = () => generation !== _wakerGeneration;
-    // Dynamic imports to avoid load-time issues with @holochain/client transitive deps
     logger.info("[ad4m-waker] Loading dependencies...");
-    const { Ad4mClient, QuerySubscriptionProxy } = require("@coasys/ad4m");
+    const { Ad4mClient, QuerySubscriptionProxy } = loadWakerClientModule();
     logger.info("[ad4m-waker] Dependencies loaded OK");
 
     logger.info(`[ad4m-waker] Connecting to ${httpUrl}...`);
