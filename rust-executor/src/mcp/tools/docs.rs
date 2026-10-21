@@ -31,7 +31,7 @@ pub enum DocTopic {
     /// class (social DNA) format in detail.
     Architecture,
     /// How to actually use the tools: reading and writing instances, the
-    /// `ad4m://has_child` tree, and the common traps.
+    /// containment tree, and the common traps.
     Usage,
     /// App-specific, kept for spaces the Flux app created: its data model
     /// (channels, messages, posts, tasks) and the recipes for reading and
@@ -75,7 +75,7 @@ pub struct GetDocumentationParams {
 impl Ad4mMcpHandler {
     /// Return the executor's documentation for a topic, as markdown.
     #[tool(
-        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the ad4m://has_child tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux — for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. No authentication needed."
+        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux — for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. No authentication needed."
     )]
     pub async fn get_documentation(&self, params: Parameters<GetDocumentationParams>) -> String {
         params.0.topic.text().to_string()

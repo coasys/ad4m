@@ -566,8 +566,8 @@ impl Ad4mMcpHandler {
                      instance_get, instance_update, instance_add_to_collection, \
                      instance_remove_from_collection, instance_remove — pass the class \
                      name as `class_name`; instance_transcript to read a node's children \
-                     that carry text; add_child / get_children for the raw \
-                     ad4m://has_child tree. To re-enable per-class tools start the \
+                     that carry text; add_child / get_children for the \
+                     containment tree. To re-enable per-class tools start the \
                      executor with `--dynamic-class-tools true`.",
                     tool_name
                 ),

@@ -339,8 +339,10 @@ export function writeStorageFile(path, content) {
 //   * Read-through cache: persistent storage is loaded lazily into an
 //     in-memory Map on the first storage call and kept consistent on
 //     every mutation via a full rewrite.
-//   * Writes are flushed synchronously on every put/delete so that a
-//     process crash cannot lose already-observed data.
+//   * A put/delete marks the store dirty and schedules one flush at the
+//     end of the current turn (a microtask), so many writes in one turn
+//     cost one file write. Rewriting the whole file on every write made a
+//     1,833-link commit take 42.6 s (7,352 rewrites).
 //   * Any I/O failure degrades to in-memory semantics and logs a warning.
 
 var KV_FILENAME = "ad4m-language-kv.json";
@@ -422,6 +424,17 @@ function flushStorage() {
     }
 }
 
+var __storageFlushQueued = false;
+
+function scheduleFlush() {
+    if (__storageFlushQueued) return;
+    __storageFlushQueued = true;
+    queueMicrotask(function () {
+        __storageFlushQueued = false;
+        flushStorage();
+    });
+}
+
 function storageKey(key) {
     var addr = "";
     try { addr = languageAddress(); } catch (_) { addr = "unknown"; }
@@ -435,12 +448,12 @@ export function storageGet(key) {
 export function storagePut(key, value) {
     ensureStorageLoaded();
     __storage.set(storageKey(key), value);
-    flushStorage();
+    scheduleFlush();
 }
 export function storageDelete(key) {
     ensureStorageLoaded();
     __storage.delete(storageKey(key));
-    flushStorage();
+    scheduleFlush();
 }
 export function storageListKeys(prefix) {
     ensureStorageLoaded();

@@ -40,7 +40,9 @@ So, in order:
    properties and lifetime.
 4. **Is it structure rather than schema?** Grouping things under a parent is
    what `ad4m://has_child` and `add_child` are for; you do not need a class to
-   express "these belong together".
+   express "these belong together". A class whose instances hold others names
+   that relation `children` (or aliases it: `"alias": {"Container":
+   "children"}`), and then every containment read follows it.
 
 Add a class when the thing has its own identity, its own properties, and its
 own lifecycle — when you would want to query for *it*, not for something that

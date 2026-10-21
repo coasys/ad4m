@@ -1173,6 +1173,12 @@ pub(crate) async fn write_mint_scope_links(
                  (id + predicate); `Traverse` scopes describe a read and name no single parent"
             );
         }
+        Scope::Contained(_) => {
+            anyhow::bail!(
+                "auto_processor `{processor_id}`: mint_scope must be a `Raw` scope \
+                 (id + predicate); a containment scope `{{ id }}` names no predicate to write"
+            );
+        }
     };
     for base in bases {
         perspective

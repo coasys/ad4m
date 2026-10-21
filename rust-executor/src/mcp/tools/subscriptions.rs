@@ -7,6 +7,7 @@
 use super::Ad4mMcpHandler;
 use crate::agent::AgentService;
 use crate::mcp::shacl;
+use crate::perspectives::model_query::builtin_classes::CONTAINER_URI;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -89,7 +90,7 @@ fn validate_sparql_iri(s: &str) -> Result<&str, String> {
 impl Ad4mMcpHandler {
     /// Generate a waker query config for watching model changes in a perspective
     #[tool(
-        description = "Generate a SPARQL query config for watching changes to a subject class in a perspective. This does NOT create a live subscription — it returns a query and config that you pass to an external waker process. The waker uses perspective query subscriptions for live updates. Flow: 1) Call this tool to get the query config, 2) Store subscription_id + context in memory, 3) Add waker_config to the waker's config file and restart it, 4) When woken, use MCP tools to fetch the latest data. The query is derived from the SHACL class definition — no hardcoded type predicates."
+        description = "Generate a query config for watching changes in a perspective. This does NOT create a live subscription — it returns a query and config that you pass to an external waker process. The waker uses perspective query subscriptions for live updates. Flow: 1) Call this tool to get the query config, 2) Store subscription_id + context in memory, 3) Add waker_config to the waker's config file and restart it, 4) When woken, use MCP tools to fetch the latest data. With parent, the query is a model query over the built-in class in query_class (ad4m://Container): the parent's children, whatever their class and however the parent holds them; subscribe to it with a model subscription. Otherwise it is SPARQL derived from the SHACL class definition — no hardcoded type predicates."
     )]
     pub async fn generate_waker_query(&self, params: Parameters<SubscribeToModelParams>) -> String {
         let p = &params.0;
@@ -99,16 +100,22 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
+        // Under a parent, the subscription is a model query over the built-in
+        // Container (#1446): that parent's row, whose `children` are
+        // everything it holds, through `has_child` or its class's own
+        // `children` relation. It changes when a child is added or removed.
+        let mut query_class: Option<&str> = None;
         let query = if let Some(ref parent) = p.parent {
-            // Scope to children of a specific parent
             let parent_encoded = Self::wrap_bare_as_literal(parent);
             if let Err(e) = validate_sparql_iri(&parent_encoded) {
                 return json!({"error": format!("Invalid parent: {}", e)}).to_string();
             }
-            format!(
-                "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?source) = \"{}\" && STR(?predicate) = \"ad4m://has_child\") }}",
-                parent_encoded
-            )
+            query_class = Some(CONTAINER_URI);
+            json!({
+                "where": { "id": parent_encoded },
+                "properties": ["children"],
+            })
+            .to_string()
         } else if let Some(ref predicate) = p.predicate {
             if let Err(e) = validate_sparql_iri(predicate) {
                 return json!({"error": format!("Invalid predicate: {}", e)}).to_string();
@@ -168,6 +175,7 @@ impl Ad4mMcpHandler {
             "predicate": p.predicate,
             "target_value": p.target_value,
             "query": query,
+            "query_class": query_class,
             "message": format!(
                 "Subscription {} created for {} changes{}.",
                 subscription_id,

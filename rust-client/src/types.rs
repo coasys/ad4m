@@ -132,6 +132,9 @@ pub struct PerspectiveHandle {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {
     pub ad4m_executor_version: String,
+    /// Absent from executors built before it was reported.
+    #[serde(default)]
+    pub ad4m_executor_commit: Option<String>,
     pub is_initialized: bool,
     pub is_unlocked: bool,
 }

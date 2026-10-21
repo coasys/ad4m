@@ -1,23 +1,27 @@
-//! Class-agnostic `ad4m://has_child` tree operations: `add_child` and
+//! Containment through the built-in `Container` (#1446): `add_child` and
 //! `get_children`.
 //!
-//! `instance_create(parent=…)` and `instance_query(parent=…)` cover the
-//! class-aware side of the tree. These two are for the raw link: parents
-//! that are not subject-class instances at all (`ad4m://self`, the plain-string
-//! ids some apps hand out), and listing children regardless of class.
+//! A node holds X when it links X with `ad4m://has_child`, whatever the node
+//! is (`ad4m://self`, a plain-string id, an instance of any class), or when it
+//! is an instance of a class whose `children` relation (by name, or aliased to
+//! `children`) links X, such as a We block over `we://child`. Both tools take
+//! that answer from the executor and look up no predicate themselves.
+//! `instance_create(parent=…)` and `instance_query(parent=…)` read and write
+//! the same containment for one class.
 //!
-//! They call the RPC methods `perspective.addLink` and `perspective.queryLinks` through the
-//! handler map, so those methods' guards apply.
+//! Both admit the caller through `get_writable_perspective` /
+//! `get_readable_perspective`, the guards of the perspective RPC methods that
+//! write and read.
 
 use super::{
-    error_json, link_target, pretty, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, HAS_CHILD,
+    error_json, link_target, pretty, run_model_query, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT,
     MAX_QUERY_LIMIT,
 };
-use crate::types::DecoratedLinkExpression;
+use crate::perspectives::model_query::builtin_classes::CONTAINER_URI;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// Parameters for adding a child to a parent node
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -47,87 +51,94 @@ pub struct GetChildrenParams {
 }
 
 impl Ad4mMcpHandler {
-    /// Link a child node under a parent via `ad4m://has_child`.
+    /// Put a child node under a parent, through `Container`.
     #[tool(
-        description = "Link a child node under a parent with ad4m://has_child — the generic containment tree apps build their structure on: items in a container, containers under ad4m://self, e.g. messages in a channel or tasks in a board. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=…) when creating a new instance, and instance_add_to_collection when the parent's class declares the collection; use this for nodes that are not instances (e.g. parent='ad4m://self') or to re-parent an existing instance."
+        description = "Put a child node under a parent — the containment tree apps build their structure on: items in a container, containers under ad4m://self, e.g. messages in a channel, blocks in a document, tasks in a board. The parent decides how it holds the child: if it is an instance of a class whose children relation is its own (a block over we://child), that relation's adder runs; otherwise one ad4m://has_child link is written, which holds on any node. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=…) when creating a new instance; use this for an existing node (e.g. to file a channel under parent='ad4m://self') or to re-parent one."
     )]
     pub async fn add_child(&self, params: Parameters<AddChildParams>) -> String {
         let p = &params.0;
+        let (mut perspective, agent_context) =
+            match self.get_writable_perspective(&p.perspective_id).await {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
         let parent = p.parent.trim();
         let child = p.child.trim();
         if parent.is_empty() || child.is_empty() {
             return error_json("parent and child must both be non-empty URIs");
         }
-        let params = json!({
-            "uuid": p.perspective_id,
-            "link": {
-                "source": link_target(parent),
-                "predicate": HAS_CHILD,
-                "target": link_target(child),
-            },
-            "status": "shared",
-        });
-        let added = self
-            .call::<DecoratedLinkExpression>("perspective.addLink", params, |e| {
-                error_json(format!("Error adding child: {}", e.message))
-            })
-            .await;
-        match added {
-            Ok(decorated) => pretty(&json!({
+        let (parent, child) = (link_target(parent), link_target(child));
+        match perspective
+            .add_to_container(&parent, &child, None, &agent_context)
+            .await
+        {
+            Ok(()) => pretty(&json!({
                 "success": true,
-                "link": {
-                    "source": decorated.data.source,
-                    "predicate": decorated.data.predicate,
-                    "target": decorated.data.target,
-                    "timestamp": decorated.timestamp,
-                },
+                "parent": parent,
+                "child": child,
             })),
-            Err(e) => e,
+            Err(e) => error_json(format!("Error adding child: {e:#}")),
         }
     }
 
-    /// List the `ad4m://has_child` children of a node, regardless of class.
+    /// List the children of a node, through `Container`.
     #[tool(
-        description = "List the children of a node linked via ad4m://has_child, regardless of their class: id, timestamp and author of each child link, oldest first. Class-agnostic — works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent); to read the ones that carry text as a transcript, instance_transcript."
+        description = "List the children of a node, regardless of their class: id, timestamp and author of each child's link, oldest first. A node's children are its ad4m://has_child targets, whatever the node is, plus, when it is an instance of a class whose children relation is its own (a block over we://child), that relation's targets. Works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent); to read the ones that carry text as a transcript, instance_transcript."
     )]
     pub async fn get_children(&self, params: Parameters<GetChildrenParams>) -> String {
         let p = &params.0;
+        let perspective = match self.get_readable_perspective(&p.perspective_id).await {
+            Ok(perspective) => perspective,
+            Err(e) => return e,
+        };
         let parent = p.parent.trim();
         if parent.is_empty() {
             return error_json("parent must be a non-empty URI");
         }
-        let params = json!({
-            "uuid": p.perspective_id,
-            "source": link_target(parent),
-            "predicate": HAS_CHILD,
+        let parent = link_target(parent);
+        // One Container row: its `children` are everything it holds, oldest
+        // first, and `__links.children` the links behind them.
+        let query = json!({
+            "where": { "id": parent },
+            "properties": ["children"],
+            "links": ["children"],
         });
-        let queried = self
-            .call::<Vec<DecoratedLinkExpression>>("perspective.queryLinks", params, |e| {
-                error_json(format!("Error getting children: {}", e.message))
-            })
-            .await;
-        let mut links = match queried {
-            Ok(links) => links,
-            Err(e) => return e,
+        let rows = match run_model_query(&perspective, CONTAINER_URI, &query).await {
+            Ok((rows, _)) => rows,
+            Err(e) => return error_json(format!("Error getting children: {e}")),
         };
-        links.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        let total = links.len();
+        let row = rows.into_iter().next().unwrap_or(Value::Null);
+        let ids: Vec<String> = row["children"]
+            .as_array()
+            .map(|c| {
+                c.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let links = row["__links"]["children"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let total = ids.len();
         let limit = p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT);
-        if links.len() > limit {
-            links = links.split_off(links.len() - limit);
-        }
-        let children: Vec<serde_json::Value> = links
+        let children: Vec<Value> = ids
             .iter()
-            .map(|l| {
+            .skip(total.saturating_sub(limit))
+            .map(|id| {
+                // The earliest link that holds it.
+                let link = links
+                    .iter()
+                    .find(|l| l["data"]["target"].as_str() == Some(id.as_str()));
                 json!({
-                    "id": l.data.target,
-                    "timestamp": l.timestamp,
-                    "author": l.author,
+                    "id": id,
+                    "timestamp": link.map(|l| l["timestamp"].clone()).unwrap_or(Value::Null),
+                    "author": link.map(|l| l["author"].clone()).unwrap_or(Value::Null),
                 })
             })
             .collect();
         pretty(&json!({
-            "parent": link_target(parent),
+            "parent": parent,
             "count": children.len(),
             "total_count": total,
             "children": children,

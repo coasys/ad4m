@@ -88,7 +88,7 @@ instance_create(perspective_id, class_name="Message",
     base_uri is auto-generated when omitted. Returns the instance's id.
 
 instance_query(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
-  → instances that are ad4m://has_child children of parent, as raw property maps
+  → instances parent contains (see "Tree structure"), as raw property maps
     (id, author, timestamp, one key per property).
     There is NO order parameter: results come oldest-first, and limit keeps the
     OLDEST N — so this is not how you read "the latest messages"
@@ -130,8 +130,12 @@ time.
 
 ## Tree structure
 
-Instances below a parent are linked via `ad4m://has_child`. The root of a
-perspective's tree is `ad4m://self`.
+A node contains its children through the built-in class `Container`: its
+`ad4m://has_child` links count whatever the node is, and when the node is an
+instance of a class whose `children` relation is its own (a block over
+`we://child`), that relation's links count too. A child can sit in several
+containers. The root of a perspective's tree is `ad4m://self`. Every tool below
+answers from this one rule; none of them asks you for a predicate.
 
 Not every perspective has a tree at all — a flat perspective (all instances
 directly in the perspective, no channels) is valid and common for simple
@@ -145,8 +149,10 @@ Two class-agnostic tools work on this tree directly:
   `parent="ad4m://self"` gives the top-level channels. `limit` defaults to 100,
   capped at 500. The parameter is `parent` — there is no `id` parameter and no
   `parent_address`.
-- `add_child(perspective_id, parent, child)` links an existing node under a
-  parent — for re-parenting, or for parents that are not instances.
+- `add_child(perspective_id, parent, child)` puts an existing node under a
+  parent — for re-parenting, or for parents that are not instances. The parent
+  decides how: its class's own `children` relation when it has one, else an
+  `ad4m://has_child` link.
 
 New instances do not need `add_child`: `instance_create(parent=…)` already
 writes the child link. Bare strings passed as `parent` / `child` are wrapped as
