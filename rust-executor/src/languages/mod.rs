@@ -110,6 +110,9 @@ pub struct LanguageController {
 
     // Cached language names (address -> name)
     language_names: Arc<TokioMutex<HashMap<String, String>>>,
+
+    // One lock per address `install_language` has seen: one install of a language at a time
+    installs: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
 }
 
 impl LanguageController {
@@ -135,6 +138,7 @@ impl LanguageController {
             system_addresses: Arc::new(TokioMutex::new(SystemLanguageAddresses::default())),
             language_aliases: Arc::new(TokioMutex::new(HashMap::new())),
             language_names: Arc::new(TokioMutex::new(HashMap::new())),
+            installs: Arc::new(TokioMutex::new(HashMap::new())),
         }
     }
 
@@ -288,10 +292,13 @@ impl LanguageController {
         capability::register_capabilities(&language_address, capabilities);
         info!("Callbacks registered for {}", label);
 
-        // Cache the language name for use by other log sites
+        // Cache the language name for use by other log sites, unless one was
+        // set for it already (`set_language_name`, e.g. a templated name)
         if let Some(name) = &runtime_handle.language_name {
             let mut names = self.language_names.lock().await;
-            names.insert(language_address.clone(), name.clone());
+            names
+                .entry(language_address.clone())
+                .or_insert_with(|| name.clone());
         }
 
         // Store the runtime handle
@@ -465,7 +472,7 @@ impl LanguageController {
     }
 
     /// Calculate IPFS hash for a language bundle using the same algorithm as utils_extension::hash()
-    fn calculate_language_hash(&self, bundle_content: &str) -> String {
+    pub(crate) fn calculate_language_hash(&self, bundle_content: &str) -> String {
         use cid::Cid;
         use multibase::Base;
         use multihash_codetable::{Code, MultihashDigest};
@@ -840,9 +847,20 @@ impl LanguageController {
         Ok(())
     }
 
+    /// Load `language`, fetching its bundle first if it is not on disk. One
+    /// install per address runs at a time: a caller that arrives during one
+    /// waits for it and then finds the language loaded.
     pub async fn install_language(language: Address) -> Result<(), AnyError> {
         log::debug!("install_language called for: {}", language);
         let controller = Self::global_instance();
+        let lock = controller
+            .installs
+            .lock()
+            .await
+            .entry(language.clone())
+            .or_default()
+            .clone();
+        let _installing = lock.lock().await;
 
         // Check if the language is already loaded in Rust runtimes
         if controller.is_language_loaded(&language).await {
@@ -850,136 +868,120 @@ impl LanguageController {
             return Ok(());
         }
 
-        let language_dir = languages_directory().join(&language);
+        let bundle_path = controller.fetch_language(&language).await?;
+
+        // Load into a per-language Deno runtime
+        controller
+            .load_language(bundle_path, false)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "install_language: failed to load language runtime for {}: {}",
+                    language,
+                    e
+                )
+            })?;
+        info!("install_language: loaded language runtime for {}", language);
+        Ok(())
+    }
+
+    /// Make sure `language`'s bundle is on disk and hashes to its address,
+    /// fetching it from the language language if it is not there; returns its
+    /// path. Does not load it.
+    pub(crate) async fn fetch_language(&self, language: &str) -> Result<PathBuf, AnyError> {
+        let language_dir = languages_directory().join(language);
         let meta_path = language_dir.join("meta.json");
         let bundle_path = language_dir.join("bundle.js");
 
-        // Check if the language language is loaded on the Rust side
+        // A bundle whose hash is not its address must not be installed: a
+        // neighbourhood published with it would name a link language that no
+        // executor can use.
+        let verify = |source: &str| {
+            let hash = self.calculate_language_hash(source);
+            if hash == language {
+                return Ok(());
+            }
+            error!(
+                "install_language: hash mismatch for {} (computed {}), not installing",
+                language, hash
+            );
+            Err(anyhow::anyhow!(
+                "install_language: hash mismatch for {} (computed {}). \
+                 The language language returned source that does not match \
+                 the requested content address; refusing to install.",
+                language,
+                hash
+            ))
+        };
+
+        if bundle_path.exists() {
+            verify(&fs::read_to_string(&bundle_path)?)?;
+            return Ok(bundle_path);
+        }
+
         let language_language_address = {
-            let sys = controller.system_addresses.lock().await;
+            let sys = self.system_addresses.lock().await;
             sys.language_language.clone()
         };
-
-        // Get bundle source: from disk or from the language language. A
-        // language another node has just published may take a while to reach
-        // the language language's store, so retry, but within a deadline.
-        let source_from_language_language = !bundle_path.exists();
-        let source = if !source_from_language_language {
-            Some(fs::read_to_string(&bundle_path)?)
-        } else if let Some(ref ll_addr) = language_language_address {
-            let language_lit =
-                serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
-            let source_script = format!(
-                r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
-                language_lit
-            );
-            let (controller, ll_addr, source_script) = (&controller, ll_addr, &source_script);
-            fetch_backoff::fetch_with_backoff(
-                &format!("the source of language {}", language),
-                fetch_backoff::SOURCE_FETCH_DEADLINE,
-                move || async move {
-                    let source = controller
-                        .execute_on_language(ll_addr, source_script)
-                        .await?;
-                    // A language-language that returns null/undefined for an
-                    // unknown address stringifies to the literal "null" /
-                    // "undefined" here: not available (yet).
-                    let trimmed = source.trim();
-                    let missing = trimmed.is_empty() || trimmed == "null" || trimmed == "undefined";
-                    Ok::<_, LanguageError>((!missing).then_some(source))
-                },
-            )
-            .await
-        } else {
-            None
-        };
-
-        // If we have source, save and load into a per-language runtime
-        if let Some(source) = source {
-            // Compute hash and verify it matches the expected address.
-            //
-            // Previously this returned Ok(()) on mismatch, which left
-            // callers (e.g. `neighbourhood_publish_from_perspective_with_context`
-            // in neighbourhoods.rs) believing the language had been
-            // installed even though nothing was loaded. The neighbourhood
-            // would then be published referencing a link_language that
-            // this node could not actually use, surfacing much later as
-            // a mysterious sync failure. Propagate the hash mismatch as
-            // a hard error so the caller knows the install did not
-            // happen.
-            let hash = controller.calculate_language_hash(&source);
-            if hash != language {
-                error!("install_language: COULDN'T VERIFY HASH OF LANGUAGE!");
-                error!("install_language: Address: {}", language);
-                error!("install_language: Computed hash: {}", hash);
-                error!("install_language: LANGUAGE WILL NOT BE INSTALLED");
-                return Err(anyhow::anyhow!(
-                    "install_language: hash mismatch for {} (computed {}). \
-                     The language language returned source that does not match \
-                     the requested content address; refusing to install.",
-                    language,
-                    hash
-                ));
-            }
-
-            // Meta is optional: it is only stored beside the bundle. Asked of
-            // the language language only for a bundle that came from it.
-            let meta: Option<JsonValue> = if meta_path.exists() {
-                let content = fs::read_to_string(&meta_path)?;
-                Some(serde_json::from_str(&content)?)
-            } else if let (true, Some(ll_addr)) = (
-                source_from_language_language,
-                language_language_address.as_ref(),
-            ) {
-                let language_lit =
-                    serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
-                let meta_script = format!(
-                    r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
-                    language_lit
-                );
-                let (controller, ll_addr, meta_script) = (&controller, ll_addr, &meta_script);
-                let expression = fetch_backoff::fetch_with_backoff(
-                    &format!("the meta of language {}", language),
-                    fetch_backoff::META_FETCH_DEADLINE,
-                    move || async move {
-                        let result = controller.execute_on_language(ll_addr, meta_script).await?;
-                        let expression = serde_json::from_str::<JsonValue>(&result)
-                            .ok()
-                            .filter(|expression| !expression.is_null());
-                        Ok::<_, LanguageError>(expression)
-                    },
-                )
-                .await;
-                expression.and_then(|expression| expression.get("data").cloned())
-            } else {
-                None
-            };
-
-            // Save language bundle to disk
-            let (_saved_hash, saved_bundle_path) =
-                controller.save_language_bundle(&source, meta.as_ref())?;
-            info!("install_language: saved language bundle for {}", language);
-
-            // Load into a per-language Deno runtime
-            controller
-                .load_language(saved_bundle_path, false)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "install_language: failed to load language runtime for {}: {}",
-                        language,
-                        e
-                    )
-                })?;
-            info!("install_language: loaded language runtime for {}", language);
-        } else {
+        let Some(ll_addr) = language_language_address.as_ref() else {
             return Err(anyhow::anyhow!(
                 "install_language: no source available for {}",
                 language
             ));
-        }
+        };
+        let language_lit = serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
 
-        Ok(())
+        // A language another executor has just published may take a while to
+        // reach the language language's store, so retry, but within a deadline.
+        let source_script = format!(
+            r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
+            language_lit
+        );
+        let source_script = &source_script;
+        let source = fetch_backoff::fetch_with_backoff(
+            &format!("the source of language {}", language),
+            fetch_backoff::SOURCE_FETCH_DEADLINE,
+            move || async move {
+                let source = self.execute_on_language(ll_addr, source_script).await?;
+                // A language-language that returns null/undefined for an
+                // unknown address stringifies to the literal "null" /
+                // "undefined" here: not available (yet).
+                let trimmed = source.trim();
+                let missing = trimmed.is_empty() || trimmed == "null" || trimmed == "undefined";
+                Ok::<_, LanguageError>((!missing).then_some(source))
+            },
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("install_language: no source available for {}", language))?;
+        verify(&source)?;
+
+        // Meta is optional: it is only stored beside the bundle.
+        let meta: Option<JsonValue> = if meta_path.exists() {
+            Some(serde_json::from_str(&fs::read_to_string(&meta_path)?)?)
+        } else {
+            let meta_script = format!(
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
+                language_lit
+            );
+            let meta_script = &meta_script;
+            fetch_backoff::fetch_with_backoff(
+                &format!("the meta of language {}", language),
+                fetch_backoff::META_FETCH_DEADLINE,
+                move || async move {
+                    let result = self.execute_on_language(ll_addr, meta_script).await?;
+                    let expression = serde_json::from_str::<JsonValue>(&result)
+                        .ok()
+                        .filter(|expression| !expression.is_null());
+                    Ok::<_, LanguageError>(expression)
+                },
+            )
+            .await
+            .and_then(|expression| expression.get("data").cloned())
+        };
+
+        let (_saved_hash, saved_bundle_path) = self.save_language_bundle(&source, meta.as_ref())?;
+        info!("install_language: saved language bundle for {}", language);
+        Ok(saved_bundle_path)
     }
 
     pub async fn create_neighbourhood(neighbourhood: Neighbourhood) -> Result<Address, AnyError> {
@@ -1654,6 +1656,24 @@ impl LanguageController {
 
         // Check if already loaded
         if self.is_language_loaded(&resolved_address).await {
+            return Ok(Language::new(resolved_address));
+        }
+
+        // A bundle on disk is one this executor templated, published or
+        // installed, and boot loads every one of them as it is: load it (or
+        // wait for the install already loading it), without asking the
+        // language language, which may not have it yet.
+        if languages_directory()
+            .join(&resolved_address)
+            .join("bundle.js")
+            .exists()
+        {
+            Self::install_language(resolved_address.clone())
+                .await
+                .map_err(|e| LanguageError::LoadError {
+                    address: resolved_address.clone(),
+                    message: format!("Failed to install language: {}", e),
+                })?;
             return Ok(Language::new(resolved_address));
         }
 

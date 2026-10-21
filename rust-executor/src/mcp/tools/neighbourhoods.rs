@@ -320,22 +320,21 @@ pub(crate) async fn clone_link_language(
         );
     }
 
-    if bundle_path.exists() {
-        controller
-            .load_language(bundle_path, false)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to load cloned language into runtime: {}. The language was published but cannot be used locally.",
-                    e
-                )
-            })?;
-    } else {
+    if !bundle_path.exists() {
         return Err(format!(
             "Language bundle not found at expected path: {:?}",
             bundle_path
         ));
     }
+    // Loaded in the background, as `language.applyTemplate` does: the
+    // perspective's `ensure_link_language` waits for this install and its
+    // state reports a failure.
+    let installing = saved_hash.clone();
+    tokio::spawn(async move {
+        if let Err(e) = LanguageController::install_language(installing).await {
+            log::warn!("Failed to load cloned language into runtime: {}", e);
+        }
+    });
 
     log::info!(
         "Cloned link language template '{}' → '{}' (name: {})",

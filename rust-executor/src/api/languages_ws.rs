@@ -253,16 +253,17 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
 
-    let bundle_on_disk = crate::utils::languages_directory()
-        .join(&hash)
-        .join("bundle.js");
-    if bundle_on_disk.exists() {
-        if let Err(e) = controller.load_language(bundle_on_disk, false).await {
+    // Loading it starts a runtime and, for a Holochain link language, installs
+    // and joins its app. Nothing here needs it loaded, so the caller gets the
+    // address now; whatever uses the language next (a publish attaching it, a
+    // `language.get`) waits for this install rather than starting another.
+    controller.set_language_name(&hash, &input_name).await;
+    let address = hash.clone();
+    tokio::spawn(async move {
+        if let Err(e) = LanguageController::install_language(address).await {
             log::warn!("Failed to load templated language into runtime: {}", e);
         }
-    }
-
-    controller.set_language_name(&hash, &input_name).await;
+    });
 
     Ok(serde_json::to_value(LanguageRef {
         address: hash,

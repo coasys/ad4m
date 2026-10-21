@@ -32,7 +32,12 @@ pub async fn neighbourhood_publish_from_perspective_with_context(
 ) -> Result<String, AnyError> {
     let perspective = get_perspective(uuid).ok_or(anyhow!("Perspective not found"))?;
 
-    LanguageController::install_language(link_language.clone()).await?;
+    // The link language must exist before a neighbourhood names it. Loading it
+    // waits for no one here: `ensure_link_language` loads and attaches it, and
+    // the perspective's state reports how that goes.
+    LanguageController::global_instance()
+        .fetch_language(&link_language)
+        .await?;
 
     let neighbourhood = Neighbourhood {
         link_language,
@@ -165,26 +170,12 @@ pub async fn install_neighbourhood_with_context(
     );
     let neighbourhood = neighbourhood_exp.unwrap();
 
-    // Install the link language before checking its availability.
-    // This fetches the bundle from the language-language and loads it on the JS side.
-    if let Err(e) =
-        LanguageController::install_language(neighbourhood.data.link_language.clone()).await
-    {
-        log::warn!(
-            "Failed to install link language {}: {}",
-            neighbourhood.data.link_language,
-            e
-        );
-    }
-
-    let state = if LanguageController::language_by_address(neighbourhood.data.link_language.clone())
-        .await?
-        .is_some()
-    {
-        PerspectiveState::LinkLanguageInstalledButNotSynced
-    } else {
-        PerspectiveState::LinkLanguageFailedToInstall
-    };
+    // The link language is installed by the new perspective's
+    // `ensure_link_language`, not here: fetching a language another executor
+    // has just published can take until its deadline, and loading a Holochain
+    // one installs an app. The state goes on to LinkLanguageInstalledButNotSynced
+    // and Synced, or LinkLanguageFailedToInstall, and each change is an event.
+    let state = PerspectiveState::NeighbourhoodJoinInitiated;
 
     log::info!(
         "Core.install_neighbourhood(): Creating perspective {}, {:?}, {:?}",

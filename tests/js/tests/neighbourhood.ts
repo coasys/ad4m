@@ -118,7 +118,9 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
                 await testContext.makeAllNodesKnown()
-                expect(bobP1!.state).to.be.oneOf([PerspectiveState.LinkLanguageInstalledButNotSynced, PerspectiveState.Synced]);
+                // The join returns before Bob's link language is installed:
+                // its state changes arrive as events from here on.
+                expect(bobP1!.state).to.be.equal(PerspectiveState.NeighbourhoodJoinInitiated);
 
                 // Wait for Alice's link language to be wired.
                 // publishFromPerspective sets state=NeighbourhoodCreationInitiated.
