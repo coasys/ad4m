@@ -73,6 +73,20 @@ impl LanguageRuntimeHandle {
         })
     }
 
+    /// Test-only: a handle with no runtime behind it. The test answers the
+    /// requests that arrive on `tx`'s receiver, in whatever order it likes.
+    #[cfg(test)]
+    pub(crate) fn from_channel(
+        language_address: String,
+        tx: UnboundedSender<LanguageRuntimeRequest>,
+    ) -> Self {
+        Self {
+            language_address,
+            language_name: None,
+            tx,
+        }
+    }
+
     /// Send an operation and wait for the result.
     async fn send(&self, operation: LanguageOperation) -> Result<String, String> {
         let op_name = format!("{:?}", operation);

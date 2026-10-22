@@ -56,6 +56,7 @@ import {
   withTimeout,
   insecureEndpointReason,
   closeWakerClient,
+  restoreSavedSubscription,
   hasLiveCredential,
   redactForDisplay,
   isLoopbackEndpoint,
@@ -1632,7 +1633,8 @@ describe("postWake", () => {
     };
 
     const logger = makeMockLogger();
-    await postWake(config, sub, "did:key:abc", logger);
+    // The manager marks the mentions seen only on true.
+    expect(await postWake(config, sub, "did:key:abc", logger)).toBe(true);
 
     expect(fetch).toHaveBeenCalledOnce();
     const call = vi.mocked(fetch).mock.calls[0];
@@ -1665,7 +1667,7 @@ describe("postWake", () => {
     };
 
     const logger = makeMockLogger();
-    await postWake(config, sub, "did:key:x", logger);
+    expect(await postWake(config, sub, "did:key:x", logger)).toBe(false);
 
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining("Network error"),
@@ -1692,7 +1694,8 @@ describe("postWake", () => {
     };
 
     const logger = makeMockLogger();
-    await postWake(config, sub, "did:key:x", logger);
+    // A gateway draining for a restart answers 503: the wake did not land, so it is offered again.
+    expect(await postWake(config, sub, "did:key:x", logger)).toBe(false);
 
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining("wake POST failed: 403"),
@@ -1945,7 +1948,9 @@ describe("ad4mPlugin", () => {
               {
                 type: "text",
                 text: JSON.stringify({
+                  class: "ad4m://TextContent",
                   query: "SELECT * FROM link WHERE ...",
+                  terms: ["TestAgent", "did:key:zTest"],
                   names: ["TestAgent"],
                   did: "did:key:zTest",
                 }),
@@ -2021,7 +2026,9 @@ describe("ad4mPlugin", () => {
               {
                 type: "text",
                 text: JSON.stringify({
+                  class: "ad4m://TextContent",
                   query: "SELECT * FROM link WHERE ...",
+                  terms: ["TestAgent", "did:key:zTest"],
                   names: ["TestAgent"],
                   did: "did:key:zTest",
                 }),
@@ -2093,6 +2100,193 @@ describe("ad4mPlugin", () => {
       expect(listed).toContain("No active waker subscriptions.");
       expect(listed).toContain("Pending");
       expect(listed).toContain("mention-persp-uuid-1");
+    } finally {
+      manager.disposeAll();
+      _setSubscriptionManagerForTests(null);
+    }
+  });
+
+  /** Answers the MCP handshake, and `get_mention_waker_config` with `config`. */
+  function mockMentionConfig(config: Record<string, unknown>) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { serverInfo: { name: "ad4m" } } }),
+          { status: 200, headers: { "Content-Type": "application/json", "Mcp-Session-Id": "sess-1" } },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (body.method === "tools/call" && body.params?.name === "get_mention_waker_config") {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { content: [{ type: "text", text: JSON.stringify(config) }] },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+  }
+
+  /** Runs ad4m_subscribe_to_mentions; returns the tool result, the proxies opened and the active subscriptions. */
+  async function subscribeToMentions(config: Record<string, unknown>) {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+    mockMentionConfig(config);
+    await ad4mPlugin({
+      pluginConfig: { mode: "external", mcpEndpoint: "http://localhost:3001/mcp", token: "test-cred" },
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn(),
+      registerCli: vi.fn(),
+    });
+    const opened: any[][] = [];
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: { modelQuery: vi.fn() },
+      logger: makeMockLogger(),
+      QuerySubscriptionProxy: vi.fn(function (...args: any[]) {
+        opened.push(args);
+        return {
+          initialized: Promise.resolve(),
+          subscribe: vi.fn(() => Promise.resolve()),
+          dispose: vi.fn(),
+          onResult: vi.fn(),
+        };
+      }),
+      onWake: () => {},
+    });
+    _setSubscriptionManagerForTests(manager);
+    try {
+      const subscribeTool = registeredTools.find((t) => t.name === "ad4m_subscribe_to_mentions");
+      const result = await subscribeTool!.execute("call-1", { perspective_id: "persp-uuid-1" });
+      return { result, opened, active: manager.getActive() };
+    } finally {
+      manager.disposeAll();
+      _setSubscriptionManagerForTests(null);
+    }
+  }
+
+  it("ad4m_subscribe_to_mentions opens the executor's mention query as a model query on its class (#1446)", async () => {
+    const query = JSON.stringify({ where: { OR: [{ text: { contains: "TestAgent" } }] } });
+    const { opened, active } = await subscribeToMentions({
+      class: "ad4m://TextContent",
+      query,
+      terms: ["TestAgent", "did:key:zTest"],
+      names: ["TestAgent"],
+      did: "did:key:zTest",
+    });
+    expect(opened.map((args) => [args[0], args[1], args[3]])).toEqual([["persp-uuid-1", query, "ad4m://TextContent"]]);
+    expect(active.map((sub) => sub.className)).toEqual(["ad4m://TextContent"]);
+    // The waker's whole-word check reads them.
+    expect(active.map((sub) => sub.terms)).toEqual([["TestAgent", "did:key:zTest"]]);
+  });
+
+  it("ad4m_subscribe_to_mentions refuses a mention query without its terms", async () => {
+    const { result, opened, active } = await subscribeToMentions({
+      class: "ad4m://TextContent",
+      query: JSON.stringify({ where: { OR: [{ text: { contains: "TestAgent" } }] } }),
+      names: ["TestAgent"],
+      did: "did:key:zTest",
+    });
+    expect(JSON.stringify(result)).toContain("without its terms");
+    expect(opened).toEqual([]);
+    expect(active).toEqual([]);
+  });
+
+  it("ad4m_subscribe_to_mentions refuses an executor that still answers with SPARQL", async () => {
+    const { result, opened, active } = await subscribeToMentions({
+      query: "SELECT ?source ?predicate ?target WHERE { ... }",
+      names: ["TestAgent"],
+      did: "did:key:zTest",
+    });
+    expect(JSON.stringify(result)).toContain("Update the executor");
+    expect(opened).toEqual([]);
+    expect(active).toEqual([]);
+  });
+
+  // Test 12 (#1446): a container whose children are not Messages (a We call
+  // holding blocks). The tool asks for no class; the executor's answer is a
+  // model subscription over Container, and a new child of any class wakes.
+  it("ad4m_subscribe_to_children subscribes through Container and wakes on a child of any class", async () => {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+    const asked: any[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { serverInfo: { name: "ad4m" } } }),
+          { status: 200, headers: { "Content-Type": "application/json", "Mcp-Session-Id": "sess-1" } },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (body.method === "tools/call" && body.params?.name === "generate_waker_query") {
+        asked.push(body.params.arguments);
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                subscription_id: "children-sub-1",
+                query: JSON.stringify({ where: { id: "we://call/1" }, properties: ["children"] }),
+                query_class: "ad4m://Container",
+              }),
+            }],
+          },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+    await ad4mPlugin({
+      pluginConfig: { mode: "external", mcpEndpoint: "http://localhost:3001/mcp", token: "test-cred" },
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn(),
+      registerCli: vi.fn(),
+    });
+
+    let deliver: ((result: any) => void) | undefined;
+    const constructed: any[][] = [];
+    const wakes: any[] = [];
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: { modelQuery: vi.fn() },
+      logger: makeMockLogger(),
+      QuerySubscriptionProxy: vi.fn(function (...args: any[]) {
+        constructed.push(args);
+        return {
+          initialized: Promise.resolve(),
+          subscribe: vi.fn(() => Promise.resolve()),
+          dispose: vi.fn(),
+          onResult: vi.fn((cb: any) => { deliver = cb; }),
+        };
+      }),
+      debounceMs: 10,
+      onWake: (_sub, result) => { wakes.push(result); },
+    });
+    _setSubscriptionManagerForTests(manager);
+    try {
+      const tool = registeredTools.find((t) => t.name === "ad4m_subscribe_to_children")!;
+      const res = await tool.execute("call-1", {
+        perspective_id: "persp-uuid-1",
+        expression_address: "we://call/1",
+      });
+      expect(res.content[0].text).toContain("Subscribed to children of we://call/1");
+      // No hard-coded child class.
+      expect(asked[0].class_name).not.toBe("Message");
+      // A model subscription over Container, not has_child SPARQL.
+      expect(constructed[0][1]).toBe(JSON.stringify({ where: { id: "we://call/1" }, properties: ["children"] }));
+      expect(constructed[0][3]).toBe("ad4m://Container");
+      expect(manager.getActive()[0].className).toBe("ad4m://Container");
+
+      // A TextBlock (not a Message) lands under the call: it wakes.
+      deliver!({ instances: [{ id: "we://call/1", children: ["we://text-block/1"] }], totalCount: 1 });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0].instances[0].children).toEqual(["we://text-block/1"]);
     } finally {
       manager.disposeAll();
       _setSubscriptionManagerForTests(null);
@@ -3326,7 +3520,7 @@ describe("WakerSubscriptionManager", () => {
   };
 
   const mockPerspectiveClientSimple = {
-    querySparql: vi.fn(() => Promise.resolve([])),
+    modelQuery: vi.fn(() => Promise.resolve({ instances: [], totalCount: 0 })),
   };
 
   it("should throw when the executor rejects the subscription, and not keep it active", async () => {
@@ -3350,6 +3544,8 @@ describe("WakerSubscriptionManager", () => {
     await expect(manager.subscribe({
       id: "mention-fail",
       type: "mention",
+      className: "ad4m://TextContent",
+      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "",
       query: "SELECT * FROM link",
@@ -3420,6 +3616,8 @@ describe("WakerSubscriptionManager", () => {
     await expect(manager.subscribe({
       id: "mention-gone",
       type: "mention",
+      className: "ad4m://TextContent",
+      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "",
       query: "SELECT * FROM link",
@@ -3535,6 +3733,8 @@ describe("WakerSubscriptionManager", () => {
     await manager.subscribe({
       id: "test-false",
       type: "mention",
+      className: "ad4m://TextContent",
+      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "",
       query: "SELECT * FROM link",
@@ -3546,7 +3746,7 @@ describe("WakerSubscriptionManager", () => {
     expect(wakeCount).toBe(0);
 
     // Deliver a real result — should fire
-    mock.deliver([{ source: "channel-1", target: "literal://string:Hey @you" }]);
+    mock.deliver({ instances: [{ id: 'channel-1', text: "hi bot" }] });
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
     // Seen messages should contain the message address
@@ -3572,21 +3772,20 @@ describe("WakerSubscriptionManager", () => {
     await manager.subscribe({
       id: "test-seen",
       type: "mention",
+      className: "ad4m://TextContent",
+      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "",
       query: "SELECT * FROM link",
     });
 
     // Deliver same message that was already seen — should NOT wake
-    mock.deliver([{ source: "channel-1", target: "literal://string:Hey @you" }]);
+    mock.deliver({ instances: [{ id: 'channel-1', text: "hi bot" }] });
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(0);
 
     // Deliver a new message — should wake
-    mock.deliver([
-      { source: "channel-1", target: "literal://string:Hey @you" },
-      { source: "channel-2", target: "literal://string:@you check this" },
-    ]);
+    mock.deliver({ instances: [{ id: 'channel-1', text: "hi bot" }, { id: 'channel-2', text: "hi bot" }] });
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
 
@@ -3632,18 +3831,19 @@ describe("WakerSubscriptionManager", () => {
     const mock = makeMockProxy();
     let capturedMentions: any[] | undefined;
 
-    // Mock perspectiveClient.querySparql to return has_child links for parent resolution
+    // Mock perspectiveClient.modelQuery: the executor's Container answers
+    // which containers hold each message (one step in) and what is above them.
+    const rows = (ids: string[]) => ({ instances: ids.map((id) => ({ id })), totalCount: ids.length });
     const mockPerspectiveClient = {
-      querySparql: vi.fn((_perspectiveId: string, query: string) => {
+      modelQuery: vi.fn((_perspectiveId: string, className: string, queryJson: string) => {
+        expect(className).toBe("ad4m://Container");
+        const { parent } = JSON.parse(queryJson);
+        if (parent.transitive) return Promise.resolve(rows([]));
         // msg-1 has two parents (channel + conversation thread)
-        if (query.includes("msg-1")) {
-          return Promise.resolve([{ source: "channel-abc" }, { source: "conversation-xyz" }]);
-        }
+        if (parent.ids.includes("msg-1")) return Promise.resolve(rows(["channel-abc", "conversation-xyz"]));
         // msg-2 is only in channel-abc
-        if (query.includes("msg-2")) {
-          return Promise.resolve([{ source: "channel-abc" }]);
-        }
-        return Promise.resolve([]);
+        if (parent.ids.includes("msg-2")) return Promise.resolve(rows(["channel-abc"]));
+        return Promise.resolve(rows([]));
       }),
     };
 
@@ -3660,20 +3860,19 @@ describe("WakerSubscriptionManager", () => {
     await manager.subscribe({
       id: "test-multi-parent",
       type: "mention",
+      className: "ad4m://TextContent",
+      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "fallback-channel",
       query: "SELECT * FROM link",
     });
 
-    // Body links: source = message address, target = body content with mention
-    mock.deliver([
-      { source: "msg-1", target: "literal://string:Hey @Marvin!" },
-      { source: "msg-2", target: "literal://string:@Marvin check this" },
-    ]);
+    // Mention model results carry the record id and its text.
+    mock.deliver({ instances: [{ id: 'msg-1', text: "hi bot" }, { id: 'msg-2', text: "hi bot" }] });
     await new Promise(r => setTimeout(r, 50));
 
-    // One parent lookup per message, then one batched lookup per ancestor level.
-    expect(mockPerspectiveClient.querySparql).toHaveBeenCalledTimes(4);
+    // Per message: one step in for its parents, one bounded walk for what is above them.
+    expect(mockPerspectiveClient.modelQuery).toHaveBeenCalledTimes(4);
     expect(capturedMentions).toBeDefined();
     expect(capturedMentions).toHaveLength(2);
     // msg-1 has two parents
@@ -3692,7 +3891,7 @@ describe("WakerSubscriptionManager", () => {
     let capturedMentions: any[] | undefined;
 
     const mockPerspectiveClient = {
-      querySparql: vi.fn(() => Promise.resolve([])),
+      modelQuery: vi.fn(() => Promise.resolve({ instances: [], totalCount: 0 })),
     };
 
     const manager = new WakerSubscriptionManager({
@@ -3708,12 +3907,14 @@ describe("WakerSubscriptionManager", () => {
     await manager.subscribe({
       id: "test-no-parent",
       type: "mention",
+      className: "ad4m://TextContent",
+      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "fallback-channel",
       query: "SELECT * FROM link",
     });
 
-    mock.deliver([{ source: "msg-1", target: "literal://string:Hey @Marvin!" }]);
+    mock.deliver({ instances: [{ id: 'msg-1', text: "hi bot" }] });
     await new Promise(r => setTimeout(r, 50));
 
     expect(capturedMentions).toHaveLength(1);
@@ -3746,12 +3947,14 @@ describe("WakerSubscriptionManager", () => {
     await manager.subscribe({
       id: "test-parent-fail",
       type: "mention",
+      className: "ad4m://TextContent",
+      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "fallback-channel",
       query: "SELECT * FROM link",
     });
 
-    mock.deliver([{ source: "msg-1", target: "literal://string:Hey @Marvin!" }]);
+    mock.deliver({ instances: [{ id: 'msg-1', text: "hi bot" }] });
     await new Promise(r => setTimeout(r, 50));
 
     // Should still wake with empty parents for the message
@@ -3769,7 +3972,7 @@ describe("WakerSubscriptionManager disposal races", () => {
     info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
   });
   const perspectiveClient = {
-    querySparql: vi.fn(() => Promise.resolve([])),
+    modelQuery: vi.fn(() => Promise.resolve({ instances: [], totalCount: 0 })),
   };
 
   /** A proxy whose subscribe() only settles when the test says so. */
@@ -3788,6 +3991,8 @@ describe("WakerSubscriptionManager disposal races", () => {
   const sub: WakerSubscription = {
     id: "mention-race",
     type: "mention",
+    className: "ad4m://TextContent",
+    terms: ["bot"],
     perspective: "fake-uuid",
     channel: "",
     query: "SELECT * FROM link",
@@ -3897,6 +4102,73 @@ describe("closeWakerClient", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("already gone"));
     // A client that was never created is not an error.
     expect(() => closeWakerClient(null)).not.toThrow();
+  });
+});
+
+describe("restoreSavedSubscription", () => {
+  const legacy: WakerSubscription = {
+    id: "mention-persp-legacy",
+    type: "mention",
+    perspective: "persp-legacy",
+    channel: "",
+    query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . }",
+  };
+
+  it("asks the executor again for a mention subscription saved without its class or terms", async () => {
+    for (const saved of [legacy, { ...legacy, className: "ad4m://TextContent" }]) {
+      const rederive = vi.fn().mockResolvedValue("Subscribed");
+      const createLive = vi.fn().mockResolvedValue(undefined);
+      await restoreSavedSubscription(saved, rederive, createLive, { warn: vi.fn() });
+      expect(rederive).toHaveBeenCalledWith("persp-legacy");
+      expect(createLive).not.toHaveBeenCalled();
+    }
+  });
+
+  it("opens a current subscription as saved", async () => {
+    const current = { ...legacy, className: "ad4m://TextContent", terms: ["bot"] };
+    const children: WakerSubscription = { id: "c", type: "children", perspective: "p", channel: "chan", query: "q" };
+    for (const saved of [current, children]) {
+      const rederive = vi.fn();
+      const createLive = vi.fn().mockResolvedValue(undefined);
+      await restoreSavedSubscription(saved, rederive, createLive, { warn: vi.fn() });
+      expect(rederive).not.toHaveBeenCalled();
+      expect(createLive).toHaveBeenCalledWith(saved);
+    }
+  });
+
+  it("keeps a legacy mention subscription running, and saved, when the executor cannot re-derive it", async () => {
+    // Before, a failed re-derive only logged: the subscription was in neither
+    // the active nor the pending set, so the next persist deleted it.
+    const persisted: { subs: WakerSubscription[] } = { subs: [] };
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: { querySparql: vi.fn() },
+      logger: makeMockLogger(),
+      QuerySubscriptionProxy: vi.fn(function () {
+        return {
+          initialized: Promise.resolve(),
+          subscribe: vi.fn(() => Promise.resolve()),
+          dispose: vi.fn(),
+          onResult: vi.fn(),
+        };
+      }),
+      debounceMs: 10,
+      onWake: () => {},
+      onPersist: (subs: WakerSubscription[]) => { persisted.subs = subs; },
+    });
+    const warn = vi.fn();
+    try {
+      await restoreSavedSubscription(
+        legacy,
+        () => Promise.reject(new Error("Perspective not accessible")),
+        (sub) => manager.subscribe(sub),
+        { warn },
+      );
+      expect(manager.getActive().map((s) => s.id)).toEqual(["mention-persp-legacy"]);
+      expect(persisted.subs.map((s) => s.id)).toEqual(["mention-persp-legacy"]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("Perspective not accessible"));
+    } finally {
+      manager.disposeAll();
+    }
   });
 });
 

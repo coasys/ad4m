@@ -188,7 +188,7 @@ const TIMEOUT_DURATION: Duration = Duration::from_secs(90);
 // budget was already tight on dev and would fire the dispatcher
 // timeout under the new gate. 45s gives comfortable headroom while
 // still catching genuinely stuck installs. (Data's PR #907 review item MED-1.)
-const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(45);
+pub(crate) const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(45);
 
 #[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
 async fn start_holochain_conductor(

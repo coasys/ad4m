@@ -4,7 +4,7 @@ use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
-use super::update_perspective;
+use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::agent::{AgentContext, AgentService};
@@ -44,7 +44,7 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use urlencoding;
@@ -66,12 +66,15 @@ use uuid::Uuid;
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
 // Abstract classes: resolution cache, queries, subscriptions (#1435).
 mod abstract_classes;
+mod containment;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
 mod subscriptions;
 pub(crate) use subscriptions::result_json;
 // Which writes re-run a model subscription (#1237).
 mod subscription_triggers;
+// Registering this executor's owners with the link language.
+mod local_agents;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -80,6 +83,10 @@ mod subscription_tests;
 #[cfg(test)]
 #[path = "perspective_instance_abstract_tests.rs"]
 mod abstract_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance_pending_diffs_tests.rs"]
+mod pending_diffs_tests;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -543,6 +550,34 @@ fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
     predicates
 }
 
+/// One wake per background loop that waits on an event; see `PerspectiveInstance::wakes`.
+#[derive(Default)]
+struct LoopWakes {
+    link_language: Notify,
+    sync: Notify,
+    notification: Notify,
+}
+
+impl LoopWakes {
+    fn all(&self) {
+        self.link_language.notify_one();
+        self.sync.notify_one();
+        self.notification.notify_one();
+    }
+}
+
+/// The first and the longest wait before `ensure_link_language` retries an
+/// install that failed (the language-language still loading, a bundle not
+/// yet fetchable). A new link language on the handle retries at once.
+const LINK_LANGUAGE_RETRY_MIN: Duration = Duration::from_millis(500);
+const LINK_LANGUAGE_RETRY_MAX: Duration = Duration::from_secs(30);
+/// How long a notification check waits after the first changed link, so a
+/// burst of links is checked once.
+const NOTIFICATION_DEBOUNCE: Duration = Duration::from_millis(100);
+/// The shortest time between two notification checks: each one runs every
+/// notification's query.
+const NOTIFICATION_MIN_SPACING: Duration = Duration::from_secs(1);
+
 #[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<Mutex<PerspectiveHandle>>,
@@ -555,8 +590,23 @@ pub struct PerspectiveInstance {
 
     pub(crate) is_teardown: Arc<AtomicBool>,
     sdna_change_mutex: Arc<Mutex<()>>,
+    /// Serialises `ensure_public_links_are_shared`: a publish and the link
+    /// language loop it wakes both call it, and two concurrent calls would
+    /// each find the remote empty and commit every shared link.
+    share_links_mutex: Arc<Mutex<()>>,
+    /// Serialises `register_local_agents`. server-link-language replaces its
+    /// local agent list (p-diff-sync adds to it), so a registration that
+    /// read the owners earlier must not land after one that read them later.
+    local_agents_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
+    /// Wakes the background loops that wait on state changes instead of a
+    /// timer: `ensure_link_language` when the handle's link language changes
+    /// (a publish sets `neighbourhood`), `nh_sync_loop` once it attaches,
+    /// `notification_check_loop` when links change. Each stores one permit,
+    /// so a wake that lands while its loop is busy is not lost. Teardown
+    /// wakes all three.
+    wakes: Arc<LoopWakes>,
     trigger_notification_check: Arc<AtomicBool>,
     trigger_subscription_check: Arc<AtomicBool>,
     /// Predicates of links changed since last subscription check.
@@ -655,8 +705,11 @@ impl PerspectiveInstance {
             retries: 0,
             is_teardown: Arc::new(AtomicBool::new(false)),
             sdna_change_mutex: Arc::new(Mutex::new(())),
+            share_links_mutex: Arc::new(Mutex::new(())),
+            local_agents_mutex: Arc::new(Mutex::new(())),
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(RwLock::new(None)),
+            wakes: Arc::new(LoopWakes::default()),
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
             trigger_subscription_check: Arc::new(AtomicBool::new(false)),
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
@@ -949,6 +1002,7 @@ impl PerspectiveInstance {
 
     pub async fn teardown_background_tasks(&self) {
         self.is_teardown.store(true, Ordering::Release);
+        self.wakes.all();
     }
 
     /// Return diagnostic stats for this perspective's memory-relevant data structures.
@@ -1052,127 +1106,110 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// Attach this neighbourhood's link language as soon as it can be: at
+    /// once for a perspective that is one, the moment a publish makes it one
+    /// (`update_perspective_with` wakes this loop), and with backoff while the
+    /// install fails. A private perspective waits without a timer.
     async fn ensure_link_language(&self) {
-        let mut interval = time::interval(Duration::from_secs(5));
+        let mut retry = LINK_LANGUAGE_RETRY_MIN;
+        // One immediate check after an install that worked, rather than a wait.
+        let mut just_installed = false;
         while !self.is_teardown.load(Ordering::Acquire) {
-            if self.link_language.read().await.is_none()
-                && self.persisted.lock().await.neighbourhood.is_some()
-            {
-                let nh = self
-                    .persisted
-                    .lock()
-                    .await
-                    .neighbourhood
-                    .as_ref()
-                    .expect("must be some")
-                    .clone();
+            let Some(nh) = self.persisted.lock().await.neighbourhood.clone() else {
+                self.wakes.link_language.notified().await;
+                continue;
+            };
+            log::debug!(
+                "ensure_link_language: checking language {} for perspective",
+                nh.data.link_language
+            );
 
-                log::debug!(
-                    "ensure_link_language: checking language {} for perspective",
-                    nh.data.link_language
-                );
-
-                match LanguageController::language_by_address(nh.data.link_language.clone()).await {
-                    Ok(Some(mut language)) => {
-                        // Set local agents before storing the language
-                        let agents_to_register = {
-                            let handle = self.persisted.lock().await;
+            match LanguageController::language_by_address(nh.data.link_language.clone()).await {
+                Ok(Some(language)) => {
+                    self.attach_link_language(&nh, language).await;
+                    return;
+                }
+                Ok(None) if !just_installed => {
+                    // `language_by_address` only checks the loaded runtimes;
+                    // install it. A perspective whose install in
+                    // `install_neighbourhood_with_context` failed (the
+                    // language-language still warming up) gets it here.
+                    log::debug!(
+                        "Link language {} not installed yet, attempting install...",
+                        nh.data.link_language
+                    );
+                    match LanguageController::install_language(nh.data.link_language.clone()).await
+                    {
+                        Ok(()) => {
+                            just_installed = true;
+                            continue;
+                        }
+                        Err(e) => {
                             log::debug!(
-                                "🔍 ensure_link_language: perspective {} has owners: {:?}",
-                                handle.uuid,
-                                handle.owners
-                            );
-                            if let Some(owners) = &handle.owners {
-                                if !owners.is_empty() {
-                                    log::debug!("🔍 Using owners list: {:?}", owners);
-                                    owners.clone()
-                                } else {
-                                    // Empty owners list - use main agent
-                                    log::debug!("🔍 Owners list is empty, using main agent");
-                                    vec![crate::agent::did()]
-                                }
-                            } else {
-                                // No owners set - use main agent
-                                log::debug!("🔍 No owners set, using main agent");
-                                vec![crate::agent::did()]
-                            }
-                        };
-
-                        log::info!(
-                            "Setting local agents for link language: {:?}",
-                            agents_to_register
-                        );
-                        if let Err(e) = language.set_local_agents(agents_to_register).await {
-                            log::error!("Failed to set local agents on link language: {:?}", e);
-                        }
-
-                        {
-                            let mut link_language_guard = self.link_language.write().await;
-                            *link_language_guard = Some(language);
-                        }
-                        // Cache language→perspective mapping for fast signal routing
-                        {
-                            let handle = self.persisted.lock().await.clone();
-                            crate::perspectives::register_link_language_perspective(
-                                nh.data.link_language.clone(),
-                                handle,
-                            );
-                        }
-                        if self.persisted.lock().await.state
-                            == PerspectiveState::NeighbourhoodCreationInitiated
-                        {
-                            self.ensure_public_links_are_shared().await;
-                        }
-                        self.update_perspective_state_log_error(
-                            PerspectiveState::LinkLanguageInstalledButNotSynced,
-                        )
-                        .await;
-                        break;
-                    }
-                    Ok(None) => {
-                        // Actively try to install the language on this tick.
-                        // `language_by_address` only CHECKS the loaded-runtimes
-                        // map; it does not trigger an install. Without the
-                        // retry call below, a perspective whose initial
-                        // install in `install_neighbourhood_with_context`
-                        // failed (e.g. the language language was still
-                        // warming up) would stay stuck in
-                        // LinkLanguageFailedToInstall forever, because
-                        // nothing in this loop ever re-attempted the install
-                        // — it just kept asking "is it loaded yet?" to a map
-                        // nothing was writing to.
-                        log::debug!(
-                            "Link language {} not installed yet, attempting install...",
-                            nh.data.link_language
-                        );
-                        if let Err(e) =
-                            LanguageController::install_language(nh.data.link_language.clone())
-                                .await
-                        {
-                            log::debug!(
-                                "ensure_link_language: install_language({}) failed, will retry in 5s: {}",
-                                nh.data.link_language, e
+                                "ensure_link_language: install_language({}) failed, retrying in {:?}: {}",
+                                nh.data.link_language, retry, e
                             );
                             self.update_perspective_state_log_error(
                                 PerspectiveState::LinkLanguageFailedToInstall,
                             )
                             .await;
                         }
-                        // Loop back around; the next tick will re-enter
-                        // language_by_address and either find the freshly
-                        // installed runtime or schedule another retry.
-                    }
-                    Err(e) => {
-                        log::error!("Error when calling language_by_address: {:?}", e);
-                        self.update_perspective_state_log_error(
-                            PerspectiveState::LinkLanguageFailedToInstall,
-                        )
-                        .await;
                     }
                 }
+                Ok(None) => log::debug!(
+                    "ensure_link_language: {} installed but not loaded yet",
+                    nh.data.link_language
+                ),
+                Err(e) => {
+                    log::error!("Error when calling language_by_address: {:?}", e);
+                    self.update_perspective_state_log_error(
+                        PerspectiveState::LinkLanguageFailedToInstall,
+                    )
+                    .await;
+                }
             }
-            interval.tick().await;
+
+            just_installed = false;
+            tokio::select! {
+                _ = sleep(retry) => retry = std::cmp::min(retry * 2, LINK_LANGUAGE_RETRY_MAX),
+                // A new link language starts from the shortest wait.
+                _ = self.wakes.link_language.notified() => retry = LINK_LANGUAGE_RETRY_MIN,
+            }
         }
+    }
+
+    /// Make `language` this perspective's link language, then let the sync
+    /// loop run its first sync at once.
+    async fn attach_link_language(
+        &self,
+        nh: &crate::types::DecoratedNeighbourhoodExpression,
+        mut language: Language,
+    ) {
+        let registered = self.register_local_agents(&mut language, None).await;
+
+        *self.link_language.write().await = Some(language.clone());
+        // A user who joined while this attached (`install_neighbourhood_with_context`
+        // adds them as an owner) found no link language to tell, and joins
+        // now land straight after a publish. From here on the join tells it
+        // itself; before here, tell it now.
+        self.register_local_agents(&mut language, registered.as_deref())
+            .await;
+        // Cache language→perspective mapping for fast signal routing
+        {
+            let handle = self.persisted.lock().await;
+            crate::perspectives::register_link_language_perspective(
+                nh.data.link_language.clone(),
+                handle.clone(),
+            );
+        }
+        if self.persisted.lock().await.state == PerspectiveState::NeighbourhoodCreationInitiated {
+            self.ensure_public_links_are_shared().await;
+        }
+        self.update_perspective_state_log_error(
+            PerspectiveState::LinkLanguageInstalledButNotSynced,
+        )
+        .await;
+        self.wakes.sync.notify_one();
     }
 
     async fn nh_sync_loop(&self) {
@@ -1223,17 +1260,11 @@ impl PerspectiveInstance {
                     }
                 }
             }
-            // Sleep in short slices so teardown is observed within ~1s
-            // even when the backoff interval is long.
-            let mut remaining = current_interval;
-            let slice = Duration::from_secs(1);
-            while remaining > Duration::from_millis(0) {
-                if self.is_teardown.load(Ordering::Acquire) {
-                    return;
-                }
-                let step = std::cmp::min(slice, remaining);
-                sleep(step).await;
-                remaining = remaining.saturating_sub(step);
+            // The first sync follows the link language attaching, not the
+            // interval; teardown wakes this too.
+            tokio::select! {
+                _ = sleep(current_interval) => {}
+                _ = self.wakes.sync.notified() => {}
             }
         }
     }
@@ -1242,11 +1273,15 @@ impl PerspectiveInstance {
         let uuid = self.uuid.clone();
         let mut interval = time::interval(Duration::from_millis(100));
         let mut last_diff_time = None;
+        // A failed commit waits 100 ms × 2^failures (at most 30 s) before
+        // the next attempt, instead of retrying on every tick.
+        let mut failures: u32 = 0;
+        let mut retry_at = Instant::now();
 
         while !self.is_teardown.load(Ordering::Acquire) {
             interval.tick().await;
 
-            if self.has_link_language().await {
+            if Instant::now() >= retry_at && self.has_link_language().await {
                 let (_, ids) = Ad4mDb::with_global_instance(|db| {
                     db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
                 })
@@ -1263,23 +1298,35 @@ impl PerspectiveInstance {
 
                 // Commit if either:
                 // 1. It's been MAX_PENDING_SECONDS since first diff in burst (don't collect longer than MAX_PENDING_SECONDS)
-                if last_diff_time.unwrap().elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
-                    if self.commit_pending_diffs().await.is_ok() {
-                        last_diff_time = None;
-                        log::debug!("💾 committed diffs after reaching 10s maximum wait time");
-                    }
+                let reason = if last_diff_time.unwrap().elapsed()
+                    >= Duration::from_secs(MAX_PENDING_SECONDS)
+                {
+                    format!("after the {}s maximum wait", MAX_PENDING_SECONDS)
                 // 2. It's been > 1s since last new diff (burst is over)
                 } else if !self.has_new_diffs_in_last_second().await {
-                    if self.commit_pending_diffs().await.is_ok() {
+                    "after 1s of inactivity".to_string()
+                // 3. We have collected MAX_PENDING_DIFFS_COUNT diffs
+                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT {
+                    format!("after collecting {}", MAX_PENDING_DIFFS_COUNT)
+                } else {
+                    continue;
+                };
+
+                match self.commit_pending_diffs().await {
+                    Ok(()) => {
                         last_diff_time = None;
-                        log::debug!("💾 committed diffs after 1s of inactivity");
+                        failures = 0;
+                        log::debug!("💾 committed diffs {}", reason);
                     }
-                // 3. We have collected more than 100 diffs
-                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT
-                    && self.commit_pending_diffs().await.is_ok()
-                {
-                    last_diff_time = None;
-                    log::debug!("💾 committed diffs after collecting 100");
+                    Err(e) => {
+                        let wait = Duration::from_millis((100 << failures.min(9)).min(30_000));
+                        failures += 1;
+                        retry_at = Instant::now() + wait;
+                        log::warn!(
+                            "💾 perspective {}: committing pending diffs failed, retrying in {:?}: {:#}",
+                            uuid, wait, e
+                        );
+                    }
                 }
             }
         }
@@ -1332,7 +1379,9 @@ impl PerspectiveInstance {
                         log::debug!("✅ 💾 successfully committed pending diffs");
                         Ok(())
                     }
-                    Err(e) => Err(e),
+                    // The batch this commit sent: the size cap can make it smaller
+                    // than the queue.
+                    Err(e) => Err(e.context(format!("a batch of {} diffs", pending_ids.len()))),
                 }
             } else {
                 Ok(()) // Keep diffs if no link language
@@ -1342,43 +1391,44 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Mark links changed for `notification_check_loop` and wake it.
+    fn request_notification_check(&self) {
+        self.trigger_notification_check
+            .store(true, Ordering::Release);
+        self.wakes.notification.notify_one();
+    }
+
+    /// Fire notifications for links that start matching. Woken by a link
+    /// change; one check covers a burst, and checks run at most once per
+    /// `NOTIFICATION_MIN_SPACING`, since each one runs every query.
     async fn notification_check_loop(&self) {
-        //log::debug!("Starting notification check loop for perspective {}", self.persisted.lock().await.uuid);
         let uuid = self.uuid.clone();
-        let mut interval = time::interval(Duration::from_secs(5));
         let mut before = self.notification_trigger_snapshot().await;
         while !self.is_teardown.load(Ordering::Acquire) {
-            interval.tick().await;
-            let changed = self
+            self.wakes.notification.notified().await;
+            sleep(NOTIFICATION_DEBOUNCE).await;
+            if self.is_teardown.load(Ordering::Acquire) {
+                return;
+            }
+            let checked_at = Instant::now();
+            if self
                 .trigger_notification_check
-                .swap(false, Ordering::AcqRel);
-
-            if changed {
-                //log::debug!("Notification check loop triggered for perspective {}", uuid);
-                //let start = std::time::Instant::now();
-                //let snapshot_start = std::time::Instant::now();
-
+                .swap(false, Ordering::AcqRel)
+            {
                 let after = self.notification_trigger_snapshot().await;
-                //let snapshot_duration = snapshot_start.elapsed();
-                //log::debug!("Notification trigger snapshot took {:?} - for perspective {}", snapshot_duration, uuid);
-
-                //let diff_start = std::time::Instant::now();
                 let new_matches = Self::subtract_before_notification_matches(&before, &after);
-                //let diff_duration = diff_start.elapsed();
-                //log::debug!("Computing notification diff took {:?} - for perspective {}", diff_duration, uuid);
-
                 tokio::spawn(Self::publish_notification_matches(
                     uuid.clone(),
                     new_matches,
                 ));
                 before = after;
-                //let total_duration = start.elapsed();
-                //log::debug!("Total notification check iteration took {:?} - for perspective {}", total_duration, uuid);
             }
+            tokio::time::sleep_until(checked_at + NOTIFICATION_MIN_SPACING).await;
         }
     }
 
     pub async fn ensure_public_links_are_shared(&self) -> bool {
+        let _sharing = self.share_links_mutex.lock().await;
         let uuid = self.uuid.clone();
 
         // Clone link_language without holding the lock
@@ -1524,10 +1574,9 @@ impl PerspectiveInstance {
 
     pub async fn update_perspective_state(&self, state: PerspectiveState) -> Result<(), AnyError> {
         if self.persisted.lock().await.state != state {
-            let mut handle = self.persisted.lock().await.clone();
-            handle.state = state.clone();
-
-            update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
+            let handle = update_perspective_with(&self.uuid, |h| h.state = state.clone())
+                .await
+                .map_err(|e| anyhow!(e))?;
 
             get_global_pubsub()
                 .await
@@ -1551,8 +1600,11 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn update_from_handle(&self, handle: PerspectiveHandle) {
-        *self.persisted.lock().await = handle;
+    /// Wakes the link-language loop: a change set or replaced the handle's link language
+    /// (a publish). Only `update_perspective_with` calls it, and only on such a change: the
+    /// loop writes its own state through there and must not cut its backoff short.
+    pub(crate) fn link_language_changed(&self) {
+        self.wakes.link_language.notify_one();
     }
 
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
@@ -4020,6 +4072,12 @@ impl PerspectiveInstance {
         // An abstract class (#1435) reads the concrete classes that have its
         // names, each through its view; none of them is an empty result.
         let targets = self.read_targets(classes, &query_input)?;
+        if let Some(edges) = &targets.containment {
+            super::model_query::containment::set_containment(&mut query_input, edges);
+        }
+        self.resolve_container_children(classes, &mut query_input)
+            .await?;
+        let named = classes;
         let classes = &targets.classes;
         if classes.names().is_empty() {
             return serde_json::to_string(&super::model_query::ModelQueryResult {
@@ -4030,10 +4088,14 @@ impl PerspectiveInstance {
                 deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
             });
         }
+        // A built-in's own rows (`Container`) are read through its view.
         let shapes = classes
             .names()
             .iter()
-            .map(|class_name| Ok((class_name.clone(), self.get_shape(class_name)?)))
+            .map(|class_name| match targets.views.get(class_name) {
+                Some(view) => Ok((class_name.clone(), view.clone())),
+                None => Ok((class_name.clone(), self.get_shape(class_name)?)),
+            })
             .collect::<Result<Vec<_>, AnyError>>()?;
         let resolver = self.shape_resolver();
 
@@ -4125,6 +4187,9 @@ impl PerspectiveInstance {
             self.get_shape_or_wait(&missing.class_name, remaining)
                 .await?;
         };
+        let mut result = result;
+        self.finish_container_rows(named, &query_input, &mut result)
+            .await?;
 
         serde_json::to_string(&result).map_err(|e| {
             deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -4237,9 +4302,7 @@ impl PerspectiveInstance {
                 || PROLOG_MODE == PrologMode::SdnaOnly
             {
                 // Trigger notification and subscription checks
-                self_clone
-                    .trigger_notification_check
-                    .store(true, Ordering::Release);
+                self_clone.request_notification_check();
                 self_clone.record_changed_predicates(&diff).await;
                 self_clone
                     .trigger_subscription_check
@@ -4374,9 +4437,7 @@ impl PerspectiveInstance {
                 // Subscription re-evaluation runs from the trigger flags below.
 
                 // Trigger notification and subscription checks after prolog facts are updated
-                self_clone
-                    .trigger_notification_check
-                    .store(true, Ordering::Release);
+                self_clone.request_notification_check();
                 self_clone
                     .trigger_subscription_check
                     .store(true, Ordering::Release);
@@ -4940,13 +5001,13 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn update_local_agents(&self, agents: Vec<String>) {
-        log::debug!("Updating local agents for perspective: {:?}", agents);
+    /// Tell the link language this executor's owners, after a join added one.
+    /// Reads them itself: a list the caller read could be older than one
+    /// another registration has already sent.
+    pub async fn update_local_agents(&self) {
         let link_language_clone = self.link_language.read().await.clone();
         if let Some(mut link_language) = link_language_clone {
-            if let Err(e) = link_language.set_local_agents(agents).await {
-                log::error!("Failed to update local agents on link language: {:?}", e);
-            }
+            self.register_local_agents(&mut link_language, None).await;
         } else {
             log::warn!("Cannot update local agents: link language not initialized");
         }
@@ -6917,6 +6978,143 @@ mod tests {
             .expect("Failed to initialize prolog engine pool");
 
         instance
+    }
+
+    // ── Background loops wake on events ──────────────────────────────
+    //
+    // On tokio's paused clock: a fixed poll would need its interval to pass
+    // (5 s before), so a bound far below it tells the two apart.
+
+    /// A registered, private perspective, as `add_perspective` leaves one,
+    /// without starting its other loops or the Prolog engine.
+    fn private_perspective() -> PerspectiveInstance {
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+        let instance = PerspectiveInstance::new(
+            PerspectiveHandle {
+                uuid: Uuid::new_v4().to_string(),
+                name: Some("wakes".to_string()),
+                shared_url: None,
+                neighbourhood: None,
+                state: PerspectiveState::Private,
+                owners: None,
+            },
+            None,
+        );
+        crate::perspectives::register_perspective(instance.uuid.clone(), instance.clone());
+        instance
+    }
+
+    /// What `neighbourhood_publish_from_perspective` writes: a neighbourhood
+    /// on a link language this executor has never loaded.
+    async fn publish(instance: &PerspectiveInstance) {
+        update_perspective_with(&instance.uuid, |h| {
+            h.shared_url = Some(format!("neighbourhood://{}", Uuid::new_v4()));
+            h.neighbourhood = Some(crate::types::DecoratedNeighbourhoodExpression {
+                data: crate::types::domain::Neighbourhood {
+                    link_language: format!("QmNotLoaded{}", Uuid::new_v4().simple()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            h.state = PerspectiveState::NeighbourhoodCreationInitiated;
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn state_of(instance: &PerspectiveInstance) -> PerspectiveState {
+        instance.persisted.lock().await.state.clone()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_publish_wakes_the_link_language_loop_at_once() {
+        let instance = private_perspective();
+        let looping = instance.clone();
+        let task = tokio::spawn(async move { looping.ensure_link_language().await });
+
+        // A private perspective waits: nothing happens however long it waits.
+        // Not a multiple of any poll interval, so a poll cannot coincide.
+        sleep(Duration::from_millis(61_700)).await;
+        assert_eq!(state_of(&instance).await, PerspectiveState::Private);
+
+        // The install fails (nothing serves the language), and says so at
+        // once rather than on the next tick.
+        publish(&instance).await;
+        tokio::time::timeout(Duration::from_millis(200), async {
+            while state_of(&instance).await != PerspectiveState::LinkLanguageFailedToInstall {
+                // A timer, so the paused clock advances while this waits.
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the publish did not wake the link language loop");
+
+        instance.teardown_background_tasks().await;
+        task.await.unwrap();
+        crate::perspectives::unregister_perspective(&instance.uuid);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_install_retries_with_backoff() {
+        // As `add_perspective` does: the loop runs before the publish.
+        let instance = private_perspective();
+        let looping = instance.clone();
+        let task = tokio::spawn(async move { looping.ensure_link_language().await });
+        sleep(Duration::from_secs(1)).await;
+        publish(&instance).await;
+
+        // Each retry sets the failed state again; clear it to count attempts.
+        let attempts_within = |window: Duration| {
+            let instance = instance.clone();
+            async move {
+                let deadline = Instant::now() + window;
+                let mut attempts = 0;
+                while Instant::now() < deadline {
+                    if state_of(&instance).await == PerspectiveState::LinkLanguageFailedToInstall {
+                        attempts += 1;
+                        instance.persisted.lock().await.state =
+                            PerspectiveState::NeighbourhoodCreationInitiated;
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+                attempts
+            }
+        };
+        // 0, 0.5, 1.5, 3.5 s: four attempts in the first 4 s, not one per 5 s.
+        assert_eq!(attempts_within(Duration::from_millis(4_000)).await, 4);
+        // Then 7.5, 15.5, 31.5 s, and every 30 s (the cap) to 301.5 s.
+        assert_eq!(attempts_within(Duration::from_secs(300)).await, 12);
+        // A new link language starts the backoff afresh, not 30 s on.
+        publish(&instance).await;
+        assert_eq!(attempts_within(Duration::from_millis(4_000)).await, 4);
+
+        instance.teardown_background_tasks().await;
+        task.await.unwrap();
+        crate::perspectives::unregister_perspective(&instance.uuid);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn teardown_ends_waiting_loops_at_once() {
+        let instance = private_perspective();
+        let (a, b, c) = (instance.clone(), instance.clone(), instance.clone());
+        let tasks = [
+            tokio::spawn(async move { a.ensure_link_language().await }),
+            tokio::spawn(async move { b.nh_sync_loop().await }),
+            tokio::spawn(async move { c.notification_check_loop().await }),
+        ];
+        sleep(Duration::from_secs(10)).await;
+
+        instance.teardown_background_tasks().await;
+        tokio::time::timeout(Duration::from_millis(200), async {
+            for task in tasks {
+                task.await.unwrap();
+            }
+        })
+        .await
+        .expect("a loop outlived teardown");
+        crate::perspectives::unregister_perspective(&instance.uuid);
     }
 
     pub fn create_link() -> Link {

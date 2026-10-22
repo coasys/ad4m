@@ -16,9 +16,9 @@
  *
  * The two nodes share a single physical machine via loopback TCP
  * gossip; the executor's `--sfu-local-did` flag distinguishes them.
- * Tie-break: the lexically-higher DID is the dialer, so we explicitly
- * use `did:windtunnel:cascade:node-0` / `did:windtunnel:cascade:node-1`
- * so node-1 drives establish_pipe.
+ * Tie-break: the lexically-higher DID is the dialer.  The cluster names
+ * its nodes `did:windtunnel:cascade:<runId>:node-0` / `…:node-1` (one
+ * run id per cluster), so node-1 drives establish_pipe.
  */
 
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";
@@ -29,8 +29,6 @@ import { wireRenegotiation, RenegotiationWire } from "../renegotiation.js";
 
 const ROOM_NAME = "t6-pipe-handshake";
 const NEIGHBOURHOOD = `windtunnel://t6`;
-const WS_BASE = 16200;
-const GOSSIP_BASE = 26200;
 const MAX_PER_NODE = 4;
 
 interface CascadeStatusPipe {
@@ -57,8 +55,7 @@ export const t6PipeHandshake: Scenario = {
       executorBin: ctx.executorPath!,
       nodeCount: 2,
       maxParticipantsPerNode: MAX_PER_NODE,
-      wsBasePort: WS_BASE,
-      gossipBasePort: GOSSIP_BASE,
+      workDir: ctx.tmpDirBase,
     });
     metrics["nodeDids"] = cluster.nodes.map((n) => n.did);
 
