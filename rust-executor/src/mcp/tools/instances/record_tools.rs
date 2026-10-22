@@ -8,11 +8,13 @@
 //! The bundle computes; this side reads and writes. `call_record_tool` reads the record as the
 //! model query returns it (file properties resolved to their content), hands it to the bundle with
 //! the arguments, and writes whatever properties come back through the class's setters, in one
-//! batch, as the calling agent — the same path `instance_update` takes, so a file property is
-//! stored as an expression and every property changes together.
+//! batch, as the calling agent — the same path and the same schema check `instance_update` takes,
+//! so a file property is stored as an expression, a value of the wrong type or cardinality is
+//! refused, and every property changes together. Each call runs in a fresh isolate (see
+//! `tool_bundles::registry`), so a record is seen by that call alone.
 
 use super::{check_setters, error_json, fetch_instance, instance_uri, pretty, resolve_class};
-use super::{subject_class, Ad4mMcpHandler};
+use super::{subject_class, validate_properties, Ad4mMcpHandler, WriteMode};
 use crate::agent::did_for_context;
 use crate::tool_bundles::ToolBundleRegistry;
 use rmcp::{handler::server::wrapper::Parameters, tool};
@@ -168,16 +170,23 @@ impl Ad4mMcpHandler {
         let (mut perspective, agent_context) =
             self.get_writable_perspective(perspective_id).await?;
         let (class_name, shape) = resolve_class(&perspective, class_name).await?;
-        let missing = check_setters(&perspective, &shape, &properties).await;
-        if !missing.is_empty() {
-            return Err(format!(
+        // The same checks instance_update makes: the class schema, then the setters, on the
+        // values the schema check coerced. A setter does not check a value's type or cardinality.
+        let refused = |problems: Vec<super::ValidationError>| {
+            format!(
                 "Nothing was written: {class_name} cannot set {}.",
-                missing
+                problems
                     .iter()
                     .map(|m| format!("{}: {}", m.property, m.problem))
                     .collect::<Vec<_>>()
                     .join("; ")
-            ));
+            )
+        };
+        let validated =
+            validate_properties(&shape, &properties, WriteMode::Update).map_err(&refused)?;
+        let missing = check_setters(&perspective, &shape, &validated.scalars).await;
+        if !missing.is_empty() {
+            return Err(refused(missing));
         }
 
         let batch_id = perspective.create_batch().await;
@@ -185,7 +194,7 @@ impl Ad4mMcpHandler {
             .update_subject(
                 subject_class(&class_name),
                 base_uri.to_string(),
-                Value::Object(properties),
+                Value::Object(validated.scalars),
                 Some(batch_id.clone()),
                 &agent_context,
             )
