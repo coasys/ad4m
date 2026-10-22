@@ -23,7 +23,7 @@ The **Holochain service** (`HolochainService`) runs an embedded Holochain **cond
 | Accessor | Behaviour |
 |---|---|
 | `maybe_get_holochain_service()` | answers now |
-| `holochain_service_once_started()` | while a conductor start is in progress, waits up to 120 s; otherwise `None` at once |
+| `holochain_service_once_started()` | the service at once if it is running; while a conductor start is in progress, waits up to 120 s; with no start in progress, `None` at once |
 | `get_holochain_service()` | waits up to 120 s, then panics; code off the boot path uses the other two |
 
 </details>

@@ -13,7 +13,7 @@
 | `neighbourhood.setOnlineStatus` | sign the status as the caller; keep it per agent in `hosted_status`; publish one **bundle** with the signed statuses of all active hosted agents through the link language |
 | `neighbourhood.onlineAgents` | the link language's online agents, by the link language's own rule (bundles unpacked, each bundled status kept only if its signature verifies), plus co-owners whose `last_seen` is less than 300 s old (`LOCAL_ONLINE_THRESHOLD_SECS`); an authenticated API call writes `last_seen` at most once per 300 s (`LAST_SEEN_WRITE_THROTTLE_S`) |
 | `neighbourhood.ownOnlineStatus` | the caller's last status on this executor |
-| `neighbourhood.otherAgents` | the link language's `others()` plus all `owners`, without the caller; only an owner may call it |
+| `neighbourhood.otherAgents` | the link language's `others()` plus all `owners`, without the caller; needs neighbourhood READ, and when the perspective has an `owners` list, the caller must be on it (no `owners` list: no owner check) |
 | `neighbourhood.sendSignal` | signed payload; if the recipient is an owner on this executor, publish locally; else send through the link language |
 | `neighbourhood.sendBroadcast` | publish locally to each managed-agent owner and to the main agent (unless it sent it), then broadcast through the link language; with `loopback` it is also published to every owner as if it came from the link language |
 
