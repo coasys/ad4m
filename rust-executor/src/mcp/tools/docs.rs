@@ -84,12 +84,26 @@ pub struct GetDocumentationParams {
 impl Ad4mMcpHandler {
     /// Return the executor's documentation for a topic, as markdown.
     #[tool(
-        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux — for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. Apps can install tools for their own records on this node; each set of them serves its own topics, and list_record_tools names the one to start from. No authentication needed."
+        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux — for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. Apps can install tools for their own records on this node; each set of them serves its own topics, and list_record_tools names the one to start from. The executor's own topics need no authentication; an app's topics do."
     )]
     pub async fn get_documentation(&self, params: Parameters<GetDocumentationParams>) -> String {
         let topic = params.0.topic.trim();
         if let Ok(own) = serde_json::from_value::<DocTopic>(serde_json::json!(topic)) {
             return own.text().to_string();
+        }
+        // The executor's own topics are open: they tell a cold agent how to authenticate. An app's
+        // are served by its bundle's code, which runs for authenticated callers only, as
+        // list_record_tools and call_record_tool do. call_tool has already adopted a header
+        // credential into the session, so the session is what decides.
+        if !self.check_auth_with_header(None).await {
+            return serde_json::json!({
+                "error": format!(
+                    "Authentication required to read {topic:?}: an app's documentation is served \
+                     to authenticated callers. The executor's own topics are open: {}.",
+                    executor_topic_names().join(", ")
+                )
+            })
+            .to_string();
         }
         let registry = crate::tool_bundles::ToolBundleRegistry::global();
         match registry.read_doc(topic).await {

@@ -2967,6 +2967,60 @@ async fn a_record_tool_writes_nothing_it_cannot_or_did_not_declare() {
     assert_eq!(room(&handler, &uuid, &base_uri).await["name"], "lobby");
 }
 
+/// Counts the times its documentation is read, and answers the count at `ledger/reads`.
+const LEDGER_DOCS: &str = r##"
+let reads = 0;
+export const toolsets = {
+  ledger: {
+    appliesTo: ["Channel"],
+    tools: [{ name: "ledger_peek", description: "Peek.", parameters: { type: "object" }, writes: false }],
+    call: async () => ({ text: "peeked" }),
+    docs: {
+      list: async () => [{ path: "ledger", title: "Ledger", summary: "S" }, { path: "ledger/reads", title: "Reads", summary: "S" }],
+      read: async (path) => { reads += 1; return path === "ledger/reads" ? String(reads) : "# Ledger"; },
+    },
+  },
+};
+"##;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_s_documentation_needs_an_authenticated_caller_and_the_executor_s_does_not() {
+    crate::test_utils::init_v8_platform();
+    crate::tool_bundles::ToolBundleRegistry::global()
+        .install(LEDGER_DOCS)
+        .await
+        .expect("fixture bundle installs");
+    let read = |handler: &Ad4mMcpHandler, topic: &str| {
+        let topic = topic.to_string();
+        let handler = handler.clone();
+        async move {
+            handler
+                .get_documentation(Parameters(
+                    crate::mcp::tools::docs::GetDocumentationParams { topic },
+                ))
+                .await
+        }
+    };
+    let anonymous = Ad4mMcpHandler::new(McpContext {
+        admin_credential: Some("test-admin".to_string()),
+        auth_token: Arc::new(RwLock::new(None)),
+        dynamic_class_tools: false,
+    });
+    let refused = read(&anonymous, "ledger").await;
+    assert!(refused.contains("Authentication required"), "{refused}");
+    assert_eq!(
+        read(&anonymous, "overview").await,
+        crate::mcp::tools::docs::DocTopic::Overview.text()
+    );
+
+    let (signed_in, _uuid, _guard) = setup(false).await;
+    assert_eq!(
+        read(&signed_in, "ledger/reads").await,
+        "1",
+        "the anonymous read ran the bundle"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_record_tool_refuses_an_unknown_tool_and_a_record_of_another_class() {
     let (handler, uuid, _guard) = setup(false).await;
