@@ -19,7 +19,10 @@ export class ToolBundlesClient {
     /**
      * Install a bundle from its source: one self-contained ES module exporting `toolsets`.
      * Replaces any installed bundle that exports a toolset of the same name, so installing a new
-     * release is how an app updates its tools. Installing the same source again changes nothing.
+     * release is how an app updates its tools — and a release must export every toolset of the
+     * bundle it replaces, or it is refused. Installing the same source again changes nothing.
+     *
+     * Only the node's operator may install: a managed user's session is refused, as for Languages.
      */
     async install(source: string, options?: CallOptions): Promise<InstalledBundle> {
         return this.#apiClient.call('toolBundles.install', { source }, options)

@@ -11,6 +11,13 @@
 //! toolset is refused, so a release cannot remove tools another toolset's users rely on. A tool
 //! name must be unique across every installed toolset, since that is how a call names it.
 //!
+//! **Who may replace a toolset is whoever may install one** — and installing needs the `language`
+//! capabilities and refuses a managed user's session, so that is the node's operator. A toolset
+//! name is not tied to the app that first installed it: an operator who installs a bundle
+//! exporting another app's toolset name takes that toolset over, writes to its records included.
+//! Tying a name to its app needs bundles that say who made them (signed), which this does not do
+//! yet.
+//!
 //! **A record is seen by one call.** Each tool call runs in a fresh isolate of its own, started
 //! from the bundle's source and dropped after the call, so nothing a call hands the bundle is
 //! there for any other call, whoever makes it. The isolate kept per bundle reads what the bundle
