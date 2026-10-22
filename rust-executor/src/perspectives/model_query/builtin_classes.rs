@@ -24,8 +24,19 @@ use std::sync::{Arc, OnceLock};
 pub const TEXT_CONTENT_URI: &str = "ad4m://TextContent";
 pub(crate) const TEXT_CONTENT_SDNA: &str = include_str!("../hardwired_sdna/text_content.json");
 
-/// URI, name aliases use, SHACL JSON.
-const BUILTINS: &[(&str, &str, &str)] = &[(TEXT_CONTENT_URI, "TextContent", TEXT_CONTENT_SDNA)];
+/// `Container { children }`: what holds other records. A record is contained
+/// in P when `P ad4m://has_child X` exists, whatever P is, or when P is an
+/// instance of a class that conforms to `Container` and links X through that
+/// class's `children` relation (see [`super::containment`]).
+pub const CONTAINER_URI: &str = "ad4m://Container";
+pub(crate) const CONTAINER_SDNA: &str = include_str!("../hardwired_sdna/container.json");
+
+/// URI, name aliases use, SHACL JSON, whether it reads its own rows (see
+/// [`Builtin::member`]).
+const BUILTINS: &[(&str, &str, &str, bool)] = &[
+    (TEXT_CONTENT_URI, "TextContent", TEXT_CONTENT_SDNA, false),
+    (CONTAINER_URI, "Container", CONTAINER_SDNA, true),
+];
 
 /// A built-in abstract class.
 #[derive(Debug)]
@@ -33,6 +44,15 @@ pub struct Builtin {
     /// The name aliases key it by.
     pub name: &'static str,
     pub shape: Arc<ModelShape>,
+    /// The shape a query over the built-in reads beside its conforming
+    /// classes, under the built-in's URI: `Container`'s holders that no class
+    /// describes (`ad4m://self`, a neighbourhood root, a plain-string id).
+    /// Its relation is required, so a row is a node with at least one link
+    /// on its predicate; required rather than structural, because the
+    /// structural tier is skipped under a parent scope, where every node in
+    /// scope would then be a row. `None` for a built-in that has no rows of
+    /// its own.
+    pub member: Option<Arc<ModelShape>>,
 }
 
 /// The built-in abstract class with this URI, or `None` for any other name.
@@ -42,12 +62,21 @@ pub fn builtin(uri: &str) -> Option<&'static Builtin> {
         .get_or_init(|| {
             BUILTINS
                 .iter()
-                .map(|(uri, name, sdna)| {
+                .map(|(uri, name, sdna, reads_itself)| {
+                    let shape = read_back(name, sdna);
+                    let member = reads_itself.then(|| {
+                        let mut member = shape.clone();
+                        for p in &mut member.properties {
+                            p.is_required = true;
+                        }
+                        Arc::new(member)
+                    });
                     (
                         *uri,
                         Builtin {
                             name,
-                            shape: Arc::new(read_back(name, sdna)),
+                            shape: Arc::new(shape),
+                            member,
                         },
                     )
                 })
@@ -103,8 +132,28 @@ mod tests {
     }
 
     #[test]
+    fn container_is_an_abstract_class_with_children_over_has_child() {
+        let container = builtin(CONTAINER_URI).expect("Container is built in");
+        assert_eq!(container.name, "Container");
+        assert_eq!(container.shape.target_class, CONTAINER_URI);
+        let children = &container.shape.include_relations;
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "children");
+        assert_eq!(children[0].predicate, "ad4m://has_child");
+        assert_eq!(children[0].direction, "forward");
+        // Its own rows: a node with a has_child link, whatever its class.
+        let member = container
+            .member
+            .as_ref()
+            .expect("Container reads its own rows");
+        assert!(member.properties.iter().all(|p| p.is_required));
+        assert!(builtin(TEXT_CONTENT_URI).unwrap().member.is_none());
+    }
+
+    #[test]
     fn only_the_uri_names_a_builtin() {
         assert!(builtin("TextContent").is_none());
         assert!(builtin("app://TextContent").is_none());
+        assert!(builtin("Container").is_none());
     }
 }

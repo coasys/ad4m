@@ -245,39 +245,16 @@ pub(super) async fn attach_links(
 {link_status}{proof_valid}{local_status}}}"#
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
-        let s = |row: &Value, var: &str| row[var].as_str().unwrap_or("").to_string();
         for row in &rows {
-            let source = s(row, "source");
-            let predicate = s(row, "predicate");
-            // Same decoding as `sparql_store::decode_proof_valid`: only a
-            // stored "true" is valid; an absent annotation is not. As in
-            // `VerifiedExpression::from`, `invalid` is `!valid`, so it covers
-            // a failed signature, a missing verdict and a missing proof alike;
-            // an empty `signature` is what tells an unsigned link apart.
-            let valid = s(row, "proofValid") == "true";
-            let mut link = json!({
-                "author": s(row, "author"),
-                "timestamp": s(row, "timestamp"),
-                "data": {
-                    "source": source,
-                    "predicate": predicate,
-                    // The signed bytes when the store keeps them apart
-                    // from its canonical literal rendering.
-                    "target": match s(row, "wireTarget") {
-                        w if w.is_empty() => s(row, "target"),
-                        w => w,
-                    },
-                },
-                "proof": {
-                    "key": s(row, "proofKey"),
-                    "signature": s(row, "proofSig"),
-                    "valid": valid,
-                    "invalid": !valid,
-                },
-            });
+            let s = |var: &str| row[var].as_str().unwrap_or("").to_string();
+            let source = s("source");
+            let predicate = s("predicate");
+            let mut link = decorated_link(row);
             // Spelled as `perspective.get` spells it (`"SHARED"` / `"LOCAL"`),
             // and absent when the store recorded none, like `status` there.
-            if let Some(status) = status_from_str(&s(row, "rowStatus")) {
+            // `decorated_link` does not set it: this query is the one that
+            // selects `rowStatus`.
+            if let Some(status) = status_from_str(&s("rowStatus")) {
                 link["status"] = serde_json::to_value(status)?;
             }
             found
@@ -312,13 +289,46 @@ pub(super) async fn attach_links(
     Ok(())
 }
 
+/// One `__links` row from a result row binding `source`, `predicate`,
+/// `target`, `wireTarget`, `author`, `timestamp`, `proofKey`, `proofSig` and
+/// `proofValid`, shaped as a `DecoratedLinkExpression`.
+pub(super) fn decorated_link(row: &Value) -> Value {
+    let s = |var: &str| row[var].as_str().unwrap_or("").to_string();
+    // Same decoding as `sparql_store::decode_proof_valid`: only a
+    // stored "true" is valid; an absent annotation is not. As in
+    // `VerifiedExpression::from`, `invalid` is `!valid`, so it covers
+    // a failed signature, a missing verdict and a missing proof alike;
+    // an empty `signature` is what tells an unsigned link apart.
+    let valid = s("proofValid") == "true";
+    json!({
+        "author": s("author"),
+        "timestamp": s("timestamp"),
+        "data": {
+            "source": s("source"),
+            "predicate": s("predicate"),
+            // The signed bytes when the store keeps them apart
+            // from its canonical literal rendering.
+            "target": match s("wireTarget") {
+                w if w.is_empty() => s("target"),
+                w => w,
+            },
+        },
+        "proof": {
+            "key": s("proofKey"),
+            "signature": s("proofSig"),
+            "valid": valid,
+            "invalid": !valid,
+        },
+    })
+}
+
 /// Order one predicate's rows by timestamp, then target, author and
 /// signature. The last two make the order total: two agents can write the same
 /// triple in the same millisecond, and the store returns those rows in no fixed
 /// order. Anything hashing `__links` (an evidence seal, a receipt) needs every
 /// replica to produce the same array, and `canonical_json` sorts keys, not
 /// arrays.
-fn sort_link_rows(rows: &mut [Value]) {
+pub(super) fn sort_link_rows(rows: &mut [Value]) {
     rows.sort_by_cached_key(|v| {
         let s = |x: &Value| x.as_str().unwrap_or("").to_string();
         (

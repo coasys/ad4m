@@ -7948,11 +7948,12 @@ fn traverse_scope(
 ) -> Scope {
     Scope::Traverse {
         ids: ids.iter().map(|s| s.to_string()).collect(),
-        predicate: "we://comment".to_string(),
+        predicate: Some("we://comment".to_string()),
         transitive,
         direction,
         limit_per_anchor,
         levels: None,
+        max_depth: None,
     }
 }
 
@@ -8225,11 +8226,12 @@ async fn walk(store: &SparqlStore, levels: Vec<usize>) -> Vec<String> {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(levels),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8325,11 +8327,12 @@ async fn a_level_walk_survives_a_where_clause_it_cannot_push_down() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![3, 2, 1]),
+            max_depth: None,
         }),
         where_clause: Some(where_clause),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
@@ -8451,11 +8454,12 @@ async fn the_window_applies_to_the_walks_union_not_to_each_level() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![3, 2]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         offset: Some(1),
@@ -8487,11 +8491,12 @@ async fn a_walk_refuses_the_combinations_its_docs_rule_out() {
     let with_transitive = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: true,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![3]),
+            max_depth: None,
         }),
         ..Default::default()
     };
@@ -8503,11 +8508,12 @@ async fn a_walk_refuses_the_combinations_its_docs_rule_out() {
     let with_limit = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: Some(2),
             levels: Some(vec![3]),
+            max_depth: None,
         }),
         ..Default::default()
     };
@@ -8538,11 +8544,12 @@ async fn a_level_walk_through_a_cycle_terminates_and_excludes_the_anchor() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://a".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![10, 10, 10]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8577,11 +8584,12 @@ async fn an_anchor_named_below_another_is_not_also_reported_as_its_child() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string(), "we://c1".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![10, 10]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8653,11 +8661,12 @@ async fn a_per_anchor_limit_counts_instances_not_timestamp_rows() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: Some(2),
             levels: None,
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8723,11 +8732,12 @@ async fn a_traverse_scope_with_an_unwritable_predicate_matches_nothing() {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
             // A space cannot appear in an IRI term.
-            predicate: "we://comment oops".to_string(),
+            predicate: Some("we://comment oops".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: None,
+            max_depth: None,
         }),
         ..Default::default()
     };
@@ -8860,11 +8870,12 @@ async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![1, 1]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8896,11 +8907,12 @@ async fn a_count_only_walk_totals_the_walk_too() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![1, 1]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         limit: Some(0),
@@ -8955,11 +8967,12 @@ async fn a_node_reached_twice_does_not_consume_the_second_anchor_s_slot() {
     let query = ModelQueryInput {
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
-            predicate: "we://comment".to_string(),
+            predicate: Some("we://comment".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
             limit_per_anchor: None,
             levels: Some(vec![2, 1]),
+            max_depth: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
