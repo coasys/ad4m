@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sfuScenario } from "../helpers/sfu/harness.js";
+import { Hearing, type Heard, toneSource, wrtc } from "../helpers/sfu/e2e/media.js";
+import { pollUntil } from "../utils/utils.js";
 import { e1TwoUsers } from "../helpers/sfu/e2e/scenarios/e1-two-users.js";
 import { e2ManyUsers } from "../helpers/sfu/e2e/scenarios/e2-many-users.js";
 import { e3TrackChanges } from "../helpers/sfu/e2e/scenarios/e3-track-changes.js";
@@ -61,6 +63,51 @@ describe("SFU: end to end through the SDK", function () {
       process.execPath, ...process.execArgv, check,
     ], { stdio: "inherit", timeout: 180_000 });
     expect(run.status).to.equal(0);
+  });
+
+  it("a user hears a participant on the connection they are on now, not on a closed one", async function () {
+    // A rejoin closes the old connection: its tracks end with their last
+    // half second of audio frozen in them. What the user hears of someone
+    // must come from the track the session holds for them now.
+    if (!wrtc) this.skip();
+    this.timeout(60_000);
+    const did = "did:test:speaker";
+    const tones = [940, 1020];
+    const hearing = new Hearing();
+    let participants: Heard[] = [];
+    const heard = () => hearing.remotes(participants, tones)[did];
+    const speaker = async (hz: number) => {
+      const source = toneSource(hz);
+      const sending = new wrtc.RTCPeerConnection();
+      const receiving = new wrtc.RTCPeerConnection();
+      sending.onicecandidate = (e: any) => e.candidate && receiving.addIceCandidate(e.candidate);
+      receiving.onicecandidate = (e: any) => e.candidate && sending.addIceCandidate(e.candidate);
+      const track = new Promise<MediaStreamTrack>((resolve) => {
+        receiving.ontrack = (e: any) => resolve(e.track);
+      });
+      sending.addTrack(source.track);
+      await sending.setLocalDescription(await sending.createOffer());
+      await receiving.setRemoteDescription(sending.localDescription);
+      await receiving.setLocalDescription(await receiving.createAnswer());
+      await sending.setRemoteDescription(receiving.localDescription);
+      const stream: MediaStream = new wrtc.MediaStream([await track]);
+      return { stream, close: () => { receiving.close(); sending.close(); source.stop(); } };
+    };
+
+    const before = await speaker(940);
+    participants = [{ agentDid: did, stream: before.stream }];
+    await pollUntil(() => heard()?.tone === 940, { timeoutMs: 15_000, label: "the first connection's tone" });
+    before.close();
+
+    const after = await speaker(1020);
+    participants = [{ agentDid: did, stream: after.stream }];
+    try {
+      await pollUntil(() => heard()?.tone === 1020 && heard()!.audioRecent > 0, { timeoutMs: 15_000, label: "the new connection's tone" }).catch(() => {});
+      expect(heard()?.tone, "the tone heard after the rejoin").to.equal(1020);
+    } finally {
+      after.close();
+      hearing.stop();
+    }
   });
 
   sfuScenario(e1TwoUsers, 600_000);
