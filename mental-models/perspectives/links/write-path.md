@@ -23,7 +23,7 @@ Local write (`add_link` → `add_link_expression`):
 
 Inbound write (`diff_from_link_language`): de-duplicate, set status `Shared`, persist, clear the shape cache if SHACL arrived, then steps 6 and 8, plus `schedule_flow_consensus_pass`.
 
-Batch: `perspective.createBatch` → writes with `batchId` → `perspective.commitBatch` splits the diff into shared and local, persists both, then commits the shared part. An open batch expires after `BATCH_TIMEOUT_SECS` (300 s). Batches live only in memory: an executor restart loses an open batch, and the next call with its id fails with "Batch not found" or "No batch found with given UUID".
+Batch: `perspective.createBatch` → writes with `batchId` → `perspective.commitBatch` signs the added links again, splits the diff into shared and local, starts the commit of the shared part when a link language is attached, then persists both. `create_batch` drops batches older than `BATCH_TIMEOUT_SECS` (300 s). Batches live only in memory: an executor restart loses an open batch, and the next call with its id fails with "Batch not found" or "No batch found with given UUID".
 
 </details>
 
