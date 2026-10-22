@@ -227,6 +227,34 @@ export function withWakerTarget(message: string, executorUrl: string): string {
   return `${message} (waker executor: ${executorUrl})`;
 }
 
+/**
+ * Restore one saved subscription at waker start. A mention subscription saved
+ * before mentions were read through TextContent (#1446), or without the terms
+ * the whole-word check needs, is asked of the executor again. If that fails it
+ * runs as saved: dropped, it would be in neither the active nor the pending
+ * set, and the next persist would delete it from disk. The next start asks
+ * again.
+ */
+export async function restoreSavedSubscription(
+  sub: WakerSubscription,
+  rederiveMention: (perspectiveId: string) => Promise<unknown>,
+  createLive: (sub: WakerSubscription) => Promise<void>,
+  logger: { warn: (message: string) => void },
+): Promise<void> {
+  if (sub.type !== "mention" || (sub.className && sub.terms?.length)) {
+    await createLive(sub);
+    return;
+  }
+  try {
+    await rederiveMention(sub.perspective);
+  } catch (err: any) {
+    logger.warn(
+      `[ad4m-waker] Could not re-derive ${sub.id} (${err?.message ?? err}); restoring it as saved`,
+    );
+    await createLive(sub);
+  }
+}
+
 /** @internal Inject a subscription manager, for tests that cannot connect a real waker. */
 export function _setSubscriptionManagerForTests(
   manager: WakerSubscriptionManager | null,
@@ -766,13 +794,27 @@ Notes:
       type: "mention",
       perspective: perspectiveId,
       channel: "",
+      // A model query over the built-in TextContent (#1446).
+      className: data.class ?? data.subscription?.class,
       query: data.query ?? data.subscription?.query,
+      // The query matches substrings; the waker keeps whole-word mentions of these.
+      terms: data.terms ?? data.subscription?.terms,
       neighbourhood: data.neighbourhood,
     };
 
     if (!subscription.query) {
       throw new Error(
         "MCP tool did not return a query. Is the perspective accessible?",
+      );
+    }
+    if (!subscription.className) {
+      throw new Error(
+        "MCP tool returned a SPARQL mention query; this waker reads mentions through TextContent. Update the executor.",
+      );
+    }
+    if (!Array.isArray(subscription.terms) || subscription.terms.length === 0) {
+      throw new Error(
+        "MCP tool returned a mention query without its terms; the waker cannot tell a whole-word mention from a substring. Update the executor.",
       );
     }
 
@@ -1382,7 +1424,12 @@ Notes:
       for (const sub of saved) {
         if (stale()) return true;
         try {
-          await createLiveSubscription(sub);
+          await restoreSavedSubscription(
+            sub,
+            subscribeToMentionsForPerspective,
+            createLiveSubscription,
+            logger,
+          );
           if (stale()) return true;
           logger.info(
             `[ad4m-waker] Restored: ${sub.id} (${sub.type}, perspective=${sub.perspective})`,
