@@ -15,6 +15,8 @@ import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
+import type { AgentMessage } from "../generated/api/AgentMessage";
+import type { AgentReply } from "../generated/api/AgentReply";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
@@ -293,6 +295,34 @@ export class PerspectiveClient {
             },
             options,
         )
+    }
+
+    /**
+     * A conversation with a model in this perspective, using the executor's own tools: the tools
+     * that read this perspective, and only the writing tools named in `writeTools`. Every tool a
+     * session offers acts on this perspective alone, so tools about other perspectives, the agent
+     * or the node (listing or publishing perspectives, the profile) are not available. Runs as the
+     * caller, with the caller's capabilities, and answers with the model's final reply.
+     *
+     * Defaults to {@link LONG_TIMEOUT_MS}: an agent may read documentation and make many tool
+     * calls before it answers.
+     */
+    async runAgent(
+        uuid: string,
+        messages: AgentMessage[],
+        settings?: {
+            /** What the person is looking at, as a hint for the model (`{ recordId }`). */
+            context?: Record<string, unknown>,
+            /** Tools that write which the model may call. Absent: the session only reads. */
+            writeTools?: string[],
+            /** A model id; the node's default language model when absent. */
+            model?: string,
+            /** How many tool calls before the model must answer. Default 20. */
+            maxToolCalls?: number,
+        },
+        options?: CallOptions,
+    ): Promise<AgentReply> {
+        return this.#apiClient.call('perspective.runAgent', { uuid, messages, ...settings }, options)
     }
 
     /**
