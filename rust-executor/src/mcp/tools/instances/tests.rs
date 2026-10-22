@@ -1337,6 +1337,71 @@ async fn a_proxied_request_without_a_token_is_not_the_operator_anywhere() {
     );
 }
 
+/// `tools/list` on a fresh MCP session (no remembered caller) with `header` as its
+/// `Authorization` credential, on a network listener: the names it lists.
+async fn listed_on_a_fresh_session(header: Option<&str>) -> Vec<String> {
+    let handler = Ad4mMcpHandler::new(McpContext::new(
+        Some("test-admin".into()),
+        crate::agent::capabilities::ListenerReach::Network,
+        true,
+    ));
+    listed_names(&handler, header).await
+}
+
+async fn listed_names(handler: &Ad4mMcpHandler, header: Option<&str>) -> Vec<String> {
+    let auth = crate::mcp::tools::RequestAuth {
+        header: header.map(str::to_string),
+        reach: Some(crate::agent::capabilities::ListenerReach::Network),
+    };
+    handler
+        .listed_tools(auth)
+        .await
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect()
+}
+
+fn lists_classes(names: &[String]) -> bool {
+    names
+        .iter()
+        .any(|n| n.starts_with("channel_") || n.starts_with("message_"))
+}
+
+// tools/list authenticates with its own request's header, as tools/call does: a client that
+// discovers tools before its first call sees what that credential may read, and only that.
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_list_authenticates_with_its_request_header() {
+    let (_admin, _uuid, _guard) = setup(true).await;
+
+    let listed = listed_on_a_fresh_session(Some("test-admin")).await;
+    assert!(listed.iter().any(|n| n == "channel_create"), "{listed:?}");
+
+    for header in [None, Some("not-a-credential")] {
+        let listed = listed_on_a_fresh_session(header).await;
+        assert!(
+            !lists_classes(&listed),
+            "{header:?} lists private classes: {listed:?}"
+        );
+        assert!(listed.iter().any(|n| n == "instance_create"), "{listed:?}");
+    }
+
+    // A fresh header replaces a remembered session that expired.
+    let expired = crate::agent::session::Session::for_test(
+        crate::agent::session::Principal::Agent(crate::agent::AgentContext::main_agent()),
+    )
+    .expiring_at(1);
+    let handler = Ad4mMcpHandler::new(
+        McpContext::new(
+            Some("test-admin".into()),
+            crate::agent::capabilities::ListenerReach::Network,
+            true,
+        )
+        .with_session(std::sync::Arc::new(expired)),
+    );
+    let listed = listed_names(&handler, Some("test-admin")).await;
+    assert!(listed.iter().any(|n| n == "channel_create"), "{listed:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dynamic_tools_are_hidden_unless_flag_is_set() {
     let (hidden, uuid, _guard) = setup(false).await;

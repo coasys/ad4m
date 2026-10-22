@@ -194,11 +194,8 @@ impl ServerHandler for Ad4mMcpHandler {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        // The dynamic tools name the classes of the perspectives this request's caller may
-        // read: a proxied request without a token is anonymous, not the operator.
-        let this = self.for_request(&RequestAuth::of(&context));
         Ok(ListToolsResult {
-            tools: this.exposed_tools().await,
+            tools: self.listed_tools(RequestAuth::of(&context)).await,
             meta: None,
             next_cursor: None,
         })
@@ -221,6 +218,20 @@ impl ServerHandler for Ad4mMcpHandler {
 }
 
 impl Ad4mMcpHandler {
+    /// `list_tools`, split out because tests cannot build an rmcp `RequestContext`.
+    ///
+    /// The dynamic tools name the classes of the perspectives this request's caller may
+    /// read, so the request's header token opens (and the MCP session remembers) a session
+    /// first, as in `call_tool`: a client that lists before its first call sees what its
+    /// credential may read. A proxied request without a token is anonymous, not the operator.
+    pub(crate) async fn listed_tools(&self, auth: RequestAuth) -> Vec<rmcp::model::Tool> {
+        let this = self.for_request(&auth);
+        // A refused or anonymous caller still lists the static tools; the class tools
+        // check the session again.
+        let _ = this.caller(auth).await;
+        this.exposed_tools().await
+    }
+
     /// `call_tool` before the tool runs, split out because tests cannot build an rmcp
     /// `RequestContext`: the handler the tool `tool_name` runs on, or the refusal.
     ///
