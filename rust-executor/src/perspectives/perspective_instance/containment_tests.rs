@@ -719,6 +719,22 @@ async fn a_containment_walk_follows_every_edge_nearest_first() {
         .await
         .unwrap_err();
     assert!(refused.to_string().contains("levels"), "{refused}");
+    // A transitive walk with no `order` is ordered by the walk, not by
+    // timestamp, so a keyset cursor on it would page the wrong order: it is
+    // refused.
+    let refused = p
+        .model_query_classes(
+            &QueryClasses::One("Block".into()),
+            &json!({
+                "parent": {"ids": [m], "direction": "in", "transitive": true},
+                "after": "",
+                "limit": 1
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("`after`"), "{refused}");
 }
 
 /// The rows and `totalCount` of a query over `classes`.
