@@ -79,34 +79,20 @@ impl Ad4mMcpHandler {
             }
         };
 
-        // Fetch meta information for each template
-        let controller = LanguageController::global_instance();
-        let mut templates = Vec::new();
-        for address in &addresses {
-            let meta = controller.get_language_expression(address).await;
-            match meta {
-                Ok(m) => {
-                    templates.push(json!({
-                        "address": m.address,
-                        "name": m.name,
-                        "description": m.description,
-                        "author": m.author,
-                        "possible_template_params": m.possible_template_params,
-                    }));
-                }
-                Err(_) => {
-                    // Fallback: try to get at least the name from local runtime
-                    let name = controller.get_language_name(address).await;
-                    templates.push(json!({
-                        "address": address,
-                        "name": name,
-                        "description": null,
-                        "author": null,
-                        "possible_template_params": null,
-                    }));
-                }
-            }
-        }
+        let templates: Vec<_> = LanguageController::global_instance()
+            .language_metas(&addresses)
+            .await
+            .into_iter()
+            .map(|m| {
+                json!({
+                    "address": m.address,
+                    "name": m.name,
+                    "description": m.description,
+                    "author": m.author,
+                    "possible_template_params": m.possible_template_params,
+                })
+            })
+            .collect();
 
         let result = json!({
             "templates": templates,
@@ -320,22 +306,21 @@ pub(crate) async fn clone_link_language(
         );
     }
 
-    if bundle_path.exists() {
-        controller
-            .load_language(bundle_path, false)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to load cloned language into runtime: {}. The language was published but cannot be used locally.",
-                    e
-                )
-            })?;
-    } else {
+    if !bundle_path.exists() {
         return Err(format!(
             "Language bundle not found at expected path: {:?}",
             bundle_path
         ));
     }
+    // Loaded in the background, as `language.applyTemplate` does: the
+    // perspective's `ensure_link_language` waits for this install and its
+    // state reports a failure.
+    let installing = saved_hash.clone();
+    tokio::spawn(async move {
+        if let Err(e) = LanguageController::install_language(installing).await {
+            log::warn!("Failed to load cloned language into runtime: {}", e);
+        }
+    });
 
     log::info!(
         "Cloned link language template '{}' → '{}' (name: {})",
