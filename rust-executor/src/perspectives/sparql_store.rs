@@ -712,10 +712,10 @@ impl SparqlStore {
         Ok(())
     }
 
-    /// Apply a diff in one transaction, removals before additions (removal
-    /// matches by source, predicate and target, so the other order would also
-    /// delete a re-added link). Readers see the store before or after the
-    /// whole diff. An addition without a status is skipped, as `add_link`
+    /// Apply a diff in one transaction, removals before additions. Removal
+    /// matches by reifier (author, triple and timestamp), so the other order
+    /// would delete a link that is removed and re-added unchanged. Readers see
+    /// the store before or after the whole diff. An addition without a status is skipped, as `add_link`
     /// refuses it.
     pub fn apply_diff(
         &self,
@@ -1631,8 +1631,9 @@ mod tests {
     }
 
     /// `apply_diff` removes before it adds, so a link removed and re-added
-    /// in the same diff (same triple, new timestamp) stays, a replaced value
-    /// is swapped, and an addition without a status is skipped alone.
+    /// unchanged in the same diff (same reifier) stays, a re-add of its triple
+    /// with a new timestamp stays beside it, a replaced value is swapped, and
+    /// an addition without a status is skipped alone.
     #[test]
     fn apply_diff_removes_before_it_adds() {
         let signer = TestSigner::generate();
@@ -1670,8 +1671,11 @@ mod tests {
         );
         let mut no_status = make_link(&signer, "ad4m://n", "ad4m://other", "ad4m://x");
         no_status.status = None;
-        svc.apply_diff(&[kept, old], &[kept_again, new, no_status])
-            .unwrap();
+        svc.apply_diff(
+            &[kept.clone(), old],
+            &[kept_again, new, kept.clone(), no_status],
+        )
+        .unwrap();
 
         let mut targets: Vec<(String, String)> = svc
             .get_links_by_source("ad4m://n")
@@ -1684,6 +1688,7 @@ mod tests {
             targets,
             vec![
                 ("ad4m://expires".to_string(), "ad4m://t2".to_string()),
+                ("ad4m://status".to_string(), "ad4m://active".to_string()),
                 ("ad4m://status".to_string(), "ad4m://active".to_string()),
             ]
         );
