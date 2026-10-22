@@ -327,6 +327,15 @@ impl Ad4mMcpHandler {
             .with_route((Self::instance_query_tool_attr(), Self::instance_query))
             .with_route((Self::instance_get_tool_attr(), Self::instance_get))
             .with_route((Self::instance_update_tool_attr(), Self::instance_update))
+            // instances/template_tools.rs: described by the bundle that runs them
+            .with_route((
+                instances::template_tools::from_bundle(Self::template_read_tool_attr()),
+                Self::template_read,
+            ))
+            .with_route((
+                instances::template_tools::from_bundle(Self::template_update_tool_attr()),
+                Self::template_update,
+            ))
             .with_route((
                 Self::instance_add_to_collection_tool_attr(),
                 Self::instance_add_to_collection,

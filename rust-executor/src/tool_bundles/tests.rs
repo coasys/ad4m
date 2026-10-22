@@ -645,6 +645,33 @@ fn a_bundle_s_log_line_is_bounded_and_never_above_debug() {
 }
 
 #[tokio::test]
+async fn close_waits_until_every_isolate_thread_has_ended() {
+    init_v8_platform();
+    let limits = SandboxLimits {
+        call_timeout: Duration::from_millis(300),
+        ..SandboxLimits::default()
+    };
+    let sandbox = BundleSandbox::start("closing", COUNTER.to_string(), limits)
+        .await
+        .expect("fixture bundle loads");
+    assert_eq!(sandbox.call(&["next"], vec![]).await, Ok(json!(1)));
+    // One isolate stopped at the time limit, and the fresh one the next call starts.
+    assert!(sandbox.call(&["spin"], vec![]).await.is_err());
+    assert_eq!(sandbox.call(&["next"], vec![]).await, Ok(json!(1)));
+
+    sandbox.close().await;
+    assert_eq!(
+        isolate_threads("closing"),
+        0,
+        "close answered before a thread ended"
+    );
+    // A call after close starts afresh.
+    assert_eq!(sandbox.call(&["next"], vec![]).await, Ok(json!(1)));
+    sandbox.close().await;
+    assert_eq!(isolate_threads("closing"), 0);
+}
+
+#[tokio::test]
 async fn calls_from_many_tasks_are_answered_in_turn() {
     let sandbox = start(API).await;
     let calls = (0..20).map(|n| {

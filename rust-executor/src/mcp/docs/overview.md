@@ -77,6 +77,17 @@ Every write is validated against the class schema before anything is
 written; a rejection names the property, the expected type and the
 cardinality, so fix what the error says rather than guessing.
 
+### WE templates
+
+| Tool | What it does |
+| --- | --- |
+| `template_read(perspective_id, base_uri, ...)` | Read a WE app's Template record: the template whole, or as an outline when it is large, and its version |
+| `template_update(perspective_id, base_uri, version, patches)` | Patch the template by WE's own rules and save it as you, all at once |
+
+Use these, not `instance_update`, for a Template: they apply WE's rules for a template — what
+makes it valid, and that its version moves with it — where a raw property write does not.
+`get_documentation(topic="template")` is the guide; read it before a first edit.
+
 ### Tree and raw links
 
 | Tool | What it does |

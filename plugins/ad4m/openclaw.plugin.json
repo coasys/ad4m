@@ -8,6 +8,8 @@
     "tools": [
       "ad4m_get_sample_config",
       "ad4m_get_documentation",
+      "ad4m_template_read",
+      "ad4m_template_update",
       "ad4m_get_my_did",
       "ad4m_auth_status",
       "ad4m_login_email",

@@ -10,6 +10,7 @@
 //! with whatever set the connection up (for the OpenClaw plugin, its skill).
 
 use super::Ad4mMcpHandler;
+use crate::tool_bundles::builtin;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -64,21 +65,55 @@ impl DocTopic {
     }
 }
 
+/// The executor's own topics by the name a call spells them.
+pub(crate) fn executor_topic_names() -> Vec<String> {
+    DocTopic::ALL
+        .into_iter()
+        .filter_map(|topic| serde_json::to_value(topic).ok())
+        .filter_map(|name| name.as_str().map(str::to_string))
+        .collect()
+}
+
 /// Parameters for reading the executor's documentation
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GetDocumentationParams {
-    /// Which document: "overview" (start here), "usage", "flux", "models"
-    /// or "architecture"
-    pub topic: DocTopic,
+    /// Which document: "overview" (start here), "usage", "flux", "models" or "architecture";
+    /// "template" for editing a WE template, and the topics under it that it names
+    pub topic: String,
 }
 
 impl Ad4mMcpHandler {
     /// Return the executor's documentation for a topic, as markdown.
     #[tool(
-        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux — for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. No authentication needed."
+        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux — for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. topic='template' is the guide to editing a WE template with template_read and template_update, and names the topics under it (template/...) for its components and props."
     )]
     pub async fn get_documentation(&self, params: Parameters<GetDocumentationParams>) -> String {
-        params.0.topic.text().to_string()
+        let topic = params.0.topic.trim();
+        if let Ok(own) = serde_json::from_value::<DocTopic>(serde_json::json!(topic)) {
+            return own.text().to_string();
+        }
+        let unknown = || {
+            serde_json::json!({
+                "error": format!(
+                    "No documentation topic {topic:?}. Topics: {}, and {}, which names the \
+                     topics under it.",
+                    executor_topic_names().join(", "),
+                    builtin::TOOLSET
+                )
+            })
+            .to_string()
+        };
+        if !builtin::is_topic(topic) {
+            return unknown();
+        }
+        match builtin::read_doc(topic).await {
+            Ok(Some(text)) => text,
+            Ok(None) => unknown(),
+            Err(e) => {
+                serde_json::json!({ "error": format!("Topic {topic:?} could not be read: {e}") })
+                    .to_string()
+            }
+        }
     }
 }
 
@@ -145,8 +180,8 @@ mod tests {
                     let named = &rest[..end];
                     pointers_found += 1;
                     assert!(
-                        served.contains(&named.to_string()),
-                        "{topic:?} points at topic={named:?}, which no DocTopic serves"
+                        served.contains(&named.to_string()) || builtin::is_topic(named),
+                        "{topic:?} points at topic={named:?}, which nothing serves"
                     );
                 }
             }
@@ -403,7 +438,7 @@ mod tests {
         // The tool itself: unauthenticated handler, still answers.
         let text = handler
             .get_documentation(Parameters(GetDocumentationParams {
-                topic: DocTopic::Overview,
+                topic: "overview".to_string(),
             }))
             .await;
         assert_eq!(text, DocTopic::Overview.text());
@@ -426,7 +461,9 @@ mod tests {
         let mut served = Vec::new();
         for topic in DocTopic::ALL {
             let text = handler
-                .get_documentation(Parameters(GetDocumentationParams { topic }))
+                .get_documentation(Parameters(GetDocumentationParams {
+                    topic: wire_name(topic),
+                }))
                 .await;
             assert_eq!(text, topic.text(), "{topic:?} served the wrong document");
             assert!(text.starts_with("# "), "{topic:?} served no markdown title");

@@ -1,6 +1,7 @@
 //! Integration tests for the static `instance_*` surface, driven through
 //! the same handler methods the MCP transport dispatches to.
 
+use super::template_tools::TemplateToolParams;
 use super::*;
 use crate::mcp::server::McpContext;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
@@ -2941,4 +2942,332 @@ async fn a_we_calls_blocks_are_its_children() {
     );
     assert_eq!(listed["total_count"], 1, "{listed}");
     assert_eq!(listed["children"][0]["id"], by_we.as_str());
+}
+
+// ── template tools (WE's rules, compiled in) ─────────────────────────────
+
+/// WE's `Template`, as far as the template tools read and write it: the schema is stored through
+/// a language (a file, in WE) and the version moves with it.
+const TEMPLATE_SDNA: &str = r#"{
+  "target_class": "we://Template",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"we://Template"}
+  ],
+  "properties": [
+    {"path":"we://name","name":"name","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://name","target":"value"}]},
+    {"path":"we://template_schema","name":"schema","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "resolve_language":"QmzSYwdTestFileLanguage",
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://template_schema","target":"value"}]},
+    {"path":"we://version","name":"version","datatype":"xsd:integer","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://version","target":"value"}]}
+  ]
+}"#;
+
+/// The same, with the schema held as a literal: what a template written as JSON text looks like.
+fn literal_template_sdna() -> String {
+    TEMPLATE_SDNA.replace(r#""resolve_language":"QmzSYwdTestFileLanguage","#, "")
+}
+
+/// A small template: a column holding a heading.
+fn small_template() -> Value {
+    json!({
+        "type": "Column",
+        "meta": { "name": "Small", "description": "A heading", "icon": "house" },
+        "props": { "bg": "page" },
+        "children": [{ "type": "we-text", "props": { "variant": "heading-lg" }, "children": ["Hello"] }]
+    })
+}
+
+/// A perspective holding one Template, its schema written as `schema`.
+async fn template_setup(
+    sdna: &str,
+    schema: Value,
+) -> (Ad4mMcpHandler, String, PerspectiveGuard, String) {
+    crate::test_utils::init_v8_platform();
+    let (handler, uuid, guard) = setup_with(&[("Template", sdna)], false).await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                properties: Some(props(&[
+                    ("name", json!("Small")),
+                    ("schema", schema),
+                    ("version", json!(1)),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let base_uri = created["base_uri"].as_str().expect("created").to_string();
+    (handler, uuid, guard, base_uri)
+}
+
+fn template_params(uuid: &str, base_uri: &str, arguments: Value) -> Parameters<TemplateToolParams> {
+    Parameters(TemplateToolParams {
+        perspective_id: uuid.to_string(),
+        base_uri: base_uri.to_string(),
+        arguments: arguments.as_object().cloned().unwrap_or_default(),
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_template_tools_are_listed_with_the_bundle_s_arguments() {
+    let (handler, _uuid, _guard) = setup(false).await;
+    let tools = handler.exposed_tools().await;
+    for declared in &crate::tool_bundles::builtin::declared().tools {
+        let listed = tools
+            .iter()
+            .find(|t| t.name == declared.name)
+            .unwrap_or_else(|| panic!("{} is not listed", declared.name));
+        assert_eq!(
+            listed.description.as_deref(),
+            Some(declared.description.as_str())
+        );
+        let schema = Value::Object((*listed.input_schema).clone());
+        for own in declared.parameters["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            assert_eq!(
+                schema["properties"][own], declared.parameters["properties"][own],
+                "{}: {own}",
+                declared.name
+            );
+        }
+        for named in ["perspective_id", "base_uri"] {
+            assert!(schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(named)));
+        }
+    }
+    assert_eq!(
+        crate::tool_bundles::builtin::declared()
+            .tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["template_read", "template_update"],
+        "a tool the bundle adds or renames needs its #[tool] method here"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_read_answers_with_the_stored_template_and_its_version() {
+    let sdna = literal_template_sdna();
+    let (handler, uuid, _guard, base_uri) =
+        template_setup(&sdna, json!(small_template().to_string())).await;
+    let read = parse(
+        &handler
+            .template_read(template_params(&uuid, &base_uri, json!({})))
+            .await,
+    );
+    assert_eq!(read["version"], 1, "{read}");
+    assert!(read.to_string().contains("Hello"), "{read}");
+
+    let found = handler
+        .template_read(template_params(
+            &uuid,
+            &base_uri,
+            json!({ "find": "Hello" }),
+        ))
+        .await;
+    assert!(found.contains("n2 we-text — Hello"), "{found}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_update_saves_the_schema_and_its_version_in_one_write() {
+    // No file language runs here, so the schema is stored as the text of what was written, and
+    // read back as that text: an object is what both sides can read.
+    let (handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let patch = |version: u32| {
+        json!({
+            "version": version,
+            "patches": [{ "targetId": "n2", "node": { "type": "we-text", "props": { "variant": "heading-lg" }, "children": ["Goodbye"] } }]
+        })
+    };
+
+    let stale = handler
+        .template_update(template_params(&uuid, &base_uri, patch(0)))
+        .await;
+    assert!(stale.contains("has changed since it was read"), "{stale}");
+
+    let mut dry_run = patch(1);
+    dry_run["dry_run"] = json!(true);
+    let checked = handler
+        .template_update(template_params(&uuid, &base_uri, dry_run))
+        .await;
+    assert!(checked.starts_with("Valid"), "{checked}");
+
+    let saved = handler
+        .template_update(template_params(&uuid, &base_uri, patch(1)))
+        .await;
+    assert!(saved.starts_with("Saved as version 2."), "{saved}");
+    let after = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri: base_uri.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 2, "{after}");
+    assert!(
+        after["schema"].to_string().contains("data_base64"),
+        "the schema is written as the file WE stores it as: {after}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_update_writes_nothing_the_class_schema_refuses() {
+    // A literal schema property cannot take the file the tool writes: nothing is written, the
+    // version included.
+    let sdna = literal_template_sdna();
+    let (handler, uuid, _guard, base_uri) =
+        template_setup(&sdna, json!(small_template().to_string())).await;
+    let refused = parse(
+        &handler
+            .template_update(template_params(
+                &uuid,
+                &base_uri,
+                json!({
+                    "version": 1,
+                    "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": ["Bye"] } }]
+                }),
+            ))
+            .await,
+    );
+    let error = refused["error"].as_str().unwrap_or_default();
+    assert!(error.contains("Nothing was written"), "{refused}");
+    assert!(error.contains("schema"), "{refused}");
+    let after = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri,
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 1, "{after}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_template_tools_refuse_a_record_that_is_not_a_template() {
+    crate::test_utils::init_v8_platform();
+    let (handler, uuid, _guard) = setup(false).await;
+    let channel = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("lobby"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let wrong = parse(
+        &handler
+            .template_read(template_params(
+                &uuid,
+                channel["base_uri"].as_str().unwrap(),
+                json!({}),
+            ))
+            .await,
+    );
+    assert!(
+        wrong["error"]
+            .as_str()
+            .unwrap()
+            .contains("works on Template"),
+        "{wrong}"
+    );
+}
+
+#[tokio::test]
+async fn the_template_documentation_is_served_to_anyone() {
+    crate::test_utils::init_v8_platform();
+    let anonymous = Ad4mMcpHandler::new(McpContext {
+        admin_credential: Some("test-admin".to_string()),
+        auth_token: Arc::new(RwLock::new(None)),
+        dynamic_class_tools: false,
+    });
+    let read = |topic: &str| {
+        anonymous.get_documentation(Parameters(
+            crate::mcp::tools::docs::GetDocumentationParams {
+                topic: topic.into(),
+            },
+        ))
+    };
+    assert!(read("template").await.contains("template_update"));
+    let missing = read("template/nothing").await;
+    assert!(missing.contains("No documentation topic"), "{missing}");
+    let elsewhere = read("rooms").await;
+    assert!(elsewhere.contains("No documentation topic"), "{elsewhere}");
+}
+
+/// A file-like property: its value is stored as an expression on a language rather than as a
+/// literal, so what is written is what that language takes — an object of bytes and type for a
+/// file — whatever the declared datatype says.
+const ATTACHMENT_SDNA: &str = r#"{
+  "target_class": "ns://Attachment",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Attachment"}
+  ],
+  "properties": [
+    {"path":"ns://attachment_title","name":"title","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://attachment_title","target":"value"}]},
+    {"path":"ns://attachment_file","name":"file","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "resolve_language":"QmzSYwdTestFileLanguage",
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://attachment_file","target":"value"}]}
+  ]
+}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_property_stored_through_a_language_takes_the_value_the_language_does() {
+    let (handler, uuid, _guard) = setup_with(&[("Attachment", ATTACHMENT_SDNA)], false).await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Attachment".into(),
+                properties: Some(props(&[("title", json!("notes"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let base_uri = created["base_uri"].as_str().expect("created").to_string();
+    let file =
+        json!({ "data_base64": "e30=", "name": "notes.json", "file_type": "application/json" });
+
+    let on_a_literal = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Attachment".into(),
+                base_uri: base_uri.clone(),
+                properties: props(&[("title", file.clone())]),
+            }))
+            .await,
+    );
+    assert!(on_a_literal.get("error").is_some(), "{on_a_literal}");
+
+    let on_a_file = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Attachment".into(),
+                base_uri,
+                properties: props(&[("file", file)]),
+            }))
+            .await,
+    );
+    assert_eq!(on_a_file["success"], true, "{on_a_file}");
 }
