@@ -53,6 +53,7 @@ const noopHandlers: WsClientHandlers = {
     onOnlineAgents() {},
     onPeerJoined() {},
     onPeerLeft() {},
+    onKeysGranted() {},
 };
 
 async function until(cond: () => boolean, label: string, timeoutMs = 2000): Promise<void> {
@@ -129,5 +130,27 @@ describe("ws-client: auth-error", () => {
 
         await until(() => factory.connections.length === 2, "reconnect");
         assert.equal(invalidations, 0);
+    });
+});
+
+describe("ws-client: keys-granted", () => {
+    it("hands a key grant to onKeysGranted", async () => {
+        const factory = new MockFactory();
+        initAdapters({ wsFactory: factory });
+        const grants: number[][] = [];
+        client = new WsClient({
+            getUrl: async () => "wss://server.example/rooms/r/ws",
+            getToken: async () => "token-1",
+            handlers: { ...noopHandlers, onKeysGranted: (msg) => grants.push(msg.versions) },
+        });
+
+        await client.connect();
+        const conn = factory.connections[0];
+        conn.open();
+        await until(() => conn.sent.length > 0, "auth frame");
+        conn.receive({ type: "online-agents", agents: [] });
+        conn.receive({ type: "keys-granted", versions: [1, 2] });
+
+        assert.deepEqual(grants, [[1, 2]]);
     });
 });

@@ -340,6 +340,14 @@ const language = defineLanguage({
                 onStatusChanged(msg) {
                     telepresenceModule.handleStatusChanged(msg);
                 },
+                onKeysGranted() {
+                    // A grant is news, not a guess: refresh past the retry
+                    // cooldown and read what the new keys open.
+                    lastKeyRingRetry = 0;
+                    void syncModule.catchUp().catch((err) => {
+                        console.error("[server-link-language] catch-up after key grant failed:", err);
+                    });
+                },
                 onOpen() {
                     getRuntime().emitSyncStateChange("Synced");
                     // Belt-and-braces catch-up: covers any diff that landed

@@ -86,6 +86,7 @@ export type ServerWsMessage =
   | { type: "peer-joined"; did: string }
   | { type: "peer-left"; did: string }
   | { type: "status-changed"; did: string; status: unknown }
+  | { type: "keys-granted"; versions: number[] }
   | { type: "auth-error"; error: string };
 
 /** Client -> server WebSocket messages. */

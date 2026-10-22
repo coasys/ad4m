@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type WebSocket from "ws";
 import {
   authenticateAgent,
+  clientSideRotate,
   collectMessages,
   createSignedLink,
   createTestAgent,
@@ -16,6 +17,7 @@ import {
   waitForOpen,
   type TestServerHandle,
 } from "./helpers.js";
+import { sealToDid } from "./sealed-box.js";
 
 async function withServer(fn: (server: TestServerHandle) => Promise<void>): Promise<void> {
   const server = await startTestServer();
@@ -98,6 +100,29 @@ test("on connect, agent receives an online-agents snapshot; a second connect tri
     assert.equal(joinedMsg.did, agentB.did);
 
     closeAll(wsA, wsB);
+  });
+});
+
+test("a key grant tells the grantee's sockets which versions it received", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    const { roomKey } = await clientSideRotate(server.url, roomId, adminToken);
+    const member = await createTestAgent();
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
+    const memberToken = await authenticateAgent(server.url, roomId, member);
+    const memberWs = await openAuthenticatedWs(server.wsUrl, roomId, memberToken);
+    const memberMessages = collectMessages(memberWs);
+
+    await postJson(
+      `${server.url}/rooms/${roomId}/keys/grant`,
+      { targetDid: member.did, keys: [{ version: 1, encryptedKey: sealToDid(member.did, roomKey) }] },
+      adminToken,
+    );
+
+    assert.deepEqual(await memberMessages.waitForType("keys-granted"), { type: "keys-granted", versions: [1] });
+    closeAll(memberWs);
   });
 });
 

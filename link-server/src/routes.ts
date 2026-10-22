@@ -502,6 +502,10 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           stored.push(entry.version);
         }
       }
+      // The grantee waits for these to read the room's history: tell it now.
+      if (stored.length > 0) {
+        ctx.ws.sendToDid(claims.roomId, body.targetDid, { type: "keys-granted", versions: stored });
+      }
       return reply.send({ granted: stored });
     }
   );

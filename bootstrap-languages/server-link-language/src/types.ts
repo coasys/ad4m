@@ -209,6 +209,7 @@ export type ServerWsMessage =
     | { type: "peer-joined"; did: DID }
     | { type: "peer-left"; did: DID }
     | { type: "status-changed"; did: DID; status: unknown }
+    | { type: "keys-granted"; versions: number[] }
     | { type: "auth-error"; error: string };
 
 export type ClientWsMessage =
