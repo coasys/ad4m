@@ -1459,7 +1459,9 @@ impl Ad4mDb {
     }
 
     /// Keep the signed links a tombstone ended on `perspective`, keyed by
-    /// predicate, author and signature; one already kept is left as is.
+    /// predicate, author and signature. Callers pass only links whose proof
+    /// verifies, so a row already under the key is replaced: a row kept
+    /// without a valid proof cannot hold the key against a verified link.
     pub fn keep_monotonic_ended(
         &self,
         perspective: &str,
@@ -1468,7 +1470,7 @@ impl Ad4mDb {
         let tx = self.conn.unchecked_transaction()?;
         for link in links {
             tx.execute(
-                "INSERT OR IGNORE INTO monotonic_ended (perspective, predicate, author, signature, link)
+                "INSERT OR REPLACE INTO monotonic_ended (perspective, predicate, author, signature, link)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     perspective,

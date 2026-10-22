@@ -1022,3 +1022,94 @@ async fn t6_a_role_grant_declaration_converges_in_every_arrival_order() {
         assert_eq!(result, expected, "{name} holds what {first} holds");
     }
 }
+
+/// The grant G of `t6_a_role_grant_declaration_converges_in_every_arrival_order`
+/// with its target changed: same author, source, predicate and signature, a
+/// proof that does not verify.
+fn unverified_copy(g: &LinkExpression) -> LinkExpression {
+    let mut copy = g.clone();
+    copy.data.target = "did:key:z6MkNotTheGrantee".to_string();
+    assert!(!copy.compute_proof_valid(), "the copy must not verify");
+    copy
+}
+
+/// A copy of the grant that does not verify, arriving before the grant,
+/// does not keep the grant from coming back when the role-grant declaration
+/// arrives last: the replica holds the grant as one the declaration reached
+/// first does.
+#[tokio::test(flavor = "multi_thread")]
+async fn t6_an_unverified_copy_does_not_keep_the_grant_from_restoring() {
+    let alice = TestSigner::generate();
+    let bob = TestSigner::generate();
+    let plain = class_links_with(&alice, "Role", MEMBER, serde_json::json!(true));
+    let role_grant = class_links_with(&alice, "Role", MEMBER, serde_json::json!("roleGrant"));
+    let d = with_predicate(&plain, FLAG).clone();
+    let r = with_predicate(&role_grant, MONOTONIC_ROLE_GRANT_FLAG_PREDICATE).clone();
+    let g = grant(&bob, ROLE, MEMBER);
+    let t = tombstone_by(&bob, &g);
+    let bad = unverified_copy(&g);
+
+    for (name, order) in [
+        ("D, T, Gbad, G, R", [&d, &t, &bad, &g, &r]),
+        ("R, D, T, Gbad, G", [&r, &d, &t, &bad, &g]),
+    ] {
+        let mut replica = neighbourhood_of(&alice).await;
+        for link in order {
+            sync_in(&mut replica, vec![link.clone()], vec![]).await;
+        }
+        assert!(present(&replica, &g), "{name}: the grant is held");
+    }
+}
+
+/// D, G and T stored, then the role-grant declaration R made durable without
+/// the restoration it starts: the grant is kept outside the store and
+/// missing from it.
+async fn stored_declaration_without_its_restoration(
+) -> (PerspectiveInstance, LinkExpression, LinkExpression) {
+    let alice = TestSigner::generate();
+    let bob = TestSigner::generate();
+    let plain = class_links_with(&alice, "Role", MEMBER, serde_json::json!(true));
+    let role_grant = class_links_with(&alice, "Role", MEMBER, serde_json::json!("roleGrant"));
+    let d = with_predicate(&plain, FLAG).clone();
+    let r = with_predicate(&role_grant, MONOTONIC_ROLE_GRANT_FLAG_PREDICATE).clone();
+    let g = grant(&bob, ROLE, MEMBER);
+    let t = tombstone_by(&bob, &g);
+
+    let mut replica = neighbourhood_of(&alice).await;
+    for link in [&d, &g, &t] {
+        sync_in(&mut replica, vec![link.clone()], vec![]).await;
+    }
+    assert!(!present(&replica, &g), "the tombstone ended the grant");
+    replica.sparql_store.add_link(&r).expect("store R");
+    replica.invalidate_monotonic_declared();
+    assert!(present(&replica, &r));
+    assert!(!present(&replica, &g), "R stored, the grant not restored");
+    (replica, r, g)
+}
+
+/// Reopening a perspective whose role-grant declaration is stored restores
+/// the grant a tombstone ended before it.
+#[tokio::test(flavor = "multi_thread")]
+async fn t6_a_stored_role_grant_declaration_restores_the_grant_on_reopen() {
+    let (replica, _, g) = stored_declaration_without_its_restoration().await;
+
+    let handle = replica.persisted.lock().await.clone();
+    let mut reopened = PerspectiveInstance::new(handle, None);
+    reopened.sparql_store = replica.sparql_store.clone();
+    drop(replica);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        reopened.monotonic_restore_at_load(),
+    )
+    .await
+    .expect("restore at load");
+    assert!(present(&reopened, &g), "the grant is restored on reopen");
+}
+
+/// The same declaration arriving again restores what it did not.
+#[tokio::test(flavor = "multi_thread")]
+async fn t6_a_stored_role_grant_declaration_arriving_again_restores_the_grant() {
+    let (mut replica, r, g) = stored_declaration_without_its_restoration().await;
+    sync_in(&mut replica, vec![r], vec![]).await;
+    assert!(present(&replica, &g), "the grant is restored");
+}

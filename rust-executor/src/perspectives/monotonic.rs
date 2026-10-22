@@ -102,8 +102,11 @@
 //! declared predicate is therefore kept, signed, outside the graph
 //! (`monotonic_ended` in the executor database); when a flag makes that
 //! predicate end only by revocation, the kept links go back into the store
-//! ([`RetractionEffects::restored`]). Replicas holding the same links agree
-//! whatever order they arrived in.
+//! ([`RetractionEffects::restored`]). Only links whose proof verifies are
+//! kept or restored. Restoring reads only, so it is retried: by the flag
+//! arriving again, and at load for every predicate that ends only by
+//! revocation (`restore_monotonic_ended`). Replicas holding the same links
+//! agree whatever order they arrived in.
 //!
 //! The check is per predicate, not per class: another class using the same
 //! predicate URI is monotonic too, which fails safe (the link stays). A
@@ -328,7 +331,16 @@ impl MonotonicDeclared {
     /// yet: `links` count as Shared (pulled links often carry no status), so
     /// a local caller passes only its Shared additions.
     pub fn with_incoming(&self, links: &[LinkExpression]) -> Self {
-        let mut declared = Self::from_flags(
+        let mut declared = self.declared_by(links);
+        for (p, ending) in &self.predicates {
+            declared.declare(p.clone(), *ending);
+        }
+        declared
+    }
+
+    /// What the flags among `links` alone declare, under `self`'s authority.
+    fn declared_by(&self, links: &[LinkExpression]) -> Self {
+        Self::from_flags(
             self.authority.clone(),
             links
                 .iter()
@@ -338,11 +350,33 @@ impl MonotonicDeclared {
                     l.status = Some(LinkStatus::Shared);
                     l
                 }),
-        );
-        for (p, ending) in &self.predicates {
-            declared.declare(p.clone(), *ending);
-        }
-        declared
+        )
+    }
+
+    /// The declared predicates that end only by revocation.
+    fn revocation_only(&self) -> impl Iterator<Item = &str> + '_ {
+        self.predicates
+            .iter()
+            .filter(|(_, e)| **e != Ending::Tombstone)
+            .map(|(p, _)| p.as_str())
+    }
+
+    /// The predicates whose kept links a write of `incoming` restores: those
+    /// `self` makes end only by revocation, newly against `before` or by a
+    /// flag among `incoming` again. A flag that arrives again retries a
+    /// restoration that did not finish.
+    fn restoring<'a>(
+        &'a self,
+        before: &'a MonotonicDeclared,
+        incoming: &[LinkExpression],
+    ) -> Vec<&'a str> {
+        let named = self.declared_by(incoming);
+        self.revocation_only()
+            .filter(|p| {
+                let ending = self.predicates.get(*p);
+                before.predicates.get(*p) != ending || named.predicates.get(*p) == ending
+            })
+            .collect()
     }
 
     /// How a Shared link under `predicate` may end: the fixed table first,
@@ -532,7 +566,8 @@ impl RetractionEffects {
 
     /// The links this write ends under a predicate only a declaration made
     /// monotonic: kept, so a later `roleGrant` flag can restore them. A
-    /// fixed-table predicate never changes how it ends.
+    /// fixed-table predicate never changes how it ends, and a link whose
+    /// proof does not verify is never kept (nor restored).
     pub fn ended_under_declared(&self) -> Vec<LinkExpression> {
         self.retracted
             .iter()
@@ -540,6 +575,7 @@ impl RetractionEffects {
             .map(LinkExpression::from)
             .chain(self.covered.iter().cloned())
             .filter(|l| ending(l.data.predicate.as_deref()).is_none())
+            .filter(|l| l.compute_proof_valid())
             .collect()
     }
 }
@@ -638,28 +674,15 @@ impl PerspectiveInstance {
             }
         }
 
+        // Now ended only by revocation: what a tombstone ended goes back.
+        for predicate in declared.restoring(stored, &incoming) {
+            effects
+                .restored
+                .extend(self.restorable(predicate, additions)?);
+        }
+
         for (predicate, ending) in declared.newly_declared(stored) {
             if ending != Ending::Tombstone {
-                // Now ended only by revocation: what a tombstone ended goes back.
-                let kept =
-                    Ad4mDb::with_global_instance(|db| db.monotonic_ended(&self.uuid, predicate))?;
-                for link in kept {
-                    let restore = link.compute_proof_valid()
-                        && !additions.iter().any(|a| same_link(a, &link))
-                        && self
-                            .sparql_store
-                            .get_link(
-                                &link.data.source,
-                                link.data.predicate.as_deref(),
-                                &link.data.target,
-                                &link.author,
-                                &link.timestamp,
-                            )?
-                            .is_none();
-                    if restore {
-                        effects.restored.push(link);
-                    }
-                }
                 continue;
             }
             for held in
@@ -689,6 +712,64 @@ impl PerspectiveInstance {
             }
         }
         Ok(effects)
+    }
+
+    /// The links kept under `predicate` that verify and are neither in the
+    /// store nor among `additions`. Reads only, so a restoration that did not
+    /// finish is retried by the next caller.
+    fn restorable(
+        &self,
+        predicate: &str,
+        additions: &[LinkExpression],
+    ) -> Result<Vec<LinkExpression>, AnyError> {
+        let kept = Ad4mDb::with_global_instance(|db| db.monotonic_ended(&self.uuid, predicate))?;
+        let mut restorable = Vec::new();
+        for link in kept {
+            let restore = link.compute_proof_valid()
+                && !additions.iter().any(|a| same_link(a, &link))
+                && self
+                    .sparql_store
+                    .get_link(
+                        &link.data.source,
+                        link.data.predicate.as_deref(),
+                        &link.data.target,
+                        &link.author,
+                        &link.timestamp,
+                    )?
+                    .is_none();
+            if restore {
+                restorable.push(link);
+            }
+        }
+        Ok(restorable)
+    }
+
+    /// Restore the kept links of every predicate that now ends only by
+    /// revocation and is missing from the store: a restoration the stored
+    /// flag started but did not finish. Returns how many went back.
+    pub(crate) async fn restore_monotonic_ended(&self) -> Result<usize, AnyError> {
+        let declared = self.monotonic_declared().await?;
+        let mut restored = 0;
+        for predicate in declared.revocation_only() {
+            for link in self.restorable(predicate, &[])? {
+                self.sparql_store.add_link(&link)?;
+                restored += 1;
+            }
+        }
+        Ok(restored)
+    }
+
+    /// [`Self::restore_monotonic_ended`] once the perspective is loaded and
+    /// its authority known.
+    pub(crate) async fn monotonic_restore_at_load(&self) {
+        if !self.agent_did_ready().await {
+            return;
+        }
+        match self.restore_monotonic_ended().await {
+            Ok(0) => {}
+            Ok(n) => log::info!("{}: restored {n} monotonic link(s) at load", self.uuid),
+            Err(e) => log::warn!("{}: restoring monotonic links at load: {e}", self.uuid),
+        }
     }
 
     fn stored_tombstone_ends(

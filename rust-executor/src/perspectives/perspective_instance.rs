@@ -858,6 +858,7 @@ impl PerspectiveInstance {
             self.fallback_sync_loop(),
             self.auto_processor_supervisor(),
             self.flow_pass_at_load(),
+            self.monotonic_restore_at_load(),
         );
     }
 
