@@ -398,6 +398,25 @@ fn the_store_keeps_a_bundle_by_its_content_address() {
 }
 
 #[test]
+fn putting_a_bundle_again_replaces_a_changed_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ToolBundleStore::new(dir.path());
+    let address = store.put("export const a = 1;").unwrap();
+    std::fs::write(
+        dir.path().join(format!("{address}.js")),
+        "export const a = 2;",
+    )
+    .unwrap();
+    assert!(store.get(&address).is_err());
+
+    assert_eq!(store.put("export const a = 1;").unwrap(), address);
+    assert_eq!(
+        store.get(&address).unwrap().as_deref(),
+        Some("export const a = 1;")
+    );
+}
+
+#[test]
 fn the_store_refuses_a_changed_file_and_anything_that_is_not_an_address() {
     let dir = tempfile::tempdir().unwrap();
     let store = ToolBundleStore::new(dir.path());

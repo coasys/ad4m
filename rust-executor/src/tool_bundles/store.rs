@@ -32,11 +32,11 @@ impl ToolBundleStore {
     }
 
     /// Store a bundle's source and answer with its address. Storing the same source again
-    /// changes nothing.
+    /// changes nothing, unless the file there was changed: then it is written again.
     pub fn put(&self, source: &str) -> io::Result<String> {
         let address = content_address(source);
         let path = self.path_of(&address)?;
-        if !path.exists() {
+        if !fs::read_to_string(&path).is_ok_and(|stored| stored == source) {
             fs::create_dir_all(&self.dir)?;
             // Written beside and renamed into place, so a reader never sees half a bundle.
             let partial = path.with_extension("js.partial");
