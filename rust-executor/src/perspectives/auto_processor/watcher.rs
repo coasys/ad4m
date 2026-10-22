@@ -961,6 +961,14 @@ pub async fn run_one_pass(
             uuid
         );
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::BackedOff { holder });
     }
 
@@ -1031,7 +1039,15 @@ pub async fn run_one_pass(
     // Unit tests stand in for the LLM here; production always runs the engine.
     #[cfg(test)]
     let stubbed = abandon_on_err!(
-        test_hooks::interpret(perspective, &shapes, &base_prefix, &cursor, context).await
+        test_hooks::interpret(
+            perspective,
+            &shapes,
+            &base_prefix,
+            &cursor,
+            &cfg.processor_id,
+            context
+        )
+        .await
     );
     #[cfg(not(test))]
     let stubbed: Option<Vec<String>> = None;
@@ -1140,6 +1156,14 @@ pub async fn run_one_pass(
         )
         .await?;
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::BackedOff { holder });
     }
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
@@ -1193,6 +1217,14 @@ pub async fn run_one_pass(
             uuid
         );
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::BackedOff { holder });
     }
 
@@ -1345,6 +1377,8 @@ pub(crate) mod test_hooks {
         pub interpret: Option<Vec<ProposedInstance>>,
         /// Fail the claim re-read that follows the interpretation.
         pub fail_confirm: bool,
+        /// A peer claim on the batch, written after the run is minted.
+        pub peer_claim: Option<String>,
     }
 
     tokio::task_local! {
@@ -1362,9 +1396,11 @@ pub(crate) mod test_hooks {
         shapes: &[ModelShape],
         base_prefix: &str,
         cursor: &InterpretationRunCursor,
+        processor_id: &str,
         context: &AgentContext,
     ) -> anyhow::Result<Option<Vec<String>>> {
-        let Some(proposals) = hooks().interpret else {
+        let hooks = hooks();
+        let Some(proposals) = hooks.interpret else {
             return Ok(None);
         };
         let existing = existing_instance_context(perspective, shapes, None).await?;
@@ -1380,6 +1416,18 @@ pub(crate) mod test_hooks {
             debug_response: None,
         };
         mint_interpretation_run(perspective, &meta, Some(cursor), None, context).await?;
+        if let Some(peer) = hooks.peer_claim {
+            let expires = chrono::Utc::now().timestamp_millis() + 60_000;
+            super::super::claim::write_claim(
+                perspective,
+                processor_id,
+                &batch_key(&cursor.sources),
+                &peer,
+                expires,
+                context,
+            )
+            .await?;
+        }
         Ok(Some(
             ops.iter()
                 .filter_map(|op| match op {
@@ -2010,6 +2058,7 @@ mod tests {
                 &[("title", serde_json::json!("Ship the parser"))],
             )]),
             fail_confirm: true,
+            ..Default::default()
         };
         let now = chrono::Utc::now().timestamp_millis();
         let mut rx = super::super::events::subscribe().await;
@@ -2059,6 +2108,171 @@ mod tests {
             assert!(
                 !(ev.perspective_uuid == p.uuid && ev.step == AutoProcessorStep::Processed),
                 "a failed re-read must not emit Processed"
+            );
+        }
+    }
+
+    /// A peer claim with a smaller DID syncs during the pass. `confirm_claim`
+    /// must back off before `Processed`: the fresh bases are linked, the
+    /// pass returns `BackedOff`, and the neighbourhood-state `Claimed` row is
+    /// closed with `Abandoned`, not `Finished`. Data, #1445.
+    #[tokio::test]
+    async fn run_one_pass_backs_off_at_confirm_when_a_smaller_claim_arrives() {
+        use super::super::events::{
+            subscribe_neighbourhood_state, AutoProcessorNeighbourhoodState,
+        };
+        use crate::perspectives::interpretation_test_support::{proposal, TASK_SDNA};
+
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        let mut cfg = cfg("proc", 100, 32);
+        cfg.interpretation_classes = vec![shapes[0].target_class.clone()];
+        cfg.mint_scope = Some(Scope::Raw {
+            id: "soa://project/42".into(),
+            predicate: "soa://contains".into(),
+        });
+        let items = vec![pt("i1"), pt("i2")];
+        let key = batch_key(&ids(&items));
+        let hooks = test_hooks::PassHooks {
+            interpret: Some(vec![proposal(
+                "Task",
+                None,
+                &[("title", serde_json::json!("Ship the parser"))],
+            )]),
+            peer_claim: Some("aaa:peer".into()),
+            ..Default::default()
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut rx = super::super::events::subscribe().await;
+        let mut nh = subscribe_neighbourhood_state().await;
+
+        let outcome = test_hooks::HOOKS
+            .scope(
+                hooks,
+                run_one_pass(&mut p, &cfg, &items, now, &ctx, false, 0),
+            )
+            .await
+            .expect("run_one_pass");
+        assert!(
+            matches!(&outcome, PassOutcome::BackedOff { holder } if holder == "aaa:peer"),
+            "expected BackedOff{{holder: aaa:peer}}, got {outcome:?}"
+        );
+
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some("soa://project/42".into()),
+                predicate: Some("soa://contains".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert_eq!(links.len(), 1, "the fresh base must be linked: {links:?}");
+
+        while let Ok(json) = rx.try_recv() {
+            let ev: AutoProcessorEvent = serde_json::from_str(&json).expect("event json");
+            assert!(
+                !(ev.perspective_uuid == p.uuid && ev.step == AutoProcessorStep::Processed),
+                "a pass that backed off at confirm must not emit Processed"
+            );
+        }
+        let mut phases = Vec::new();
+        while let Ok(json) = nh.try_recv() {
+            let ev: AutoProcessorNeighbourhoodState =
+                serde_json::from_str(&json).expect("state json");
+            if ev.perspective_uuid == p.uuid && ev.batch_key == key {
+                phases.push(ev.phase);
+            }
+        }
+        assert_eq!(
+            phases,
+            vec![NeighbourhoodPhase::Claimed, NeighbourhoodPhase::Abandoned],
+            "the Claimed row must be closed with Abandoned"
+        );
+    }
+
+    /// A smaller peer claim lands while the pass waits in `settle_claim`.
+    /// The pass must back off before the interpretation runs: no cursor, no
+    /// `Claimed`. Data, #1445.
+    #[tokio::test]
+    async fn run_one_pass_backs_off_in_settle_before_the_interpretation() {
+        use crate::perspectives::auto_processor::claim::active_claimants;
+        use crate::perspectives::auto_processor::cursor::load_processed_source_ids;
+        use crate::perspectives::interpretation_test_support::{proposal, TASK_SDNA};
+
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        let mut cfg = cfg("proc", 100, 32);
+        cfg.interpretation_classes = vec![shapes[0].target_class.clone()];
+        let items = vec![pt("i1"), pt("i2")];
+        let key = batch_key(&ids(&items));
+        let me = did_for_context(&ctx).expect("did");
+        let hooks = test_hooks::PassHooks {
+            interpret: Some(vec![proposal(
+                "Task",
+                None,
+                &[("title", serde_json::json!("Ship the parser"))],
+            )]),
+            ..Default::default()
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut rx = super::super::events::subscribe().await;
+
+        // Write the peer claim only once our own claim is in: `try_claim` has
+        // then returned `Won`, and only the settle wait can see the peer.
+        let mut peer = p.clone();
+        let (ctx_w, key_w) = (ctx.clone(), key.clone());
+        let writer = tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let t = chrono::Utc::now().timestamp_millis();
+                if active_claimants(&peer, "proc", &key_w, t)
+                    .await
+                    .expect("read claims")
+                    .contains(&me)
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "own claim never appeared"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let expires = chrono::Utc::now().timestamp_millis() + 60_000;
+            write_claim(&mut peer, "proc", &key_w, "aaa:peer", expires, &ctx_w)
+                .await
+                .expect("peer claim");
+        });
+
+        let outcome = test_hooks::HOOKS
+            .scope(
+                hooks,
+                run_one_pass(&mut p, &cfg, &items, now, &ctx, false, 2_000),
+            )
+            .await
+            .expect("run_one_pass");
+        writer.await.expect("writer");
+        assert!(
+            matches!(&outcome, PassOutcome::BackedOff { holder } if holder == "aaa:peer"),
+            "expected BackedOff{{holder: aaa:peer}}, got {outcome:?}"
+        );
+
+        let processed = load_processed_source_ids(&p, "proc", now, None)
+            .await
+            .expect("load cursor");
+        assert!(
+            processed.is_empty(),
+            "the interpretation must not run after a settle back-off: {processed:?}"
+        );
+        while let Ok(json) = rx.try_recv() {
+            let ev: AutoProcessorEvent = serde_json::from_str(&json).expect("event json");
+            assert!(
+                !(ev.perspective_uuid == p.uuid
+                    && matches!(
+                        ev.step,
+                        AutoProcessorStep::Claimed | AutoProcessorStep::RunningInterpretation
+                    )),
+                "a settle back-off must stop before {:?}",
+                ev.step
             );
         }
     }
