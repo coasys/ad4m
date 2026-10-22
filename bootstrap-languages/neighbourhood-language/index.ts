@@ -11,8 +11,8 @@ import { defineLanguage, agentCreateSignedExpression, hash } from "@coasys/ad4m-
 const PROXY_URL = "https://bootstrap-store-gateway.perspect3vism.workers.dev/";
 
 // A neighbourhood's address is the hash of its content, so the expression under
-// an address never changes. Keeping the ones written or read here also answers a
-// read straight after a create, which the store may not serve yet.
+// an address never changes: keep the ones written or read here, and answer a
+// repeat read without another round trip to the store.
 const expressions = new Map<string, any>();
 
 const language = defineLanguage({

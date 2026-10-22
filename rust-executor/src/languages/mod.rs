@@ -2,7 +2,12 @@ mod byte_array;
 pub mod capability;
 mod conductor_languages;
 pub mod error;
-mod fetch_backoff;
+#[cfg(test)]
+mod install_tests;
+/// How long one request to the language language may take before an install
+/// gives up on it. Its store is consistent, so this bounds a request that
+/// hangs, not a wait for a value to appear.
+const LANGUAGE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub mod language;
 pub mod language_context;
 pub mod language_runtime;
@@ -931,52 +936,59 @@ impl LanguageController {
         };
         let language_lit = serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
 
-        // A language another executor has just published may take a while to
-        // reach the language language's store, so retry, but within a deadline.
-        let source_script = format!(
+        // The language language's store is consistent, so one request decides:
+        // a miss means the language was never published. The timeout only ends
+        // a request that hangs; `ensure_link_language` tries a failed install
+        // again later.
+        let ask = |script: String| async move {
+            tokio::time::timeout(
+                LANGUAGE_FETCH_TIMEOUT,
+                self.execute_on_language(ll_addr, &script),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "install_language: the language language timed out after {:?}",
+                    LANGUAGE_FETCH_TIMEOUT
+                )
+            })?
+            .map_err(anyhow::Error::from)
+        };
+
+        let source = ask(format!(
             r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
             language_lit
-        );
-        let source_script = &source_script;
-        let source = fetch_backoff::fetch_with_backoff(
-            &format!("the source of language {}", language),
-            fetch_backoff::SOURCE_FETCH_DEADLINE,
-            move || async move {
-                let source = self.execute_on_language(ll_addr, source_script).await?;
-                // A language-language that returns null/undefined for an
-                // unknown address stringifies to the literal "null" /
-                // "undefined" here: not available (yet).
-                let trimmed = source.trim();
-                let missing = trimmed.is_empty() || trimmed == "null" || trimmed == "undefined";
-                Ok::<_, LanguageError>((!missing).then_some(source))
-            },
-        )
-        .await
-        .ok_or_else(|| anyhow::anyhow!("install_language: no source available for {}", language))?;
+        ))
+        .await?;
+        // An unknown address comes back as null/undefined, stringified.
+        let trimmed = source.trim();
+        if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
+            return Err(anyhow::anyhow!(
+                "install_language: no source available for {}",
+                language
+            ));
+        }
         verify(&source)?;
 
-        // Meta is optional: it is only stored beside the bundle.
+        // Meta is optional: it is only stored beside the bundle, so a failed
+        // read does not stop the install.
         let meta: Option<JsonValue> = if meta_path.exists() {
             Some(serde_json::from_str(&fs::read_to_string(&meta_path)?)?)
         } else {
-            let meta_script = format!(
+            match ask(format!(
                 r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
                 language_lit
-            );
-            let meta_script = &meta_script;
-            fetch_backoff::fetch_with_backoff(
-                &format!("the meta of language {}", language),
-                fetch_backoff::META_FETCH_DEADLINE,
-                move || async move {
-                    let result = self.execute_on_language(ll_addr, meta_script).await?;
-                    let expression = serde_json::from_str::<JsonValue>(&result)
-                        .ok()
-                        .filter(|expression| !expression.is_null());
-                    Ok::<_, LanguageError>(expression)
-                },
-            )
+            ))
             .await
-            .and_then(|expression| expression.get("data").cloned())
+            {
+                Ok(result) => serde_json::from_str::<JsonValue>(&result)
+                    .ok()
+                    .and_then(|expression| expression.get("data").cloned()),
+                Err(e) => {
+                    warn!("install_language: no meta for {}: {}", language, e);
+                    None
+                }
+            }
         };
 
         let (_saved_hash, saved_bundle_path) = self.save_language_bundle(&source, meta.as_ref())?;
