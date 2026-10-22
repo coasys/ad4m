@@ -281,7 +281,11 @@ pub(super) mod running {
 
     impl Thread {
         pub(super) fn start(name: &str) -> Self {
-            *threads().lock().unwrap().entry(name.to_string()).or_default() += 1;
+            *threads()
+                .lock()
+                .unwrap()
+                .entry(name.to_string())
+                .or_default() += 1;
             Self(name.to_string())
         }
     }
