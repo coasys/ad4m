@@ -32,7 +32,7 @@ A reader must be able to stop at any level and hold a correct, if coarse, pictur
 
 - Link pages with relative paths in the tree: `[Sessions](../access/sessions.md)`, `[Access](../access/README.md)`.
 - Link code with relative paths from the page to the file or directory: `[session.rs](../../../rust-executor/src/agent/session.rs)`. The link then always matches the commit the page sits in. Link only paths that exist.
-- No line anchors (`#L10-L20`): they go out of date. Name the symbol in backticks instead: ``` `Session::from_token` in [session.rs](../../../rust-executor/src/agent/session.rs) ```.
+- No line anchors (`#L10-L20`): they go out of date. Name the symbol in backticks instead: ``` `Session::open` in [session.rs](../../../rust-executor/src/agent/session.rs) ```.
 - No links to issues or pull requests, unless the issue describes current behaviour and the reader needs it.
 
 ## One page
