@@ -12,6 +12,7 @@ import { LinkQuery } from "@coasys/ad4m";
 import { v4 as uuidv4 } from 'uuid';
 import { NotificationInput, TriggeredNotification } from '@coasys/ad4m';
 import sinon from 'sinon';
+import { linkLanguagesAttached } from './test-context';
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -3259,7 +3260,9 @@ describe("Multi-User Simple integration tests", () => {
             expect(remoteNH).to.not.be.undefined;
             const remoteProxy = await remoteNH!.getNeighbourhoodProxy();
 
-            // Exchange agent infos and poll until the two main agents discover each other
+            // Exchange agent infos once both link-language cells exist, then poll until
+            // the two main agents discover each other
+            await linkLanguagesAttached([[adminAd4mClient!, localMainNH!.uuid], [node3MainClient!, remoteNH!.uuid]]);
             console.log("Exchanging agent infos and waiting for main agents to sync...");
             const pollUntilSeen = async (proxy: any, expectedDids: string[], label: string, timeoutMs = 100000) => {
                 let others: string[] = [];

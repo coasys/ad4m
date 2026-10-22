@@ -79,34 +79,20 @@ impl Ad4mMcpHandler {
             }
         };
 
-        // Fetch meta information for each template
-        let controller = LanguageController::global_instance();
-        let mut templates = Vec::new();
-        for address in &addresses {
-            let meta = controller.get_language_expression(address).await;
-            match meta {
-                Ok(m) => {
-                    templates.push(json!({
-                        "address": m.address,
-                        "name": m.name,
-                        "description": m.description,
-                        "author": m.author,
-                        "possible_template_params": m.possible_template_params,
-                    }));
-                }
-                Err(_) => {
-                    // Fallback: try to get at least the name from local runtime
-                    let name = controller.get_language_name(address).await;
-                    templates.push(json!({
-                        "address": address,
-                        "name": name,
-                        "description": null,
-                        "author": null,
-                        "possible_template_params": null,
-                    }));
-                }
-            }
-        }
+        let templates: Vec<_> = LanguageController::global_instance()
+            .language_metas(&addresses)
+            .await
+            .into_iter()
+            .map(|m| {
+                json!({
+                    "address": m.address,
+                    "name": m.name,
+                    "description": m.description,
+                    "author": m.author,
+                    "possible_template_params": m.possible_template_params,
+                })
+            })
+            .collect();
 
         let result = json!({
             "templates": templates,

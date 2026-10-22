@@ -20,6 +20,11 @@ cd .. && pnpm run test-main                        # JS integration suites again
 ```
 
 `--release` and `--test-threads=1` are required (see `.claude/skills/rust-executor-testing.md`).
+
+**Where a create or join spends its time:** `grep 'timing:'` in the executor log. Each line is
+`timing: <step> [address] <ms>ms` (`logging::span`), logged when the step ends. `applyTemplate`,
+`publish` and `join` are the totals of the three calls; `applyTemplate.*`, `publish.*`,
+`installLanguage.*`, `loadLanguage.*` and `holochain.*` are their steps.
 Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call real LLMs.
 
 ## Module map (what lives where)

@@ -91,7 +91,7 @@ export class TestContext {
 
 /** Wait until each perspective's link language is attached: its state has moved
  *  past `NeighbourhoodCreationInitiated` / `NeighbourhoodJoinInitiated`. */
-async function linkLanguagesAttached(perspectives: [Ad4mClient, string][]) {
+export async function linkLanguagesAttached(perspectives: [Ad4mClient, string][]) {
   for (const [client, uuid] of perspectives) {
     await pollUntil(async () => {
       const state = (await client.perspective.byUUID(uuid))?.state;

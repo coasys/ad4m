@@ -13,6 +13,7 @@ pub mod language_context;
 pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
+mod metas;
 #[cfg(test)]
 mod signing_reach_tests;
 pub mod wasm_delegate;
@@ -23,6 +24,7 @@ use deno_core::error::AnyError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use crate::logging::span;
 use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
 use crate::runtime_service::RuntimeService;
 use crate::types::Address;
@@ -244,6 +246,7 @@ impl LanguageController {
         );
 
         // Spawn dedicated runtime in its own thread (sandboxed to storage_directory)
+        let starting = span(format!("loadLanguage.runtimeStart {}", language_address));
         let runtime_handle = LanguageRuntimeHandle::spawn(
             language_address.clone(),
             storage_directory.clone(),
@@ -265,10 +268,12 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to load language module: {}", e),
             })?;
+        drop(starting);
         info!("Module loaded for language {}", language_address);
 
         // Initialize the language with context
         info!("Initializing language {}", language_address);
+        let initializing = span(format!("loadLanguage.init {}", language_address));
         runtime_handle
             .load_language(language_context_json)
             .await
@@ -276,6 +281,7 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to initialize language: {}", e),
             })?;
+        drop(initializing);
 
         // Query the language name now that the constructor has run
         let mut runtime_handle = runtime_handle;
@@ -876,6 +882,7 @@ impl LanguageController {
         let bundle_path = controller.fetch_language(&language).await?;
 
         // Load into a per-language Deno runtime
+        let _loading = span(format!("installLanguage.load {}", language));
         controller
             .load_language(bundle_path, false)
             .await
@@ -955,11 +962,13 @@ impl LanguageController {
             .map_err(anyhow::Error::from)
         };
 
+        let fetching = span(format!("installLanguage.fetchSource {}", language));
         let source = ask(format!(
             r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
             language_lit
         ))
         .await?;
+        drop(fetching);
         // An unknown address comes back as null/undefined, stringified.
         let trimmed = source.trim();
         if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
@@ -975,6 +984,7 @@ impl LanguageController {
         let meta: Option<JsonValue> = if meta_path.exists() {
             Some(serde_json::from_str(&fs::read_to_string(&meta_path)?)?)
         } else {
+            let _fetching = span(format!("installLanguage.fetchMeta {}", language));
             match ask(format!(
                 r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
                 language_lit
@@ -1460,9 +1470,11 @@ impl LanguageController {
             r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
             source_language_hash_lit
         );
+        let reading = span("applyTemplate.templateMeta");
         let meta_result = self
             .execute_on_language(&language_language_address, &meta_script)
             .await?;
+        drop(reading);
 
         let meta_expression: JsonValue =
             serde_json::from_str(&meta_result).map_err(|e| LanguageError::SerializationError {
@@ -1480,9 +1492,11 @@ impl LanguageController {
             r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
             source_language_hash_lit
         );
+        let reading = span("applyTemplate.templateSource");
         let source_language = self
             .execute_on_language(&language_language_address, &source_script)
             .await?;
+        drop(reading);
 
         // Same nullish-stringification guard as install_language_from_address:
         // a language language returning null/undefined for an unknown hash
@@ -1516,9 +1530,11 @@ impl LanguageController {
         template_data = sorted_data;
 
         // Read and template Holochain DNA
+        let templating = span("applyTemplate.dna");
         let happ_code = self
             .read_and_template_holochain_dna(&source_lines, &template_data, source_language_hash)
             .await?;
+        drop(templating);
 
         if let Some(happ_code) = happ_code {
             info!("setting happCode in templateData");

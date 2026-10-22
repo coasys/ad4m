@@ -7,6 +7,7 @@ use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::languages::LanguageController;
+use crate::logging::span;
 use crate::types::*;
 
 use super::guards::refuse_user_session;
@@ -203,6 +204,7 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     ctx.require(&LANGUAGE_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
+    let _total = span("applyTemplate");
     let body: ApplyTemplateRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -230,11 +232,13 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     let input_name = input.meta.name.clone();
 
+    let saving = span("applyTemplate.saveBundle");
     let (hash, _bundle_path) = controller
         .save_language_bundle(&input.bundle, None)
         .map_err(|e| {
             WsRpcError::internal(format!("Failed to save templated language bundle: {}", e))
         })?;
+    drop(saving);
 
     let language_language_address = {
         let sys = controller.system_addresses.lock().await;
@@ -248,10 +252,12 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     // Users template link languages to create neighbourhoods, so this call stays open to
     // them. A user session publishes as the user, never as the main agent.
+    let publishing = span("applyTemplate.publish");
     controller
         .expression_create(&language_language_address, content, &ctx.acts_as())
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
+    drop(publishing);
 
     // Loading it starts a runtime and, for a Holochain link language, installs
     // and joins its app. Nothing here needs it loaded, so the caller gets the
