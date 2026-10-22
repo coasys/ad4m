@@ -1071,7 +1071,10 @@ async fn a_record_call_given_up_on_keeps_its_turn_until_its_isolate_is_done() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(next.await.unwrap(), Ok(json!({ "text": "ok" })));
-    assert_eq!(most, 2, "the next call started while the given-up one still ran");
+    assert_eq!(
+        most, 2,
+        "the next call started while the given-up one still ran"
+    );
 }
 
 #[tokio::test]
