@@ -80,6 +80,25 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   handler (wired in `index.ts`) both funnel through this one function. If
   you add a new inbound-diff source, route it through
   `applyInboundWireDiff` — do not call `store.applyDiff` + emit separately.
+- **Commit: the store follows the server, nothing is echoed.**
+  `sync.commit()` writes a diff to the language's store only after the
+  server accepted the POST, so a failed commit leaves no local-only links.
+  It does NOT emit the diff back to the executor: the executor committed
+  those links and already holds them (the echo made it re-persist,
+  re-index and re-publish every link). When the server's answer puts the
+  commit at exactly cursor + 1 the cursor moves past it, so catch-up does
+  not fetch our own links back; otherwise another agent's diff is in
+  between and the cursor stays.
+- **A 401 replaces the session.** `commit`, `bootstrap` and `catchUp` run
+  their request through `withToken` (src/sync.ts): on a 401 it drops the
+  cached token (`invalidateToken` → `auth.invalidateSession()`),
+  re-authenticates and retries once. A WebSocket `auth-error` drops the
+  token before the reconnect for the same reason.
+- **The KV write cost is the host's.** `ad4m:host`'s KV
+  (rust-executor/src/js_core/host.js) keeps the store in memory and
+  rewrites its file once at the end of the turn that changed it, so the
+  store's one key per link is cheap within one synchronous `applyDiff`.
+  Keep store writes for a diff in one turn (no `await` between them).
 - **`sync.sync()` always does an HTTP catch-up**, regardless of WebSocket
   connection state. This is deliberate, not a missing optimization: because
   `since` only advances after a diff is actually applied, a live WebSocket
@@ -118,8 +137,9 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   (src/sync.ts) coalesces contiguous commits into segments and retries
   each segment up to 3 times with exponential backoff. If all attempts
   fail, the failed segments re-enqueue for the next flush cycle and the
-  language emits `LinkLanguageInstalledButNotSynced`. This keeps links
-  local-only until the server recovers, but a process restart loses the
+  language emits `LinkLanguageInstalledButNotSynced`. The language's store
+  only gets links the server accepted, so queued links stay out of it until
+  the server recovers, and a process restart loses the
   queue — a durable pending-commits queue (persisted in the KV store,
   retried by `sync()`) would close this gap.
 - **E2E encryption activates automatically — no plaintext mode.** The admin's
@@ -130,7 +150,11 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   never sees plaintext. It does NOT fire on presence events (`onPeerJoined` is
   reconnect/wake, not ACL change — rotating there would mint a new version on
   every reconnect). `onPeerJoined` only calls `performAdminKeyGrants()` to
-  grant historical keys to members who lack them (idempotent). The key ring
+  grant historical keys to members who lack them (idempotent). A member
+  whose key status is `pending` (no keys yet) re-reads `/keys` on every
+  sync, skipping the 10 s refresh cooldown (`refreshSkippedByCooldown`,
+  src/key-ring-policy.ts), so it sees the room on the first sync after the
+  grant. The key ring
   loads once during `init()`'s `setupKeyRing()` and the `version` field in
   `KeysResponse` remains unused for mid-session detection — a periodic `/keys`
   re-fetch or a dedicated WS push message would close that gap.

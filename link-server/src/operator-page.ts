@@ -16,6 +16,7 @@ export const OPERATOR_PAGE_HTML = `<!doctype html>
 <body>
 <h1>Link server admission <span id="instance" class="tag instance"></span></h1>
 <div class="muted">Signed in as <span id="who">?</span></div>
+<p id="admission" class="note"></p>
 <p class="note">A room is a neighbourhood (the server link language's UID). Its first agent is the room admin.
 An added DID can sync once it reconnects. It can read and write encrypted links only after the
 room admin's executor has been online and granted it the room keys.</p>
@@ -32,6 +33,8 @@ room admin's executor has been online and granted it the room keys.</p>
   <h2>History</h2>
   <table id="history"><thead><tr><th>When</th><th>Change</th><th>DID</th><th>By</th></tr></thead><tbody></tbody></table>
 </section>
+<h2>Logs <select id="log-level"><option value="30">info and up</option><option value="40">warn and up</option><option value="50">error and up</option></select></h2>
+<div id="log-lines" role="log"></div>
 <script src="admin.js"></script>
 </body>
 </html>
@@ -56,6 +59,9 @@ input[type=text] { flex: 1; font: inherit; font-family: ui-monospace, monospace;
 button { font: inherit; padding: .3rem .8rem; cursor: pointer; }
 #error { color: #b00020; min-height: 1.2rem; }
 .note { background: #f2f2f7; padding: .5rem .75rem; border-radius: .4rem; font-size: .9rem; }
+#log-lines { font: .78rem ui-monospace, monospace; height: 24rem; overflow-y: auto; background: #1d1d1f; color: #e5e5ea; padding: .5rem; white-space: pre-wrap; word-break: break-all; }
+.l40 { color: #ffd60a; }
+.l50, .l60 { color: #ff6961; }
 `;
 
 export const OPERATOR_PAGE_JS = `"use strict";
@@ -179,8 +185,35 @@ export const OPERATOR_PAGE_JS = `"use strict";
     changeAcl("add", did).then(function () { if (!errorBox.textContent) input.value = ""; });
   });
 
+  // Live logs (Server-Sent Events): the server's buffered lines, then each new
+  // one. Every (re)connect resends the buffer, so the list starts over, and it
+  // keeps as many rows as the server's buffer (LogTail: 1000).
+  var logBox = document.getElementById("log-lines");
+  var logLevel = document.getElementById("log-level");
+  function filterLog(row) { row.hidden = row.level < Number(logLevel.value); }
+  var logs = new EventSource("api/logs");
+  logs.onopen = function () { logBox.replaceChildren(); };
+  logs.onmessage = function (event) {
+    var entry = JSON.parse(event.data);
+    var row = el("div", null, "l" + (entry.level || 30));
+    row.level = entry.level || 30;
+    var head = (entry.time ? new Date(entry.time).toISOString().slice(11, 19) + " " : "") +
+      ({ 40: "WARN ", 50: "ERROR ", 60: "FATAL " }[row.level] || "") + (entry.msg || "");
+    delete entry.level; delete entry.time; delete entry.msg;
+    row.textContent = Object.keys(entry).length ? head + " " + JSON.stringify(entry) : head;
+    filterLog(row);
+    var atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 4;
+    logBox.appendChild(row);
+    if (logBox.childElementCount > 1000) logBox.firstChild.remove();
+    if (atBottom) logBox.scrollTop = logBox.scrollHeight;
+  };
+  logLevel.addEventListener("change", function () { Array.prototype.forEach.call(logBox.children, filterLog); });
+
   api("/whoami").then(function (data) {
     document.getElementById("who").textContent = data.operator || "(no sign-in header)";
+    document.getElementById("admission").textContent = data.admission === "auto"
+      ? "Admission: auto (--auto-admit). Every DID that proves its key joins any room."
+      : "Admission: allowlist (the default). A room's first DID is its admin; anyone else joins once the room admin or you admit their DID.";
     if (data.instance) {
       document.getElementById("instance").textContent = data.instance;
       document.title = "Link server admission: " + data.instance;

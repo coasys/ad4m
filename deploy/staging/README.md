@@ -32,7 +32,7 @@ from there.
 
 | File | Installed to | What it does |
 |---|---|---|
-| `ad4m-staging.service` | `~/.config/systemd/user/` | Runs `current/ad4m-executor run --config …`; secrets through `LoadCredential=` |
+| `ad4m-staging.service` | `~/.config/systemd/user/` | Runs `current/ad4m-executor run --config …`; secrets through `LoadCredential=`; `LimitNOFILE=65536` |
 | `ad4m-staging-update.service` | `~/.config/systemd/user/` | Runs `update.sh` once, at the lowest CPU and IO priority |
 | `ad4m-staging-update.timer` | `~/.config/systemd/user/` | Starts the update 10 minutes after the last one finished |
 | `update.sh` | `~/.local/share/ad4m-staging/bin/` | Fetch, build, snapshot, swap, gate, roll back; writes `status.json`. `update.sh rollback` goes back one build by hand |
@@ -66,6 +66,13 @@ does not get there, the script stops it, restores the snapshot, points
 between the stop and the start fails (a full disk during the snapshot, say),
 the build that ran before is started again. A commit that failed to build or
 failed that check is not tried again until `staging` moves on.
+
+The build is the CircleCI build job plus `--features cuda` on
+`cargo build --release` in `cli`. The in-process candle models need that
+feature; CircleCI does not pass it. The link adds an rpath to
+`${AD4M_STAGING_CUDA_ROOT:-/usr/local/cuda}/lib64`, because cudarc links
+`libcudart` and does not set one, and that library is not on the default
+linker path.
 
 Anyone who can merge to `staging` can run code on this box as `marvin`.
 `staging` is protected (one approving review) for that reason. As of this

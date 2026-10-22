@@ -13,9 +13,9 @@
 //!
 //! Both live in two executor SQLite tables (`flow_replica_state`,
 //! `flow_fired_mark` in [`Ad4mDb`]). They are not links, so they never sync,
-//! no model query sees them, and no other agent on the same node can read
+//! no model query sees them, and no other agent on the same executor can read
 //! them through the graph. Rows are keyed by `(perspective, agent_did, …)`
-//! because the pass runs once per owner agent on a multi-user node, and are
+//! because the pass runs once per owner agent on a multi-user executor, and are
 //! deleted with the perspective.
 //!
 //! Before #1424 both were `Local` links (#987). Those links, where they still
@@ -392,7 +392,7 @@ mod tests {
         assert!(!FlowReplicaState::has_derived(&p, ALICE, "i").unwrap());
     }
 
-    /// The key carries the agent: two agents on one node never see each
+    /// The key carries the agent: two agents on one executor never see each
     /// other's state or marks.
     #[test]
     fn rows_are_per_agent() {

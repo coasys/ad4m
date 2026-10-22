@@ -4,7 +4,11 @@ use tokio::sync::oneshot;
 
 lazy_static! {
     /// The current version of AD4M
-    pub static ref AD4M_VERSION: String = String::from("0.13.1-staging.2");
+    pub static ref AD4M_VERSION: String = String::from("0.13.1-staging.3");
+    /// The commit this executor was built from, embedded by `build.rs`. None when the build had no
+    /// git checkout to read it from, such as a source tarball.
+    pub static ref AD4M_COMMIT: Option<String> =
+        Some(env!("AD4M_GIT_COMMIT").to_string()).filter(|commit| !commit.is_empty());
 }
 
 /// Global shutdown signal sender. Used by the `runtime_quit` WS-RPC method and signal handlers

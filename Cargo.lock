@@ -10,7 +10,7 @@ checksum = "415ed64958754dbe991900f3940677e6a7eefb4d7367afd70d642677b0c7d19d"
 
 [[package]]
 name = "ad4m"
-version = "0.13.1-staging.2"
+version = "0.13.1-staging.3"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-client"
-version = "0.13.1-staging.2"
+version = "0.13.1-staging.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-executor"
-version = "0.13.1-staging.2"
+version = "0.13.1-staging.3"
 dependencies = [
  "ad4m-client",
  "anyhow",
@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-launcher"
-version = "0.13.1-staging.2"
+version = "0.13.1-staging.3"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
@@ -2096,6 +2096,18 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex 2.0.1",
+]
+
+[[package]]
+name = "ccm"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ae3c82e4355234767756212c570e29833699ab63e6ffd161887314cc5b43847"
+dependencies = [
+ "aead",
+ "cipher 0.4.4",
+ "ctr",
+ "subtle",
 ]
 
 [[package]]
@@ -5483,6 +5495,7 @@ checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid 0.9.6",
  "der_derive",
+ "flagset",
  "pem-rfc7468 0.7.0",
  "zeroize",
 ]
@@ -5808,6 +5821,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8ede7d79366f419921e2e2f67889c12125726692a313bffb474bd5f37a581e9"
 dependencies = [
  "chrono",
+]
+
+[[package]]
+name = "dimpl"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e769119713c7cf11efb6dd594258095c4a5959fa2bb8d4a7f89978efbd0c08b"
+dependencies = [
+ "aes 0.8.3",
+ "arrayvec",
+ "aws-lc-rs",
+ "ccm",
+ "der 0.7.10",
+ "log",
+ "nom 8.0.0",
+ "once_cell",
+ "pkcs8 0.10.2",
+ "rand 0.9.5",
+ "rcgen",
+ "sec1 0.7.3",
+ "signature 2.2.0",
+ "spki 0.7.3",
+ "subtle",
+ "time 0.3.55",
+ "x509-cert",
 ]
 
 [[package]]
@@ -7044,6 +7082,12 @@ dependencies = [
  "strum 0.27.2",
  "strum_macros 0.27.2",
 ]
+
+[[package]]
+name = "flagset"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 
 [[package]]
 name = "flate2"
@@ -10452,6 +10496,19 @@ dependencies = [
  "url",
  "webpki-roots 1.0.9",
  "ws_stream_wasm",
+]
+
+[[package]]
+name = "is"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6edbbdc611843e8c65878ee735f68c495cede11ae5a9582b17fe0369c456ef5"
+dependencies = [
+ "crc",
+ "serde",
+ "str0m-proto",
+ "subtle",
+ "tracing",
 ]
 
 [[package]]
@@ -16317,6 +16374,7 @@ version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "091e7a8e7d86e6feb87a27ce8e2cba29d49eff9507afeebefab7eeb2ca667fb4"
 dependencies = [
+ "aws-lc-rs",
  "pem 3.0.6",
  "ring 0.17.14",
  "rustls-pki-types",
@@ -17848,17 +17906,17 @@ dependencies = [
 
 [[package]]
 name = "sctp-proto"
-version = "0.3.0"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4dea4fe3384a24652f065296ac333c810dfd0c5b39b98a2214762c16aaadc3c"
+checksum = "bba218fe5119005820ab5aa74ffae0f1267763ae242541f5787ef42427cff262"
 dependencies = [
  "bytes",
  "crc",
- "fxhash",
  "log",
- "rand 0.8.5",
+ "rand 0.9.5",
+ "rustc-hash 2.1.3",
  "slab",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -19308,23 +19366,49 @@ checksum = "9e08d8363704e6c71fc928674353e6b7c23dcea9d82d7012c8faf2a3a025f8d0"
 
 [[package]]
 name = "str0m"
-version = "0.9.0"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f9fdffeb677e1d5d2cf84993f865143680b8e5eece3396fa488d43b34c1245"
+checksum = "3e80c4a4ef148e4a9fd15b9525c7f376d97e86729f19880b591ad220f1288c0f"
 dependencies = [
+ "arrayvec",
+ "base64ct",
  "combine",
- "crc",
+ "dimpl",
  "fastrand 2.5.0",
- "hmac 0.12.1",
- "libc",
- "once_cell",
- "openssl",
- "openssl-sys",
+ "is",
  "sctp-proto",
  "serde",
- "sha1 0.10.7",
- "thiserror 1.0.69",
+ "str0m-aws-lc-rs",
+ "str0m-proto",
+ "subtle",
+ "time 0.3.55",
  "tracing",
+]
+
+[[package]]
+name = "str0m-aws-lc-rs"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73269314334fc6bfa8024f09dd652b9f5068360bf623c871e3d8d18e26d8035a"
+dependencies = [
+ "aws-lc-rs",
+ "dimpl",
+ "str0m-proto",
+ "time 0.3.55",
+]
+
+[[package]]
+name = "str0m-proto"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8f3d99f2cf6c76a502e45feb896ea71e54787ede8744bcdb215acfbfcb905dd"
+dependencies = [
+ "base64ct",
+ "dimpl",
+ "fastrand 2.5.0",
+ "serde",
+ "subtle",
+ "time 0.3.55",
 ]
 
 [[package]]
@@ -24380,6 +24464,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "x509-cert"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1301e935010a701ae5f8655edc0ad17c44bad3ac5ce8c39185f75453b720ae94"
+dependencies = [
+ "const-oid 0.9.6",
+ "der 0.7.10",
+ "spki 0.7.3",
+]
+
+[[package]]
 name = "x509-parser"
 version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -24420,6 +24515,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43b0f71ce057da06bc0851b23ee24f3f86190b07203dd8f567d0b706a185202"
 dependencies = [
  "asn1-rs 0.7.2",
+ "aws-lc-rs",
  "data-encoding",
  "der-parser 10.0.0",
  "lazy_static",
