@@ -580,6 +580,79 @@ async fn a_new_release_of_a_toolset_replaces_the_old_one() {
     );
 }
 
+/// A bundle exporting one toolset per name, each with one tool `<name>_tool`.
+fn toolsets_bundle(names: &[&str], version: u32) -> String {
+    let toolsets: Vec<String> = names
+        .iter()
+        .map(|name| {
+            format!(
+                r#"{name}: {{ appliesTo: ["Thing"], tools: [{{ name: "{name}_tool", description: "d", parameters: {{}}, writes: false }}], call: async () => ({{ text: "{name} v{version}" }}), docs: {{ list: async () => [], read: async () => "" }} }}"#
+            )
+        })
+        .collect();
+    format!("export const toolsets = {{ {} }};", toolsets.join(", "))
+}
+
+#[tokio::test]
+async fn a_release_that_would_drop_another_toolset_of_the_bundle_it_replaces_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = registry(dir.path());
+    let both = registry
+        .install(&toolsets_bundle(&["alpha", "beta"], 1))
+        .await
+        .unwrap();
+
+    let only_alpha = registry.install(&toolsets_bundle(&["alpha"], 2)).await;
+    assert!(
+        matches!(&only_alpha, Err(RegistryError::Conflict(m)) if m.contains("beta")),
+        "{only_alpha:?}"
+    );
+    let names: Vec<String> = registry.toolsets().await.into_iter().map(|t| t.name).collect();
+    assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+    assert!(registry.find_tool("beta_tool").await.is_some());
+    assert_eq!(
+        ToolBundleStore::new(dir.path()).list().unwrap(),
+        vec![both.address.clone()]
+    );
+
+    // A release exporting every toolset of the old one, and more, replaces it.
+    let more = registry
+        .install(&toolsets_bundle(&["alpha", "beta", "gamma"], 2))
+        .await
+        .unwrap();
+    assert_eq!(registry.list().await, vec![more]);
+}
+
+#[tokio::test]
+async fn an_install_that_cannot_be_stored_leaves_every_installed_bundle_in_place() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join("store");
+    let registry = registry(&store_dir);
+    let first = registry
+        .install(&toolsets_bundle(&["alpha"], 1))
+        .await
+        .unwrap();
+
+    std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let unrelated = registry.install(&toolsets_bundle(&["beta"], 1)).await;
+    let replacing = registry
+        .install(&toolsets_bundle(&["alpha"], 2))
+        .await;
+    std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        matches!(unrelated, Err(RegistryError::Store(_))),
+        "{unrelated:?}"
+    );
+    assert!(
+        matches!(replacing, Err(RegistryError::Store(_))),
+        "{replacing:?}"
+    );
+    assert_eq!(registry.list().await, vec![first]);
+    assert!(registry.find_tool("alpha_tool").await.is_some());
+}
+
 /// Keeps the last record it was given, and shows it to the next call and in its documentation.
 const KEEPER: &str = r#"
 let last = null;

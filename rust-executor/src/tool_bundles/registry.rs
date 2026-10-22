@@ -165,8 +165,9 @@ impl ToolBundleRegistry {
     }
 
     /// Install a bundle from its source, replacing any bundle that exports a toolset of the same
-    /// name. Answers with what it exports. Nothing changes if it does not load, or if a name it
-    /// exports belongs to a bundle it would not replace.
+    /// name. Answers with what it exports. Nothing changes if it does not load, if it would drop
+    /// a toolset of a bundle it replaces, if a name it exports belongs to a bundle it would not
+    /// replace, or if it cannot be stored.
     pub async fn install(&self, source: &str) -> Result<InstalledBundle, RegistryError> {
         let address = content_address(source);
         if let Some(existing) = self.get(&address).await {
@@ -176,18 +177,30 @@ impl ToolBundleRegistry {
 
         let mut loaded = self.loaded.write().await;
         let names: HashSet<&str> = bundle.toolsets.iter().map(|t| t.name.as_str()).collect();
-        let (replaced, kept): (Vec<_>, Vec<_>) = loaded.drain(..).partition(|l| {
+        let replaces = |l: &Loaded| {
             l.bundle
                 .toolsets
                 .iter()
                 .any(|t| names.contains(t.name.as_str()))
-        });
-        if let Err(conflict) = check_tool_names(&bundle, &kept) {
-            loaded.extend(kept.into_iter().chain(replaced));
-            return Err(conflict);
+        };
+        // Every check first, and the store, so that nothing installed changes unless all pass.
+        if let Some((old, dropped)) = loaded
+            .iter()
+            .filter(|l| replaces(l))
+            .flat_map(|l| l.bundle.toolsets.iter().map(move |t| (l, t)))
+            .find(|(_, t)| !names.contains(t.name.as_str()))
+        {
+            return Err(RegistryError::Conflict(format!(
+                "this bundle replaces {}, but does not export its toolset {:?}. A release must \
+                 export every toolset of the bundle it replaces; to drop one, remove that bundle \
+                 first.",
+                old.bundle.address, dropped.name
+            )));
         }
-
+        check_tool_names(&bundle, loaded.iter().filter(|l| !replaces(l)))?;
         self.store.put(source)?;
+
+        let (replaced, kept): (Vec<_>, Vec<_>) = loaded.drain(..).partition(|l| replaces(l));
         for old in &replaced {
             info!(
                 "[tool-bundles] {} replaces {}",
@@ -399,7 +412,7 @@ impl ToolBundleRegistry {
             address: address.to_string(),
             toolsets,
         };
-        check_tool_names(&bundle, &[])?;
+        check_tool_names(&bundle, [])?;
         Ok((bundle, sandbox))
     }
 }
@@ -414,9 +427,12 @@ fn parse<T: serde::de::DeserializeOwned>(
 }
 
 /// A tool's name must be unique within the bundle and across every bundle it is installed beside.
-fn check_tool_names(bundle: &InstalledBundle, beside: &[Loaded]) -> Result<(), RegistryError> {
+fn check_tool_names<'a>(
+    bundle: &InstalledBundle,
+    beside: impl IntoIterator<Item = &'a Loaded>,
+) -> Result<(), RegistryError> {
     let mut seen: HashSet<&str> = beside
-        .iter()
+        .into_iter()
         .flat_map(|l| l.bundle.toolsets.iter())
         .flat_map(|t| t.tools.iter().map(|tool| tool.name.as_str()))
         .collect();
