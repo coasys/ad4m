@@ -1,0 +1,132 @@
+---
+title: Agents
+description: How an AI agent works with AD4M data it did not design, over the executor's MCP server, woken by query subscriptions, or as an interpretation pass inside the executor.
+---
+
+import { Callout } from "nextra/components";
+
+# Agents
+
+How does a bot work with my data without knowing my app? It asks the executor for the schema, reads and writes records through classes it discovers at run time, and is woken when something it watches changes. An AI agent is a peer like any other: it has its own DID (or acts for yours), its writes are signed links, and the app sees them because they match the app's classes.
+
+## Three ways in
+
+```
+            external agent (Claude, OpenClaw, any MCP client)
+                 │  MCP tools                ▲ wake event
+                 ▼                           │
+┌─ executor ─────────────────────────┐   ┌─ host: OpenClaw plugin, or your code ──┐
+│ MCP server :3001/mcp               │   │ WakerSubscriptionManager (@coasys/ad4m)│
+│   describe_perspective, instance_* │   │   registers the query, debounces,      │
+│   generate_waker_query  ───────────┼──►│   resolves parents, calls onWake       │
+│ RPC :12000  (query subscriptions) ◄┼───┤                                        │
+│ AI service: interpretation passes, │   └────────────────────────────────────────┘
+│   auto-processors (SDK-started)    │
+└────────────────────────────────────┘
+```
+
+| Way | Who owns it | What it is for |
+|---|---|---|
+| **MCP tools** | the executor | An agent outside the executor reads the schema, queries, creates and updates records, reads text under a container, votes on flow proposals. |
+| **Wakers** | the host (the OpenClaw plugin, or your code with the SDK) | The agent is woken when a query's result changes: a mention of it, a new child under a channel. The executor builds the query; the host holds the subscription. |
+| **Interpretation** | the executor, started over the SDK | The executor's own LLM turns a conversation into typed records of the perspective's classes, once or as a standing auto-processor. |
+
+## A session over MCP
+
+The agent starts with no knowledge of the app. Every step below is a tool on the executor's MCP server ([MCP tools](../reference/mcp-tools.mdx)):
+
+1. `get_documentation(topic="overview")`: the executor's own instructions, compiled into the binary, so they match the node ([overview](../reference/mcp-topics/overview.md)).
+2. `list_perspectives()`, then `describe_perspective(perspective_id)`: every class with its properties, collections and flows. Here the app's `Message` has a required `body`.
+3. `instance_transcript(perspective_id, parent=<channel id>)`: the newest messages under the channel, with author and timestamp.
+4. `get_my_did()`, to skip its own items, then a reply into the same parent:
+
+```json
+{ "perspective_id": "ab23…", "class_name": "Message",
+  "properties": { "body": "The deploy is green." },
+  "parent": "<channel id>" }
+```
+
+`instance_create` validates `properties` against the class (required properties present, each value of the declared type and cardinality) and refuses a write that does not fit, naming the property, the expected type and the cardinality. The record is a `Message` to the app because it has exactly the links the app's class describes.
+
+The full walk-through, with authentication: [Connect an agent](../start/connect-an-agent.mdx).
+
+## Reading an app you do not know
+
+Two built-in classes make step 3 work without knowing what the app calls things ([Built-in interfaces](../reference/built-in-interfaces.mdx)):
+
+- **`TextContent`** (`ad4m://TextContent`) is an abstract class with one property, `text`. Querying it reads every class that has a `text` property or a property aliased to `text` (`@Property({ through: "flux://body", alias: { TextContent: "text" } })`). `instance_transcript` is one query on it.
+- **`Container`** (`ad4m://Container`) answers "what does this node hold": its `ad4m://has_child` targets, whatever the node is, plus the targets of its class's own children relation when it has one. `instance_query(parent=...)`, `get_children`, `add_child` and `instance_create(parent=...)` follow the same rule.
+
+A record can sit under several holders; containment is a graph, not a tree. See [Containment](./containment.mdx) and [Abstract classes and aliases](./abstract-classes-and-aliases.mdx).
+
+## Wakers
+
+An agent cannot poll every channel. A waker is a live query subscription on the executor whose result changes wake the agent. The executor provides two query builders over MCP; the subscription itself is registered over the RPC WebSocket API, so MCP alone cannot hold one.
+
+- **Children of a node.** `generate_waker_query(perspective_id, class_name, parent=<id>)` returns a model query over the built-in `ad4m://Container` (in `query_class`): the node's children, whatever their class and however the node holds them.
+- **Mentions.** `get_mention_waker_config(perspective_id, name_override?)` returns one SPARQL query that matches any link whose target contains one of the agent's profile names or its DID as a whole word, case-insensitively, and skips links the agent wrote itself.
+
+The SDK's `WakerSubscriptionManager` holds such subscriptions. The OpenClaw plugin uses the same class (`plugins/ad4m/wakerSubscriptionManager.ts` re-exports it) behind its `ad4m_subscribe_to_mentions` and `ad4m_subscribe_to_children` tools, and subscribes to mentions on its own after a neighbourhood join or publish. In your own host:
+
+```typescript
+import { Ad4mClient, QuerySubscriptionProxy, WakerSubscriptionManager } from "@coasys/ad4m";
+
+const manager = new WakerSubscriptionManager({
+  perspectiveClient: client.perspective,
+  QuerySubscriptionProxy,
+  logger: console,
+  onWake: (sub, result, mentions) => {
+    // mentions: [{ address, parents, ancestors }] for a mention subscription
+  },
+});
+
+// `config` is the parsed result of get_mention_waker_config
+await manager.subscribe({
+  id: "mentions-" + perspectiveUuid,
+  type: "mention",
+  perspective: perspectiveUuid,
+  channel: "",
+  query: config.query,
+});
+```
+
+What the manager does for you: it debounces wakes (2000 ms by default), remembers which items it has already reported, and for a mention it looks up every container holding the mentioned item, plus their ancestors up to `ancestorDepth` (default 3), with one model query on `Container`. A children subscription passes `className: "ad4m://Container"` so the query runs as a model subscription. When the executor rejects a subscription, for example because it is locked after a restart, the manager re-attempts it every 30 s (`retryPendingMs`); `getPending()` lists those.
+
+## Capabilities for agents
+
+An agent authenticates like any other client, with the same capability system ([Agent, executor and capabilities](./agent-executor-capabilities.mdx)):
+
+- The operator's **admin credential**, sent as `Authorization: Bearer <credential>`, gives every capability.
+- On a local node, `request_capability` asks for all capabilities and `generate_jwt` stores the resulting token in the MCP session. The code that `generate_jwt` needs is returned inline only to a session that may permit; otherwise the operator approves the request in the Launcher.
+- On a hosted node, `login_email` gives a token scoped to that user's DID and perspectives.
+
+A perspective the token may not read answers `Perspective not found: <id>`, the same as one that does not exist. The tools that need no authentication, and the bind rules for the MCP port, are on [Run the MCP server](../how-to/mcp-server.mdx).
+
+## Interpretation inside the executor
+
+The executor can run its default LLM over a conversation and write typed records of the perspective's own classes, steered by each class's interpretation hint. This is an SDK call, not an MCP tool:
+
+```typescript
+const created = await perspective.runInterpretation(
+  [{ speaker: "did:key:z6Mk…alice", text: "I'll write the release notes by Friday." }],
+  "soa://ext/",          // namespace for new instance ids
+  ["Intention"],         // optional: the classes to extract into
+);
+```
+
+A standing version watches the perspective and runs passes as new items arrive: `perspective.addAutoProcessor({ processorId, sourceScopeQuery, interpretationClasses, debounceMs, batchMax, claimTtlMs, ... })`. `sourceScopeQuery` is a SPARQL `SELECT ?speaker ?text ?timestamp` over the source items. The config is shared, so in a neighbourhood the peers coordinate which one processes each batch; `perspective.removeAutoProcessor(processorId)` stops it for everyone. Progress arrives as `auto-processor-event`s.
+
+Some suggestions are staged instead of applied. `perspective.interpretationOverlays()` lists them; `acceptInterpretation(base, property?)` makes the suggestion the real value and deletes the overlay, and `rejectInterpretation(base, property?)` drops it (a rejected create deletes the suggested instance). `runInterpretationWithHarness(transcript, basePrefix, maxToolCalls, ...)` runs the same extraction as a tool-calling loop over the per-class tools instead of one prompt.
+
+The model the passes use: [Configure AI models](../how-to/ai-models.mdx).
+
+## How it is built
+
+The MCP server is `rust-executor/src/mcp/` (transport and binding in `server.rs`, tools under `tools/`, the agent documentation in `docs/`). The waker manager is `core/src/perspectives/WakerSubscriptionManager.ts`; the OpenClaw plugin is `plugins/ad4m/`. Interpretation and auto-processors are `rust-executor/src/perspectives/interpretation/`, with the SDK side in `core/src/perspectives/PerspectiveProxy.ts` and `AutoProcessor.ts`.
+
+## Next
+
+- [Connect an agent](../start/connect-an-agent.mdx): the first session, step by step
+- [Run the MCP server](../how-to/mcp-server.mdx) and [Connect an agent framework](../how-to/connect-an-agent-framework.mdx)
+- [MCP tools](../reference/mcp-tools.mdx): every tool, its parameters and its owner
+- [Troubleshooting](../how-to/troubleshooting.mdx): a locked executor, a refused capability, an unknown tool

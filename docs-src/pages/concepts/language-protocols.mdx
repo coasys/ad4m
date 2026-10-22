@@ -1,0 +1,158 @@
+---
+title: Language protocols
+description: How a Language attaches a storage backend or a network protocol to AD4M - flat exports the executor calls, host imports it calls back, and addresses of the form <language>://<address>.
+---
+
+import { Callout } from "nextra/components";
+
+# Language protocols
+
+How do I attach a protocol or a storage backend to AD4M? You write a **Language**: a small ES module the executor loads into its own sandbox, calls through a fixed set of exported functions, and serves through the host imports it provides. App developers rarely write one; this page is for protocol authors and for anyone who wants to know what sits under an expression URL or a neighbourhood.
+
+## What a Language is
+
+A Language decides how a piece of data is stored, fetched and addressed, and, for a link language, how link changes travel between agents. Nothing else in the executor is protocol-specific. The same agent can store a file through an HTTP store, publish its profile through a Holochain DHT and sync a neighbourhood through a link server, because each of those is a different Language behind the same interface.
+
+Every expression is addressed as
+
+```text
+<language address>://<address inside that language>
+```
+
+The language address is the content hash of the Language's bundle (`calculate_language_hash` in `rust-executor/src/languages/mod.rs`), so a URL names the exact code that can resolve it. The part after `://` means whatever the Language says it means: a content hash, a key in a store, a DID. Two exceptions are built in: `literal:` URLs need no Language at all (see [Types and values](./types-and-values.mdx)), and `did:` URLs resolve through the agent language.
+
+## One example
+
+A Language that stores notes in the executor's key-value store, written with `defineLanguage` from the JS Language Development Kit (`@coasys/ad4m-ldk`):
+
+```typescript
+import { defineLanguage, agentCreateSignedExpression, hash, storageGet, storagePut } from "@coasys/ad4m-ldk";
+
+const language = defineLanguage({
+  name: "note-store",
+  version: "0.1.0",
+  async init() {},
+  expression: {
+    async create(content) {
+      const expression = JSON.stringify(agentCreateSignedExpression(content)); // signed by the calling agent
+      const address = hash(expression);
+      storagePut(address, expression);
+      return address;
+    },
+    async get(address) {
+      const raw = storageGet(address);
+      return raw ? JSON.parse(raw) : null;
+    },
+  },
+});
+
+export const { name, version, init, expressionCreate, expressionGet } = language;
+```
+
+Once it is published, an app writes and reads through it with the ordinary expression API:
+
+```typescript
+const url = await ad4m.expression.create("Buy milk", noteStoreAddress);
+// "<noteStoreAddress>://<hash>"
+const note = await ad4m.expression.get(url);
+note.author;       // the DID that signed it
+note.proof.valid;  // signature checked by the executor on read
+```
+
+The steps, bundling included, are in [Write a Language](../how-to/write-a-language.mdx) and [Publish a Language](../how-to/publish-a-language.mdx).
+
+## How the executor and a Language talk
+
+```text
+  app ── expression.create(content, lang) ──▶ executor
+                                               │  loads bundle <lang> into its own sandboxed runtime
+                                               │  calls exports ─────────────▶ Language module
+                                               │                               expressionCreate(content)
+                                               │  ◀──────────── host imports ─ agentCreateSignedExpression,
+                                               │                               hash, storagePut, httpFetch, …
+  app ◀── "<lang>://<address>" ────────────────┘
+```
+
+Two directions, nothing else: the executor calls functions the module **exports**; the module calls functions the executor **imports** into it. There is no factory object and no context argument; `init()` takes no parameters and reads its context through imports.
+
+### Exports: what the executor calls
+
+The executor reads the module's named exports (or the same names on its default export) and records which ones are functions; that set is the Language's capabilities (`register_callbacks` in `rust-executor/src/languages/language_runtime.rs`). A Language exports only what it implements; there is no manifest and no capability flag.
+
+| Group | Exports | Used for |
+|---|---|---|
+| Lifecycle | `name`, `version`, `init()`, `teardown()`, `isPublic()`, `interactions(address)` | Loading, unloading, UI actions on an expression |
+| Expression | `expressionCreate(content)`, `expressionGet(address)`, `expressionAddressOf`, `isImmutableExpression`, `expressionIcon`, `expressionConstructorIcon` | Minting and resolving `<lang>://<address>` |
+| Perspective commit | `perspectiveCommit(diff)` | Writing link diffs into a shared perspective |
+| Perspective sync | `perspectiveSyncSync()`, `perspectiveSyncRender()`, `perspectiveSyncCurrentRevision()` | Full-replica sync of a neighbourhood |
+| Perspective query | `perspectiveQuerySupportedKinds()`, `perspectiveQueryRun(request)` | Answering queries without a local replica |
+| Peers | `peersSetLocal(dids)`, `peersRemote()` | Who is in the neighbourhood |
+| Telepresence | `telepresenceSetOnlineStatus`, `telepresenceGetOnlineAgents`, `telepresenceSendSignal`, `telepresenceSendBroadcast`, `telepresenceRegisterSignalCallback` | Presence and signals between online members |
+| Language source | `languageGetSource(address)` | Serving other Languages' bundles (the language language) |
+| Holochain | `handleHolochainSignal(signal)` | Signals from the Language's DNAs |
+
+The full list the loader copies is `flatExportNames` in `rust-executor/src/js_core/language_bootstrap.js`. A link language is a Language that exports the perspective and peers groups; [Neighbourhoods and trust](./neighbourhoods.mdx) shows how one is used.
+
+### Imports: what a Language calls
+
+A Language imports executor services from the synthetic module `ad4m:host` (or from `@coasys/ad4m-ldk`, which re-exports them with types):
+
+| Group | Imports |
+|---|---|
+| Agent | `agentDid`, `agentSigningKeyId`, `agentSign`, `agentSignStringHex`, `agentCreateSignedExpression`, and the multi-user variants `agentGetAllLocalUserDids`, `agentDidForUser`, `agentCreateSignedExpressionForUser` |
+| Language context | `languageAddress`, `languageSettings`, `languageStorageDirectory` |
+| Key-value storage | `storageGet`, `storagePut`, `storageDelete`, `storageListKeys` |
+| Events to the executor | `emitPerspectiveDiff`, `emitSyncStateChange`, `emitTelepresenceSignal`, `emitSignal` |
+| Network | `httpFetch` (each call times out after 10 seconds) |
+| Utilities | `hash` |
+| Holochain extension | `holochainRegisterDnas`, `holochainCall`, `holochainCallAsync` |
+| File storage extension | `readStorageFile`, `writeStorageFile` |
+
+Signing goes through the agent imports, which sign as the agent the executor is currently acting for; the Language never sees a private key. Prefer the key-value store to the file extension: its keys are prefixed with the Language's address, so two Languages cannot read each other's entries. What a host must provide for each import is the [host contract](../reference/host-contract.md).
+
+The list is `ad4m-ldk/js/src/imports.ts`; the timeout is `HTTP_FETCH_TIMEOUT_MS` in `rust-executor/src/js_core/host.js`.
+
+## TypeScript or Rust
+
+A Language is JavaScript to the executor. The JS kit's `defineLanguage` turns a spec grouped by capability into the flat exports above. The Rust kit (`ad4m-ldk/rust`) does the same for a Rust crate: implement the `Language` trait and capability traits, list the capabilities in the `ad4m_language!` macro, compile to WebAssembly and wrap it with `wasm-bindgen --target deno`. The macro emits exports only for the listed capabilities, so detection works the same way. Both kits live in the AD4M repository; neither is published to npm or crates.io yet.
+
+## Templates
+
+A Language can mark variables as template parameters with a `//!@ad4m-template-variable` comment on the line before a `const`, `let` or `var` declaration. `languages.applyTemplateAndPublish(source, json)` rewrites those declarations with the given values and publishes the result as a new Language with a new address (`apply_template_data` in `rust-executor/src/languages/mod.rs`). This is how each neighbourhood gets its own link language: the template is cloned with a fresh `uid`.
+
+## Trust and installation
+
+An executor installs a Language it does not have by address. It fetches the meta and the bundle from the **language language** (the system Language that stores bundles), checks the signature on the meta, checks that the bundle hashes to the address, and then checks who published it: the bundle is installed only if its author is the agent itself or one of its trusted agents, or if it is a template of a Language whose author is trusted and re-applying the template reproduces the hash (`language_by_ref` in `rust-executor/src/languages/mod.rs`). Otherwise installation fails and the executor emits an `AgentIsUntrusted` exception. Trusted agents are managed with `runtime.addTrustedAgents`.
+
+## Security model
+
+Each Language runs in its own Deno runtime on its own thread, which handles one request at a time (`rust-executor/src/languages/language_runtime.rs`). The runtime's permissions (`JsCore::new_for_language` in `rust-executor/src/js_core/mod.rs`):
+
+- **Filesystem:** read and write only in the Language's own storage directory. System Languages also get the executor's working directory.
+- **Network:** allowed. Most Languages are network protocols, so a Language can reach any host the executor can; which Languages you install and trust matters.
+- **Environment, subprocesses, FFI, system information:** denied.
+
+<Callout type="info">
+A Language's identity is the hash of its code. A changed bundle has a different address, so a Language cannot be swapped under an existing URL.
+</Callout>
+
+## The core Languages
+
+Every executor starts with a small set of system Languages, named in its bootstrap seed (`rust-executor/src/mainnet_seed.json`):
+
+| Language | Role |
+|---|---|
+| language language | Stores and serves Language bundles and their meta. Publishing a Language is creating an expression in it. |
+| agent language | Resolves `did:` URLs to agent profiles. |
+| neighbourhood language | Stores neighbourhood expressions (`neighbourhood://…`). |
+| known link languages | Templates for neighbourhood link languages (`runtime.knownLinkLanguageTemplates()`). |
+
+## How it is built
+
+The loader is `rust-executor/src/languages/language_runtime.rs` (bundle loading and capability detection) with `rust-executor/src/js_core/language_bootstrap.js` (the export table and `ad4m:host`); install, trust and templating are `rust-executor/src/languages/mod.rs`. The authoring kits are `ad4m-ldk/js` and `ad4m-ldk/rust`. The normative interface is `docs-src/ad4m-lang.wit`.
+
+## Next
+
+- [Write a Language](../how-to/write-a-language.mdx): a note store in TypeScript and in Rust.
+- [Publish a Language](../how-to/publish-a-language.mdx): publish, install, use, from the SDK and the CLI.
+- Reference: [Language interface spec](../reference/language-interface-spec.md), [Host contract](../reference/host-contract.md), [Social conventions](../reference/social-conventions.md).

@@ -1,34 +1,11 @@
 {
-  "--start": {
-    "type": "separator",
-    "title": "Getting Started"
-  },
-  "index": "Introduction",
-  "installation": "Installation",
-  "--essentials": {
-    "type": "separator",
-    "title": "Core Concepts"
-  },
-  "spanning-layer": "The Spanning Layer",
-  "auth": "Authentication",
-  "agents": "Agents",
-  "languages": "Languages",
-  "expressions": "Expressions",
-  "perspectives": "Perspectives",
-  "neighbourhoods": "Neighbourhoods",
-  "social-dna": "Social DNA",
-  "flows": "Flows",
-  "multi-user": "Multi-User Mode",
-  "--dev": {
-    "type": "separator",
-    "title": "Developing with AD4M"
-  },
-  "tutorial": {
-    "type": "separator",
-    "title": "Tutorial"
-  },
-  "developer-guides": "Developer Guides",
-  "jsdoc": "API Reference",
+  "index": "AD4M",
+  "start": "Start",
+  "tutorial": "Tutorial",
+  "concepts": "Concepts",
+  "how-to": "How-to",
+  "reference": "Reference",
+  "jsdoc": "SDK API (typedoc)",
   "download": {
     "title": "AD4M Website",
     "type": "page",

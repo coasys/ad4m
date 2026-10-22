@@ -1,0 +1,107 @@
+---
+title: Social DNA and flows
+description: "Where a group's rules live, what the executor enforces on incoming links and what it does not: classes recognize, flows gate."
+---
+
+import { Callout } from "nextra/components";
+
+# Social DNA and flows
+
+Where do a group's rules live, and what is actually enforced? **Social DNA** is the set of definitions a group stores *in* its shared perspective: the **subject classes** that say what a Task or a Message is, and the **flows** that say how the group moves one forward. Both are links like any other, so every member's executor holds the same rules and applies them locally.
+
+## The idea
+
+In a conventional app the rules are in the server's code. In AD4M there is no server, and the same neighbourhood is read by apps nobody coordinated. So the rules travel with the data:
+
+- A **subject class** is a lens. It declares which links around a node make that node a Task: a type marker, required properties, relations. Different classes can see the same node differently, and a node can be an instance of several classes. Classes **recognize**; they never block a write.
+- A **flow** is a shared state machine over a node. Its state is derived from signed proposals and votes; a transition into a state only counts when the state's guards hold and enough eligible agents signed. Flows **gate**: they decide what the group agrees has happened.
+
+```text
+   incoming link ──▶ stored as it is ──▶ signature verdict computed ──▶ in the graph
+                                                          │
+          ┌───────────────────────────────────────────────┴──────────────────────────┐
+          │  classes recognize                          flows gate                   │
+          │  "is this node a Task?"                     "has this Task reached Done?" │
+          │  marker + required properties present  →    guards met + n eligible      │
+          │  yes/no per reader, per query               signatures → derived state   │
+          └────────────────────────────────────────────────────────────────────────┘
+```
+
+## What is enforced, and where
+
+The question developers ask first is "can a member write a bad Task?" The honest answer has three parts, each pinned to code at `origin/dev`:
+
+1. **Nothing rejects an incoming link.** A diff from the link language is deduplicated, marked shared and written (`rust-executor/src/perspectives/perspective_instance.rs`, `diff_from_link_language`). The only SHACL-related step on that path is `inbound_touches_shacl`, which clears a shape *cache* when a class definition itself changes. Nothing on this path validates a link against a SHACL shape before storing it (the MCP `instance_*` tools check values against the class schema, but only for writes made through them, `rust-executor/src/mcp/tools/instances/`). A member who can write to the link language can write any triple.
+2. **Signatures are checked, and reads depend on them.** When a link is written, the store computes its verdict from the `proof` and records it as `<ad4m://ontology/proofValid>` (`sparql_store.rs`, `insert_link_triples`; the caller's own `valid` flag is ignored). Model queries add `proofValid "true"` to every link pattern unless the query sets `includeUnverified` (`model_query/sparql_builder.rs`, `proof_valid_filter`). A forged link is stored but invisible to a model query.
+3. **Recognition is a read-time test, not a write-time one.** "Is this node a Task?" is answered per query from the class's marker and required-property links (`model_query/sparql_builder.rs`, `build_query_patterns`). A node missing a required property is not refused; it is not a Task. [Models and identity](./models-and-identity.mdx) lists the recognition rules.
+
+So a class is a promise about how to read, not a constraint on what can be written. A flow adds the constraint that matters socially: a **state** is reached only when the fold over signed links says so, each proposal is read only from links its proposer signed, and each vote is counted only if the voter was eligible at the time of the vote (`rust-executor/src/perspectives/flow_instance/`). [Flows](./flows.mdx) specifies that engine.
+
+<Callout type="warning">
+  Treat "recognized as a Task" as "shaped like a Task, signed by whoever signed it". Treat "the TaskFlow says Done" as "n eligible members signed into Done with the guards met". Only the second is a group decision.
+</Callout>
+
+## Subject classes in one example
+
+A class is written as a TypeScript model and registered on the perspective. The SDK turns the decorators into a SHACL shape (`core/src/model/shacl-gen.ts`) and stores the shape as links; the executor parses those links back (`rust-executor/src/perspectives/shacl_parser.rs`).
+
+```typescript
+import { Ad4mModel, Model, Property, HasMany } from "@coasys/ad4m";
+
+@Model({ name: "Task" })
+class Task extends Ad4mModel {
+  @Property({ through: "todo://title", required: true })
+  title: string = "";
+
+  @Property({ through: "todo://state", initial: "todo://ready" })
+  state: string = "";
+
+  @HasMany({ through: "todo://comment" })
+  comments: string[] = [];
+}
+
+await Task.register(perspective);          // writes the shape as links; every member receives it
+const task = await Task.create(perspective, { title: "Ship the handover" });
+const open = await Task.findAll(perspective, { where: { state: "todo://ready" } });
+```
+
+Underneath, `register` calls `perspective.ensureSDNASubjectClass(Task)`, an alias of `ensureSubjectClass`, which serializes the generated shape and hands it to `addSdna(name, "", "subject_class", shaclJson)`; the executor writes the shape as links (`core/src/perspectives/PerspectiveProxy.ts`). `perspective.getAllShacl()`, `subjectClasses()` and `getClassShape(name)` read the definitions back. The predicates a shape is stored under, and the SHACL subset the executor reads, are in the [SHACL vocabulary reference](../reference/shacl-vocabulary.mdx); defining classes is [Define a model](../how-to/define-a-model.mdx).
+
+## Flows in one example
+
+A flow is a `SHACLFlow`: states with a `value` (the lowest is the initial state), transitions, optional `requires` guards and `consensusRule`s, and English hints an interpreting LLM reads.
+
+```typescript
+import { SHACLFlow, FlowInstance } from "@coasys/ad4m";
+
+const delivery = new SHACLFlow("Delivery", "delivery://");
+delivery.inputTypes = ["Task"];
+delivery.consensusRule = { n: 1 };
+delivery.addState({ name: "Ready",  value: 0, interpretationHint: "Named, not started." });
+delivery.addState({ name: "Review", value: 1, interpretationHint: "Waiting on review.",
+  requires: [{ className: "Deliverable", linkedTo: "base", count: { min: 1 } }] });
+delivery.addState({ name: "Done",   value: 2, interpretationHint: "Accepted.",
+  consensusRule: { n: 2 } });
+delivery.addTransition({ actionName: "Submit", fromState: "Ready",  toState: "Review", actions: [] });
+delivery.addTransition({ actionName: "Accept", fromState: "Review", toState: "Done",   actions: [] });
+
+await perspective.addFlow("Delivery", delivery);         // Social DNA: stored as links
+await perspective.sdnaFlows();                           // ["Delivery"]
+await perspective.availableFlows(task.id);               // ["Delivery"] — inputTypes match Task
+
+const run = await FlowInstance.start(perspective, "Delivery", task.id);
+run.currentStateName;                                    // "Ready"
+const result = await run.proposeTransition("Review");    // refused until a Deliverable exists
+```
+
+`addFlow`, `sdnaFlows`, `availableFlows` and `getFlow` are on `PerspectiveProxy`; `consensusRule` and `requires` are on `SHACLFlow` (`core/src/shacl/SHACLFlow.ts`). What a proposal is, why state is derived and never stored, roles, receipts and the full API are on [Flows](./flows.mdx); a worked example is [Write a flow](../how-to/writing-a-flow.mdx).
+
+## Why "subject" class
+
+The name marks the subjectivity: a class is one reader's interpretation of a pattern around a node, not a fact about the node. The same `task://17` can be a `Task` to a board, a `TextContent` to an agent reading transcripts, and a `Message` to a chat view, at the same time, with no conflict. [Abstract classes and aliases](./abstract-classes-and-aliases.mdx) is how a reader matches classes it did not define.
+
+## How it is built
+
+Class shapes: generated in `core/src/model/shacl-gen.ts`, parsed in `rust-executor/src/perspectives/shacl_parser.rs`, applied to queries in `rust-executor/src/perspectives/model_query/`. Flows: `core/src/shacl/SHACLFlow.ts` on the SDK side, `rust-executor/src/perspectives/flow_instance/` for the engine. Incoming links: `diff_from_link_language` in `rust-executor/src/perspectives/perspective_instance.rs`.
+
+Next: [Flows](./flows.mdx).

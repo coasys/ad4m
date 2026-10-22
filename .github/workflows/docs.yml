@@ -1,0 +1,56 @@
+# Builds the docs site and checks it on every PR that touches it.
+# Deploying is not done here yet: GitHub Pages still serves the committed
+# `docs/` directory (see docs-src/README.md). Switching the Pages source to
+# Actions is a separate change.
+name: Docs
+
+on:
+  pull_request:
+    paths:
+      - "docs-src/**"
+      - "rust-executor/src/mcp/docs/**"
+      - "core/src/**"
+      - ".github/workflows/docs.yml"
+  push:
+    branches: [dev]
+    paths:
+      - "docs-src/**"
+      - "rust-executor/src/mcp/docs/**"
+      - ".github/workflows/docs.yml"
+
+jobs:
+  build:
+    name: Build, portability and link check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install (docs-src and core, for typedoc)
+        run: pnpm install --frozen-lockfile --filter ./docs-src --filter ./core
+
+      - name: Portability check
+        working-directory: docs-src
+        run: pnpm run check:portability
+
+      - name: Build site
+        working-directory: docs-src
+        run: pnpm run build
+
+      - name: Link check
+        working-directory: docs-src
+        run: pnpm run check:links
+
+      - name: Upload built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site
+          path: docs-src/out
+          retention-days: 7

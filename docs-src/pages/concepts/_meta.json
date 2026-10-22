@@ -1,0 +1,18 @@
+{
+  "--data": { "type": "separator", "title": "Data and interoperability" },
+  "what-ad4m-is": "What AD4M is",
+  "agent-executor-capabilities": "Agent, executor and capabilities",
+  "perspectives-and-links": "Perspectives and links",
+  "models-and-identity": "Models and identity",
+  "types-and-values": "Types and values",
+  "queries": "Queries and live results",
+  "abstract-classes-and-aliases": "Abstract classes and aliases",
+  "containment": "Containment and navigation",
+  "--collab": { "type": "separator", "title": "Collaboration and execution" },
+  "neighbourhoods": "Neighbourhoods and trust",
+  "social-dna-and-flows": "Social DNA and flows",
+  "flows": "Flows",
+  "agents": "Agents",
+  "hosted-deployment": "Hosted deployment",
+  "language-protocols": "Language protocols"
+}

@@ -1,0 +1,143 @@
+---
+title: Abstract classes and aliases
+description: Cross-app interfaces - an abstract class reads every class that has its property and relation names, aliases let a class answer to another name, and writes go to the record's own class.
+---
+
+import { Callout } from "nextra/components";
+
+# Abstract classes and aliases
+
+How does a view, or an agent, read records from an app it does not know?
+
+A concrete class says what a record **is**: a `Message` carries the `flux://body` predicate and a `Message` flag. An **abstract class** says what a record **has**: "anything with a `text`". Querying an abstract class reads every installed class that has all of its property and relation names, whatever predicates those classes use and whatever app installed them. An **alias** lets a class answer to a name it does not use itself, so a `Message` whose field is `body` can still be read as `text`.
+
+## The example
+
+```typescript
+import { Ad4mModel, Model, Flag, Property } from "@coasys/ad4m";
+
+@Model({ name: "Readable", abstract: true })
+class Readable extends Ad4mModel {
+  @Property({ through: "app://text" })
+  text: string = "";
+}
+
+// Calls it `text`, under its own predicate.
+@Model({ name: "Block", implements: [Readable] })
+class Block extends Ad4mModel {
+  @Flag({ through: "app://kind", value: "app://block" })
+  kind = "app://block";
+
+  @Property({ through: "app://block_text" })
+  text: string = "";
+}
+
+// Calls it `body`; the alias makes it answer to `text` through Readable.
+@Model({ name: "Message", implements: [Readable] })
+class Message extends Ad4mModel {
+  @Flag({ through: "app://kind", value: "app://message" })
+  kind = "app://message";
+
+  @Property({ through: "flux://body", alias: { Readable: "text" } })
+  body: string = "";
+}
+
+await Ad4mModel.registerAll(perspective, [Readable, Block, Message]);
+await Block.create(perspective, { text: "hello" });
+await Message.create(perspective, { body: "<p>hi @data</p>" });
+
+const all = await Readable.findAll(perspective);
+// [{ id, text: "hello", __subjectClass: "Block" }, { id, text: "<p>hi @data</p>", __subjectClass: "Message" }]
+
+const mentions = await Readable.findAll(perspective, { where: { text: { contains: "@data" } } });
+// the Message only; `where` and `order` use the abstract name
+```
+
+Nothing is ever written at `app://text`, the abstract class's own predicate. It is a name, not a storage location.
+
+```
+  Readable { text }                  what it compares: names (and aliases)
+      │                              what it ignores:  predicates, datatypes, directions
+      ├─ Block.text        ──▶  "text" == "text"                    ✓
+      ├─ Message.body      ──▶  alias { Readable: "text" } == "text" ✓
+      └─ Poll.title        ──▶  no "text", no alias                   ✗  (Poll is not read)
+```
+
+## Abstract classes
+
+An abstract class is declared with `@Model({ name, abstract: true })`. Registering it writes a shape with an `ad4m://abstract` marker. The executor then resolves it against the installed classes every time it is queried:
+
+| Rule | Detail |
+|---|---|
+| Matching | By name only. A class conforms when, for every property of the abstract class, it has a property with that name or an alias for it under the abstract class's name, and the same for every relation. `through`, datatypes and link directions are not compared. |
+| Rows | A query over an abstract class is a union over the conforming classes, with the rules of [several classes at once](./queries.mdx#several-classes-at-once). Each row is its real class: `__subjectClass` names it, and `__subjectClasses` lists every class it conforms to. |
+| Classification | An abstract class is never one of a record's classes. `subjectClassesOf`, polymorphic relations and union queries do not list it. |
+| Creating | Refused. `Readable.create(...)` and `new Readable(p).save()` throw: there is no record yet, so there is no class to write. |
+| Empty | An abstract class with no property and no relation is refused at registration; one that arrives without names anyway (synced before its properties) reads nothing. |
+| Two names, one target | A class that has a property named `text` cannot also alias another property to `text`; registration fails. |
+| Later classes | A subscription over an abstract class picks up a class installed after the subscription opened. |
+| Unions | An abstract class is queried on its own, not inside `findAllOf` with other classes. |
+
+### Aliases
+
+`alias: { Readable: "text" }` on a property or relation says: when my class is read through `Readable`, this field is called `text`. Read as `Message`, it is still `body`. A field may carry aliases for several abstract classes, keyed by each one's name. For the built-ins the key is the local name, `TextContent` or `Container`.
+
+### `implements` is a check in the SDK
+
+`@Model({ implements: [Readable] })` does not register anything with the executor. It is evaluated when the class is declared: every property and relation name of each listed abstract class must be a name or an alias on the class, or the decorator throws (`Message implements Readable but has no property or alias named 'text'`). The executor matches by structure whether or not a class lists `implements`, so the option exists to catch a renamed field at build time, not to opt in.
+
+## Writing through an abstract class
+
+A row read through an abstract class can be edited and deleted. The write is dispatched to the record's own classes, the way a virtual call goes to the object's real type, so code that knows only `Readable` can edit a `Message` without knowing it is one:
+
+```typescript
+const [row] = await Readable.findAll(perspective, { where: { text: { contains: "@data" } } });
+row.text = "edited";
+await row.save();          // runs Message's setter for `body`
+await row.delete();        // runs Message's destructor
+```
+
+Relations dispatch the same way: `addChildren`, `removeChildren` and `setChildren` on a row read through an abstract `Folderish { children }` run the adder, remover or setter of the record's own relation that answers to `children`. The rules:
+
+- Every class the record belongs to among those the abstract class reads gets the write; a class it also belongs to but that the abstract class does not read is untouched.
+- Only the abstract class's own names can be written through it.
+- Values are not converted between classes: if one class stores HTML and another Markdown, both receive what you wrote.
+- A record that is none of the abstract class's classes is an error.
+- `perspective.updateSubject("Readable", id, { text })` and `perspective.removeSubject("Readable", id)` dispatch the same way, and so do the MCP tools `instance_update` and `instance_remove`.
+
+Steps and a complete example: [Write through an abstract class](../how-to/write-through-abstract-class.mdx).
+
+## The built-ins: TextContent and Container
+
+The executor ships two abstract classes that no perspective stores and no app can replace. They are the interface an agent uses to read a space it has never seen:
+
+- `TextContent { text }`, URI `ad4m://TextContent`: text a view or an LLM can read. The MCP tool `instance_transcript` is one query over it.
+- `Container { children }`, URI `ad4m://Container`: what holds other records. The `parent: { id }` scope, `add_child` and `get_children` go through it ([Containment](./containment.mdx)).
+
+```typescript
+import { TextContent, Container } from "@coasys/ad4m";
+
+@Model({ name: "Message", implements: [TextContent] })
+class Message extends Ad4mModel {
+  @Property({ through: "flux://body", alias: { TextContent: "text" } })
+  body: string = "";
+}
+
+const texts = await TextContent.findAll(perspective, { parent: { id: channelId } });
+```
+
+The SDK exports both as `@Model({ abstract: true })` classes that query by URI; `register()` on them writes nothing. Exact shapes and behavior: [Built-in interfaces](../reference/built-in-interfaces.mdx).
+
+<Callout type="info">
+Two different questions, two mechanisms. "Does this class answer `Readable`?" is decided by names and aliases. "Is this node a `Message`?" is decided by the `Message` shape's flags, required properties and initial values ([Models and identity](./models-and-identity.mdx#how-a-node-is-recognized-as-an-instance)). An abstract class never decides the second.
+</Callout>
+
+## How it is built
+
+Conformance and the per-class view are computed in `rust-executor/src/perspectives/model_query/abstract_classes.rs` (`view_through`); the built-ins are declared in `rust-executor/src/perspectives/model_query/builtin_classes.rs` from `hardwired_sdna/*.json`. The `implements` check is `checkImplements` in `core/src/model/decorators.ts`; the SDK mirrors of the built-ins are `core/src/perspectives/TextContent.ts` and `Container.ts`.
+
+## Next
+
+- [Containment](./containment.mdx): `has_child`, a holder's own children relation, scoping.
+- [Write through an abstract class](../how-to/write-through-abstract-class.mdx).
+- Reference: [Built-in interfaces](../reference/built-in-interfaces.mdx), [Decorators](../reference/decorators.mdx#model).

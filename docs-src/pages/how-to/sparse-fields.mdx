@@ -1,0 +1,108 @@
+---
+title: Request only some fields
+description: Return model instances with only the listed fields using properties, what is removed (author, createdAt and updatedAt included), what stays, how it combines with include, and saving a trimmed instance.
+---
+
+import { Callout } from "nextra/components";
+
+# Request only some fields
+
+`properties` lists the fields a query returns. Every other field is removed from each row, the metadata fields `author`, `createdAt` and `updatedAt` included. Use it for lists that show a title and nothing else, or to keep large values out of a response. Concepts: [Sparse fields with properties](../concepts/queries.mdx#sparse-fields-with-properties).
+
+## Steps
+
+1. **List the fields** you need: `properties: ["title"]` in a query object, or `.properties(["title"])` on the builder.
+2. **Add metadata fields by name** if you show them: `"author"`, `"createdAt"`, `"updatedAt"`. They are removed unless listed. The typed query object only accepts declared property names, so ask for metadata fields through the builder's `.properties()`, which takes any string.
+3. **Include relations as usual.** A relation named in `include` is kept and hydrated even when it is not in `properties`. A sub-query in `include` takes its own `properties`.
+4. **Read the row.** Fields you did not request are not on the instance at all (not `undefined` defaults); `id` always is.
+
+```typescript
+import { Ad4mModel, Model, Flag, Property, HasMany, HasManyMethods } from "@coasys/ad4m";
+
+@Model({ name: "Comment" })
+class Comment extends Ad4mModel {
+  @Property({ through: "blog://comment_body", required: true })
+  body: string = "";
+
+  @Property({ through: "blog://comment_mood" })
+  mood: string = "";
+}
+
+@Model({ name: "Post" })
+class Post extends Ad4mModel {
+  @Flag({ through: "blog://kind", value: "blog://post" })
+  kind = "blog://post";
+
+  @Property({ through: "blog://title", required: true })
+  title: string = "";
+
+  @Property({ through: "blog://body" })
+  body: string = "";
+
+  @HasMany(() => Comment, { through: "blog://comment" })
+  comments: Comment[] = [];
+}
+interface Post extends HasManyMethods<"comments"> {}
+
+await Ad4mModel.registerAll(perspective, [Comment, Post]);
+
+// Titles only.
+const titles = await Post.findAll(perspective, { properties: ["title"] });
+titles[0].id;                     // kept
+titles[0].title;                  // "Hello"
+Object.hasOwn(titles[0], "body");   // false
+Object.hasOwn(titles[0], "author"); // false: metadata is removed too
+
+// Metadata by name, through the builder.
+const bylines = await Post.query(perspective).properties(["title", "author", "createdAt"]).get();
+
+// With include: comments are hydrated although they are not listed,
+// and each comment is trimmed to its body.
+const [post] = await Post.findAll(perspective, {
+  where: { id: postId },
+  properties: ["title"],
+  include: { comments: { properties: ["body"] } },
+});
+post.comments[0].body; // kept
+Object.hasOwn(post.comments[0], "mood"); // false
+```
+
+## What stays on a trimmed row
+
+| On the row | With `properties: ["title"]` |
+|---|---|
+| `id` | always |
+| `title` | yes |
+| other properties and relations | removed |
+| `author`, `createdAt`, `updatedAt` | removed unless listed |
+| relations named in `include` | kept and hydrated |
+| `$` projections from `include` | kept (attached after the trim) |
+| `__links` from `links: [...]` | kept (attached after the trim) |
+| `addX` / `removeX` / `setX`, `save()`, `delete()` | still work |
+
+## Saving a trimmed instance
+
+A trimmed instance can be edited and saved. Dirty tracking compares against the fields that were read, so `save()` writes only what you changed and leaves the fields you did not request as they are stored:
+
+```typescript
+const draft = await Post.findOne(perspective, { where: { id: postId }, properties: ["title"] });
+draft!.title = "Renamed";
+await draft!.save();   // writes the title; the stored body is unchanged
+```
+
+Check for a field with `Object.hasOwn(row, "body")`, not `"body" in row`: the decorators define every declared field on the prototype, so `in` is `true` even when the field was removed.
+
+## What it does not do
+
+- **It does not make the query cheaper on the executor.** The executor hydrates each row in full, evaluates getters, and removes the unrequested fields just before it answers. `properties` saves transfer and object size. To skip getter-backed scalar properties during hydration, set `deepQuery: false` (getter-backed relations still run).
+- **It does not filter rows.** Use `where` for that.
+
+<Callout type="warning">
+`properties: []` throws in `findAll` and `findOne` (`properties[] must not be empty ...`). Omit the field to get every property.
+</Callout>
+
+## Next
+
+- Concepts: [Queries and live results](../concepts/queries.mdx).
+- Reference: [Query fields](../reference/model-query.mdx#query-fields).
+- How-to: [Include relations](./include-relations.mdx), [Paginate](./paginate.mdx).

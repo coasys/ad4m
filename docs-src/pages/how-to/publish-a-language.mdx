@@ -1,0 +1,92 @@
+---
+title: Publish a Language
+description: Publish a Language bundle, install it on another executor, clone it from a template, and use it, from the SDK or the ad4m CLI.
+---
+
+import { Callout } from "nextra/components";
+
+# Publish a Language
+
+You have a bundle (`build/bundle.js`, see [Write a Language](./write-a-language.mdx)) and want your executor and others to use it. Publishing stores the bundle and its meta in the **language language**; any executor can then install it by address. Background: [Language protocols](../concepts/language-protocols.mdx#trust-and-installation).
+
+The samples use `ad4m`, an `Ad4mClient` connected with admin rights ([Build an app](../start/build-an-app.mdx)).
+
+## 1. Publish the bundle
+
+```typescript
+import { LanguageMetaInput } from "@coasys/ad4m";
+
+const input = new LanguageMetaInput("note-store", "Notes in the executor's key-value store");
+input.possibleTemplateParams = ["uid"];                 // optional: names of template variables
+input.sourceCodeLink = "https://github.com/you/note-store"; // optional
+
+const meta = await ad4m.languages.publish("/absolute/path/to/build/bundle.js", input);
+meta.address;  // "Qm…": the content hash of the bundle, the Language's address
+meta.author;   // your DID
+```
+
+`languages.publish(path, meta)` (`core/src/language/LanguageClient.ts`) sends a **path**, not the file: the executor reads the bundle from its own filesystem (`publish_language` in `rust-executor/src/api/languages_ws.rs`), so the path must exist on the machine the executor runs on. The executor hashes the bundle, signs the meta as the agent, stores both through the language language and loads the Language right away.
+
+<Callout type="warning">
+Publishing needs the `language` `CREATE` capability, and on a multi-user executor it is refused for user sessions: a published Language is signed by the node's own agent, so only the node's admin can publish.
+</Callout>
+
+## 2. Install it on another executor
+
+```typescript
+const handle = await ad4m.languages.byAddress(meta.address);
+handle.name;     // "note-store"
+```
+
+`byAddress` installs the Language if it is not loaded yet (`get_language` in `languages_ws.rs`). Installation succeeds only if the executor trusts the author: the author is the agent itself or in its trusted agents list. Otherwise it fails with "Language not created by trusted agent". To trust an author:
+
+```typescript
+await ad4m.runtime.addTrustedAgents([authorDid]);
+```
+
+A Language cloned from a template is the exception: it installs when the **template's** author is trusted and re-applying the recorded parameters to the template reproduces the clone's hash (`language_by_ref` in `rust-executor/src/languages/mod.rs`).
+
+Read the published meta with `ad4m.languages.meta(address)`; list what is installed with `ad4m.languages.all()`; uninstall with `ad4m.languages.remove(address)`.
+
+## 3. Use it
+
+```typescript
+const url = await ad4m.expression.create("Buy milk", meta.address);   // content first, then the Language
+// url === `${meta.address}://<address returned by expressionCreate>`
+const note = await ad4m.expression.get(url);
+note.data;          // the content as a JSON string: '"Buy milk"'
+note.proof.valid;   // the signature checked on read
+```
+
+`expression.create(content, languageAddress)` (`core/src/expression/ExpressionClient.ts`) JSON-encodes the content; the executor decodes it before it calls `expressionCreate`, and prefixes the returned address with the Language's address (`expression_create` in `rust-executor/src/languages/mod.rs`). Store the URL as a link target or a model property with `resolveLanguage` set to the address ([Types and values](../concepts/types-and-values.mdx)).
+
+## Clone from a template
+
+If the Language marks template variables, anyone can publish a variant:
+
+```typescript
+const clone = await ad4m.languages.applyTemplateAndPublish(
+  meta.address,
+  JSON.stringify({ uid: crypto.randomUUID() }),   // a JSON string, not an object
+);
+clone.address;  // a new address: the bundle changed
+```
+
+This is the same call [Publish a neighbourhood](./publish-neighbourhood.mdx) uses to give each neighbourhood its own link language.
+
+## From the CLI
+
+The `ad4m` binary has the same operations (`cli/src/languages.rs`, `cli/src/expression.rs`, `cli/src/runtime.rs`):
+
+```bash
+ad4m languages publish ./build/bundle.js -n note-store -d "Notes in the KV store" -p uid -s https://github.com/you/note-store
+ad4m languages by-address <address>       # install if needed, then show
+ad4m languages meta <address>
+ad4m languages apply-template-and-publish <address> '{"uid":"team-a"}'
+ad4m languages remove <address>
+ad4m runtime add-trusted-agents <did>
+ad4m expression create <address> '"Buy milk"'
+ad4m expression get <url>
+```
+
+`publish` prompts for any of `--name`, `--description`, `--possible-template-params` (comma-separated) and `--source-code-link` you leave out. Unlike the SDK, the CLI also reads the file locally first, to fail early on a wrong path; the executor still reads it from its own filesystem. `expression create` sends `content` as JSON when it parses as JSON, else as a string. All commands: [CLI reference](../reference/cli.mdx).

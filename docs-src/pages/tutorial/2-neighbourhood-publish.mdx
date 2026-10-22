@@ -1,13 +1,25 @@
-# Publish Perspective as Neighbourhood
+---
+title: Publishing a Neighbourhood
+description: Clone a link language from a template with your own uid and publish a perspective as a neighbourhood.
+---
+
+# Publishing a Neighbourhood
 
 The back-bone of a Neighbourhood is a _LinkLanguage_ - a Language that enables the sharing
-and thus synchronizing of links (see [LinksAdapter](api.html#linksadapter)).
+and thus synchronizing of links (see [Language protocols](../concepts/language-protocols.mdx)).
 While there can and will be many different implementations
 with different trade-offs and features (like membranes etc.),
-there currently is one [fully implemented and Holochain based LinkLanguage with the name _Perspective Diff Sync_](https://github.com/perspect3vism/perspective-diff-sync).
+the executor ships a Holochain based LinkLanguage named _Perspective Diff Sync_
+(`bootstrap-languages/p-diff-sync` in the AD4M repository).
 
-It is deployed on the current test network (Language Language v0.0.15, included in [current network seed](https://github.com/perspect3vism/ad4m-seeds/blob/main/mainnetSeed.json)) under the address:
-`QmeBD9n9Z5yZsegxArToww5zmwtPpojXN6zXJsi7WwMUa8`.
+The addresses of the link languages your executor knows as templates come from
+its network seed (`rust-executor/src/mainnet_seed.json`, field `knownLinkLanguages`)
+and can be listed at runtime:
+
+```js
+const templates = await ad4m.runtime.knownLinkLanguageTemplates();
+const templateAddress = templates[0];
+```
 
 #### Creating our unique LinkLanguage clone through templating
 
@@ -15,43 +27,29 @@ But we should not just use this publicly known Language as the back-bone for our
 if we don't want to have everybody following this guide end up in the same network.
 
 So what we want is to use this existing Language as a template and create a new copy with the same code
-but different UUID and/name in order to create a fresh space for our new Neighbourhood.
+but a different `uid` and name in order to create a fresh space for our new Neighbourhood.
 
 What parameters can we adjust when using it as template?
 Let's have a look at the Language's meta information:
 
 ```js
-const socialContextMeta = await ad4m.languages.meta(
-  "QmeBD9n9Z5yZsegxArToww5zmwtPpojXN6zXJsi7WwMUa8"
-);
-console.log(socialContextMeta);
+const linkLanguageMeta = await ad4m.languages.meta(templateAddress);
+console.log(linkLanguageMeta);
 ```
 
-Which should yield something like this:
+Which yields the language's name, description, author, whether it was itself
+templated, and `possibleTemplateParams`. For a Holochain based link language the
+`uid` parameter becomes the DNA's network seed, so two clones with different
+`uid`s are two separate networks.
 
-```
- {
-  name: 'Perspective Diff Sync',
-  address: 'QmeBD9n9Z5yZsegxArToww5zmwtPpojXN6zXJsi7WwMUa8',
-  description: 'Holochain based LinkLanguage. First full implementation of a LinkLanguage, for collaborative Neighbourhoods where every agent can add links. No membrane. Basic template for all custom Neighbourhoods in this first iteration of the Perspect3vism test network.',
-  author: 'did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n',
-  templated: false,
-  templateSourceLanguageAddress: null,
-  templateAppliedParams: null,
-  possibleTemplateParams: [ 'uuid', 'name', 'description' ],
-  sourceCodeLink: 'https://github.com/perspect3vism/perspective-diff-sync'
-}
-```
-
-The field `possibleTemplateParams` tells us that we can set a `UUID` and override `name` and `description`.
-Let's leave description but change the name.
-The function `languages.applyTemplateAndPublish()` takes an object as JSON as second parameter like so:
+The function `languages.applyTemplateAndPublish()` takes the template
+parameters as a JSON string:
 
 ```js
 const uniqueLinkLanguage = await ad4m.languages.applyTemplateAndPublish(
-  "QmeBD9n9Z5yZsegxArToww5zmwtPpojXN6zXJsi7WwMUa8",
+  templateAddress,
   JSON.stringify({
-    uuid: "84a329-77384c-1510fb",
+    uid: "84a329-77384c-1510fb",
     name: "Perspective Diff Sync clone for demo Neighbourhood",
   })
 );
@@ -82,6 +80,6 @@ const neighbourhoodUrl = await ad4m.neighbourhood.publishFromPerspective(
 console.log(neighbourhoodUrl); // => neighbourhood://Qm123456789abcdef
 ```
 
-The `meta` field a (static/snapshotted) Perspective that is immutably stored with
+The `meta` field is a (static/snapshotted) Perspective that is immutably stored with
 the Neighbourhood. It can hold arbitrary/semantic meta information about the
 Neighbourhood but can technically stay empty, just like we did here.

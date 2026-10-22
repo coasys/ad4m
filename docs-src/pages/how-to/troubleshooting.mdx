@@ -1,0 +1,149 @@
+---
+title: Troubleshooting
+description: The common failures when running an executor, connecting an app or an agent, and building these docs, with the exact error text and the fix.
+---
+
+import { Callout } from "nextra/components";
+
+# Troubleshooting
+
+Find the message you see, then apply the fix. Each entry names the source file that emits the text (paths from the repository root), so you can check it against the version you run.
+
+## The executor does not start
+
+### No admin credential
+
+```
+Refusing to start: no admin credential is set, and without one every caller on a loopback listener gets full admin access. Set AD4M_ADMIN_CREDENTIAL (or --admin-credential, `adminCredential` in the config) to a secret, or, for tests and local development only, pass --insecure-no-admin-credential (AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true).
+```
+
+Source: `rust-executor/src/config.rs` (`NO_ADMIN_CREDENTIAL_ERROR`).
+
+`ad4m-executor run` needs a secret that grants full access to whoever presents it. Prefer a file, since a flag value shows up in `ps` and shell history:
+
+```bash
+head -c 32 /dev/urandom | base64 > ~/.ad4m-admin && chmod 600 ~/.ad4m-admin
+AD4M_ADMIN_CREDENTIAL_FILE=~/.ad4m-admin ad4m-executor run
+```
+
+See [Run an executor](../start/run-an-executor.mdx) and [Agent, executor and capabilities](../concepts/agent-executor-capabilities.mdx#the-admin-credential).
+
+### Port already in use
+
+```
+REST API server failed, exiting: ... Address already in use ...
+```
+
+Source: `rust-executor/src/lib.rs` (`exit_when_api_fails`); the binding is `bind_api_listeners` in `rust-executor/src/api/mod.rs`. The part after the colon is the operating system's error.
+
+Another process holds the RPC port (default 12000): often a second executor, or the Launcher. Stop it, or start this one on another port with `--port <n>` (`AD4M_PORT`). The executor exits with status 1 when its API cannot start.
+
+Two related lines do not stop the executor:
+
+- `API HTTPS listener on port <tls-port> could not start: ...`: the TLS port is taken; the cleartext listener stays on `127.0.0.1` only (`rust-executor/src/api/mod.rs`, `bind_api_listeners`).
+- `MCP server error: ...` (`rust-executor/src/lib.rs`) and `MCP: could not bind the HTTPS MCP listener on <addr>: ...` (`rust-executor/src/mcp/server.rs`): the MCP port, or `--mcp-port + 1` for its TLS listener, is taken. Free it or pick another `--mcp-port`.
+
+## The executor is locked
+
+```
+Executor is locked: the wallet has not been unlocked since the last restart. Ask the executor operator to call unlockAgent, then retry.
+```
+
+Sources: `rust-executor/src/agent/capabilities/token.rs` (issuing a token); the same cause reads `Executor is locked: ask the operator to unlock it, then reconnect` on an RPC connection (`rust-executor/src/agent/session.rs`) and `Executor is locked: its admin has not unlocked the agent yet ...` on a multi-user login (`rust-executor/src/user_management.rs`). Over MCP, `auth_status` reports `"executor_locked": true` (`rust-executor/src/mcp/tools/auth.rs`).
+
+The agent's keys live in memory only, so every restart locks the executor again; nothing can sign, log in or mint a token until the operator unlocks it with the agent passphrase:
+
+```bash
+ad4m agent unlock --passphrase '<passphrase>'
+```
+
+or in the Launcher, or with `client.agent.unlock(passphrase)` from the SDK (`core/src/agent/AgentClient.ts`). `ad4m agent status` shows `is_unlocked`. A waker subscription refused for this reason is re-attempted on its own once the node is unlocked; its log line ends with a hint that says so (`hintFor` in `core/src/perspectives/WakerSubscriptionManager.ts`).
+
+## A call is refused
+
+### Capability not granted
+
+```
+Capability is not matched, you have capabilities: [...], expected: Capability { with: ..., can: [...] }
+```
+
+Source: `require_capability` in `rust-executor/src/agent/capabilities/mod.rs`.
+
+The token was issued for capabilities that do not cover this call. The message lists what the token holds and what the call needs. Request the missing domain and verb (or the perspective UUID in `pointers`) when you request the capability, let the agent approve the new request, and use the new token. The domain and verb names are on [Agent, executor and capabilities](../concepts/agent-executor-capabilities.mdx#reference-domains-and-verbs).
+
+### Token revoked or expired
+
+```
+Unauthorized access
+Unauthorized access: the token has expired
+```
+
+Source: `AuthError` in `rust-executor/src/agent/session.rs`.
+
+The first means the agent revoked the token (`agent.revokeToken`), the second that it expired. Run the capability request again to get a new one.
+
+## A language does not install
+
+### Untrusted author
+
+```
+Language not created by trusted agent: <did> and is not templated... aborting language install. Language metadata: {...}
+```
+
+Source: `rust-executor/src/languages/mod.rs`.
+
+The executor installs a language only if its author is the agent itself or on the trusted-agents list, or if it is a template clone whose source is trusted. If you trust the author, add the DID and retry:
+
+```typescript
+await client.runtime.addTrustedAgents(["did:key:z6Mk…"]);
+```
+
+(`core/src/runtime/RuntimeClient.ts`). If you do not trust the author, do not install the language.
+
+### Holochain conductor not available
+
+```
+Holochain conductor not available
+```
+
+Source: `rust-executor/src/holochain_service/holochain_service_extension.rs`.
+
+A language that runs on Holochain was used before the conductor was running. The conductor starts when the agent is generated or unlocked (`rust-executor/src/api/agent_ws.rs`), and only when the executor runs Holochain (`--run-holochain`, default `true`). Unlock the agent first ([above](#the-executor-is-locked)). If the log also shows `Holochain conductor still starting after 120s; giving up waiting` (`rust-executor/src/holochain_service/interface.rs`), the conductor is slow or failed to start; look further up the log for the start error.
+
+## Multi-user login fails
+
+| Message | Source (`rust-executor/src/user_management.rs`) | Fix |
+|---|---|---|
+| `Multi-user mode is not enabled` | `login_user`, `signup_user`, `request_login_code`, `verify_and_login` | Start the executor with `--enable-multi-user true` (`AD4M_ENABLE_MULTI_USER`). See [Multi-user host](./multi-user-host.mdx). |
+| `Invalid credentials` | `verify_credentials` | Wrong email or password. |
+| `User already exists` | `create_user` | Log in instead of signing up. |
+| `Invalid verification code` | `verify_and_login` | Request a new code and use the latest one. |
+| `Executor is locked: its admin has not unlocked the agent yet ...` | `check_executor_unlocked` | The host was restarted; its operator must unlock it ([above](#the-executor-is-locked)). |
+
+## An MCP agent cannot work
+
+| Message | Source (`rust-executor/src/mcp/tools/`) | Fix |
+|---|---|---|
+| `Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate.` | `mod.rs`, `call_tool` | Send the admin credential as `Authorization: Bearer <credential>`, or authenticate in the session. See [Run the MCP server](./mcp-server.mdx#2-authenticate). |
+| `Unknown tool: <name>. Dynamic per-class tools are not exposed on this MCP server ...` | `mod.rs`, `dispatch_non_router_tool` | Use the `instance_*` tool the message names with `class_name`, or start the executor with `--dynamic-class-tools true`. See [MCP tools](../reference/mcp-tools.mdx#per-class-tools-opt-in). |
+| `Perspective not found: <id>` | `mod.rs`, `get_readable_perspective` | Either the UUID is wrong or the token may not read that perspective; the two answers are the same by design. Check the id with `list_perspectives`. |
+| `auth_status` says `authenticated: false`, `Token set but invalid - could not decode`, while other calls succeed | `auth.rs`, `auth_status`, `auth_status_json` | The session holds the admin credential. `auth_status` reports only a decodable JWT, and the admin credential is not one; the other tools accept it. Not an error. |
+
+**Connection refused from another machine.** Without an admin credential the MCP server binds `127.0.0.1` (`resolve_host` in `rust-executor/src/mcp/server.rs`). Set an admin credential (it then binds `0.0.0.0`), or set `MCP_HOST` to an IP address. The full table: [Run the MCP server](./mcp-server.mdx#where-it-binds).
+
+## The docs build fails
+
+These are reported by `docs-src/scripts/check-portability.mjs`, which `pnpm run build` runs first (`docs-src/package.json`). The rules behind them are in `docs-src/PORTABILITY.md`.
+
+| Message | Fix |
+|---|---|
+| `<page>: missing frontmatter (title, description)` | Add both keys to the page's YAML frontmatter. |
+| `<page>:<line>: site-absolute link, use a file-relative path with extension: /...` | Write `../concepts/queries.mdx`, not `/concepts/queries`. |
+| `<page>:<line>: page link must carry the .mdx/.md extension: ...` | Write `./queries.mdx#where-operators`, not `./queries#where-operators`. |
+| `<page>:<line>: link target does not exist: ...` | Fix the path. For `reference/mcp-topics/*.md`, run `pnpm run check:portability`, which copies the topics from `rust-executor/src/mcp/docs/` first; plain `node scripts/check-portability.mjs` does not. |
+| `<page>:<line>: anchor #<anchor> not found in <target>` | Use the anchor of an existing heading: lowercase, spaces as hyphens, punctuation dropped. |
+| `<page>:<line>: import not in the portable component set: ...` | The only allowed import is `import { Callout, Tabs, Tab } from "nextra/components";`. |
+
+<Callout type="info">
+Not listed here? Run the executor with `RUST_LOG=info` (or `debug`) and look for the first `ERROR` line; most of the messages above are logged before the client sees them.
+</Callout>

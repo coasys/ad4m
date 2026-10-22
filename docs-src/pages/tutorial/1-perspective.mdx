@@ -1,11 +1,16 @@
-import { Callout } from "nextra-theme-docs";
+---
+title: Dealing with Perspectives
+description: Create a perspective, add a signed link made of literal URIs, and read it back as a LinkExpression.
+---
 
-# Tutorial
+import { Callout } from "nextra/components";
+
+# Dealing with Perspectives
 
 <Callout type="info">
-  This will get you to a shared Neighbourhood on Holochain in less than 20
-  minutes! The code assumes an `ad4m` variable was setup as described in
-  [Getting Started](/getting-started).
+  This tutorial gets you to a shared Neighbourhood in a few steps. The code
+  assumes an `ad4m` client variable was set up as described in
+  [Build an app](../start/build-an-app.mdx).
 </Callout>
 
 ## Create a Perspective and add content
@@ -16,7 +21,7 @@ Adding a new perspective is as easy as
 const myPerspective = await ad4m.perspective.add("My new perspective");
 ```
 
-The returned object is of type [PerspectiveProxy](api.md#class-perspectiveproxy),
+The returned object is of type [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy),
 which hides all the remote calls to the AD4M executor and can be treated like a
 local database object.
 
@@ -41,7 +46,7 @@ const source = me.did;
 const predicate = Literal.from("thinks").toUrl();
 const target = Literal.from("AD4M will be the last social network").toUrl();
 
-const linkExpresion = await myPerspective.add({ source, predicate, target });
+const linkExpression = await myPerspective.add({ source, predicate, target });
 ```
 
 Links consist of 3 URIs pointing to Expressions of Languages.
@@ -50,7 +55,7 @@ For this example, we made life easy by using the agent's DID and AD4M's `Literal
 ### Agent DID
 
 For the source of our link, we got the user's DID URI by first getting
-the users [Agent](api.md#class-agent) object with `ad4m.agent.me()`.
+the user's [Agent](/jsdoc/classes/Agent) object with `ad4m.agent.me()`.
 That has a DID property and DID URIs are considered valid URIs in AD4M
 (they can be looked-up using the Agent bootstrap language which resolves
 to the same Agent object we got through `ad4m.agent.me()` - just even if
@@ -75,7 +80,7 @@ Literal.from("AD4M will be the last social network").toUrl();
 ```
 
 returns `literal:string:AD4M%20will%20be%20the%20last%20social%20network`.
-This is basically like URL parameters and let's us get around introducing Languages
+This is basically like URL parameters and lets us get around introducing Languages
 before using Perspectives and Links.
 
 We can decode the URL into a JavaScript literal like so:
@@ -87,18 +92,18 @@ const string = Literal.fromUrl("literal:string:thinks").get();
 
 ### LinkExpression
 
-We have put in a [Link](api.md#class-link) object into `myPerspective.add()`
+We have put in a [Link](/jsdoc/classes/Link) object into `myPerspective.add()`
 (`{source, predicate, target}`),
-but what this function returns is a [LinkExpression](api.md#class-linkexpression).
+but what this function returns is a [LinkExpression](/jsdoc/classes/LinkExpression).
 
 Even though this Perspective is not shared (yet) but just our private, local
-graph database, we might want to share it [later](#2-publish-perspective-as-neighbourhood)
+graph database, we might want to share it [later](./2-neighbourhood-publish.mdx)
 as Neighbourhood.
 Then, all links added by some agent to their local Perspective will be shared
 with the other agents using a LinkLanguage - a Language which defines Expressions
 representing Links. That is LinkExpressions.
 
-Using the [generic Expression template](api.html#expressiongeneric),
+Using the generic Expression envelope,
 LinkExpressions wrap Links with author, timestamp and signature:
 
 ```js
@@ -116,3 +121,6 @@ LinkExpressions wrap Links with author, timestamp and signature:
     }
 }
 ```
+
+The concept page [Perspectives and links](../concepts/perspectives-and-links.mdx)
+explains what the envelope guarantees.

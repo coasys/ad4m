@@ -1,0 +1,86 @@
+---
+title: Connect an agent
+description: Enable the executor's MCP server, connect an agent, read a perspective's schema and text, create a record, and learn where wakers, interpretation and flows live.
+---
+
+import { Callout } from "nextra/components";
+
+# Connect an agent
+
+An AI agent works with AD4M data through the executor's MCP server. It does not need to know the app that wrote the data: it asks the executor for the schema (`describe_perspective`) and then reads and writes records with the generic `instance_*` tools. This page is the first session, step by step. Each step names who owns the tool: the **executor** (its MCP server), the **SDK** (`@coasys/ad4m`, over RPC), or the **OpenClaw plugin** (a host that bridges the executor's tools and adds its own).
+
+## 1. Enable the MCP server (executor)
+
+The MCP server is off by default. Turn it on in the Launcher (Settings, "MCP" toggle; port 3001) or on the command line:
+
+```bash
+export AD4M_ADMIN_CREDENTIAL_FILE=/path/to/admin-credential   # mode 0600
+ad4m-executor run --enable-mcp true --mcp-port 3001
+```
+
+It serves Streamable HTTP at `http://<host>:3001/mcp`. Where it binds follows from whether anything gates access:
+
+- **With an admin credential** (`AD4M_ADMIN_CREDENTIAL_FILE` or `AD4M_ADMIN_CREDENTIAL`), it binds `0.0.0.0`; callers authenticate with the credential, a capability JWT or a multi-user login.
+- **Without one**, it defaults to `127.0.0.1` and treats every caller on loopback as the node's owner.
+- `MCP_HOST=<ip>` in the environment overrides the bind address either way (it is an IP literal, not a hostname). Credentials a caller presents are still checked. There is no `--mcp-host` flag.
+
+If the executor has TLS configured and an admin credential, MCP is also served over HTTPS on `--mcp-port + 1`, reachable from other machines. Once that HTTPS listener is up, the plain HTTP listener narrows to `127.0.0.1` unless `MCP_HOST` is set, so a remote client uses `https://<host>:<mcp-port + 1>/mcp`. Details, authentication modes and the per-class tool option are on [Run the MCP server](../how-to/mcp-server.mdx).
+
+## 2. Connect a client
+
+Any MCP client that speaks Streamable HTTP can connect. Two that are used with AD4M:
+
+- **OpenClaw** with the AD4M plugin, which bridges the executor's tools under an `ad4m_` prefix and adds waker tools of its own.
+- **Claude Code** with an `mcpServers` entry pointing at `http://localhost:3001/mcp`.
+
+Snippets for both are on [Connect an agent framework](../how-to/connect-an-agent-framework.mdx). When the executor has an admin credential, send it as `Authorization: Bearer <credential>` on every call, or authenticate once inside the session with `request_capability` and `generate_jwt` (local node) or `login_email` (multi-user host). `auth_status` reports only a session JWT: a session that holds the admin credential reads `authenticated: false` there while every other tool works.
+
+## 3. The first session (executor)
+
+Call `get_documentation(topic="overview")` first; the executor compiles its own documentation into the binary, so what it tells you matches the node you are talking to.
+
+**Find a perspective.** `list_perspectives()` returns your local perspectives with their `uuid`, `name`, `has_neighbourhood` and, when shared, the neighbourhood URL in `shared_url`. A perspective UUID is local to this executor; the neighbourhood URL is what two executors have in common.
+
+**Read the schema.** `describe_perspective(perspective_id)` returns every registered class with its `properties` (name, type, required, cardinality, hints), `collections` and `flows`:
+
+```json
+{ "classes": [
+    { "name": "Message", "class_uri": "flux://Message",
+      "properties": [ { "name": "body", "type": "string", "required": true } ],
+      "collections": [] },
+    { "name": "Channel", "class_uri": "flux://Channel",
+      "properties": [ { "name": "name", "type": "string", "required": true } ],
+      "collections": [ { "name": "messages" } ] } ],
+  "flows": [] }
+```
+
+**List records.** `instance_query(perspective_id, class_name, filter?, parent?, limit?, offset?)` lists instances with their property values, plus `id`, `author` and `timestamp` for each. `filter` is a where clause (`{"status": "open"}`, `{"title": {"contains": "mcp"}}`, `OR`/`AND`/`NOT`). `parent` restricts to what one node contains.
+
+**Read the text under a container.** `instance_transcript(perspective_id, parent, limit?)` returns the newest children under a node that carry text, as a chronological transcript with timestamp, author and text. It reads through the built-in abstract class `TextContent`: every class that has a `text` property, or a property aliased to `text`, whatever the app calls it. The built-in `Container` is the other half: a node holds a child when `parent ad4m://has_child child` exists, or when the parent's class has its own `children` relation. This is how you read a channel without knowing its message class.
+
+**Create a record.** `instance_create(perspective_id, class_name, properties, base_uri?, parent?)` validates `properties` against the class, writes the record, and with `parent` also puts it under that node:
+
+```json
+{ "perspective_id": "ab23…", "class_name": "Message",
+  "properties": { "body": "Hello from an agent" },
+  "parent": "<channel id from instance_query>" }
+```
+
+A rejected write names the property, the expected type and the cardinality; fix what it names. The new record appears in the app that owns the perspective because the app reads the same class through the same schema.
+
+<Callout type="info">
+Prefer the `instance_*` tools to raw `add_link`. A link no class recognizes is not a record for the app or for other agents. The executor's `usage` topic has the traps: [usage](../reference/mcp-topics/usage.md).
+</Callout>
+
+## 4. Beyond the first session
+
+**Wakers (OpenClaw plugin).** The executor can wake an agent when the result of a live query subscription changes: a SPARQL query for mentions, a model query over `Container` for new children under a node. The subscription is registered over the executor's WebSocket API, not over MCP, so the plugin owns it: through OpenClaw you use its wrapper tools, and joining or publishing a neighbourhood subscribes you to mentions automatically. Talking to the executor directly, you build the query with `generate_waker_query` or `get_mention_waker_config` and register it yourself with the SDK. See [Agents](../concepts/agents.mdx).
+
+**Interpretation (SDK).** Running a model inside the executor over a conversation and turning it into typed records is an SDK call, `perspective.runInterpretation(transcript, basePrefix)`, or a standing auto-processor registered with `perspective.addAutoProcessor(config)`. What the model would overwrite is staged as an overlay a human accepts or rejects. See [Agents](../concepts/agents.mdx) and [Configure AI models](../how-to/ai-models.mdx).
+
+**Flows (executor and SDK).** A flow is a state machine a group agrees on. Over MCP you can read flows (`get_flows`, `flow_state`, `flow_actions`, `flow_valid_outputs`), register one (`add_flow`) and vote on a proposal (`flow_proposal_accept`, `flow_proposal_reject`); proposing a transition is an SDK call. See [Social DNA and flows](../concepts/social-dna-and-flows.mdx) and [Flows](../concepts/flows.mdx).
+
+## Reference
+
+- Every tool, with owner: [MCP tools](../reference/mcp-tools.mdx)
+- The executor's own topics: [overview](../reference/mcp-topics/overview.md), [usage](../reference/mcp-topics/usage.md)

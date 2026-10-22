@@ -1,0 +1,113 @@
+---
+title: Filter by author
+description: Select model instances by who wrote a link or who created the instance, with the nested per-link, bare and side-by-side author forms, and the queries the executor refuses.
+---
+
+import { Callout } from "nextra/components";
+
+# Filter by author
+
+Every link carries the DID of the agent that signed it. `author` in a `where` turns that into a condition. Where you put it decides what it asks: who wrote one specific link, or who created the instance. Concepts: [Filtering by author](../concepts/queries.mdx#filtering-by-author).
+
+```
+  role instance ad4m://obj/r1
+  ├── test://type  → reviewer        written by admin   (earliest link: the instance's .author)
+  ├── app://agent  → did:key:bob     written by admin   ← { agent: { eq: bob, author: admin } } matches
+  └── app://agent  → did:key:mal     written by mallory ← { agent: { eq: mal, author: admin } } does not
+```
+
+## Steps
+
+1. **Get the DID** you want to check against: your own is `(await ad4m.agent.me()).did`; other agents' DIDs come from their links or profiles.
+2. **Decide the question.**
+   - "Did A write *this* link?" (authority, role gating): nest `author` under the property, `{ agent: { eq: did, author: A } }`.
+   - "Did A create the instance?" (my posts, mute lists): put `author` alone at the top, `{ author: A }`.
+   - Both at once: put `author` beside property conditions, `{ agent: did, author: A }`.
+3. **Pick the author value**: a DID, an array of DIDs (any of them), `{ not: did }` or `{ not: [dids] }`, or `{ contains: "text" }` (a case-insensitive substring of the DID).
+4. **Run it** with `findAll`, `findOne`, `count`, `findAllAndCount`, `paginate` or the builder. All of them agree on the same `where`.
+
+```typescript
+import { Ad4mModel, Model, Flag, Property } from "@coasys/ad4m";
+
+@Model({ name: "RoleGrant" })
+class RoleGrant extends Ad4mModel {
+  @Flag({ through: "app://role_type", value: "app://reviewer" })
+  type = "app://reviewer";
+
+  @Property({ through: "app://role_agent" })
+  agent: string = "";
+
+  @Property({ through: "app://role_note" })
+  note: string = "";
+}
+
+await RoleGrant.register(perspective);
+const admin = (await ad4m.agent.me()).did;
+
+// Nested, per link: admin signed an `agent -> candidate` link on the grant.
+const appointed = await RoleGrant.findAll(perspective, {
+  where: { agent: { eq: candidateDid, author: admin } },
+});
+
+// Nested without a value: admin wrote some `agent` link, whatever it says.
+const touched = await RoleGrant.count(perspective, { where: { agent: { author: admin } } });
+
+// Nested beside another operator: admin wrote a `note` link containing "ok".
+const approved = await RoleGrant.findAll(perspective, {
+  where: { note: { contains: "ok", author: admin } },
+});
+
+// Bare, per instance: grants whose earliest link someone other than these agents wrote.
+const unmuted = await RoleGrant.findAll(perspective, {
+  where: { author: { not: mutedDids } },
+});
+
+// Side by side: admin created the grant AND wrote its `agent -> candidate` link.
+const strict = await RoleGrant.query(perspective)
+  .where({ agent: candidateDid, author: admin })
+  .get();
+```
+
+## What each form matches
+
+| Form | Example | Matches when |
+|---|---|---|
+| Nested, per link | `{ agent: { eq: did, author: A } }` | A wrote an `agent → did` link |
+| Nested, no value | `{ agent: { author: A } }` | A wrote some `agent` link |
+| Bare, per instance | `{ author: A }` | A wrote the instance's earliest link (the `.author` on the row) |
+| Side by side | `{ agent: did, note: "x", author: A }` | A wrote the earliest link, an `agent → did` link and a `note → x` link |
+
+- **The link need not hold the current value.** `{ agent: { eq: alice, author: admin } }` still matches after someone writes `agent → bob`; the row then shows `agent: "bob"`. The row's `.author` is always the earliest link's author, whatever you filtered on.
+- **Relations work the same way.** `{ reviews: { author: A } }` is "A wrote some `reviews` link". Beside a quantifier it scopes the relation link: `{ reviews: { some: { verdict: "ok" }, author: A } }` is "A linked a review whose verdict is ok", `{ reviews: { none: {}, author: A } }` is "A linked no review". A relation typed as a model class (`Review[]`) is not in the typed `where`, so cast the clause `as any`.
+- **Negation is explicit.** `NOT: { agent: { eq: did, author: A } }` is "A wrote no `agent → did` link". `agent: { eq: did, author: { not: A } }` is "someone other than A wrote one". If A and a peer both wrote it, the first fails and the second passes.
+- **Scope stays in its object.** A top-level `author` does not reach into `AND` / `OR` / `NOT`, and an `author` inside one of them applies only to that sub-object. For "A or B wrote the `agent` link", write `{ agent: { eq: did, author: [A, B] } }`.
+- **Side by side never widens.** It is the bare condition plus the nested one under each link-backed property beside it, so it never matches more than either reading. `author: { not: A }` there negates both halves. A `none` quantifier beside it is left unscoped.
+
+## Only verified links count
+
+The executor records a signature verdict for every link when it stores it. A per-link `author` is checked on the same link that satisfies the value condition, and only on links whose signature verified. A peer who stores a link claiming admin as its author, without admin's key, does not pass `{ agent: { eq: peer, author: admin } }`. The bare form reads the earliest *verified* link, so a forged early link cannot make admin the instance's creator either.
+
+`includeUnverified: true` lifts that filter for the whole query. Never combine it with an author check you act on ([Unverified links](../concepts/queries.mdx#unverified-links)).
+
+## What is refused
+
+A per-link `author` is answered in the store, where each link still has its own author. After hydration a row has only one `author`, so the executor refuses a query that would have to finish the check there rather than answer against the wrong author:
+
+| You write | The error says |
+|---|---|
+| `author` nested under a getter property, `timestamp` or `id`: `{ timestamp: { author: A } }` | ``where: `timestamp` has a nested `author`, but it is not a property stored as a link`` |
+| A per-link `author` (nested or side by side) beside something evaluated after hydration: `timestamp`, a getter property, a relation `some`/`none` the store cannot express, `not`/`contains` on a relation | ``where: a per-link `author` (nested under a property, or a top-level `author` beside property conditions) is answered in the store`` |
+| An author value that is not one of the four forms: `{ agent: { author: { gt: 1 } } }` | ``where: `agent`: `author` must be a DID, an array of DIDs, ...`` |
+| `eq` together with another value operator: `{ agent: { eq: "x", not: "y" } }` | ``where: `agent`: `eq` cannot be combined with another value operator`` |
+
+A bare `{ author: A }` beside only `timestamp` or getter properties is not refused: there is no link-backed property beside it, so it keeps its per-instance meaning.
+
+<Callout type="warning">
+For a permission check, always use the nested form. Anyone in a neighbourhood can add a link to a record someone else created. `{ agent: peer, author: admin }` and `{ author: admin }` only prove who created the record; the nested `{ agent: { eq: peer, author: admin } }` proves admin signed the `agent → peer` link itself.
+</Callout>
+
+## Next
+
+- Concepts: [Queries and live results](../concepts/queries.mdx), [Perspectives and links](../concepts/perspectives-and-links.mdx).
+- Reference: [Where operators](../reference/model-query.mdx#where-operators).
+- How-to: [Paginate](./paginate.mdx), [Subscribe](./subscribe.mdx).

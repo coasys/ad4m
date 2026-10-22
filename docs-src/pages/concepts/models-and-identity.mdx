@@ -1,0 +1,175 @@
+---
+title: Models and identity
+description: How a TypeScript class becomes a SHACL shape stored as links, how an instance gets its id, and how the executor decides that a node is an instance of a class.
+---
+
+import { Callout } from "nextra/components";
+
+# Models and identity
+
+How do I stop thinking in links, and how does the executor know that a node is a `Task`?
+
+A perspective holds links: `source → predicate → target`, each signed by its author ([Perspectives and links](./perspectives-and-links.mdx)). A **model** (also called a subject class) is a named pattern over those links: "a node with a `board://type` link to `board://task`, a `board://title`, and maybe a `board://status`". The SDK class `Ad4mModel` lets you write and read records through that pattern; the executor stores the pattern itself as a SHACL shape in the same perspective, so every client, an MCP agent included, recognizes the same records.
+
+## One model, start to finish
+
+```typescript
+import { Ad4mModel, Model, Flag, Property } from "@coasys/ad4m";
+
+@Model({ name: "Task" })
+class Task extends Ad4mModel {
+  @Flag({ through: "board://type", value: "board://task" })
+  type = "board://task";
+
+  @Property({ through: "board://title", required: true })
+  title: string = "";
+
+  @Property({ through: "board://status" })
+  status: string = "";
+}
+
+// Once per perspective, at startup: writes the shape into the perspective.
+await Task.register(perspective);
+
+const task = await Task.create(perspective, { title: "Write the guide", status: "open" });
+task.id; // "ad4m://obj/…" (24 random characters)
+
+const open = await Task.findAll(perspective, { where: { status: "open" } });
+open[0].title; // "Write the guide"
+```
+
+Underneath, `create` wrote three links from one new node:
+
+```
+ad4m://obj/k3Qw…   board://type     board://task
+ad4m://obj/k3Qw…   board://title    literal:string:Write%20the%20guide
+ad4m://obj/k3Qw…   board://status   literal:string:open
+```
+
+The node is the record. The class is how you read it. No `rdf:type` triple says "this is a Task"; the executor decides that from the links (see [How a node is recognized](#how-a-node-is-recognized-as-an-instance)).
+
+```
+  @Model class ──generateSHACL()──▶ SHACL shape ──register()──▶ links in the perspective
+      │                                 │                              │
+      │  save() / create()              │  describe_perspective        │  model query
+      ▼                                 ▼                              ▼
+  links on ad4m://obj/<id>     an MCP agent reads the schema    rows that match the shape
+```
+
+## Instance identity
+
+Every instance has an `id`: the URI of the node its links hang from. When you do not supply one, the constructor generates `ad4m://obj/<24 random characters>`. The id is independent of the record's content, so two tasks with the same title stay distinct. You can pass your own URI instead:
+
+```typescript
+const a = new Task(perspective);                    // ad4m://obj/…
+const b = new Task(perspective, "board://task/42"); // your URI, used as is
+```
+
+Auto-generated ids use their own `ad4m://obj/` scheme rather than a `literal:` URL so that a link pointing at a record is always an IRI in the store and never mistaken for a value.
+
+<Callout type="info">
+A record is not owned by one class. The same node can be read as a `Task` by one app and as a `Post` by another, if it carries both patterns. `perspective.subjectClassesOf([id])` lists every registered class a node is an instance of.
+</Callout>
+
+## How it works under the hood
+
+### The shape
+
+`@Model` injects `generateSHACL()` into the class. The namespace is the scheme of the first property's predicate (`board://` here; `ad4m://` when there is none). For `Task` it produces a SHACL node shape with URI `board://TaskShape` and `sh:targetClass board://Task`, plus one property shape per decorated field (`board://Task.title`, `board://Task.status`, ...). The shape URI must end in `<Name>Shape`; the executor refuses any other.
+
+`register()` sends the shape as JSON (`shape.toJSON()`) to the executor, which writes it as links in the perspective:
+
+```
+ad4m://self                  ad4m://has_shacl         literal:string:shacl://Task
+literal:string:shacl://Task  ad4m://shacl_shape_uri   board://TaskShape
+board://Task                 rdf://type               ad4m://SubjectClass
+board://TaskShape            rdf://type               sh://NodeShape
+board://TaskShape            sh://targetClass         board://Task
+board://TaskShape            sh://property            board://Task.title
+board://Task.title           sh://path                board://title
+board://Task.title           sh://minCount            literal:1^^xsd:integer
+board://Task.title           sh://maxCount            literal:1^^xsd:integer
+board://TaskShape            ad4m://constructor       literal:string:[{"action":"addLink",…}]
+```
+
+Because the schema is data in the perspective, it travels with a neighbourhood and is readable by any client. The full predicate list is in the [SHACL vocabulary](../reference/shacl-vocabulary.mdx). You can also install a shape without a decorated class, from SHACL JSON or from JSON Schema: see [Define a model](../how-to/define-a-model.mdx).
+
+### Constructor actions and initial values
+
+The shape carries an `ad4m://constructor` list: the links written when an instance is created. A flag contributes its fixed link. A property with an `initial` value contributes a link to that value. A `required` property without `initial` contributes a placeholder (`literal:string:uninitialized`) that the first `save()` replaces. An optional property with no initial writes nothing until you set it.
+
+### How a node is recognized as an instance
+
+When you query `Task`, the executor builds a SPARQL pattern from the shape that a node must satisfy. It uses the strongest signal the shape offers, in this order:
+
+| Tier | Used when | What a node needs |
+|---|---|---|
+| Required properties and flags | The shape has any `minCount 1` property | A link on each required predicate; for a flag, a link to the flag's fixed value |
+| Initial values | No required property, but some property has an initial value | A link on the first such predicate |
+| Structural fallback | Neither of the above | At least one link on any of the class's predicates. Weakest and most expensive; skipped when the query already narrows the subject, for example under a `parent` scope |
+
+Every triple in the pattern is kept only when a link whose signature verified asserts it, so a forged flag does not make a node an instance ([Unverified links](./queries.mdx#unverified-links)). A class with no flag and no required property matches any node that shares one of its predicates, which may include records of other classes. Give a class a `@Flag` when you want it to be unambiguous.
+
+### Dirty tracking
+
+After `get()`, `findAll()` or `subscribe()` an instance holds a snapshot of its field values. `save()` writes only the fields that changed since the snapshot; a fresh instance with no snapshot writes everything you set.
+
+```typescript
+const [task] = await Task.findAll(perspective, { where: { status: "open" } });
+task.status = "done";
+task.isDirty();       // true
+task.changedFields(); // ["status"]
+await task.save();    // one setSingleTarget on board://status
+```
+
+A flag cannot change after creation: `save()` skips it.
+
+### Built-in instance properties
+
+Every hydrated instance carries, besides its declared fields:
+
+| Field | Meaning |
+|---|---|
+| `id` | The node URI |
+| `author` | DID of the agent who wrote the instance's earliest link |
+| `createdAt` | Timestamp of the earliest link |
+| `updatedAt` | Timestamp of the most recent link |
+| `timestamp` | Deprecated alias of `createdAt` |
+| `__links` | Per-link rows, present only when the query asked for `links` |
+| `__subjectClass`, `__subjectClasses` | The class a row was read as, and every class it conforms to; present on rows of a union, abstract or polymorphic read |
+
+`author` is the creator of the record, not of any particular value. To ask who wrote one link, use a per-link author condition ([Filtering by author](./queries.mdx#filtering-by-author)).
+
+## Model inheritance
+
+A `@Model` class may extend another `@Model` class. The child inherits the parent's properties and relations, and its shape references the parent's shape with `sh:node`. Instances of the child satisfy the parent's pattern too, so a query over the parent returns them as well:
+
+```typescript
+@Model({ name: "Note" })
+class Note extends Ad4mModel {
+  @Property({ through: "board://content" })
+  content: string = "";
+}
+
+@Model({ name: "Poll" })
+class Poll extends Note {
+  @Flag({ through: "board://poll_type", value: "board://poll" })
+  pollType = "board://poll";
+
+  @Property({ through: "board://question", required: true })
+  question: string = "";
+}
+```
+
+Here `Note` has no flag, so it is recognized by structure (a `board://content` link), and every `Poll` with content is also a `Note`. Inheritance shares fields; it is not how two apps agree on an interface. For that, see [Abstract classes and aliases](./abstract-classes-and-aliases.mdx).
+
+## How it is built
+
+The SDK side is `core/src/model/decorators.ts` (the decorators), `core/src/model/shacl-gen.ts` (class to shape) and `core/src/model/Ad4mModel.ts` (ids, save, dirty tracking). The executor writes a shape as links in `rust-executor/src/perspectives/shacl_parser.rs` (`parse_shacl_to_links`) and recognizes instances in `rust-executor/src/perspectives/model_query/sparql_builder.rs` (`shape_conformance_patterns`).
+
+## Next
+
+- [Types and values](./types-and-values.mdx): what a property, a relation, a literal and a signed expression are.
+- [Queries and live results](./queries.mdx): `where`, `order`, `include`, subscriptions.
+- [Define a model](../how-to/define-a-model.mdx) with decorators, SHACL JSON or JSON Schema.
+- Reference: [Decorators](../reference/decorators.mdx), [SHACL vocabulary](../reference/shacl-vocabulary.mdx).

@@ -1,0 +1,83 @@
+---
+title: Subscribe to a query
+description: Keep a list, a count or a page of model instances live with subscribe, countSubscribe and paginateSubscribe, and end the subscription with dispose.
+---
+
+import { Callout } from "nextra/components";
+
+# Subscribe to a query
+
+A subscription runs a model query once, returns the rows, and calls you back whenever a write changes the result. Why and when the executor re-runs it: [Real-time subscriptions](../concepts/queries.mdx#real-time-subscriptions).
+
+## Steps
+
+1. **Build the query** with `Model.query(perspective)` and the usual `where`, `order`, `include`, `parent` methods. Subscriptions live on the builder, not on `findAll`.
+2. **Subscribe**: `await builder.subscribe(callback)` returns the initial rows; `callback(rows)` gets the full new result after each change. Use `countSubscribe(cb)` for a number and `paginateSubscribe(pageSize, pageNumber, cb)` for one page with its total.
+3. **Render the initial rows yourself.** The callback is not called for them.
+4. **Call `builder.dispose()`** when the view goes away. That ends the subscription on the client and on the executor.
+
+```typescript
+import { Ad4mModel, Model, Flag, Property } from "@coasys/ad4m";
+
+@Model({ name: "Task" })
+class Task extends Ad4mModel {
+  @Flag({ through: "board://type", value: "board://task" })
+  type = "board://task";
+
+  @Property({ through: "board://title", required: true })
+  title: string = "";
+
+  @Property({ through: "board://status" })
+  status: string = "";
+}
+
+await Task.register(perspective);
+
+// A live list.
+const open = Task.query(perspective).where({ status: "open" }).order({ createdAt: "ASC" });
+const initial = await open.subscribe((tasks) => render(tasks));
+render(initial);
+
+// A live count.
+const counter = Task.query(perspective).where({ status: "open" });
+const n = await counter.countSubscribe((count) => render(count));
+
+// A live page: page 1 of 20, newest first.
+const pager = Task.query(perspective).order({ createdAt: "DESC" });
+const first = await pager.paginateSubscribe(20, 1, (page) => render(page.results));
+
+await Task.create(perspective, { title: "New", status: "open" }); // all three callbacks fire
+
+open.dispose();
+counter.dispose();
+pager.dispose();
+```
+
+## What you get
+
+- `subscribe` resolves to `Task[]`; later calls pass the whole new `Task[]`, already merged from the change the executor sent (records added, updated and removed, plus the new total).
+- `countSubscribe` resolves to a `number`; `paginateSubscribe` to `{ results, totalCount, pageSize, pageNumber }`.
+- `subscribe` skips a callback whose result equals the previous one, so a write that changes nothing you read does not re-render your list. `countSubscribe` and `paginateSubscribe` call back on every update, including a reconnect or resync that brings back the same result, and `paginateSubscribe` on any change to the whole result set even when the page you show did not change. Make their callbacks cheap or compare before re-rendering.
+
+## What triggers an update
+
+The executor re-runs the query when a write could change its result: a record of the class created, edited or deleted, an edit to a record pulled in by `include`, a related record that starts or stops matching a `some`/`none` quantifier, a link on a requested `links` entry. It does not re-run for unrelated classes: creating a `Note` does not wake a `Task` subscription. A subscription over an [abstract class](../concepts/abstract-classes-and-aliases.mdx) also picks up classes installed after it opened.
+
+`paginateSubscribe` watches the whole result set without the page window and re-reads the page after each change, so a new record on page 1 shifts what you see on page 2.
+
+## Rules
+
+- **One subscription per builder.** A second `subscribe`, `countSubscribe` or `paginateSubscribe` on the same builder ends the first. Use one builder per live view.
+- **Two builders are two subscriptions.** Disposing one never stops the other, even for the same query.
+- **Reconnects are handled.** `LiveQuery` (the class under the builder) opens a new subscription after a reconnect and resyncs when it misses an update; the executor ends every subscription of a connection when the connection closes.
+- **Dispose, always.** A builder you drop without `dispose()` keeps its executor subscription until the connection closes.
+
+<Callout type="info">
+In React or Vue, use `useLiveQuery` from `@coasys/ad4m-react-hooks` / `@coasys/ad4m-vue-hooks`: it subscribes, re-renders and disposes for you ([React and Vue hooks](./hooks.mdx)). For a live SPARQL query rather than a model query, see [SPARQL](./sparql.mdx).
+</Callout>
+
+## Next
+
+- Concepts: [Queries and live results](../concepts/queries.mdx).
+- Reference: [Builder](../reference/model-query.mdx#builder).
+- How-to: [Paginate](./paginate.mdx), [React and Vue hooks](./hooks.mdx).

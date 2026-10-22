@@ -1,0 +1,128 @@
+---
+title: Containment and navigation
+description: What holds what - the canonical ad4m://has_child predicate, a class's own children relation, the parent scope, bounded traversal in both directions, and why containment is not a tree.
+---
+
+import { Callout } from "nextra/components";
+
+# Containment and navigation
+
+What holds what, and how do I scope a query to it?
+
+Apps build their structure on containment: messages in a channel, blocks in a document, tasks on a board, channels under the perspective root. AD4M gives this one canonical predicate, `ad4m://has_child`, and one built-in abstract class, `Container { children }`, so that an agent or a view can navigate a space without knowing which app wrote it. A class that already stores its children under its own predicate joins in by aliasing that relation to `children`.
+
+## The example
+
+```typescript
+import { Ad4mModel, Model, Flag, HasMany, Property, Container, Link } from "@coasys/ad4m";
+
+@Model({ name: "Message" })
+class Message extends Ad4mModel {
+  @Flag({ through: "chat://kind", value: "chat://message" })
+  kind = "chat://message";
+
+  @Property({ through: "chat://body" })
+  body: string = "";
+}
+
+// Holds its children through its own relation, as a We block does.
+@Model({ name: "Block", implements: [Container] })
+class Block extends Ad4mModel {
+  @Flag({ through: "chat://kind", value: "chat://block" })
+  kind = "chat://block";
+
+  @HasMany({ through: "we://child", alias: { Container: "children" } })
+  blocks: string[] = [];
+}
+
+const block = await Block.create(perspective);
+const m1 = await Message.create(perspective, { body: "in the block" }, { parent: { id: block.id } });
+// writes  block.id  we://child  m1.id  (the holder's own relation)
+
+const room = "chat://room/general";               // a node no class describes
+const m2 = await Message.create(perspective, { body: "in the room" }, { parent: { id: room } });
+// writes  room  ad4m://has_child  m2.id
+
+await Message.findAll(perspective, { parent: { id: block.id } });   // [m1]
+await Message.findAll(perspective, { parent: { id: room } });       // [m2]
+await Message.findAll(perspective, { parent: { ids: [block.id, room] } }); // [m1, m2]
+
+// Who holds m1?
+await Container.findAll(perspective, { parent: { ids: [m1.id], direction: "in" } }); // [block]
+```
+
+```
+   ad4m://self ──has_child──▶ channel ──has_child──▶ message
+                                                       ▲
+   block ──we://child (Block.children)─────────────────┘        one record,
+   board ──board://item (Board.children)───────────────┘        several holders
+```
+
+## What counts as containment
+
+`X` is contained in `P` when either holds:
+
+1. `P ad4m://has_child X` exists, whatever `P` is: an instance of any class, a neighbourhood root, `ad4m://self`, or a plain string id. `has_child` means containment and nothing else.
+2. `P` is an instance of a class that conforms to `Container`, and `P p X` exists where `p` is the predicate of that class's relation answering to `children` (named `children`, or aliased `{ Container: "children" }`).
+
+Rule 2 is class-scoped on purpose. `we://child` is containment on a `Block` because `Block` says so; the same predicate from a `Board`, whose `children` is `board://item`, is a stray link and holds nothing. A class with nothing that marks its instances (no flag, required property or initial value) adds no edge, because the holder check would be empty and its predicate would then count on every node. Its `has_child` links still count.
+
+The child's class never matters. `children` is untyped; the class of the query you run filters what you read.
+
+## Scoping a query
+
+`parent: { id }`, with nothing else, means "contained in `id`" through both rules. Give it a predicate and it means that predicate only; give it a model and field and the predicate is resolved from the model.
+
+```typescript
+await Message.findAll(perspective, { parent: { id: channel } });                  // containment
+await Message.findAll(perspective, { parent: { id: channel, predicate: "chat://pinned" } }); // one predicate
+await Message.findAll(perspective, { parent: { model: Channel, id: channel, field: "pinned" } });
+```
+
+`Container.findAll(perspective, { where: { id: holder } })` returns one row whose `children` is everything the holder holds, merged across its classes. A node no class describes is a row when it holds something by `has_child`. Scope a `Container` query (`where: { id }`, a `children` filter or `parent`); unscoped, it reads every holder in the perspective.
+
+## Bounded traversal and the reverse direction
+
+The traversal scope takes several anchors and bounds the walk. With no predicate it follows containment: `has_child` on any node, and each class's own `children` relation on its instances.
+
+```typescript
+// A step out from several anchors
+await Message.findAll(perspective, { parent: { ids: [a, b] } });
+
+// Everything below, any depth, nearest first when there is no order
+await Message.findAll(perspective, { parent: { ids: [doc], transitive: true, maxDepth: 3 } });
+
+// What holds X: the reverse direction, through Container
+await Container.findAll(perspective, { parent: { ids: [x], direction: "in" } });
+
+// Which Blocks hold X
+await Block.findAll(perspective, { parent: { ids: [x], direction: "in" } });
+```
+
+A transitive result is flat: SPARQL property paths bind no intermediate node, so a row says it is under the anchor and not where. To draw a tree, read the reverse relation alongside (a `@BelongsToOne` back up the predicate) and assemble from each row's parent. `levels` is refused on a containment traversal, and so is `limitPerAnchor` on a transitive one; bound it with `maxDepth`. Named-predicate traversals take `levels` and `limitPerAnchor` as described in [Parent-scoped queries](./queries.mdx#parent-scoped-queries).
+
+## Attach, detach, delete
+
+- **Attach** a record to a holder: `Model.create(p, data, { parent: { id } })` writes the holder's own relation when it has one, else `has_child`. For an existing record, write the link: the holder class's `add<Children>` method, or `perspective.add(new Link({ source: holder, predicate: "ad4m://has_child", target: id }))` for a node no class describes.
+- **Detach**: remove that link (`remove<Children>`, or `perspective.remove`). The record stays.
+- **Delete**: `record.delete()` removes the record's own links and incoming links to it, so it leaves every holder at once.
+
+## Not a tree
+
+<Callout type="warning">
+A record can sit under several holders at the same time: one message under a plain node by `has_child`, under one `Block` by `has_child`, under another `Block` by `we://child` and on a `Board` by `board://item` is a tested case, and `Container.findAll(..., { parent: { ids: [x], direction: "in" } })` returns all four. Do not model "the parent" as unique, do not assume a cycle-free graph, and bound transitive walks.
+</Callout>
+
+## Agents
+
+The MCP tools use the same rules: `instance_create(parent=...)` and `add_child` write the holder's own relation or `has_child`; `get_children` lists what a node holds, whatever the children's class; `instance_query(parent=...)` scopes to one holder; `instance_transcript` reads the contained records that carry text through `TextContent`. See [Built-in interfaces](../reference/built-in-interfaces.mdx) and [MCP tools](../reference/mcp-tools.mdx).
+
+## How it is built
+
+The two rules and the edge set are `rust-executor/src/perspectives/model_query/containment.rs` (`edges`, `contains_patterns`); the `Container` shape is `rust-executor/src/perspectives/hardwired_sdna/container.json`. The scope types are `ContainedScope` and `TraverseByContainment` in `core/src/model/types.ts`; the end-to-end cases are `tests/js/tests/model/model-containment.test.ts`.
+
+## Next
+
+- [Abstract classes and aliases](./abstract-classes-and-aliases.mdx): why `Container` reads a `Block`.
+- [Queries and live results](./queries.mdx#parent-scoped-queries): every scope form.
+- Reference: [Built-in interfaces](../reference/built-in-interfaces.mdx), [Model query](../reference/model-query.mdx#parent-scopes).

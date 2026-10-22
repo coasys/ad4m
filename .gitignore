@@ -75,6 +75,11 @@ docs-src/typedoc
 docs-src/_book
 docs-src/.next
 docs-src/pages/jsdoc
+# Generated at build time by docs-src/scripts/copy-generated.mjs
+docs-src/pages/reference/mcp-topics
+docs-src/pages/reference/language-interface-spec.md
+docs-src/pages/reference/host-contract.md
+docs-src/pages/reference/social-conventions.md
 .worktrees/
 CUSTOM_DENO_SNAPSHOT.bin
 waker-bridge/package-lock.json

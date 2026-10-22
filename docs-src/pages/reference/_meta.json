@@ -1,0 +1,17 @@
+{
+  "--sdk": { "type": "separator", "title": "SDK" },
+  "decorators": "Decorators and options",
+  "model-query": "Model query",
+  "built-in-interfaces": "Built-in interfaces",
+  "shacl-vocabulary": "SHACL vocabulary",
+  "--agents": { "type": "separator", "title": "Agents" },
+  "mcp-tools": "MCP tools",
+  "mcp-topics": "MCP documentation topics",
+  "--ops": { "type": "separator", "title": "Operations" },
+  "cli": "CLI",
+  "executor-config": "Executor config file",
+  "--languages": { "type": "separator", "title": "Languages" },
+  "language-interface-spec": "Language interface spec",
+  "host-contract": "Host contract",
+  "social-conventions": "Social conventions"
+}
