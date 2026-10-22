@@ -68,8 +68,10 @@ const PING_INTERVAL_MS = 10_000
 
 /** The slowest link a socket is given time for. The executor reads a ping
  *  only after the frames sent before it, so a ping left unanswered counts as
- *  silence only once what the socket sent since it was last heard from could
- *  have crossed this link, if that takes longer than PING_INTERVAL_MS. */
+ *  silence only once everything the socket sent before that ping could have
+ *  crossed this link, if that takes longer than PING_INTERVAL_MS. Messages
+ *  that come in meanwhile do not shorten this: they say nothing about how far
+ *  an upload has got. */
 const SLOWEST_LINK_BYTES_PER_MS = 16 // 16 kB/s
 
 /** The bytes `text` takes as UTF-8, as a WebSocket text frame sends it. */
@@ -159,8 +161,12 @@ export class ApiClient {
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
     /** When the open socket was first pinged since it last delivered a message; null while none is unanswered. */
     private _wsPingedAt: number | null = null
-    /** What the open socket sent since it last delivered a message, in characters. */
-    private _wsUnheardBytes = 0
+    /** When that ping could have reached the executor, which reads it only after what the socket sent before it. */
+    private _wsPingArrivesBy = 0
+    /** When everything the open socket sent so far could have crossed a SLOWEST_LINK_BYTES_PER_MS link.
+     *  A message from the socket does not move it back: hearing from the executor says nothing
+     *  about how much of a large upload has reached it. */
+    private _wsSentBy = 0
     // The executor sends a socket only the events it asked for (`events.watch`).
     // What the executor has for the open socket, as sent; a new socket has `{}`.
     private _watching: string | null = '{}'
@@ -206,10 +212,7 @@ export class ApiClient {
         this._wsOpen.catch(() => {})
 
         ws.onmessage = (event) => {
-            if (this._ws === ws) {
-                this._wsPingedAt = null
-                this._wsUnheardBytes = 0
-            }
+            if (this._ws === ws) this._wsPingedAt = null
             let parsed: Record<string, unknown>
             try { parsed = JSON.parse(event.data) } catch (e) {
                 console.error('Error parsing WebSocket data:', e)
@@ -306,22 +309,27 @@ export class ApiClient {
     private _startPing(ws: WebSocket): void {
         this._stopPing()
         this._wsPingedAt = null
-        this._wsUnheardBytes = 0
+        this._wsSentBy = 0
         this._wsPingTimer = setInterval(() => {
             if (this._ws !== ws) return
+            const ping = JSON.stringify({ type: 'ping' })
             if (this._wsPingedAt === null) {
                 this._wsPingedAt = Date.now()
-            } else if (Date.now() - this._wsPingedAt >= Math.max(PING_INTERVAL_MS, this._wsUnheardBytes / SLOWEST_LINK_BYTES_PER_MS)) {
+                this._send(ws, ping)
+                this._wsPingArrivesBy = this._wsSentBy
+                return
+            }
+            if (Date.now() >= Math.max(this._wsPingedAt + PING_INTERVAL_MS, this._wsPingArrivesBy)) {
                 this._dropSilentSocket(ws)
                 return
             }
-            this._send(ws, JSON.stringify({ type: 'ping' }))
+            this._send(ws, ping)
         }, PING_INTERVAL_MS)
     }
 
-    /** Send on `ws`, counting what the open socket has sent since it was last heard from. */
+    /** Send on `ws`, counting how long what the open socket sent could take to cross the slowest link. */
     private _send(ws: WebSocket, text: string): void {
-        if (this._ws === ws) this._wsUnheardBytes += utf8Length(text)
+        if (this._ws === ws) this._wsSentBy = Math.max(this._wsSentBy, Date.now()) + utf8Length(text) / SLOWEST_LINK_BYTES_PER_MS
         ws.send(text)
     }
 
