@@ -11,7 +11,7 @@ at boot.
 | `sandbox.rs` | `BundleSandbox`: one bare `JsRuntime` per bundle on its own thread; `call(path, args)` / `read(path)`, JSON in and out; per-call time limit and heap cap |
 | `bootstrap.js` | Runs before the bundle: the only globals it gets beyond the language (`structuredClone`, `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `crypto.getRandomValues`, `console`), removes `Deno`, evaluates to the invoker |
 | `store.rs` | `ToolBundleStore`: `<data>/tool_bundles/<address>.js`, addressed by `js_core::utils::content_address` |
-| `registry.rs` | `ToolBundleRegistry::global()`: install (a toolset name already taken replaces its bundle), `load_stored` at boot, `find_tool`, `read_doc`. Reached by `api/tool_bundles_ws.rs` and `mcp/tools/instances/record_tools.rs` |
+| `registry.rs` | `ToolBundleRegistry::global()`: install (a toolset name already taken replaces its bundle, which must not drop any of that bundle's toolsets), `load_stored` at boot, `find_tool` (a `FoundTool` calls in a fresh isolate), `read_doc`. Reached by `api/tool_bundles_ws.rs`, `mcp/tools/instances/record_tools.rs` and `mcp/tools/docs.rs` |
 | `tests.rs` | Fixture bundles: calls, isolation, limits, store |
 
 ## Invariants
@@ -29,6 +29,14 @@ at boot.
   tool answers through the class setters, in one batch, as the calling agent.
 - Tool names are unique across the node; a toolset's doc topics sit under its own name and may
   not take an executor topic. Tests get a registry over a temp-dir store, never `~/.ad4m`.
+- A record is seen by one call: every tool call runs in a fresh isolate that ends with it. The
+  isolate a bundle keeps installed reads its exports and serves its docs, and is never given a
+  record. Bundle docs are served to authenticated callers only (`get_documentation` checks);
+  the executor's own topics stay open.
+- `install` changes nothing unless every check passes and the source is stored: check, `put`,
+  then replace.
+- A tool's answer is written only after `validate_properties(.., WriteMode::Update)`, like
+  `instance_update`; the setters do not check type or cardinality.
 
 ## Do not
 
