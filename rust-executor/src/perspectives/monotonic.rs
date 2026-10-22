@@ -523,7 +523,9 @@ mod tests {
         assert!(refusal("ad4m://flow/to_state").contains("tombstone (ad4m://retracted)"));
         assert!(refusal(MONOTONIC_FLAG_PREDICATE).contains("cannot be ended"));
         assert!(refuse_monotonic_removal(&link("test://likes"), &LinkStatus::Shared).is_ok());
-        assert!(refuse_monotonic_removal(&link("ad4m://flow/to_state"), &LinkStatus::Local).is_ok());
+        assert!(
+            refuse_monotonic_removal(&link("ad4m://flow/to_state"), &LinkStatus::Local).is_ok()
+        );
     }
 
     #[test]
