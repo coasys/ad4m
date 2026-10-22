@@ -21,7 +21,8 @@ import * as auth from "./src/auth.js";
 import * as syncModule from "./src/sync.js";
 import * as telepresenceModule from "./src/telepresence.js";
 import { WsClient } from "./src/ws-client.js";
-import { buildKeyRing, opensOwnBoxes, type KeyRing } from "./src/encryption.js";
+import type { KeyRing } from "./src/encryption.js";
+import { loadKeyRing } from "./src/key-ring-setup.js";
 import { grantMissingRoomKeys, rotateRoomKey } from "./src/room-keys.js";
 
 import {
@@ -110,65 +111,18 @@ function setupKeyRingCoalesced(): Promise<void> {
 async function setupKeyRing(): Promise<void> {
     const gen = lifecycleGen;
     const config = getConfig();
-    try {
-        const token = await auth.getValidToken();
-        const keysRes = await api.fetchRoomKeys(config, token);
-        if (gen !== lifecycleGen) return;
-        if (!keysRes) {
-            keyRingStatus = "none";
-            keyRing = null;
-            return;
-        }
-        if (keysRes.keys.length === 0 && keysRes.e2e_enabled) {
-            keyRingStatus = "pending";
-            keyRing = null;
-            console.log(
-                "[server-link-language] room has E2E enabled but this agent has no keys yet — " +
-                "commits blocked until a member holding the room key grants it",
-            );
-            return;
-        }
-        if (keysRes.keys.length === 0) {
-            keyRingStatus = "none";
-            keyRing = null;
-            return;
-        }
-        const { ring, spoiled } = buildKeyRing(keysRes.keys, getAgent());
-        if (spoiled.length > 0 && !opensOwnBoxes(getAgent(), myDid)) {
-            // The boxes failed because this executor cannot open any box now (a locked
-            // agent), not because they are spoiled: drop none, and try again later.
-            throw new Error(`this executor does not open a box sealed to ${myDid} right now`);
-        }
-        // A spoiled box would block its version for good: drop it, and a member holding the
-        // version grants it again.
-        for (const version of spoiled) {
-            await api.deleteRoomKey(config, token, version).catch((err) =>
-                console.error(`[server-link-language] could not drop the spoiled box for version ${version}:`, err),
-            );
-        }
-        if (gen !== lifecycleGen) return;
-        keyRing = ring;
-        if (keyRing.size === 0) {
-            // Boxes sealed to this agent, none of which open (sealed in an older
-            // format, or a spoiled grant): the same as holding none.
-            keyRingStatus = "pending";
-            keyRing = null;
-            console.log("[server-link-language] no room key version opens for this agent — waiting for a new one");
-            return;
-        }
-        keyRingStatus = "ready";
-        const versions = [...keyRing.keys()].sort((a, b) => a - b);
-        console.log(`[server-link-language] E2E key ring acquired (${versions.length} version(s): ${versions.join(", ")})`);
-    } catch (err) {
-        if (gen !== lifecycleGen) return;
-        keyRingStatus = "error";
-        keyRing = null;
-        console.error(
-            "[server-link-language] failed to acquire/decrypt E2E key ring — " +
-            "refusing to commit plaintext until this resolves:",
-            err,
-        );
-    }
+    await loadKeyRing({
+        getToken: () => auth.getValidToken(),
+        fetchRoomKeys: (token) => api.fetchRoomKeys(config, token),
+        deleteRoomKey: (token, version) => api.deleteRoomKey(config, token, version),
+        getAgent: () => getAgent(),
+        myDid: () => myDid,
+        superseded: () => gen !== lifecycleGen,
+        apply: (status, ring) => {
+            keyRingStatus = status;
+            keyRing = ring;
+        },
+    });
 }
 
 /**
