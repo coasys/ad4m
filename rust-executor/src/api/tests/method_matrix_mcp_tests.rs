@@ -323,36 +323,6 @@ fn tools() -> Vec<Tool> {
             },
         ),
         tool(
-            "add_child",
-            AsCaller,
-            vec![m("perspective.addLink", link_params)],
-            |h, uuid| {
-                Box::pin(async move {
-                    h.add_child(Parameters(instances::AddChildParams {
-                        perspective_id: uuid,
-                        parent: "matrix://s".into(),
-                        child: "matrix://t".into(),
-                    }))
-                    .await
-                })
-            },
-        ),
-        tool(
-            "get_children",
-            AsCaller,
-            vec![m("perspective.queryLinks", query_params)],
-            |h, uuid| {
-                Box::pin(async move {
-                    h.get_children(Parameters(instances::GetChildrenParams {
-                        perspective_id: uuid,
-                        parent: "matrix://s".into(),
-                        limit: None,
-                    }))
-                    .await
-                })
-            },
-        ),
-        tool(
             "language_meta",
             AsCaller,
             vec![m("language.meta", |_| json!({ "address": "QmMatrix" }))],
@@ -635,11 +605,13 @@ fn tools() -> Vec<Tool> {
 /// The tools with no RPC method. Those that take a perspective follow the RPC perspective rule
 /// ([`perspective_tools`]).
 const NOT_WRAPPED: &[&str] = &[
+    "add_child",
     "auth_status",
     "describe_perspective",
     "flow_actions",
     "flow_state",
     "generate_waker_query",
+    "get_children",
     "get_documentation",
     "get_mention_waker_config",
     "instance_add_to_collection",
@@ -884,6 +856,26 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
     let tool = |name: &'static str, access: Access, run: Run| PerspectiveTool { name, access, run };
     const CLASS: &str = "Matrix";
     vec![
+        tool("add_child", Write, |h, uuid| {
+            Box::pin(async move {
+                h.add_child(Parameters(instances::AddChildParams {
+                    perspective_id: uuid,
+                    parent: "matrix://s".into(),
+                    child: "matrix://t".into(),
+                }))
+                .await
+            })
+        }),
+        tool("get_children", Read, |h, uuid| {
+            Box::pin(async move {
+                h.get_children(Parameters(instances::GetChildrenParams {
+                    perspective_id: uuid,
+                    parent: "matrix://s".into(),
+                    limit: None,
+                }))
+                .await
+            })
+        }),
         tool("describe_perspective", Read, |h, uuid| {
             Box::pin(async move {
                 h.describe_perspective(Parameters(instances::DescribePerspectiveParams {
