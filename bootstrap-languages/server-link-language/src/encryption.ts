@@ -219,6 +219,20 @@ export function openRoomKey(agent: Pick<AgentAdapter, "openSealed">, sealed: Sea
     return roomKey;
 }
 
+/**
+ * Whether this agent's executor opens a box sealed to `did` right now. While it
+ * cannot use the agent's key (a locked agent), every box fails to open, and
+ * none of them is spoiled.
+ */
+export function opensOwnBoxes(agent: Pick<AgentAdapter, "openSealed">, did: string): boolean {
+    const probe = generateRoomKey();
+    try {
+        return bytesToHex(openRoomKey(agent, sealToDid(did, probe))) === bytesToHex(probe);
+    } catch {
+        return false;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Key ring
 // ---------------------------------------------------------------------------

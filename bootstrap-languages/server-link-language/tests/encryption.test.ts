@@ -21,6 +21,7 @@ import {
     hexToBytes,
     latestKeyVersion,
     openRoomKey,
+    opensOwnBoxes,
     randomBytes,
     roomKeyCommitment,
     sealToDid,
@@ -317,6 +318,28 @@ describe("encryption: buildKeyRing / latestKeyVersion", () => {
         const other = new OpeningAgent();
         const { ring } = buildKeyRing([entry(other.did(), generateRoomKey(), 1)], agent);
         assert.equal(ring.size, 0);
+    });
+
+    it("tells a box that is spoiled from an executor that opens nothing now", () => {
+        const agent = new OpeningAgent();
+        assert.equal(opensOwnBoxes(agent, agent.did()), true, "the agent opens a box sealed to itself");
+
+        // A locked agent: the executor cannot use the key, so every box fails, good ones too.
+        const locked: Pick<AgentAdapter, "openSealed"> = {
+            openSealed: () => {
+                throw new Error("main key not found");
+            },
+        };
+        const rk1 = generateRoomKey();
+        const { ring, spoiled } = buildKeyRing([entry(agent.did(), rk1, 1)], locked);
+        assert.equal(ring.size, 0);
+        assert.deepEqual(spoiled, [1], "the good box failed too");
+        assert.equal(opensOwnBoxes(locked, agent.did()), false, "so its failure is not the box's");
+
+        // An executor that answers with bytes other than the box's.
+        const wrong: Pick<AgentAdapter, "openSealed"> = { openSealed: () => bytesToHex(generateRoomKey()) };
+        assert.equal(opensOwnBoxes(wrong, agent.did()), false);
+        assert.equal(opensOwnBoxes(agent, "not a did"), false);
     });
 
     it("latestKeyVersion returns the highest version", () => {

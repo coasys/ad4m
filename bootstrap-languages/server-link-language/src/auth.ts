@@ -41,6 +41,13 @@ export function parseJwtExpiryMs(token: string): number | null {
     }
 }
 
+/**
+ * The link server's challenge: 32 random bytes as lowercase hex
+ * (`generateChallenge` in `link-server/src/auth.ts`). The agent's key signs
+ * more than auth challenges, so the language signs nothing else here.
+ */
+const CHALLENGE_FORMAT = /^[0-9a-f]{64}$/;
+
 /** Runs the full two-step DID challenge-response flow and caches the result. */
 export async function authenticate(): Promise<AuthSession> {
     const config = getConfig();
@@ -48,6 +55,9 @@ export async function authenticate(): Promise<AuthSession> {
     const did = agent.did();
 
     const challenge = await api.requestChallenge(config, did);
+    if (typeof challenge !== "string" || !CHALLENGE_FORMAT.test(challenge)) {
+        throw new Error("the link server's challenge is not 32 bytes of hex; not signing it");
+    }
     const signature = agent.signStringHex(challenge);
     const token = await api.verifyChallenge(config, did, challenge, signature);
 
