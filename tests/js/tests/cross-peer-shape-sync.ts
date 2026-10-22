@@ -22,7 +22,6 @@
 import { PerspectiveProxy, Perspective, Link, LinkQuery } from "@coasys/ad4m";
 import { Ad4mModel, Model, Property } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
-import { pollUntil } from "../utils/utils";
 import { waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
@@ -73,58 +72,31 @@ export default function crossPeerShapeSyncTests(
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
 
-        // Prove the sync path is live BEFORE the assertions run. A cold
-        // gossip peer failing to warm up manifests as a shape-sync
-        // timeout downstream, which would be misdiagnosed.
-        const marker = `warmup://${uuidv4()}`;
+        // Alice registers the SHACL and creates one instance. Registration
+        // writes `LinkStatus::Shared` links (see `add_sdna_inner`) which
+        // the link language delivers to Bob.
+        await CrossPeerNote.register(aliceP);
+        const note = new CrossPeerNote(aliceP);
+        note.body = "hello from Alice";
+        await note.save();
+        // Written last: once Bob holds it, he holds the shape and the note.
+        const marker = `marker://${uuidv4()}`;
         await aliceP.add(
           new Link({ source: marker, predicate: "ns://ping", target: "literal:string:ok" }),
         );
         await waitUntil(
           async () => (await bobP.get(new LinkQuery({ source: marker }))).length > 0,
           180_000,
-          "gossip warm-up: Alice's marker link to reach Bob",
+          "Alice's shape, note and marker to reach Bob",
         );
-
-        // Alice registers the SHACL and creates one instance. Registration
-        // writes `LinkStatus::Shared` links (see `add_sdna_inner`) which
-        // p-diff-sync will deliver to Bob.
-        await CrossPeerNote.register(aliceP);
-        const note = new CrossPeerNote(aliceP);
-        note.body = "hello from Alice";
-        await note.save();
 
         // Bob does NOT call `CrossPeerNote.register(bobP)` — this is the
         // whole point. Without the engine fix, this findAll throws
-        // `No SHACL shape stored for class 'CrossPeerNote'` immediately.
-        // With the fix, `model_query` polls up to `MODEL_QUERY_SHAPE_WAIT`
-        // (20s) for Alice's SDNA to arrive over sync, then succeeds.
-        //
-        // Extra tolerance beyond the engine's 20s wait so a cold
-        // Holochain gossip cycle can still land: retry the query in a
-        // waitUntil loop. Any single call may throw "no shape" if the
-        // shape hasn't arrived within the engine budget — that's the
-        // caller's cue to try again.
-        const notes = await waitUntilFindAllSucceeds(bobP);
+        // `No SHACL shape stored for class 'CrossPeerNote'`.
+        const notes = await CrossPeerNote.findAll(bobP);
         expect(notes.length, "Bob should see Alice's note").to.equal(1);
         expect(notes[0].body).to.equal("hello from Alice");
       });
-
-      /**
-       * Wrap `findAll` in a bounded retry loop. Each `model_query` call
-       * already waits up to 20s internally; here we tolerate one full
-       * engine budget expiry then retry, up to a 90s ceiling.
-       */
-      async function waitUntilFindAllSucceeds(p: PerspectiveProxy): Promise<CrossPeerNote[]> {
-        let results: CrossPeerNote[] = [];
-        await pollUntil(async () => {
-          try {
-            results = await CrossPeerNote.findAll(p);
-            return results.length > 0;
-          } catch { return false; }
-        }, { timeoutMs: 90000, intervalMs: 2000, label: "CrossPeerNote.findAll succeeds on non-registering peer" });
-        return results;
-      }
     });
   };
 }
