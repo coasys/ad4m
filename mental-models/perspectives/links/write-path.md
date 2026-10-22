@@ -1,6 +1,6 @@
 # Link write path
 
-Every link write, local or arriving from a neighbourhood, follows one sequence inside `PerspectiveInstance`: store the change, flag live queries and notifications, emit link events, and, for a local shared write, commit to the link language. A **batch** collects writes in memory and runs the sequence once on commit.
+Every link write, local or arriving from a neighbourhood, runs the same steps inside `PerspectiveInstance`: store the change, flag live queries and notifications, emit link events, and, for a local shared write, start a commit to the link language. The order of the last steps differs per path (below). A **batch** collects writes in memory and runs the sequence once on commit.
 
 **Why:** One sequence keeps the store, the subscribers and the neighbourhood consistent, whatever path the write came in by. A batch lets an instance with many properties reach readers and peers as one change, not as a burst of partial states.
 

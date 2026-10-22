@@ -15,7 +15,7 @@ The **server link language** (`@coasys/server-link-language`) syncs a neighbourh
 4. `perspectiveSyncSync`: `GET /sync?since=<seq>`; the WebSocket also pushes `diff` messages. Both go through `applyInboundWireDiff`.
 5. Telepresence: online roster, signals and broadcasts over the WebSocket.
 
-The local store in the language is always plaintext; only the wire carries ciphertext.
+The local store in the language is always plaintext. Ciphertext appears only on the wire, and only once the room has a room key.
 
 </details>
 
