@@ -1365,9 +1365,9 @@ Notes:
       debounceMs: config.debounceMs,
       subscribeTimeoutMs: config.subscribeTimeoutMs ?? WAKER_SUBSCRIBE_TIMEOUT_MS,
       previousSeenMessages: savedState.seenMessages,
-      onWake: (sub, _result, mentions) => {
-        postWake(config, sub, _pluginAgentDid, logger, mentions);
-      },
+      // Resolves false when the gateway did not take the wake; the manager offers it again.
+      onWake: (sub, _result, mentions) =>
+        postWake(config, sub, _pluginAgentDid, logger, mentions),
       onPersist: (subs, seenMessages) => {
         if (_stateDir) saveWakerState(_stateDir, subs, seenMessages);
       },
