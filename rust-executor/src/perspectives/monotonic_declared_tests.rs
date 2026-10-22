@@ -1,6 +1,7 @@
 //! SHACL-declared monotonic predicates (#1176 PR B), T5: a property shape
-//! flagged `monotonic` makes its predicate end only by tombstone, like the
-//! fixed core, and only when the perspective's authority wrote the flag.
+//! flagged `monotonic` makes its predicate monotonic, like the fixed table,
+//! and only when the perspective's authority wrote the flag. T6: `true` ends
+//! by its author's tombstone, `"roleGrant"` only by revocation.
 //!
 //! The flag is `<propShape> --ad4m://monotonic--> literal:string:<predicate>`,
 //! so the predicate is read from the flag alone. Removing `sh://path` does
@@ -14,6 +15,8 @@ use super::monotonic_tests::as_input;
 use super::*;
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+use crate::perspectives::model_query::utils::parse_literal_value;
+use crate::perspectives::monotonic::MONOTONIC_ROLE_GRANT_FLAG_PREDICATE;
 use crate::types::DecoratedNeighbourhoodExpression;
 
 const ROLE: &str = "app://role/1";
@@ -790,4 +793,136 @@ async fn t5_update_link_into_a_flag_is_refused() {
     );
     assert!(present(&p, &link));
     assert!(links_under(&p, FLAG).is_empty(), "nothing was written");
+}
+
+// ---------------------------------------------------------------------------
+// How a declared link ends: `true` by its author's tombstone, `"roleGrant"`
+// only by revocation
+// ---------------------------------------------------------------------------
+
+/// `class_links`, with the `monotonic` option given as a JSON value.
+fn class_links_with(
+    signer: &TestSigner,
+    class: &str,
+    predicate: &str,
+    monotonic: serde_json::Value,
+) -> Vec<LinkExpression> {
+    let shacl = serde_json::json!({
+        "target_class": format!("app://{class}"),
+        "properties": [{
+            "path": predicate,
+            "name": "did",
+            "min_count": 0,
+            "monotonic": monotonic,
+        }],
+    })
+    .to_string();
+    parse_shacl_to_links(&shacl, class)
+        .expect("shacl")
+        .into_iter()
+        .map(|l| signed(signer, l))
+        .collect()
+}
+
+/// `signer`'s tombstone naming `link`.
+fn tombstone_by(signer: &TestSigner, link: &LinkExpression) -> LinkExpression {
+    signed(
+        signer,
+        crate::perspectives::monotonic::retraction_for(link).expect("retraction_for"),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_parser_emits_the_role_grant_flag_for_role_grant() {
+    let alice = TestSigner::generate();
+    let links = class_links_with(&alice, "Role", MEMBER, serde_json::json!("roleGrant"));
+    let flag = with_predicate(&links, MONOTONIC_ROLE_GRANT_FLAG_PREDICATE);
+    assert_eq!(
+        parse_literal_value(&flag.data.target),
+        serde_json::Value::String(MEMBER.to_string())
+    );
+    assert!(
+        !links
+            .iter()
+            .any(|l| l.data.predicate.as_deref() == Some(FLAG)),
+        "a role grant emits only the role-grant flag"
+    );
+    assert!(
+        parse_shacl_to_links(
+            &serde_json::json!({
+                "target_class": "app://Role",
+                "properties": [{ "path": MEMBER, "name": "did", "monotonic": "forever" }],
+            })
+            .to_string(),
+            "Role",
+        )
+        .is_err(),
+        "an unknown kind fails the parse instead of declaring something weaker"
+    );
+}
+
+/// A predicate the authority declared `monotonic: true` ends like a flow
+/// link: its author's tombstone removes it, anyone else's does nothing. One
+/// declared `"roleGrant"` is not ended by its author's tombstone either.
+/// (Red on the previous head, where no declared predicate was retractable.)
+#[tokio::test(flavor = "multi_thread")]
+async fn t6_a_declared_link_ends_by_its_authors_tombstone_unless_a_role_grant() {
+    let alice = TestSigner::generate();
+    let bob = TestSigner::generate();
+    let mut p = neighbourhood_of(&alice).await;
+    let mut declarations = class_links_with(&alice, "Role", MEMBER, serde_json::json!(true));
+    declarations.extend(class_links_with(
+        &alice,
+        "Badge",
+        HOLDER,
+        serde_json::json!("roleGrant"),
+    ));
+    sync_in(&mut p, declarations, vec![]).await;
+
+    let member = grant(&bob, ROLE, MEMBER);
+    let holder = grant(&bob, BADGE, HOLDER);
+    sync_in(&mut p, vec![member.clone(), holder.clone()], vec![]).await;
+
+    sync_in(&mut p, vec![tombstone_by(&alice, &member)], vec![]).await;
+    assert!(present(&p, &member), "not the author's tombstone");
+
+    sync_in(
+        &mut p,
+        vec![tombstone_by(&bob, &member), tombstone_by(&bob, &holder)],
+        vec![],
+    )
+    .await;
+    assert!(!present(&p, &member), "the author's tombstone ends it");
+    assert!(
+        present(&p, &holder),
+        "a role grant ends only by revocation, not by a tombstone"
+    );
+}
+
+/// The declaration can reach a replica after the tombstone. It then applies
+/// the stored tombstone, so the replica ends where one that received the
+/// declaration first does.
+#[tokio::test(flavor = "multi_thread")]
+async fn t6_a_declaration_after_the_tombstone_still_ends_the_link() {
+    let alice = TestSigner::generate();
+    let bob = TestSigner::generate();
+    let member = grant(&bob, ROLE, MEMBER);
+    let tombstone = tombstone_by(&bob, &member);
+    let declaration = class_links_with(&alice, "Role", MEMBER, serde_json::json!(true));
+
+    let mut late = neighbourhood_of(&alice).await;
+    sync_in(&mut late, vec![member.clone()], vec![]).await;
+    sync_in(&mut late, vec![tombstone.clone()], vec![]).await;
+    assert!(
+        present(&late, &member),
+        "undeclared: a tombstone ends nothing"
+    );
+    sync_in(&mut late, declaration.clone(), vec![]).await;
+    assert!(!present(&late, &member), "the declaration applies it");
+
+    let mut early = neighbourhood_of(&alice).await;
+    sync_in(&mut early, declaration, vec![]).await;
+    sync_in(&mut early, vec![member.clone()], vec![]).await;
+    sync_in(&mut early, vec![tombstone], vec![]).await;
+    assert!(!present(&early, &member), "control: declaration first");
 }
