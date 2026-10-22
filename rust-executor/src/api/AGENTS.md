@@ -47,9 +47,8 @@ parameter that names a user by email (`runtime.computeLog { userEmail }`, the op
 field that shows an address (`hosting.info`'s `email`, the compute log's `userEmail`) reads it
 back with `AgentService::email_for_did` or a join on `users.did`.
 
-`RequestContext` (`types/domain.rs`) is the caller for one request: `session: Arc<Session>`,
-the per-request `cancel_token`, and `auth_token` (read only by the interpretation pass; Plan 20
-PR 6 removes it). The RPC socket opens one per connection (`RequestContext::open`); REST and the
+`RequestContext` (`types/domain.rs`) is the caller for one request: `session: Arc<Session>`
+and the per-request `cancel_token`. It carries no token: a handler acts as the session. The RPC socket opens one per connection (`RequestContext::open`); REST and the
 OpenAI-compatible API take it as an axum extractor (`auth.rs`), which answers 401 for a token
 that opens no session and 503 while the wallet is locked. `auto_permit_cap_requests` is read
 from the global config where `agent.requestCapability` uses it.
