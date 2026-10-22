@@ -345,6 +345,19 @@ pub async fn try_claim(
 pub const CLAIM_SETTLE_MS: u64 = 8_000;
 pub(crate) const CLAIM_SETTLE_POLL_MS: u64 = 500;
 
+/// The `settle_ms` the auto-processor tick passes to a pass on `perspective`.
+/// A peer's claim can arrive late when the perspective syncs with other
+/// executors, or when this executor runs one loop per managed user. Only an
+/// unshared perspective on a single-user executor skips the wait.
+pub async fn claim_settle_ms(perspective: &PerspectiveInstance) -> u64 {
+    let shared = perspective.persisted.lock().await.shared_url.is_some();
+    if shared || crate::user_management::is_multi_user_enabled() {
+        CLAIM_SETTLE_MS
+    } else {
+        0
+    }
+}
+
 /// Min-DID decision over an already-loaded holder list. An empty list is a
 /// win: the caller just wrote its own claim, and a failed read must not
 /// stall the only peer that can process the batch.
@@ -800,5 +813,36 @@ mod tests {
             vec![active.to_string()],
             "only the renewing peer should remain active; got {holders:?}"
         );
+    }
+
+    /// The tick's settle choice: an unshared perspective skips the wait only
+    /// on a single-user executor. With multi-user mode on, each managed user
+    /// runs its own loop on the same perspective, so a smaller DID's claim can
+    /// still arrive after ours.
+    #[tokio::test]
+    async fn settle_waits_when_shared_or_multi_user() {
+        let (p, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
+        struct MultiUserFlag;
+        impl Drop for MultiUserFlag {
+            fn drop(&mut self) {
+                let _ =
+                    crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(false));
+            }
+        }
+        let _reset = MultiUserFlag;
+        assert_eq!(claim_settle_ms(&p).await, 0, "unshared, single user");
+
+        crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true))
+            .expect("enable multi-user");
+        assert_eq!(
+            claim_settle_ms(&p).await,
+            CLAIM_SETTLE_MS,
+            "unshared, multi-user"
+        );
+
+        crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(false))
+            .expect("disable multi-user");
+        p.persisted.lock().await.shared_url = Some("neighbourhood://test".to_string());
+        assert_eq!(claim_settle_ms(&p).await, CLAIM_SETTLE_MS, "shared");
     }
 }
