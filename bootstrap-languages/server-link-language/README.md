@@ -126,7 +126,9 @@ self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 ### WebSocket — `/rooms/:roomId/ws`
 
 Server → client: `diff`, `telepresence-signal`, `telepresence-broadcast`,
-`online-agents`, `peer-joined`, `peer-left`.
+`online-agents`, `peer-joined`, `peer-left`, `status-changed`,
+`keys-granted {versions}` (to the grantee's sockets after a stored grant: the
+language refreshes its key ring and catches up), `auth-error`.
 Client → server: `telepresence-signal`, `telepresence-broadcast`,
 `set-online-status`.
 

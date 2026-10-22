@@ -39,7 +39,7 @@ import {
     DenoTransport,
     DenoWebSocketFactory,
 } from "./src/adapters-deno.js";
-import { commitNeedsKeyRetry, refreshSkippedByCooldown, type KeyRingStatus } from "./src/key-ring-policy.js";
+import { adminRotates, commitNeedsKeyRetry, refreshSkippedByCooldown, type KeyRingStatus } from "./src/key-ring-policy.js";
 
 // ---------------------------------------------------------------------------
 // Template Variables
@@ -78,6 +78,8 @@ let keyRing: KeyRing | null = null;
 let keyRingStatus: KeyRingStatus = "none";
 /** True when this agent has been identified as the room admin. */
 let isRoomAdmin = false;
+/** Set once this run has minted a room key version (see `adminRotates`). */
+let rotatedThisRun = false;
 /** Cooldown for key ring retries — shared across WS and HTTP paths (ms since epoch). */
 let lastKeyRingRetry = 0;
 const KEY_RING_RETRY_COOLDOWN_MS = 10_000;
@@ -104,12 +106,6 @@ function setupKeyRingCoalesced(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Startup helpers
 // ---------------------------------------------------------------------------
-
-/** No room key this agent can open: none exists yet ("none"), or the room has
- *  keys but none sealed to this agent opens ("pending"). */
-function adminHoldsNoKey(): boolean {
-    return keyRingStatus === "none" || keyRingStatus === "pending";
-}
 
 async function setupKeyRing(): Promise<void> {
     const gen = lifecycleGen;
@@ -224,6 +220,7 @@ async function performRotation(): Promise<void> {
             console.log("[server-link-language] no ACL member to seal a room key to — skipping rotation");
             return;
         }
+        rotatedThisRun = true;
         console.log(
             `[server-link-language] client-side key rotation complete: version ${result.version}, ` +
             `${result.recipients.length} recipient(s)`,
@@ -341,10 +338,11 @@ const language = defineLanguage({
                     telepresenceModule.handleStatusChanged(msg);
                 },
                 onKeysGranted() {
-                    // A grant is news, not a guess: refresh past the retry
-                    // cooldown and read what the new keys open.
+                    // A grant is news, not a guess: refresh the key ring past
+                    // the retry cooldown (re-bootstrapping if it grew), then
+                    // catch up on what arrived since.
                     lastKeyRingRetry = 0;
-                    void syncModule.catchUp().catch((err) => {
+                    void refreshKeyRingIfNeeded().then(() => syncModule.catchUp()).catch((err) => {
                         console.error("[server-link-language] catch-up after key grant failed:", err);
                     });
                 },
@@ -394,7 +392,7 @@ const language = defineLanguage({
             // E2E is mandatory: an admin that holds no room key it can open
             // (none exists yet, or none opens) rotates, sealing a new version
             // to every ACL member. There is no plaintext mode.
-            if (isRoomAdmin && adminHoldsNoKey()) {
+            if (isRoomAdmin && adminRotates(keyRingStatus, rotatedThisRun)) {
                 console.log(
                     `[server-link-language] admin holds no room key (${keyRingStatus}) — generating a new one`,
                 );
@@ -465,6 +463,7 @@ const language = defineLanguage({
         keyRing = null;
         keyRingStatus = "none";
         isRoomAdmin = false;
+        rotatedThisRun = false;
         lastKeyRingRetry = 0;
         keyRingInflight = null;
         auth.resetAuth();
@@ -514,7 +513,7 @@ const language = defineLanguage({
             // commits. Non-admin "none" means the room genuinely has no E2E
             // yet — plaintext is correct for the first commit that triggers
             // the admin flow.
-            if (isRoomAdmin && adminHoldsNoKey()) {
+            if (isRoomAdmin && adminRotates(keyRingStatus, rotatedThisRun)) {
                 console.log(
                     `[server-link-language] admin holds no room key (${keyRingStatus}) — rotating before commit`,
                 );

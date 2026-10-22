@@ -280,7 +280,7 @@ GET  /api/logs                  -> text/event-stream; the last 1000 lines, then 
 
 ### WebSocket messages
 
-Server -> client: `diff`, `telepresence-signal`, `telepresence-broadcast`, `online-agents`, `peer-joined`, `peer-left`, `status-changed`, `auth-error`.
+Server -> client: `diff`, `telepresence-signal`, `telepresence-broadcast`, `online-agents`, `peer-joined`, `peer-left`, `status-changed`, `keys-granted {versions}` (to the grantee's sockets after a stored grant), `auth-error`.
 Client -> server: `auth { token }` (first message only), `telepresence-signal { toDid, payload }`, `telepresence-broadcast { payload }`, `set-online-status { status }`.
 
 ### Rate limits

@@ -5,7 +5,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { initAdapters, getConfig, resetAdapters } from "../src/adapters.js";
-import { commitNeedsKeyRetry, refreshSkippedByCooldown } from "../src/key-ring-policy.js";
+import { adminRotates, commitNeedsKeyRetry, refreshSkippedByCooldown } from "../src/key-ring-policy.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const bundlePath = resolve(__dirname, "..", "build", "bundle.js");
@@ -100,6 +100,23 @@ describe("refreshSkippedByCooldown", () => {
             assert.strictEqual(refreshSkippedByCooldown(status, 500, 10_000), true, status);
             assert.strictEqual(refreshSkippedByCooldown(status, 10_000, 10_000), false, status);
         }
+    });
+});
+
+describe("adminRotates", () => {
+    it("rotates when the admin holds no room key it can open", () => {
+        assert.strictEqual(adminRotates("none", false), true);
+        assert.strictEqual(adminRotates("pending", false), true);
+    });
+
+    it("rotates at most once a run: if its own new box did not open, another version would not either", () => {
+        assert.strictEqual(adminRotates("pending", true), false);
+        assert.strictEqual(adminRotates("none", true), false);
+    });
+
+    it("does not rotate while it holds a key, or when the key ring errored", () => {
+        assert.strictEqual(adminRotates("ready", false), false);
+        assert.strictEqual(adminRotates("error", false), false);
     });
 });
 
