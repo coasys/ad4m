@@ -1,0 +1,41 @@
+# Monotonic Links
+
+Most links in a Perspective can be removed: by you, or, in a Neighbourhood, by a removal that arrives from a peer. Some links must outlast that. A vote must not disappear because another member removed it, and a revocation must not disappear because someone wants a grant back. For these the executor keeps a fixed list of **monotonic predicates**: a Shared link under one of them is **never removed by a diff**. It ends only through a new signed link, or not at all.
+
+[Flows](./flows#flow-links-end-only-by-tombstone) are the first feature that relies on this. The mechanism itself knows nothing about flows: it is one table of predicates in the executor, and a feature makes its links monotonic by adding an entry.
+
+## The rules
+
+For a Shared link under a monotonic predicate:
+
+- **Removals from peers are dropped.** A removal of such a link arriving through the link language is ignored, with a warning in the executor log.
+- **Local removals are refused.** `removeLink`, `removeLinks`, `updateLink` (its old link is a removal), `linkMutations` and a batch commit fail with `<predicate> is monotonic; …` before anything is written or sent. The rest of the message says how such a link ends instead. This includes your own links, and deleting a model instance that carries such links.
+- **Local links are not affected.** A `Local` link under these predicates is removed as before, and its removal is never sent to peers. The executor goes by the status the link is stored with, not the one a call names: `linkMutations` with its default `shared` status still removes a Local link, a `local`-labelled removal of a Shared one is still refused, and a Shared-labelled removal of a link the executor does not hold is refused.
+
+Readers see an ended link gone, exactly as after a removal: `model_query`, raw SPARQL and the flow derivation all read the links present now.
+
+## How a link ends
+
+Each entry in the table says how a link under its predicate may end:
+
+| Ending | Meaning | Used for |
+|---|---|---|
+| **Tombstone** | Its author writes a signed tombstone (below). | Flow links: everything under `ad4m://flow/`, and votes (`ad4m://acceptedBy`) |
+| **Revocation** | Only a dedicated revocation link ends it, and the feature that reads the predicate interprets that link. The original link stays, so its history can still be read, the way a flow role is revoked by `ad4m://flow/role_grant_revoked` rather than by deleting the grant. | no built-in predicate yet |
+| **Never** | It cannot be ended. | Tombstones (`ad4m://retracted`), role revocations (`ad4m://flow/role_grant_revoked`) and the `ad4m://monotonic` declaration flag |
+
+Ending a tombstone or a revocation would undo it, and a declaration stays once made, which is why those are **Never**.
+
+## Tombstones: `ad4m://retracted`
+
+A link whose entry is **Tombstone** ends through a signed tombstone from its **author**:
+
+```
+<link.source> --ad4m://retracted--> literal:string:<link.proof.signature>
+```
+
+Every replica applies it the same way: the link that tombstone names (same source, same author, that signature) is removed from its store, and a copy of the link that arrives later is not stored, so the order the two sync in does not matter. A tombstone signed by anyone else, whose signature does not verify, or that is itself `Local`, does nothing. A tombstone never ends a link whose entry is **Revocation** or **Never**. The removal is each replica's own store effect; it is never sent to peers as a removal.
+
+## Mixed versions
+
+An executor from before this rule still applies removals and stores tombstones as ordinary links. Until every member upgrades, the two versions can disagree about these links, in a direction that depends on the operation: after an ordinary removal the older executor drops the link and the newer one keeps it; after a valid tombstone the newer executor ends the link and refuses later copies, while the older one keeps the link and stores the tombstone as an ordinary link.
