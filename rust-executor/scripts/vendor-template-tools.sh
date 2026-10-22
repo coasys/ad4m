@@ -16,8 +16,8 @@ we="$(cd "$we" && pwd)"
 here="$(cd "$(dirname "$0")/.." && pwd)"
 out="$here/src/tool_bundles"
 
-if ! git -C "$we" diff --quiet HEAD -- packages; then
-  echo "The WE checkout has uncommitted changes under packages/; vendor from a clean commit." >&2
+if [ -n "$(git -C "$we" status --porcelain -- packages)" ]; then
+  echo "The WE checkout has changes or untracked files under packages/; vendor from a clean commit." >&2
   exit 1
 fi
 
