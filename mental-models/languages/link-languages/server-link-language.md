@@ -2,16 +2,16 @@
 
 The **server link language** (`@coasys/server-link-language`) syncs a neighbourhood's links through one [link server](link-server.md), with end-to-end (E2E) encryption under a **room key**. Each neighbourhood is a **link-server room**, named by the template variable `UID`. The server URL is the template variable `SERVER_URL`. The language uses HTTP for auth, commit and catch-up, and a WebSocket for live diffs and telepresence.
 
-**Why:** A small server that a community runs itself gives fast, predictable sync and telepresence. The server stores only ciphertext, so the link-server operator cannot read the links. The older server-backed link language, `centralized-p-diff-sync`, talks to one fixed host and does not encrypt.
+**Why:** A small server that a community runs itself gives fast, predictable sync and telepresence. Once the room admin has created the first room key, the server stores only ciphertext and refuses plaintext links, so the link-server operator cannot read them. The older server-backed link language, `centralized-p-diff-sync`, talks to one fixed host and does not encrypt.
 
 **Parent:** [Link languages](README.md)
 
 <details><summary>How it works</summary>
 
-1. `init()`: if `SERVER_URL` or `UID` is still a placeholder, the language stays inert. Otherwise it authenticates: `POST /rooms/:id/auth` for a challenge, signs it with `agentSignStringHex`, sends the signature and its X25519 public key, and gets a JWT.
+1. `init()`: if `UID` is still the placeholder, the language stays inert (`SERVER_URL` defaults to `https://link.ad4m.dev`). Otherwise it authenticates: `POST /rooms/:id/auth` for a challenge, signs it with `agentSignStringHex`, sends the signature and its X25519 public key, and gets a JWT.
    A link server admits only DIDs on the link-server room's ACL, unless it runs with `--auto-admit`. The executor and the SDK have no call to add a DID to an ACL: the room's admin uses the link-server operator's page or the HTTP ACL route ([Link server](link-server.md)). The integration tests run the server with auto-admit.
-2. E2E setup (`setupKeyRing`): the link-server room's admin creates the first AES-256-GCM room key and seals it to each member's X25519 key. Members fetch their sealed copies with `/keys`. Key rotation is an explicit admin action (`rotateKeys` in `src/api.ts`). A member refreshes its key ring when sync finds a key version it does not hold.
-3. `perspectiveCommit`: store the diff locally, encrypt each link at the wire boundary (`toWireLink`), `POST /commit` with up to 3 attempts per segment, then emit the diff.
+2. E2E setup (`setupKeyRing`): the link-server room's admin creates the first AES-256-GCM room key and seals it to each member's X25519 key. Members fetch their sealed copies with `/keys`. The admin's language rotates keys by itself (`performRotation`) while the room has no E2E yet: at `init()` and before a commit (`rotateKeys` in `src/api.ts` is the HTTP call). A member refreshes its key ring when sync finds a key version it does not hold.
+3. `perspectiveCommit`: encrypt each link at the wire boundary (`toWireLink`) and `POST /commit` once (`commit` in `src/sync.ts`). The local store changes only after the server accepts the diff. Nothing is emitted back. A failed commit throws, and the executor keeps the diff in its queue.
 4. `perspectiveSyncSync`: `GET /sync?since=<seq>`; the WebSocket also pushes `diff` messages. Both go through `applyInboundWireDiff`.
 5. Telepresence: online roster, signals and broadcasts over the WebSocket.
 

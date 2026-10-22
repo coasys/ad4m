@@ -154,7 +154,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Keystore** (`AgentStore.keystore`, `KeystoreEnvelope`): The encrypted form of all wallet keys inside `agent.json`. [Wallet and keys](agents/identity/wallet-and-keys.md)
 
-**Known link languages** (`RuntimeService::get_know_link_languages`): The link language addresses from the bootstrap seed that the executor loads at start. [Bootstrap languages](languages/runtime/bootstrap-languages.md)
+**Known link languages** (`RuntimeService::get_know_link_languages`): The link language addresses from the bootstrap seed plus the database table `known_link_languages`; the executor loads them after the Holochain conductor starts. [Bootstrap languages](languages/runtime/bootstrap-languages.md)
 
 **Language** (`rust-executor/src/languages/`): A JavaScript bundle, loaded into its own isolate, that does some of these, one per language capability it exports: create and fetch expressions; commit, sync, render and query links; list peers; carry telepresence. [Languages](languages/README.md)
 
@@ -272,7 +272,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Request context** (`RequestContext` in `types/domain.rs`): The value that each RPC handler receives: one `Arc<Session>`, a cancel token and the RPC connection id. [Sessions](agents/access/sessions.md)
 
-**Revision** (`Language::current_revision`): A link language's name for its current state: in p-diff-sync a diff-entry hash, in the link server a hash of the active link hashes. [Link languages](languages/link-languages/README.md)
+**Revision** (`Language::current_revision`): A link language's name for its current state: in p-diff-sync a diff-entry hash, in the link server the XOR of the active link hashes. [Link languages](languages/link-languages/README.md)
 
 **Role gate** (`ConsensusRule.from_role`, `flow_instance/roles/`): A model query that a voter must match, as of the vote's time, for the vote to count. [Flow consensus](perspectives/social-dna/flows/consensus.md)
 

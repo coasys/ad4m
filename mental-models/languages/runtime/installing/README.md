@@ -4,7 +4,7 @@
 
 1. Get the bundle, from disk or from the language language by address.
 2. Check that the bundle hashes to the address.
-3. Save it as `<data>/languages/<address>/bundle.js`.
+3. Save it as `<data>/ad4m/languages/<address>/bundle.js`.
 4. Load it into an isolate.
 
 **Publishing** stores a bundle and its language meta (`LanguageMeta`) in the language language, so other executors can install it.

@@ -23,7 +23,7 @@ SDK / MCP / perspective ──► LanguageController ──► one language isol
                      language language (fetches other bundles by address)
 ```
 
-1. When the main agent is generated or unlocked, the executor loads the **language language** from the **bootstrap seed**, then the agent, neighbourhood and perspective languages, then the known link languages ([Bootstrap languages](runtime/bootstrap-languages.md)).
+1. When the main agent is generated or unlocked, the executor loads the **language language** from the **bootstrap seed**, then the agent, neighbourhood and perspective languages, then, with Holochain on, the known link languages ([Bootstrap languages](runtime/bootstrap-languages.md)).
 2. A caller names a language by its address. The [language controller](runtime/controller.md) sends a JavaScript snippet to that language's isolate and waits for the result.
 3. A link language pushes remote changes back with `emitPerspectiveDiff` (or a callback setter). The executor routes the diff to the perspective that uses this link language ([Link languages](link-languages/README.md)).
 4. Every agent on the executor, main and managed, shares these isolates: the executor runs one isolate per language address, created with the main agent's DID. A call carries an `AgentContext` that names the agent it runs as ([Language isolates](runtime/isolates.md)).
