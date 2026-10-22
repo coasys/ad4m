@@ -130,6 +130,16 @@ mod tests {
         );
     }
 
+    // The length check covers every byte of the length: the value followed by 65536 NUL
+    // bytes differed from it only above the low 16 bits, which went unchecked.
+    #[test]
+    fn compare_refuses_the_value_with_padding_of_any_length() {
+        let secret = Secret::new("s3cret");
+        for pad in [1usize, 256, 65536, 65536 * 2] {
+            assert!(!secret.expose_for_compare(&format!("s3cret{}", "\0".repeat(pad))));
+        }
+    }
+
     #[test]
     fn compare_matches_only_the_exact_value() {
         let secret = Secret::new("hunter2");
