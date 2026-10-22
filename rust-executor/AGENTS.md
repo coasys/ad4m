@@ -49,7 +49,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **Services are global singletons** (`lazy_static`), e.g. `Ad4mDb::with_global_instance`,
   `AgentService::with_global_instance`, `LanguageController::global_instance()`,
   `AIService::global_instance().await`, `get_global_pubsub()`, `perspectives::get_perspective(uuid)`.
-  Do not add new ones; spec item 11 introduces `AppContext`.
+  Do not add new ones; spec item 11 introduces `AppContext`. The one exception since is
+  `ToolBundleRegistry::global()` (`tool_bundles/registry.rs`): the RPC handlers that install
+  bundles take nothing but the request, so until `AppContext` there is nowhere else for it. Move
+  it into `AppContext` with the rest; do not copy the pattern.
 - **Perspective links live in the per-perspective `SparqlStore`** (oxigraph), not SQLite.
   `PerspectiveInstance` is `Clone` and cheap: all state is behind `Arc`. `get_perspective()` returns a clone.
 - **Prolog is off.** `prolog_service::PROLOG_MODE` is `Disabled`; Prolog query paths return empty.

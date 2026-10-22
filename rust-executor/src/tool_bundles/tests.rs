@@ -854,10 +854,7 @@ async fn the_registry_installs_a_bundle_and_reads_what_it_exports() {
         .expect("found by name");
     assert_eq!(found.toolset, "things");
     assert_eq!(
-        found
-            .sandbox
-            .call(&["toolsets", "things", "call"], vec![json!("thing_read")])
-            .await,
+        found.call(json!({})).await,
         Ok(json!({ "text": "thing_read v1" }))
     );
     assert_eq!(
@@ -887,6 +884,127 @@ async fn a_new_release_of_a_toolset_replaces_the_old_one() {
     assert_eq!(
         registry.read_doc("things").await,
         Ok(Some("# things v2".to_string()))
+    );
+}
+
+/// A bundle exporting one toolset per name, each with one tool `<name>_tool`.
+fn toolsets_bundle(names: &[&str], version: u32) -> String {
+    let toolsets: Vec<String> = names
+        .iter()
+        .map(|name| {
+            format!(
+                r#"{name}: {{ appliesTo: ["Thing"], tools: [{{ name: "{name}_tool", description: "d", parameters: {{}}, writes: false }}], call: async () => ({{ text: "{name} v{version}" }}), docs: {{ list: async () => [], read: async () => "" }} }}"#
+            )
+        })
+        .collect();
+    format!("export const toolsets = {{ {} }};", toolsets.join(", "))
+}
+
+#[tokio::test]
+async fn a_release_that_would_drop_another_toolset_of_the_bundle_it_replaces_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = registry(dir.path());
+    let both = registry
+        .install(&toolsets_bundle(&["alpha", "beta"], 1))
+        .await
+        .unwrap();
+
+    let only_alpha = registry.install(&toolsets_bundle(&["alpha"], 2)).await;
+    assert!(
+        matches!(&only_alpha, Err(RegistryError::Conflict(m)) if m.contains("beta")),
+        "{only_alpha:?}"
+    );
+    let names: Vec<String> = registry
+        .toolsets()
+        .await
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+    assert!(registry.find_tool("beta_tool").await.is_some());
+    assert_eq!(
+        ToolBundleStore::new(dir.path()).list().unwrap(),
+        vec![both.address.clone()]
+    );
+
+    // A release exporting every toolset of the old one, and more, replaces it.
+    let more = registry
+        .install(&toolsets_bundle(&["alpha", "beta", "gamma"], 2))
+        .await
+        .unwrap();
+    assert_eq!(registry.list().await, vec![more]);
+}
+
+#[tokio::test]
+async fn an_install_that_cannot_be_stored_leaves_every_installed_bundle_in_place() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join("store");
+    let registry = registry(&store_dir);
+    let first = registry
+        .install(&toolsets_bundle(&["alpha"], 1))
+        .await
+        .unwrap();
+
+    std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let unrelated = registry.install(&toolsets_bundle(&["beta"], 1)).await;
+    let replacing = registry.install(&toolsets_bundle(&["alpha"], 2)).await;
+    std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        matches!(unrelated, Err(RegistryError::Store(_))),
+        "{unrelated:?}"
+    );
+    assert!(
+        matches!(replacing, Err(RegistryError::Store(_))),
+        "{replacing:?}"
+    );
+    assert_eq!(registry.list().await, vec![first]);
+    assert!(registry.find_tool("alpha_tool").await.is_some());
+}
+
+/// Keeps the last record it was given, and shows it to the next call and in its documentation.
+const KEEPER: &str = r#"
+let last = null;
+export const toolsets = {
+  keeper: {
+    appliesTo: ["Thing"],
+    tools: [{ name: "keeper_keep", description: "d", parameters: {}, writes: false }],
+    call: async (tool, input) => {
+      const before = last;
+      last = input.record.properties.secret;
+      return { text: JSON.stringify(before) };
+    },
+    docs: {
+      list: async () => [{ path: "keeper", title: "K", summary: "S" }],
+      read: async () => JSON.stringify(last),
+    },
+  },
+};
+"#;
+
+#[tokio::test]
+async fn a_record_handed_to_a_tool_is_seen_by_no_other_call_and_no_documentation() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = registry(dir.path());
+    registry.install(KEEPER).await.unwrap();
+    let record = |secret: &str| json!({ "record": { "properties": { "secret": secret } } });
+
+    let tool = registry.find_tool("keeper_keep").await.unwrap();
+    assert_eq!(
+        tool.call(record("alice's")).await,
+        Ok(json!({ "text": "null" }))
+    );
+    let tool = registry.find_tool("keeper_keep").await.unwrap();
+    assert_eq!(
+        tool.call(record("bob's")).await,
+        Ok(json!({ "text": "null" })),
+        "the second call saw the first call's record"
+    );
+    assert_eq!(
+        registry.read_doc("keeper").await,
+        Ok(Some("null".to_string())),
+        "the documentation saw a record"
     );
 }
 
