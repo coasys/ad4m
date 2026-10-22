@@ -560,7 +560,10 @@ mod tests {
         let ctx_poll = ctx.clone();
         let items_poll = items.clone();
         let settled = tokio::spawn(async move {
-            settle_claim(&polling, "proc", &items_poll, &ctx_poll, 250, 40, || 1_000).await
+            settle_claim(&polling, "proc", &items_poll, &ctx_poll, 5_000, 40, || {
+                1_000
+            })
+            .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         write_claim(&mut p, "proc", &key, "zzz:larger-peer", 60_000, &ctx)
