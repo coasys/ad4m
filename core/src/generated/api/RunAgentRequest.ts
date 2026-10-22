@@ -11,7 +11,7 @@ messages: Array<AgentMessage>,
  */
 context?: Record<string, unknown>, 
 /**
- * Tools that write which the model may call — `instance_update`, `call_record_tool`; only
+ * Tools that write which the model may call — `instance_update`, `template_update`; only
  * tools that write inside the perspective (`agent_session::SESSION_WRITES`). None means a
  * session that only reads.
  */

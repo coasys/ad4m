@@ -287,8 +287,8 @@ async fn a_write_it_was_given_lands_in_its_own_perspective_only() {
     assert_eq!(title(&f, &f.uuid, &f.note).await, "renamed");
 }
 
-/// Reads that name no perspective at all: the docs, the installed tools, who the caller is.
-const NAMES_NO_PERSPECTIVE: &[&str] = &["get_documentation", "list_record_tools", "get_my_did"];
+/// Reads that name no perspective at all: the docs, and who the caller is.
+const NAMES_NO_PERSPECTIVE: &[&str] = &["get_documentation", "get_my_did"];
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_tool_a_session_can_offer_stays_in_its_perspective() {
