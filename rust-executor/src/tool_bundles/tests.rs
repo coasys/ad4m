@@ -1,11 +1,11 @@
-//! The sandbox and the store, against fixture bundles.
+//! The sandbox, against fixture bundles.
 //!
 //! What is pinned here is what a bundle is allowed: the language, the host globals listed in
 //! `bootstrap.js`, and nothing else — so a change that leaks a global, an op or a way to load code
 //! fails here. And that the limits hold: a call that runs too long or allocates too much is
 //! stopped, and the next call gets a fresh isolate.
 
-use super::{BundleSandbox, SandboxError, SandboxLimits, ToolBundleStore};
+use super::{BundleSandbox, SandboxError, SandboxLimits};
 use crate::test_utils::init_v8_platform;
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -653,82 +653,6 @@ async fn calls_from_many_tasks_are_answered_in_turn() {
     });
     for (n, call) in calls.enumerate() {
         assert_eq!(call.await.unwrap(), Ok(json!(n * 2)));
-    }
-}
-
-#[test]
-fn the_store_keeps_a_bundle_by_its_content_address() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = ToolBundleStore::new(dir.path().join("tool_bundles"));
-    assert_eq!(store.list().unwrap(), Vec::<String>::new());
-
-    let address = store.put("export const a = 1;").unwrap();
-    assert!(address.starts_with("Qm"));
-    assert_eq!(
-        address,
-        crate::js_core::utils::content_address("export const a = 1;")
-    );
-    assert_eq!(store.put("export const a = 1;").unwrap(), address);
-    assert_eq!(
-        store.get(&address).unwrap().as_deref(),
-        Some("export const a = 1;")
-    );
-
-    let other = store.put("export const b = 2;").unwrap();
-    let mut both = vec![address.clone(), other.clone()];
-    both.sort();
-    assert_eq!(store.list().unwrap(), both);
-
-    assert!(store.remove(&address).unwrap());
-    assert!(!store.remove(&address).unwrap());
-    assert_eq!(store.get(&address).unwrap(), None);
-    assert_eq!(store.list().unwrap(), vec![other]);
-}
-
-#[test]
-fn putting_a_bundle_again_replaces_a_changed_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = ToolBundleStore::new(dir.path());
-    let address = store.put("export const a = 1;").unwrap();
-    std::fs::write(
-        dir.path().join(format!("{address}.js")),
-        "export const a = 2;",
-    )
-    .unwrap();
-    assert!(store.get(&address).is_err());
-
-    assert_eq!(store.put("export const a = 1;").unwrap(), address);
-    assert_eq!(
-        store.get(&address).unwrap().as_deref(),
-        Some("export const a = 1;")
-    );
-}
-
-#[test]
-fn the_store_refuses_a_changed_file_and_anything_that_is_not_an_address() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = ToolBundleStore::new(dir.path());
-    let address = store.put("export const a = 1;").unwrap();
-    std::fs::write(
-        dir.path().join(format!("{address}.js")),
-        "export const a = 2;",
-    )
-    .unwrap();
-    assert_eq!(
-        store.get(&address).unwrap_err().kind(),
-        std::io::ErrorKind::InvalidData
-    );
-
-    for bad in ["../secret", "Qm../x", "", "Qm", "notAnAddress", "Qm/abs"] {
-        assert_eq!(
-            store.get(bad).unwrap_err().kind(),
-            std::io::ErrorKind::InvalidInput,
-            "{bad}"
-        );
-        assert_eq!(
-            store.remove(bad).unwrap_err().kind(),
-            std::io::ErrorKind::InvalidInput
-        );
     }
 }
 

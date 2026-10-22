@@ -1,8 +1,7 @@
 # tool_bundles/ — agent guide
 
-JavaScript an app ships so agents can use its tools, run in an isolate that can compute and
-nothing else. Not Languages: no network, storage, agent or holochain access, and never loaded
-at boot.
+JavaScript the executor runs for its agents' tools, in an isolate that can compute and nothing
+else. Not Languages: no network, storage, agent or holochain access.
 
 ## Files
 
@@ -10,8 +9,7 @@ at boot.
 |---|---|
 | `sandbox.rs` | `BundleSandbox`: one bare `JsRuntime` per bundle on its own thread; `call(path, args)` / `read(path)`, JSON in and out; time limit on the load and on each call, memory cap on the V8 heap and (through the isolate's ArrayBuffer allocator) on buffers |
 | `bootstrap.js` | Runs before the bundle: the only globals it gets beyond the language (`structuredClone`, `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `crypto.getRandomValues`, `console`), removes `Deno` and `WebAssembly`, makes `ArrayBuffer`/`SharedArrayBuffer` fixed-length only, evaluates to the invoker |
-| `store.rs` | `ToolBundleStore`: `<data>/tool_bundles/<address>.js`, addressed by `js_core::utils::content_address` |
-| `tests.rs` | Fixture bundles: calls, isolation, limits, store |
+| `tests.rs` | Fixture bundles: calls, isolation, limits |
 
 ## Invariants
 
@@ -36,9 +34,7 @@ at boot.
   have replaced those. This matters most wherever it holds an uncounted Rust-backed buffer.
 - A bundle's `console` never logs above debug, and a line is cut to 2,000 characters.
 - Calls are typed: an export path and JSON arguments. Never build JS source with `format!`.
-- The store refuses any address that is not one, so a caller's string never names a path.
 
 ## Do not
 
 - Do not give bundles state a caller relies on between calls: an isolate may be replaced.
-- Do not store a bundle under the languages directory: everything there is booted as a Language.
