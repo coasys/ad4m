@@ -6680,6 +6680,7 @@ impl PerspectiveInstance {
                 now_ms,
                 context,
                 escalate,
+                crate::perspectives::auto_processor::claim::CLAIM_SETTLE_MS,
             )
             .await
             {
