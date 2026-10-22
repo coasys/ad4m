@@ -1028,8 +1028,16 @@ pub async fn run_one_pass(
     // Both paths return `InterpretationOutcome`; the harness one carries
     // `debug: None` (multi-turn loop — no single prompt/response to
     // snapshot; per-tool-call events cover it instead).
-    let (bases, debug) = match cfg.max_tool_calls {
-        Some(n) if n > 0 => {
+    // Unit tests stand in for the LLM here; production always runs the engine.
+    #[cfg(test)]
+    let stubbed = abandon_on_err!(
+        test_hooks::interpret(perspective, &shapes, &base_prefix, &cursor, context).await
+    );
+    #[cfg(not(test))]
+    let stubbed: Option<Vec<String>> = None;
+    let (bases, debug) = match (stubbed, cfg.max_tool_calls) {
+        (Some(bases), _) => (bases, None),
+        (None, Some(n)) if n > 0 => {
             let outcome = abandon_on_err!(
                 run_interpretation_with_harness_and_model(
                     perspective,
@@ -1067,7 +1075,7 @@ pub async fn run_one_pass(
             );
             (outcome.bases, outcome.debug)
         }
-        _ => {
+        (None, _) => {
             let outcome = abandon_on_err!(
                 run_interpretation_with_strategy_and_model(
                     perspective,
@@ -1134,42 +1142,6 @@ pub async fn run_one_pass(
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
         return Ok(PassOutcome::BackedOff { holder });
     }
-    // A peer claim that synced during the pass. The bases and the cursor are
-    // already committed. Link the fresh bases, then refuse `Processed` so the
-    // other executor's retirement is not counted twice.
-    let now_confirm = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    if let ClaimOutcome::BackedOff { holder } = confirm_claim(
-        perspective,
-        &cfg.processor_id,
-        &item_ids,
-        now_confirm,
-        context,
-    )
-    .await?
-    {
-        log::warn!(
-            "❌ ⚙️ auto-processor lost the claim during the pass — holder `{holder}` \
-             processor={} items={} perspective={}: linking fresh bases, not emitting Processed",
-            cfg.processor_id,
-            item_ids.len(),
-            uuid
-        );
-        link_fresh_bases(
-            perspective,
-            cfg.mint_scope.as_ref(),
-            &bases,
-            &pre_existing_uris,
-            context,
-            &cfg.processor_id,
-        )
-        .await?;
-        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
-        return Ok(PassOutcome::BackedOff { holder });
-    }
-
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
     // every **freshly created** base as a child under the target node via the
     // configured predicate — turning the SoA-tree "children live under this
@@ -1181,19 +1153,49 @@ pub async fn run_one_pass(
     // orphaned but the next pass will upsert by identity + re-attempt the
     // link write (idempotent). The `Processed` signal fires only after the
     // mint-scope write succeeds, so observers never see a false "done" state.
-    if let Some(mint_scope) = &cfg.mint_scope {
-        let created = partition_created(&bases, &pre_existing_uris);
-        abandon_on_err!(
-            write_mint_scope_links(
-                perspective,
-                mint_scope,
-                &created,
-                context,
-                &cfg.processor_id,
-            )
-            .await
+    //
+    // The bases and the cursor are already committed, so the links are
+    // written before the claim re-read below, which can fail or back off.
+    abandon_on_err!(
+        link_fresh_bases(
+            perspective,
+            cfg.mint_scope.as_ref(),
+            &bases,
+            &pre_existing_uris,
+            context,
+            &cfg.processor_id,
+        )
+        .await
+    );
+
+    // A peer claim that synced during the pass. Refuse `Processed` so the
+    // other executor's retirement is not counted twice.
+    let now_confirm = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    #[cfg(test)]
+    test_hooks::confirm_error()?;
+    if let ClaimOutcome::BackedOff { holder } = confirm_claim(
+        perspective,
+        &cfg.processor_id,
+        &item_ids,
+        now_confirm,
+        context,
+    )
+    .await?
+    {
+        log::warn!(
+            "❌ ⚙️ auto-processor lost the claim during the pass — holder `{holder}` \
+             processor={} items={} perspective={}: fresh bases linked, not emitting Processed",
+            cfg.processor_id,
+            item_ids.len(),
+            uuid
         );
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        return Ok(PassOutcome::BackedOff { holder });
     }
+
     // Emit the `Processed` event. Carries the final `bases` list — the
     // LLM prompt + response now travel via the mid-pass `LlmRequestSent`
     // and `LlmResponseReceived` events (Nico 2026-08-20), so a subscribing
@@ -1230,7 +1232,8 @@ pub async fn run_one_pass(
     Ok(PassOutcome::Won { bases })
 }
 
-/// Link freshly created bases under `mint_scope` before a late back-off.
+/// Link freshly created bases under `mint_scope` before any exit that can
+/// follow the interpretation.
 /// The interpretation has already committed them and the processed-turn
 /// cursor. Leaving without these links keeps them out of the subtree, and
 /// the cursor then suppresses the turns, so a later pass does not repair it.
@@ -1322,6 +1325,77 @@ pub(crate) async fn write_mint_scope_links(
             })?;
     }
     Ok(())
+}
+
+/// Stand-ins for what a unit test cannot run inside [`run_one_pass`]: the LLM,
+/// and a failing claim re-read after the interpretation.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use super::*;
+    use crate::perspectives::interpretation::{
+        apply_interpretation_ops, ensure_interpretation_overlay_classes, existing_instance_context,
+        mint_interpretation_run, plan_interpretation_ops_with_context, InterpretationOp,
+        InterpretationRunMeta, ProposedInstance,
+    };
+    use crate::perspectives::model_query::types::ModelShape;
+
+    #[derive(Clone, Default)]
+    pub(crate) struct PassHooks {
+        /// Written in place of the LLM's answer, with the pass cursor.
+        pub interpret: Option<Vec<ProposedInstance>>,
+        /// Fail the claim re-read that follows the interpretation.
+        pub fail_confirm: bool,
+    }
+
+    tokio::task_local! {
+        pub(crate) static HOOKS: PassHooks;
+    }
+
+    fn hooks() -> PassHooks {
+        HOOKS.try_with(|h| h.clone()).unwrap_or_default()
+    }
+
+    /// Plan and write the canned proposals, then mint the run with `cursor`,
+    /// as the interpretation engine does. `None` when no stand-in is set.
+    pub(super) async fn interpret(
+        perspective: &mut PerspectiveInstance,
+        shapes: &[ModelShape],
+        base_prefix: &str,
+        cursor: &InterpretationRunCursor,
+        context: &AgentContext,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        let Some(proposals) = hooks().interpret else {
+            return Ok(None);
+        };
+        let existing = existing_instance_context(perspective, shapes, None).await?;
+        let ops = plan_interpretation_ops_with_context(shapes, &proposals, base_prefix, &existing);
+        apply_interpretation_ops(perspective, &ops, context).await?;
+        ensure_interpretation_overlay_classes(perspective, context).await?;
+        let meta = InterpretationRunMeta {
+            run_id: uuid::Uuid::new_v4().to_string(),
+            model: "stub".into(),
+            prompt_version: "stub".into(),
+            ran_at: chrono::Utc::now().timestamp_millis().to_string(),
+            debug_prompt: None,
+            debug_response: None,
+        };
+        mint_interpretation_run(perspective, &meta, Some(cursor), None, context).await?;
+        Ok(Some(
+            ops.iter()
+                .filter_map(|op| match op {
+                    InterpretationOp::Create { base, .. } => Some(base.clone()),
+                    _ => None,
+                })
+                .collect(),
+        ))
+    }
+
+    pub(super) fn confirm_error() -> anyhow::Result<()> {
+        if hooks().fail_confirm {
+            anyhow::bail!("injected claim re-read failure");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1910,6 +1984,82 @@ mod tests {
                 assert_eq!(missing, vec!["ns://Unregistered".to_string()]);
             }
             other => panic!("expected ShapesMissing, got {other:?}"),
+        }
+    }
+
+    /// The claim re-read after the interpretation fails. The bases and the
+    /// cursor are already committed, so the fresh bases must still be linked
+    /// under mint_scope, and the pass must not report `Processed`.
+    #[tokio::test]
+    async fn run_one_pass_links_fresh_bases_when_the_claim_reread_fails() {
+        use crate::perspectives::auto_processor::cursor::load_processed_source_ids;
+        use crate::perspectives::interpretation_test_support::{proposal, TASK_SDNA};
+
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        let mut cfg = cfg("proc", 100, 32);
+        cfg.interpretation_classes = vec![shapes[0].target_class.clone()];
+        cfg.mint_scope = Some(Scope::Raw {
+            id: "soa://project/42".into(),
+            predicate: "soa://contains".into(),
+        });
+        let items = vec![pt("i1"), pt("i2")];
+        let hooks = test_hooks::PassHooks {
+            interpret: Some(vec![proposal(
+                "Task",
+                None,
+                &[("title", serde_json::json!("Ship the parser"))],
+            )]),
+            fail_confirm: true,
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut rx = super::super::events::subscribe().await;
+
+        let result = test_hooks::HOOKS
+            .scope(
+                hooks,
+                run_one_pass(&mut p, &cfg, &items, now, &ctx, false, 0),
+            )
+            .await;
+        let err = result.expect_err("the injected re-read error must propagate");
+        assert!(
+            format!("{err:#}").contains("injected claim re-read failure"),
+            "unexpected error: {err:#}"
+        );
+
+        let processed = load_processed_source_ids(&p, "proc", now, None)
+            .await
+            .expect("load cursor");
+        assert!(
+            processed.contains("i1") && processed.contains("i2"),
+            "the interpretation committed the cursor before the re-read: {processed:?}"
+        );
+
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some("soa://project/42".into()),
+                predicate: Some("soa://contains".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        let base_prefix = "ad4m://autoprocessor/proc/instance/";
+        assert_eq!(
+            links.len(),
+            1,
+            "the fresh base must be linked under mint_scope: {links:?}"
+        );
+        assert!(
+            links[0].data.target.starts_with(base_prefix),
+            "linked target is the minted base: {}",
+            links[0].data.target
+        );
+
+        while let Ok(json) = rx.try_recv() {
+            let ev: AutoProcessorEvent = serde_json::from_str(&json).expect("event json");
+            assert!(
+                !(ev.perspective_uuid == p.uuid && ev.step == AutoProcessorStep::Processed),
+                "a failed re-read must not emit Processed"
+            );
         }
     }
 

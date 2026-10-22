@@ -402,7 +402,7 @@ pub async fn settle_claim(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{did_for_context, AgentContext};
+    use crate::agent::did_for_context;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
     use crate::types::LinkQuery;
 
@@ -549,10 +549,7 @@ mod tests {
         assert_eq!(won, ClaimOutcome::Won);
 
         let polling = p.clone();
-        let ctx_poll = AgentContext {
-            user_email: ctx.user_email.clone(),
-            is_main_agent: ctx.is_main_agent,
-        };
+        let ctx_poll = ctx.clone();
         let items_poll = items.clone();
         let settled = tokio::spawn(async move {
             settle_claim(&polling, "proc", &items_poll, &ctx_poll, 250, 40, || 1_000).await
