@@ -5,7 +5,7 @@ import path from "node:path";
 import * as ed from "@noble/ed25519";
 import WebSocket from "ws";
 import { hashMessageForVerify, publicKeyToDid, signHex } from "../src/auth.js";
-import { generateRoomKey, sealToDid } from "../src/encryption.js";
+import { generateRoomKey, sealToDid } from "./sealed-box.js";
 import { buildServer, type ServerOptions } from "../src/server.js";
 import {
   canonicalLinkPayload,

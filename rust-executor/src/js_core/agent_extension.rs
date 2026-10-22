@@ -4,7 +4,7 @@ use crate::languages::language_runtime::get_runtime_agent_context;
 use crate::{
     agent::{
         create_signed_expression, did, did_document, did_for_context,
-        sealed_box::{open_sealed_for_context, seal_to_did, SealedBox},
+        sealed_box::{open_sealed_for_context, SealedBox},
         sign_for_context, sign_string_hex_for_context, signing_key_id_for_context, AgentService,
     },
     types::Agent,
@@ -149,19 +149,6 @@ fn agent_sign_string_hex(#[string] payload: String) -> Result<String, AnyhowWrap
         .map_err(AnyhowWrapperError::from)
 }
 
-/// Seals the bytes `plaintext_hex` to the Ed25519 key of `did` (see `agent::sealed_box`).
-/// Needs no key of the caller: anyone can seal to a DID.
-#[op2]
-#[serde]
-fn agent_seal_to_did(
-    #[string] did: String,
-    #[string] plaintext_hex: String,
-) -> Result<SealedBox, AnyhowWrapperError> {
-    let plaintext = hex::decode(plaintext_hex.trim())
-        .map_err(|e| anyhow::anyhow!("plaintext is not hex: {e}"))?;
-    seal_to_did(&did, &plaintext).map_err(AnyhowWrapperError::from)
-}
-
 /// Opens a box sealed to the agent the language runs for, and returns the plaintext as
 /// hex. Fails for a box sealed to any other DID.
 #[op2]
@@ -204,7 +191,7 @@ fn agent() -> Result<Agent, AnyhowWrapperError> {
 // passphrase, lock the node under a passphrase of its own, or rewrite the node's profile.
 deno_core::extension!(
     agent_service,
-    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_seal_to_did, agent_open_sealed, agent_is_initialized, agent_is_unlocked, agent],
+    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_open_sealed, agent_is_initialized, agent_is_unlocked, agent],
     esm_entry_point = "ext:agent_service/agent_extension.js",
     esm = [dir "src/js_core", "agent_extension.js"]
 );

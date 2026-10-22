@@ -81,8 +81,6 @@ export function agentDid() { return agent().did(); }
 export function agentSigningKeyId() { return agent().signingKeyId(); }
 export function agentSign(payload) { return agent().sign(payload); }
 export function agentSignStringHex(payload) { return agent().signStringHex(payload); }
-// Seal bytes (hex) to a DID's Ed25519 key; open a box sealed to the calling agent.
-export function agentSealToDid(did, plaintextHex) { return agent().sealToDid(did, plaintextHex); }
 export function agentOpenSealed(sealed) { return agent().openSealed(sealed); }
 export function agentCreateSignedExpression(data) { return agent().createSignedExpression(data); }
 export function agentGetAllLocalUserDids() { return agent().getAllLocalUserDIDs(); }

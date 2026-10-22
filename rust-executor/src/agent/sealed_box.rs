@@ -9,16 +9,20 @@
 //! A box: an ephemeral X25519 keypair, ECDH with the recipient's X25519 key,
 //! `HKDF-SHA256(shared, salt = ephemeral public ‖ recipient public, info = SEALED_BOX_INFO)`
 //! as an AES-256-GCM key, a random 12-byte nonce. Every field is hex. The server link
-//! language's tests pin the same format in noble (`tests/sealed-box.ts`).
+//! language seals in the same format with noble (`sealToDid` in `src/encryption.ts`); the
+//! executor only opens, and seals only in tests.
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
+#[cfg(test)]
 use curve25519_dalek::edwards::CompressedEdwardsY;
 use curve25519_dalek::montgomery::MontgomeryPoint;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+#[cfg(test)]
 use did_key::KeyMaterial;
 use hkdf::Hkdf;
+#[cfg(test)]
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
@@ -40,7 +44,8 @@ pub struct SealedBox {
 }
 
 /// The X25519 public key of an Ed25519 `did:key` (a `#key-id` suffix is ignored).
-pub fn x25519_public_key_of_did(did: &str) -> Result<[u8; 32], AnyError> {
+#[cfg(test)]
+fn x25519_public_key_of_did(did: &str) -> Result<[u8; 32], AnyError> {
     let did = did.split('#').next().unwrap_or(did);
     // Multicodec 0xed01 in base58btc: every Ed25519 did:key starts with z6Mk.
     if !did.starts_with("did:key:z6Mk") {
@@ -93,7 +98,7 @@ fn seal_key(
 }
 
 /// Seals `plaintext` to `recipient_public` with the given ephemeral secret and nonce.
-/// Only [`seal_to_did`] (with fresh random ones) and the test vectors call it.
+#[cfg(test)]
 fn seal_with(
     recipient_public: &[u8; 32],
     ephemeral_secret: &[u8; 32],
@@ -115,6 +120,7 @@ fn seal_with(
 }
 
 /// Seals `plaintext` to the agent `did`. Needs no key: anyone may seal to any DID.
+#[cfg(test)]
 pub fn seal_to_did(did: &str, plaintext: &[u8]) -> Result<SealedBox, AnyError> {
     let recipient_public = x25519_public_key_of_did(did)?;
     let mut ephemeral_secret = Zeroizing::new([0u8; 32]);

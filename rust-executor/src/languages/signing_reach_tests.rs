@@ -5,7 +5,7 @@
 //! extensions), as a managed user, instead of calling the ops' Rust bodies.
 
 use super::language_runtime_handle::LanguageRuntimeHandle;
-use crate::agent::AgentContext;
+use crate::agent::{sealed_box::seal_to_did, AgentContext};
 use serde_json::{json, Value};
 
 fn init_v8_platform() {
@@ -97,8 +97,8 @@ async fn a_language_signs_only_as_the_user_it_runs_for() {
     let _ = handle.teardown().await;
 }
 
-/// `AGENT.sealToDid` seals to any DID; `AGENT.openSealed` opens only what was sealed to
-/// the agent the language runs for, the node or a managed user.
+/// `AGENT.openSealed` opens only what was sealed to the agent the language runs for, the
+/// node or a managed user.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_language_opens_only_boxes_sealed_to_the_agent_it_runs_for() {
     init_v8_platform();
@@ -115,17 +115,10 @@ async fn a_language_opens_only_boxes_sealed_to_the_agent_it_runs_for() {
         LanguageRuntimeHandle::spawn("QmSealedBoxTest".into(), dir.path().to_path_buf(), false)
             .unwrap();
 
-    let sealed = run_as(
-        &handle,
-        &as_alice,
-        &format!(
-            r#"(() => JSON.stringify({{
-  toMain: AGENT.sealToDid({main_did:?}, "00ff10"),
-  toAlice: AGENT.sealToDid({alice:?}, "c0ffee"),
-}}))()"#
-        ),
-    )
-    .await;
+    let sealed = json!({
+        "toMain": seal_to_did(&main_did, &[0x00, 0xff, 0x10]).unwrap(),
+        "toAlice": seal_to_did(&alice, &[0xc0, 0xff, 0xee]).unwrap(),
+    });
 
     let open = |sealed: &Value| {
         format!(
@@ -150,23 +143,6 @@ async fn a_language_opens_only_boxes_sealed_to_the_agent_it_runs_for() {
             "{context:?} opened a box sealed to another agent"
         );
     }
-
-    let refused = run_as(
-        &handle,
-        &main,
-        r#"(() => {
-  const attempt = (f) => { try { f(); return "sealed"; } catch (e) { return "refused"; } };
-  return JSON.stringify({
-    notHex: attempt(() => AGENT.sealToDid(AGENT.did(), "xyz")),
-    notADidKey: attempt(() => AGENT.sealToDid("did:web:example.org", "00")),
-  });
-})()"#,
-    )
-    .await;
-    assert_eq!(
-        refused,
-        json!({ "notHex": "refused", "notADidKey": "refused" })
-    );
 
     let _ = handle.teardown().await;
 }

@@ -10,7 +10,7 @@
 
 import type { RoomConfig } from "./adapters.js";
 import * as api from "./api.js";
-import { generateRoomKey, sealRoomKey, type KeyRing, type Sealer } from "./encryption.js";
+import { generateRoomKey, sealToDid, type KeyRing } from "./encryption.js";
 
 function message(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
@@ -24,14 +24,13 @@ function message(err: unknown): string {
 export async function rotateRoomKey(
     config: RoomConfig,
     token: string,
-    sealer: Sealer,
 ): Promise<api.RotateResponse | null> {
     const acl = await api.fetchAclInfo(config, token);
     const roomKey = generateRoomKey();
     const keys: api.RotateKeyEntry[] = [];
     for (const member of acl.members) {
         try {
-            keys.push({ did: member.did, encryptedKey: sealRoomKey(sealer, roomKey, member.did) });
+            keys.push({ did: member.did, encryptedKey: sealToDid(member.did, roomKey) });
         } catch (err) {
             console.error(`[server-link-language] cannot seal the room key to ${member.did}, skipping: ${message(err)}`);
         }
@@ -49,7 +48,6 @@ export async function rotateRoomKey(
 export async function grantMissingRoomKeys(
     config: RoomConfig,
     token: string,
-    sealer: Sealer,
     ring: KeyRing,
     myDid: string,
 ): Promise<Array<{ did: string; versions: number[] }>> {
@@ -61,7 +59,7 @@ export async function grantMissingRoomKeys(
             const keys: api.GrantKeyEntry[] = [];
             for (const version of member.missingVersions) {
                 const roomKey = ring.get(version);
-                if (roomKey) keys.push({ version, encryptedKey: sealRoomKey(sealer, roomKey, member.did) });
+                if (roomKey) keys.push({ version, encryptedKey: sealToDid(member.did, roomKey) });
             }
             if (keys.length === 0) continue;
             const versions = await api.grantKeys(config, token, member.did, keys);

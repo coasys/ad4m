@@ -11,11 +11,8 @@ import {
   startTestServer,
   type TestServerHandle,
 } from "./helpers.js";
-import {
-  openSealed,
-  sealToDid,
-  type SealedBox,
-} from "../src/encryption.js";
+import type { SealedBox } from "../src/encryption.js";
+import { openSealed, sealToDid } from "./sealed-box.js";
 import type { EncryptedLinkData, LinkExpression } from "../src/types.js";
 
 async function withServer(fn: (server: TestServerHandle) => Promise<void>): Promise<void> {

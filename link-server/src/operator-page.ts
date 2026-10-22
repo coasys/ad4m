@@ -29,7 +29,7 @@ holding the room keys has been online and sealed them to its DID.</p>
     <input id="add-did" type="text" placeholder="did:key:z6Mk..." autocomplete="off" spellcheck="false" required>
     <button type="submit">Admit DID</button>
   </form>
-  <table id="members"><thead><tr><th>Member</th><th>Added</th><th>Added by</th><th>Keys</th><th></th></tr></thead><tbody></tbody></table>
+  <table id="members"><thead><tr><th>Member</th><th>Added</th><th>Added by</th><th></th></tr></thead><tbody></tbody></table>
   <h2>History</h2>
   <table id="history"><thead><tr><th>When</th><th>Change</th><th>DID</th><th>By</th></tr></thead><tbody></tbody></table>
 </section>
@@ -131,7 +131,6 @@ export const OPERATOR_PAGE_JS = `"use strict";
       row.appendChild(who);
       row.appendChild(el("td", (member.addedAt || "").slice(0, 16).replace("T", " ")));
       row.appendChild(el("td", member.addedBy ? actorLabel(member.addedBy) : "", "mono"));
-      row.appendChild(el("td", member.hasRoomKey ? "held" : "not yet"));
       var action = el("td");
       if (member.did !== room.admin) {
         var remove = el("button", "Remove");

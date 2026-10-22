@@ -27,12 +27,8 @@ import {
   startTestServer,
   type TestServerHandle,
 } from "./helpers.js";
-import {
-  openSealed,
-  generateRoomKey,
-  sealToDid,
-  type SealedBox,
-} from "../src/encryption.js";
+import type { SealedBox } from "../src/encryption.js";
+import { generateRoomKey, openSealed, sealToDid } from "./sealed-box.js";
 
 const { bytesToHex } = ed.etc;
 

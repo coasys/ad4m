@@ -36,7 +36,7 @@ import * as api from "../src/api.js";
 import { buildKeyRing, bytesToHex, hexToBytes } from "../src/encryption.js";
 import { grantMissingRoomKeys, rotateRoomKey } from "../src/room-keys.js";
 import type { LinkExpression, PerspectiveDiff, SealedBox } from "../src/types.js";
-import { openSealed, sealToDid } from "./sealed-box.js";
+import { openSealed } from "./sealed-box.js";
 
 // Link-server imports — test helpers to boot a real server, and auth
 // utilities for DID construction + the SHA-256 pre-hash convention.
@@ -103,11 +103,6 @@ class RealAgent implements AgentAdapter {
     const hashed = hashMessageForVerify(payload);
     const sig = ed25519.sign(hashed, this.privateKey);
     return Buffer.from(sig).toString("hex");
-  }
-
-  /** The executor's `agentSealToDid` (tests/sealed-box.ts is its format). */
-  sealToDid(did: string, plaintextHex: string): SealedBox {
-    return sealToDid(did, hexToBytes(plaintextHex));
   }
 
   /** The executor's `agentOpenSealed`, with this agent's key. */
@@ -498,7 +493,7 @@ describe("integration: room keys", () => {
     const adminToken = await signIn(server.url, admin);
     await admit(server.url, adminToken, member.did());
 
-    const rotated = await rotateRoomKey({ serverUrl: server.url, roomId }, adminToken, admin);
+    const rotated = await rotateRoomKey({ serverUrl: server.url, roomId }, adminToken);
     assert.equal(rotated?.version, 1);
     assert.deepEqual(rotated?.recipients.sort(), [admin.did(), member.did()].sort());
 
@@ -516,19 +511,19 @@ describe("integration: room keys", () => {
     const config = { serverUrl: server.url, roomId };
 
     const adminToken = await signIn(server.url, admin);
-    await rotateRoomKey(config, adminToken, admin); // version 1: the admin alone
+    await rotateRoomKey(config, adminToken); // version 1: the admin alone
     await admit(server.url, adminToken, bob.did());
-    await rotateRoomKey(config, adminToken, admin); // version 2: the admin and Bob
+    await rotateRoomKey(config, adminToken); // version 2: the admin and Bob
     await admit(server.url, adminToken, carol.did()); // Carol: no version, never connected
 
     const bobRing = await ringOf(server.url, bob);
     assert.deepEqual([...bobRing.keys()], [2]);
     const bobToken = await signIn(server.url, bob);
-    const bobGrants = await grantMissingRoomKeys(config, bobToken, bob, bobRing, bob.did());
+    const bobGrants = await grantMissingRoomKeys(config, bobToken, bobRing, bob.did());
     assert.deepEqual(bobGrants, [{ did: carol.did(), versions: [2] }], "Bob grants Carol the version he holds");
 
     const adminRing = await ringOf(server.url, admin);
-    const adminGrants = await grantMissingRoomKeys(config, await signIn(server.url, admin), admin, adminRing, admin.did());
+    const adminGrants = await grantMissingRoomKeys(config, await signIn(server.url, admin), adminRing, admin.did());
     assert.deepEqual(
       adminGrants.map((g) => [g.did, g.versions]).sort(),
       [[bob.did(), [1]], [carol.did(), [1]]].sort(),
@@ -540,7 +535,7 @@ describe("integration: room keys", () => {
     assert.deepEqual(carolRing.get(1), adminRing.get(1));
     assert.deepEqual(carolRing.get(2), adminRing.get(2));
 
-    const again = await grantMissingRoomKeys(config, await signIn(server.url, bob), bob, await ringOf(server.url, bob), bob.did());
+    const again = await grantMissingRoomKeys(config, await signIn(server.url, bob), await ringOf(server.url, bob), bob.did());
     assert.deepEqual(again, [], "nobody lacks a version any more");
   });
 });

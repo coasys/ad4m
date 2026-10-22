@@ -16,7 +16,6 @@ import {
     storageListKeys,
     agentDid,
     agentSignStringHex,
-    agentSealToDid,
     agentOpenSealed,
     emitPerspectiveDiff,
     emitSyncStateChange,
@@ -102,10 +101,6 @@ export class DenoAgentAdapter implements AgentAdapter {
 
     signStringHex(payload: string): string {
         return agentSignStringHex(payload);
-    }
-
-    sealToDid(did: string, plaintextHex: string): SealedBox {
-        return agentSealToDid(did, plaintextHex);
     }
 
     openSealed(sealed: SealedBox): string {

@@ -57,15 +57,12 @@ export interface StorageAdapter {
  * actually needs. Deliberately narrow — the language never signs
  * commits itself (the runtime signs diffs upstream before they reach
  * `commit()`); it only needs its own DID (for auth + peer filtering),
- * a signature primitive (for auth), and the executor's sealed boxes to
- * hand room keys from member to member by DID.
+ * a signature primitive (for auth), and the executor's opening of boxes
+ * sealed to it (room keys, see src/encryption.ts).
  */
 export interface AgentAdapter {
     did(): string;
-    /** `agentSignStringHex`: hex of the agent's Ed25519 signature over sha256(payload). */
     signStringHex(payload: string): string;
-    /** `agentSealToDid`: seals the bytes `plaintextHex` to the agent `did`. */
-    sealToDid(did: string, plaintextHex: string): SealedBox;
     /**
      * `agentOpenSealed`: opens a box sealed to this agent, returns hex.
      * Throws for a box sealed to any other DID.

@@ -222,10 +222,10 @@ export type ClientWsMessage =
 // ---------------------------------------------------------------------------
 
 /**
- * A room key version sealed to one member's DID by the executor's
- * `agentSealToDid` host import (X25519 form of the DID's Ed25519 key,
- * ECDH + HKDF-SHA256 + AES-256-GCM; docs-src/host-contract.md "Sealed
- * boxes"). Only that member's executor opens it (`agentOpenSealed`).
+ * A room key version sealed to one member's DID by `sealToDid`
+ * (src/encryption.ts: X25519 form of the DID's Ed25519 key, ECDH +
+ * HKDF-SHA256 + AES-256-GCM; docs-src/host-contract.md "Sealed boxes").
+ * Only that member's executor opens it (`agentOpenSealed`).
  */
 export interface SealedBox {
     /** Hex-encoded ephemeral X25519 public key used for this seal. */

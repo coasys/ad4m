@@ -195,9 +195,9 @@ summary:
 
 - **Room keys are sealed to DIDs.** A member's X25519 key is the Montgomery
   form of the Ed25519 key in its `did:key`, so it follows from the DID; the
-  language never sees an agent secret. It seals with the executor's
-  `agentSealToDid(did, keyHex)` host import and opens with `agentOpenSealed`,
-  which opens only boxes sealed to the agent the language runs for
+  language never sees an agent secret. It seals itself (`sealToDid`) and
+  opens with the executor's `agentOpenSealed` host import, which opens only
+  boxes sealed to the agent the language runs for
   (`docs-src/host-contract.md` "Sealed boxes": ephemeral X25519 ECDH,
   HKDF-SHA256, AES-256-GCM, hex `{ephemeralPublicKey, nonce, ciphertext}`).
   Auth carries no key.

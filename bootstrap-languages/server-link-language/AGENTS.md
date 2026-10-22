@@ -165,13 +165,13 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   loads once during `init()`'s `setupKeyRing()` and the `version` field in
   `KeysResponse` remains unused for mid-session detection — a periodic `/keys`
   re-fetch or a dedicated WS push message would close that gap.
-- **Room keys are sealed to DIDs by the executor.** A member's X25519 key is
-  the Montgomery form of the Ed25519 key in its `did:key`. The language seals
-  with the `agentSealToDid(did, hex)` host import and opens with
-  `agentOpenSealed(box)` (`AgentAdapter.sealToDid` / `openSealed`); it never
-  holds an agent secret, and auth sends no key. `tests/sealed-box.ts` is a
-  noble reference of the executor's format for the mock agents; its test
-  vector in `tests/encryption.test.ts` is pinned in
+- **Room keys are sealed to DIDs.** A member's X25519 key is the Montgomery
+  form of the Ed25519 key in its `did:key`. The language seals itself
+  (`sealToDid`, src/encryption.ts) and opens with the `agentOpenSealed(box)`
+  host import (`AgentAdapter.openSealed`); it never holds an agent secret,
+  and auth sends no key. `tests/sealed-box.ts` is a noble reference of the
+  executor's opening for the mock agents; the test vector in
+  `tests/encryption.test.ts` is pinned in
   `rust-executor/src/agent/sealed_box.rs` too: changing the format orphans
   every sealed room key.
 - **E2E encryption wire format is unified.** Both client and server use

@@ -4,16 +4,15 @@
  * ## Room keys, sealed to members' DIDs
  *
  * A room key version is a random AES-256-GCM key. Whoever holds it seals it
- * to a member with the executor's `agentSealToDid(did, keyHex)` host import:
- * the X25519 form of the Ed25519 key in the member's `did:key` (RFC 7748
- * map), an ephemeral X25519 ECDH, HKDF-SHA256 and AES-256-GCM
- * (docs-src/host-contract.md "Sealed boxes"). The member's executor opens it
- * with `agentOpenSealed`, from the agent's own key; the language never
- * holds an agent secret. Any member's X25519 key follows from its DID, so
- * the room admin seals each new version to every ACL member, including one
- * that never connected, and any member holding a version can grant it to a
- * member lacking it. The server stores and relays the boxes and never sees
- * a room key.
+ * to a member with `sealToDid`: the X25519 form of the Ed25519 key in the
+ * member's `did:key` (RFC 7748 map), an ephemeral X25519 ECDH, HKDF-SHA256
+ * and AES-256-GCM (docs-src/host-contract.md "Sealed boxes"). The member's
+ * executor opens it with the `agentOpenSealed` host import, from the agent's
+ * own key; the language never holds an agent secret. Any member's X25519
+ * key follows from its DID, so the room admin seals each new version to
+ * every ACL member, including one that never connected, and any member
+ * holding a version can grant it to a member lacking it. The server stores
+ * and relays the boxes and never sees a room key.
  *
  * ## Link confidentiality
  *
@@ -29,8 +28,10 @@
  * encrypted before the full-encryption change).
  */
 
+import { ed25519, x25519 } from "@noble/curves/ed25519";
 import { gcm } from "@noble/ciphers/aes";
 import { sha256 } from "@noble/hashes/sha2";
+import { hkdf } from "@noble/hashes/hkdf";
 
 import type { AgentAdapter } from "./adapters.js";
 import type {
@@ -93,28 +94,110 @@ export function randomBytes(length: number): Uint8Array {
 }
 
 // ---------------------------------------------------------------------------
+// Base58btc decoder (minimal — avoids @scure/base dependency)
+// ---------------------------------------------------------------------------
+
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BASE58_MAP = new Map<string, number>();
+for (let i = 0; i < BASE58_ALPHABET.length; i++) BASE58_MAP.set(BASE58_ALPHABET[i], i);
+
+function base58Decode(input: string): Uint8Array {
+    if (input.length === 0) return new Uint8Array(0);
+    const bytes: number[] = [0];
+    for (const ch of input) {
+        const val = BASE58_MAP.get(ch);
+        if (val === undefined) throw new Error(`base58: invalid character '${ch}'`);
+        let carry = val;
+        for (let j = 0; j < bytes.length; j++) {
+            carry += bytes[j] * 58;
+            bytes[j] = carry & 0xff;
+            carry >>= 8;
+        }
+        while (carry > 0) {
+            bytes.push(carry & 0xff);
+            carry >>= 8;
+        }
+    }
+    // Preserve leading zeros (base58 '1' == 0x00)
+    let leadingZeros = 0;
+    for (const ch of input) { if (ch === "1") leadingZeros++; else break; }
+    const result = new Uint8Array(leadingZeros + bytes.length);
+    bytes.reverse();
+    result.set(bytes, leadingZeros);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// DID:key → Ed25519 public key extraction
+// ---------------------------------------------------------------------------
+
+const ED25519_MULTICODEC = new Uint8Array([0xed, 0x01]);
+
+/**
+ * Extracts the raw 32-byte Ed25519 public key from a `did:key:z...` string.
+ * Only supports ed25519 keys (multicodec prefix 0xed01). Strips any
+ * `#fragment` key-id suffix.
+ */
+function didToEd25519PublicKey(did: string): Uint8Array {
+    const base = did.includes("#") ? did.slice(0, did.indexOf("#")) : did;
+    const prefix = "did:key:";
+    if (!base.startsWith(prefix)) throw new Error(`not a did:key DID: ${did}`);
+    const multibase = base.slice(prefix.length);
+    if (!multibase.startsWith("z")) throw new Error(`unsupported multibase: ${did}`);
+    const decoded = base58Decode(multibase.slice(1));
+    if (decoded.length !== 34 || decoded[0] !== ED25519_MULTICODEC[0] || decoded[1] !== ED25519_MULTICODEC[1]) {
+        throw new Error(`unsupported did:key type: ${did}`);
+    }
+    return decoded.slice(2);
+}
+
+// ---------------------------------------------------------------------------
 // Room keys sealed to DIDs (the executor's sealed boxes)
 // ---------------------------------------------------------------------------
 
-/** The executor's sealing and opening, as the agent adapter exposes them. */
-export type Sealer = Pick<AgentAdapter, "sealToDid" | "openSealed">;
+/** HKDF `info` of every sealed box, as `rust-executor/src/agent/sealed_box.rs` has it. */
+export const SEALED_BOX_INFO = "ad4m:sealed-box:v1";
 
 /** Generates a fresh random 32-byte AES-256 room key. */
 export function generateRoomKey(): Uint8Array {
     return randomBytes(AES_KEY_BYTES);
 }
 
-/** Seals `roomKey` to the member `did`; needs only the DID. */
-export function sealRoomKey(sealer: Sealer, roomKey: Uint8Array, did: string): SealedBox {
-    return sealer.sealToDid(did, bytesToHex(roomKey));
+export function deriveSealKey(sharedSecret: Uint8Array, ephemeralPublicKey: Uint8Array, recipientPublicKey: Uint8Array): Uint8Array {
+    const salt = new Uint8Array(64);
+    salt.set(ephemeralPublicKey);
+    salt.set(recipientPublicKey, 32);
+    return hkdf(sha256, sharedSecret, salt, utf8ToBytes(SEALED_BOX_INFO), AES_KEY_BYTES);
+}
+
+/**
+ * Seals `plaintext` to the agent `did`, which only that agent's executor
+ * opens. Needs only the DID. `ephemeralSecret` and `nonce` are for test
+ * vectors only.
+ */
+export function sealToDid(
+    did: string,
+    plaintext: Uint8Array,
+    ephemeralSecret: Uint8Array = randomBytes(32),
+    nonce: Uint8Array = randomBytes(AES_NONCE_BYTES),
+): SealedBox {
+    const recipientPublicKey = ed25519.utils.toMontgomery(didToEd25519PublicKey(did));
+    const ephemeralPublicKey = x25519.getPublicKey(ephemeralSecret);
+    const sharedSecret = x25519.getSharedSecret(ephemeralSecret, recipientPublicKey);
+    const ciphertext = gcm(deriveSealKey(sharedSecret, ephemeralPublicKey, recipientPublicKey), nonce).encrypt(plaintext);
+    return {
+        ephemeralPublicKey: bytesToHex(ephemeralPublicKey),
+        nonce: bytesToHex(nonce),
+        ciphertext: bytesToHex(ciphertext),
+    };
 }
 
 /**
  * Opens a room key sealed to this agent. Throws for a box sealed to anyone
  * else, an altered box, or a sealed value that is not a 32-byte key.
  */
-export function openRoomKey(sealer: Sealer, sealed: SealedBox): Uint8Array {
-    const roomKey = hexToBytes(sealer.openSealed(sealed));
+export function openRoomKey(agent: Pick<AgentAdapter, "openSealed">, sealed: SealedBox): Uint8Array {
+    const roomKey = hexToBytes(agent.openSealed(sealed));
     if (roomKey.length !== AES_KEY_BYTES) {
         throw new Error(`a room key has ${AES_KEY_BYTES} bytes, the box held ${roomKey.length}`);
     }
@@ -136,13 +219,13 @@ export type KeyRing = Map<number, Uint8Array>;
  */
 export function buildKeyRing(
     entries: KeysResponseEntry[],
-    sealer: Sealer,
+    agent: Pick<AgentAdapter, "openSealed">,
 ): KeyRing {
     const ring: KeyRing = new Map();
     const failures: string[] = [];
     for (const entry of entries) {
         try {
-            ring.set(entry.version, openRoomKey(sealer, entry.encryptedKey));
+            ring.set(entry.version, openRoomKey(agent, entry.encryptedKey));
         } catch (err) {
             failures.push(`version ${entry.version}: ${err instanceof Error ? err.message : String(err)}`);
         }

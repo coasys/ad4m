@@ -1,9 +1,9 @@
 /**
- * Tests for src/encryption.ts — room keys sealed to members' DIDs through
- * the executor's sealed boxes, and AES-256-GCM link encryption. No mocking
- * of the crypto primitives: the mock agents seal and open with the noble
- * reference of the executor's format (tests/sealed-box.ts), so a broken
- * wire format or a swapped key fails the round trip.
+ * Tests for src/encryption.ts — room keys sealed to members' DIDs in the
+ * executor's sealed-box format, and AES-256-GCM link encryption. No mocking
+ * of the crypto primitives: the mock agents open with the noble reference
+ * of the executor's opening (tests/sealed-box.ts), so a broken wire format
+ * or a swapped key fails the round trip.
  */
 
 import { describe, it } from "node:test";
@@ -22,14 +22,14 @@ import {
     latestKeyVersion,
     openRoomKey,
     randomBytes,
-    sealRoomKey,
+    sealToDid,
 } from "../src/encryption.js";
 import type { LinkExpression, SealedBox } from "../src/types.js";
 import { isEncryptedLinkData } from "../src/types.js";
-import { didForEd25519PublicKey, openSealed, sealToDid } from "./sealed-box.js";
+import { didForEd25519PublicKey, openSealed } from "./sealed-box.js";
 
-/** An agent whose executor seals and opens like the real one. */
-class SealingAgent implements AgentAdapter {
+/** An agent whose executor opens like the real one. */
+class OpeningAgent implements AgentAdapter {
     readonly secret: Uint8Array;
     readonly didValue: string;
     constructor(secret: Uint8Array = ed25519.utils.randomPrivateKey()) {
@@ -41,9 +41,6 @@ class SealingAgent implements AgentAdapter {
     }
     signStringHex(): string {
         throw new Error("room keys need no signature");
-    }
-    sealToDid(did: string, plaintextHex: string): SealedBox {
-        return sealToDid(did, hexToBytes(plaintextHex));
     }
     openSealed(sealed: SealedBox): string {
         return bytesToHex(openSealed(sealed, this.secret));
@@ -109,21 +106,20 @@ describe("encryption: the sealed box format", () => {
 // Room keys sealed to DIDs
 // ---------------------------------------------------------------------------
 
-describe("encryption: sealRoomKey / openRoomKey", () => {
+describe("encryption: sealToDid / openRoomKey", () => {
     it("seals a room key to a member by DID alone, and the member opens it", () => {
-        const sealer = new SealingAgent();
-        const member = new SealingAgent();
+        const member = new OpeningAgent();
         const roomKey = generateRoomKey();
 
-        const sealed = sealRoomKey(sealer, roomKey, member.did());
+        const sealed = sealToDid(member.did(), roomKey);
         assert.deepEqual(openRoomKey(member, sealed), roomKey);
     });
 
     it("produces a different box each time (fresh ephemeral key + nonce)", () => {
-        const member = new SealingAgent();
+        const member = new OpeningAgent();
         const roomKey = generateRoomKey();
-        const box1 = sealRoomKey(member, roomKey, member.did());
-        const box2 = sealRoomKey(member, roomKey, member.did());
+        const box1 = sealToDid(member.did(), roomKey);
+        const box2 = sealToDid(member.did(), roomKey);
         assert.notEqual(box1.ephemeralPublicKey, box2.ephemeralPublicKey);
         assert.notEqual(box1.ciphertext, box2.ciphertext);
         assert.deepEqual(openRoomKey(member, box1), roomKey);
@@ -131,15 +127,15 @@ describe("encryption: sealRoomKey / openRoomKey", () => {
     });
 
     it("another agent cannot open it", () => {
-        const member = new SealingAgent();
-        const impostor = new SealingAgent();
-        const sealed = sealRoomKey(member, generateRoomKey(), member.did());
+        const member = new OpeningAgent();
+        const impostor = new OpeningAgent();
+        const sealed = sealToDid(member.did(), generateRoomKey());
         assert.throws(() => openRoomKey(impostor, sealed));
     });
 
     it("refuses a sealed value that is not a room key", () => {
-        const member = new SealingAgent();
-        const sealed = member.sealToDid(member.did(), "00".repeat(16));
+        const member = new OpeningAgent();
+        const sealed = sealToDid(member.did(), new Uint8Array(16));
         assert.throws(() => openRoomKey(member, sealed), /32 bytes/);
     });
 
@@ -267,12 +263,12 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
 
 describe("encryption: buildKeyRing / latestKeyVersion", () => {
     it("builds a KeyRing from the boxes sealed to this agent", () => {
-        const agent = new SealingAgent();
+        const agent = new OpeningAgent();
         const rk1 = generateRoomKey();
         const rk2 = generateRoomKey();
         const entries = [
-            { encryptedKey: sealRoomKey(agent, rk1, agent.did()), version: 1 },
-            { encryptedKey: sealRoomKey(agent, rk2, agent.did()), version: 2 },
+            { encryptedKey: sealToDid(agent.did(), rk1), version: 1 },
+            { encryptedKey: sealToDid(agent.did(), rk2), version: 2 },
         ];
         const ring = buildKeyRing(entries, agent);
         assert.equal(ring.size, 2);
@@ -281,13 +277,13 @@ describe("encryption: buildKeyRing / latestKeyVersion", () => {
     });
 
     it("leaves out a version that does not open, so one bad grant does not lock the room", () => {
-        const agent = new SealingAgent();
-        const other = new SealingAgent();
+        const agent = new OpeningAgent();
+        const other = new OpeningAgent();
         const rk1 = generateRoomKey();
         const ring = buildKeyRing(
             [
-                { encryptedKey: sealRoomKey(agent, rk1, agent.did()), version: 1 },
-                { encryptedKey: sealRoomKey(agent, generateRoomKey(), other.did()), version: 2 },
+                { encryptedKey: sealToDid(agent.did(), rk1), version: 1 },
+                { encryptedKey: sealToDid(other.did(), generateRoomKey()), version: 2 },
             ],
             agent,
         );
@@ -296,10 +292,10 @@ describe("encryption: buildKeyRing / latestKeyVersion", () => {
     });
 
     it("is empty when no version opens: the agent waits for a key, and an admin rotates", () => {
-        const agent = new SealingAgent();
-        const other = new SealingAgent();
+        const agent = new OpeningAgent();
+        const other = new OpeningAgent();
         const ring = buildKeyRing(
-            [{ encryptedKey: sealRoomKey(agent, generateRoomKey(), other.did()), version: 1 }],
+            [{ encryptedKey: sealToDid(other.did(), generateRoomKey()), version: 1 }],
             agent,
         );
         assert.equal(ring.size, 0);

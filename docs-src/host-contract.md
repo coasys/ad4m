@@ -53,9 +53,8 @@ any language is loaded.
 | `did()` | `() => string` | Returns the agent's DID (e.g. `did:key:z6Mk...`). |
 | `signingKeyId()` | `() => string` | Returns the signing key identifier. |
 | `sign(payload)` | `(Uint8Array) => Uint8Array` | Signs raw bytes, returns the signature bytes. |
-| `signStringHex(payload)` | `(string) => string` | Signs `sha256(payload)` and returns the hex-encoded signature. |
-| `sealToDid(did, plaintextHex)` | `(string, string) => SealedBox` | Seals the bytes `plaintextHex` to the Ed25519 key of the `did:key` `did` and returns `{ ephemeralPublicKey, nonce, ciphertext }` (hex). Needs no key: anyone can seal to a DID. Throws for a DID that is not an Ed25519 `did:key`. See "Sealed boxes" below. |
-| `openSealed(sealed)` | `(SealedBox) => string` | Opens a box sealed to the acting agent (the node, or the managed user the call runs for) and returns the plaintext as hex. Throws for a box sealed to any other DID, or an altered one. |
+| `signStringHex(payload)` | `(string) => string` | Signs a string payload and returns the hex-encoded signature. |
+| `openSealed(sealed)` | `(SealedBox) => string` | Opens a box sealed to the acting agent (the node, or the managed user the call runs for) and returns the plaintext as hex. Throws for a box sealed to any other DID, or an altered one. See "Sealed boxes" below. |
 | `createSignedExpression(data)` | `(any) => object` | Wraps `data` in an Expression envelope with `author`, `timestamp`, `data`, and `proof` fields. Returns the signed expression object. |
 | `getAllLocalUserDIDs()` | `() => string[]` | Returns DIDs of all local managed users. |
 | `createSignedExpressionForUser(email, data)` | `(string, any) => object` | Like `createSignedExpression` but signs with a managed user's key. Only the user that the current call runs for: any other email, and any call that runs for the node, throws. |
@@ -63,14 +62,16 @@ any language is loaded.
 
 #### Sealed boxes
 
-The recipient's X25519 key is the Montgomery form of the Ed25519 key in its
-`did:key` (RFC 7748 birational map, libsodium
+Anyone can seal to an agent from its DID alone, so a language seals itself;
+only opening needs the host. The recipient's X25519 key is the Montgomery form
+of the Ed25519 key in its `did:key` (RFC 7748 birational map, libsodium
 `crypto_sign_ed25519_pk_to_curve25519`); the host opens with the X25519 form of
 the agent's Ed25519 secret (`crypto_sign_ed25519_sk_to_curve25519`). A box is an
 ephemeral X25519 key `ephemeralPublicKey`, the AES-256-GCM key
 `HKDF-SHA256(ECDH, salt = ephemeralPublicKey || recipient X25519 key,
 info = "ad4m:sealed-box:v1")`, a 12-byte `nonce` and the `ciphertext` with its
-tag, all hex. The executor implements it in `rust-executor/src/agent/sealed_box.rs`.
+tag, all hex. The executor opens in `rust-executor/src/agent/sealed_box.rs`; the
+server link language seals in `bootstrap-languages/server-link-language/src/encryption.ts`.
 
 ### Notes
 

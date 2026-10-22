@@ -10,7 +10,6 @@ import { createHash } from "node:crypto";
 import type { AgentAdapter, Transport, TransportResponse } from "../src/adapters.js";
 import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as auth from "../src/auth.js";
-import type { SealedBox } from "../src/types.js";
 
 // ---------------------------------------------------------------------------
 // Mock adapters
@@ -46,9 +45,6 @@ class MockAgent implements AgentAdapter {
         // Deterministic stand-in for EdDSA signing — auth.ts only relies on
         // determinism (same input -> same output), not on real Ed25519 math.
         return createHash("sha256").update(`${this.didValue}:${payload}`).digest("hex");
-    }
-    sealToDid(): SealedBox {
-        throw new Error("auth never seals");
     }
     openSealed(): string {
         throw new Error("auth never opens");

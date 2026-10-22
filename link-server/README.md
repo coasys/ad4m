@@ -270,7 +270,7 @@ GET  /                          admission page (+ /admin.js, /admin.css; CSP def
 GET  /api/whoami                -> { operator, instance, admission: "allowlist" | "auto" }   (X-Forwarded-User, --operator-label)
 GET  /api/rooms                 -> { rooms: [{ id, admin, e2e, createdAt, memberCount }] }
 GET  /api/rooms/:roomId         -> { id, admin, e2e, createdAt,
-                                     members: [{ did, addedAt, hasRoomKey, online, addedBy: { actor, source, at } | null }],
+                                     members: [{ did, addedAt, online, addedBy: { actor, source, at } | null }],
                                      history: [{ did, action, actor, source, at }] }   (newest first, last 100)
 POST /api/rooms/:roomId/acl     { action: "add"|"remove", did } -> same as GET /api/rooms/:roomId
 GET  /api/logs                  -> text/event-stream; the last 1000 lines, then each new one; each event:

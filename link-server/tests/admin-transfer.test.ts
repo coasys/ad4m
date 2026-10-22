@@ -10,7 +10,7 @@ import {
   startTestServer,
   type TestServerHandle,
 } from "./helpers.js";
-import { generateRoomKey, sealToDid } from "../src/encryption.js";
+import { generateRoomKey, sealToDid } from "./sealed-box.js";
 
 async function withServer(fn: (server: TestServerHandle) => Promise<void>): Promise<void> {
   const server = await startTestServer();

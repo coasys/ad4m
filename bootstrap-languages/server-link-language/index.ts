@@ -198,7 +198,7 @@ async function performKeyGrants(): Promise<void> {
     if (!keyRing || keyRing.size === 0) return;
     try {
         const token = await auth.getValidToken();
-        const grants = await grantMissingRoomKeys(getConfig(), token, getAgent(), keyRing, myDid);
+        const grants = await grantMissingRoomKeys(getConfig(), token, keyRing, myDid);
         for (const grant of grants) {
             console.log(
                 `[server-link-language] granted key versions [${grant.versions.join(", ")}] to ${grant.did}`,
@@ -219,7 +219,7 @@ async function performRotation(): Promise<void> {
     if (!isRoomAdmin) return;
     try {
         const token = await auth.getValidToken();
-        const result = await rotateRoomKey(getConfig(), token, getAgent());
+        const result = await rotateRoomKey(getConfig(), token);
         if (!result) {
             console.log("[server-link-language] no ACL member to seal a room key to — skipping rotation");
             return;

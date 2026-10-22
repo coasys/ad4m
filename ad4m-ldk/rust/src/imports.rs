@@ -27,10 +27,6 @@ extern "C" {
     pub fn agent_sign(payload: &[u8]) -> Result<Vec<u8>, JsValue>;
     #[wasm_bindgen(js_name = "agentSignStringHex", catch)]
     pub fn agent_sign_string_hex(payload: &str) -> Result<String, JsValue>;
-    /// Seals the bytes `plaintext_hex` to the Ed25519 `did:key` `did`. Returns
-    /// `{ ephemeralPublicKey, nonce, ciphertext }` (hex).
-    #[wasm_bindgen(js_name = "agentSealToDid", catch)]
-    pub fn agent_seal_to_did(did: &str, plaintext_hex: &str) -> Result<JsValue, JsValue>;
     /// Opens a box sealed to the calling agent; returns the plaintext as hex.
     /// Fails for a box sealed to any other DID.
     #[wasm_bindgen(js_name = "agentOpenSealed", catch)]
