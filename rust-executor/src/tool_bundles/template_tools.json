@@ -1,0 +1,140 @@
+{
+  "package": "@we/agent-tools",
+  "version": "0.1.0",
+  "commit": "3b40be8cd77a153b8257d8a2611f727d1b87e6fe",
+  "appliesTo": [
+    "Template"
+  ],
+  "tools": [
+    {
+      "name": "template_read",
+      "description": "Read the template being edited. With no arguments: its version, and the template — whole, or as an outline of every node with the parts `about` names in full when it is too large to send — plus the space's own data models. With `ids`, those nodes in full; with `find`, the nodes whose type or text matches. Read the `template` documentation topic before a first edit.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Node ids, e.g. \"n12\"."
+          },
+          "find": {
+            "type": "string",
+            "description": "Text or a type to look for, e.g. \"Load more\"."
+          },
+          "about": {
+            "type": "string",
+            "description": "What the edit is about, in words — chooses which nodes of a large template come back in full."
+          }
+        }
+      },
+      "writes": false
+    },
+    {
+      "name": "template_update",
+      "description": "Apply patches to the template and SAVE them, as one change everybody sees. Put every patch an edit needs in one call. Pass the version template_read gave: a template that has changed since is refused. `dry_run` checks the patches without saving. Each patch targets a node by its id, with exactly one of node, insert, remove or split.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "description": "The version template_read answered with."
+          },
+          "patches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "targetId": {
+                  "type": "string",
+                  "description": "For node (update): the id of the node to merge into. For insert/remove: the id of the PARENT node whose children/routes array to modify. Use \"\" for root."
+                },
+                "node": {
+                  "type": "object",
+                  "description": "Partial node to merge (JSON Merge Patch). Absent keys preserved, null deletes a key. Mutually exclusive with insert/remove."
+                },
+                "insert": {
+                  "type": "object",
+                  "properties": {
+                    "children": {
+                      "type": "object",
+                      "properties": {
+                        "node": {
+                          "type": "object",
+                          "description": "The new node to insert."
+                        },
+                        "after": {
+                          "type": "string",
+                          "description": "ID of sibling to insert after. Omit to append."
+                        },
+                        "before": {
+                          "type": "string",
+                          "description": "ID of sibling to insert before."
+                        }
+                      },
+                      "required": [
+                        "node"
+                      ]
+                    },
+                    "routes": {
+                      "type": "object",
+                      "properties": {
+                        "node": {
+                          "type": "object",
+                          "description": "The new route node to insert."
+                        },
+                        "after": {
+                          "type": "string",
+                          "description": "ID of sibling route to insert after. Omit to append."
+                        },
+                        "before": {
+                          "type": "string",
+                          "description": "ID of sibling route to insert before."
+                        }
+                      },
+                      "required": [
+                        "node"
+                      ]
+                    }
+                  },
+                  "description": "Insert into children or routes array. Mutually exclusive with node/remove."
+                },
+                "remove": {
+                  "type": "object",
+                  "properties": {
+                    "children": {
+                      "type": "string",
+                      "description": "ID of child to remove."
+                    },
+                    "routes": {
+                      "type": "string",
+                      "description": "ID of route to remove."
+                    }
+                  },
+                  "description": "Remove from children or routes array by child ID. Mutually exclusive with node/insert."
+                },
+                "split": {
+                  "type": "boolean",
+                  "description": "targetId is a $ref: give THIS use of the shared shape a copy of its own, so a later patch to it changes nowhere else. Every other use keeps sharing the definition. Use it when a request means one of several places that currently look alike; patch the definition itself when it means all of them. The copy is returned with fresh ids, so patch it on the next turn. Mutually exclusive with node/insert/remove."
+                }
+              },
+              "required": [
+                "targetId"
+              ]
+            }
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Check the patches and save nothing."
+          }
+        },
+        "required": [
+          "version",
+          "patches"
+        ]
+      },
+      "writes": true
+    }
+  ]
+}

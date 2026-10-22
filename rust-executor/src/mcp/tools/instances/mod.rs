@@ -41,6 +41,8 @@
 //!   of the children under a node that carry text, through the built-in
 //!   TextContent
 //! - [`commands`] — `execute_commands`, raw SDNA actions on an instance
+//! - [`template_tools`] — `template_read` + `template_update`: a WE template, edited by WE's
+//!   own rules (`tool_bundles::builtin`)
 //! - [`validate`] — SHACL-derived property validation shared by every write
 //! - this file — the borrowed [`PropView`] over a class shape, class
 //!   resolution, instance URI minting and the other helpers the tools share
@@ -51,7 +53,7 @@ pub mod commands;
 pub mod create;
 pub mod describe;
 pub mod query;
-pub mod record_tools;
+pub mod template_tools;
 pub mod transcript;
 pub mod update;
 pub(crate) mod validate;

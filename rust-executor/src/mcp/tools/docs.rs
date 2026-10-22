@@ -10,6 +10,7 @@
 //! with whatever set the connection up (for the OpenClaw plugin, its skill).
 
 use super::Ad4mMcpHandler;
+use crate::tool_bundles::builtin;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -64,7 +65,7 @@ impl DocTopic {
     }
 }
 
-/// The executor's own topics by the name a call spells them, which no app's toolset may take.
+/// The executor's own topics by the name a call spells them.
 pub(crate) fn executor_topic_names() -> Vec<String> {
     DocTopic::ALL
         .into_iter()
@@ -76,50 +77,38 @@ pub(crate) fn executor_topic_names() -> Vec<String> {
 /// Parameters for reading the executor's documentation
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GetDocumentationParams {
-    /// Which document: "overview" (start here), "usage", "flux", "models"
-    /// or "architecture" — or a topic an app's tools serve, as list_record_tools names them
+    /// Which document: "overview" (start here), "usage", "flux", "models" or "architecture";
+    /// "template" for editing a WE template, and the topics under it that it names
     pub topic: String,
 }
 
 impl Ad4mMcpHandler {
     /// Return the executor's documentation for a topic, as markdown.
     #[tool(
-        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux — for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. Apps can install tools for their own records on this node; each set of them serves its own topics, and list_record_tools names the one to start from. The executor's own topics need no authentication; an app's topics do."
+        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux — for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. topic='template' is the guide to editing a WE template with template_read and template_update, and names the topics under it (template/...) for its components and props."
     )]
     pub async fn get_documentation(&self, params: Parameters<GetDocumentationParams>) -> String {
         let topic = params.0.topic.trim();
         if let Ok(own) = serde_json::from_value::<DocTopic>(serde_json::json!(topic)) {
             return own.text().to_string();
         }
-        // The executor's own topics are open: they tell a cold agent how to authenticate. An app's
-        // are served by its bundle's code, which runs for authenticated callers only, as
-        // list_record_tools and call_record_tool do. call_tool has already adopted a header
-        // credential into the session, so the session is what decides.
-        if !self.check_auth_with_header(None).await {
-            return serde_json::json!({
+        let unknown = || {
+            serde_json::json!({
                 "error": format!(
-                    "Authentication required to read {topic:?}: an app's documentation is served \
-                     to authenticated callers. The executor's own topics are open: {}.",
-                    executor_topic_names().join(", ")
+                    "No documentation topic {topic:?}. Topics: {}, and {}, which names the \
+                     topics under it.",
+                    executor_topic_names().join(", "),
+                    builtin::TOOLSET
                 )
             })
-            .to_string();
+            .to_string()
+        };
+        if !builtin::is_topic(topic) {
+            return unknown();
         }
-        let registry = crate::tool_bundles::ToolBundleRegistry::global();
-        match registry.read_doc(topic).await {
+        match builtin::read_doc(topic).await {
             Ok(Some(text)) => text,
-            Ok(None) => {
-                let mut known = executor_topic_names();
-                known.extend(registry.toolsets().await.into_iter().map(|t| t.name));
-                serde_json::json!({
-                    "error": format!(
-                        "No documentation topic {topic:?}. Topics: {}. An app's toolset serves \
-                         topics under its own name; list_record_tools names them.",
-                        known.join(", ")
-                    )
-                })
-                .to_string()
-            }
+            Ok(None) => unknown(),
             Err(e) => {
                 serde_json::json!({ "error": format!("Topic {topic:?} could not be read: {e}") })
                     .to_string()
@@ -191,8 +180,8 @@ mod tests {
                     let named = &rest[..end];
                     pointers_found += 1;
                     assert!(
-                        served.contains(&named.to_string()),
-                        "{topic:?} points at topic={named:?}, which no DocTopic serves"
+                        served.contains(&named.to_string()) || builtin::is_topic(named),
+                        "{topic:?} points at topic={named:?}, which nothing serves"
                     );
                 }
             }

@@ -1,18 +1,16 @@
 # tool_bundles/ — agent guide
 
-JavaScript an app ships so agents can use its tools, run in an isolate that can compute and
-nothing else. Not Languages: no network, storage, agent or holochain access, and never loaded
-at boot.
+JavaScript the executor runs for its agents' tools, in an isolate that can compute and nothing
+else. Not Languages: no network, storage, agent or holochain access.
 
 ## Files
 
 | File | Role |
 |---|---|
-| `sandbox.rs` | `BundleSandbox`: a bare `JsRuntime` on its own thread (the registry keeps one per bundle and starts a fresh one per record call); `call(path, args)` / `read(path)`, JSON in and out; time limit on the load and on each call, memory cap on the V8 heap and (through the isolate's ArrayBuffer allocator) on buffers |
+| `sandbox.rs` | `BundleSandbox`: one bare `JsRuntime` per bundle on its own thread; `call(path, args)` / `read(path)`, JSON in and out; time limit on the load and on each call, memory cap on the V8 heap and (through the isolate's ArrayBuffer allocator) on buffers |
 | `bootstrap.js` | Runs before the bundle: the only globals it gets beyond the language (`structuredClone`, `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `crypto.getRandomValues`, `console`), removes `Deno` and `WebAssembly`, makes `ArrayBuffer`/`SharedArrayBuffer` fixed-length only, evaluates to the invoker |
-| `store.rs` | `ToolBundleStore`: `<data>/tool_bundles/<address>.js`, addressed by `js_core::utils::content_address` |
-| `registry.rs` | `ToolBundleRegistry::global()`: install (a toolset name already taken replaces its bundle, which must not drop any of that bundle's toolsets), `load_stored` at boot, `find_tool` (a `FoundTool` calls in a fresh isolate), `read_doc`. Reached by `api/tool_bundles_ws.rs`, `mcp/tools/instances/record_tools.rs` and `mcp/tools/docs.rs` |
-| `tests.rs` | Fixture bundles: calls, isolation, limits, store |
+| `builtin.rs` | WE's template tools, compiled in: `template_tools.bundle.js` (WE's build of `@we/agent-tools`) and `template_tools.json` (its tools as it declares them, and the WE commit). `call` runs a tool in a fresh isolate; `read_doc` serves the `template` topics from one kept isolate. Both files are written by `scripts/vendor-template-tools.sh`, never by hand; a test fails when they disagree |
+| `tests.rs` | Fixture bundles: calls, isolation, limits |
 
 ## Invariants
 
@@ -37,21 +35,10 @@ at boot.
   have replaced those. This matters most wherever it holds an uncounted Rust-backed buffer.
 - A bundle's `console` never logs above debug, and a line is cut to 2,000 characters.
 - Calls are typed: an export path and JSON arguments. Never build JS source with `format!`.
-- The store refuses any address that is not one, so a caller's string never names a path.
-- A bundle never touches a perspective. `call_record_tool` reads the record and writes what a
-  tool answers through the class setters, in one batch, as the calling agent.
-- Tool names are unique across the node; a toolset's doc topics sit under its own name and may
-  not take an executor topic. Tests get a registry over a temp-dir store, never `~/.ad4m`.
-- A record is seen by one call: every tool call runs in a fresh isolate that ends with it. The
-  isolate a bundle keeps installed reads its exports and serves its docs, and is never given a
-  record. Bundle docs are served to authenticated callers only (`get_documentation` checks);
-  the executor's own topics stay open.
-- `install` changes nothing unless every check passes and the source is stored: check, `put`,
-  then replace.
-- A tool's answer is written only after `validate_properties(.., WriteMode::Update)`, like
-  `instance_update`; the setters do not check type or cardinality.
+
+- A bundle never touches a perspective; `mcp/tools/instances/template_tools.rs` reads and writes.
+- A record is seen by one call: every tool call runs in a fresh isolate that ends with it.
 
 ## Do not
 
 - Do not give bundles state a caller relies on between calls: an isolate may be replaced.
-- Do not store a bundle under the languages directory: everything there is booted as a Language.
