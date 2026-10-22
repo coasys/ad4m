@@ -539,17 +539,10 @@ async fn a_bundle_cannot_make_a_resizable_buffer_by_any_route() {
     );
 }
 
-/// How many threads of this process carry `name`'s isolate. The kernel keeps 15 bytes of a
-/// thread's name, so `bundle-` and the first 8 characters of the sandbox's name.
+/// How many isolate threads of the sandbox called `name` are still running, as the sandbox counts
+/// them under test: portable, and exact whatever the name's length.
 fn isolate_threads(name: &str) -> usize {
-    let comm = format!("bundle-{}", name.chars().take(8).collect::<String>());
-    std::fs::read_dir("/proc/self/task")
-        .unwrap()
-        .filter(|task| {
-            let path = task.as_ref().unwrap().path().join("comm");
-            std::fs::read_to_string(path).is_ok_and(|c| c.trim_end() == comm)
-        })
-        .count()
+    super::sandbox::running::count(name)
 }
 
 /// Wait up to `within` for `name`'s isolate thread to end. Answers whether it did.

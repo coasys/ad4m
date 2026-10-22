@@ -214,6 +214,8 @@ async fn spawn_isolate(
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
+            #[cfg(test)]
+            let _running = running::Thread::start(&thread_bundle);
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -255,6 +257,42 @@ async fn spawn_isolate(
         tx,
         isolate: isolate.disarm(),
     })
+}
+
+/// Under test: how many isolate threads are running per sandbox name, counted by the threads
+/// themselves, so a test can see a worker end on any platform.
+#[cfg(test)]
+pub(super) mod running {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn threads() -> &'static Mutex<HashMap<String, usize>> {
+        static THREADS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+        THREADS.get_or_init(Default::default)
+    }
+
+    /// The isolate threads of the sandbox called `name` that have not ended yet.
+    pub fn count(name: &str) -> usize {
+        threads().lock().unwrap().get(name).copied().unwrap_or(0)
+    }
+
+    /// Counts its thread as running until dropped, which is when the thread ends.
+    pub(super) struct Thread(String);
+
+    impl Thread {
+        pub(super) fn start(name: &str) -> Self {
+            *threads().lock().unwrap().entry(name.to_string()).or_default() += 1;
+            Self(name.to_string())
+        }
+    }
+
+    impl Drop for Thread {
+        fn drop(&mut self) {
+            if let Some(n) = threads().lock().unwrap().get_mut(&self.0) {
+                *n -= 1;
+            }
+        }
+    }
 }
 
 /// Terminates the isolate when dropped, unless disarmed.
