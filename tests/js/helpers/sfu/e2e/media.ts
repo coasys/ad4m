@@ -9,6 +9,7 @@
  */
 
 import { createRequire } from "node:module";
+import type { Remote } from "./protocol.js";
 
 const require_ = createRequire(import.meta.url);
 export const wrtc: any = (() => {
@@ -155,5 +156,70 @@ export class Receiver {
 
   stop(): void {
     if (!this.sink.stopped) this.sink.stop();
+  }
+}
+
+/** A participant as the SDK session reports it: who, and the stream their media arrives on. */
+export interface Heard {
+  agentDid: string;
+  stream: MediaStream;
+}
+
+/**
+ * What one user receives from everyone else, per participant: from the
+ * tracks the session holds for each participant now. A track ends with its
+ * connection, its last half second of audio frozen in it; a rejoin or a
+ * rebuilt connection brings new tracks, and the old ones are no longer any
+ * participant's, so what they froze is never read as what the user hears.
+ */
+export class Hearing {
+  /** One receiver per track id, kept across snapshots so it collects frames. */
+  private receivers = new Map<string, Receiver>();
+
+  /** Attach a receiver to every track of every participant that has none yet. */
+  attach(participants: readonly Heard[]): void {
+    for (const participant of participants) {
+      for (const track of participant.stream.getTracks()) {
+        if (!this.receivers.has(track.id)) this.receivers.set(track.id, new Receiver(track));
+      }
+    }
+  }
+
+  /** Per participant: the frames arriving, the tone their audio carries, their video's size. */
+  remotes(participants: readonly Heard[], tones: number[]): Record<string, Remote> {
+    this.attach(participants);
+    const held = new Set<string>();
+    const remotes: Record<string, Remote> = {};
+    for (const participant of participants) {
+      const remote = (remotes[participant.agentDid] ??= { audioFrames: 0, audioRecent: 0, tone: null, videoFrames: 0, videoRecent: 0, width: 0, height: 0 });
+      for (const track of participant.stream.getTracks()) {
+        held.add(track.id);
+        const receiver = this.receivers.get(track.id)!;
+        if (track.kind === "audio") {
+          remote.audioFrames += receiver.frames;
+          remote.audioRecent += receiver.recentFrames;
+          remote.tone = remote.tone ?? receiver.dominantTone(tones);
+        } else {
+          // The resolution of the track receiving most now: a replaced track keeps its last frame size.
+          if (receiver.recentFrames > remote.videoRecent) {
+            remote.width = receiver.width;
+            remote.height = receiver.height;
+          }
+          remote.videoFrames += receiver.frames;
+          remote.videoRecent = Math.max(remote.videoRecent, receiver.recentFrames);
+        }
+      }
+    }
+    for (const [id, receiver] of this.receivers) {
+      if (held.has(id)) continue;
+      receiver.stop();
+      this.receivers.delete(id);
+    }
+    return remotes;
+  }
+
+  stop(): void {
+    for (const receiver of this.receivers.values()) receiver.stop();
+    this.receivers.clear();
   }
 }
