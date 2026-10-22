@@ -12,12 +12,16 @@
 //! from the bundle and dropped after the call, so nothing a call hands the bundle is there for any
 //! other call, whoever makes it. One isolate is kept for the documentation, and is never given a
 //! record.
+//!
+//! **One call at a time.** Every isolate has the sandbox's whole memory cap, so calls made at once
+//! wait their turn ([`CALLS_AT_ONCE`]) rather than each start one: how much memory the template
+//! tools hold does not grow with how many callers call at once.
 
 use super::{BundleSandbox, SandboxError, SandboxLimits};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::{Arc, LazyLock};
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, Semaphore};
 
 /// The bundle, as WE builds it.
 pub const SOURCE: &str = include_str!("template_tools.bundle.js");
@@ -71,10 +75,38 @@ fn source() -> Arc<str> {
 /// Call a tool with `input` (the record, the arguments, the author) and await its answer, in a
 /// fresh isolate that ends with the call.
 pub async fn call(tool: &str, input: Value) -> Result<Value, SandboxError> {
-    let sandbox = BundleSandbox::start(TOOLSET, source(), SandboxLimits::default()).await?;
-    sandbox
-        .call(&["toolsets", TOOLSET, "call"], vec![json!(tool), input])
-        .await
+    call_with(TOOLSET, source(), tool, input).await
+}
+
+/// How many tool calls may run at once, each in an isolate of its own. One, as when every call
+/// went through a bundle's single isolate.
+const CALLS_AT_ONCE: usize = 1;
+
+/// [`call`], with `source` standing in for the bundle, in an isolate called `name`.
+async fn call_with(
+    name: &'static str,
+    source: Arc<str>,
+    tool: &str,
+    input: Value,
+) -> Result<Value, SandboxError> {
+    static SLOTS: Semaphore = Semaphore::const_new(CALLS_AT_ONCE);
+    let tool = tool.to_string();
+    // On a task of its own, which holds the slot until the isolate's thread has ended: a caller
+    // that gives up must not free it while the isolate still runs or holds its memory.
+    tokio::spawn(async move {
+        let _slot = SLOTS
+            .acquire()
+            .await
+            .map_err(|_| SandboxError::Closed("the template tools' calls were closed".into()))?;
+        let sandbox = BundleSandbox::start(name, source, SandboxLimits::default()).await?;
+        let answer = sandbox
+            .call(&["toolsets", TOOLSET, "call"], vec![json!(tool), input])
+            .await;
+        sandbox.close().await;
+        answer
+    })
+    .await
+    .unwrap_or_else(|e| Err(SandboxError::Closed(format!("the call's task failed: {e}"))))
 }
 
 /// The isolate that serves the documentation. Started on the first read; one that fails to start
@@ -135,6 +167,76 @@ mod tests {
         assert_eq!(read_doc("template/no-such-topic").await.unwrap(), None);
         assert!(is_topic("template/core/expressions"));
         assert!(!is_topic("templates"));
+    }
+
+    /// Stands in for the bundle: its one tool keeps its isolate busy for a while.
+    const SLOW: &str = r#"
+    export const toolsets = {
+      template: {
+        call: async () => { const until = Date.now() + 300; while (Date.now() < until) {} return { text: "ok" }; },
+      },
+    };
+    "#;
+
+    /// The most isolates called `name` running at once while `calls` run.
+    async fn most_isolates_while(
+        name: &str,
+        calls: Vec<tokio::task::JoinHandle<Result<Value, SandboxError>>>,
+    ) -> usize {
+        let count = || crate::tool_bundles::sandbox::running::count(name);
+        let mut most = 0;
+        while calls.iter().any(|c| !c.is_finished()) {
+            most = most.max(count());
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        for call in calls {
+            assert_eq!(call.await.unwrap(), Ok(json!({ "text": "ok" })));
+        }
+        most
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn template_tool_calls_run_one_at_a_time() {
+        init_v8_platform();
+        let name = "slots-at-once";
+        let calls = (0..4)
+            .map(|_| tokio::spawn(call_with(name, Arc::from(SLOW), "slow", json!({}))))
+            .collect();
+        assert_eq!(
+            most_isolates_while(name, calls).await,
+            1,
+            "calls made at once must not each hold an isolate"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_template_tool_call_has_let_go_of_its_isolate_when_it_answers() {
+        init_v8_platform();
+        let name = "slots-released";
+        for _ in 0..3 {
+            let answer = call_with(name, Arc::from(SLOW), "slow", json!({})).await;
+            assert_eq!(answer, Ok(json!({ "text": "ok" })));
+            assert_eq!(
+                crate::tool_bundles::sandbox::running::count(name),
+                0,
+                "the call answered while its isolate's thread was still running"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_template_tool_call_given_up_on_keeps_its_turn_until_its_isolate_is_done() {
+        init_v8_platform();
+        let name = "slots-given-up";
+        let given_up = tokio::spawn(call_with(name, Arc::from(SLOW), "slow", json!({})));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        given_up.abort();
+        let next = tokio::spawn(call_with(name, Arc::from(SLOW), "slow", json!({})));
+        assert_eq!(
+            most_isolates_while(name, vec![next]).await,
+            1,
+            "the next call started while the given-up one still ran"
+        );
     }
 
     #[tokio::test]
