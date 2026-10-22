@@ -11,13 +11,14 @@ use crate::agent::AgentService;
 use crate::db::Ad4mDb;
 use crate::globals::{AD4M_COMMIT, AD4M_VERSION};
 use crate::holochain_service::get_holochain_service;
+use crate::languages::LanguageController;
 use crate::runtime_service::notification_access::{
     caller_may_manage, granted_after_update, owner_may_read,
 };
 use crate::runtime_service::RuntimeService;
 use crate::types::domain::{ComputeLogEntry, ImportResult};
 use crate::types::Notification;
-use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
+use crate::types::{LanguageMeta, PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
 use super::guards::refuse_user_session;
 use super::perspectives_ws::get_perspective_or_404;
@@ -510,6 +511,8 @@ async fn delete_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
 
 // ── Link Language Templates ──
 
+/// Every known link-language template with its meta, so a client choosing
+/// one needs no `language.meta` call per template.
 async fn get_link_language_templates(
     _params: Value,
     ctx: Arc<RequestContext>,
@@ -517,10 +520,12 @@ async fn get_link_language_templates(
     ctx.require(&RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let templates = RuntimeService::with_global_instance(|runtime| {
-        Ok::<Vec<String>, WsRpcError>(runtime.get_know_link_languages())
-    })?;
-    Ok(serde_json::to_value(templates)?)
+    let addresses =
+        RuntimeService::with_global_instance(|runtime| runtime.get_know_link_languages());
+    let metas = LanguageController::global_instance()
+        .language_metas(&addresses)
+        .await;
+    Ok(serde_json::to_value(metas)?)
 }
 
 async fn add_link_language_templates(
@@ -862,7 +867,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         delete_notification,
     );
     // Link language templates
-    map.method::<NoParams, Vec<String>>(
+    map.method::<NoParams, Vec<LanguageMeta>>(
         "runtime.linkLanguageTemplates",
         get_link_language_templates,
     )
