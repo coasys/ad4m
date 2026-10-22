@@ -582,3 +582,69 @@ async fn t3_a_local_tombstone_ends_nothing() {
 
     assert!(present(&p, &vote), "a Local tombstone ends nothing");
 }
+
+/// The other status axis: a Shared tombstone ends only a Shared link. A Local
+/// link is private to this replica, so the author's tombstone naming it
+/// leaves it alone in every arrival order.
+fn own_local(signer: &TestSigner, predicate: &str, target: &str) -> LinkExpression {
+    let mut link = signed(signer, PROPOSAL, predicate, target);
+    link.status = Some(LinkStatus::Local);
+    link
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t3_a_shared_tombstone_does_not_end_a_local_link() {
+    let (mut p, _) = fixture().await;
+    let alice = TestSigner::generate();
+    let local = own_local(&alice, TO_STATE, "literal:string:draft");
+    p.add_link_expression(local.clone(), LinkStatus::Local, None)
+        .await
+        .expect("add the Local link");
+
+    sync_in(&p, vec![retraction_of(&alice, &local)], vec![]).await;
+
+    assert!(present(&p, &local), "a Shared tombstone ends no Local link");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t3_a_stored_shared_tombstone_does_not_cover_a_local_addition() {
+    let (mut p, _) = fixture().await;
+    let alice = TestSigner::generate();
+    let local = own_local(&alice, TO_STATE, "literal:string:draft");
+    sync_in(&p, vec![retraction_of(&alice, &local)], vec![]).await;
+
+    p.add_link_expression(local.clone(), LinkStatus::Local, None)
+        .await
+        .expect("add the Local link");
+
+    assert!(present(&p, &local), "tombstone first, Local link second");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t3_a_shared_tombstone_in_the_same_diff_does_not_cover_a_local_addition() {
+    let (p, _) = fixture().await;
+    let alice = TestSigner::generate();
+    let local = own_local(&alice, TO_STATE, "literal:string:draft");
+    let shared = signed(&alice, PROPOSAL, TO_STATE, "literal:string:done");
+
+    p.persist_link_diff(&PerspectiveDiff {
+        additions: vec![
+            retraction_of(&alice, &local),
+            local.clone(),
+            retraction_of(&alice, &shared),
+            shared.clone(),
+        ],
+        removals: vec![],
+    })
+    .await
+    .expect("persist");
+
+    assert!(
+        present(&p, &local),
+        "both in one diff: the Local link stays"
+    );
+    assert!(
+        !present(&p, &shared),
+        "the Shared one in the same diff ends"
+    );
+}
