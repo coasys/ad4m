@@ -420,6 +420,19 @@ describe('ApiClient notices a socket that went silent', () => {
         expect(socket(0).readyState).toBe(2)
     })
 
+    it('judges a new socket by its own pings, not by its predecessor\'s', async () => {
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+        await jest.advanceTimersByTimeAsync(500)
+        socket(1).open()
+        // Its first tick pings; nothing has gone unanswered on it yet.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(1).sent.some(m => m.type === 'ping')).toBe(true)
+        expect(socket(1).readyState).toBe(1)
+    })
+
     it('pings a quiet socket before it counts as silent, even when the timer fires late', async () => {
         // A socket with no traffic hears nothing until its first ping is answered.
         // Silence is counted from that ping, not from the last message.
