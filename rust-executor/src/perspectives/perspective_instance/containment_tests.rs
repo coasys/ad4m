@@ -482,7 +482,8 @@ async fn a_containment_subscription_follows_new_edges_and_removals() {
         .await
         .expect("a removed containment link re-runs the subscription");
     assert!(
-        !update.contains("ad4m://m4") && update.contains("\"instances\":[]"),
+        // An update carries the ids in the result and the rows that changed.
+        !update.contains("ad4m://m4") && update.contains("\"ids\":[]"),
         "{update}"
     );
 }
