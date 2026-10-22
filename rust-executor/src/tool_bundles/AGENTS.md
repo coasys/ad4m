@@ -38,6 +38,9 @@ else. Not Languages: no network, storage, agent or holochain access.
 
 - A bundle never touches a perspective; `mcp/tools/instances/template_tools.rs` reads and writes.
 - A record is seen by one call: every tool call runs in a fresh isolate that ends with it.
+- Template tool calls run one at a time (`builtin::CALLS_AT_ONCE`): each isolate has the whole
+  memory cap, so concurrent callers queue instead of each starting one. The slot is held on the
+  call's own task until its isolate is done, so a caller that gives up does not free it early.
 
 ## Do not
 
