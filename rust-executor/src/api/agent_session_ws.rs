@@ -85,8 +85,9 @@ pub struct RunAgentRequest {
     /// What the person is looking at, as a hint for the model (`{ "recordId": "…" }`).
     #[ts(optional, type = "Record<string, unknown>")]
     pub context: Option<Value>,
-    /// Tools that write which the model may call — `instance_update`, `call_record_tool`. None
-    /// means a session that only reads.
+    /// Tools that write which the model may call — `instance_update`, `call_record_tool`; only
+    /// tools that write inside the perspective (`agent_session::SESSION_WRITES`). None means a
+    /// session that only reads.
     #[ts(optional)]
     pub write_tools: Option<Vec<String>>,
     /// A model id; the node's default language model when absent.
