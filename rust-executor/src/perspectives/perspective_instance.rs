@@ -2246,7 +2246,8 @@ impl PerspectiveInstance {
             .flatten()
             .collect();
         // A held link's stored status decides (#1176): a Shared monotonic
-        // link is ended only by its author's tombstone, never by a removal.
+        // link ends only as its `monotonic` table entry allows, never by a
+        // removal.
         for link in &removals {
             refuse_monotonic_removal(link, link.status.as_ref().unwrap_or(&LinkStatus::Local))?;
         }
@@ -4239,7 +4240,7 @@ impl PerspectiveInstance {
         })
     }
 
-    /// Returns what `ad4m://flow/retracted` tombstones did on the way in
+    /// Returns what `ad4m://retracted` tombstones did on the way in
     /// (`monotonic::RetractionEffects`); callers that publish the diff fold
     /// it in so subscribers see what the store holds.
     pub(crate) async fn persist_link_diff(

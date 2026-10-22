@@ -82,7 +82,7 @@
 //! unanswerable, but loudly, and only F's. Index and body links are flow
 //! links, so they are monotonic (`perspectives::monotonic`, #1176): nobody
 //! can remove a genuine receipt's index link, and nobody but each junk
-//! link's author can end it (by `ad4m://flow/retracted`), so a flood lasts
+//! link's author can end it (by `ad4m://retracted`), so a flood lasts
 //! until its authors retract it. A remedy is tracked in #1177.
 //!
 //! # The quorum time

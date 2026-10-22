@@ -4,7 +4,7 @@
 //! - T1: a removal arriving from the link language is dropped.
 //! - T2: every local write path refuses a Shared removal, before anything is
 //!   persisted or committed; a Local link in the same namespace still goes.
-//! - T3: `ad4m://flow/retracted` ends the author's own link on every replica,
+//! - T3: `ad4m://retracted` ends the author's own link on every replica,
 //!   in either arrival order, and cannot be forged or undone by a replay.
 //!
 //! A child of `perspective_instance` so the `commit_batch` backstop can queue
@@ -19,7 +19,7 @@ const PROPOSAL: &str = "ad4m://flow/proposal/p1";
 const ACCEPTED_BY: &str = "ad4m://acceptedBy";
 const TO_STATE: &str = "ad4m://flow/to_state";
 const CURRENT_STATE: &str = "ad4m://flow/current_state";
-const RETRACTED: &str = "ad4m://flow/retracted";
+const RETRACTED: &str = "ad4m://retracted";
 const ROLE_GRANT_REVOKED: &str = "ad4m://flow/role_grant_revoked";
 const PLAIN: &str = "test://likes";
 

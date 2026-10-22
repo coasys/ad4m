@@ -31,7 +31,7 @@ async fn a_retracted_settled_vote_recomputes_the_earlier_state() {
     let retraction = bob.sign(
         Link {
             source: minted.clone(),
-            predicate: Some("ad4m://flow/retracted".to_string()),
+            predicate: Some("ad4m://retracted".to_string()),
             target: format!("literal:string:{}", votes[0].proof.signature),
         }
         .normalize(),
@@ -152,7 +152,7 @@ async fn rejecting_our_own_settled_vote_regresses_the_state() {
     let retractions: Vec<_> = links_of(&f, &proposal)
         .await
         .into_iter()
-        .filter(|l| l.data.predicate.as_deref() == Some("ad4m://flow/retracted"))
+        .filter(|l| l.data.predicate.as_deref() == Some("ad4m://retracted"))
         .collect();
     assert_eq!(
         retractions.len(),
