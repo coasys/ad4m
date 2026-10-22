@@ -15,7 +15,7 @@
  * on Alice (no other choice) and either `relay` or another type on
  * Bob (depending on what str0m picks).  The point is media flows.
  *
- * Like W5 this needs a TURN_URL.  Skips gracefully without one.
+ * Like W5 this needs a TURN_URL; shows as skipped (pending) without one.
  */
 
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";
@@ -28,6 +28,10 @@ export const f3OneWayNat: Scenario = {
   name: "Asymmetric ICE: one peer relay-only",
   description: "Alice relay-only, Bob unrestricted — verifies asymmetric ICE establishment",
 
+  unavailable() {
+    return process.env.TURN_URL ? null : "TURN_URL env var not set";
+  },
+
   async run(ctx: ScenarioContext): Promise<ScenarioResult> {
     const { branch } = ctx;
     const startTime = Date.now();
@@ -36,19 +40,8 @@ export const f3OneWayNat: Scenario = {
 
     const turnUrl = process.env.TURN_URL;
     if (!turnUrl) {
-      metrics["skipped"] = true;
-      metrics["skip_reason"] = "TURN_URL env var not set";
-      return {
-        scenario: "f3-one-way-nat",
-        branch,
-        startTime,
-        endTime: Date.now(),
-        durationMs: Date.now() - startTime,
-        passed: true,
-        metrics,
-        samples,
-        summary: `F3: SKIPPED — TURN_URL unset`,
-      };
+      // The harness skips the scenario first (see `unavailable`).
+      throw new Error("F3: TURN_URL env var not set");
     }
 
     const iceServers = [
