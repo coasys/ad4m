@@ -104,11 +104,13 @@ async function join(opts: JoinOptions): Promise<void> {
 
   if (!session) {
     // As an app does (WE's call adapter): the space's stored policy decides the topology.
-    const sfuConfig = await proxy.sfuConfig(opts.neighbourhoodUrl).catch(() => undefined);
+    // The executor always has a config, so an error here is a failure to report,
+    // not a reason to join in mesh.
+    const sfuConfig = await proxy.sfuConfig(opts.neighbourhoodUrl);
     session = await proxy.createSession(opts.room, {
       neighbourhoodUrl: opts.neighbourhoodUrl,
-      topology: sfuConfig?.mode === "mesh" ? "mesh" : "auto",
-      ...(sfuConfig ? { sfuConfig } : {}),
+      topology: sfuConfig.mode === "mesh" ? "mesh" : "auto",
+      sfuConfig,
     });
     session.on("topology-changed", (topology: string) => { state.topology = topology; });
     session.on("participant-joined", (p: any) => { state.roster.add(didOf(p)); state.left.delete(didOf(p)); receiveAll(); });
