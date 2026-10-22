@@ -4228,6 +4228,21 @@ impl PerspectiveInstance {
         // and computes the verdict itself. Callers decorate *after* persist for
         // pubsub/prolog, rather than decorating and converting back here.
 
+        // One store transaction for the whole diff, so a batch lands as one
+        // write. On failure nothing was written; fall back to one link at a
+        // time.
+        match self
+            .sparql_store
+            .apply_diff(&diff.removals, &diff.additions)
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => log::warn!(
+                "Failed to apply link diff to SPARQL store in one transaction, \
+                 writing links one by one: {:?}",
+                e
+            ),
+        }
+
         // Removals first
         for removal in &diff.removals {
             if let Err(e) = self.sparql_store.remove_link(removal) {
@@ -6673,6 +6688,7 @@ impl PerspectiveInstance {
             // to the claim (the min-DID claim still prevents doubles among peers
             // that escalate together).
             let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
+            let settle_ms = crate::perspectives::auto_processor::claim::claim_settle_ms(self).await;
             let outcome = match run_one_pass(
                 &mut perspective_clone,
                 cfg,
@@ -6680,7 +6696,7 @@ impl PerspectiveInstance {
                 now_ms,
                 context,
                 escalate,
-                crate::perspectives::auto_processor::claim::CLAIM_SETTLE_MS,
+                settle_ms,
             )
             .await
             {

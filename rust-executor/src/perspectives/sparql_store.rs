@@ -5,7 +5,7 @@ use chrono::DateTime as ChronoDateTime;
 use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
-use oxigraph::store::Store;
+use oxigraph::store::{Store, Transaction};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
@@ -527,6 +527,19 @@ impl SparqlStore {
     /// crash before the commit, leaves none of them, and readers never see a
     /// direct triple without its reifier and annotations.
     fn insert_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let mut tx = self.store.start_transaction()?;
+        Self::insert_link_in(&mut tx, link)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The quads of one link, written into `tx`: the direct triple, its
+    /// reifier and the reifier's annotations.
+    fn insert_link_in(tx: &mut Transaction<'_>, link: &LinkExpression) -> Result<(), Error> {
         // Status must be decided by the caller, not defaulted here. A silent
         // `None => Shared` fallback would let any write path that forgot to
         // set it mislabel a local link as shared — the kind of quiet
@@ -542,11 +555,6 @@ impl SparqlStore {
                 link.data.target
             )
         })?;
-        let _writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
-        let mut tx = self.store.start_transaction()?;
         let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
         let reifier_iri = make_reifier_iri(link);
 
@@ -640,8 +648,6 @@ impl SparqlStore {
                 GraphNameRef::DefaultGraph,
             ));
         }
-
-        tx.commit()?;
         Ok(())
     }
 
@@ -701,6 +707,47 @@ impl SparqlStore {
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
+        Self::remove_link_in(&mut tx, link)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Apply a diff in one transaction, removals before additions. Removal
+    /// matches by reifier (author, triple and timestamp), so the other order
+    /// would delete a link that is removed and re-added unchanged. Readers see
+    /// the store before or after the whole diff. An addition without a status is skipped, as `add_link`
+    /// refuses it.
+    pub fn apply_diff(
+        &self,
+        removals: &[LinkExpression],
+        additions: &[LinkExpression],
+    ) -> Result<(), Error> {
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let mut tx = self.store.start_transaction()?;
+        for link in removals {
+            Self::remove_link_in(&mut tx, link)?;
+        }
+        for link in additions {
+            if link.status.is_none() {
+                log::warn!(
+                    "Refusing to store link without an explicit local/shared status: {} -[{}]-> {}",
+                    link.data.source,
+                    link.data.predicate.as_deref().unwrap_or(""),
+                    link.data.target
+                );
+                continue;
+            }
+            Self::insert_link_in(&mut tx, link)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove one link's quads inside `tx`.
+    fn remove_link_in(tx: &mut Transaction<'_>, link: &LinkExpression) -> Result<(), Error> {
         let reifier_iri = make_reifier_iri(link);
 
         // 1. Remove all quads where reifier is subject (metadata + rdf:reifies)
@@ -737,7 +784,7 @@ impl SparqlStore {
                 Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
                 Term::Literal(l) => TermRef::Literal(l.as_ref()),
                 Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-                Term::Triple(_) => return Ok(tx.commit()?),
+                Term::Triple(_) => return Ok(()),
             };
             tx.remove(QuadRef::new(
                 source.as_ref(),
@@ -746,8 +793,6 @@ impl SparqlStore {
                 GraphNameRef::DefaultGraph,
             ));
         }
-
-        tx.commit()?;
         Ok(())
     }
 
@@ -1583,6 +1628,70 @@ mod tests {
 
     fn new_service() -> SparqlStore {
         SparqlStore::new(None).unwrap()
+    }
+
+    /// `apply_diff` removes before it adds, so a link removed and re-added
+    /// unchanged in the same diff (same reifier) stays, a re-add of its triple
+    /// with a new timestamp stays beside it, a replaced value is swapped, and
+    /// an addition without a status is skipped alone.
+    #[test]
+    fn apply_diff_removes_before_it_adds() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let kept = make_link_with_ts(
+            &signer,
+            "ad4m://n",
+            "ad4m://status",
+            "ad4m://active",
+            "2026-01-01T00:00:01Z",
+        );
+        let old = make_link_with_ts(
+            &signer,
+            "ad4m://n",
+            "ad4m://expires",
+            "ad4m://t1",
+            "2026-01-01T00:00:01Z",
+        );
+        svc.add_link(&kept).unwrap();
+        svc.add_link(&old).unwrap();
+
+        let kept_again = make_link_with_ts(
+            &signer,
+            "ad4m://n",
+            "ad4m://status",
+            "ad4m://active",
+            "2026-01-01T00:00:02Z",
+        );
+        let new = make_link_with_ts(
+            &signer,
+            "ad4m://n",
+            "ad4m://expires",
+            "ad4m://t2",
+            "2026-01-01T00:00:02Z",
+        );
+        let mut no_status = make_link(&signer, "ad4m://n", "ad4m://other", "ad4m://x");
+        no_status.status = None;
+        svc.apply_diff(
+            &[kept.clone(), old],
+            &[kept_again, new, kept.clone(), no_status],
+        )
+        .unwrap();
+
+        let mut targets: Vec<(String, String)> = svc
+            .get_links_by_source("ad4m://n")
+            .unwrap()
+            .into_iter()
+            .map(|l| (l.data.predicate.unwrap_or_default(), l.data.target))
+            .collect();
+        targets.sort();
+        assert_eq!(
+            targets,
+            vec![
+                ("ad4m://expires".to_string(), "ad4m://t2".to_string()),
+                ("ad4m://status".to_string(), "ad4m://active".to_string()),
+                ("ad4m://status".to_string(), "ad4m://active".to_string()),
+            ]
+        );
     }
 
     // ── Storage Model Tests (Reifier Model) ──
