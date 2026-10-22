@@ -44,8 +44,8 @@
 //! # Retraction
 //!
 //! `<link.source> --ad4m://retracted--> literal:string:<link.proof.signature>`,
-//! Shared and signed by the retracted link's own author. It ends only links
-//! whose entry is [`Ending::Tombstone`]. [`retraction_effects`]
+//! Shared and signed by the retracted link's own author. It ends only Shared
+//! links whose entry is [`Ending::Tombstone`]; a Local link stays. [`retraction_effects`]
 //! runs inside every store write, so every replica applies it the same way
 //! whatever path the tombstone or the link arrives by: a stored link it names
 //! (same source, same author, that signature) is removed from the store, and
@@ -297,9 +297,12 @@ fn retracted_signature(link: &LinkExpression) -> Option<String> {
 }
 
 /// Whether `tombstone` (already checked by [`retracted_signature`] to name
-/// `signature`) ends `link`.
+/// `signature`) ends `link`. Only a Shared link: a Local one is private to
+/// this replica, whatever tombstone names it. Every store and same-diff
+/// match goes through here.
 fn ends(tombstone: &LinkExpression, signature: &str, link: &LinkExpression) -> bool {
-    is_retractable(link.data.predicate.as_deref())
+    link.status == Some(LinkStatus::Shared)
+        && is_retractable(link.data.predicate.as_deref())
         && link.data.source == tombstone.data.source
         && link.author == tombstone.author
         && link.proof.signature == signature

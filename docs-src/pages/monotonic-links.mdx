@@ -34,7 +34,7 @@ A link whose entry is **Tombstone** ends through a signed tombstone from its **a
 <link.source> --ad4m://retracted--> literal:string:<link.proof.signature>
 ```
 
-Every replica applies it the same way: the link that tombstone names (same source, same author, that signature) is removed from its store, and a copy of the link that arrives later is not stored, so the order the two sync in does not matter. A tombstone signed by anyone else, whose signature does not verify, or that is itself `Local`, does nothing. A tombstone never ends a link whose entry is **Revocation** or **Never**. The removal is each replica's own store effect; it is never sent to peers as a removal.
+Every replica applies it the same way: the link that tombstone names (same source, same author, that signature) is removed from its store, and a copy of the link that arrives later is not stored, so the order the two sync in does not matter. A tombstone signed by anyone else, whose signature does not verify, or that is itself `Local`, does nothing, and a tombstone never ends a `Local` link. A tombstone never ends a link whose entry is **Revocation** or **Never**. The removal is each replica's own store effect; it is never sent to peers as a removal.
 
 ## Mixed versions
 
