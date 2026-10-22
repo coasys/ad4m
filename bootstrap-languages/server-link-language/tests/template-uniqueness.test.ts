@@ -5,7 +5,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { initAdapters, getConfig, resetAdapters } from "../src/adapters.js";
-import { commitNeedsKeyRetry } from "../src/key-ring-policy.js";
+import { commitNeedsKeyRetry, refreshSkippedByCooldown } from "../src/key-ring-policy.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const bundlePath = resolve(__dirname, "..", "build", "bundle.js");
@@ -84,6 +84,22 @@ describe("template uniqueness", () => {
         const roomB = getConfig().roomId;
 
         assert.notStrictEqual(roomA, roomB);
+    });
+});
+
+describe("refreshSkippedByCooldown", () => {
+    it("a joiner waiting for its first keys re-checks on every sync, cooldown or not", () => {
+        // Staging E5: a joiner re-read /keys at most every 10 s, so it saw
+        // the room up to 10 s after the admin granted its keys.
+        assert.strictEqual(refreshSkippedByCooldown("pending", 0, 10_000), false);
+        assert.strictEqual(refreshSkippedByCooldown("pending", 500, 10_000), false);
+    });
+
+    it("keeps the cooldown once keys are held, or when the room has none or errored", () => {
+        for (const status of ["ready", "none", "error"] as const) {
+            assert.strictEqual(refreshSkippedByCooldown(status, 500, 10_000), true, status);
+            assert.strictEqual(refreshSkippedByCooldown(status, 10_000, 10_000), false, status);
+        }
     });
 });
 
