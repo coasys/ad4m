@@ -15,12 +15,125 @@ export interface WakerSubscription {
   /** SPARQL, or with `className` a model query (JSON) over that class. */
   query: string;
   /**
-   * The class `query` reads, as a model query. A children subscription has
-   * one from the executor's `generate_waker_query`: the built-in
-   * `ad4m://Container` (#1446). Without it `query` is SPARQL.
+   * The class `query` reads, as a model query. A mention subscription has
+   * one, from the executor's `get_mention_waker_config`: the built-in
+   * `ad4m://TextContent`; a children subscription has the built-in
+   * `ad4m://Container`, from `generate_waker_query` (#1446). Without it
+   * `query` is SPARQL.
    */
   className?: string;
+  /**
+   * A mention subscription's terms (profile names and the DID), from
+   * `get_mention_waker_config`. The query matches substrings, so a record
+   * wakes only when its text holds one of these as a whole word
+   * ({@link holdsAWholeWordTerm}); without them a mention subscription is
+   * refused.
+   */
+  terms?: string[];
   neighbourhood?: string;
+}
+
+/** A letter, combining mark, digit or underscore: what a term must not touch. */
+const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
+
+/**
+ * The elements a message's HTML is made of. A `<` before any other name is text:
+ * We stores plain text, where "<hey Data> can you look" is words.
+ */
+const ELEMENT =
+  "a|abbr|b|bdi|bdo|blockquote|br|caption|center|cite|code|col|colgroup|dd|del|details|dfn|div|dl|dt|em|" +
+  "figcaption|figure|font|h[1-6]|hr|i|img|ins|kbd|label|li|mark|ol|p|pre|q|s|samp|section|article|small|" +
+  "span|strike|strong|sub|summary|sup|table|tbody|td|tfoot|th|thead|time|tr|u|ul|var|wbr|script|style";
+/** An attribute: a name, then optionally `=` and a quoted value (which may hold `>`) or an unquoted one. */
+const ATTRIBUTE = `\\s+[A-Za-z_:][-\\w:.]*(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s"'=<>\`]+))?`;
+/**
+ * Markup: a comment, a `<script>`/`<style>` element with its contents, or a tag of
+ * a known element whose rest is a valid attribute list. "a < b" and
+ * "if a <b then ask Data, else c -> d" are text: the comma is no attribute.
+ */
+const TAG = new RegExp(
+  `<!--[\\s\\S]*?-->` +
+    `|<(script|style)(?=[\\s/>])(?:${ATTRIBUTE})*\\s*>[\\s\\S]*?<\\/\\1\\s*>` +
+    `|<(?:${ELEMENT})(?=[\\s/>])(?:${ATTRIBUTE})*\\s*\\/?>` +
+    `|<\\/(?:${ELEMENT})\\s*>`,
+  "gi",
+);
+/** Tags that break a line: replaced by a space, so `<p>hi</p><p>Data</p>` keeps "Data" a word. */
+const BREAKING_TAG = /^<\/?(?:p|div|br|hr|li|ul|ol|h[1-6]|blockquote|pre|tr|td|th|table|section|article)\b/i;
+/**
+ * The attributes a mention puts its target's DID in: Flux's `<a data-type="mention"
+ * href="did:…">`, older Flux messages' `<span data-id="did:…">`, and We's editor chip
+ * `<span class="we-mention" data-did="did:…">`.
+ */
+const ATTRIBUTES = new RegExp(ATTRIBUTE, "g");
+const MENTION_TARGET = /^\s+(?:href|data-id|data-did)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))$/i;
+
+/**
+ * How much of a record's text the word check reads. Dropping markup costs time
+ * quadratic in a run of unclosed `<script>`, `<style>` or `<!--` openers, so a
+ * very long text could hold the event loop for seconds, and a row that holds
+ * no term is checked again on every result while it is in the window. A term
+ * past this many characters does not wake.
+ */
+export const MENTION_TEXT_LIMIT = 16_384;
+
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+function decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (whole, ref: string) => {
+    if (ref[0] !== "#") return ENTITIES[ref.toLowerCase()] ?? whole;
+    const code = ref[1] === "x" || ref[1] === "X" ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+  });
+}
+
+/**
+ * What a reader sees of `text`, and the DIDs its mentions point at. `text` may be
+ * HTML (TextContent allows it): tag names and attributes are markup, not words, so
+ * a bot named "Data" must not wake on `data-type="mention"` in a mention of
+ * someone else. Plain text passes through unchanged, apart from entities.
+ */
+function readableParts(text: string): { visible: string; targets: string[] } {
+  const targets: string[] = [];
+  const visible = text.replace(TAG, (tag, scriptOrStyle?: string) => {
+    if (scriptOrStyle) return " ";
+    if (tag.startsWith("<!--")) return "";
+    // Parse complete attributes first: a DID-shaped string inside `title`
+    // is not a target attribute and must not wake an agent.
+    for (const attribute of tag.matchAll(ATTRIBUTES)) {
+      const target = MENTION_TARGET.exec(attribute[0]);
+      if (target) targets.push(decodeEntities(target[1] ?? target[2] ?? target[3]));
+    }
+    return BREAKING_TAG.test(tag) ? " " : "";
+  });
+  return { visible: decodeEntities(visible), targets };
+}
+
+/**
+ * Whether `text` holds one of `terms` as a whole word, case-insensitively:
+ * "Data" is in "hi Data!", "@data" and "Data's turn", not in "metadata" or
+ * "database". A term is matched literally (regex characters, quotes) and must
+ * not touch a letter, mark, digit or underscore on either side, so a name
+ * that starts or ends with punctuation still matches. Same rule as #1459's
+ * SPARQL `(?:^|\W)term(?:\W|$)`.
+ *
+ * The rule runs on the visible text only: in HTML, tags and attributes are
+ * dropped and entities decoded first. A mention's target attribute
+ * (`href`, `data-id`, `data-did`) matches an exact, case-sensitive DID term, which
+ * is how a mention by DID is found when the DID is not in the visible text.
+ *
+ * The mention query's `contains` matches substrings (model query has no word
+ * match); this is the check that keeps "data" from waking on "metadata".
+ * It reads the first {@link MENTION_TEXT_LIMIT} characters only.
+ */
+export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
+  const { visible, targets } = readableParts(text.slice(0, MENTION_TEXT_LIMIT));
+  return terms.some((term) => {
+    if (!term) return false;
+    if (term.startsWith("did:") && targets.includes(term)) return true;
+    const escaped = term.replace(/[\\^$.*+?()[\]{}|\/]/g, "\\$&");
+    return new RegExp(`(?<!${WORD_CHAR})${escaped}(?!${WORD_CHAR})`, "iu").test(visible);
+  });
 }
 
 /** The built-in `Container` (`Container.builtinUri`; not imported, so the
@@ -29,7 +142,7 @@ const CONTAINER = "ad4m://Container";
 
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
-  /** The message's expression address (source of the body link). */
+  /** The mentioned record's id. */
   address: string;
   /**
    * Every container holding it (channels, threads, calls, blocks): whatever
@@ -203,6 +316,13 @@ export class WakerSubscriptionManager {
       throw new Error("WakerSubscriptionManager: QuerySubscriptionProxy must be provided via constructor options");
     }
     const QuerySubscriptionProxy = this.QuerySubscriptionProxyCtor;
+    if (sub.type === "mention" && sub.className && !sub.terms?.length) {
+      // Without terms the whole-word check cannot run, and every substring
+      // ("metadata" for "data") would wake the agent.
+      throw new Error(
+        `Waker subscription ${sub.id}: a mention subscription needs its terms (get_mention_waker_config returns them)`,
+      );
+    }
 
     this.logger.info(
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
@@ -298,23 +418,31 @@ export class WakerSubscriptionManager {
       }
 
       if (sub.type === "mention") {
-        // For mention subscriptions: track seen message addresses.
-        // Only wake for messages we haven't seen before.
+        // For mention subscriptions: track seen record ids.
+        // Only wake for records we haven't seen before.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
 
+        const terms = sub.terms ?? [];
         for (const item of rows as any[]) {
           // A SPARQL row names the record as `source`, a model row as `id`.
           const address = sub.className ? item?.id : item?.source;
-          if (typeof address === "string" && address && !currentSeen.has(address)) {
-            currentSeen.add(address);
-            newMessages.push(address);
+          if (typeof address !== "string" || !address || currentSeen.has(address)) continue;
+          if (terms.length) {
+            // The mention query matched a substring; wake only on a whole word.
+            const text = Array.isArray(item.text) ? item.text.join(" ") : item.text;
+            if (typeof text !== "string" || !holdsAWholeWordTerm(text, terms)) {
+              this.logger.debug(`[waker] ${sub.id}: ${address} holds no term as a whole word, skipping`);
+              continue;
+            }
           }
+          currentSeen.add(address);
+          newMessages.push(address);
         }
 
         if (newMessages.length === 0) {
           this.logger.info(
-            `[waker] ${sub.id}: all ${rows.length} items already seen, skipping`,
+            `[waker] ${sub.id}: no new mention among ${rows.length} items, skipping`,
           );
           return;
         }
