@@ -76,7 +76,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
         RuntimeFunctions::LinkLanguageTemplates => {
             let templates = ad4m_client.runtime.link_language_templates().await?;
             for template in templates {
-                println!("{}", template);
+                println!("{} {}", template.address, template.name);
             }
         }
         RuntimeFunctions::AddLinkLanguageTemplates { addresses } => {
