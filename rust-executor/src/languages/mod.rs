@@ -472,7 +472,7 @@ impl LanguageController {
     }
 
     /// Calculate IPFS hash for a language bundle using the same algorithm as utils_extension::hash()
-    pub(crate) fn calculate_language_hash(&self, bundle_content: &str) -> String {
+    fn calculate_language_hash(&self, bundle_content: &str) -> String {
         use cid::Cid;
         use multibase::Base;
         use multihash_codetable::{Code, MultihashDigest};
@@ -888,7 +888,7 @@ impl LanguageController {
     /// Make sure `language`'s bundle is on disk and hashes to its address,
     /// fetching it from the language language if it is not there; returns its
     /// path. Does not load it.
-    pub(crate) async fn fetch_language(&self, language: &str) -> Result<PathBuf, AnyError> {
+    async fn fetch_language(&self, language: &str) -> Result<PathBuf, AnyError> {
         let language_dir = languages_directory().join(language);
         let meta_path = language_dir.join("meta.json");
         let bundle_path = language_dir.join("bundle.js");

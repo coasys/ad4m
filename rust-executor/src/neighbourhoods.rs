@@ -32,12 +32,11 @@ pub async fn neighbourhood_publish_from_perspective_with_context(
 ) -> Result<String, AnyError> {
     let perspective = get_perspective(uuid).ok_or(anyhow!("Perspective not found"))?;
 
-    // The link language must exist before a neighbourhood names it. Loading it
-    // waits for no one here: `ensure_link_language` loads and attaches it, and
-    // the perspective's state reports how that goes.
-    LanguageController::global_instance()
-        .fetch_language(&link_language)
-        .await?;
+    // The creator's link language loads before the URL exists: loading it is
+    // what claims the neighbourhood's backing store (a server-link room makes
+    // its first member the admin), so a joiner must not get there first. If
+    // `apply_template` is still installing it, this waits for that install.
+    LanguageController::install_language(link_language.clone()).await?;
 
     let neighbourhood = Neighbourhood {
         link_language,

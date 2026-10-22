@@ -1,9 +1,9 @@
-//! Publishing and joining a neighbourhood must not wait on its link language:
-//! telling it a new owner (`peersSetLocal`) is a Holochain zome call in
-//! p-diff-sync, queued behind everything else that language's runtime is
-//! doing; fetching one another executor has just published can take until
-//! its deadline; loading one installs a Holochain app. The perspective's
-//! `ensure_link_language` does those, and its state reports them.
+//! Joining a neighbourhood must not wait on its link language: telling it a
+//! new owner (`peersSetLocal`) is a Holochain zome call in p-diff-sync, queued
+//! behind everything else that language's runtime is doing; fetching one
+//! another executor has just published can take until its deadline; loading
+//! one installs a Holochain app. The perspective's `ensure_link_language` does
+//! those, and its state reports them.
 
 use super::*;
 use crate::agent::{AgentContext, AgentService};
@@ -211,50 +211,4 @@ async fn a_first_join_does_not_wait_for_the_link_language_install() {
         .unwrap();
     assert_eq!(joined.state, PerspectiveState::NeighbourhoodJoinInitiated);
     crate::perspectives::remove_perspective(&joined.uuid).await;
-}
-
-/// Publishing names a link language that is on disk without loading it:
-/// loading one starts its runtime and, for Holochain, installs its app. The
-/// perspective's `ensure_link_language` loads it afterwards.
-#[tokio::test(start_paused = true)]
-async fn publishing_does_not_load_the_link_language() {
-    setup_wallet();
-    Ad4mDb::init_global_instance(":memory:").unwrap();
-    AgentService::init_global_test_instance();
-    let controller = LanguageController::global_instance();
-    let bundle = format!("export const name = 'never loaded {}';", Uuid::new_v4());
-    let link_language = controller.calculate_language_hash(&bundle);
-    let dir = crate::test_utils::test_languages_directory().join(&link_language);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("bundle.js"), &bundle).unwrap();
-
-    let handle = PerspectiveHandle::new_from_name("to publish".to_string());
-    Ad4mDb::with_global_instance(|db| db.add_perspective(&handle)).unwrap();
-    let instance = PerspectiveInstance::new(handle, None);
-    crate::perspectives::register_perspective(instance.uuid.clone(), instance.clone());
-    let nh = serve_system_language(neighbourhood_language, one_neighbourhood).await;
-
-    let published = tokio::time::timeout(
-        Duration::from_secs(1),
-        crate::neighbourhoods::neighbourhood_publish_from_perspective_with_context(
-            &instance.uuid,
-            link_language.clone(),
-            Perspective::default(),
-            &AgentContext::main_agent(),
-        ),
-    )
-    .await;
-
-    stop_serving_system_language(neighbourhood_language, nh).await;
-    crate::perspectives::unregister_perspective(&instance.uuid);
-    let url = published
-        .expect("the publish waited for the link language")
-        .unwrap();
-    assert_eq!(url, "neighbourhood://QmTheNeighbourhood");
-    assert!(!controller.is_language_loaded(&link_language).await);
-    let handle = instance.persisted.lock().await.clone();
-    assert_eq!(
-        handle.state,
-        PerspectiveState::NeighbourhoodCreationInitiated
-    );
 }
