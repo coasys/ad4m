@@ -137,7 +137,7 @@ One listener serves one instance. Run staging and prod as separate servers with 
 - The operator only manages rooms that exist (rooms are still created by their first agent). The operator cannot remove the room admin.
 - **Live logs:** the page shows the server's log as it is written (both listeners), with a level filter. `GET /api/logs` streams it as Server-Sent Events: the last 1000 lines first, then each new one. A reconnect gets the last 1000 lines again and the page starts its list over. If the sign-in has expired, the panel stops updating: reload the page. The lines are kept in memory only, at most 8 streams are open at once, and a stream sends `X-Accel-Buffering: no` and a comment line every 15 s, so nginx neither buffers it nor closes it as idle. The lines are what the server already writes to stdout: no headers, so no tokens.
 
-**Trust model.** This gives the operator no power it does not already have: the server owns the ACL (and the SQLite file). But it makes ACL changes by the operator a supported path. The admin's server-link-language grants room keys to every ACL member that lacks them, so **a DID the operator admits can read the room's encrypted history** once the admin's executor has been online. Only run this listener where the server's operator is trusted with membership. Removing a member does not rotate the room key: the removed DID keeps the keys it had, but the ACL check stops it from fetching anything new.
+**Trust model.** This gives the operator no power it does not already have: the server owns the ACL (and the SQLite file). But it makes ACL changes by the operator a supported path. Every member's server-link-language grants the room keys it holds to every ACL member that lacks them, so **a DID the operator admits can read the room's encrypted history** once any member holding the keys has been online. Only run this listener where the server's operator is trusted with membership. Removing a member does not rotate the room key: the removed DID keeps the keys it had, but the ACL check stops it from fetching anything new.
 
 **Wiring it behind a sign-in.** Put a reverse proxy in front that signs the human in and injects the token, so the browser never holds it. With nginx and [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) (GitHub provider, `github_users` allowlist = the operators), on a host of its own:
 
@@ -214,21 +214,21 @@ The server handles storage and sync — it does not speak AD4M on its own. The c
 
 ### End-to-end encryption (optional)
 
-E2E encryption uses **true client-side key generation**: the admin's language client generates each room key locally, seals it to every member's X25519 public key via ECIES (ephemeral X25519 ECDH + HKDF-SHA256 + AES-256-GCM), and uploads only the sealed envelopes. The server never sees the plaintext key.
+E2E encryption uses **true client-side key generation**: the admin's language client generates each room key locally, seals it to the DID of every ACL member (the X25519 form of the DID's Ed25519 key; ephemeral X25519 ECDH + HKDF-SHA256 + AES-256-GCM, the AD4M executor's sealed box), and uploads only the sealed boxes. The server never sees the plaintext key and stores no member keys: the ACL is DIDs.
 
 ```bash
 # Enable or rotate the room key (admin only).
-# The client generates the key, fetches ACL for X25519 public keys,
-# seals the key to each member, and POSTs only sealed envelopes:
+# The client generates the key, seals it to each ACL member's DID,
+# and POSTs only sealed boxes:
 curl -X POST https://your-server:3456/rooms/YOUR_ROOM/keys/rotate \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"keys": [{"did": "did:key:z6Mk...", "encryptedKey": {"ephemeralPublicKey": "...", "nonce": "...", "ciphertext": "..."}}]}'
 ```
 
-After rotation, each member receives a sealed copy of the new room key the next time they connect or refresh their key ring. Once a room has E2E enabled, the server rejects plaintext commits — a client without keys cannot write until it receives them.
+A rotation seals the new version to every ACL member, including members that never connected; each reads it the next time it connects or refreshes its key ring. Once a room has E2E enabled, the server rejects plaintext commits — a client without keys cannot write until it receives them.
 
-After adding a new member to an encrypted room, rotate again so they receive the new version. The admin's language instance then automatically detects members missing historical key versions and re-seals those versions for them (see `performAdminKeyGrants` in server-link-language).
+A member added after a rotation gets the versions it lacks from any member holding them: every member's language reads `GET /keys/missing` and seals the versions it holds to the members lacking them (`POST /keys/grant`, see `src/room-keys.ts` in server-link-language). The server accepts a grant only of versions the granter holds, and keeps the first box stored per member and version.
 
 ## How it works
 
@@ -254,9 +254,11 @@ GET  /rooms/:roomId/render    -> { links: LinkExpression[], revision }
 GET  /rooms/:roomId/revision  -> { revision, sequence }
 GET  /rooms/:roomId/peers     -> { peers: string[] }               (currently online agents)
 POST /rooms/:roomId/acl       { action: "add"|"remove", did } (admin only)
-GET  /rooms/:roomId/acl       -> { admin, members: [{did, x25519PublicKey}] }
+GET  /rooms/:roomId/acl       -> { admin, members: [{did}] }
 GET  /rooms/:roomId/keys       -> { keys: [...], e2e_enabled } | 404 (no E2E)
-GET  /rooms/:roomId/keys/missing  (admin only) -> { membersNeedingHistoricalKeys }
+GET  /rooms/:roomId/keys/missing  -> { membersNeedingHistoricalKeys: [{did, missingVersions}] }
+POST /rooms/:roomId/keys/grant    { targetDid, keys: [{version, encryptedKey}] } -> { granted }
+                                   (any member; 403 for a version the caller does not hold)
 POST /rooms/:roomId/keys/rotate (admin only) -> { version, recipients, membersNeedingHistoricalKeys }
 GET  /rooms/:roomId/ws              (WebSocket upgrade — first message must be {type:"auth",token:"<jwt>"})
 ```
@@ -268,7 +270,7 @@ GET  /                          admission page (+ /admin.js, /admin.css; CSP def
 GET  /api/whoami                -> { operator, instance, admission: "allowlist" | "auto" }   (X-Forwarded-User, --operator-label)
 GET  /api/rooms                 -> { rooms: [{ id, admin, e2e, createdAt, memberCount }] }
 GET  /api/rooms/:roomId         -> { id, admin, e2e, createdAt,
-                                     members: [{ did, addedAt, hasX25519Key, online, addedBy: { actor, source, at } | null }],
+                                     members: [{ did, addedAt, hasRoomKey, online, addedBy: { actor, source, at } | null }],
                                      history: [{ did, action, actor, source, at }] }   (newest first, last 100)
 POST /api/rooms/:roomId/acl     { action: "add"|"remove", did } -> same as GET /api/rooms/:roomId
 GET  /api/logs                  -> text/event-stream; the last 1000 lines, then each new one; each event:
@@ -300,25 +302,22 @@ Tests boot a real server per test (random port, temp SQLite file) and drive it o
 
 ### E2E encryption — trust model and remaining gaps
 
-Key generation now happens exclusively client-side — the admin generates each
-room key locally, seals it to members' X25519 public keys, and uploads only
-sealed envelopes. The server never touches plaintext key material. This closes
-the most significant trust gap (server-side key generation).
+Key generation happens exclusively client-side — the admin generates each
+room key locally, seals it to members' DIDs, and uploads only sealed boxes.
+The server never touches plaintext key material, and it holds no member key it
+could swap: a member's X25519 key follows from its DID.
 
-**Remaining gap:**
+**Remaining gaps:**
 
-- **Unsigned X25519 public key.** The DID challenge signature covers only the
-  nonce, not the `x25519PublicKey` field sent alongside it. A malicious server
-  could substitute its own X25519 key for a member's during the ACL or
-  `membersNeedingHistoricalKeys` response, causing the admin to seal keys
-  to the server instead of the real member. Fix: require the client to send
-  `signature = sign(x25519PublicKey)` at registration, store it, return it in
-  ACL/missing-keys responses, and have the admin verify the DID signature before
-  sealing. The signing capability already exists.
-
-With this gap open, the E2E guarantee protects against passive observation
-and later compromise, but not against an actively malicious server operator
-who tampers with X25519 public keys at registration time.
+- **The ACL is the server's.** An operator who adds a DID to the ACL gets the
+  room keys sealed to it by the next member online (see the trust model
+  above).
+- **A member can spoil a grant.** The server cannot check the key inside a
+  box. A member that grants a box holding a wrong key for a version stores the
+  first box for that member and version; the recipient's language leaves the
+  version out of its key ring (it cannot open the links of that version) until
+  the box is removed. Only a member of the room can do this, and only for
+  versions it holds.
 
 ### E2E encryption — other future requirements
 

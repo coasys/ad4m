@@ -18,8 +18,8 @@ export const OPERATOR_PAGE_HTML = `<!doctype html>
 <div class="muted">Signed in as <span id="who">?</span></div>
 <p id="admission" class="note"></p>
 <p class="note">A room is a neighbourhood (the server link language's UID). Its first agent is the room admin.
-An added DID can sync once it reconnects. It can read and write encrypted links only after the
-room admin's executor has been online and granted it the room keys.</p>
+An added DID can sync once it reconnects. It can read and write encrypted links once a member
+holding the room keys has been online and sealed them to its DID.</p>
 <div id="error" role="alert"></div>
 <h2>Rooms</h2>
 <table id="rooms"><thead><tr><th>Room</th><th>Admin</th><th>Members</th><th>E2E</th><th>Created</th></tr></thead><tbody></tbody></table>
@@ -131,7 +131,7 @@ export const OPERATOR_PAGE_JS = `"use strict";
       row.appendChild(who);
       row.appendChild(el("td", (member.addedAt || "").slice(0, 16).replace("T", " ")));
       row.appendChild(el("td", member.addedBy ? actorLabel(member.addedBy) : "", "mono"));
-      row.appendChild(el("td", member.hasX25519Key ? "registered" : "not yet"));
+      row.appendChild(el("td", member.hasRoomKey ? "held" : "not yet"));
       var action = el("td");
       if (member.did !== room.admin) {
         var remove = el("button", "Remove");

@@ -6,14 +6,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { x25519 } from "@noble/curves/ed25519";
 
 import type { AgentAdapter, Transport, TransportResponse } from "../src/adapters.js";
 import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as auth from "../src/auth.js";
-import { bytesToHex, hexToBytes } from "../src/encryption.js";
-
-const ROOM_KEY_SEED_MESSAGE = "adam-server-link-language:x25519-seed:v1";
+import type { SealedBox } from "../src/types.js";
 
 // ---------------------------------------------------------------------------
 // Mock adapters
@@ -43,17 +40,18 @@ class MockAgent implements AgentAdapter {
     did(): string {
         return this.didValue;
     }
+    signed: string[] = [];
     signStringHex(payload: string): string {
-        // The executor refuses this message on every signing path.
-        if (payload === ROOM_KEY_SEED_MESSAGE) {
-            throw new Error("Refusing to sign the reserved room-key seed message");
-        }
+        this.signed.push(payload);
         // Deterministic stand-in for EdDSA signing — auth.ts only relies on
         // determinism (same input -> same output), not on real Ed25519 math.
         return createHash("sha256").update(`${this.didValue}:${payload}`).digest("hex");
     }
-    roomKeySeedHex(): string {
-        return createHash("sha256").update(`room-key-seed:${this.didValue}`).digest("hex");
+    sealToDid(): SealedBox {
+        throw new Error("auth never seals");
+    }
+    openSealed(): string {
+        throw new Error("auth never opens");
     }
 }
 
@@ -65,14 +63,16 @@ function makeJwt(payload: Record<string, unknown>): string {
     return `${b64url(JSON.stringify({ alg: "none", typ: "JWT" }))}.${b64url(JSON.stringify(payload))}.`;
 }
 
-function setup(transport: Transport, did = "did:key:zTestAgent"): void {
+function setup(transport: Transport, did = "did:key:zTestAgent"): MockAgent {
     resetAdapters();
+    const agent = new MockAgent(did);
     initAdapters({
         transport,
-        agent: new MockAgent(did),
+        agent,
         config: { serverUrl: "https://server.example", roomId: "room-123" },
     });
     auth.resetAuth();
+    return agent;
 }
 
 /** Routes both auth steps (same endpoint) to a challenge-then-token flow. */
@@ -116,9 +116,9 @@ describe("auth: parseJwtExpiryMs", () => {
 // ---------------------------------------------------------------------------
 
 describe("auth: authenticate", () => {
-    it("performs the two-step DID challenge-response flow and includes the derived X25519 public key", async () => {
+    it("performs the two-step DID challenge-response flow, signing only the challenge", async () => {
         const transport = new MockTransport();
-        setup(transport);
+        const agent = setup(transport);
 
         transport.route(
             (url, method) => method === "POST" && url.endsWith("/rooms/room-123/auth"),
@@ -128,13 +128,13 @@ describe("auth: authenticate", () => {
                     assert.equal(parsed.did, "did:key:zTestAgent");
                     return { status: 200, headers: {}, body: JSON.stringify({ challenge: "chal-abc" }) };
                 }
+                assert.deepEqual(
+                    Object.keys(parsed).sort(),
+                    ["challenge", "did", "signature"],
+                    "step 2 carries the signed challenge and nothing else: members' keys come from their DIDs",
+                );
                 assert.equal(parsed.challenge, "chal-abc");
                 assert.ok(typeof parsed.signature === "string" && parsed.signature.length > 0);
-                assert.equal(
-                    parsed.x25519PublicKey,
-                    bytesToHex(x25519.getPublicKey(hexToBytes(new MockAgent("did:key:zTestAgent").roomKeySeedHex()))),
-                    "step 2 carries the X25519 public key of the agent's room-key seed",
-                );
                 return {
                     status: 200,
                     headers: {},
@@ -147,6 +147,7 @@ describe("auth: authenticate", () => {
         assert.ok(session.token);
         assert.ok(session.expiresAt !== null && session.expiresAt > Date.now());
         assert.equal(transport.calls.length, 2);
+        assert.deepEqual(agent.signed, ["chal-abc"], "auth signs the challenge only");
         // Verify the session got cached — getValidToken should return the same
         // token without triggering another auth round-trip.
         const cached = await auth.getValidToken();

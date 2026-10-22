@@ -97,56 +97,76 @@ async fn a_language_signs_only_as_the_user_it_runs_for() {
     let _ = handle.teardown().await;
 }
 
-/// The server link language derives its X25519 key from the agent's signature over a
-/// fixed message. Language code must not get that signature from any signing op, as
-/// the node or as a user, raw bytes or string; it gets only the seed, for its own agent.
+/// `AGENT.sealToDid` seals to any DID; `AGENT.openSealed` opens only what was sealed to
+/// the agent the language runs for, the node or a managed user.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_language_cannot_sign_the_room_key_seed_message() {
+async fn a_language_opens_only_boxes_sealed_to_the_agent_it_runs_for() {
     init_v8_platform();
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
     let alice =
         crate::test_utils::create_test_user(&format!("alice.{}@example.org", uuid::Uuid::new_v4()));
+    let main = AgentContext::main_agent();
+    let as_alice = AgentContext::managed(alice.clone());
+    let main_did = crate::agent::did_for_context(&main).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let handle =
-        LanguageRuntimeHandle::spawn("QmRoomKeySeedTest".into(), dir.path().to_path_buf(), false)
+        LanguageRuntimeHandle::spawn("QmSealedBoxTest".into(), dir.path().to_path_buf(), false)
             .unwrap();
 
-    let script = r#"(async () => {
-  const message = "adam-server-link-language:x25519-seed:v1";
-  const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(message)));
-  const attempt = (f) => { try { f(); return "signed"; } catch (e) { return "refused"; } };
-  let seed;
-  try { seed = AGENT.roomKeySeed(); } catch (e) { seed = "error: " + e; }
-  return JSON.stringify({
-    signStringHex: attempt(() => AGENT.signStringHex(message)),
-    sign: attempt(() => AGENT.sign(digest)),
-    other: attempt(() => AGENT.signStringHex(message + ".")),
-    seed,
-  });
-})()"#;
+    let sealed = run_as(
+        &handle,
+        &as_alice,
+        &format!(
+            r#"(() => JSON.stringify({{
+  toMain: AGENT.sealToDid({main_did:?}, "00ff10"),
+  toAlice: AGENT.sealToDid({alice:?}, "c0ffee"),
+}}))()"#
+        ),
+    )
+    .await;
 
-    for context in [
-        AgentContext::main_agent(),
-        AgentContext::managed(alice.clone()),
+    let open = |sealed: &Value| {
+        format!(
+            r#"(() => {{
+  try {{ return JSON.stringify(AGENT.openSealed({sealed})); }}
+  catch (e) {{ return JSON.stringify("refused"); }}
+}})()"#
+        )
+    };
+    for (context, own, other, plaintext) in [
+        (&as_alice, "toAlice", "toMain", "c0ffee"),
+        (&main, "toMain", "toAlice", "00ff10"),
     ] {
-        let raw = handle
-            .execute_with_context(script.to_string(), context.clone())
-            .await
-            .expect("the script runs");
-        let reach: Value = serde_json::from_str(&raw).expect("the script returns JSON");
-        assert_eq!(reach["signStringHex"], json!("refused"), "{context:?}");
-        assert_eq!(reach["sign"], json!("refused"), "{context:?}");
-        assert_eq!(reach["other"], json!("signed"), "{context:?}");
-        let expected = hex::encode(crate::agent::room_key_seed_for_context(&context).unwrap());
         assert_eq!(
-            reach["seed"],
-            json!(expected),
-            "AGENT.roomKeySeed() is the seed of the agent the language runs for ({context:?})"
+            run_as(&handle, context, &open(&sealed[own])).await,
+            json!(plaintext),
+            "{context:?} opens the box sealed to its DID"
+        );
+        assert_eq!(
+            run_as(&handle, context, &open(&sealed[other])).await,
+            json!("refused"),
+            "{context:?} opened a box sealed to another agent"
         );
     }
+
+    let refused = run_as(
+        &handle,
+        &main,
+        r#"(() => {
+  const attempt = (f) => { try { f(); return "sealed"; } catch (e) { return "refused"; } };
+  return JSON.stringify({
+    notHex: attempt(() => AGENT.sealToDid(AGENT.did(), "xyz")),
+    notADidKey: attempt(() => AGENT.sealToDid("did:web:example.org", "00")),
+  });
+})()"#,
+    )
+    .await;
+    assert_eq!(
+        refused,
+        json!({ "notHex": "refused", "notADidKey": "refused" })
+    );
 
     let _ = handle.teardown().await;
 }

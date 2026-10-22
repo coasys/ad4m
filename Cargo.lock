@@ -60,6 +60,7 @@ name = "ad4m-executor"
 version = "0.13.1-staging.2"
 dependencies = [
  "ad4m-client",
+ "aes-gcm",
  "anyhow",
  "argon2 0.5.3",
  "async-trait",
@@ -75,6 +76,7 @@ dependencies = [
  "clap 4.6.6",
  "colored 2.2.0",
  "crypto_box",
+ "curve25519-dalek 4.1.3",
  "deflate",
  "deno_core",
  "deno_error",
@@ -95,6 +97,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
+ "hkdf 0.12.4",
  "holochain",
  "holochain_cli_bundle",
  "holochain_types",

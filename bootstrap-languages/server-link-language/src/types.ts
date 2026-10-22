@@ -169,8 +169,6 @@ export interface PeersResponse {
 
 export interface AclMember {
     did: DID;
-    x25519PublicKey: string | null;
-    x25519Signature: string | null;
 }
 
 export interface AclResponse {
@@ -179,7 +177,7 @@ export interface AclResponse {
 }
 
 export interface KeysResponseEntry {
-    encryptedKey: SealedRoomKeyEnvelope;
+    encryptedKey: SealedBox;
     version: number;
 }
 
@@ -193,8 +191,6 @@ export interface KeysResponse {
 export interface MemberMissingKeys {
     did: string;
     missingVersions: number[];
-    x25519PublicKey: string;
-    x25519Signature: string | null;
 }
 
 export interface MissingKeysResponse {
@@ -226,11 +222,12 @@ export type ClientWsMessage =
 // ---------------------------------------------------------------------------
 
 /**
- * Sealed-box style envelope used to deliver the room's shared symmetric
- * key to a single recipient, addressed to their X25519 public key.
- * See src/encryption.ts for the full scheme.
+ * A room key version sealed to one member's DID by the executor's
+ * `agentSealToDid` host import (X25519 form of the DID's Ed25519 key,
+ * ECDH + HKDF-SHA256 + AES-256-GCM; docs-src/host-contract.md "Sealed
+ * boxes"). Only that member's executor opens it (`agentOpenSealed`).
  */
-export interface SealedRoomKeyEnvelope {
+export interface SealedBox {
     /** Hex-encoded ephemeral X25519 public key used for this seal. */
     ephemeralPublicKey: string;
     /** Hex-encoded 12-byte AES-GCM nonce. */

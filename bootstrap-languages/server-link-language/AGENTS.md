@@ -54,7 +54,8 @@ src/auth.ts                  — DID challenge-response + JWT-expiry-driven toke
 src/ws-client.ts               — WebSocket lifecycle: typed dispatch, send queue, exponential-backoff reconnect
 src/sync.ts                     — commit / catch-up / bootstrap; the ONE inbound-diff choke point (applyInboundWireDiff)
 src/telepresence.ts              — online-agent roster + outbound signal/broadcast/status
-src/encryption.ts                 — X25519 derivation, sealed room-key exchange, AES-256-GCM link encryption
+src/encryption.ts                 — room keys sealed to DIDs via the executor, key ring, AES-256-GCM link encryption
+src/room-keys.ts                   — admin rotation (seals to every ACL member) and any member's grants
 tests/*.test.ts                    — node:test + tsx, one file per pure module, all use mock adapters (no real network/WS/Deno)
 ```
 
@@ -145,41 +146,41 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 - **E2E encryption activates automatically — no plaintext mode.** The admin's
   language instance generates the initial room key during `init()` when no E2E
   exists yet. Subsequent rotations require explicit admin action.
-  `performRotation()` generates a fresh room key client-side, seals it to every
-  ACL member's X25519 public key, and POSTs only sealed envelopes — the server
-  never sees plaintext. It does NOT fire on presence events (`onPeerJoined` is
-  reconnect/wake, not ACL change — rotating there would mint a new version on
-  every reconnect). `onPeerJoined` only calls `performAdminKeyGrants()` to
-  grant historical keys to members who lack them (idempotent). A member
-  whose key status is `pending` (no keys yet) re-reads `/keys` on every
-  sync, skipping the 10 s refresh cooldown (`refreshSkippedByCooldown`,
-  src/key-ring-policy.ts), so it sees the room on the first sync after the
-  grant. The key ring
+  `performRotation()` (admin only) generates a fresh room key client-side,
+  seals it to the DID of every ACL member, including members that never
+  connected, and POSTs only sealed boxes — the server never sees plaintext.
+  It does NOT fire on presence events (`onPeerJoined` is reconnect/wake, not
+  ACL change — rotating there would mint a new version on every reconnect).
+  `performKeyGrants()` runs on every member that holds keys (at init, after
+  every sync, on `onPeerJoined`) and seals the versions it holds to ACL
+  members lacking them (idempotent; the server keeps the first box per member
+  and version and refuses versions the granter lacks). A member whose key
+  status is `pending` (no member holding a key has been online since it
+  joined) re-reads `/keys` on every sync, skipping the 10 s refresh cooldown
+  (`refreshSkippedByCooldown`, src/key-ring-policy.ts), so it sees the room on
+  the first sync after the grant. A version whose box does not open is left
+  out of the ring (`buildKeyRing`), so one bad grant costs that version, not
+  the room. The key ring
   loads once during `init()`'s `setupKeyRing()` and the `version` field in
   `KeysResponse` remains unused for mid-session detection — a periodic `/keys`
   re-fetch or a dedicated WS push message would close that gap.
-- **The X25519 key comes from `agentRoomKeySeed()`, never from a signature.**
-  An agent's X25519 private key is
-  `sha256(sign(sha256("adam-server-link-language:x25519-seed:v1")))`; room keys
-  are sealed to it. Whoever gets that signature can open every room key sealed
-  to the agent, so the executor refuses to sign that message on every signing
-  path (`agentSignStringHex`, `agentSign`, `agent.sign`, entanglement proofs,
-  managed users included) and computes the seed itself behind the
-  `agentRoomKeySeed()` host import (`AgentAdapter.roomKeySeedHex`,
-  `deriveX25519KeyPair(() => seedHex)`). Never sign the seed message, or any
-  message derived from it, anywhere else; never send the seed off the agent.
-  The derivation is byte-identical to the earlier in-language
-  `sha256(hexToBytes(agentSignStringHex(message)))`, pinned by a test vector in
-  `tests/encryption.test.ts` and `rust-executor/src/agent/mod.rs`: changing it
-  orphans every sealed room key.
+- **Room keys are sealed to DIDs by the executor.** A member's X25519 key is
+  the Montgomery form of the Ed25519 key in its `did:key`. The language seals
+  with the `agentSealToDid(did, hex)` host import and opens with
+  `agentOpenSealed(box)` (`AgentAdapter.sealToDid` / `openSealed`); it never
+  holds an agent secret, and auth sends no key. `tests/sealed-box.ts` is a
+  noble reference of the executor's format for the mock agents; its test
+  vector in `tests/encryption.test.ts` is pinned in
+  `rust-executor/src/agent/sealed_box.rs` too: changing the format orphans
+  every sealed room key.
 - **E2E encryption wire format is unified.** Both client and server use
   the same `EncryptedLinkData` shape (`{ciphertext, nonce}`) in the link's
   `data` field for encrypted rooms — no separate `encrypted` field. The
   server treats link data as opaque (no E2E validation at commit time)
-  and stores only sealed `encryptedKey` envelopes (ECIES: ephemeral X25519
-  ECDH + HKDF-SHA256 + AES-256-GCM). Key generation and sealing happen
-  exclusively client-side. The server accepts client-registered X25519
-  public keys during auth.
+  and stores only sealed `encryptedKey` boxes (the executor's sealed box:
+  ephemeral X25519 ECDH + HKDF-SHA256 + AES-256-GCM). Key generation and
+  sealing happen exclusively client-side. The server stores no member keys:
+  the ACL is DIDs.
 - **E2E integration coverage via test matrix.** The integration suite
   (`tests/js/tests/integration.test.ts`) runs the full neighbourhood test
   battery for both `[holochain]` and `[server-link]` link-language

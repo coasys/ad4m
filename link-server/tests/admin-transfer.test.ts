@@ -3,12 +3,14 @@ import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import {
   authenticateAgent,
+  clientSideRotate,
   createTestAgent,
   getJson,
   postJson,
   startTestServer,
   type TestServerHandle,
 } from "./helpers.js";
+import { generateRoomKey, sealToDid } from "../src/encryption.js";
 
 async function withServer(fn: (server: TestServerHandle) => Promise<void>): Promise<void> {
   const server = await startTestServer();
@@ -120,12 +122,14 @@ test("new admin can rotate keys after transfer", async () => {
       adminToken,
     );
 
-    // New admin can access admin-only key endpoints
-    const missingRes = await getJson(`${server.url}/rooms/${roomId}/keys/missing`, memberToken);
-    assert.equal(missingRes.status, 200);
-
-    // Old admin cannot
-    const oldMissingRes = await getJson(`${server.url}/rooms/${roomId}/keys/missing`, adminToken);
-    assert.equal(oldMissingRes.status, 403);
+    // The new admin rotates the room key; the old admin no longer can.
+    const rotated = await clientSideRotate(server.url, roomId, memberToken);
+    assert.equal(rotated.version, 1);
+    const oldAdminRotate = await postJson(
+      `${server.url}/rooms/${roomId}/keys/rotate`,
+      { keys: [{ did: admin.did, encryptedKey: sealToDid(admin.did, generateRoomKey()) }] },
+      adminToken,
+    );
+    assert.equal(oldAdminRotate.status, 403);
   });
 });

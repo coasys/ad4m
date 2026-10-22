@@ -6,7 +6,6 @@
 
 import { getAgent, getConfig } from "./adapters.js";
 import * as api from "./api.js";
-import { bytesToHex, deriveX25519KeyPair } from "./encryption.js";
 
 export interface AuthSession {
     token: string;
@@ -15,7 +14,6 @@ export interface AuthSession {
 }
 
 let _session: AuthSession | null = null;
-let _x25519PublicKeyHex: string | null = null;
 /** In-flight authenticate() promise — prevents two concurrent callers from
  * each consuming a fresh challenge (the second would overwrite the first's
  * token before it's used). */
@@ -43,14 +41,6 @@ export function parseJwtExpiryMs(token: string): number | null {
     }
 }
 
-function myX25519PublicKeyHex(): string {
-    if (_x25519PublicKeyHex) return _x25519PublicKeyHex;
-    const agent = getAgent();
-    const { publicKey } = deriveX25519KeyPair(() => agent.roomKeySeedHex());
-    _x25519PublicKeyHex = bytesToHex(publicKey);
-    return _x25519PublicKeyHex;
-}
-
 /** Runs the full two-step DID challenge-response flow and caches the result. */
 export async function authenticate(): Promise<AuthSession> {
     const config = getConfig();
@@ -59,11 +49,7 @@ export async function authenticate(): Promise<AuthSession> {
 
     const challenge = await api.requestChallenge(config, did);
     const signature = agent.signStringHex(challenge);
-    const x25519Hex = myX25519PublicKeyHex();
-    // Sign the X25519 public key to prove it belongs to this DID.
-    // Uses the same SHA-256 hashing convention as agentSignStringHex.
-    const x25519Signature = agent.signStringHex(x25519Hex);
-    const token = await api.verifyChallenge(config, did, challenge, signature, x25519Hex, x25519Signature);
+    const token = await api.verifyChallenge(config, did, challenge, signature);
 
     const session: AuthSession = { token, expiresAt: parseJwtExpiryMs(token) };
     _session = session;
@@ -100,6 +86,5 @@ export function invalidateSession(): void {
 
 export function resetAuth(): void {
     _session = null;
-    _x25519PublicKeyHex = null;
     _authInFlight = null;
 }

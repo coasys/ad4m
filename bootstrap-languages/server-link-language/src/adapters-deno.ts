@@ -16,7 +16,8 @@ import {
     storageListKeys,
     agentDid,
     agentSignStringHex,
-    agentRoomKeySeed,
+    agentSealToDid,
+    agentOpenSealed,
     emitPerspectiveDiff,
     emitSyncStateChange,
     emitTelepresenceSignal,
@@ -31,6 +32,7 @@ import type {
     WSConnection,
     WebSocketFactory,
 } from "./adapters.js";
+import type { SealedBox } from "./types.js";
 
 export class DenoTransport implements Transport {
     async fetch(
@@ -102,8 +104,12 @@ export class DenoAgentAdapter implements AgentAdapter {
         return agentSignStringHex(payload);
     }
 
-    roomKeySeedHex(): string {
-        return agentRoomKeySeed();
+    sealToDid(did: string, plaintextHex: string): SealedBox {
+        return agentSealToDid(did, plaintextHex);
+    }
+
+    openSealed(sealed: SealedBox): string {
+        return agentOpenSealed(sealed);
     }
 }
 

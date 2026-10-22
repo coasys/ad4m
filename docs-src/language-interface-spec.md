@@ -453,13 +453,14 @@ as `extern "C"`.
 | `agentGetAllLocalUserDids()` | `string[]` |
 | `agentDidForUser(email: string)` | `string` |
 | `agentCreateSignedExpressionForUser(email, data)` | `Expression` |
-| `agentRoomKeySeed()` | `string` (hex, 32 bytes) |
+| `agentSealToDid(did: string, plaintextHex: string)` | `SealedBox` (`{ ephemeralPublicKey, nonce, ciphertext }`, hex) |
+| `agentOpenSealed(sealed: SealedBox)` | `string` (plaintext, hex) |
 
-`agentSignStringHex(data)` signs `sha256(data)`. Every signing import refuses
-the reserved message `adam-server-link-language:x25519-seed:v1` (and `agentSign`
-refuses its SHA-256): an agent's signature over it is the secret its room-key
-X25519 keypair is derived from. `agentRoomKeySeed()` returns that secret,
-`sha256(signature bytes)`, for the acting agent only.
+`agentSignStringHex(data)` signs `sha256(data)`. `agentSealToDid` seals bytes to
+the X25519 form of the Ed25519 key in a `did:key`, so any language can seal to
+any agent by its DID alone. `agentOpenSealed` opens only boxes sealed to the
+acting agent, and throws for any other. The format is in `host-contract.md`
+("Sealed boxes").
 
 #### Ambient acting-agent contract
 

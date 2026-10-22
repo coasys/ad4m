@@ -21,8 +21,6 @@ CREATE TABLE IF NOT EXISTS acl (
   room_id TEXT,
   did TEXT,
   added_at TEXT,
-  x25519_public_key TEXT,
-  x25519_signature TEXT,
   PRIMARY KEY (room_id, did)
 );
 CREATE TABLE IF NOT EXISTS links (
@@ -86,8 +84,6 @@ export interface AclRow {
   room_id: string;
   did: string;
   added_at: string;
-  x25519_public_key: string | null;
-  x25519_signature: string | null;
 }
 
 /** One row of the ACL audit trail. `source` is "operator" (actor = signed-in login) or "room-admin" (actor = admin DID). */
@@ -185,11 +181,6 @@ export class LinkServerDB {
       isMember: this.raw.prepare("SELECT 1 FROM acl WHERE room_id = ? AND did = ?"),
       addAcl: this.raw.prepare("INSERT OR IGNORE INTO acl (room_id, did, added_at) VALUES (?, ?, ?)"),
       removeAcl: this.raw.prepare("DELETE FROM acl WHERE room_id = ? AND did = ?"),
-      setX25519: this.raw.prepare("UPDATE acl SET x25519_public_key = ? WHERE room_id = ? AND did = ?"),
-      setX25519WithSig: this.raw.prepare(
-        "UPDATE acl SET x25519_public_key = ?, x25519_signature = ? WHERE room_id = ? AND did = ?"
-      ),
-      getX25519: this.raw.prepare("SELECT x25519_public_key FROM acl WHERE room_id = ? AND did = ?"),
       transferAdmin: this.raw.prepare("UPDATE rooms SET admin_did = ? WHERE id = ?"),
       recordAclChange: this.raw.prepare(
         "INSERT INTO acl_changes (room_id, did, action, actor, source, at) VALUES (?, ?, ?, ?, ?, ?)"
@@ -339,19 +330,6 @@ export class LinkServerDB {
   /** The latest "add" per DID over the whole history: who admitted each current member. */
   getLatestAdds(roomId: string): AclChangeRow[] {
     return this.stmts.getLatestAdds.all(roomId) as AclChangeRow[];
-  }
-
-  setX25519PublicKey(roomId: string, did: string, x25519PublicKey: string, x25519Signature?: string): void {
-    if (x25519Signature) {
-      this.stmts.setX25519WithSig.run(x25519PublicKey, x25519Signature, roomId, did);
-    } else {
-      this.stmts.setX25519.run(x25519PublicKey, roomId, did);
-    }
-  }
-
-  getX25519PublicKey(roomId: string, did: string): string | null {
-    const row = this.stmts.getX25519.get(roomId, did) as { x25519_public_key: string | null } | undefined;
-    return row?.x25519_public_key ?? null;
   }
 
   // ---- links (active OR-Set) ----

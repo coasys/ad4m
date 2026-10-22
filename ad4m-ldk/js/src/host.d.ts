@@ -13,10 +13,20 @@ declare module "ad4m:host" {
     export function agentSigningKeyId(): string;
     export function agentSign(payload: Uint8Array): Uint8Array;
     export function agentSignStringHex(payload: string): string;
-    // Hex of the 32-byte secret seed of the calling agent's room-key X25519
-    // keypair. The executor refuses to sign the message it is derived from
-    // ("adam-server-link-language:x25519-seed:v1") on every signing path.
-    export function agentRoomKeySeed(): string;
+    // A box sealed to a DID's Ed25519 key (X25519 form, ECDH + HKDF-SHA256 +
+    // AES-256-GCM); every field is hex.
+    export interface SealedBox {
+        ephemeralPublicKey: string;
+        nonce: string;
+        ciphertext: string;
+    }
+    // Seals the bytes `plaintextHex` to the `did:key` `did`. Throws for a DID
+    // that is not an Ed25519 did:key, or for non-hex plaintext.
+    export function agentSealToDid(did: string, plaintextHex: string): SealedBox;
+    // Opens a box sealed to the calling agent (the node or the managed user
+    // the call runs for) and returns the plaintext as hex. Throws for a box
+    // sealed to any other DID, or an altered one.
+    export function agentOpenSealed(sealed: SealedBox): string;
     export function agentCreateSignedExpression(data: unknown): object;
     export function agentGetAllLocalUserDids(): string[];
     export function agentCreateSignedExpressionForUser(userEmail: string, data: unknown): object;

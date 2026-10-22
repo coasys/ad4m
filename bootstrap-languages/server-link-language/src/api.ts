@@ -15,6 +15,7 @@ import type {
     KeysResponse,
     PeersResponse,
     RenderResponse,
+    SealedBox,
     SyncResponse,
     WirePerspectiveDiff,
 } from "./types.js";
@@ -79,29 +80,18 @@ export async function requestChallenge(config: RoomConfig, did: string): Promise
 
 /**
  * Step 2: POST {did, challenge, signature} -> {token}
- *
- * `x25519PublicKeyHex` is an additive field (not in the base spec) this
- * language sends so the server can capture the agent's E2E public key at
- * the one point it already verifies DID ownership. A server that doesn't
- * care about E2E simply ignores it. See src/encryption.ts module doc.
  */
 export async function verifyChallenge(
     config: RoomConfig,
     did: string,
     challenge: string,
     signature: string,
-    x25519PublicKeyHex?: string,
-    x25519Signature?: string,
 ): Promise<string> {
-    const payload: Record<string, unknown> = { did, challenge, signature };
-    if (x25519PublicKeyHex) payload.x25519PublicKey = x25519PublicKeyHex;
-    if (x25519Signature) payload.x25519Signature = x25519Signature;
-
     const res = await request<AuthTokenResponse>(
         roomUrl(config, "/auth"),
         "POST",
         jsonHeaders(),
-        JSON.stringify(payload),
+        JSON.stringify({ did, challenge, signature }),
     );
     return res.token;
 }
@@ -161,7 +151,7 @@ export async function fetchPeers(config: RoomConfig, token: string): Promise<str
 
 export interface RotateKeyEntry {
     did: string;
-    encryptedKey: { ephemeralPublicKey: string; nonce: string; ciphertext: string };
+    encryptedKey: SealedBox;
 }
 
 export interface RotateResponse {
@@ -170,9 +160,9 @@ export interface RotateResponse {
 }
 
 /**
- * Rotates the room's E2E key. The caller generates the room key locally,
- * seals it to each member's X25519 public key, and sends only the sealed
- * envelopes. The server never touches the plaintext key.
+ * Rotates the room's E2E key (room admin only). The caller generates the
+ * room key locally, seals it to each ACL member's DID, and sends only the
+ * sealed boxes. The server never touches the plaintext key.
  */
 export async function rotateKeys(
     config: RoomConfig,
@@ -211,12 +201,12 @@ export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<
 }
 
 // ---------------------------------------------------------------------------
-// E2E key grant (admin re-seals historical versions for late members)
+// E2E key grant (any member re-seals versions it holds for a member lacking them)
 // ---------------------------------------------------------------------------
 
 export interface GrantKeyEntry {
     version: number;
-    encryptedKey: { ephemeralPublicKey: string; nonce: string; ciphertext: string };
+    encryptedKey: SealedBox;
 }
 
 export async function grantKeys(
@@ -235,10 +225,10 @@ export async function grantKeys(
 }
 
 // ---------------------------------------------------------------------------
-// E2E admin: missing keys + ACL query
+// E2E missing keys + ACL query
 // ---------------------------------------------------------------------------
 
-/** Admin only. Returns members missing historical key versions. */
+/** Any member. Returns the ACL members lacking key versions, by DID. */
 export async function fetchMissingKeys(config: RoomConfig, token: string): Promise<MissingKeysResponse> {
     const res = await request<Partial<MissingKeysResponse>>(
         roomUrl(config, "/keys/missing"), "GET", jsonHeaders(token),
@@ -246,7 +236,7 @@ export async function fetchMissingKeys(config: RoomConfig, token: string): Promi
     return { membersNeedingHistoricalKeys: res.membersNeedingHistoricalKeys ?? [] };
 }
 
-/** Returns the room's admin DID and full member list (with X25519 public keys). */
+/** Returns the room's admin DID and its ACL members' DIDs. */
 export async function fetchAclInfo(config: RoomConfig, token: string): Promise<AclResponse> {
     const res = await request<Partial<AclResponse>>(roomUrl(config, "/acl"), "GET", jsonHeaders(token));
     return { admin: res.admin ?? "", members: res.members ?? [] };

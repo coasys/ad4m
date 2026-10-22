@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { didToPublicKey, hashMessageForVerify, verifyHex, type AuthManager, type ChallengeStore } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
-import type { EncryptedKeyPayload } from "./encryption.js";
+import type { SealedBox } from "./encryption.js";
 import type { SlidingWindowLimiter } from "./rate-limit.js";
 import type { TelepresenceManager } from "./telepresence.js";
 import {
@@ -56,6 +56,35 @@ function requireAdmin(ctx: RouteContext) {
   };
 }
 
+function isSealedBox(value: unknown): value is SealedBox {
+  const box = value as Partial<SealedBox> | null;
+  return (
+    !!box &&
+    typeof box === "object" &&
+    typeof box.ephemeralPublicKey === "string" &&
+    typeof box.nonce === "string" &&
+    typeof box.ciphertext === "string"
+  );
+}
+
+/** The ACL members lacking one or more of the room's key versions, by DID. */
+function membersMissingKeys(
+  ctx: Pick<RouteContext, "db">,
+  roomId: string
+): Array<{ did: string; missingVersions: number[] }> {
+  const latestVersion = ctx.db.getLatestKeyVersion(roomId);
+  if (latestVersion === 0) return [];
+  const held = ctx.db.getAllMemberKeyVersions(roomId);
+  const expected = Array.from({ length: latestVersion }, (_, i) => i + 1);
+  const missing: Array<{ did: string; missingVersions: number[] }> = [];
+  for (const row of ctx.db.getAcl(roomId)) {
+    const has = new Set(held.get(row.did) ?? []);
+    const missingVersions = expected.filter((v) => !has.has(v));
+    if (missingVersions.length > 0) missing.push({ did: row.did, missingVersions });
+  }
+  return missing;
+}
+
 /**
  * Takes a DID out of a room: ACL row, sessions and open sockets, so access ends at once on every path.
  * Returns false when the DID was not a member (sessions and sockets are still cleared).
@@ -105,8 +134,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         did?: string;
         challenge?: string;
         signature?: string;
-        x25519PublicKey?: string;
-        x25519Signature?: string;
       } | null;
 
       if (!body || typeof body.did !== "string") {
@@ -154,32 +181,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
             .code(403)
             .send({ error: "not authorized for this room; ask the admin to add your DID to the ACL" });
         }
-      }
-
-      // Store the agent's derived X25519 public key for E2E room-key
-      // sealing. The language sends this during step 2 of the DID
-      // challenge-response — the one point where DID ownership has
-      // already been verified.
-      //
-      // When x25519Signature is provided, verify that the key genuinely
-      // belongs to the DID (prevents a MITM from substituting keys).
-      // The signature is: ed25519.sign(SHA-256(x25519PublicKey), privateKey)
-      // — same hashing convention as agentSignStringHex.
-      if (
-        typeof body.x25519PublicKey === "string" &&
-        body.x25519PublicKey.length === 64 &&
-        /^[0-9a-fA-F]{64}$/.test(body.x25519PublicKey)
-      ) {
-        let x25519Sig: string | undefined;
-        if (typeof body.x25519Signature === "string") {
-          const keyHash = hashMessageForVerify(body.x25519PublicKey);
-          const sigValid = await verifyHex(pubkey, keyHash, body.x25519Signature);
-          if (!sigValid) {
-            return reply.code(400).send({ error: "x25519 public key signature verification failed" });
-          }
-          x25519Sig = body.x25519Signature;
-        }
-        ctx.db.setX25519PublicKey(roomId, body.did, body.x25519PublicKey, x25519Sig);
       }
 
       const { token, expiresAt } = await ctx.auth.issueSession(body.did, roomId);
@@ -357,11 +358,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const acl = ctx.db.getAcl(claims.roomId);
       return reply.send({
         admin: room.admin_did,
-        members: acl.map((a) => ({
-          did: a.did,
-          x25519PublicKey: a.x25519_public_key ?? null,
-          x25519Signature: a.x25519_signature ?? null,
-        })),
+        // A member is its DID: its X25519 key for room keys follows from it.
+        members: acl.map((a) => ({ did: a.did })),
       });
     }
   );
@@ -418,13 +416,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
             error: `DID ${entry.did ?? "(missing)"} is not in this room's ACL`,
           });
         }
-        const ek = entry.encryptedKey as Partial<EncryptedKeyPayload> | null;
-        if (
-          !ek ||
-          typeof ek.ephemeralPublicKey !== "string" ||
-          typeof ek.nonce !== "string" ||
-          typeof ek.ciphertext !== "string"
-        ) {
+        if (!isSealedBox(entry.encryptedKey)) {
           return reply.code(400).send({
             error: `malformed encryptedKey for DID ${entry.did}`,
           });
@@ -444,79 +436,31 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       }
       ctx.db.setE2eEnabled(claims.roomId, true);
 
-      // Detect members missing historical key versions so the admin can
-      // grant them (same logic as the old server-side rotate).
-      const membersNeedingHistoricalKeys: Array<{
-        did: string;
-        missingVersions: number[];
-        x25519PublicKey: string;
-        x25519Signature: string | null;
-      }> = [];
-      if (version > 1) {
-        const allAcl = ctx.db.getAcl(claims.roomId);
-        const allVersions = ctx.db.getAllMemberKeyVersions(claims.roomId);
-        const expected = Array.from({ length: version }, (_, i) => i + 1);
-        for (const row of allAcl) {
-          if (!row.x25519_public_key) continue;
-          const has = new Set(allVersions.get(row.did) ?? []);
-          const missing = expected.filter((v) => !has.has(v));
-          if (missing.length > 0) {
-            membersNeedingHistoricalKeys.push({
-              did: row.did,
-              missingVersions: missing,
-              x25519PublicKey: row.x25519_public_key,
-              x25519Signature: row.x25519_signature ?? null,
-            });
-          }
-        }
-      }
-
-      return reply.send({ version, recipients, membersNeedingHistoricalKeys });
+      return reply.send({ version, recipients, membersNeedingHistoricalKeys: membersMissingKeys(ctx, claims.roomId) });
     }
   );
 
-  // ---- E2E missing keys (admin query — who needs historical keys?) ----
+  // ---- E2E missing keys (any member: who lacks which version?) ----
 
   app.get(
     "/rooms/:roomId/keys/missing",
-    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const latestVersion = ctx.db.getLatestKeyVersion(claims.roomId);
-      if (latestVersion === 0) {
-        return reply.send({ membersNeedingHistoricalKeys: [] });
-      }
-      const aclRows = ctx.db.getAcl(claims.roomId);
-      const allVersions = ctx.db.getAllMemberKeyVersions(claims.roomId);
-      const expectedVersions = Array.from({ length: latestVersion }, (_, i) => i + 1);
-      const missingKeys: Array<{ did: string; missingVersions: number[]; x25519PublicKey: string; x25519Signature: string | null }> = [];
-      for (const row of aclRows) {
-        if (!row.x25519_public_key) continue;
-        const memberVersions = new Set(allVersions.get(row.did) ?? []);
-        const missing = expectedVersions.filter((v) => !memberVersions.has(v));
-        if (missing.length > 0) {
-          missingKeys.push({
-            did: row.did,
-            missingVersions: missing,
-            x25519PublicKey: row.x25519_public_key,
-            x25519Signature: row.x25519_signature ?? null,
-          });
-        }
-      }
-      return reply.send({ membersNeedingHistoricalKeys: missingKeys });
+      return reply.send({ membersNeedingHistoricalKeys: membersMissingKeys(ctx, claims.roomId) });
     }
   );
 
-  // ---- E2E key grant (admin re-seals historical versions for a member) ----
+  // ---- E2E key grant (any member re-seals versions it holds for a member lacking them) ----
 
   app.post(
     "/rooms/:roomId/keys/grant",
-    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
       const body = request.body as {
         targetDid?: string;
-        keys?: Array<{ version: number; encryptedKey: EncryptedKeyPayload }>;
+        keys?: Array<{ version: number; encryptedKey: SealedBox }>;
       } | null;
 
       if (!body || typeof body.targetDid !== "string") {
@@ -531,33 +475,33 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return reply.code(404).send({ error: "target DID is not a member of this room" });
       }
 
-      // Validate each entry: version must be a positive integer, encryptedKey
-      // must have the expected shape. The server cannot verify the plaintext
-      // inside — the admin holds the trust anchor for the room.
+      // Validate every entry before storing any: the version exists, the
+      // granter holds it (a member passes on only what it was given), and the
+      // box has the expected shape. The server cannot check the key inside;
+      // the first box stored for a version stays.
       const latestVersion = ctx.db.getLatestKeyVersion(claims.roomId);
-      const stored: number[] = [];
+      const held = new Set(ctx.db.getAllRoomKeys(claims.roomId, claims.did).map((r) => r.version));
       for (const entry of body.keys) {
-        if (typeof entry.version !== "number" || entry.version < 1 || entry.version > latestVersion) {
+        if (!entry || typeof entry !== "object") {
+          return reply.code(400).send({ error: "each key entry must be a non-null object" });
+        }
+        if (!Number.isInteger(entry.version) || entry.version < 1 || entry.version > latestVersion) {
           return reply.code(400).send({ error: `invalid version ${entry.version}; latest is ${latestVersion}` });
         }
-        const ek = entry.encryptedKey;
-        if (
-          !ek ||
-          typeof ek.ephemeralPublicKey !== "string" ||
-          typeof ek.nonce !== "string" ||
-          typeof ek.ciphertext !== "string"
-        ) {
+        if (!held.has(entry.version)) {
+          return reply.code(403).send({ error: `you do not hold key version ${entry.version}` });
+        }
+        if (!isSealedBox(entry.encryptedKey)) {
           return reply.code(400).send({ error: `malformed encryptedKey for version ${entry.version}` });
         }
-        const inserted = ctx.db.addRoomKeyIfMissing(
-          claims.roomId,
-          body.targetDid,
-          entry.version,
-          JSON.stringify(ek)
-        );
-        if (inserted) stored.push(entry.version);
       }
 
+      const stored: number[] = [];
+      for (const entry of body.keys) {
+        if (ctx.db.addRoomKeyIfMissing(claims.roomId, body.targetDid, entry.version, JSON.stringify(entry.encryptedKey))) {
+          stored.push(entry.version);
+        }
+      }
       return reply.send({ granted: stored });
     }
   );

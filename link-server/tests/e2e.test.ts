@@ -25,18 +25,16 @@ import {
   getJson,
   postJson,
   startTestServer,
-  testAgentX25519PrivateKey,
-  testAgentX25519PublicKey,
   type TestServerHandle,
 } from "./helpers.js";
 import {
-  decryptRoomKeyWithX25519,
-  encryptRoomKeyForRecipient,
+  openSealed,
   generateRoomKey,
-  type EncryptedKeyPayload,
+  sealToDid,
+  type SealedBox,
 } from "../src/encryption.js";
 
-const { bytesToHex, hexToBytes } = ed.etc;
+const { bytesToHex } = ed.etc;
 
 async function withServer(fn: (server: TestServerHandle) => Promise<void>): Promise<void> {
   const server = await startTestServer();
@@ -66,7 +64,7 @@ test("server stores only sealed envelopes — plaintext room key bytes never app
     // Fetch every key the server stores for this room. Verify the
     // response succeeded and contains sealed records, THEN check that
     // the plaintext room key does not appear anywhere in it.
-    const adminKeys = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload }> }>(
+    const adminKeys = await getJson<{ keys: Array<{ encryptedKey: SealedBox }> }>(
       `${server.url}/rooms/${roomId}/keys`, adminToken,
     );
     assert.equal(adminKeys.status, 200);
@@ -88,24 +86,23 @@ test("server cannot decrypt sealed envelopes — decryption requires recipient's
     const { roomKey } = await clientSideRotate(server.url, roomId, adminToken);
 
     // Fetch the sealed envelope the server stored for the admin.
-    const keysRes = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+    const keysRes = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`,
       adminToken,
     );
     const envelope = keysRes.body.keys[0].encryptedKey;
 
-    // The server knows the ephemeral public key (it's in the envelope) and
-    // the recipient's public key (it's in the ACL table). But it does NOT
-    // have any X25519 private key. Attempting decryption with a random
-    // private key must fail.
+    // The server knows the ephemeral public key (it's in the box) and the
+    // recipient's public key (it follows from the DID). But it does NOT
+    // hold any agent's secret key. Opening with a random key must fail.
     const fakePriv = ed.utils.randomPrivateKey().slice(0, 32);
     assert.throws(
-      () => decryptRoomKeyWithX25519(envelope, fakePriv),
+      () => openSealed(envelope, fakePriv),
       "decrypting with a random key must throw (AEAD tag mismatch)",
     );
 
     // The real recipient CAN decrypt.
-    const decrypted = decryptRoomKeyWithX25519(envelope, testAgentX25519PrivateKey(admin));
+    const decrypted = openSealed(envelope, admin.privateKey);
     assert.deepEqual(decrypted, roomKey);
   });
 });
@@ -121,11 +118,11 @@ test("each member receives a uniquely-sealed envelope — envelopes are not shar
 
     await clientSideRotate(server.url, roomId, adminToken);
 
-    const adminKeys = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload }> }>(
+    const adminKeys = await getJson<{ keys: Array<{ encryptedKey: SealedBox }> }>(
       `${server.url}/rooms/${roomId}/keys`,
       adminToken,
     );
-    const memberKeys = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload }> }>(
+    const memberKeys = await getJson<{ keys: Array<{ encryptedKey: SealedBox }> }>(
       `${server.url}/rooms/${roomId}/keys`,
       memberToken,
     );
@@ -139,8 +136,8 @@ test("each member receives a uniquely-sealed envelope — envelopes are not shar
     assert.notEqual(ae.nonce, me.nonce, "nonces must differ");
 
     // But both decrypt to the same underlying room key.
-    const adminPlain = decryptRoomKeyWithX25519(ae, testAgentX25519PrivateKey(admin));
-    const memberPlain = decryptRoomKeyWithX25519(me, testAgentX25519PrivateKey(member));
+    const adminPlain = openSealed(ae, admin.privateKey);
+    const memberPlain = openSealed(me, member.privateKey);
     assert.deepEqual(adminPlain, memberPlain, "both envelopes must unwrap to the same room key");
   });
 });
@@ -205,10 +202,9 @@ test("server rejects rotation containing a DID not in the room's ACL", async () 
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
     const roomKey = generateRoomKey();
-    const adminPubHex = testAgentX25519PublicKey(admin);
     const keys = [
-      { did: admin.did, encryptedKey: encryptRoomKeyForRecipient(roomKey, hexToBytes(adminPubHex)) },
-      { did: outsider.did, encryptedKey: encryptRoomKeyForRecipient(roomKey, hexToBytes(testAgentX25519PublicKey(outsider))) },
+      { did: admin.did, encryptedKey: sealToDid(admin.did, roomKey) },
+      { did: outsider.did, encryptedKey: sealToDid(outsider.did, roomKey) },
     ];
 
     const res = await postJson<{ error: string }>(
@@ -238,38 +234,49 @@ test("server rejects rotation with malformed envelope (missing fields)", async (
 });
 
 // ---------------------------------------------------------------------------
-// ACL endpoint returns X25519 public keys for client-side sealing
+// Members are their DIDs: the ACL carries no keys, and a room key reaches
+// a member who never connected
 // ---------------------------------------------------------------------------
 
-test("GET /acl returns X25519 public keys for each member", async () => {
+test("GET /acl lists members by DID alone", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const admin = await createTestAgent();
     const member = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
-    await authenticateAgent(server.url, roomId, member);
 
-    const aclRes = await getJson<{
-      admin: string;
-      members: Array<{ did: string; x25519PublicKey: string | null }>;
-    }>(`${server.url}/rooms/${roomId}/acl`, adminToken);
-
+    const aclRes = await getJson<{ admin: string; members: Array<Record<string, unknown>> }>(
+      `${server.url}/rooms/${roomId}/acl`,
+      adminToken,
+    );
     assert.equal(aclRes.status, 200);
-    assert.equal(aclRes.body.members.length, 2);
+    assert.deepEqual(
+      aclRes.body.members,
+      [{ did: admin.did }, { did: member.did }],
+      "no key material in the ACL: a member's key follows from its DID",
+    );
+  });
+});
 
-    // Both members must have X25519 public keys (registered during auth)
-    for (const m of aclRes.body.members) {
-      assert.ok(m.x25519PublicKey, `member ${m.did} must have an X25519 public key`);
-      assert.equal(typeof m.x25519PublicKey, "string");
-      assert.ok(m.x25519PublicKey.length > 0);
-    }
+test("the admin seals a room key to a member who never connected, and the member opens it", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const member = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
 
-    // Verify the keys match what we expect from the test agents
-    const adminEntry = aclRes.body.members.find((m) => m.did === admin.did)!;
-    const memberEntry = aclRes.body.members.find((m) => m.did === member.did)!;
-    assert.equal(adminEntry.x25519PublicKey, testAgentX25519PublicKey(admin));
-    assert.equal(memberEntry.x25519PublicKey, testAgentX25519PublicKey(member));
+    const { roomKey, recipients } = await clientSideRotate(server.url, roomId, adminToken);
+    assert.deepEqual(recipients.sort(), [admin.did, member.did].sort());
+
+    const memberToken = await authenticateAgent(server.url, roomId, member);
+    const keys = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
+      `${server.url}/rooms/${roomId}/keys`,
+      memberToken,
+    );
+    assert.equal(keys.status, 200);
+    assert.deepEqual(openSealed(keys.body.keys[0].encryptedKey, member.privateKey), roomKey);
   });
 });
 
@@ -290,18 +297,18 @@ test("full E2E lifecycle: rotate, late member, grant, all decrypt", async () => 
     const { roomKey: keyV1 } = await clientSideRotate(server.url, roomId, adminToken);
 
     // Both can decrypt v1
-    const adminKeysV1 = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+    const adminKeysV1 = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`, adminToken,
     );
-    const aliceKeysV1 = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+    const aliceKeysV1 = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`, aliceToken,
     );
     assert.deepEqual(
-      decryptRoomKeyWithX25519(adminKeysV1.body.keys[0].encryptedKey, testAgentX25519PrivateKey(admin)),
+      openSealed(adminKeysV1.body.keys[0].encryptedKey, admin.privateKey),
       keyV1,
     );
     assert.deepEqual(
-      decryptRoomKeyWithX25519(aliceKeysV1.body.keys[0].encryptedKey, testAgentX25519PrivateKey(alice)),
+      openSealed(aliceKeysV1.body.keys[0].encryptedKey, alice.privateKey),
       keyV1,
     );
 
@@ -326,51 +333,50 @@ test("full E2E lifecycle: rotate, late member, grant, all decrypt", async () => 
     assert.deepEqual(rot2.membersNeedingHistoricalKeys![0].missingVersions, [1]);
 
     // Bob gets v2 but not v1
-    const bobKeysV2 = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+    const bobKeysV2 = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`, bobToken,
     );
     assert.equal(bobKeysV2.body.keys.length, 1);
     assert.equal(bobKeysV2.body.keys[0].version, 2);
 
-    // --- Grant v1 to Bob ---
-    const bobPubHex = rot2.membersNeedingHistoricalKeys![0].x25519PublicKey;
-    const resealedV1 = encryptRoomKeyForRecipient(keyV1, hexToBytes(bobPubHex));
+    // --- Alice, a member who is not the admin, grants v1 to Bob ---
+    const resealedV1 = sealToDid(bob.did, keyV1);
     const grantRes = await postJson<{ granted: number[] }>(
       `${server.url}/rooms/${roomId}/keys/grant`,
       { targetDid: bob.did, keys: [{ version: 1, encryptedKey: resealedV1 }] },
-      adminToken,
+      aliceToken,
     );
     assert.deepEqual(grantRes.body.granted, [1]);
 
     // Bob now has both versions and can decrypt both
-    const bobKeysFinal = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+    const bobKeysFinal = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`, bobToken,
     );
     assert.equal(bobKeysFinal.body.keys.length, 2);
-    const bobPriv = testAgentX25519PrivateKey(bob);
-    const bobV1 = decryptRoomKeyWithX25519(
+    const bobPriv = bob.privateKey;
+    const bobV1 = openSealed(
       bobKeysFinal.body.keys.find((k) => k.version === 1)!.encryptedKey, bobPriv,
     );
-    const bobV2 = decryptRoomKeyWithX25519(
+    const bobV2 = openSealed(
       bobKeysFinal.body.keys.find((k) => k.version === 2)!.encryptedKey, bobPriv,
     );
     assert.deepEqual(bobV1, keyV1, "Bob's v1 must match the original v1 key");
     assert.deepEqual(bobV2, rot2.roomKey, "Bob's v2 must match the original v2 key");
 
     // --- Cross-check: all three agree on both versions ---
-    const adminKeysFinal = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+    const adminKeysFinal = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`, adminToken,
     );
-    const aliceKeysFinal = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+    const aliceKeysFinal = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`, aliceToken,
     );
-    const adminV2 = decryptRoomKeyWithX25519(
+    const adminV2 = openSealed(
       adminKeysFinal.body.keys.find((k) => k.version === 2)!.encryptedKey,
-      testAgentX25519PrivateKey(admin),
+      admin.privateKey,
     );
-    const aliceV2 = decryptRoomKeyWithX25519(
+    const aliceV2 = openSealed(
       aliceKeysFinal.body.keys.find((k) => k.version === 2)!.encryptedKey,
-      testAgentX25519PrivateKey(alice),
+      alice.privateKey,
     );
     assert.deepEqual(adminV2, rot2.roomKey);
     assert.deepEqual(aliceV2, rot2.roomKey);
@@ -395,13 +401,13 @@ test("successive rotations produce independent keys — compromising v2 does not
     assert.notDeepEqual(keyV1, keyV2, "successive room keys must differ");
 
     // Verify both versions decrypt correctly from the server's storage.
-    const keysRes = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+    const keysRes = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`, adminToken,
     );
     assert.equal(keysRes.body.keys.length, 2);
-    const priv = testAgentX25519PrivateKey(admin);
-    const decV1 = decryptRoomKeyWithX25519(keysRes.body.keys.find((k) => k.version === 1)!.encryptedKey, priv);
-    const decV2 = decryptRoomKeyWithX25519(keysRes.body.keys.find((k) => k.version === 2)!.encryptedKey, priv);
+    const priv = admin.privateKey;
+    const decV1 = openSealed(keysRes.body.keys.find((k) => k.version === 1)!.encryptedKey, priv);
+    const decV2 = openSealed(keysRes.body.keys.find((k) => k.version === 2)!.encryptedKey, priv);
     assert.deepEqual(decV1, keyV1);
     assert.deepEqual(decV2, keyV2);
   });
@@ -430,7 +436,7 @@ test("re-authenticating an existing member must not create new key versions — 
     assert.equal(version, 1);
 
     // Simulate three "reconnects" — member re-authenticates each time.
-    // A correct client runs only performAdminKeyGrants() here (idempotent),
+    // A correct client runs only performKeyGrants() here (idempotent),
     // NOT performRotation(). We verify the server-side consequence: the
     // version count must not grow.
     for (let i = 0; i < 3; i++) {
@@ -463,25 +469,21 @@ test("adding a new member and granting historical keys does not inflate the vers
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     await authenticateAgent(server.url, roomId, member);
 
-    // Grant v1 to the new member (what performAdminKeyGrants does)
+    // Grant v1 to the new member (what the language's key grants do)
     const missingRes = await getJson<{
-      membersNeedingHistoricalKeys: Array<{
-        did: string;
-        missingVersions: number[];
-        x25519PublicKey: string;
-      }>;
+      membersNeedingHistoricalKeys: Array<{ did: string; missingVersions: number[] }>;
     }>(`${server.url}/rooms/${roomId}/keys/missing`, adminToken);
     assert.equal(missingRes.status, 200);
 
     for (const m of missingRes.body.membersNeedingHistoricalKeys) {
       for (const ver of m.missingVersions) {
         // Re-seal admin's key for this version to the new member
-        const adminKeysRes = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+        const adminKeysRes = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
           `${server.url}/rooms/${roomId}/keys`, adminToken,
         );
         const adminEnvelope = adminKeysRes.body.keys.find((k) => k.version === ver)!;
-        const plainKey = decryptRoomKeyWithX25519(adminEnvelope.encryptedKey, testAgentX25519PrivateKey(admin));
-        const resealed = encryptRoomKeyForRecipient(plainKey, hexToBytes(m.x25519PublicKey));
+        const plainKey = openSealed(adminEnvelope.encryptedKey, admin.privateKey);
+        const resealed = sealToDid(m.did, plainKey);
         await postJson(
           `${server.url}/rooms/${roomId}/keys/grant`,
           { targetDid: m.did, keys: [{ version: ver, encryptedKey: resealed }] },
@@ -528,20 +530,14 @@ test("POST /keys/rotate request body contains zero plaintext key bytes — hex o
     const roomKeyBase64 = Buffer.from(roomKey).toString("base64");
     const roomKeyBase64Url = Buffer.from(roomKey).toString("base64url");
 
-    // Fetch ACL for X25519 public keys.
-    const aclRes = await getJson<{
-      admin: string;
-      members: Array<{ did: string; x25519PublicKey: string | null }>;
-    }>(`${server.url}/rooms/${roomId}/acl`, adminToken);
+    const aclRes = await getJson<{ admin: string; members: Array<{ did: string }> }>(
+      `${server.url}/rooms/${roomId}/acl`,
+      adminToken,
+    );
     assert.equal(aclRes.status, 200);
 
-    // Seal to each member.
-    const keys = aclRes.body.members
-      .filter((m) => m.x25519PublicKey)
-      .map((m) => ({
-        did: m.did,
-        encryptedKey: encryptRoomKeyForRecipient(roomKey, hexToBytes(m.x25519PublicKey!)),
-      }));
+    // Seal to each member's DID.
+    const keys = aclRes.body.members.map((m) => ({ did: m.did, encryptedKey: sealToDid(m.did, roomKey) }));
 
     // Serialize — this exact string goes on the wire.
     const wireBody = JSON.stringify({ keys });
@@ -569,13 +565,13 @@ test("POST /keys/rotate request body contains zero plaintext key bytes — hex o
 
     // Member can still decrypt — proves the sealed envelope carries the real key.
     const memberToken = await authenticateAgent(server.url, roomId, member);
-    const keysRes = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+    const keysRes = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`, memberToken,
     );
     assert.equal(keysRes.status, 200);
-    const decrypted = decryptRoomKeyWithX25519(
+    const decrypted = openSealed(
       keysRes.body.keys[0].encryptedKey,
-      testAgentX25519PrivateKey(member),
+      member.privateKey,
     );
     assert.deepEqual(decrypted, roomKey, "member must recover the original room key");
   });
@@ -677,71 +673,69 @@ test("no server endpoint leaks plaintext room key in its response", async () => 
   });
 });
 
-// ---- Review item 13: admin loss scenario ----
+// ---- Grants by members; rotation stays the admin's ----
 
-test("non-admin member cannot rotate or grant keys when admin is absent", async () => {
+test("a member grants the versions it holds to a member lacking them, but cannot rotate or manage the ACL", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const admin = await createTestAgent();
     const member = await createTestAgent();
+    const carol = await createTestAgent();
+    const dave = await createTestAgent();
 
-    // Setup: admin creates room, adds member, both auth with x25519 keys
     const adminToken = await authenticateAgent(server.url, roomId, admin);
-    await postJson(
-      `${server.url}/rooms/${roomId}/acl`,
-      { action: "add", did: member.did },
-      adminToken,
-    );
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     const memberToken = await authenticateAgent(server.url, roomId, member);
+    const { roomKey } = await clientSideRotate(server.url, roomId, adminToken);
 
-    // Admin rotates keys
-    await clientSideRotate(server.url, roomId, adminToken);
+    // Carol and Dave join after version 1: neither holds it.
+    for (const late of [carol, dave]) {
+      await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: late.did }, adminToken);
+    }
+    const daveToken = await authenticateAgent(server.url, roomId, dave);
 
-    // Member can fetch keys — should have them
-    const keysRes = await getJson<{ keys: unknown[]; e2e_enabled: boolean }>(
-      `${server.url}/rooms/${roomId}/keys`,
+    // Any member sees who lacks which version.
+    const missing = await getJson<{ membersNeedingHistoricalKeys: Array<{ did: string; missingVersions: number[] }> }>(
+      `${server.url}/rooms/${roomId}/keys/missing`,
       memberToken,
     );
-    assert.equal(keysRes.status, 200);
-    assert.equal(keysRes.body.e2e_enabled, true);
-    assert.equal(keysRes.body.keys.length, 1);
+    assert.equal(missing.status, 200);
+    assert.deepEqual(
+      missing.body.membersNeedingHistoricalKeys.map((m) => [m.did, m.missingVersions]).sort(),
+      [[carol.did, [1]], [dave.did, [1]]].sort(),
+    );
 
-    // Member tries to rotate — should get 403 (not admin)
+    // Dave holds no version, so he cannot grant one.
+    const daveGrant = await postJson<{ error: string }>(
+      `${server.url}/rooms/${roomId}/keys/grant`,
+      { targetDid: carol.did, keys: [{ version: 1, encryptedKey: sealToDid(carol.did, generateRoomKey()) }] },
+      daveToken,
+    );
+    assert.equal(daveGrant.status, 403);
+    assert.match(daveGrant.body.error, /version 1/);
+
+    // The member, who is not the admin, grants version 1 to Carol, who never connected.
+    const grant = await postJson<{ granted: number[] }>(
+      `${server.url}/rooms/${roomId}/keys/grant`,
+      { targetDid: carol.did, keys: [{ version: 1, encryptedKey: sealToDid(carol.did, roomKey) }] },
+      memberToken,
+    );
+    assert.equal(grant.status, 200);
+    assert.deepEqual(grant.body.granted, [1]);
+    const carolToken = await authenticateAgent(server.url, roomId, carol);
+    const carolKeys = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
+      `${server.url}/rooms/${roomId}/keys`,
+      carolToken,
+    );
+    assert.deepEqual(openSealed(carolKeys.body.keys[0].encryptedKey, carol.privateKey), roomKey);
+
+    // Rotation and the ACL stay with the admin.
     const rotateAttempt = await postJson(
       `${server.url}/rooms/${roomId}/keys/rotate`,
-      {
-        keys: [{
-          did: member.did,
-          encryptedKey: {
-            ephemeralPublicKey: "aa".repeat(32),
-            nonce: "bb".repeat(12),
-            ciphertext: "cc".repeat(32),
-          },
-        }],
-      },
+      { keys: [{ did: member.did, encryptedKey: sealToDid(member.did, generateRoomKey()) }] },
       memberToken,
     );
     assert.equal(rotateAttempt.status, 403);
-
-    // Member tries to grant keys — should get 403 (not admin)
-    const grantAttempt = await postJson(
-      `${server.url}/rooms/${roomId}/keys/grant`,
-      {
-        targetDid: member.did,
-        keys: [{
-          version: 1,
-          encryptedKey: {
-            ephemeralPublicKey: "aa".repeat(32),
-            nonce: "bb".repeat(12),
-            ciphertext: "cc".repeat(32),
-          },
-        }],
-      },
-      memberToken,
-    );
-    assert.equal(grantAttempt.status, 403);
-
-    // Member cannot manage ACL — should get 403 (not admin)
     const aclAttempt = await postJson(
       `${server.url}/rooms/${roomId}/acl`,
       { action: "add", did: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK" },
@@ -751,56 +745,29 @@ test("non-admin member cannot rotate or grant keys when admin is absent", async 
   });
 });
 
-// ---- Review item 1: X25519 signature verification ----
+// ---- Auth carries no key ----
 
-test("auth rejects an invalid x25519 signature", async () => {
+test("auth takes the signed challenge alone; a key sent along is not stored", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const agent = await createTestAgent();
-
-    // Step 1: get challenge
-    const step1 = await postJson<{ challenge: string }>(
-      `${server.url}/rooms/${roomId}/auth`,
-      { did: agent.did },
-    );
+    const step1 = await postJson<{ challenge: string }>(`${server.url}/rooms/${roomId}/auth`, { did: agent.did });
     assert.equal(step1.status, 200);
 
-    // Step 2: valid challenge signature, but bogus x25519 signature
     const { signHex, hashMessageForVerify } = await import("../src/auth.js");
-    const challenge = step1.body.challenge;
-    const challengeHash = hashMessageForVerify(challenge);
-    const validChallengeSignature = await signHex(agent.privateKey, challengeHash);
-    const x25519PublicKey = testAgentX25519PublicKey(agent);
+    const signature = await signHex(agent.privateKey, hashMessageForVerify(step1.body.challenge));
+    const step2 = await postJson<{ token: string }>(`${server.url}/rooms/${roomId}/auth`, {
+      did: agent.did,
+      challenge: step1.body.challenge,
+      signature,
+      x25519PublicKey: "aa".repeat(32),
+    });
+    assert.equal(step2.status, 200);
 
-    const step2 = await postJson(
-      `${server.url}/rooms/${roomId}/auth`,
-      {
-        did: agent.did,
-        challenge,
-        signature: validChallengeSignature,
-        x25519PublicKey,
-        x25519Signature: "deadbeef".repeat(16), // bogus 64-byte hex
-      },
+    const acl = await getJson<{ members: Array<Record<string, unknown>> }>(
+      `${server.url}/rooms/${roomId}/acl`,
+      step2.body.token,
     );
-    assert.equal(step2.status, 400);
-  });
-});
-
-test("ACL response includes x25519Signature when provided during auth", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const agent = await createTestAgent();
-    const token = await authenticateAgent(server.url, roomId, agent);
-
-    const acl = await getJson<{
-      admin: string;
-      members: Array<{ did: string; x25519PublicKey: string | null; x25519Signature: string | null }>;
-    }>(`${server.url}/rooms/${roomId}/acl`, token);
-
-    assert.equal(acl.status, 200);
-    assert.equal(acl.body.members.length, 1);
-    assert.equal(typeof acl.body.members[0].x25519PublicKey, "string");
-    assert.equal(typeof acl.body.members[0].x25519Signature, "string");
-    assert.notEqual(acl.body.members[0].x25519Signature, null);
+    assert.deepEqual(acl.body.members, [{ did: agent.did }]);
   });
 });

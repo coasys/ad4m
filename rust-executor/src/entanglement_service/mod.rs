@@ -6,9 +6,8 @@ use crate::{
     types::EntanglementProof,
 };
 
-/// Signs `device_key` with the node's key. The device key is caller-chosen, so a
-/// refusal of the signing core (the reserved room-key seed message) comes back as
-/// an error instead of a panic.
+/// Signs `device_key` with the node's key. A failed signature (no key in the
+/// wallet, a locked wallet) comes back as an error instead of a panic.
 pub fn sign_device_key(
     device_key: String,
     device_key_type: String,

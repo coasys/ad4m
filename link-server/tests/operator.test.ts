@@ -12,6 +12,7 @@ import { isLoopbackHost, readOperatorToken } from "../src/operator.js";
 import { OPERATOR_PAGE_HTML, OPERATOR_PAGE_JS } from "../src/operator-page.js";
 import {
   authenticateAgent,
+  clientSideRotate,
   createTestAgent,
   getJson,
   openAuthenticatedWs,
@@ -108,22 +109,25 @@ test("operator admits a DID, which can then authenticate in an allowlist room", 
     const roomId = randomUUID();
     const admin = await createTestAgent();
     const joiner = await createTestAgent();
-    await authenticateAgent(server.url, roomId, admin);
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
     await assert.rejects(() => authenticateAgent(server.url, roomId, joiner), /403/);
 
-    const res = await op<{ admin: string; members: Array<{ did: string; hasX25519Key: boolean }> }>(
+    const res = await op<{ admin: string; members: Array<{ did: string; hasRoomKey: boolean }> }>(
       `${opUrl}/api/rooms/${roomId}/acl`,
       { action: "add", did: joiner.did }
     );
     assert.equal(res.status, 200);
     assert.equal(res.body.admin, admin.did);
-    assert.ok(res.body.members.some((m) => m.did === joiner.did && !m.hasX25519Key));
+    assert.ok(res.body.members.some((m) => m.did === joiner.did && !m.hasRoomKey));
+
+    // The admin seals the room key to the admitted DID before it ever connects.
+    await clientSideRotate(server.url, roomId, adminToken);
+    const detail = await op<{ members: Array<{ did: string; hasRoomKey: boolean }> }>(`${opUrl}/api/rooms/${roomId}`);
+    assert.ok(detail.body.members.some((m) => m.did === joiner.did && m.hasRoomKey));
 
     const token = await authenticateAgent(server.url, roomId, joiner);
     const acl = await getJson<{ members: Array<{ did: string }> }>(`${server.url}/rooms/${roomId}/acl`, token);
     assert.equal(acl.status, 200);
-    const detail = await op<{ members: Array<{ did: string; hasX25519Key: boolean }> }>(`${opUrl}/api/rooms/${roomId}`);
-    assert.ok(detail.body.members.some((m) => m.did === joiner.did && m.hasX25519Key));
   });
 });
 

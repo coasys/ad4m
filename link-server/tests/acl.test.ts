@@ -85,7 +85,7 @@ test("GET acl lists the admin and all members", async () => {
 
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
 
-    const res = await getJson<{ admin: string; members: Array<{ did: string; x25519PublicKey: string | null }> }>(
+    const res = await getJson<{ admin: string; members: Array<{ did: string }> }>(
       `${server.url}/rooms/${roomId}/acl`,
       adminToken
     );

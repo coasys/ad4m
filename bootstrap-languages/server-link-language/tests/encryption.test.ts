@@ -1,63 +1,54 @@
 /**
- * Tests for src/encryption.ts — X25519 key derivation, sealed-box room-key
- * exchange, and AES-256-GCM link encryption. No mocking of the crypto
- * primitives themselves: these run the real @noble/* implementations
- * end-to-end so a broken wire format or a swapped key would actually fail
- * the round trip, not just satisfy a mock.
+ * Tests for src/encryption.ts — room keys sealed to members' DIDs through
+ * the executor's sealed boxes, and AES-256-GCM link encryption. No mocking
+ * of the crypto primitives: the mock agents seal and open with the noble
+ * reference of the executor's format (tests/sealed-box.ts), so a broken
+ * wire format or a swapped key fails the round trip.
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { ed25519, x25519 } from "@noble/curves/ed25519";
 
+import type { AgentAdapter } from "../src/adapters.js";
 import {
     AES_KEY_BYTES,
     buildKeyRing,
     bytesToHex,
     decryptLinkFromWire,
-    deriveX25519KeyPair,
     encryptLinkForWire,
     generateRoomKey,
     hexToBytes,
     latestKeyVersion,
-    openRoomKeyEnvelope,
+    openRoomKey,
     randomBytes,
-    sealRoomKeyForRecipient,
-    verifyX25519Ownership,
+    sealRoomKey,
 } from "../src/encryption.js";
-import type { LinkExpression } from "../src/types.js";
+import type { LinkExpression, SealedBox } from "../src/types.js";
 import { isEncryptedLinkData } from "../src/types.js";
+import { didForEd25519PublicKey, openSealed, sealToDid } from "./sealed-box.js";
 
-/** Deterministic stand-in for AgentAdapter.roomKeySeedHex: 32 secret bytes,
- * the same every time for a given "agent". */
-function mockSeed(seedTag: string) {
-    return () => createHash("sha256").update(`room-key-seed:${seedTag}`).digest("hex");
+/** An agent whose executor seals and opens like the real one. */
+class SealingAgent implements AgentAdapter {
+    readonly secret: Uint8Array;
+    readonly didValue: string;
+    constructor(secret: Uint8Array = ed25519.utils.randomPrivateKey()) {
+        this.secret = secret;
+        this.didValue = didForEd25519PublicKey(ed25519.getPublicKey(secret));
+    }
+    did(): string {
+        return this.didValue;
+    }
+    signStringHex(): string {
+        throw new Error("room keys need no signature");
+    }
+    sealToDid(did: string, plaintextHex: string): SealedBox {
+        return sealToDid(did, hexToBytes(plaintextHex));
+    }
+    openSealed(sealed: SealedBox): string {
+        return bytesToHex(openSealed(sealed, this.secret));
+    }
 }
-
-const ROOM_KEY_SEED_MESSAGE = "adam-server-link-language:x25519-seed:v1";
-
-/** What the executor's `agentSignStringHex` returns: hex of the Ed25519
- * signature over sha256(payload). */
-function agentSignStringHex(ed25519PrivateKey: Uint8Array, payload: string): string {
-    const msgHash = createHash("sha256").update(payload).digest();
-    return bytesToHex(ed25519.sign(msgHash, ed25519PrivateKey));
-}
-
-/** What the executor's `agentRoomKeySeed` returns (`room_key_seed_for_context`):
- * hex of sha256 of the signature bytes over sha256(seed message). */
-function agentRoomKeySeed(ed25519PrivateKey: Uint8Array): string {
-    const msgHash = createHash("sha256").update(ROOM_KEY_SEED_MESSAGE).digest();
-    const signature = ed25519.sign(msgHash, ed25519PrivateKey);
-    return createHash("sha256").update(signature).digest("hex");
-}
-
-// Ed25519 key 0x01 * 32. The Rust test
-// `agent::tests::the_room_key_seed_matches_the_language_test_vector` pins the
-// same seed. Changing these values changes every agent's X25519 key and orphans
-// every room key sealed to it.
-const PINNED_SEED_HEX = "006af1ad448e09f3d060623636d9e943c31f852b4962e85a9b40b2d72b0ba881";
-const PINNED_X25519_PUBLIC_HEX = "615b113aa09aae87eed60da63a8f9c05c840d7b67319e0528167dab602989617";
 
 // ---------------------------------------------------------------------------
 // hex helpers
@@ -79,94 +70,77 @@ describe("encryption: hex helpers", () => {
 });
 
 // ---------------------------------------------------------------------------
-// X25519 key derivation
+// The executor's sealed box, pinned on both sides
 // ---------------------------------------------------------------------------
 
-describe("encryption: deriveX25519KeyPair", () => {
-    it("is deterministic for the same agent", () => {
-        const seed = mockSeed("did:key:zAgentA");
-        const kp1 = deriveX25519KeyPair(seed);
-        const kp2 = deriveX25519KeyPair(seed);
-        assert.deepEqual(kp1.privateKey, kp2.privateKey);
-        assert.deepEqual(kp1.publicKey, kp2.publicKey);
+describe("encryption: the sealed box format", () => {
+    // `rust-executor/src/agent/sealed_box.rs` pins the same values. Changing
+    // either side makes every room key sealed so far unreadable.
+    const secret = new Uint8Array(32).fill(1);
+
+    it("maps a did:key's Ed25519 key to X25519 like the executor", () => {
+        const did = didForEd25519PublicKey(ed25519.getPublicKey(secret));
+        assert.equal(did, "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX");
+        const x25519Public = ed25519.utils.toMontgomery(ed25519.getPublicKey(secret));
+        const x25519Secret = ed25519.utils.toMontgomerySecret(secret);
+        assert.equal(bytesToHex(x25519Public), "1b1b58dd50ea14b60da17b790cd02754d970c9bab864ebb3c0f3016fe51d3f57");
+        assert.equal(bytesToHex(x25519Secret), "58e86efb75fa4e2c410f46e16de9f6acae1a1703528651b69bc176c088bef36e");
+        assert.deepEqual(x25519.getPublicKey(x25519Secret), x25519Public, "the two maps agree");
     });
 
-    it("produces different keys for different agents", () => {
-        const kpA = deriveX25519KeyPair(mockSeed("did:key:zAgentA"));
-        const kpB = deriveX25519KeyPair(mockSeed("did:key:zAgentB"));
-        assert.notDeepEqual(kpA.privateKey, kpB.privateKey);
-        assert.notDeepEqual(kpA.publicKey, kpB.publicKey);
-    });
-
-    it("produces 32-byte keys", () => {
-        const kp = deriveX25519KeyPair(mockSeed("did:key:zAgentA"));
-        assert.equal(kp.privateKey.length, 32);
-        assert.equal(kp.publicKey.length, 32);
-    });
-
-    it("refuses a seed that is not 32 bytes", () => {
-        assert.throws(() => deriveX25519KeyPair(() => "ab".repeat(64)), /32 bytes/);
-    });
-
-    it("yields the keypair the old in-language derivation did, for the same agent", () => {
-        const ed25519PrivateKey = ed25519.utils.randomPrivateKey();
-
-        // Before agentRoomKeySeed: the language signed the seed message itself.
-        const oldSignatureHex = agentSignStringHex(ed25519PrivateKey, ROOM_KEY_SEED_MESSAGE);
-        const oldPrivateKey = createHash("sha256").update(hexToBytes(oldSignatureHex)).digest();
-        const oldPublicKey = x25519.getPublicKey(oldPrivateKey);
-
-        const kp = deriveX25519KeyPair(() => agentRoomKeySeed(ed25519PrivateKey));
-        assert.deepEqual(kp.privateKey, new Uint8Array(oldPrivateKey));
-        assert.deepEqual(kp.publicKey, oldPublicKey);
-    });
-
-    it("pins the derivation for a fixed Ed25519 key", () => {
-        const ed25519PrivateKey = new Uint8Array(32).fill(1);
-        const seedHex = agentRoomKeySeed(ed25519PrivateKey);
-        const kp = deriveX25519KeyPair(() => seedHex);
-        assert.equal(seedHex, PINNED_SEED_HEX);
-        assert.equal(bytesToHex(kp.publicKey), PINNED_X25519_PUBLIC_HEX);
+    it("seals the box the executor opens", () => {
+        const did = didForEd25519PublicKey(ed25519.getPublicKey(secret));
+        const sealed = sealToDid(
+            did,
+            new TextEncoder().encode("ad4m room key v1"),
+            new Uint8Array(32).fill(2),
+            new Uint8Array(12).fill(3),
+        );
+        assert.deepEqual(sealed, {
+            ephemeralPublicKey: "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59",
+            nonce: "030303030303030303030303",
+            ciphertext: "11b99acbd7bdf173901c669b2ed8c4794cb801ac9c2ac9642531fd873dfde2cc",
+        });
+        assert.equal(new TextDecoder().decode(openSealed(sealed, secret)), "ad4m room key v1");
     });
 });
 
 // ---------------------------------------------------------------------------
-// Sealed room-key envelope (X25519 ECDH + HKDF + AES-256-GCM)
+// Room keys sealed to DIDs
 // ---------------------------------------------------------------------------
 
-describe("encryption: sealRoomKeyForRecipient / openRoomKeyEnvelope", () => {
-    it("round-trips a room key to its intended recipient", () => {
-        const recipient = deriveX25519KeyPair(mockSeed("did:key:zRecipient"));
+describe("encryption: sealRoomKey / openRoomKey", () => {
+    it("seals a room key to a member by DID alone, and the member opens it", () => {
+        const sealer = new SealingAgent();
+        const member = new SealingAgent();
         const roomKey = generateRoomKey();
 
-        const envelope = sealRoomKeyForRecipient(roomKey, recipient.publicKey);
-        const opened = openRoomKeyEnvelope(envelope, recipient.privateKey);
-
-        assert.deepEqual(opened, roomKey);
+        const sealed = sealRoomKey(sealer, roomKey, member.did());
+        assert.deepEqual(openRoomKey(member, sealed), roomKey);
     });
 
-    it("produces a different envelope each time (fresh ephemeral key + nonce)", () => {
-        const recipient = deriveX25519KeyPair(mockSeed("did:key:zRecipient"));
+    it("produces a different box each time (fresh ephemeral key + nonce)", () => {
+        const member = new SealingAgent();
         const roomKey = generateRoomKey();
-
-        const envelope1 = sealRoomKeyForRecipient(roomKey, recipient.publicKey);
-        const envelope2 = sealRoomKeyForRecipient(roomKey, recipient.publicKey);
-
-        assert.notEqual(envelope1.ephemeralPublicKey, envelope2.ephemeralPublicKey);
-        assert.notEqual(envelope1.ciphertext, envelope2.ciphertext);
-
-        // Both still open correctly despite differing ciphertext.
-        assert.deepEqual(openRoomKeyEnvelope(envelope1, recipient.privateKey), roomKey);
-        assert.deepEqual(openRoomKeyEnvelope(envelope2, recipient.privateKey), roomKey);
+        const box1 = sealRoomKey(member, roomKey, member.did());
+        const box2 = sealRoomKey(member, roomKey, member.did());
+        assert.notEqual(box1.ephemeralPublicKey, box2.ephemeralPublicKey);
+        assert.notEqual(box1.ciphertext, box2.ciphertext);
+        assert.deepEqual(openRoomKey(member, box1), roomKey);
+        assert.deepEqual(openRoomKey(member, box2), roomKey);
     });
 
-    it("fails to open with the wrong recipient private key", () => {
-        const recipient = deriveX25519KeyPair(mockSeed("did:key:zRecipient"));
-        const impostor = deriveX25519KeyPair(mockSeed("did:key:zImpostor"));
-        const roomKey = generateRoomKey();
+    it("another agent cannot open it", () => {
+        const member = new SealingAgent();
+        const impostor = new SealingAgent();
+        const sealed = sealRoomKey(member, generateRoomKey(), member.did());
+        assert.throws(() => openRoomKey(impostor, sealed));
+    });
 
-        const envelope = sealRoomKeyForRecipient(roomKey, recipient.publicKey);
-        assert.throws(() => openRoomKeyEnvelope(envelope, impostor.privateKey));
+    it("refuses a sealed value that is not a room key", () => {
+        const member = new SealingAgent();
+        const sealed = member.sealToDid(member.did(), "00".repeat(16));
+        assert.throws(() => openRoomKey(member, sealed), /32 bytes/);
     });
 
     it("generateRoomKey returns AES_KEY_BYTES (32) random bytes", () => {
@@ -174,7 +148,6 @@ describe("encryption: sealRoomKeyForRecipient / openRoomKeyEnvelope", () => {
         assert.equal(key.length, AES_KEY_BYTES);
         assert.notDeepEqual(key, generateRoomKey());
     });
-
 });
 
 // ---------------------------------------------------------------------------
@@ -293,18 +266,43 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
 // ---------------------------------------------------------------------------
 
 describe("encryption: buildKeyRing / latestKeyVersion", () => {
-    it("builds a KeyRing from sealed envelopes", () => {
-        const { privateKey, publicKey } = deriveX25519KeyPair(mockSeed("ring-agent"));
+    it("builds a KeyRing from the boxes sealed to this agent", () => {
+        const agent = new SealingAgent();
         const rk1 = generateRoomKey();
         const rk2 = generateRoomKey();
         const entries = [
-            { encryptedKey: sealRoomKeyForRecipient(rk1, publicKey), version: 1 },
-            { encryptedKey: sealRoomKeyForRecipient(rk2, publicKey), version: 2 },
+            { encryptedKey: sealRoomKey(agent, rk1, agent.did()), version: 1 },
+            { encryptedKey: sealRoomKey(agent, rk2, agent.did()), version: 2 },
         ];
-        const ring = buildKeyRing(entries, privateKey);
+        const ring = buildKeyRing(entries, agent);
         assert.equal(ring.size, 2);
         assert.deepEqual(ring.get(1), rk1);
         assert.deepEqual(ring.get(2), rk2);
+    });
+
+    it("leaves out a version that does not open, so one bad grant does not lock the room", () => {
+        const agent = new SealingAgent();
+        const other = new SealingAgent();
+        const rk1 = generateRoomKey();
+        const ring = buildKeyRing(
+            [
+                { encryptedKey: sealRoomKey(agent, rk1, agent.did()), version: 1 },
+                { encryptedKey: sealRoomKey(agent, generateRoomKey(), other.did()), version: 2 },
+            ],
+            agent,
+        );
+        assert.deepEqual([...ring.keys()], [1]);
+        assert.deepEqual(ring.get(1), rk1);
+    });
+
+    it("is empty when no version opens: the agent waits for a key, and an admin rotates", () => {
+        const agent = new SealingAgent();
+        const other = new SealingAgent();
+        const ring = buildKeyRing(
+            [{ encryptedKey: sealRoomKey(agent, generateRoomKey(), other.did()), version: 1 }],
+            agent,
+        );
+        assert.equal(ring.size, 0);
     });
 
     it("latestKeyVersion returns the highest version", () => {
@@ -355,85 +353,3 @@ describe("encryption: link_hash invariant", () => {
     });
 });
 
-// ---------------------------------------------------------------------------
-// X25519 ownership verification
-// ---------------------------------------------------------------------------
-
-describe("encryption: verifyX25519Ownership", () => {
-    /**
-     * Creates a real Ed25519 keypair, derives the X25519 public key, and
-     * signs it — matching the production flow where the agent signs its
-     * X25519 public key hex via agentSignStringHex (SHA-256 hashing
-     * convention).
-     */
-    async function makeTestIdentity() {
-        const privateKey = ed25519.utils.randomPrivateKey();
-        const publicKey = ed25519.getPublicKey(privateKey);
-
-        // Build did:key from the ed25519 public key
-        const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-        function base58Encode(bytes: Uint8Array): string {
-            const digits = [0];
-            for (const b of bytes) {
-                let carry = b;
-                for (let j = 0; j < digits.length; j++) {
-                    carry += digits[j] << 8;
-                    digits[j] = carry % 58;
-                    carry = (carry / 58) | 0;
-                }
-                while (carry > 0) { digits.push(carry % 58); carry = (carry / 58) | 0; }
-            }
-            let str = "";
-            for (let i = 0; i < bytes.length && bytes[i] === 0; i++) str += "1";
-            for (let i = digits.length - 1; i >= 0; i--) str += BASE58_ALPHABET[digits[i]];
-            return str;
-        }
-        const prefixed = new Uint8Array(34);
-        prefixed[0] = 0xed; prefixed[1] = 0x01;
-        prefixed.set(publicKey, 2);
-        const did = `did:key:z${base58Encode(prefixed)}`;
-
-        // Derive X25519 keypair the same way the production code does
-        const kp = deriveX25519KeyPair(() => agentRoomKeySeed(privateKey));
-        const x25519Hex = bytesToHex(kp.publicKey);
-
-        // Sign the X25519 public key (matching agentSignStringHex convention)
-        const keyHash = createHash("sha256").update(x25519Hex).digest();
-        const x25519Sig = ed25519.sign(keyHash, privateKey);
-        const x25519SigHex = bytesToHex(x25519Sig);
-
-        return { did, privateKey, publicKey, x25519Hex, x25519SigHex };
-    }
-
-    it("accepts a valid X25519 ownership signature", async () => {
-        const id = await makeTestIdentity();
-        assert.equal(verifyX25519Ownership(id.did, id.x25519Hex, id.x25519SigHex), true);
-    });
-
-    it("rejects a wrong signature", async () => {
-        const id = await makeTestIdentity();
-        // Flip the first byte in the signature. XOR (not an overwrite to a fixed
-        // value like "ff") guarantees the byte always changes, even when the
-        // real signature's first byte already happens to be 0xff.
-        const firstByte = parseInt(id.x25519SigHex.slice(0, 2), 16);
-        const flippedByte = (firstByte ^ 0xff).toString(16).padStart(2, "0");
-        const badSig = flippedByte + id.x25519SigHex.slice(2);
-        assert.equal(verifyX25519Ownership(id.did, id.x25519Hex, badSig), false);
-    });
-
-    it("rejects a substituted X25519 key (signed by a different agent)", async () => {
-        const agent1 = await makeTestIdentity();
-        const agent2 = await makeTestIdentity();
-        // agent1's signature, but agent2's X25519 key — should fail
-        assert.equal(verifyX25519Ownership(agent1.did, agent2.x25519Hex, agent1.x25519SigHex), false);
-    });
-
-    it("rejects a malformed DID", () => {
-        assert.equal(verifyX25519Ownership("not-a-did", "aa".repeat(32), "bb".repeat(64)), false);
-    });
-
-    it("rejects an empty signature", async () => {
-        const id = await makeTestIdentity();
-        assert.equal(verifyX25519Ownership(id.did, id.x25519Hex, ""), false);
-    });
-});

@@ -12,6 +12,7 @@ use crate::types::{Expression, ExpressionProof};
 use crate::wallet::wallet_backend;
 
 pub mod capabilities;
+pub mod sealed_box;
 pub mod session;
 pub mod signatures;
 
@@ -336,63 +337,13 @@ pub fn did_for_context(context: &AgentContext) -> Result<String, AnyError> {
     }
 }
 
-/// The message the server link language derives each agent's X25519 key from:
-/// `sha256(sign(sha256(ROOM_KEY_SEED_MESSAGE)))`. Room keys are sealed to that
-/// X25519 key, and Ed25519 signatures are deterministic, so whoever gets the
-/// agent's signature over this message can unseal every room key sealed to it.
-/// No signing API may produce that signature; [`room_key_seed_for_context`] is
-/// the only way to the seed.
-pub const ROOM_KEY_SEED_MESSAGE: &str = "adam-server-link-language:x25519-seed:v1";
-
-/// Signs `payload` with the key of `context`, without the refusals of
-/// [`sign_for_context`]. Only [`room_key_seed_for_context`] may sign the reserved
-/// payload through it.
-fn sign_unchecked(payload: &[u8], context: &AgentContext) -> Result<Vec<u8>, AnyError> {
+pub fn sign_for_context(payload: &[u8], context: &AgentContext) -> Result<Vec<u8>, AnyError> {
     let backend = wallet_backend();
     let key_name = context.wallet_key_name()?;
     let signature = backend
         .sign(&key_name, payload)
         .ok_or(anyhow!("{} key not found", key_name))?;
     Ok(signature)
-}
-
-/// Every signature the executor makes with an agent's key, for the node or for a
-/// managed user, comes through here: raw-byte signing, `sign_string_hex*` (which
-/// signs `sha256(message)`), `AgentSignature`, signed expressions, entanglement
-/// proofs, and every RPC, language op and WASM import built on them. It refuses
-/// the payload the room-key seed is signed over, so no caller can obtain that
-/// signature and with it the agent's X25519 private key.
-pub fn sign_for_context(payload: &[u8], context: &AgentContext) -> Result<Vec<u8>, AnyError> {
-    if is_room_key_seed_payload(payload) {
-        return Err(anyhow!(
-            "Refusing to sign the reserved room-key seed message \"{}\"",
-            ROOM_KEY_SEED_MESSAGE
-        ));
-    }
-    sign_unchecked(payload, context)
-}
-
-fn is_room_key_seed_payload(payload: &[u8]) -> bool {
-    payload == signatures::hash_message(&ROOM_KEY_SEED_MESSAGE.to_string()).as_slice()
-}
-
-/// The secret seed of the agent's room-key X25519 keypair:
-/// `sha256(sign(sha256(ROOM_KEY_SEED_MESSAGE)))` with the key of `context`. The
-/// same value the server link language derived itself before signing that
-/// message was refused, so existing X25519 keys do not change.
-pub fn room_key_seed_for_context(context: &AgentContext) -> Result<[u8; 32], AnyError> {
-    room_key_seed_with(|payload| sign_unchecked(payload, context))
-}
-
-/// `sha256(sign(sha256(ROOM_KEY_SEED_MESSAGE)))` for the signer `sign`.
-fn room_key_seed_with(
-    sign: impl FnOnce(&[u8]) -> Result<Vec<u8>, AnyError>,
-) -> Result<[u8; 32], AnyError> {
-    use sha2::{Digest, Sha256};
-    let signature = sign(&signatures::hash_message(
-        &ROOM_KEY_SEED_MESSAGE.to_string(),
-    ))?;
-    Ok(Sha256::digest(&signature).into())
 }
 
 pub fn did_document() -> did_key::Document {
@@ -1544,108 +1495,6 @@ mod tests {
             .expect("Creating signed expression should succeed once key exists");
         assert_eq!(expression.author, user_did);
         assert!(signatures::verify(&expression).unwrap());
-    }
-
-    /// The server link language's X25519 key is `sha256(sign(sha256(this message)))`.
-    /// Whoever obtains that signature learns the key, so no signing API may produce it.
-    const SEED_MESSAGE: &str = "adam-server-link-language:x25519-seed:v1";
-
-    fn assert_refuses_the_seed_message(context: &AgentContext) {
-        let seed_message = SEED_MESSAGE.to_string();
-        let seed_hash = signatures::hash_message(&seed_message);
-        assert!(
-            sign_string_hex_for_context(seed_message.clone(), context).is_err(),
-            "sign_string_hex_for_context signed the room-key seed message"
-        );
-        assert!(
-            sign_for_context(&seed_hash, context).is_err(),
-            "sign_for_context signed the hash of the room-key seed message"
-        );
-        assert!(
-            AgentSignature::from_message_for_context(seed_message.clone(), context).is_err(),
-            "AgentSignature::from_message_for_context signed the room-key seed message"
-        );
-        // Other messages, including near misses, still sign.
-        assert!(sign_string_hex_for_context(format!("{} ", SEED_MESSAGE), context).is_ok());
-        assert!(sign_for_context(seed_message.as_bytes(), context).is_ok());
-    }
-
-    #[test]
-    fn no_signing_api_signs_the_room_key_seed_message() {
-        ensure_setup();
-        assert_refuses_the_seed_message(&AgentContext::main_agent());
-        let seed_message = SEED_MESSAGE.to_string();
-        assert!(sign_string_hex(seed_message.clone()).is_err());
-        assert!(sign(&signatures::hash_message(&seed_message)).is_err());
-        assert!(AgentSignature::from_message(seed_message.clone()).is_err());
-        assert!(
-            crate::entanglement_service::sign_device_key(seed_message.clone(), "x".into()).is_err(),
-            "an entanglement preflight signed the room-key seed message"
-        );
-        assert!(
-            crate::entanglement_service::generate_holochain_proof(seed_message, "s".into())
-                .is_err(),
-            "a holochain entanglement proof signed the room-key seed message"
-        );
-
-        let did = crate::test_utils::create_test_user("room.key.seed.refusal@example.org");
-        assert_refuses_the_seed_message(&AgentContext::managed(did));
-    }
-
-    /// `room_key_seed_for_context` is what the server link language computed before
-    /// the seed message was refused: sha256 of the bytes of the agent's signature over
-    /// sha256(message), i.e. of what `agentSignStringHex(message)` returned, decoded.
-    #[test]
-    fn the_room_key_seed_is_the_hash_of_the_old_seed_signature() {
-        use sha2::{Digest, Sha256};
-        ensure_setup();
-        assert_eq!(ROOM_KEY_SEED_MESSAGE, SEED_MESSAGE);
-        let did = crate::test_utils::create_test_user("room.key.seed.value@example.org");
-
-        let mut seeds = Vec::new();
-        for context in [AgentContext::main_agent(), AgentContext::managed(did)] {
-            // The old derivation, straight from the wallet: no refusal on this path.
-            let old_signature = wallet_backend()
-                .sign(
-                    &context.wallet_key_name().unwrap(),
-                    &signatures::hash_message(&SEED_MESSAGE.to_string()),
-                )
-                .expect("the wallet signs");
-            let did = did_for_context(&context).unwrap();
-            assert!(
-                verify_string_signed_by_did(&did, SEED_MESSAGE, &hex::encode(&old_signature))
-                    .unwrap(),
-                "the old derivation was the agent's agentSignStringHex signature"
-            );
-            let expected: [u8; 32] = Sha256::digest(&old_signature).into();
-
-            let seed = room_key_seed_for_context(&context).expect("the seed");
-            assert_eq!(seed, expected, "{context:?}");
-            assert_eq!(
-                room_key_seed_for_context(&context).unwrap(),
-                seed,
-                "deterministic"
-            );
-            seeds.push(seed);
-        }
-        assert_ne!(
-            seeds[0], seeds[1],
-            "the node and a user have their own seeds"
-        );
-    }
-
-    /// The same vector `bootstrap-languages/server-link-language/tests/encryption.test.ts`
-    /// pins for the Ed25519 key 0x01 * 32. Changing it changes every agent's X25519 key
-    /// and orphans every room key sealed to it.
-    #[test]
-    fn the_room_key_seed_matches_the_language_test_vector() {
-        use did_key::{CoreSign, Ed25519KeyPair};
-        let keypair = did_key::generate::<Ed25519KeyPair>(Some(&[1u8; 32]));
-        let seed = room_key_seed_with(|payload| Ok(keypair.sign(payload))).unwrap();
-        assert_eq!(
-            hex::encode(seed),
-            "006af1ad448e09f3d060623636d9e943c31f852b4962e85a9b40b2d72b0ba881"
-        );
     }
 
     // User key management tests

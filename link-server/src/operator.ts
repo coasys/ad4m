@@ -148,6 +148,7 @@ function roomDetail(ctx: OperatorContext, roomId: string) {
   const online = new Set(ctx.telepresence.getOnlineAgents(roomId).map((a) => a.did));
   const history = ctx.db.getAclChanges(roomId);
   // Over the whole history, not just the last 100 changes shown.
+  const keyHolders = ctx.db.getAllMemberKeyVersions(roomId);
   const addedBy = new Map(
     ctx.db.getLatestAdds(roomId).map((c) => [c.did, { actor: c.actor, source: c.source, at: c.at }])
   );
@@ -159,7 +160,8 @@ function roomDetail(ctx: OperatorContext, roomId: string) {
     members: ctx.db.getAcl(roomId).map((a) => ({
       did: a.did,
       addedAt: a.added_at,
-      hasX25519Key: !!a.x25519_public_key,
+      // Sealed to the member's DID, so it can hold a room key before it ever connects.
+      hasRoomKey: (keyHolders.get(a.did)?.length ?? 0) > 0,
       online: online.has(a.did),
       addedBy: addedBy.get(a.did) ?? null,
     })),

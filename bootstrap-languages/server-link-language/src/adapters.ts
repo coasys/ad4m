@@ -16,6 +16,8 @@
  *   initAdapters({ storage: new MockStorage() });
  */
 
+import type { SealedBox } from "./types.js";
+
 // ---------------------------------------------------------------------------
 // Transport (HTTP)
 // ---------------------------------------------------------------------------
@@ -55,20 +57,20 @@ export interface StorageAdapter {
  * actually needs. Deliberately narrow — the language never signs
  * commits itself (the runtime signs diffs upstream before they reach
  * `commit()`); it only needs its own DID (for auth + peer filtering),
- * a signature primitive (for auth) and the secret seed of its room-key
- * X25519 keypair (see src/encryption.ts).
+ * a signature primitive (for auth), and the executor's sealed boxes to
+ * hand room keys from member to member by DID.
  */
 export interface AgentAdapter {
     did(): string;
     /** `agentSignStringHex`: hex of the agent's Ed25519 signature over sha256(payload). */
     signStringHex(payload: string): string;
+    /** `agentSealToDid`: seals the bytes `plaintextHex` to the agent `did`. */
+    sealToDid(did: string, plaintextHex: string): SealedBox;
     /**
-     * `agentRoomKeySeed`: hex of the 32-byte secret seed of this agent's
-     * room-key X25519 keypair, computed by the executor. The executor refuses
-     * to sign the message the seed is derived from, so it is never available
-     * through `signStringHex`.
+     * `agentOpenSealed`: opens a box sealed to this agent, returns hex.
+     * Throws for a box sealed to any other DID.
      */
-    roomKeySeedHex(): string;
+    openSealed(sealed: SealedBox): string;
 }
 
 // ---------------------------------------------------------------------------
