@@ -190,11 +190,18 @@ impl PendingRequests {
             };
         let same_target = |t: &RequestTarget| *t == target;
         let for_target = pending.values().filter(|r| same_target(&r.target)).count();
-        // A share that is all approved takes no more: a request for no agent is never approved,
-        // so only an agent's request is refused here.
+        // A share that is all approved takes no more. The operator may approve a request for
+        // no agent (`may_approve`), so that share can fill too: such a request is then dropped
+        // and answered like an agent's, as when the store is full, so the answer reveals no
+        // accounts.
         if for_target >= MAX_PENDING_REQUESTS_PER_TARGET {
-            let id = oldest_unapproved(&pending, &same_target).ok_or_else(too_many)?;
-            pending.remove(&id);
+            match oldest_unapproved(&pending, &same_target) {
+                Some(id) => {
+                    pending.remove(&id);
+                }
+                None if target == RequestTarget::NoAgent => return Ok(()),
+                None => return Err(too_many()),
+            }
         }
         if pending.len() >= MAX_PENDING_REQUESTS {
             let below_share = for_target < MAX_PENDING_REQUESTS_PER_TARGET;
@@ -656,6 +663,28 @@ mod tests {
         assert!(pending
             .request("alice".into(), AuthInfo::default(), alice, 0)
             .is_ok());
+
+        // The share of no agent, approved in full by the operator, drops the next request for
+        // no agent, answered as one for an agent.
+        for i in 0..MAX_PENDING_REQUESTS_PER_TARGET {
+            let id = format!("n{i}");
+            pending
+                .request(id.clone(), AuthInfo::default(), RequestTarget::NoAgent, 0)
+                .unwrap();
+            pending
+                .approve(&id, AuthInfo::default(), "123456".into(), 0)
+                .unwrap();
+        }
+        assert!(pending
+            .request(
+                "none".into(),
+                AuthInfo::default(),
+                RequestTarget::NoAgent,
+                0
+            )
+            .is_ok());
+        assert!(!pending.contains("none"));
+        assert_eq!(pending.len(), 2 * MAX_PENDING_REQUESTS_PER_TARGET + 1);
     }
 
     // Requests for emails without an agent are silent and live a day; a flood of them used to

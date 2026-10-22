@@ -165,7 +165,8 @@ from the global config where `agent.requestCapability` uses it.
      new request evicts an unapproved one, oldest first: for no agent, then for its own
      target, then (for an agent below its share) the target holding the most; never an
      approved one, so when none may go it is refused (429; MCP's `request_capability` answers
-     `success: false`). A request lives 10 minutes for the main agent and 24 hours for a
+     `success: false`). A target whose 64 are all approved takes no more, though the store has
+     room; a request for no agent is then dropped and answered as one for an agent. A request lives 10 minutes for the main agent and 24 hours for a
      managed agent, restarted at approval. Its approval request goes to the target agent's DID
      (`Event::approval_request`). Every request waits for that owner: the declared app name
      and domain are the caller's claim and approve nothing. `AuthInfo.user_email` on the
