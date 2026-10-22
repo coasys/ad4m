@@ -400,7 +400,12 @@ mod tests {
             let refused = check_request(&request(&messages, &[outside.into()]));
             assert!(refused.is_err(), "{outside} was accepted");
         }
-        for inside in ["instance_update", "call_record_tool", "add_child", "add_link"] {
+        for inside in [
+            "instance_update",
+            "call_record_tool",
+            "add_child",
+            "add_link",
+        ] {
             assert!(
                 check_request(&request(&messages, &[inside.into()])).is_ok(),
                 "{inside}"
