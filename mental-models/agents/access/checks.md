@@ -16,7 +16,7 @@ An **access check** applies a session's grant to one call: a capability check pl
 | MCP write tools | `PERSPECTIVE_CREATE_CAPABILITY` for every write | `get_writable_perspective` → `get_perspective_with_auth` | 404-shaped JSON |
 | Event stream ([Events](../interfaces/events.md)) | any authenticated session; per stream only `AGENT_PERMIT` (`apps-changed`) and `NEIGHBOURHOOD_READ` (SFU events) | owner DID filters in `events_ws.rs`; `notification_access.rs` for notifications | event not sent |
 | Live query updates | at subscribe | the subscribing RPC connection only | — |
-| Language ops (JS) | none: language code is trusted with the ops | signs as `get_runtime_agent_context()`; `*_for_user` ops check the runtime's user | error |
+| Language ops (JS) | none: language code is trusted with the ops | signs as `get_runtime_agent_context()`; `agent_create_signed_expression_for_user` checks the runtime's user | error |
 
 MCP and RPC check different capabilities for the same write. MCP writes check `perspective/CREATE` on `*` (`get_writable_perspective`). RPC writes check `perspective/UPDATE` on the perspective's UUID (`add_link` in [perspectives_ws.rs](../../../rust-executor/src/api/perspectives_ws.rs)). This page owns the MCP and RPC rules.
 
