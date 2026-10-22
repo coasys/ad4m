@@ -68,7 +68,7 @@ export default function crossPeerShapeSyncTests(
           new Perspective(),
         );
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
-        await testContext.makeAllNodesKnown();
+        await testContext.makeAllNodesKnown([alice, aliceHandle.uuid], [bob, bobHandle.uuid]);
 
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
