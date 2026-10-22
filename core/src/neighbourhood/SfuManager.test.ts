@@ -309,6 +309,23 @@ test("a second offer waits until the first one is answered", async () => {
     expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
 })
 
+test("an offer the executor sends again after it was answered is not answered twice", async () => {
+    // A second restart request while the restart's offer waits gets that
+    // offer again. The executor takes one answer per offer: a second answer
+    // would land on its next offer and leave it with stale ICE credentials.
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+
+    api.emitOffer(offer("restart"))
+    api.emitOffer(offer("restart"))
+    api.emitOffer(offer("next"))
+    await flush()
+
+    expect(currentPc().remoteSdps()).toEqual(["server-answer", "restart", "next"])
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
+})
+
 test("an offer queued for a connection that has since been replaced is dropped", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)

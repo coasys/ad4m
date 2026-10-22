@@ -215,6 +215,10 @@ export class SfuManager {
     private qualityPreference: SfuQualityPreference | null = null
     /** Server offers waiting to be applied, in arrival order, one at a time. */
     private offerQueue: Promise<void> = Promise.resolve()
+    /** The last server offer answered. The executor sends an unanswered
+     *  restart offer again when asked twice; one that was answered meanwhile
+     *  must not be answered again, or that answer lands on its next offer. */
+    private answeredOffer: string | null = null
     private renegotiationUnsubscribe: (() => void) | null = null
     private rosterUnsubscribe: (() => void) | null = null
     private dataChannelUnsubscribe: (() => void) | null = null
@@ -616,7 +620,7 @@ export class SfuManager {
 
     /** Apply one server offer to `pc` and answer it, unless `pc` is no longer the call's. */
     private async applyServerOffer(pc: RTCPeerConnection, event: SfuCallRenegotiationOffer): Promise<void> {
-        if (this.state.peerConnection !== pc) return
+        if (this.state.peerConnection !== pc || event.sdpOffer === this.answeredOffer) return
         // The mapping first: the tracks this offer adds arrive while it is applied.
         for (const entry of event.trackMapping ?? []) {
             this.midToParticipant.set(entry.mid, entry.agentDid)
@@ -629,6 +633,7 @@ export class SfuManager {
                 event.roomName,
                 JSON.stringify(pc.localDescription),
             )
+            this.answeredOffer = event.sdpOffer
         } catch (err) {
             if (this.state.peerConnection !== pc) return
             // A renegotiation that fails leaves this connection out of step
