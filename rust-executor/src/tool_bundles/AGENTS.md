@@ -8,7 +8,7 @@ at boot.
 
 | File | Role |
 |---|---|
-| `sandbox.rs` | `BundleSandbox`: one bare `JsRuntime` per bundle on its own thread; `call(path, args)` / `read(path)`, JSON in and out; time limit on the load and on each call, memory cap on the V8 heap and (through the isolate's ArrayBuffer allocator) on buffers |
+| `sandbox.rs` | `BundleSandbox`: a bare `JsRuntime` on its own thread (the registry keeps one per bundle and starts a fresh one per record call); `call(path, args)` / `read(path)`, JSON in and out; time limit on the load and on each call, memory cap on the V8 heap and (through the isolate's ArrayBuffer allocator) on buffers |
 | `bootstrap.js` | Runs before the bundle: the only globals it gets beyond the language (`structuredClone`, `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `crypto.getRandomValues`, `console`), removes `Deno` and `WebAssembly`, makes `ArrayBuffer`/`SharedArrayBuffer` fixed-length only, evaluates to the invoker |
 | `store.rs` | `ToolBundleStore`: `<data>/tool_bundles/<address>.js`, addressed by `js_core::utils::content_address` |
 | `registry.rs` | `ToolBundleRegistry::global()`: install (a toolset name already taken replaces its bundle, which must not drop any of that bundle's toolsets), `load_stored` at boot, `find_tool` (a `FoundTool` calls in a fresh isolate), `read_doc`. Reached by `api/tool_bundles_ws.rs`, `mcp/tools/instances/record_tools.rs` and `mcp/tools/docs.rs` |
