@@ -28,7 +28,7 @@ import {
   type TestServerHandle,
 } from "./helpers.js";
 import type { SealedBox } from "../src/encryption.js";
-import { generateRoomKey, openSealed, sealToDid } from "./sealed-box.js";
+import { generateRoomKey, openSealed, roomKeyCommitment, sealToDid } from "./sealed-box.js";
 
 const { bytesToHex } = ed.etc;
 
@@ -536,7 +536,8 @@ test("POST /keys/rotate request body contains zero plaintext key bytes — hex o
     const keys = aclRes.body.members.map((m) => ({ did: m.did, encryptedKey: sealToDid(m.did, roomKey) }));
 
     // Serialize — this exact string goes on the wire.
-    const wireBody = JSON.stringify({ keys });
+    const body = { keys, commitment: roomKeyCommitment(roomKey) };
+    const wireBody = JSON.stringify(body);
 
     // The plaintext key must not appear in any encoding.
     assert.equal(
@@ -554,7 +555,7 @@ test("POST /keys/rotate request body contains zero plaintext key bytes — hex o
 
     // Now send it — server must accept the sealed-only payload.
     const rotateRes = await postJson<{ version: number; recipients: string[] }>(
-      `${server.url}/rooms/${roomId}/keys/rotate`, { keys }, adminToken,
+      `${server.url}/rooms/${roomId}/keys/rotate`, body, adminToken,
     );
     assert.equal(rotateRes.status, 200);
     assert.equal(rotateRes.body.version, 1);

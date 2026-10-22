@@ -163,6 +163,21 @@ export function generateRoomKey(): Uint8Array {
     return randomBytes(AES_KEY_BYTES);
 }
 
+export const ROOM_KEY_COMMITMENT_INFO = "ad4m:room-key-commitment:v1";
+
+/**
+ * The admin's commitment to a room key version, published with the rotation:
+ * SHA-256 of a domain tag and the key, hex. A member keeps an opened key only
+ * if it matches, so a granter cannot hand it a wrong key that decrypts.
+ */
+export function roomKeyCommitment(roomKey: Uint8Array): string {
+    const tag = utf8ToBytes(ROOM_KEY_COMMITMENT_INFO);
+    const input = new Uint8Array(tag.length + roomKey.length);
+    input.set(tag);
+    input.set(roomKey, tag.length);
+    return bytesToHex(sha256(input));
+}
+
 export function deriveSealKey(sharedSecret: Uint8Array, ephemeralPublicKey: Uint8Array, recipientPublicKey: Uint8Array): Uint8Array {
     const salt = new Uint8Array(64);
     salt.set(ephemeralPublicKey);
@@ -212,28 +227,36 @@ export function openRoomKey(agent: Pick<AgentAdapter, "openSealed">, sealed: Sea
 export type KeyRing = Map<number, Uint8Array>;
 
 /**
- * The versions sealed to this agent that open. A box that does not open (a
- * member granted a version sealed wrongly) is left out with a log line, so
- * it costs that version, not the room. When none opens, the ring is empty
- * and the caller treats the agent as holding no key ("pending").
+ * The versions sealed to this agent whose box opens to the key the rotation
+ * committed to. A box that does not open, or opens to another key (a member
+ * granted a wrong one), is `spoiled`: left out with a log line, so it costs
+ * that version, not the room, and the caller drops it so it is granted again.
+ * When none opens, the ring is empty and the caller treats the agent as
+ * holding no key ("pending").
  */
 export function buildKeyRing(
     entries: KeysResponseEntry[],
     agent: Pick<AgentAdapter, "openSealed">,
-): KeyRing {
+): { ring: KeyRing; spoiled: number[] } {
     const ring: KeyRing = new Map();
+    const spoiled: number[] = [];
     const failures: string[] = [];
     for (const entry of entries) {
         try {
-            ring.set(entry.version, openRoomKey(agent, entry.encryptedKey));
+            const key = openRoomKey(agent, entry.encryptedKey);
+            if (roomKeyCommitment(key) !== entry.commitment) {
+                throw new Error("the key does not match the rotation's commitment");
+            }
+            ring.set(entry.version, key);
         } catch (err) {
+            spoiled.push(entry.version);
             failures.push(`version ${entry.version}: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
     if (failures.length > 0) {
         console.error(`[server-link-language] room key versions that do not open: ${failures.join("; ")}`);
     }
-    return ring;
+    return { ring, spoiled };
 }
 
 export function latestKeyVersion(ring: KeyRing): number {

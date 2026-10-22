@@ -22,6 +22,7 @@ import {
     latestKeyVersion,
     openRoomKey,
     randomBytes,
+    roomKeyCommitment,
     sealToDid,
 } from "../src/encryption.js";
 import type { LinkExpression, SealedBox } from "../src/types.js";
@@ -262,42 +263,59 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
 // ---------------------------------------------------------------------------
 
 describe("encryption: buildKeyRing / latestKeyVersion", () => {
+    const entry = (did: string, key: Uint8Array, version: number, committed = key) => ({
+        encryptedKey: sealToDid(did, key),
+        version,
+        commitment: roomKeyCommitment(committed),
+    });
+
     it("builds a KeyRing from the boxes sealed to this agent", () => {
         const agent = new OpeningAgent();
         const rk1 = generateRoomKey();
         const rk2 = generateRoomKey();
-        const entries = [
-            { encryptedKey: sealToDid(agent.did(), rk1), version: 1 },
-            { encryptedKey: sealToDid(agent.did(), rk2), version: 2 },
-        ];
-        const ring = buildKeyRing(entries, agent);
+        const { ring, spoiled } = buildKeyRing([entry(agent.did(), rk1, 1), entry(agent.did(), rk2, 2)], agent);
         assert.equal(ring.size, 2);
         assert.deepEqual(ring.get(1), rk1);
         assert.deepEqual(ring.get(2), rk2);
+        assert.deepEqual(spoiled, []);
     });
 
-    it("leaves out a version that does not open, so one bad grant does not lock the room", () => {
+    it("spoils a version that does not open, so one bad grant does not lock the room", () => {
         const agent = new OpeningAgent();
         const other = new OpeningAgent();
         const rk1 = generateRoomKey();
-        const ring = buildKeyRing(
-            [
-                { encryptedKey: sealToDid(agent.did(), rk1), version: 1 },
-                { encryptedKey: sealToDid(other.did(), generateRoomKey()), version: 2 },
-            ],
+        const { ring, spoiled } = buildKeyRing(
+            [entry(agent.did(), rk1, 1), entry(other.did(), generateRoomKey(), 2)],
             agent,
         );
         assert.deepEqual([...ring.keys()], [1]);
         assert.deepEqual(ring.get(1), rk1);
+        assert.deepEqual(spoiled, [2]);
+    });
+
+    it("spoils a version whose box opens to a key other than the committed one", () => {
+        const agent = new OpeningAgent();
+        const rk1 = generateRoomKey();
+        // A member holding version 1 sealed a key of its own under it.
+        const { ring, spoiled } = buildKeyRing([entry(agent.did(), generateRoomKey(), 1, rk1)], agent);
+        assert.equal(ring.size, 0);
+        assert.deepEqual(spoiled, [1]);
+    });
+
+    it("spoils a version with no commitment", () => {
+        const agent = new OpeningAgent();
+        const { ring, spoiled } = buildKeyRing(
+            [{ encryptedKey: sealToDid(agent.did(), generateRoomKey()), version: 1 }],
+            agent,
+        );
+        assert.equal(ring.size, 0);
+        assert.deepEqual(spoiled, [1]);
     });
 
     it("is empty when no version opens: the agent waits for a key, and an admin rotates", () => {
         const agent = new OpeningAgent();
         const other = new OpeningAgent();
-        const ring = buildKeyRing(
-            [{ encryptedKey: sealToDid(other.did(), generateRoomKey()), version: 1 }],
-            agent,
-        );
+        const { ring } = buildKeyRing([entry(other.did(), generateRoomKey(), 1)], agent);
         assert.equal(ring.size, 0);
     });
 

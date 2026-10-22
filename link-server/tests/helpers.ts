@@ -5,7 +5,7 @@ import path from "node:path";
 import * as ed from "@noble/ed25519";
 import WebSocket from "ws";
 import { hashMessageForVerify, publicKeyToDid, signHex } from "../src/auth.js";
-import { generateRoomKey, sealToDid } from "./sealed-box.js";
+import { generateRoomKey, roomKeyCommitment, sealToDid } from "./sealed-box.js";
 import { buildServer, type ServerOptions } from "../src/server.js";
 import {
   canonicalLinkPayload,
@@ -273,7 +273,7 @@ export async function clientSideRotate(
     version: number;
     recipients: string[];
     membersNeedingHistoricalKeys?: Array<{ did: string; missingVersions: number[] }>;
-  }>(`${serverUrl}/rooms/${roomId}/keys/rotate`, { keys }, adminToken);
+  }>(`${serverUrl}/rooms/${roomId}/keys/rotate`, { keys, commitment: roomKeyCommitment(roomKey) }, adminToken);
 
   if (rotateRes.status !== 200) {
     throw new Error(`rotate failed: ${rotateRes.status} ${JSON.stringify(rotateRes.body)}`);

@@ -12,7 +12,7 @@ import {
   type TestServerHandle,
 } from "./helpers.js";
 import type { SealedBox } from "../src/encryption.js";
-import { openSealed, sealToDid } from "./sealed-box.js";
+import { generateRoomKey, openSealed, roomKeyCommitment, sealToDid } from "./sealed-box.js";
 import type { EncryptedLinkData, LinkExpression } from "../src/types.js";
 
 async function withServer(fn: (server: TestServerHandle) => Promise<void>): Promise<void> {
@@ -390,6 +390,76 @@ test("admin can grant historical key versions to a late member", async () => {
     const lateV2 = openSealed(lateKeys.body.keys.find((k) => k.version === 2)!.encryptedKey, latePriv);
     assert.deepEqual(lateV1, roomKeyV1, "late member's decrypted v1 must match the original");
     assert.deepEqual(lateV2, rotateRes.roomKey, "late member's decrypted v2 must match v2's key");
+  });
+});
+
+// A member who holds a version can seal it to a newcomer, so a malicious one can seal a key
+// that opens but is not the room's. The rotation's commitment lets the newcomer tell, and
+// dropping its own box lets an honest member grant the version again.
+test("a wrong key granted by a member is detected against the commitment and replaced after the box is dropped", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    const mallory = await createTestAgent();
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: mallory.did }, adminToken);
+    const malloryToken = await authenticateAgent(server.url, roomId, mallory);
+    const { roomKey } = await clientSideRotate(server.url, roomId, adminToken);
+    const late = await createTestAgent();
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: late.did }, adminToken);
+    const lateToken = await authenticateAgent(server.url, roomId, late);
+
+    // Mallory holds version 1 and grants the newcomer a different key under it.
+    const wrong = await postJson<{ granted: number[] }>(
+      `${server.url}/rooms/${roomId}/keys/grant`,
+      { targetDid: late.did, keys: [{ version: 1, encryptedKey: sealToDid(late.did, generateRoomKey()) }] },
+      malloryToken,
+    );
+    assert.deepEqual(wrong.body.granted, [1]);
+
+    const lateKeys = () =>
+      getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number; commitment: string }> }>(
+        `${server.url}/rooms/${roomId}/keys`,
+        lateToken,
+      );
+    const [spoiled] = (await lateKeys()).body.keys;
+    assert.equal(spoiled.commitment, roomKeyCommitment(roomKey));
+    assert.notEqual(roomKeyCommitment(openSealed(spoiled.encryptedKey, late.privateKey)), spoiled.commitment);
+
+    const dropped = await fetch(`${server.url}/rooms/${roomId}/keys/1`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${lateToken}` },
+    });
+    assert.deepEqual(await dropped.json(), { deleted: true });
+    const missing = await getJson<{ membersNeedingHistoricalKeys: Array<{ did: string; missingVersions: number[] }> }>(
+      `${server.url}/rooms/${roomId}/keys/missing`,
+      adminToken,
+    );
+    assert.deepEqual(missing.body.membersNeedingHistoricalKeys, [{ did: late.did, missingVersions: [1] }]);
+
+    await postJson(
+      `${server.url}/rooms/${roomId}/keys/grant`,
+      { targetDid: late.did, keys: [{ version: 1, encryptedKey: sealToDid(late.did, roomKey) }] },
+      adminToken,
+    );
+    const [repaired] = (await lateKeys()).body.keys;
+    assert.deepEqual(openSealed(repaired.encryptedKey, late.privateKey), roomKey);
+    assert.equal(roomKeyCommitment(openSealed(repaired.encryptedKey, late.privateKey)), repaired.commitment);
+  });
+});
+
+test("rotate refuses a rotation without a commitment to the new key", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    const res = await postJson<{ error: string }>(
+      `${server.url}/rooms/${roomId}/keys/rotate`,
+      { keys: [{ did: admin.did, encryptedKey: sealToDid(admin.did, generateRoomKey()) }] },
+      adminToken,
+    );
+    assert.equal(res.status, 400);
+    assert.match(res.body.error, /commitment/);
   });
 });
 

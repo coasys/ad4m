@@ -10,7 +10,7 @@
 
 import type { RoomConfig } from "./adapters.js";
 import * as api from "./api.js";
-import { generateRoomKey, sealToDid, type KeyRing } from "./encryption.js";
+import { generateRoomKey, roomKeyCommitment, sealToDid, type KeyRing } from "./encryption.js";
 
 function message(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
@@ -36,7 +36,7 @@ export async function rotateRoomKey(
         }
     }
     if (keys.length === 0) return null;
-    return api.rotateKeys(config, token, keys);
+    return api.rotateKeys(config, token, keys, roomKeyCommitment(roomKey));
 }
 
 /**

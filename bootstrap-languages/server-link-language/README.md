@@ -118,8 +118,9 @@ self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 | `GET /rooms/:roomId/peers` | Connected agent DIDs → `{peers: string[]}` |
 | `GET /rooms/:roomId/revision` | `{revision, sequence}` |
 | `GET /rooms/:roomId/acl` | `{admin, members: [{did}]}` |
-| `GET /rooms/:roomId/keys` | This agent's sealed room key versions → `{keys: [{encryptedKey, version}], e2e_enabled}` (E2E rooms only) |
-| `POST /rooms/:roomId/keys/rotate` | Room admin: a new version sealed to every ACL member |
+| `GET /rooms/:roomId/keys` | This agent's sealed room key versions → `{keys: [{encryptedKey, version, commitment}], e2e_enabled}` (E2E rooms only) |
+| `POST /rooms/:roomId/keys/rotate` | Room admin: `{keys, commitment}`, a new version sealed to every ACL member and the commitment to its key (`roomKeyCommitment`) |
+| `DELETE /rooms/:roomId/keys/:version` | Any member: drops its own box for a version whose key does not match the commitment, so a holder grants it again |
 | `GET /rooms/:roomId/keys/missing` | Any member: `{membersNeedingHistoricalKeys: [{did, missingVersions}]}` |
 | `POST /rooms/:roomId/keys/grant` | Any member: `{targetDid, keys: [{version, encryptedKey}]}`, only versions the caller holds |
 

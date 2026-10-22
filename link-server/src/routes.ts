@@ -382,7 +382,11 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       // e2e_enabled flag so the client can distinguish "no E2E" (404)
       // from "E2E but keys pending" (200, empty keys array).
       return reply.send({
-        keys: rows.map((r) => ({ encryptedKey: JSON.parse(r.encrypted_key), version: r.version })),
+        keys: rows.map((r) => ({
+          encryptedKey: JSON.parse(r.encrypted_key),
+          version: r.version,
+          commitment: r.commitment ?? undefined,
+        })),
         e2e_enabled: e2eEnabled,
       });
     }
@@ -395,6 +399,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const claims = request.authClaims!;
       const body = request.body as {
         keys?: Array<{ did: string; encryptedKey: unknown }>;
+        commitment?: unknown;
       } | null;
 
       if (!body || !Array.isArray(body.keys) || body.keys.length === 0) {
@@ -423,7 +428,13 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         }
       }
 
+      // Members check every key they open against it, whoever granted the box.
+      if (typeof body.commitment !== "string" || !/^[0-9a-f]{64}$/.test(body.commitment)) {
+        return reply.code(400).send({ error: "commitment is required: 64 hex characters committing to the new key" });
+      }
+
       const version = ctx.db.getLatestKeyVersion(claims.roomId) + 1;
+      ctx.db.addKeyCommitment(claims.roomId, version, body.commitment);
       const recipients: string[] = [];
       for (const entry of body.keys) {
         ctx.db.addRoomKey(
@@ -448,6 +459,22 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     async (request, reply) => {
       const claims = request.authClaims!;
       return reply.send({ membersNeedingHistoricalKeys: membersMissingKeys(ctx, claims.roomId) });
+    }
+  );
+
+  // ---- E2E: a member drops its own box for a version (it did not open to the committed key) ----
+
+  app.delete(
+    "/rooms/:roomId/keys/:version",
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
+    async (request, reply) => {
+      const claims = request.authClaims!;
+      const version = Number((request.params as { version: string }).version);
+      if (!Number.isInteger(version) || version < 1) {
+        return reply.code(400).send({ error: "version must be a positive integer" });
+      }
+      // The version is then missing for this member again, so a member holding it grants it.
+      return reply.send({ deleted: ctx.db.deleteRoomKey(claims.roomId, claims.did, version) });
     }
   );
 

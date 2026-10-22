@@ -1,4 +1,4 @@
-import { hkdfSync, randomBytes as nodeRandomBytes } from "node:crypto";
+import { createHash, hkdfSync, randomBytes as nodeRandomBytes } from "node:crypto";
 import * as ed from "@noble/ed25519";
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { gcm } from "@noble/ciphers/aes.js";
@@ -24,6 +24,11 @@ function sealKey(shared: Uint8Array, ephemeralPublic: Uint8Array, recipientPubli
 
 export function generateRoomKey(): Uint8Array {
   return new Uint8Array(nodeRandomBytes(32));
+}
+
+/** The rotation's commitment to `roomKey`, as the server link language computes it. */
+export function roomKeyCommitment(roomKey: Uint8Array): string {
+  return createHash("sha256").update("ad4m:room-key-commitment:v1").update(roomKey).digest("hex");
 }
 
 /** Seals `plaintext` to the agent `did`, as the server link language does. */

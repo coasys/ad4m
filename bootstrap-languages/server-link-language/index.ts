@@ -133,7 +133,16 @@ async function setupKeyRing(): Promise<void> {
             keyRing = null;
             return;
         }
-        keyRing = buildKeyRing(keysRes.keys, getAgent());
+        const { ring, spoiled } = buildKeyRing(keysRes.keys, getAgent());
+        // A spoiled box would block its version for good: drop it, and a member holding the
+        // version grants it again.
+        for (const version of spoiled) {
+            await api.deleteRoomKey(config, token, version).catch((err) =>
+                console.error(`[server-link-language] could not drop the spoiled box for version ${version}:`, err),
+            );
+        }
+        if (gen !== lifecycleGen) return;
+        keyRing = ring;
         if (keyRing.size === 0) {
             // Boxes sealed to this agent, none of which open (sealed in an older
             // format, or a spoiled grant): the same as holding none.

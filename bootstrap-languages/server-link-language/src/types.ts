@@ -179,6 +179,8 @@ export interface AclResponse {
 export interface KeysResponseEntry {
     encryptedKey: SealedBox;
     version: number;
+    /** The rotation's commitment to the version's key; absent for a version from before commitments. */
+    commitment?: string;
 }
 
 export interface KeysResponse {

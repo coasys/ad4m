@@ -162,19 +162,27 @@ export interface RotateResponse {
 /**
  * Rotates the room's E2E key (room admin only). The caller generates the
  * room key locally, seals it to each ACL member's DID, and sends only the
- * sealed boxes. The server never touches the plaintext key.
+ * sealed boxes and the key's commitment (`roomKeyCommitment`). The server
+ * never touches the plaintext key.
  */
 export async function rotateKeys(
     config: RoomConfig,
     token: string,
     keys: RotateKeyEntry[],
+    commitment: string,
 ): Promise<RotateResponse> {
     return request<RotateResponse>(
         roomUrl(config, "/keys/rotate"),
         "POST",
         jsonHeaders(token),
-        JSON.stringify({ keys }),
+        JSON.stringify({ keys, commitment }),
     );
+}
+
+/** Drops this agent's box for `version`, so a member holding the version grants it again. */
+export async function deleteRoomKey(config: RoomConfig, token: string, version: number): Promise<void> {
+    // No body, so no JSON content type: the server refuses an empty JSON body.
+    await request<unknown>(roomUrl(config, `/keys/${version}`), "DELETE", { Authorization: `Bearer ${token}` });
 }
 
 /**

@@ -223,12 +223,14 @@ E2E encryption uses **true client-side key generation**: the admin's language cl
 curl -X POST https://your-server:3456/rooms/YOUR_ROOM/keys/rotate \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"keys": [{"did": "did:key:z6Mk...", "encryptedKey": {"ephemeralPublicKey": "...", "nonce": "...", "ciphertext": "..."}}]}'
+  -d '{"keys": [{"did": "did:key:z6Mk...", "encryptedKey": {"ephemeralPublicKey": "...", "nonce": "...", "ciphertext": "..."}}], "commitment": "<sha256 hex>"}'
 ```
 
 A rotation seals the new version to every ACL member, including members that never connected; each reads it the next time it connects or refreshes its key ring. Once a room has E2E enabled, the server rejects plaintext commits — a client without keys cannot write until it receives them.
 
 A member added after a rotation gets the versions it lacks from any member holding them: every member's language reads `GET /keys/missing` and seals the versions it holds to the members lacking them (`POST /keys/grant`, see `src/room-keys.ts` in server-link-language). The server accepts a grant only of versions the granter holds, and keeps the first box stored per member and version.
+
+The server cannot see inside a box, so a member could grant a key that opens but is not the room's. Each rotation therefore carries a `commitment` (SHA-256 of `ad4m:room-key-commitment:v1` and the key), returned with every box from `GET /keys`. A member keeps an opened key only if it matches; otherwise it drops its own box (`DELETE /keys/:version`), the version shows as missing again, and a member holding it grants it.
 
 ## How it works
 
@@ -255,11 +257,12 @@ GET  /rooms/:roomId/revision  -> { revision, sequence }
 GET  /rooms/:roomId/peers     -> { peers: string[] }               (currently online agents)
 POST /rooms/:roomId/acl       { action: "add"|"remove", did } (admin only)
 GET  /rooms/:roomId/acl       -> { admin, members: [{did}] }
-GET  /rooms/:roomId/keys       -> { keys: [...], e2e_enabled } | 404 (no E2E)
+GET  /rooms/:roomId/keys       -> { keys: [{encryptedKey, version, commitment}], e2e_enabled } | 404 (no E2E)
+DELETE /rooms/:roomId/keys/:version -> { deleted }      (the caller's own box only)
 GET  /rooms/:roomId/keys/missing  -> { membersNeedingHistoricalKeys: [{did, missingVersions}] }
 POST /rooms/:roomId/keys/grant    { targetDid, keys: [{version, encryptedKey}] } -> { granted }
                                    (any member; 403 for a version the caller does not hold)
-POST /rooms/:roomId/keys/rotate (admin only) -> { version, recipients, membersNeedingHistoricalKeys }
+POST /rooms/:roomId/keys/rotate { keys, commitment } (admin only) -> { version, recipients, membersNeedingHistoricalKeys }
 GET  /rooms/:roomId/ws              (WebSocket upgrade — first message must be {type:"auth",token:"<jwt>"})
 ```
 

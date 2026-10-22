@@ -50,6 +50,14 @@ CREATE TABLE IF NOT EXISTS room_keys (
   version INTEGER,
   PRIMARY KEY (room_id, did, version)
 );
+-- The admin's commitment to each room key version: a member keeps an opened key only if it
+-- matches, so a member cannot grant a wrong key that decrypts.
+CREATE TABLE IF NOT EXISTS room_key_commitments (
+  room_id TEXT,
+  version INTEGER,
+  commitment TEXT,
+  PRIMARY KEY (room_id, version)
+);
 CREATE TABLE IF NOT EXISTS server_identity (
   key_type TEXT PRIMARY KEY,
   public_key TEXT,
@@ -124,6 +132,8 @@ export interface RoomKeyRow {
   did: string;
   encrypted_key: string;
   version: number;
+  /** The version's commitment; null for a version rotated before commitments. */
+  commitment: string | null;
 }
 
 export interface ServerIdentityRow {
@@ -225,10 +235,20 @@ export class LinkServerDB {
          VALUES (?, ?, ?, ?)`
       ),
       getAllRoomKeys: this.raw.prepare(
-        `SELECT * FROM room_keys WHERE room_id = ? AND did = ? ORDER BY version ASC`
+        `SELECT k.*, c.commitment FROM room_keys k
+         LEFT JOIN room_key_commitments c ON c.room_id = k.room_id AND c.version = k.version
+         WHERE k.room_id = ? AND k.did = ? ORDER BY k.version ASC`
       ),
       getLatestKeyVersion: this.raw.prepare(
-        "SELECT COALESCE(MAX(version), 0) AS max FROM room_keys WHERE room_id = ?"
+        `SELECT COALESCE(MAX(version), 0) AS max FROM (
+           SELECT version FROM room_keys WHERE room_id = ?
+           UNION ALL SELECT version FROM room_key_commitments WHERE room_id = ?)`
+      ),
+      addKeyCommitment: this.raw.prepare(
+        `INSERT INTO room_key_commitments (room_id, version, commitment) VALUES (?, ?, ?)`
+      ),
+      deleteRoomKey: this.raw.prepare(
+        `DELETE FROM room_keys WHERE room_id = ? AND did = ? AND version = ?`
       ),
       getAllMemberKeyVersions: this.raw.prepare(
         `SELECT did, version FROM room_keys WHERE room_id = ? ORDER BY did, version ASC`
@@ -470,7 +490,7 @@ export class LinkServerDB {
   }
 
   getLatestKeyVersion(roomId: string): number {
-    const row = this.stmts.getLatestKeyVersion.get(roomId) as { max: number };
+    const row = this.stmts.getLatestKeyVersion.get(roomId, roomId) as { max: number };
     return row.max;
   }
 
@@ -487,6 +507,15 @@ export class LinkServerDB {
       }
     }
     return result;
+  }
+
+  addKeyCommitment(roomId: string, version: number, commitment: string): void {
+    this.stmts.addKeyCommitment.run(roomId, version, commitment);
+  }
+
+  /** Deletes one member's box for one version; true when there was one. */
+  deleteRoomKey(roomId: string, did: string, version: number): boolean {
+    return this.stmts.deleteRoomKey.run(roomId, did, version).changes > 0;
   }
 
   /** INSERT OR IGNORE — stores a sealed key only if that (room, did, version) doesn't exist yet. */

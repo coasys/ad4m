@@ -33,7 +33,7 @@ import * as auth from "../src/auth.js";
 import * as store from "../src/store.js";
 import * as syncModule from "../src/sync.js";
 import * as api from "../src/api.js";
-import { buildKeyRing, bytesToHex, hexToBytes } from "../src/encryption.js";
+import { buildKeyRing, bytesToHex, generateRoomKey, hexToBytes, sealToDid } from "../src/encryption.js";
 import { grantMissingRoomKeys, rotateRoomKey } from "../src/room-keys.js";
 import type { LinkExpression, PerspectiveDiff, SealedBox } from "../src/types.js";
 import { openSealed } from "./sealed-box.js";
@@ -483,7 +483,7 @@ describe("integration: room keys", () => {
   async function ringOf(serverUrl: string, agent: RealAgent) {
     const token = await signIn(serverUrl, agent);
     const keys = await api.fetchRoomKeys({ serverUrl, roomId }, token);
-    return buildKeyRing(keys?.keys ?? [], agent);
+    return buildKeyRing(keys?.keys ?? [], agent).ring;
   }
 
   it("the admin seals a new version to every ACL member, including one that never connected", async () => {
@@ -537,5 +537,35 @@ describe("integration: room keys", () => {
 
     const again = await grantMissingRoomKeys(config, await signIn(server.url, bob), await ringOf(server.url, bob), bob.did());
     assert.deepEqual(again, [], "nobody lacks a version any more");
+  });
+
+  it("a wrong key a member grants is spoiled, dropped, and replaced by an honest grant", async () => {
+    const server = await bootServer();
+    const admin = RealAgent.create();
+    const mallory = RealAgent.create();
+    const late = RealAgent.create();
+    const config = { serverUrl: server.url, roomId };
+
+    const adminToken = await signIn(server.url, admin);
+    await admit(server.url, adminToken, mallory.did());
+    await rotateRoomKey(config, adminToken); // version 1: the admin and Mallory
+    await admit(server.url, adminToken, late.did());
+
+    // Mallory holds version 1, so the server lets her grant it: she seals a key of her own.
+    await api.grantKeys(config, await signIn(server.url, mallory), late.did(), [
+      { version: 1, encryptedKey: sealToDid(late.did(), generateRoomKey()) },
+    ]);
+    const lateToken = await signIn(server.url, late);
+    const first = buildKeyRing((await api.fetchRoomKeys(config, lateToken))?.keys ?? [], late);
+    assert.equal(first.ring.size, 0, "the wrong key is not taken");
+    assert.deepEqual(first.spoiled, [1]);
+
+    await api.deleteRoomKey(config, lateToken, 1);
+    const adminRing = await ringOf(server.url, admin);
+    const grants = await grantMissingRoomKeys(config, await signIn(server.url, admin), adminRing, admin.did());
+    assert.deepEqual(grants, [{ did: late.did(), versions: [1] }], "the dropped version is missing again");
+
+    const lateRing = await ringOf(server.url, late);
+    assert.deepEqual(lateRing.get(1), adminRing.get(1), "the newcomer now holds the room's key");
   });
 });
