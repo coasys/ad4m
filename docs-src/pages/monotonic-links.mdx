@@ -20,9 +20,9 @@ Each entry in the table says how a link under its predicate may end:
 
 | Ending | Meaning | Used for |
 |---|---|---|
-| **Tombstone** | Its author writes a signed tombstone (below). | Flow links: everything under `ad4m://flow/`, and votes (`ad4m://acceptedBy`) |
-| **Revocation** | Only a dedicated revocation link ends it, and the feature that reads the predicate interprets that link. The original link stays, so its history can still be read, the way a flow role is revoked by `ad4m://flow/role_grant_revoked` rather than by deleting the grant. | no built-in predicate yet |
-| **Never** | It cannot be ended. | Tombstones (`ad4m://retracted`), role revocations (`ad4m://flow/role_grant_revoked`) and the `ad4m://monotonic` declaration flag |
+| **Tombstone** | Its author writes a signed tombstone (below). | Flow links: everything under `ad4m://flow/`, and votes (`ad4m://acceptedBy`). App predicates declared `monotonic: true` |
+| **Revocation** | Only a dedicated revocation link ends it, and the feature that reads the predicate interprets that link. The original link stays, so its history can still be read. A tombstone does not end it. | Role grants: predicates a role class declares `monotonic: "roleGrant"`, which end through `ad4m://flow/role_grant_revoked` |
+| **Never** | It cannot be ended. | Tombstones (`ad4m://retracted`), role revocations (`ad4m://flow/role_grant_revoked`) and the declaration flags (`ad4m://monotonic`, `ad4m://monotonic_role_grant`) |
 
 Ending a tombstone or a revocation would undo it, and a declaration stays once made, which is why those are **Never**.
 
@@ -35,6 +35,23 @@ A link whose entry is **Tombstone** ends through a signed tombstone from its **a
 ```
 
 Every replica applies it the same way: the link that tombstone names (same source, same author, that signature) is removed from its store, and a copy of the link that arrives later is not stored, so the order the two sync in does not matter. A tombstone signed by anyone else, whose signature does not verify, or that is itself `Local`, does nothing, and a tombstone never ends a `Local` link. A tombstone never ends a link whose entry is **Revocation** or **Never**. The removal is each replica's own store effect; it is never sent to peers as a removal.
+
+## Declaring app predicates monotonic
+
+A model class can make its own predicates monotonic with the `monotonic` option on `@Property` or `@Flag` (see [Model classes](./developer-guides/model-classes)):
+
+- `monotonic: true`: links under the predicate end by their author's tombstone, like flow links.
+- `monotonic: "roleGrant"`: links under the predicate end only through a role revocation, `ad4m://flow/role_grant_revoked`, never by a tombstone. Use it on every link of a role class; see [Role grants that cannot be removed](./flows#role-grants-that-cannot-be-removed-monotonic).
+
+The rules for a declaration:
+
+- **Only the neighbourhood author's declaration counts.** The class registration writes `<property shape> --ad4m://monotonic--> literal:string:<predicate>` (or `ad4m://monotonic_role_grant` for `"roleGrant"`). An executor honours it only if the link is Shared, its signature verifies and its author is the neighbourhood author (the owner, while the perspective is not shared). The same link written by any other member declares nothing, so no member can freeze a predicate for everyone.
+- **A declaration protects removals in the same sync, call or batch.** When a peer's diff carries both the author's declaration and a removal under that predicate, the removal is dropped, just as it would be if they arrived separately. When the author writes the declaration and removes a Shared link under it in one `linkMutations` call or one batch, or turns the link into the declaration with `updateLink`, the call fails, because peers receive both in one diff and would keep the link.
+- **Tombstones count in any order.** A tombstone for a link under a `true` predicate ends it whether it arrives before or after the declaration.
+- **`"roleGrant"` wins in any order too.** If a `"roleGrant"` declaration of a predicate arrives after a tombstone already ended a link under it (because the `true` declaration arrived first), the executor puts the link back. It keeps every link with a valid signature that a tombstone ends under a declared predicate for this, and checks again when the perspective loads, so a restore cut short is finished later. Every replica with the same links ends up with the same links.
+- **The link names the predicate itself.** It does not depend on the property shape's `sh://path` link: removing or adding a path changes nothing about what is declared.
+- **A declaration stays once made, and only tightens.** The declaration link is itself monotonic and cannot be removed. Registering the class again keeps it. If you change `through`, the new predicate is declared as well and the old one stays declared. If one predicate is declared both ways, `"roleGrant"` wins. A declaration never changes how a built-in predicate ends.
+- **It is per predicate, not per class.** Any other class that uses the same predicate URI gets the same treatment. The link stays, which is the safe side.
 
 ## Mixed versions
 

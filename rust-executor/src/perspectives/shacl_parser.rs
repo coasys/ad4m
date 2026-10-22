@@ -73,6 +73,34 @@ pub struct ConformanceCondition {
     pub value: Option<String>,
 }
 
+/// `monotonic` on a property shape: `true`, `false` or `"roleGrant"`. Any
+/// other value fails the parse rather than declaring something weaker.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MonotonicOption {
+    Bool(bool),
+    Kind(MonotonicKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MonotonicKind {
+    RoleGrant,
+}
+
+impl MonotonicOption {
+    /// The declaration flag predicate this option emits, if any.
+    fn flag_predicate(&self) -> Option<&'static str> {
+        match self {
+            MonotonicOption::Bool(true) => Some(super::monotonic::MONOTONIC_FLAG_PREDICATE),
+            MonotonicOption::Bool(false) => None,
+            MonotonicOption::Kind(MonotonicKind::RoleGrant) => {
+                Some(super::monotonic::MONOTONIC_ROLE_GRANT_FLAG_PREDICATE)
+            }
+        }
+    }
+}
+
 /// SHACL Property Shape structure
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PropertyShape {
@@ -101,6 +129,16 @@ pub struct PropertyShape {
     pub max_count: Option<u32>,
     pub writable: Option<bool>,
     pub local: Option<bool>,
+    /// Declares `path` monotonic (#1176): a Shared link under it is never
+    /// removed. `true` → ended by its author's tombstone, emitted as
+    /// `ad4m://monotonic` → `literal:string:<path>` on the property node;
+    /// `"roleGrant"` → ended only by `ad4m://flow/role_grant_revoked`,
+    /// emitted the same way under `ad4m://monotonic_role_grant`. The flag
+    /// names the predicate itself, so the declaration does not depend on
+    /// `sh://path`. Counts only when the neighbourhood author wrote it
+    /// (`monotonic::MonotonicDeclared`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monotonic: Option<MonotonicOption>,
     /// Sole selector of storage mode. `None` → deterministic typed
     /// literal (fast POS-index path, the default). `Some("literal")` →
     /// signed envelope on the built-in literal language. `Some(<addr>)`
@@ -1857,6 +1895,15 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://local".to_string()),
                 target: format!("literal:{}", local),
+            });
+        }
+
+        // `false` emits nothing: a declaration cannot be withdrawn.
+        if let Some(flag_predicate) = prop.monotonic.as_ref().and_then(|m| m.flag_predicate()) {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some(flag_predicate.to_string()),
+                target: ad4m_client::literal::Literal::from_string(prop.path.clone()).to_url()?,
             });
         }
 

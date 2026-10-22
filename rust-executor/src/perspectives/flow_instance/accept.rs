@@ -231,9 +231,10 @@ pub async fn reject_flow_proposal(
         .into_iter()
         .filter(|l| signed_by(l, &did))
         .partition(|l| l.status != Some(LinkStatus::Local));
+    let declared = perspective.monotonic_declared().await?;
     let tombstones = shared
         .into_iter()
-        .filter(|l| is_retractable(l.data.predicate.as_deref()))
+        .filter(|l| is_retractable(l.data.predicate.as_deref(), &declared))
         .map(|l| retraction_for(&LinkExpression::from(l)))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("reject_flow_proposal: {e:#}"))?;

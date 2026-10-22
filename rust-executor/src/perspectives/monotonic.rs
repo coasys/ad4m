@@ -12,12 +12,15 @@
 //!   predicate's reader interprets; the link itself stays, and so does the
 //!   history it is part of.
 //! - [`Ending::Never`]: tombstones themselves (`ad4m://retracted`,
-//!   `ad4m://flow/role_grant_revoked`) and the `ad4m://monotonic` flag.
-//!   Ending a revocation would reopen a grant, and a declaration stays once
-//!   made.
+//!   `ad4m://flow/role_grant_revoked`) and the declaration flags
+//!   (`ad4m://monotonic`, `ad4m://monotonic_role_grant`). Ending a
+//!   revocation would reopen a grant, and a declaration stays once made.
 //!
 //! Another feature makes its predicates monotonic by adding an entry. The
-//! rule is enforced where links cross into this replica's store:
+//! app predicates a perspective's authority declares in SHACL join the same
+//! lookup at run time ([`MonotonicDeclared`], see *Declared predicates*);
+//! the fixed table is consulted first, so a declaration cannot loosen it.
+//! The rule is enforced where links cross into this replica's store:
 //!
 //! ```text
 //!  peer diff ──► diff_from_link_language ──► drop_monotonic_removals (warn)
@@ -45,7 +48,7 @@
 //!
 //! `<link.source> --ad4m://retracted--> literal:string:<link.proof.signature>`,
 //! Shared and signed by the retracted link's own author. It ends only Shared
-//! links whose entry is [`Ending::Tombstone`]; a Local link stays. [`retraction_effects`]
+//! links whose ending is [`Ending::Tombstone`]; a Local link stays. [`retraction_effects`]
 //! runs inside every store write, so every replica applies it the same way
 //! whatever path the tombstone or the link arrives by: a stored link it names
 //! (same source, same author, that signature) is removed from the store, and
@@ -63,11 +66,56 @@
 //! node drops the link and the new node keeps it; after a valid tombstone the
 //! new node ends the link while the old node keeps it (and stores the
 //! tombstone as an ordinary link). There is no compatibility switch, since
-//! accepting tombstone-less removals is the hole this closes. Pending diffs from before an upgrade go through the same
-//! ingest.
+//! accepting tombstone-less removals is the hole this closes. Pending diffs
+//! from before an upgrade go through the same ingest.
+//!
+//! # Declared predicates
+//!
+//! A SHACL property shape with `monotonic: true` emits
+//! `<propShape> --ad4m://monotonic--> literal:string:<predicate>`, which
+//! declares the predicate with [`Ending::Tombstone`]. `monotonic:
+//! "roleGrant"` emits the same shape under `ad4m://monotonic_role_grant`,
+//! which declares it with [`Ending::Revocation`] by
+//! `ad4m://flow/role_grant_revoked`: a role grant keeps the role history
+//! replicas gate votes on (#1027), so a tombstone does not end it. Where
+//! both name one predicate, the revocation wins: a declaration only ever
+//! tightens.
+//!
+//! A flag names the predicate itself; `sh://path` is never read for it, so
+//! what the gate reads is all in the fixed table and cannot be removed. A
+//! flag counts only if it is Shared, its signature verifies, and its author
+//! is the neighbourhood author (the primary owner, or this agent, while the
+//! perspective is not shared). That is stricter than the Prolog SDNA pool,
+//! which also accepts the owner and this agent in a neighbourhood; keep it
+//! so. From anyone else it declares nothing, so no member can freeze a
+//! predicate for everyone. A flag in an incoming diff counts for the
+//! removals and tombstones in that same diff
+//! ([`MonotonicDeclared::with_incoming`]), so replicas agree however the
+//! link language batches. The author's side matches: a Shared flag written
+//! in one `link_mutations` call or batch counts for that call's removals,
+//! which peers receive in the same diff. A flag that arrives after a
+//! tombstone for a link under its predicate applies that tombstone then, so
+//! the order of flag, link and tombstone does not matter either.
+//!
+//! A `roleGrant` flag can arrive after a `true` flag's tombstone ended a
+//! link under the same predicate. Every link a tombstone ends under a
+//! declared predicate is therefore kept, signed, outside the graph
+//! (`monotonic_ended` in the executor database); when a flag makes that
+//! predicate end only by revocation, the kept links go back into the store
+//! ([`RetractionEffects::restored`]). Only links whose proof verifies are
+//! kept or restored. Restoring reads only, so it is retried: by the flag
+//! arriving again, and at load for every predicate that ends only by
+//! revocation (`restore_monotonic_ended`). Replicas holding the same links
+//! agree whatever order they arrived in.
+//!
+//! The check is per predicate, not per class: another class using the same
+//! predicate URI is monotonic too, which fails safe (the link stays). A
+//! declaration stays once made: a re-registration that changes the path adds
+//! a new flag, and the old predicate stays monotonic.
 //!
 //! [`retraction_effects`]: PerspectiveInstance::retraction_effects
 
+use crate::db::Ad4mDb;
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{
@@ -76,6 +124,8 @@ use crate::types::{
 };
 use ad4m_client::literal::Literal;
 use deno_core::error::AnyError;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Vocabulary. Defined here, not in the code that writes it, so this module
@@ -85,10 +135,13 @@ use deno_core::error::AnyError;
 /// Tombstone: link source → `literal:string:<signature of the ended link>`.
 /// Generic: it ends a link under any [`Ending::Tombstone`] predicate.
 pub const RETRACTED_PREDICATE: &str = "ad4m://retracted";
-/// The property-shape flag that declares an app predicate monotonic (#1176
-/// PR B reads it). The flag link is itself monotonic, so a declaration
-/// cannot be withdrawn.
+/// The property-shape flag that declares an app predicate monotonic, ended
+/// by tombstone; its target is `literal:string:<predicate>`. The flag link
+/// is itself monotonic, so a declaration cannot be withdrawn.
 pub const MONOTONIC_FLAG_PREDICATE: &str = "ad4m://monotonic";
+/// As [`MONOTONIC_FLAG_PREDICATE`], for a role grant: the predicate ends
+/// only by [`ROLE_GRANT_REVOKED_PREDICATE`].
+pub const MONOTONIC_ROLE_GRANT_FLAG_PREDICATE: &str = "ad4m://monotonic_role_grant";
 /// Namespace of the flow engine's shared vocabulary; every predicate under it
 /// is monotonic.
 pub const FLOW_NAMESPACE: &str = "ad4m://flow/";
@@ -125,6 +178,18 @@ pub enum Ending {
     Never,
 }
 
+impl Ending {
+    /// Tombstone < Revocation < Never: the stricter of two declarations
+    /// of one predicate wins.
+    fn strictness(&self) -> u8 {
+        match self {
+            Ending::Tombstone => 0,
+            Ending::Revocation(_) => 1,
+            Ending::Never => 2,
+        }
+    }
+}
+
 /// Which predicates an entry of [`MONOTONIC_PREDICATES`] covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PredicateMatch {
@@ -150,7 +215,8 @@ pub struct MonotonicPredicate {
 
 /// Every monotonic predicate this executor knows. The first matching entry
 /// decides, so exact entries come before a prefix that also covers them.
-/// A predicate in no entry is ordinary: removable by any diff.
+/// A predicate in no entry (and not declared, see [`MonotonicDeclared`]) is
+/// ordinary: removable by any diff.
 pub const MONOTONIC_PREDICATES: &[MonotonicPredicate] = &[
     MonotonicPredicate {
         predicate: PredicateMatch::Exact(RETRACTED_PREDICATE),
@@ -158,6 +224,10 @@ pub const MONOTONIC_PREDICATES: &[MonotonicPredicate] = &[
     },
     MonotonicPredicate {
         predicate: PredicateMatch::Exact(MONOTONIC_FLAG_PREDICATE),
+        ending: Ending::Never,
+    },
+    MonotonicPredicate {
+        predicate: PredicateMatch::Exact(MONOTONIC_ROLE_GRANT_FLAG_PREDICATE),
         ending: Ending::Never,
     },
     // A revocation is itself a tombstone; ending it would reopen the grant.
@@ -186,21 +256,158 @@ pub fn ending_in(table: &[MonotonicPredicate], predicate: Option<&str>) -> Optio
         .map(|entry| entry.ending)
 }
 
-/// How a Shared link under `predicate` may end; `None` if it is not
-/// monotonic.
+/// How a Shared link under `predicate` may end per the fixed table, whatever
+/// any perspective declares; `None` if the table does not list it.
 pub fn ending(predicate: Option<&str>) -> Option<Ending> {
     ending_in(MONOTONIC_PREDICATES, predicate)
 }
 
-/// Whether a Shared link under `predicate` is never removed by a diff.
-pub fn is_monotonic(predicate: Option<&str>) -> bool {
-    ending(predicate).is_some()
+/// The app predicates the perspective's authority declared monotonic, with
+/// their endings, as read from its declaration flags. See the module doc.
+#[derive(Debug, Default)]
+pub struct MonotonicDeclared {
+    /// Whose flags count: the neighbourhood author, else the owner.
+    authority: Option<String>,
+    predicates: HashMap<String, Ending>,
+}
+
+/// The ending a declaration flag under `predicate` declares, if it is one.
+fn declared_ending(predicate: Option<&str>) -> Option<Ending> {
+    match predicate {
+        Some(MONOTONIC_FLAG_PREDICATE) => Some(Ending::Tombstone),
+        Some(MONOTONIC_ROLE_GRANT_FLAG_PREDICATE) => {
+            Some(Ending::Revocation(ROLE_GRANT_REVOKED_PREDICATE))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `link` is a declaration flag.
+pub fn is_declaration_flag(link: &LinkExpression) -> bool {
+    declared_ending(link.data.predicate.as_deref()).is_some()
+}
+
+impl MonotonicDeclared {
+    /// The declared set from `flags` (the stored declaration flags): those
+    /// that are Shared, verify, were written by `authority`, and name the
+    /// predicate as a `literal:string:`.
+    pub fn from_flags(
+        authority: Option<String>,
+        flags: impl IntoIterator<Item = LinkExpression>,
+    ) -> Self {
+        let mut declared = MonotonicDeclared {
+            authority,
+            predicates: HashMap::new(),
+        };
+        for flag in flags {
+            let Some(ending) = declared_ending(flag.data.predicate.as_deref()) else {
+                continue;
+            };
+            if Some(&flag.author) != declared.authority.as_ref()
+                || flag.status != Some(LinkStatus::Shared)
+                || !flag.data.target.starts_with("literal:string:")
+                || !flag.compute_proof_valid()
+            {
+                continue;
+            }
+            if let serde_json::Value::String(p) = parse_literal_value(&flag.data.target) {
+                if !p.is_empty() {
+                    declared.declare(p, ending);
+                }
+            }
+        }
+        declared
+    }
+
+    fn declare(&mut self, predicate: String, ending: Ending) {
+        let entry = self.predicates.entry(predicate).or_insert(ending);
+        if ending.strictness() > entry.strictness() {
+            *entry = ending;
+        }
+    }
+
+    /// This set plus what the flags among `links` declare, under the same
+    /// authority and checks. For a diff whose flags are not in the store
+    /// yet: `links` count as Shared (pulled links often carry no status), so
+    /// a local caller passes only its Shared additions.
+    pub fn with_incoming(&self, links: &[LinkExpression]) -> Self {
+        let mut declared = self.declared_by(links);
+        for (p, ending) in &self.predicates {
+            declared.declare(p.clone(), *ending);
+        }
+        declared
+    }
+
+    /// What the flags among `links` alone declare, under `self`'s authority.
+    fn declared_by(&self, links: &[LinkExpression]) -> Self {
+        Self::from_flags(
+            self.authority.clone(),
+            links
+                .iter()
+                .filter(|l| is_declaration_flag(l))
+                .cloned()
+                .map(|mut l| {
+                    l.status = Some(LinkStatus::Shared);
+                    l
+                }),
+        )
+    }
+
+    /// The declared predicates that end only by revocation.
+    fn revocation_only(&self) -> impl Iterator<Item = &str> + '_ {
+        self.predicates
+            .iter()
+            .filter(|(_, e)| **e != Ending::Tombstone)
+            .map(|(p, _)| p.as_str())
+    }
+
+    /// The predicates whose kept links a write of `incoming` restores: those
+    /// `self` makes end only by revocation, newly against `before` or by a
+    /// flag among `incoming` again. A flag that arrives again retries a
+    /// restoration that did not finish.
+    fn restoring<'a>(
+        &'a self,
+        before: &'a MonotonicDeclared,
+        incoming: &[LinkExpression],
+    ) -> Vec<&'a str> {
+        let named = self.declared_by(incoming);
+        self.revocation_only()
+            .filter(|p| {
+                let ending = self.predicates.get(*p);
+                before.predicates.get(*p) != ending || named.predicates.get(*p) == ending
+            })
+            .collect()
+    }
+
+    /// How a Shared link under `predicate` may end: the fixed table first,
+    /// so a declaration cannot loosen it, then the declarations.
+    pub fn ending(&self, predicate: Option<&str>) -> Option<Ending> {
+        ending(predicate).or_else(|| self.predicates.get(predicate?).copied())
+    }
+
+    /// The declared predicates `self` adds to `before`, or whose ending it
+    /// changed, with their endings.
+    fn newly_declared<'a>(
+        &'a self,
+        before: &'a MonotonicDeclared,
+    ) -> impl Iterator<Item = (&'a str, Ending)> + 'a {
+        self.predicates
+            .iter()
+            .filter(move |(p, e)| before.predicates.get(*p) != Some(e))
+            .map(|(p, e)| (p.as_str(), *e))
+    }
+}
+
+/// Whether a Shared link under `predicate` is never removed by a diff: in
+/// the fixed table, or declared.
+pub fn is_monotonic(predicate: Option<&str>, declared: &MonotonicDeclared) -> bool {
+    declared.ending(predicate).is_some()
 }
 
 /// Whether a [`RETRACTED_PREDICATE`] tombstone can end a link under
-/// `predicate`: its entry says [`Ending::Tombstone`].
-pub fn is_retractable(predicate: Option<&str>) -> bool {
-    ending(predicate) == Some(Ending::Tombstone)
+/// `predicate`: its ending is [`Ending::Tombstone`].
+pub fn is_retractable(predicate: Option<&str>, declared: &MonotonicDeclared) -> bool {
+    declared.ending(predicate) == Some(Ending::Tombstone)
 }
 
 /// What the refusal of a removal under a predicate ending `ending` tells
@@ -218,9 +425,10 @@ fn instead(ending: Ending) -> String {
 pub fn refuse_monotonic_removal(
     link: &LinkExpression,
     status: &LinkStatus,
+    declared: &MonotonicDeclared,
 ) -> Result<(), AnyError> {
     let predicate = link.data.predicate.as_deref();
-    match ending(predicate) {
+    match declared.ending(predicate) {
         Some(ending) if *status == LinkStatus::Shared => Err(anyhow::anyhow!(
             "{} is monotonic; {} instead of removing {} -> {}",
             predicate.unwrap_or_default(),
@@ -235,14 +443,17 @@ pub fn refuse_monotonic_removal(
 /// Ingest side: the removals of a peer's diff that may be applied. Every
 /// removal under a monotonic predicate is dropped with a warning, whatever
 /// status the sender claims; everything arriving by sync is Shared.
-pub fn drop_monotonic_removals(removals: Vec<LinkExpression>) -> Vec<LinkExpression> {
+pub fn drop_monotonic_removals(
+    removals: Vec<LinkExpression>,
+    declared: &MonotonicDeclared,
+) -> Vec<LinkExpression> {
     removals
         .into_iter()
         .filter(|link| {
-            let keep = !is_monotonic(link.data.predicate.as_deref());
+            let keep = !is_monotonic(link.data.predicate.as_deref(), declared);
             if !keep {
                 log::warn!(
-                    "dropping a peer's removal of a monotonic link ({} -[{}]-> {} by {}); only its author's tombstone ends it",
+                    "dropping a peer's removal of a monotonic link ({} -[{}]-> {} by {}); it ends only as its monotonic entry allows",
                     link.data.source,
                     link.data.predicate.as_deref().unwrap_or_default(),
                     link.data.target,
@@ -258,13 +469,13 @@ pub fn drop_monotonic_removals(removals: Vec<LinkExpression>) -> Vec<LinkExpress
 /// removal under a monotonic predicate. One that got this far passed
 /// [`refuse_monotonic_removal`] on its stored status, so it ends a Local link
 /// that peers never held; sending it would break "never sends one".
-pub fn committable(diff: &PerspectiveDiff) -> PerspectiveDiff {
+pub fn committable(diff: &PerspectiveDiff, declared: &MonotonicDeclared) -> PerspectiveDiff {
     PerspectiveDiff {
         additions: diff.additions.clone(),
         removals: diff
             .removals
             .iter()
-            .filter(|l| !is_monotonic(l.data.predicate.as_deref()))
+            .filter(|l| !is_monotonic(l.data.predicate.as_deref(), declared))
             .cloned()
             .collect(),
     }
@@ -300,9 +511,14 @@ fn retracted_signature(link: &LinkExpression) -> Option<String> {
 /// `signature`) ends `link`. Only a Shared link: a Local one is private to
 /// this replica, whatever tombstone names it. Every store and same-diff
 /// match goes through here.
-fn ends(tombstone: &LinkExpression, signature: &str, link: &LinkExpression) -> bool {
+fn ends(
+    tombstone: &LinkExpression,
+    signature: &str,
+    link: &LinkExpression,
+    declared: &MonotonicDeclared,
+) -> bool {
     link.status == Some(LinkStatus::Shared)
-        && is_retractable(link.data.predicate.as_deref())
+        && is_retractable(link.data.predicate.as_deref(), declared)
         && link.data.source == tombstone.data.source
         && link.author == tombstone.author
         && link.proof.signature == signature
@@ -318,6 +534,9 @@ pub(crate) struct RetractionEffects {
     /// Stored links a tombstone in the diff ends: removed from this store,
     /// never committed.
     pub retracted: Vec<DecoratedLinkExpression>,
+    /// Links a tombstone ended under a predicate a flag in the diff now
+    /// makes end only by revocation: written back to the store.
+    pub restored: Vec<LinkExpression>,
 }
 
 impl RetractionEffects {
@@ -328,7 +547,7 @@ impl RetractionEffects {
     /// Bring the diff a write path publishes (Prolog, pubsub, flow trigger)
     /// in line with what the store now holds.
     pub fn fold_into(&self, diff: &mut DecoratedPerspectiveDiff) {
-        if self.covered.is_empty() && self.retracted.is_empty() {
+        if self.covered.is_empty() && self.retracted.is_empty() && self.restored.is_empty() {
             return;
         }
         diff.additions.retain(|added| {
@@ -338,6 +557,26 @@ impl RetractionEffects {
                 .any(|c| same_link(c, &LinkExpression::from(added.clone())))
         });
         diff.removals.extend(self.retracted.iter().cloned());
+        diff.additions.extend(
+            self.restored
+                .iter()
+                .map(|l| DecoratedLinkExpression::from((l.clone(), LinkStatus::Shared))),
+        );
+    }
+
+    /// The links this write ends under a predicate only a declaration made
+    /// monotonic: kept, so a later `roleGrant` flag can restore them. A
+    /// fixed-table predicate never changes how it ends, and a link whose
+    /// proof does not verify is never kept (nor restored).
+    pub fn ended_under_declared(&self) -> Vec<LinkExpression> {
+        self.retracted
+            .iter()
+            .cloned()
+            .map(LinkExpression::from)
+            .chain(self.covered.iter().cloned())
+            .filter(|l| ending(l.data.predicate.as_deref()).is_none())
+            .filter(|l| l.compute_proof_valid())
+            .collect()
     }
 }
 
@@ -350,12 +589,73 @@ fn same_link(a: &LinkExpression, b: &LinkExpression) -> bool {
 }
 
 impl PerspectiveInstance {
-    /// The retraction effects of writing `additions`: see the module doc.
-    /// Reads the store, writes nothing.
+    /// Whose declaration flags count: the neighbourhood author, else
+    /// the primary owner, else this agent.
+    async fn monotonic_authority(&self) -> Option<String> {
+        let handle = self.persisted.lock().await;
+        match &handle.neighbourhood {
+            Some(n) => Some(n.author.clone()),
+            None => handle.get_primary_owner().or_else(|| {
+                crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()).ok()
+            }),
+        }
+    }
+
+    /// The declared set, cached until a flag is written
+    /// ([`Self::invalidate_monotonic_declared`]) or the authority changes.
+    pub(crate) async fn monotonic_declared(&self) -> Result<Arc<MonotonicDeclared>, AnyError> {
+        let authority = self.monotonic_authority().await;
+        let generation = {
+            let cache = self.monotonic_declared.read().unwrap();
+            if let Some(declared) = cache.1.as_ref().filter(|d| d.authority == authority) {
+                return Ok(declared.clone());
+            }
+            cache.0
+        };
+        let mut flags = Vec::new();
+        for flag_predicate in [
+            MONOTONIC_FLAG_PREDICATE,
+            MONOTONIC_ROLE_GRANT_FLAG_PREDICATE,
+        ] {
+            flags.extend(
+                self.sparql_store
+                    .query_links(None, Some(flag_predicate), None, None, None, None)?
+                    .into_iter()
+                    .map(LinkExpression::from),
+            );
+        }
+        let declared = Arc::new(MonotonicDeclared::from_flags(authority, flags));
+        let mut cache = self.monotonic_declared.write().unwrap();
+        // A flag written while this read ran leaves the result uncached.
+        if cache.0 == generation {
+            cache.1 = Some(declared.clone());
+        }
+        Ok(declared)
+    }
+
+    /// Called by every store write that touches a declaration flag.
+    pub(crate) fn invalidate_monotonic_declared(&self) {
+        let mut cache = self.monotonic_declared.write().unwrap();
+        cache.0 += 1;
+        cache.1 = None;
+    }
+
+    /// The retraction effects of writing `additions`, given the declared set
+    /// `stored` read before the write: see the module doc. The flags among
+    /// the additions count (Local ones excepted), and a flag that newly
+    /// declares a predicate ended by tombstone applies the stored tombstones
+    /// that already name links under it. Reads the store, writes nothing.
     pub(crate) fn retraction_effects(
         &self,
         additions: &[LinkExpression],
+        stored: &MonotonicDeclared,
     ) -> Result<RetractionEffects, AnyError> {
+        let incoming: Vec<LinkExpression> = additions
+            .iter()
+            .filter(|l| l.status != Some(LinkStatus::Local))
+            .cloned()
+            .collect();
+        let declared = stored.with_incoming(&incoming);
         let mut effects = RetractionEffects::default();
         let tombstones: Vec<(&LinkExpression, String)> = additions
             .iter()
@@ -368,25 +668,120 @@ impl PerspectiveInstance {
                 .get_links_by_source(&tombstone.data.source)?
             {
                 let link = LinkExpression::from(stored.clone());
-                if ends(tombstone, signature, &link) {
+                if ends(tombstone, signature, &link, &declared) {
                     effects.retracted.push(stored);
                 }
             }
         }
 
-        for link in additions {
-            if !is_retractable(link.data.predicate.as_deref()) {
+        // Now ended only by revocation: what a tombstone ended goes back.
+        for predicate in declared.restoring(stored, &incoming) {
+            effects
+                .restored
+                .extend(self.restorable(predicate, additions)?);
+        }
+
+        for (predicate, ending) in declared.newly_declared(stored) {
+            if ending != Ending::Tombstone {
                 continue;
             }
-            let in_diff = tombstones.iter().any(|(t, sig)| ends(t, sig, link));
-            if in_diff || self.stored_tombstone_ends(link)? {
+            for held in
+                self.sparql_store
+                    .query_links(None, Some(predicate), None, None, None, None)?
+            {
+                let link = LinkExpression::from(held.clone());
+                let already = effects
+                    .retracted
+                    .iter()
+                    .any(|r| same_link(&LinkExpression::from(r.clone()), &link));
+                if !already && self.stored_tombstone_ends(&link, &declared)? {
+                    effects.retracted.push(held);
+                }
+            }
+        }
+
+        for link in additions {
+            if !is_retractable(link.data.predicate.as_deref(), &declared) {
+                continue;
+            }
+            let in_diff = tombstones
+                .iter()
+                .any(|(t, sig)| ends(t, sig, link, &declared));
+            if in_diff || self.stored_tombstone_ends(link, &declared)? {
                 effects.covered.push(link.clone());
             }
         }
         Ok(effects)
     }
 
-    fn stored_tombstone_ends(&self, link: &LinkExpression) -> Result<bool, AnyError> {
+    /// The links kept under `predicate` that verify and are neither in the
+    /// store nor among `additions`. Reads only, so a restoration that did not
+    /// finish is retried by the next caller.
+    fn restorable(
+        &self,
+        predicate: &str,
+        additions: &[LinkExpression],
+    ) -> Result<Vec<LinkExpression>, AnyError> {
+        let kept = Ad4mDb::with_global_instance(|db| db.monotonic_ended(&self.uuid, predicate))?;
+        let mut restorable = Vec::new();
+        for link in kept {
+            let restore = link.compute_proof_valid()
+                && !additions.iter().any(|a| same_link(a, &link))
+                && self
+                    .sparql_store
+                    .get_link(
+                        &link.data.source,
+                        link.data.predicate.as_deref(),
+                        &link.data.target,
+                        &link.author,
+                        &link.timestamp,
+                    )?
+                    .is_none();
+            if restore {
+                restorable.push(link);
+            }
+        }
+        Ok(restorable)
+    }
+
+    /// Restore the kept links of every predicate that now ends only by
+    /// revocation and is missing from the store: a restoration the stored
+    /// flag started but did not finish. Returns how many went back.
+    pub(crate) async fn restore_monotonic_ended(&self) -> Result<usize, AnyError> {
+        let declared = self.monotonic_declared().await?;
+        let mut restored = 0;
+        for predicate in declared.revocation_only() {
+            for link in self.restorable(predicate, &[])? {
+                self.sparql_store.add_link(&link)?;
+                restored += 1;
+            }
+        }
+        Ok(restored)
+    }
+
+    /// [`Self::restore_monotonic_ended`] once the perspective is loaded and
+    /// its authority known. A non-empty restore queues an all-instance flow
+    /// pass: the links go in through the store, not a diff, and a sweep that
+    /// already recorded the missing grant would otherwise keep that record.
+    pub(crate) async fn monotonic_restore_at_load(&self) {
+        if !self.agent_did_ready().await {
+            return;
+        }
+        match self.restore_monotonic_ended().await {
+            Ok(0) => {}
+            Ok(n) => {
+                log::info!("{}: restored {n} monotonic link(s) at load", self.uuid);
+                self.schedule_every_instance_flow_pass();
+            }
+            Err(e) => log::warn!("{}: restoring monotonic links at load: {e}", self.uuid),
+        }
+    }
+
+    fn stored_tombstone_ends(
+        &self,
+        link: &LinkExpression,
+        declared: &MonotonicDeclared,
+    ) -> Result<bool, AnyError> {
         let stored = self.sparql_store.query_links(
             Some(&link.data.source),
             Some(RETRACTED_PREDICATE),
@@ -397,7 +792,8 @@ impl PerspectiveInstance {
         )?;
         Ok(stored.into_iter().any(|t| {
             let tombstone = LinkExpression::from(t);
-            retracted_signature(&tombstone).is_some_and(|sig| ends(&tombstone, &sig, link))
+            retracted_signature(&tombstone)
+                .is_some_and(|sig| ends(&tombstone, &sig, link, declared))
         }))
     }
 }
@@ -420,10 +816,10 @@ mod tests {
     fn every_table_entry_is_monotonic_and_ends_as_listed() {
         for entry in MONOTONIC_PREDICATES {
             let p = sample(entry);
-            assert!(is_monotonic(Some(&p)), "{p}");
+            assert!(is_monotonic(Some(&p), &MonotonicDeclared::default()), "{p}");
             assert_eq!(ending(Some(&p)), Some(entry.ending), "{p}");
             assert_eq!(
-                is_retractable(Some(&p)),
+                is_retractable(Some(&p), &MonotonicDeclared::default()),
                 entry.ending == Ending::Tombstone,
                 "{p}"
             );
@@ -438,8 +834,9 @@ mod tests {
             "ad4m://retracted",
             "ad4m://acceptedBy",
             "ad4m://monotonic",
+            "ad4m://monotonic_role_grant",
         ] {
-            assert!(is_monotonic(Some(p)), "{p}");
+            assert!(ending(Some(p)).is_some(), "{p}");
         }
         for p in [
             "ad4m://flowName",
@@ -448,24 +845,200 @@ mod tests {
             "ad4m://retractedX",
             "test://likes",
         ] {
-            assert!(!is_monotonic(Some(p)), "{p}");
+            assert!(ending(Some(p)).is_none(), "{p}");
         }
-        assert!(!is_monotonic(None));
+        assert!(ending(None).is_none());
+    }
+
+    #[test]
+    fn only_the_authoritys_shared_verified_flags_declare() {
+        use crate::agent::signatures::TestSigner;
+        let alice = TestSigner::generate();
+        let bob = TestSigner::generate();
+        let flag = |signer: &TestSigner, predicate: &str, status: LinkStatus| {
+            let mut link = LinkExpression::from(
+                signer.sign(
+                    Link {
+                        source: "app://Role.did".to_string(),
+                        predicate: Some(MONOTONIC_FLAG_PREDICATE.to_string()),
+                        target: Literal::from_string(predicate.to_string())
+                            .to_url()
+                            .expect("literal"),
+                    }
+                    .normalize(),
+                ),
+            );
+            link.status = Some(status);
+            link
+        };
+        let declared = MonotonicDeclared::from_flags(
+            Some(alice.did.clone()),
+            [
+                flag(&alice, "app://shared", LinkStatus::Shared),
+                flag(&alice, "app://local", LinkStatus::Local),
+                flag(&bob, "app://bobs", LinkStatus::Shared),
+            ],
+        );
+        assert!(is_monotonic(Some("app://shared"), &declared));
+        assert!(
+            !is_monotonic(Some("app://local"), &declared),
+            "a Local flag"
+        );
+        assert!(
+            !is_monotonic(Some("app://bobs"), &declared),
+            "not the authority"
+        );
+        assert!(
+            is_retractable(Some("app://shared"), &declared),
+            "a declared predicate ends by tombstone by default"
+        );
+        let nobody =
+            MonotonicDeclared::from_flags(None, [flag(&alice, "app://shared", LinkStatus::Shared)]);
+        assert!(
+            !is_monotonic(Some("app://shared"), &nobody),
+            "no authority, no declaration"
+        );
+    }
+
+    /// `ad4m://monotonic` declares a predicate ended by tombstone,
+    /// `ad4m://monotonic_role_grant` one ended only by
+    /// `ad4m://flow/role_grant_revoked`; where both name one predicate the
+    /// stricter wins, in either order and across stored and incoming flags.
+    /// A declaration never loosens the fixed table.
+    #[test]
+    fn a_role_grant_flag_declares_revocation_and_wins() {
+        use crate::agent::signatures::TestSigner;
+        let alice = TestSigner::generate();
+        let flag = |flag_predicate: &str, predicate: &str| {
+            let mut link = LinkExpression::from(
+                alice.sign(
+                    Link {
+                        source: "app://Role.did".to_string(),
+                        predicate: Some(flag_predicate.to_string()),
+                        target: Literal::from_string(predicate.to_string())
+                            .to_url()
+                            .expect("literal"),
+                    }
+                    .normalize(),
+                ),
+            );
+            link.status = Some(LinkStatus::Shared);
+            link
+        };
+        let revocation = Some(Ending::Revocation(ROLE_GRANT_REVOKED_PREDICATE));
+        let declared = MonotonicDeclared::from_flags(
+            Some(alice.did.clone()),
+            [
+                flag(MONOTONIC_FLAG_PREDICATE, "app://note"),
+                flag(MONOTONIC_ROLE_GRANT_FLAG_PREDICATE, "app://member"),
+                flag(MONOTONIC_ROLE_GRANT_FLAG_PREDICATE, "app://both"),
+                flag(MONOTONIC_FLAG_PREDICATE, "app://both"),
+                flag(MONOTONIC_FLAG_PREDICATE, "ad4m://retracted"),
+            ],
+        );
+        assert_eq!(declared.ending(Some("app://note")), Some(Ending::Tombstone));
+        assert_eq!(declared.ending(Some("app://member")), revocation);
+        assert_eq!(declared.ending(Some("app://both")), revocation);
+        assert_eq!(
+            declared.ending(Some("ad4m://retracted")),
+            Some(Ending::Never),
+            "the fixed table first"
+        );
+        assert!(!is_retractable(Some("app://member"), &declared));
+
+        let tightened =
+            declared.with_incoming(&[flag(MONOTONIC_ROLE_GRANT_FLAG_PREDICATE, "app://note")]);
+        assert_eq!(tightened.ending(Some("app://note")), revocation);
+        let not_loosened =
+            tightened.with_incoming(&[flag(MONOTONIC_FLAG_PREDICATE, "app://member")]);
+        assert_eq!(not_loosened.ending(Some("app://member")), revocation);
+
+        let link = LinkExpression {
+            data: Link {
+                source: "s".into(),
+                predicate: Some("app://member".into()),
+                target: "t".into(),
+            },
+            author: "did:key:a".into(),
+            timestamp: "t0".into(),
+            proof: Default::default(),
+            status: Some(LinkStatus::Shared),
+        };
+        let refusal = format!(
+            "{:#}",
+            refuse_monotonic_removal(&link, &LinkStatus::Shared, &declared).unwrap_err()
+        );
+        assert!(
+            refusal.contains("revocation (ad4m://flow/role_grant_revoked)"),
+            "{refusal}"
+        );
+    }
+
+    /// Only a `literal:string:` target names a predicate. A bare IRI or a
+    /// literal of another type (the issue's original `literal:true`) declares
+    /// nothing, even from the authority.
+    #[test]
+    fn a_flag_declares_only_a_string_literal_target() {
+        use crate::agent::signatures::TestSigner;
+        let alice = TestSigner::generate();
+        let flag = |target: &str| {
+            let mut link = LinkExpression::from(
+                alice.sign(
+                    Link {
+                        source: "app://Role.did".to_string(),
+                        predicate: Some(MONOTONIC_FLAG_PREDICATE.to_string()),
+                        target: target.to_string(),
+                    }
+                    .normalize(),
+                ),
+            );
+            link.status = Some(LinkStatus::Shared);
+            link
+        };
+        let declared = MonotonicDeclared::from_flags(
+            Some(alice.did.clone()),
+            [
+                flag("app://member"),
+                flag("literal:true"),
+                flag("literal:boolean:true"),
+                flag("literal:number:5"),
+                flag("literal:string:"),
+                flag("literal:string:app%3A%2F%2Fgood"),
+            ],
+        );
+        let leaked: Vec<_> = ["app://member", "literal:true", "true", "5", ""]
+            .into_iter()
+            .filter(|p| is_monotonic(Some(p), &declared))
+            .collect();
+        assert!(leaked.is_empty(), "declared {leaked:?}");
+        assert!(is_monotonic(Some("app://good"), &declared), "control");
     }
 
     #[test]
     fn tombstones_and_the_flag_are_not_retractable() {
-        assert!(is_retractable(Some("ad4m://acceptedBy")));
-        assert!(is_retractable(Some("ad4m://flow/to_state")));
+        assert!(is_retractable(
+            Some("ad4m://acceptedBy"),
+            &MonotonicDeclared::default()
+        ));
+        assert!(is_retractable(
+            Some("ad4m://flow/to_state"),
+            &MonotonicDeclared::default()
+        ));
         for p in [
             RETRACTED_PREDICATE,
             ROLE_GRANT_REVOKED_PREDICATE,
             MONOTONIC_FLAG_PREDICATE,
         ] {
             assert_eq!(ending(Some(p)), Some(Ending::Never), "{p}");
-            assert!(!is_retractable(Some(p)), "{p}");
+            assert!(
+                !is_retractable(Some(p), &MonotonicDeclared::default()),
+                "{p}"
+            );
         }
-        assert!(!is_retractable(Some("test://likes")));
+        assert!(!is_retractable(
+            Some("test://likes"),
+            &MonotonicDeclared::default()
+        ));
     }
 
     /// The lookup reads whatever table it is given: a new entry is all a
@@ -517,17 +1090,21 @@ mod tests {
             proof: Default::default(),
             status: Some(LinkStatus::Shared),
         };
+        let none = MonotonicDeclared::default();
         let refusal = |predicate: &str| {
             format!(
                 "{:#}",
-                refuse_monotonic_removal(&link(predicate), &LinkStatus::Shared).unwrap_err()
+                refuse_monotonic_removal(&link(predicate), &LinkStatus::Shared, &none).unwrap_err()
             )
         };
         assert!(refusal("ad4m://flow/to_state").contains("tombstone (ad4m://retracted)"));
         assert!(refusal(MONOTONIC_FLAG_PREDICATE).contains("cannot be ended"));
-        assert!(refuse_monotonic_removal(&link("test://likes"), &LinkStatus::Shared).is_ok());
         assert!(
-            refuse_monotonic_removal(&link("ad4m://flow/to_state"), &LinkStatus::Local).is_ok()
+            refuse_monotonic_removal(&link("test://likes"), &LinkStatus::Shared, &none).is_ok()
+        );
+        assert!(
+            refuse_monotonic_removal(&link("ad4m://flow/to_state"), &LinkStatus::Local, &none)
+                .is_ok()
         );
     }
 
@@ -546,10 +1123,18 @@ mod tests {
         };
         let diff = PerspectiveDiff {
             additions: vec![link("ad4m://flow/current_state")],
-            removals: vec![link("ad4m://flow/current_state"), link("test://likes")],
+            removals: vec![
+                link("ad4m://flow/current_state"),
+                link("app://member"),
+                link("test://likes"),
+            ],
+        };
+        let declared = MonotonicDeclared {
+            authority: Some("did:key:a".into()),
+            predicates: HashMap::from([("app://member".to_string(), Ending::Tombstone)]),
         };
 
-        let committed = committable(&diff);
+        let committed = committable(&diff, &declared);
 
         assert_eq!(committed.additions.len(), 1);
         assert_eq!(committed.removals.len(), 1);
