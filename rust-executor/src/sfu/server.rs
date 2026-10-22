@@ -2382,6 +2382,34 @@ mod tests {
         assert!(peer.ice_restart.is_none(), "handed over with the answer");
     }
 
+    /// A restart whose offer went stale is forgotten with it: the next
+    /// request makes a fresh offer instead of republishing one the SFU no
+    /// longer waits on, and candidates go to str0m again.
+    #[test]
+    fn a_stale_restart_offer_ends_the_restart() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:caller".to_string(),
+            rtc,
+            false,
+        );
+        let now = Instant::now();
+        assert!(peer.restart_ice(now).is_none());
+        let (first, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
+
+        peer.drop_stale_offer();
+        assert!(peer.ice_restart.is_none());
+        assert!(
+            peer.restart_ice(now).is_none(),
+            "a new restart, not the stale offer"
+        );
+        let (second, _) = apply_deferred_tracks(&mut peer).expect("offered afresh");
+        assert_ne!(second, first);
+    }
+
     /// A fixed port is bound exactly; the STUN probe runs on that socket and
     /// the public address is advertised on it.
     #[tokio::test]
