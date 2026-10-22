@@ -598,6 +598,49 @@ mod tests {
         );
     }
 
+    /// A lease renewal rewrites our own claim while `confirm_claim` reads the
+    /// batch. Every read must still see our claim and keep the win over a
+    /// larger peer. Data, #1445.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn confirm_keeps_own_claim_during_a_renewal() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let items = vec!["i1".to_string()];
+        let key = batch_key(&items);
+        let me = did_for_context(&ctx).expect("did");
+        write_claim(&mut p, "proc", &key, &me, 1_000_000_000, &ctx)
+            .await
+            .expect("own");
+        write_claim(&mut p, "proc", &key, "zzz:larger-peer", 1_000_000_000, &ctx)
+            .await
+            .expect("peer");
+        let mut renewer = p.clone();
+        let (ctx_r, me_r, key_r) = (ctx.clone(), me.clone(), key.clone());
+        let h = tokio::spawn(async move {
+            for _ in 0..30 {
+                renew_claim_at(
+                    &mut renewer,
+                    "proc",
+                    &key_r,
+                    &me_r,
+                    1_000_000_000,
+                    1_000,
+                    &ctx_r,
+                )
+                .await
+                .expect("renew");
+            }
+        });
+        while !h.is_finished() {
+            assert_eq!(
+                confirm_claim(&p, "proc", &items, 2_000, &ctx)
+                    .await
+                    .expect("confirm"),
+                ClaimOutcome::Won
+            );
+        }
+        h.await.expect("renewer");
+    }
+
     /// A peer with a larger DID does not block us — we win the tiebreak.
     #[tokio::test]
     async fn wins_over_larger_did() {
