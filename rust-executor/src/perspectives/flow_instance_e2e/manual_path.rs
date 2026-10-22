@@ -351,19 +351,32 @@ async fn the_engine_pass_never_reaches_quorum_by_itself_however_many_dids_run_it
     );
 }
 
+/// How `did`'s grant of a `didProperty: field` role on `ns://Task` is dated,
+/// with `field` spelled as given: the property name or the predicate.
+fn owner_dating(
+    field: &str,
+    did: &str,
+) -> crate::perspectives::flow_instance::roles::dating::GrantDating {
+    use crate::perspectives::flow_instance::roles::dating::GrantDating;
+    let role: crate::perspectives::shacl_parser::ModelQuery = serde_json::from_value(
+        serde_json::json!({ "className": "ns://Task", "didProperty": field }),
+    )
+    .expect("role query");
+    GrantDating::new(&role, &serde_json::json!({ "where": { field: did } }), did).expect("dating")
+}
+
 /// `instance` as the role class's `model_query` returns it when asked for the
 /// role-grant `links` — the read `resolve_role_grants` makes for every
-/// candidate (#1103). `did_property` is passed as spelled, so a test can ask
-/// by the property name or by the predicate.
+/// candidate (#1103).
 async fn role_instance_with_grant_links(
     f: &Fixture,
     instance: &str,
-    did_property: &str,
+    dating: &crate::perspectives::flow_instance::roles::dating::GrantDating,
 ) -> anyhow::Result<serde_json::Value> {
     use crate::perspectives::flow_evaluator::{RequiresQueryable, RoleGrantLinks};
     let query = serde_json::json!({
         "where": { "id": instance },
-        "links": RoleGrantLinks::query_keys(Some(did_property)),
+        "links": RoleGrantLinks::query_keys(dating, &[]),
     });
     let raw =
         RequiresQueryable::model_query(&f.perspective, "ns://Task", &query.to_string()).await?;
@@ -376,19 +389,16 @@ async fn role_instance_with_grant_links(
 }
 
 /// One role instance's grant history for `did`, collected exactly as
-/// `resolve_role_grants` collects it.
+/// `resolve_role_grants` collects it, with the `didProperty` spelled `field`.
 async fn grant_history(
     f: &Fixture,
     instance: &str,
-    did_property: &str,
+    field: &str,
     did: &str,
 ) -> anyhow::Result<crate::perspectives::flow_evaluator::RoleGrantLinks> {
-    let found = role_instance_with_grant_links(f, instance, did_property).await?;
-    crate::perspectives::flow_evaluator::RoleGrantLinks::from_instance(
-        &found,
-        Some(did_property),
-        did,
-    )
+    let dating = owner_dating(field, did);
+    let found = role_instance_with_grant_links(f, instance, &dating).await?;
+    crate::perspectives::flow_evaluator::RoleGrantLinks::from_instance(&found, &dating, &[])
 }
 
 /// **The real store, not a stub of it.**
@@ -414,24 +424,25 @@ async fn grant_history(
 ///    either, and a role rule must not gate differently depending on which);
 /// 3. a name the class does not declare is an `Err` — at the query layer and
 ///    through `resolve_role_grants` — never an empty list;
-/// 4. the window `resolve` recomputes is dated from the **assignment**, and is
-///    strictly later than the fallback it used to silently take.
+/// 4. the window `resolve` recomputes is dated from the **assignment**.
 ///
 /// Failed on `8bb33678d~1` at assertion 1: `grant_links` came back empty.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_did_property_grant_link_travels_through_the_real_store() {
     use crate::perspectives::flow_evaluator::requires_query_input;
     use crate::perspectives::flow_instance::roles::resolve_role_grants;
-    use crate::perspectives::flow_instance::time::parse_link_timestamp;
     use crate::perspectives::shacl_parser::ModelQuery;
 
     let mut f = seed_satisfied_fixture(None).await;
     set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE).await;
     // The instance's own links are written first; the assignment comes after,
-    // so the two datings are distinguishable and the fallback is the earlier.
+    // so a grant dated from the instance would show.
     tick().await;
     grant_owner_role(&mut f).await;
     let me = acting_did(&f);
+    let role: ModelQuery =
+        serde_json::from_str(r#"{"className":"ns://Task","didProperty":"owner"}"#)
+            .expect("role query");
 
     // 1. `owner` is the SDNA property NAME; the graph holds `ns://owner`.
     //    Before #1065 this vector was empty.
@@ -489,9 +500,6 @@ async fn a_did_property_grant_link_travels_through_the_real_store() {
 
     // 4. End to end: the evidence that travels in a receipt carries the
     //    assignment, and the window is dated from it.
-    let role: ModelQuery =
-        serde_json::from_str(r#"{"className":"ns://Task","didProperty":"owner"}"#)
-            .expect("role query");
     let record = f.instances().await.remove(0);
     let evidence = resolve_role_grants(
         &f.perspective,
@@ -525,18 +533,6 @@ async fn a_did_property_grant_link_travels_through_the_real_store() {
     assert_eq!(
         window.granted_at, instance.grant_links[0].timestamp,
         "granted_at is the assignment link's own timestamp"
-    );
-
-    let fallback = instance
-        .asserted_instance_timestamp
-        .clone()
-        .expect("the instance is datable, so the fallback exists and is the wrong answer");
-    assert!(
-        parse_link_timestamp(&window.granted_at) > parse_link_timestamp(&fallback),
-        "the assignment must date the grant STRICTLY LATER than the instance fallback \
-         ({} vs {}) — taking the fallback is what widened every didProperty window",
-        window.granted_at,
-        fallback
     );
 }
 
@@ -574,7 +570,7 @@ async fn raw_links(f: &Fixture, source: &str, predicate: &str) -> Vec<LinkExpres
 #[tokio::test(flavor = "multi_thread")]
 async fn role_grant_evidence_is_reachable_through_model_query() {
     use crate::perspectives::flow_evaluator::{
-        did_literal_url, grant_link_names_did, revocation_link_counts_for_did, RoleGrantLinks,
+        did_literal_url, revocation_link_counts_for_did, RoleGrantLinks,
     };
 
     let mut f = seed_satisfied_fixture(None).await;
@@ -585,11 +581,12 @@ async fn role_grant_evidence_is_reachable_through_model_query() {
     revoke_own_role(&mut f, TASK).await;
     let me = acting_did(&f);
     let me_literal = did_literal_url(&me).expect("literal");
+    let dating = owner_dating("owner", &me);
 
     let oracle_grants: Vec<LinkExpression> = raw_links(&f, TASK, "ns://owner")
         .await
         .into_iter()
-        .filter(|l| grant_link_names_did(l, &me, &me_literal))
+        .filter(|l| dating.is_grant_link(l, TASK))
         .collect();
     let oracle_revocations: Vec<LinkExpression> = raw_links(&f, TASK, ROLE_GRANT_REVOKED_PREDICATE)
         .await
@@ -599,11 +596,11 @@ async fn role_grant_evidence_is_reachable_through_model_query() {
     assert_eq!(oracle_grants.len(), 1, "fixture: one assignment");
     assert_eq!(oracle_revocations.len(), 1, "fixture: one tombstone");
 
-    let task = role_instance_with_grant_links(&f, TASK, "owner")
+    let task = role_instance_with_grant_links(&f, TASK, &dating)
         .await
         .expect("model_query with links");
     let history =
-        RoleGrantLinks::from_instance(&task, Some("owner"), &me).expect("history from `__links`");
+        RoleGrantLinks::from_instance(&task, &dating, &[]).expect("history from `__links`");
     assert_eq!(
         history.grant_links, oracle_grants,
         "the assignment, byte for byte"

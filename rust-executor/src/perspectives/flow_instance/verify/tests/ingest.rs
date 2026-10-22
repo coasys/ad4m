@@ -1,8 +1,9 @@
 //! The untrusted boundary (#1068): every carried verdict is recomputed,
-//! and a broken grant signature collapses the window instead of widening it.
+//! and a broken grant signature narrows the window instead of widening it.
 
 use super::*;
-// ---- (d) a broken grant signature collapses the window ------------------
+use crate::perspectives::shacl_parser::ModelQuery;
+// ---- (d) a broken grant signature narrows the window --------------------
 
 /// A role-gated flow: only a `coasys://Reviewer` may settle `done`.
 fn role_gated_flow() -> SHACLFlow {
@@ -24,14 +25,18 @@ fn role_gated_flow() -> SHACLFlow {
     )
 }
 
-/// `r0 --agent--> did`, the assignment link that dates a grant.
+/// `r0 --agent--> did`, the assignment link that dates a grant, at `at`.
 /// `valid` is honoured cryptographically: a forged link is signed with a
 /// key that is not the author's. Plain [`LinkExpression`] on purpose —
 /// since #1065 the role-evidence half of a read-set cannot carry a
 /// verdict claim at all, so "claims to be valid" is unrepresentable and
 /// a forgery has nothing left to assert but its (wrong) signature.
+fn grant_link_at(who: &str, valid: bool, at: &str) -> LinkExpression {
+    signed_link("r0", "agent", did_of(who), "admin", valid, None, at).into()
+}
+
 fn grant_link(who: &str, valid: bool) -> LinkExpression {
-    signed_link("r0", "agent", did_of(who), "admin", valid, None, T2).into()
+    grant_link_at(who, valid, T2)
 }
 
 fn reviewer_evidence(grant: LinkExpression) -> RoleGrantEvidence {
@@ -46,45 +51,30 @@ fn reviewer_evidence_from(grant_links: Vec<LinkExpression>) -> RoleGrantEvidence
         instances: vec![RoleInstanceHistory {
             instance_id: "r0".into(),
             grant_links,
+            grantees_own_links: Vec::new(),
             revocation_links: Vec::new(),
-            // Earlier than the assignment link — the widening the
-            // suppression rule exists to prevent.
-            asserted_instance_timestamp: Some(INSTANCE_CREATED.into()),
             produced_at: None,
         }],
     }
 }
 
-/// The fail-open direction #1063 is open on, closed at the ingest.
-///
-/// Grant links are the one kind nothing downstream signature-checks, so a
-/// forged one has to be dropped here. Dropping alone **inverts**: with no
-/// grant link left, `RoleGrantEvidence::resolve` falls back to
-/// `asserted_instance_timestamp` — the instance's own creation, earlier
-/// than any assignment — and the forgery buys a *wider* window than the
-/// genuine link it replaced. So dropping also drops the fallback, leaving
-/// `resolve` to fail closed and abort the derivation.
+/// The fail-open direction #1063 closed, as a reader of a receipt meets it.
 ///
 /// The receipt is minted from honest material and the grant link swapped
 /// afterwards, because that is the shape of the threat: the artifact
 /// arrives from elsewhere, already carrying what its sender chose.
 ///
-/// Red under either half of the fix:
-/// - drop `asserted_instance_timestamp: None` from `reverified_history`
-///   (keep `history.asserted_instance_timestamp.clone()`) — the window
-///   widens to `INSTANCE_CREATED`, the vote at `T3` becomes eligible and
-///   the tampered receipt reports `Verified`;
-/// - write the grant filter as a pass-through (skip
-///   `compute_proof_valid`) — the forgery survives on its wrong-key
-///   signature, and the tampered receipt reports `Verified`. (The older
-///   shape of this mutation — inheriting a carried `"valid": true` — is
-///   unrepresentable since #1065: the plain type has no verdict field.)
+/// A forged grant link is not a link anyone wrote, so it dates nothing:
+/// with only the forgery the grant is gone and the receipt no longer
+/// verifies; beside the genuine link, an EARLIER forgery does not move the
+/// grant before it, and the receipt still verifies against the genuine
+/// date alone.
 ///
-/// And red in the third scenario if the collapse is not the *filter's*
-/// doing — see the comment there for why a verdict assertion alone cannot
-/// tell those apart.
+/// Red if `GrantDating::is_grant_link` skips `compute_proof_valid`: the
+/// forgery then dates the grant and the tampered receipt reports
+/// `Verified`.
 #[test]
-fn a_forged_grant_link_collapses_the_eligibility_window_instead_of_widening_it() {
+fn a_forged_grant_link_narrows_the_eligibility_window_instead_of_widening_it() {
     let flow = role_gated_flow();
     let honest = read_set(
         // Vote at T3, grant at T2: eligible as of its own timestamp.
@@ -102,53 +92,39 @@ fn a_forged_grant_link_collapses_the_eligibility_window_instead_of_widening_it()
     // signed with somebody else's key.
     let mut tampered = receipt;
     tampered.read_set.role_grants = vec![reviewer_evidence(grant_link(ALICE, false))];
-
     let verdict = verify_receipt(&reader, &tampered);
     assert!(
-        verdict.is_rejected(),
-        "a forged assignment link must never buy eligibility, and this is a finding \
-         about the MATERIAL rather than about the reader — got: {verdict}"
-    );
-    let ReceiptVerdict::Unfoldable { reason } = &verdict else {
-        panic!(
-            "the window must COLLAPSE — an unresolvable candidate aborts the derivation \
-             rather than de-quorating one edge — got: {verdict}"
-        );
-    };
-    assert!(
-        reason.contains("cannot be placed in time"),
-        "the refusal must name the fail-closed grant dating, got: {reason}"
+        matches!(verdict, ReceiptVerdict::StateMismatch { .. }),
+        "a forged assignment link grants nothing, so Alice's vote does not count and the \
+         run does not reach `done` — got: {verdict}"
     );
 
-    // The separating case, and the reason the two above are not enough.
-    //
-    // `Unfoldable`/"cannot be placed in time" is also what a `resolve`
-    // that failed closed on an ABSENT field would say — code that
-    // collapses the window whenever anything is dropped, or that drops
-    // every grant link once one is bad, passes both assertions above
-    // while being wrong. The verdict is right there for a reason the test
-    // never inspects.
-    //
-    // So: one fixture carrying both links. The forgery is dropped, the
-    // genuine link SURVIVES and still dates the grant at `T2`, and the
-    // vote at `T3` is eligible against it — the receipt verifies with the
-    // forgery sitting right beside the link that carried it.
-    //
-    // That is the assertion that separates "the signature filter dropped
-    // one link" from "the collapse happens for some other reason": the
-    // two differ only here, because only here is there surviving material
-    // for `resolve` to date a window from.
+    // A forged link EARLIER than the genuine one, carried beside it, must
+    // neither poison the genuine link nor date the grant before it. The
+    // vote at T3 is after the genuine grant at T2, so the receipt verifies.
     let mut half_forged = tampered;
     half_forged.read_set.role_grants = vec![reviewer_evidence_from(vec![
-        grant_link(ALICE, false),
+        grant_link_at(ALICE, false, T1),
         grant_link(ALICE, true),
     ])];
-    let verdict = verify_receipt(&reader, &half_forged);
     assert!(
-        verdict.is_verified(),
-        "the forgery must be dropped WITHOUT poisoning the genuine link beside \
-         it — a filter that collapses the window on any bad link, or a `resolve` \
-         failing closed on absence, is red here and green above — got: {verdict}"
+        verify_receipt(&reader, &half_forged).is_verified(),
+        "the forgery must be ignored WITHOUT poisoning the genuine link beside it"
+    );
+    let reverified = half_forged.read_set.reverified();
+    let role = ModelQuery {
+        class_name: REVIEWER.into(),
+        did_property: Some("agent".into()),
+        ..Default::default()
+    };
+    let window = reverified.role_grants[0]
+        .resolve(&json!({ "where": { "agent": did_of(ALICE) } }), &role)
+        .expect("resolves")
+        .windows
+        .remove(0);
+    assert_eq!(
+        window.granted_at, T2,
+        "the grant starts at the genuine link, not at the earlier forgery"
     );
 }
 
