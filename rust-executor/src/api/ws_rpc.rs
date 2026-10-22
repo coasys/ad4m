@@ -20,8 +20,11 @@ use futures::stream::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::capabilities::*;
@@ -158,8 +161,11 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
 
     // ── Writer task ─────────────────────────────────────────────────────
     let writer_session_over = conn.session_over.clone();
-    let write_handle = tokio::spawn(async move {
+    let unheard = Arc::new(AtomicU64::new(0));
+    let written = unheard.clone();
+    let mut write_handle = tokio::spawn(async move {
         use futures::SinkExt;
+        let mut ping = tokio::time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
         loop {
             tokio::select! {
                 biased;
@@ -179,19 +185,25 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
                 }
                 msg = rx.recv() => match msg {
                     Some(msg) => {
+                        written.fetch_add(msg.len() as u64, Ordering::Relaxed);
                         if ws_sink.send(Message::Text(msg.into())).await.is_err() {
                             return;
                         }
                     }
                     None => return,
                 },
+                _ = ping.tick() => {
+                    if ws_sink.send(Message::Ping(Default::default())).await.is_err() {
+                        return;
+                    }
+                }
             }
         }
     });
 
-    // Text frames until the socket closes or errors; pings and binary
-    // frames are skipped.
-    let incoming = ws_stream
+    // Text frames until the socket closes, errors or goes silent; pongs, pings
+    // and binary frames count as heard and are skipped.
+    let incoming = until_silent(ws_stream, unheard)
         .take_while(|msg| {
             futures::future::ready(matches!(msg, Ok(m) if !matches!(m, Message::Close(_))))
         })
@@ -203,10 +215,60 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
         });
     serve(conn, incoming, events).await;
 
-    // The writer ends once calls still in flight drop their senders.
-    if let Err(e) = write_handle.await {
-        log::error!("WS RPC writer task failed: {}", e);
+    // The writer ends once calls still in flight drop their senders and what
+    // they queued is sent. A client that went silent takes nothing, and the
+    // send would wait until TCP gives up on it: close the socket instead.
+    match tokio::time::timeout(SILENCE_LIMIT, &mut write_handle).await {
+        Ok(Err(e)) => log::error!("WS RPC writer task failed: {}", e),
+        Ok(Ok(())) => {}
+        Err(_) => write_handle.abort(),
     }
+}
+
+/// How often the executor sends its client a WebSocket ping. Every client answers
+/// one by itself, so a live client is heard from at least this often.
+const PING_INTERVAL: Duration = Duration::from_secs(20);
+
+/// How long a client may send no frame at all before its connection ends. After
+/// a network switch a dead client's socket stays open with no close for as long
+/// as TCP retries, while its live queries run and its events queue up.
+const SILENCE_LIMIT: Duration = Duration::from_secs(60);
+
+/// The slowest link a client is given time for, as in the SDK. A pong waits
+/// behind what the executor wrote before its ping, so silence counts only once
+/// that could have crossed this link, if that takes longer than SILENCE_LIMIT.
+const SLOWEST_LINK_BYTES_PER_SEC: u64 = 16_000;
+
+/// `frames` until the client has been silent for longer than a live one could
+/// be: [`SILENCE_LIMIT`], extended while `unheard` (bytes written to it since it
+/// was last heard from) could still be on the way. Each frame clears `unheard`.
+fn until_silent<S>(frames: S, unheard: Arc<AtomicU64>) -> impl futures::Stream<Item = S::Item>
+where
+    S: futures::Stream + Unpin,
+{
+    futures::stream::unfold((frames, Instant::now()), move |(mut frames, heard_at)| {
+        let unheard = unheard.clone();
+        async move {
+            loop {
+                let in_flight = Duration::from_secs(
+                    unheard.load(Ordering::Relaxed) / SLOWEST_LINK_BYTES_PER_SEC,
+                );
+                let deadline = heard_at + SILENCE_LIMIT.max(in_flight);
+                if Instant::now() >= deadline {
+                    log::info!(
+                        "WS RPC: client silent for {:?}; ending the connection",
+                        deadline - heard_at
+                    );
+                    return None;
+                }
+                // Woken at the deadline, check it again: more may have been written.
+                if let Ok(frame) = tokio::time::timeout_at(deadline, frames.next()).await {
+                    unheard.store(0, Ordering::Relaxed);
+                    return frame.map(|frame| (frame, (frames, Instant::now())));
+                }
+            }
+        }
+    })
 }
 
 type EventStream = std::pin::Pin<Box<dyn futures::Stream<Item = String> + Send>>;
@@ -908,5 +970,81 @@ mod socket_tests {
             !matches!(leaked, Ok(true)),
             "a socket without a token got an event"
         );
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    //! A client that stops sending frames is let go: its stream of frames ends, and
+    //! `serve` then ends the connection's subscriptions and its event queue.
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    /// When the stream ends, measured from `start`.
+    async fn ended_after<S: futures::Stream + Unpin>(mut frames: S, start: Instant) -> Duration {
+        while frames.next().await.is_some() {}
+        start.elapsed()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_client_is_let_go_after_the_limit() {
+        let start = Instant::now();
+        let frames = until_silent(futures::stream::pending::<()>(), Arc::default());
+        assert_eq!(ended_after(Box::pin(frames), start).await, SILENCE_LIMIT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_frame_restarts_the_limit() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let start = Instant::now();
+        let frames = Box::pin(until_silent(
+            tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+            Arc::default(),
+        ));
+        tokio::spawn(async move {
+            for _ in 0..3 {
+                tokio::time::sleep(SILENCE_LIMIT - Duration::from_secs(1)).await;
+                let _ = tx.send(());
+            }
+            // Held open, but silent from here.
+            std::future::pending::<()>().await;
+        });
+        let last_heard = (SILENCE_LIMIT - Duration::from_secs(1)) * 3;
+        assert_eq!(ended_after(frames, start).await, last_heard + SILENCE_LIMIT);
+    }
+
+    /// A pong waits behind what the executor wrote before its ping, so a large
+    /// reply on a slow link is not silence.
+    #[tokio::test(start_paused = true)]
+    async fn what_was_written_since_the_client_was_heard_extends_the_limit() {
+        let unheard = Arc::new(AtomicU64::new(0));
+        let start = Instant::now();
+        let frames = Box::pin(until_silent(
+            futures::stream::pending::<()>(),
+            unheard.clone(),
+        ));
+        let writer = unheard.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(50)).await;
+            // 1.6 MB written: 100 s on the slowest link.
+            writer.fetch_add(1_600_000, Ordering::Relaxed);
+        });
+        assert_eq!(ended_after(frames, start).await, Duration::from_secs(100));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_frame_from_the_client_clears_what_was_written() {
+        let unheard = Arc::new(AtomicU64::new(1_600_000));
+        let start = Instant::now();
+        let frames = until_silent(
+            futures::stream::iter([()]).chain(futures::stream::pending()),
+            unheard.clone(),
+        );
+        let mut frames = Box::pin(frames);
+        assert!(frames.next().await.is_some());
+        assert_eq!(unheard.load(Ordering::Relaxed), 0);
+        assert_eq!(ended_after(frames, start).await, SILENCE_LIMIT);
     }
 }
