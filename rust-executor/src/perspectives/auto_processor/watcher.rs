@@ -121,6 +121,10 @@ impl LeaseGuard {
     /// `true` while every renewal has succeeded. A `false` here means the
     /// claim may have expired; another peer could have re-claimed the batch.
     fn is_healthy(&self) -> bool {
+        #[cfg(test)]
+        if test_hooks::lease_lost() {
+            return false;
+        }
         !self.renewal_failed.load(Ordering::Relaxed)
     }
 }
@@ -1379,6 +1383,12 @@ pub(crate) mod test_hooks {
         pub fail_confirm: bool,
         /// A peer claim on the batch, written after the run is minted.
         pub peer_claim: Option<String>,
+        /// The lease counts as lost from the start of the pass.
+        pub lose_lease: bool,
+        /// The lease counts as lost once the stand-in interpretation ran.
+        pub lose_lease_in_interpretation: bool,
+        /// Set by either of the two above; read by `LeaseGuard::is_healthy`.
+        pub lease_lost: Arc<AtomicBool>,
     }
 
     tokio::task_local! {
@@ -1416,6 +1426,9 @@ pub(crate) mod test_hooks {
             debug_response: None,
         };
         mint_interpretation_run(perspective, &meta, Some(cursor), None, context).await?;
+        if hooks.lose_lease_in_interpretation {
+            hooks.lease_lost.store(true, Ordering::Relaxed);
+        }
         if let Some(peer) = hooks.peer_claim {
             let expires = chrono::Utc::now().timestamp_millis() + 60_000;
             super::super::claim::write_claim(
@@ -1436,6 +1449,12 @@ pub(crate) mod test_hooks {
                 })
                 .collect(),
         ))
+    }
+
+    pub(super) fn lease_lost() -> bool {
+        HOOKS
+            .try_with(|h| h.lose_lease || h.lease_lost.load(Ordering::Relaxed))
+            .unwrap_or(false)
     }
 
     pub(super) fn confirm_error() -> anyhow::Result<()> {
@@ -2182,6 +2201,119 @@ mod tests {
                 phases.push(ev.phase);
             }
         }
+        assert_eq!(
+            phases,
+            vec![NeighbourhoodPhase::Claimed, NeighbourhoodPhase::Abandoned],
+            "the Claimed row must be closed with Abandoned"
+        );
+    }
+
+    /// Run a pass whose lease is lost at the point `hooks` says; return its
+    /// outcome, whether it emitted `Processed`, the neighbourhood-state
+    /// phases of its batch, and the links under its mint scope.
+    async fn run_pass_with_lost_lease(
+        hooks: test_hooks::PassHooks,
+    ) -> (
+        PassOutcome,
+        bool,
+        Vec<NeighbourhoodPhase>,
+        Vec<crate::types::DecoratedLinkExpression>,
+    ) {
+        use super::super::events::{
+            subscribe_neighbourhood_state, AutoProcessorNeighbourhoodState,
+        };
+        use crate::perspectives::interpretation_test_support::{proposal, TASK_SDNA};
+
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        let mut cfg = cfg("proc", 100, 32);
+        cfg.interpretation_classes = vec![shapes[0].target_class.clone()];
+        cfg.mint_scope = Some(Scope::Raw {
+            id: "soa://project/42".into(),
+            predicate: "soa://contains".into(),
+        });
+        let items = vec![pt("i1"), pt("i2")];
+        let key = batch_key(&ids(&items));
+        let hooks = test_hooks::PassHooks {
+            interpret: Some(vec![proposal(
+                "Task",
+                None,
+                &[("title", serde_json::json!("Ship the parser"))],
+            )]),
+            ..hooks
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut rx = super::super::events::subscribe().await;
+        let mut nh = subscribe_neighbourhood_state().await;
+
+        let outcome = test_hooks::HOOKS
+            .scope(
+                hooks,
+                run_one_pass(&mut p, &cfg, &items, now, &ctx, false, 0),
+            )
+            .await
+            .expect("run_one_pass");
+
+        let mut processed = false;
+        while let Ok(json) = rx.try_recv() {
+            let ev: AutoProcessorEvent = serde_json::from_str(&json).expect("event json");
+            processed |= ev.perspective_uuid == p.uuid && ev.step == AutoProcessorStep::Processed;
+        }
+        let mut phases = Vec::new();
+        while let Ok(json) = nh.try_recv() {
+            let ev: AutoProcessorNeighbourhoodState =
+                serde_json::from_str(&json).expect("state json");
+            if ev.perspective_uuid == p.uuid && ev.batch_key == key {
+                phases.push(ev.phase);
+            }
+        }
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some("soa://project/42".into()),
+                predicate: Some("soa://contains".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        (outcome, processed, phases, links)
+    }
+
+    /// A lease lost before the interpretation: the pass backs off without
+    /// interpreting, and the `Claimed` row is closed with `Abandoned`.
+    #[tokio::test]
+    async fn run_one_pass_abandons_when_the_lease_is_lost_before_interpretation() {
+        let (outcome, processed, phases, links) = run_pass_with_lost_lease(test_hooks::PassHooks {
+            lose_lease: true,
+            ..Default::default()
+        })
+        .await;
+        assert!(
+            matches!(&outcome, PassOutcome::BackedOff { holder } if holder == "(claim expired mid-pass)"),
+            "expected BackedOff before interpretation, got {outcome:?}"
+        );
+        assert!(!processed, "a lost lease must not emit Processed");
+        assert!(links.is_empty(), "nothing was interpreted: {links:?}");
+        assert_eq!(
+            phases,
+            vec![NeighbourhoodPhase::Claimed, NeighbourhoodPhase::Abandoned],
+            "the Claimed row must be closed with Abandoned"
+        );
+    }
+
+    /// A lease lost during the interpretation: the fresh bases are linked,
+    /// the pass backs off, and the `Claimed` row is closed with `Abandoned`.
+    #[tokio::test]
+    async fn run_one_pass_abandons_when_the_lease_is_lost_during_interpretation() {
+        let (outcome, processed, phases, links) = run_pass_with_lost_lease(test_hooks::PassHooks {
+            lose_lease_in_interpretation: true,
+            ..Default::default()
+        })
+        .await;
+        assert!(
+            matches!(&outcome, PassOutcome::BackedOff { holder } if holder == "(claim lost during interpretation)"),
+            "expected BackedOff after interpretation, got {outcome:?}"
+        );
+        assert!(!processed, "a lost lease must not emit Processed");
+        assert_eq!(links.len(), 1, "the fresh base must be linked: {links:?}");
         assert_eq!(
             phases,
             vec![NeighbourhoodPhase::Claimed, NeighbourhoodPhase::Abandoned],
