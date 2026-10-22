@@ -3,8 +3,8 @@ use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::monotonic::{
-    committable, drop_monotonic_removals, is_monotonic, refuse_monotonic_removal,
-    MonotonicDeclared, MONOTONIC_FLAG_PREDICATE,
+    committable, drop_monotonic_removals, is_declaration_flag, is_monotonic,
+    refuse_monotonic_removal, MonotonicDeclared,
 };
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
@@ -2269,7 +2269,8 @@ impl PerspectiveInstance {
             .flatten()
             .collect();
         // A held link's stored status decides (#1176): a Shared monotonic
-        // link is ended only by its author's tombstone, never by a removal.
+        // link ends only as its `monotonic` table entry allows, never by a
+        // removal.
         for link in &removals {
             let link_status = link.status.as_ref().unwrap_or(&LinkStatus::Local);
             refuse_monotonic_removal(link, link_status, &declared)?;
@@ -4288,7 +4289,7 @@ impl PerspectiveInstance {
         })
     }
 
-    /// Returns what `ad4m://flow/retracted` tombstones did on the way in
+    /// Returns what `ad4m://retracted` tombstones did on the way in
     /// (`monotonic::RetractionEffects`); callers that publish the diff fold
     /// it in so subscribers see what the store holds.
     pub(crate) async fn persist_link_diff(
@@ -4304,7 +4305,8 @@ impl PerspectiveInstance {
         // and computes the verdict itself. Callers decorate *after* persist for
         // pubsub/prolog, rather than decorating and converting back here.
 
-        let effects = self.retraction_effects(&diff.additions)?;
+        let declared = self.monotonic_declared().await?;
+        let effects = self.retraction_effects(&diff.additions, &declared)?;
         let retracted = effects.retracted.iter().cloned().map(LinkExpression::from);
 
         // Removals first
@@ -4341,7 +4343,7 @@ impl PerspectiveInstance {
             .additions
             .iter()
             .chain(diff.removals.iter())
-            .any(|l| l.data.predicate.as_deref() == Some(MONOTONIC_FLAG_PREDICATE))
+            .any(is_declaration_flag)
         {
             self.invalidate_monotonic_declared();
         }

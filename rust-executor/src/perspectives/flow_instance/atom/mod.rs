@@ -54,9 +54,12 @@ use outputs::named_outputs;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// The link vocabulary of a flow proposal. One home, because the flow engine
-// is the only thing that reads it.
+// The link vocabulary of a flow proposal. Votes and role revocations are
+// defined in `monotonic`, whose table names them and which depends on nothing
+// in the flow engine, and re-exported here.
 // ---------------------------------------------------------------------------
+
+pub use crate::perspectives::monotonic::{ACCEPTED_BY_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE};
 
 /// Proposal → the `FlowInstance` URI it proposes a transition for.
 pub const FLOW_INSTANCE_PREDICATE: &str = "ad4m://flow/instance";
@@ -96,9 +99,6 @@ pub const OUTPUTS_HASH_TAG: &str = "ad4m-flow-outputs/v2";
 pub const PROPOSAL_NONCE_PREDICATE: &str = "ad4m://flow/nonce";
 /// Domain tag of a proposal's content-addressed URI ([`proposal_uri`]).
 pub const PROPOSAL_URI_TAG: &str = "ad4m-flow-proposal-uri/v1";
-/// Proposal → a voting DID. A vote counts only when the link's author IS the
-/// DID it names, with a valid signature (see [`valid_votes`]).
-pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
 /// Proposal → `"fired"`: the engine's fired mark as it was written before
 /// #1424, as a `Local` link. Nothing writes or reads it any more — marks live
 /// in [`replica_state`](super::replica_state) — and old links under it are dead
@@ -106,16 +106,6 @@ pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
 /// shape still declares it can be told to re-register
 /// (`flow_classes::ensure_flow_model_classes`).
 pub const LEGACY_RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
-/// Tombstone: role instance → revoked DID. Written instead of deleting the
-/// grant; the link's author-asserted timestamp is the revocation time. Source =
-/// role-instance URI, target = the DID — literal-encoded or raw, the reader
-/// accepts both (`flow_evaluator::target_names_did`). Authority mirrors the
-/// grant's own rule (`roles::revocation_authorised`): whoever the role
-/// query's `author` condition accepts as granter may revoke, which makes
-/// admin-gated roles admin-revoked, `$did` roles self-revoked, and
-/// open-authorship roles revocable by anyone. Stays in the graph forever so
-/// newcomers can reconstruct the full role-membership history.
-pub const ROLE_GRANT_REVOKED_PREDICATE: &str = "ad4m://flow/role_grant_revoked";
 
 // ---------------------------------------------------------------------------
 // Types

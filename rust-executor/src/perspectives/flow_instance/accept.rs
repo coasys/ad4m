@@ -199,7 +199,7 @@ pub(crate) async fn accept_flow_proposal_locked(
 /// signature is not our action either, so it is left alone.
 ///
 /// A proposal's links are monotonic (#1176): each one ends by a signed
-/// `ad4m://flow/retracted` tombstone naming its signature
+/// `ad4m://retracted` tombstone naming its signature
 /// ([`crate::perspectives::monotonic`]), never by a removal. The tombstones
 /// take the links out of this store at once and out of every peer's when
 /// they sync; readers see the links gone, as after a removal. Our earlier
@@ -231,9 +231,10 @@ pub async fn reject_flow_proposal(
         .into_iter()
         .filter(|l| signed_by(l, &did))
         .partition(|l| l.status != Some(LinkStatus::Local));
+    let declared = perspective.monotonic_declared().await?;
     let tombstones = shared
         .into_iter()
-        .filter(|l| is_retractable(l.data.predicate.as_deref()))
+        .filter(|l| is_retractable(l.data.predicate.as_deref(), &declared))
         .map(|l| retraction_for(&LinkExpression::from(l)))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("reject_flow_proposal: {e:#}"))?;
