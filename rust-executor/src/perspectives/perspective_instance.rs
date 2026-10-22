@@ -4307,6 +4307,12 @@ impl PerspectiveInstance {
 
         let declared = self.monotonic_declared().await?;
         let effects = self.retraction_effects(&diff.additions, &declared)?;
+        // Kept before the store drops them, so a later `roleGrant` flag can
+        // still restore them.
+        let ended = effects.ended_under_declared();
+        if !ended.is_empty() {
+            Ad4mDb::with_global_instance(|db| db.keep_monotonic_ended(&self.uuid, &ended))?;
+        }
         let retracted = effects.retracted.iter().cloned().map(LinkExpression::from);
 
         // Removals first
@@ -4316,7 +4322,12 @@ impl PerspectiveInstance {
             }
         }
         // Additions after
-        for addition in diff.additions.iter().filter(|a| !effects.covers(a)) {
+        for addition in diff
+            .additions
+            .iter()
+            .filter(|a| !effects.covers(a))
+            .chain(effects.restored.iter())
+        {
             if let Err(e) = self.sparql_store.add_link(addition) {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }

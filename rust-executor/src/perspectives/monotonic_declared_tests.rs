@@ -926,3 +926,99 @@ async fn t6_a_declaration_after_the_tombstone_still_ends_the_link() {
     sync_in(&mut early, vec![tombstone], vec![]).await;
     assert!(!present(&early, &member), "control: declaration first");
 }
+
+/// What a replica holds, comparable across replicas.
+fn held(p: &PerspectiveInstance) -> Vec<(String, String, String, String, String)> {
+    let mut links: Vec<_> = p
+        .sparql_store
+        .get_all_links()
+        .expect("get_all_links")
+        .into_iter()
+        .map(|l| {
+            (
+                l.data.source,
+                l.data.predicate.unwrap_or_default(),
+                l.data.target,
+                l.author,
+                l.timestamp,
+            )
+        })
+        .collect();
+    links.sort();
+    links
+}
+
+/// One complete set of signed links, in any order: the authority's plain
+/// declaration D and role-grant declaration R of one predicate, a grant G
+/// under it, and G's author's tombstone T. With R in the set the grant ends
+/// only by revocation, so every replica keeps G and they all hold the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn t6_a_role_grant_declaration_converges_in_every_arrival_order() {
+    let alice = TestSigner::generate();
+    let bob = TestSigner::generate();
+    let plain = class_links_with(&alice, "Role", MEMBER, serde_json::json!(true));
+    let role_grant = class_links_with(&alice, "Role", MEMBER, serde_json::json!("roleGrant"));
+    let d = with_predicate(&plain, FLAG).clone();
+    let r = with_predicate(&role_grant, MONOTONIC_ROLE_GRANT_FLAG_PREDICATE).clone();
+    let g = grant(&bob, ROLE, MEMBER);
+    let t = tombstone_by(&bob, &g);
+
+    let orders: [(&str, Vec<Vec<LinkExpression>>); 5] = [
+        (
+            "D, G, T, R",
+            vec![
+                vec![d.clone()],
+                vec![g.clone()],
+                vec![t.clone()],
+                vec![r.clone()],
+            ],
+        ),
+        (
+            "D, T, G, R",
+            vec![
+                vec![d.clone()],
+                vec![t.clone()],
+                vec![g.clone()],
+                vec![r.clone()],
+            ],
+        ),
+        (
+            "G, T, D, R",
+            vec![
+                vec![g.clone()],
+                vec![t.clone()],
+                vec![d.clone()],
+                vec![r.clone()],
+            ],
+        ),
+        (
+            "R, D, G, T",
+            vec![
+                vec![r.clone()],
+                vec![d.clone()],
+                vec![g.clone()],
+                vec![t.clone()],
+            ],
+        ),
+        (
+            "one diff",
+            vec![vec![d.clone(), r.clone(), g.clone(), t.clone()]],
+        ),
+    ];
+
+    let mut results = Vec::new();
+    for (name, diffs) in orders {
+        let mut replica = neighbourhood_of(&alice).await;
+        for diff in diffs {
+            sync_in(&mut replica, diff, vec![]).await;
+        }
+        for link in [&d, &r, &g, &t] {
+            assert!(present(&replica, link), "{name}: {link:?} is held");
+        }
+        results.push((name, held(&replica)));
+    }
+    let (first, expected) = &results[0];
+    for (name, result) in &results[1..] {
+        assert_eq!(result, expected, "{name} holds what {first} holds");
+    }
+}

@@ -524,6 +524,19 @@ impl Ad4mDb {
                 PRIMARY KEY (perspective, agent_did, instance)
             )",
         )?;
+        // Links a tombstone ended under a predicate only a declaration made
+        // monotonic (#1176), kept so a later `roleGrant` declaration of that
+        // predicate can restore them: see `perspectives::monotonic`.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS monotonic_ended (
+                perspective TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                author TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                link TEXT NOT NULL,
+                PRIMARY KEY (perspective, predicate, author, signature)
+            )",
+        )?;
         // `instance` is not part of the key — a proposal belongs to exactly one
         // instance — but it lets `flowFired` list one instance's history
         // without walking the proposals' links.
@@ -1439,8 +1452,56 @@ impl Ad4mDb {
         )?;
 
         self.remove_flow_replica_rows(uuid)?;
+        self.conn
+            .execute("DELETE FROM monotonic_ended WHERE perspective = ?1", [uuid])?;
 
         Ok(())
+    }
+
+    /// Keep the signed links a tombstone ended on `perspective`, keyed by
+    /// predicate, author and signature; one already kept is left as is.
+    pub fn keep_monotonic_ended(
+        &self,
+        perspective: &str,
+        links: &[LinkExpression],
+    ) -> Ad4mDbResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for link in links {
+            tx.execute(
+                "INSERT OR IGNORE INTO monotonic_ended (perspective, predicate, author, signature, link)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    perspective,
+                    link.data.predicate.as_deref().unwrap_or_default(),
+                    link.author,
+                    link.proof.signature,
+                    serde_json::to_string(link)?
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The links [`keep_monotonic_ended`](Self::keep_monotonic_ended) kept
+    /// under `predicate` on `perspective`.
+    pub fn monotonic_ended(
+        &self,
+        perspective: &str,
+        predicate: &str,
+    ) -> Ad4mDbResult<Vec<LinkExpression>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT link FROM monotonic_ended WHERE perspective = ?1 AND predicate = ?2
+             ORDER BY author, signature",
+        )?;
+        let rows = stmt
+            .query_map(params![perspective, predicate], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.iter()
+            .map(|json| Ok(serde_json::from_str(json)?))
+            .collect()
     }
 
     /// Every flow-bookkeeping row of `perspective`, for every agent. Part of

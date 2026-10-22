@@ -97,6 +97,14 @@
 //! tombstone for a link under its predicate applies that tombstone then, so
 //! the order of flag, link and tombstone does not matter either.
 //!
+//! A `roleGrant` flag can arrive after a `true` flag's tombstone ended a
+//! link under the same predicate. Every link a tombstone ends under a
+//! declared predicate is therefore kept, signed, outside the graph
+//! (`monotonic_ended` in the executor database); when a flag makes that
+//! predicate end only by revocation, the kept links go back into the store
+//! ([`RetractionEffects::restored`]). Replicas holding the same links agree
+//! whatever order they arrived in.
+//!
 //! The check is per predicate, not per class: another class using the same
 //! predicate URI is monotonic too, which fails safe (the link stays). A
 //! declaration stays once made: a re-registration that changes the path adds
@@ -104,6 +112,7 @@
 //!
 //! [`retraction_effects`]: PerspectiveInstance::retraction_effects
 
+use crate::db::Ad4mDb;
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{
@@ -491,6 +500,9 @@ pub(crate) struct RetractionEffects {
     /// Stored links a tombstone in the diff ends: removed from this store,
     /// never committed.
     pub retracted: Vec<DecoratedLinkExpression>,
+    /// Links a tombstone ended under a predicate a flag in the diff now
+    /// makes end only by revocation: written back to the store.
+    pub restored: Vec<LinkExpression>,
 }
 
 impl RetractionEffects {
@@ -501,7 +513,7 @@ impl RetractionEffects {
     /// Bring the diff a write path publishes (Prolog, pubsub, flow trigger)
     /// in line with what the store now holds.
     pub fn fold_into(&self, diff: &mut DecoratedPerspectiveDiff) {
-        if self.covered.is_empty() && self.retracted.is_empty() {
+        if self.covered.is_empty() && self.retracted.is_empty() && self.restored.is_empty() {
             return;
         }
         diff.additions.retain(|added| {
@@ -511,6 +523,24 @@ impl RetractionEffects {
                 .any(|c| same_link(c, &LinkExpression::from(added.clone())))
         });
         diff.removals.extend(self.retracted.iter().cloned());
+        diff.additions.extend(
+            self.restored
+                .iter()
+                .map(|l| DecoratedLinkExpression::from((l.clone(), LinkStatus::Shared))),
+        );
+    }
+
+    /// The links this write ends under a predicate only a declaration made
+    /// monotonic: kept, so a later `roleGrant` flag can restore them. A
+    /// fixed-table predicate never changes how it ends.
+    pub fn ended_under_declared(&self) -> Vec<LinkExpression> {
+        self.retracted
+            .iter()
+            .cloned()
+            .map(LinkExpression::from)
+            .chain(self.covered.iter().cloned())
+            .filter(|l| ending(l.data.predicate.as_deref()).is_none())
+            .collect()
     }
 }
 
@@ -610,6 +640,26 @@ impl PerspectiveInstance {
 
         for (predicate, ending) in declared.newly_declared(stored) {
             if ending != Ending::Tombstone {
+                // Now ended only by revocation: what a tombstone ended goes back.
+                let kept =
+                    Ad4mDb::with_global_instance(|db| db.monotonic_ended(&self.uuid, predicate))?;
+                for link in kept {
+                    let restore = link.compute_proof_valid()
+                        && !additions.iter().any(|a| same_link(a, &link))
+                        && self
+                            .sparql_store
+                            .get_link(
+                                &link.data.source,
+                                link.data.predicate.as_deref(),
+                                &link.data.target,
+                                &link.author,
+                                &link.timestamp,
+                            )?
+                            .is_none();
+                    if restore {
+                        effects.restored.push(link);
+                    }
+                }
                 continue;
             }
             for held in
