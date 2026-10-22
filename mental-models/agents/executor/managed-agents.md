@@ -9,10 +9,10 @@ A **managed agent** is an agent that the executor hosts for a **user account** i
 <details><summary>How it works</summary>
 
 1. The operator turns on multi-user mode (`enable_multi_user` at start, or `user.setMultiUserEnabled`). Anonymous callers then get sign-up, login and verify capabilities ([Capabilities](../access/capabilities.md)).
-2. `user.create { email, password }` calls `user_management::create_user`. It creates a wallet key named by the new DID, saves the keystore and adds the `users` row (Argon2 hash). The handler then stores an empty profile, publishes it to the agent language and emails a sign-up code.
-3. `user.login { email, password }`, or `user.verifyEmail { code }` after a code mail, calls `generate_user_jwt`. It issues a **user token**: a JWT with `sub` = the DID, `user_email` and `get_user_default_capabilities()`, valid 180 days.
+2. `user.create { email, password }` calls `user_management::create_user`. It creates a wallet key named by the new DID (by the email on a shared wallet), saves the keystore and adds the `users` row (Argon2 hash). The handler then stores an empty profile, publishes it to the agent language and emails a sign-up code.
+3. `user.login { email, password }`, or `user.verifyEmail { email, code }` after a code mail, calls `generate_user_jwt`. It issues a **user token**: a JWT with `sub` = the DID, `user_email` and `get_user_default_capabilities()`, valid 180 days.
 4. Each connection with that token opens a `Session` with `Principal::Agent(Managed { did })`. Before that, `managed_agent_for_subject` checks that a `users` row owns the DID and that the wallet holds its key.
-5. Handlers act as `ctx.acts_as()`. Perspectives that the user creates get `owner = DID`, and a user reaches only perspectives it owns ([Access checks](../access/checks.md)). Each language has one runtime per executor, shared by every agent. Expression writes run language code with `set_runtime_agent_context(ctx)` and sign as that agent. Link-language calls (commit, sync, render, signals) run as the main agent ([Identity](../identity/README.md)).
+5. Handlers act as `ctx.acts_as()`. Perspectives that the user creates get `owner = DID`, and the `perspective.*` handlers let a user reach only perspectives it owns (`get_perspective_with_access`, [Access checks](../access/checks.md)). Each language has one runtime per executor, shared by every agent. Expression writes run language code with `set_runtime_agent_context(ctx)` and sign as that agent. Link-language calls (commit, sync, render, signals) run as the main agent ([Identity](../identity/README.md)).
 6. Calls on the executor itself refuse user sessions (`refuse_user_session`).
 
 </details>
