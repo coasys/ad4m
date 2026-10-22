@@ -219,12 +219,52 @@ export function closeWakerClient(client: any, logger?: any): void {
 }
 
 /**
+ * The `@coasys/ad4m` module the waker builds its client and query proxies
+ * from. Loaded lazily to avoid load-time issues with @holochain/client
+ * transitive deps; build.mjs bundles it from core source.
+ */
+export function loadWakerClientModule(): {
+  Ad4mClient: any;
+  QuerySubscriptionProxy: any;
+} {
+  return require("@coasys/ad4m");
+}
+
+/**
  * Name the executor the waker is talking to in a subscribe failure, so a
  * wrong `executorUrl` (the waker's own key, separate from `mcpEndpoint`) is
  * visible in the tool result rather than only in startup logs (#1016).
  */
 export function withWakerTarget(message: string, executorUrl: string): string {
   return `${message} (waker executor: ${executorUrl})`;
+}
+
+/**
+ * Restore one saved subscription at waker start. A mention subscription saved
+ * before mentions were read through TextContent (#1446), or without the terms
+ * the whole-word check needs, is asked of the executor again. If that fails it
+ * runs as saved: dropped, it would be in neither the active nor the pending
+ * set, and the next persist would delete it from disk. The next start asks
+ * again.
+ */
+export async function restoreSavedSubscription(
+  sub: WakerSubscription,
+  rederiveMention: (perspectiveId: string) => Promise<unknown>,
+  createLive: (sub: WakerSubscription) => Promise<void>,
+  logger: { warn: (message: string) => void },
+): Promise<void> {
+  if (sub.type !== "mention" || (sub.className && sub.terms?.length)) {
+    await createLive(sub);
+    return;
+  }
+  try {
+    await rederiveMention(sub.perspective);
+  } catch (err: any) {
+    logger.warn(
+      `[ad4m-waker] Could not re-derive ${sub.id} (${err?.message ?? err}); restoring it as saved`,
+    );
+    await createLive(sub);
+  }
 }
 
 /** @internal Inject a subscription manager, for tests that cannot connect a real waker. */
@@ -571,20 +611,26 @@ export default function ad4mPlugin(api: any) {
   }
 
   /**
-   * Helper: detect "user not found" errors from the executor.
+   * Whether a login error may mean "this user does not exist yet".
+   *
+   * The executor answers "Invalid credentials" both for an unknown email and
+   * for a wrong password, on purpose: login must not reveal which emails are
+   * registered (#989). So that answer alone cannot tell the plugin to sign up;
+   * it only says signup is worth one try. Other failures (executor locked,
+   * shared DB down) are not about the account and never trigger a signup.
    */
-  function isUserNotFoundError(error: string | undefined): boolean {
+  function mayBeUnknownUser(error: string | undefined): boolean {
     if (!error) return false;
     const lower = error.toLowerCase();
-    return lower.includes("user not found") || lower.includes("user does not exist") || lower.includes("account not found");
+    return lower.includes("invalid credentials") || lower.includes("user not found");
   }
 
   /**
    * Obtain a JWT token from a running executor.
    *
    * When email/password credentials are available, tries multi-user login first
-   * (login_email, with auto-signup on "user not found"). Falls back to the
-   * capability-request flow (6-digit code from launcher UI).
+   * (login_email, with one signup attempt when login fails on credentials).
+   * Falls back to the capability-request flow (6-digit code from launcher UI).
    *
    * Password is resolved from `AD4M_PASSWORD` env var (preferred, headless-safe)
    * or `providedConfig.password` (discouraged: plaintext-at-rest). At runtime we
@@ -625,9 +671,11 @@ export default function ad4mPlugin(api: any) {
           return loginData.token;
         }
 
-        // User doesn't exist — signup then retry login
-        if (isUserNotFoundError(loginData?.error)) {
-          logger.info("[ad4m] User not found. Attempting signup...");
+        // Maybe the user doesn't exist yet: try signup once, then log in again.
+        // If signup says the user exists, the password was wrong, and the login
+        // error below is the one to report.
+        if (mayBeUnknownUser(loginData?.error)) {
+          logger.info("[ad4m] Login failed; trying signup in case the user does not exist yet...");
           const signupResult = await mcpCallTool(
             endpoint,
             "signup",
@@ -635,7 +683,9 @@ export default function ad4mPlugin(api: any) {
             initResp.sessionId,
           );
           const signupData = extractMcpResultData(signupResult);
-          if (signupData?.did) {
+          if (!signupData?.did) {
+            logger.info(`[ad4m] Signup not possible: ${JSON.stringify(signupData?.error ?? signupData)}`);
+          } else {
             logger.info(`[ad4m] Signup successful! DID: ${signupData.did}`);
             const retryLogin = await mcpCallTool(
               endpoint,
@@ -756,13 +806,27 @@ Notes:
       type: "mention",
       perspective: perspectiveId,
       channel: "",
+      // A model query over the built-in TextContent (#1446).
+      className: data.class ?? data.subscription?.class,
       query: data.query ?? data.subscription?.query,
+      // The query matches substrings; the waker keeps whole-word mentions of these.
+      terms: data.terms ?? data.subscription?.terms,
       neighbourhood: data.neighbourhood,
     };
 
     if (!subscription.query) {
       throw new Error(
         "MCP tool did not return a query. Is the perspective accessible?",
+      );
+    }
+    if (!subscription.className) {
+      throw new Error(
+        "MCP tool returned a SPARQL mention query; this waker reads mentions through TextContent. Update the executor.",
+      );
+    }
+    if (!Array.isArray(subscription.terms) || subscription.terms.length === 0) {
+      throw new Error(
+        "MCP tool returned a mention query without its terms; the waker cannot tell a whole-word mention from a substring. Update the executor.",
       );
     }
 
@@ -868,10 +932,11 @@ Notes:
   api.registerTool({
     name: "ad4m_subscribe_to_children",
     description:
-      "Subscribe to new children under a specific parent — messages in a channel, or whatever " +
-      "items this space's ontology hangs under that container. " +
-      "Creates a live waker subscription that watches for new ad4m://has_child links and wakes you when detected. " +
-      "Call this to monitor one container for everything added to it.",
+      "Subscribe to new children under a specific parent — messages in a channel, blocks in a call, " +
+      "or whatever items this space's ontology hangs under that container, whatever their class. " +
+      "Creates a live waker subscription on the parent's children (the built-in Container: its " +
+      "ad4m://has_child links, and its class's own children relation such as a block's we://child) " +
+      "and wakes you when one is added. Call this to monitor one container for everything added to it.",
     parameters: {
       type: "object",
       properties: {
@@ -892,9 +957,13 @@ Notes:
     ) {
       try {
         // Call the MCP tool to generate the waker query
+        // Under a parent the executor answers with a model query over the
+        // built-in Container (`query_class`): the parent's children, whatever
+        // their class. An older executor answers with has_child SPARQL and no
+        // `query_class`, which still subscribes.
         const result = await callToolWithRetry("generate_waker_query", {
           perspective_id: params.perspective_id,
-          class_name: "Message",
+          class_name: "ad4m://Container",
           parent: params.expression_address,
         });
         const data = extractMcpResultData(result);
@@ -914,6 +983,7 @@ Notes:
           perspective: params.perspective_id,
           channel: params.expression_address,
           query: data.query ?? data.waker_config?.query,
+          ...(data.query_class ? { className: data.query_class } : {}),
         };
 
         if (!subscription.query) {
@@ -1265,9 +1335,8 @@ Notes:
     generation: number,
   ): Promise<boolean> {
     const stale = () => generation !== _wakerGeneration;
-    // Dynamic imports to avoid load-time issues with @holochain/client transitive deps
     logger.info("[ad4m-waker] Loading dependencies...");
-    const { Ad4mClient, QuerySubscriptionProxy } = require("@coasys/ad4m");
+    const { Ad4mClient, QuerySubscriptionProxy } = loadWakerClientModule();
     logger.info("[ad4m-waker] Dependencies loaded OK");
 
     logger.info(`[ad4m-waker] Connecting to ${httpUrl}...`);
@@ -1296,9 +1365,9 @@ Notes:
       debounceMs: config.debounceMs,
       subscribeTimeoutMs: config.subscribeTimeoutMs ?? WAKER_SUBSCRIBE_TIMEOUT_MS,
       previousSeenMessages: savedState.seenMessages,
-      onWake: (sub, _result, mentions) => {
-        postWake(config, sub, _pluginAgentDid, logger, mentions);
-      },
+      // Resolves false when the gateway did not take the wake; the manager offers it again.
+      onWake: (sub, _result, mentions) =>
+        postWake(config, sub, _pluginAgentDid, logger, mentions),
       onPersist: (subs, seenMessages) => {
         if (_stateDir) saveWakerState(_stateDir, subs, seenMessages);
       },
@@ -1366,7 +1435,12 @@ Notes:
       for (const sub of saved) {
         if (stale()) return true;
         try {
-          await createLiveSubscription(sub);
+          await restoreSavedSubscription(
+            sub,
+            subscribeToMentionsForPerspective,
+            createLiveSubscription,
+            logger,
+          );
           if (stale()) return true;
           logger.info(
             `[ad4m-waker] Restored: ${sub.id} (${sub.type}, perspective=${sub.perspective})`,

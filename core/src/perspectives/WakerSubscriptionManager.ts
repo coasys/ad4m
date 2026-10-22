@@ -12,16 +12,150 @@ export interface WakerSubscription {
   type: "mention" | "channel-messages";
   perspective: string;
   channel: string;
+  /** SPARQL, or with `className` a model query (JSON) over that class. */
   query: string;
+  /**
+   * The class `query` reads, as a model query. A mention subscription has
+   * one, from the executor's `get_mention_waker_config`: the built-in
+   * `ad4m://TextContent`; a children subscription has the built-in
+   * `ad4m://Container`, from `generate_waker_query` (#1446). Without it
+   * `query` is SPARQL.
+   */
+  className?: string;
+  /**
+   * A mention subscription's terms (profile names and the DID), from
+   * `get_mention_waker_config`. The query matches substrings, so a record
+   * wakes only when its text holds one of these as a whole word
+   * ({@link holdsAWholeWordTerm}); without them a mention subscription is
+   * refused.
+   */
+  terms?: string[];
   neighbourhood?: string;
 }
 
+/** A letter, combining mark, digit or underscore: what a term must not touch. */
+const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
+
+/**
+ * The elements a message's HTML is made of. A `<` before any other name is text:
+ * We stores plain text, where "<hey Data> can you look" is words.
+ */
+const ELEMENT =
+  "a|abbr|b|bdi|bdo|blockquote|br|caption|center|cite|code|col|colgroup|dd|del|details|dfn|div|dl|dt|em|" +
+  "figcaption|figure|font|h[1-6]|hr|i|img|ins|kbd|label|li|mark|ol|p|pre|q|s|samp|section|article|small|" +
+  "span|strike|strong|sub|summary|sup|table|tbody|td|tfoot|th|thead|time|tr|u|ul|var|wbr|script|style";
+/** An attribute: a name, then optionally `=` and a quoted value (which may hold `>`) or an unquoted one. */
+const ATTRIBUTE = `\\s+[A-Za-z_:][-\\w:.]*(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s"'=<>\`]+))?`;
+/**
+ * Markup: a comment, a `<script>`/`<style>` element with its contents, or a tag of
+ * a known element whose rest is a valid attribute list. "a < b" and
+ * "if a <b then ask Data, else c -> d" are text: the comma is no attribute.
+ */
+const TAG = new RegExp(
+  `<!--[\\s\\S]*?-->` +
+    `|<(script|style)(?=[\\s/>])(?:${ATTRIBUTE})*\\s*>[\\s\\S]*?<\\/\\1\\s*>` +
+    `|<(?:${ELEMENT})(?=[\\s/>])(?:${ATTRIBUTE})*\\s*\\/?>` +
+    `|<\\/(?:${ELEMENT})\\s*>`,
+  "gi",
+);
+/** Tags that break a line: replaced by a space, so `<p>hi</p><p>Data</p>` keeps "Data" a word. */
+const BREAKING_TAG = /^<\/?(?:p|div|br|hr|li|ul|ol|h[1-6]|blockquote|pre|tr|td|th|table|section|article)\b/i;
+/**
+ * The attributes a mention puts its target's DID in: Flux's `<a data-type="mention"
+ * href="did:…">`, older Flux messages' `<span data-id="did:…">`, and We's editor chip
+ * `<span class="we-mention" data-did="did:…">`.
+ */
+const ATTRIBUTES = new RegExp(ATTRIBUTE, "g");
+const MENTION_TARGET = /^\s+(?:href|data-id|data-did)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))$/i;
+
+/**
+ * How much of a record's text the word check reads. Dropping markup costs time
+ * quadratic in a run of unclosed `<script>`, `<style>` or `<!--` openers, so a
+ * very long text could hold the event loop for seconds, and a row that holds
+ * no term is checked again on every result while it is in the window. A term
+ * past this many characters does not wake.
+ */
+export const MENTION_TEXT_LIMIT = 16_384;
+
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+function decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (whole, ref: string) => {
+    if (ref[0] !== "#") return ENTITIES[ref.toLowerCase()] ?? whole;
+    const code = ref[1] === "x" || ref[1] === "X" ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+  });
+}
+
+/**
+ * What a reader sees of `text`, and the DIDs its mentions point at. `text` may be
+ * HTML (TextContent allows it): tag names and attributes are markup, not words, so
+ * a bot named "Data" must not wake on `data-type="mention"` in a mention of
+ * someone else. Plain text passes through unchanged, apart from entities.
+ */
+function readableParts(text: string): { visible: string; targets: string[] } {
+  const targets: string[] = [];
+  const visible = text.replace(TAG, (tag, scriptOrStyle?: string) => {
+    if (scriptOrStyle) return " ";
+    if (tag.startsWith("<!--")) return "";
+    // Parse complete attributes first: a DID-shaped string inside `title`
+    // is not a target attribute and must not wake an agent.
+    for (const attribute of tag.matchAll(ATTRIBUTES)) {
+      const target = MENTION_TARGET.exec(attribute[0]);
+      if (target) targets.push(decodeEntities(target[1] ?? target[2] ?? target[3]));
+    }
+    return BREAKING_TAG.test(tag) ? " " : "";
+  });
+  return { visible: decodeEntities(visible), targets };
+}
+
+/**
+ * Whether `text` holds one of `terms` as a whole word, case-insensitively:
+ * "Data" is in "hi Data!", "@data" and "Data's turn", not in "metadata" or
+ * "database". A term is matched literally (regex characters, quotes) and must
+ * not touch a letter, mark, digit or underscore on either side, so a name
+ * that starts or ends with punctuation still matches. Same rule as #1459's
+ * SPARQL `(?:^|\W)term(?:\W|$)`.
+ *
+ * The rule runs on the visible text only: in HTML, tags and attributes are
+ * dropped and entities decoded first. A mention's target attribute
+ * (`href`, `data-id`, `data-did`) matches an exact, case-sensitive DID term, which
+ * is how a mention by DID is found when the DID is not in the visible text.
+ *
+ * The mention query's `contains` matches substrings (model query has no word
+ * match); this is the check that keeps "data" from waking on "metadata".
+ * It reads the first {@link MENTION_TEXT_LIMIT} characters only.
+ */
+export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
+  const { visible, targets } = readableParts(text.slice(0, MENTION_TEXT_LIMIT));
+  return terms.some((term) => {
+    if (!term) return false;
+    if (term.startsWith("did:") && targets.includes(term)) return true;
+    const escaped = term.replace(/[\\^$.*+?()[\]{}|\/]/g, "\\$&");
+    return new RegExp(`(?<!${WORD_CHAR})${escaped}(?!${WORD_CHAR})`, "iu").test(visible);
+  });
+}
+
+/** The built-in `Container` (`Container.builtinUri`; not imported, so the
+ *  plugin bundle does not pull in the model layer). */
+const CONTAINER = "ad4m://Container";
+
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
-  /** The message's expression address (source of the body link). */
+  /** The mentioned record's id. */
   address: string;
-  /** All parent addresses this message belongs to (channels, conversations, etc.). */
+  /**
+   * Every container holding it (channels, threads, calls, blocks): whatever
+   * links it with `ad4m://has_child`, and every instance of a class whose
+   * `children` relation links it. A record can sit in several.
+   */
   parents: string[];
+  /**
+   * Everything above the parents, nearest first: their parents, theirs, and so on up to the
+   * manager's `ancestorDepth`. Each address once, however many paths reach it. Empty when the
+   * parents have none, or the walk could not be made.
+   */
+  ancestors: string[];
 }
 
 export interface WakerLogger {
@@ -38,9 +172,23 @@ export interface WakerSubscriptionManagerOptions {
   logger: WakerLogger;
   /** Debounce interval in ms before firing the wake callback (default 2000) */
   debounceMs?: number;
-  /** Called when a subscription fires (after debounce). Return value is ignored.
-   *  For mention subs, `mentions` contains per-message parent info. */
-  onWake: (sub: WakerSubscription, result: any, mentions?: MentionMessage[]) => void;
+  /**
+   * How many levels above a mentioned item's parents to report as `ancestors` (default 3).
+   * Each level is one batched query, so the walk is bounded by this depth and by
+   * what the levels hold. 0 reports parents only.
+   */
+  ancestorDepth?: number;
+  /**
+   * Called when a subscription fires (after debounce). For mention subs, `mentions` holds every
+   * mention not yet delivered, with its parent info. Resolve `false` (or reject) when the wake did
+   * not reach the agent: those mentions stay out of the persisted seen set and are offered again
+   * after `retryWakeMs`, so a wake lost to a restarting gateway is not lost for good.
+   */
+  onWake: (
+    sub: WakerSubscription,
+    result: any,
+    mentions?: MentionMessage[],
+  ) => void | boolean | Promise<void | boolean>;
   /** Called when the active subscription list changes (for persistence). */
   onPersist?: (subscriptions: WakerSubscription[], seenMessages: Record<string, string[]>) => void;
   /** Previously persisted seen message IDs per subscription. Seeds seenMessages on resubscribe to avoid duplicate wakes. */
@@ -59,6 +207,9 @@ export interface WakerSubscriptionManagerOptions {
    * so the re-attempt cycle never saw it (#1016).
    */
   subscribeTimeoutMs?: number;
+  /** First delay before offering an undelivered mention wake again (default 5000); doubles per
+   *  failed attempt, up to 60000. */
+  retryWakeMs?: number;
 }
 
 /**
@@ -108,12 +259,14 @@ export class WakerSubscriptionManager {
   private perspectiveClient: any;
   private logger: WakerLogger;
   private debounceMs: number;
-  private onWake: (sub: WakerSubscription, result: any, mentions?: MentionMessage[]) => void;
+  private ancestorDepth: number;
+  private onWake: WakerSubscriptionManagerOptions["onWake"];
   private onPersist?: (subscriptions: WakerSubscription[], seenMessages: Record<string, string[]>) => void;
   private QuerySubscriptionProxyCtor: any;
   private previousSeenMessages: Record<string, string[]>;
   private retryPendingMs: number;
   private subscribeTimeoutMs: number;
+  private retryWakeMs: number;
 
   private proxies = new Map<string, any>();
   private activeSubscriptions = new Map<string, WakerSubscription>();
@@ -136,17 +289,33 @@ export class WakerSubscriptionManager {
   /** Per-subscription set of already-processed message addresses (for mention subs)
    *  or serialized result hash (for channel-messages subs). */
   private seenMessages = new Map<string, Set<string>>();
+  /**
+   * Per mention subscription: the addresses whose wake was delivered, or that were history when
+   * the subscription opened. This, not `seenMessages`, is what gets persisted: an address joins
+   * `seenMessages` as soon as it is read, while its parents are still resolving and before any
+   * wake, so a restart in between must not take it as done.
+   */
+  private delivered = new Map<string, Set<string>>();
+  /**
+   * Per mention subscription: mentions read but whose wake has not been delivered yet, keyed by
+   * address. They accumulate across a debounce window, so one wake names all of them.
+   */
+  private undelivered = new Map<string, Map<string, MentionMessage>>();
+  /** Failed wake attempts in a row per subscription, for the retry backoff. */
+  private wakeFailures = new Map<string, number>();
 
   constructor(options: WakerSubscriptionManagerOptions) {
     this.perspectiveClient = options.perspectiveClient;
     this.logger = options.logger;
     this.debounceMs = options.debounceMs ?? 2000;
+    this.ancestorDepth = options.ancestorDepth ?? 3;
     this.onWake = options.onWake;
     this.onPersist = options.onPersist;
     this.QuerySubscriptionProxyCtor = options.QuerySubscriptionProxy ?? null;
     this.previousSeenMessages = options.previousSeenMessages ?? {};
     this.retryPendingMs = options.retryPendingMs ?? 30000;
     this.subscribeTimeoutMs = options.subscribeTimeoutMs ?? 15000;
+    this.retryWakeMs = options.retryWakeMs ?? 5000;
   }
 
   /** A token identifying this attempt at subscribing `id`. */
@@ -162,7 +331,7 @@ export class WakerSubscriptionManager {
   }
 
   /**
-   * Create a live SPARQL subscription.
+   * Create a live subscription: SPARQL, or a model query when `sub.className` is set.
    * If a subscription with the same id already exists, it is disposed first.
    */
   async subscribe(sub: WakerSubscription): Promise<void> {
@@ -174,17 +343,22 @@ export class WakerSubscriptionManager {
       throw new Error("WakerSubscriptionManager: QuerySubscriptionProxy must be provided via constructor options");
     }
     const QuerySubscriptionProxy = this.QuerySubscriptionProxyCtor;
+    if (sub.type === "mention" && sub.className && !sub.terms?.length) {
+      // Without terms the whole-word check cannot run, and every substring
+      // ("metadata" for "data") would wake the agent.
+      throw new Error(
+        `Waker subscription ${sub.id}: a mention subscription needs its terms (get_mention_waker_config returns them)`,
+      );
+    }
 
     this.logger.info(
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
     );
-    this.logger.info(`[waker] ${sub.id}: SPARQL query:\n${sub.query}`);
+    this.logger.info(`[waker] ${sub.id}: ${sub.className ? `model query over ${sub.className}` : "SPARQL query"}:\n${sub.query}`);
 
-    const proxy = new QuerySubscriptionProxy(
-      sub.perspective,
-      sub.query,
-      this.perspectiveClient,
-    );
+    const proxy = sub.className
+      ? new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient, sub.className)
+      : new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient);
     // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
     // rejects this promise internally when subscribe() fails, and if nobody catches
     // it before the next microtask it crashes the process.
@@ -224,6 +398,7 @@ export class WakerSubscriptionManager {
       // reported as active or persisted as if it were.
       this.activeSubscriptions.delete(sub.id);
       this.seenMessages.delete(sub.id);
+      this.delivered.delete(sub.id);
       this.persist();
       // Keep it pending and re-attempt: the usual cause (locked wallet, executor
       // mid-restart, a handshake the executor never answered) clears on its
@@ -248,94 +423,104 @@ export class WakerSubscriptionManager {
     this.logger.info(`[waker] ${sub.id}: subscription initialized successfully`);
 
     // Seed from persisted seen messages so we don't re-wake after restart
+    const restored = Object.prototype.hasOwnProperty.call(this.previousSeenMessages, sub.id);
     const seen = new Set<string>(this.previousSeenMessages[sub.id] ?? []);
     this.seenMessages.set(sub.id, seen);
+    this.delivered.set(sub.id, new Set(seen));
     if (seen.size > 0) {
       this.logger.info(`[waker] ${sub.id}: seeded ${seen.size} seen message(s) from persisted state`);
     }
 
-    proxy.onResult(async (result: any) => {
+    // `opening` is the result the subscription holds when it opens (`proxy.result`): `onResult`
+    // only reports later changes, so this is the one chance to see what was written meanwhile.
+    const handleResult = async (result: any, opening = false) => {
       this.logger.info(
-        `[waker] ${sub.id}: onResult fired — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
+        `[waker] ${sub.id}: ${opening ? "opening result" : "onResult fired"} — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
       );
 
-      // Query engine can deliver non-array values (e.g. false) on disconnect/reconnect — ignore them
-      if (!Array.isArray(result)) {
+      // A model subscription delivers `{ instances }`, SPARQL an array of
+      // rows. Anything else (e.g. `false` on a disconnect/reconnect) is
+      // ignored.
+      const rows: unknown = sub.className ? result?.instances : result;
+      if (!Array.isArray(rows)) {
         this.logger.warn(
-          `[waker] ${sub.id}: ignoring non-array result: ${JSON.stringify(result)}`,
+          `[waker] ${sub.id}: ignoring result without ${sub.className ? "instances" : "rows"}: ${JSON.stringify(result)}`,
         );
         return;
       }
 
       if (sub.type === "mention") {
-        // For mention subscriptions: track seen message addresses.
-        // Only wake for messages we haven't seen before.
+        // For mention subscriptions: track seen record ids.
+        // Only wake for records we haven't seen before.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
 
-        for (const item of result) {
-          if (item && item.source && !currentSeen.has(item.source)) {
-            newMessages.push(item.source);
+        const terms = sub.terms ?? [];
+        for (const item of rows as any[]) {
+          // A SPARQL row names the record as `source`, a model row as `id`.
+          const address = sub.className ? item?.id : item?.source;
+          if (typeof address !== "string" || !address || currentSeen.has(address)) continue;
+          if (terms.length) {
+            // The mention query matched a substring; wake only on a whole word.
+            const text = Array.isArray(item.text) ? item.text.join(" ") : item.text;
+            if (typeof text !== "string" || !holdsAWholeWordTerm(text, terms)) {
+              this.logger.debug(`[waker] ${sub.id}: ${address} holds no term as a whole word, skipping`);
+              continue;
+            }
           }
+          currentSeen.add(address);
+          newMessages.push(address);
         }
 
         if (newMessages.length === 0) {
           this.logger.info(
-            `[waker] ${sub.id}: all ${result.length} items already seen, skipping`,
+            `[waker] ${sub.id}: no new mention among ${rows.length} items, skipping`,
+          );
+          return;
+        }
+
+        if (opening && !restored) {
+          // A new subscription: what it opens on is history, readable on demand, not news.
+          this.seenMessages.set(sub.id, currentSeen);
+          const done = this.delivered.get(sub.id) ?? new Set<string>();
+          for (const address of newMessages) done.add(address);
+          this.delivered.set(sub.id, done);
+          this.logger.info(
+            `[waker] ${sub.id}: ${newMessages.length} existing mention(s) taken as history, not woken`,
           );
           return;
         }
 
         this.logger.info(
-          `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${result.length} total`,
+          `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${rows.length} total`,
         );
 
-        // Resolve parents per new message
+        // Resolve parents, and the chain above them, per new message
         const mentions: MentionMessage[] = [];
         for (const msgAddr of newMessages) {
-          const parents: string[] = [];
-          try {
-            const parentQuery = `SELECT ?source WHERE { ?source <ad4m://has_child> <${msgAddr}> . }`;
-            this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
-            const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
-            if (Array.isArray(rows)) {
-              // A row omits a variable left unbound in its solution.
-              parents.push(...rows.map((row) => row?.source).filter((source): source is string => typeof source === "string"));
-            }
-          } catch (err: any) {
-            this.logger.warn(
-              `[waker] ${sub.id}: parent resolution failed for ${msgAddr} — ${err?.message ?? err}`,
-            );
-          }
+          this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
+          const parents = await this.parentsOf(sub, [msgAddr]);
+          const ancestors = await this.ancestorsOf(sub, msgAddr, parents);
           this.logger.info(
-            `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}`,
+            `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}` +
+              (ancestors.length ? `; ancestors: ${ancestors.join(", ")}` : ""),
           );
-          mentions.push({ address: msgAddr, parents });
+          mentions.push({ address: msgAddr, parents, ancestors });
         }
 
-        // Mark all new messages as seen
-        for (const addr of newMessages) {
-          currentSeen.add(addr);
-        }
         this.seenMessages.set(sub.id, currentSeen);
+        const pending = this.undelivered.get(sub.id) ?? new Map<string, MentionMessage>();
+        for (const mention of mentions) pending.set(mention.address, mention);
+        this.undelivered.set(sub.id, pending);
 
-        // Debounce the wake callback
-        const existing = this.debounceTimers.get(sub.id);
-        if (existing) clearTimeout(existing);
-
-        this.debounceTimers.set(
-          sub.id,
-          setTimeout(() => {
-            this.onWake(sub, result, mentions);
-            this.debounceTimers.delete(sub.id);
-            this.persist();
-          }, this.debounceMs),
-        );
+        this.scheduleMentionWake(sub, result, this.debounceMs);
       } else {
+        // A container's contents when the subscription opens are not an update.
+        if (opening) return;
         // For channel-messages: always notify the agent on every subscription push.
         // No deduplication — the agent reads recent messages itself.
         this.logger.info(
-          `[waker] ${sub.id}: channel update (${result.length} items)`,
+          `[waker] ${sub.id}: channel update (${rows.length} items)`,
         );
 
         const existing = this.debounceTimers.get(sub.id);
@@ -349,7 +534,8 @@ export class WakerSubscriptionManager {
           }, this.debounceMs),
         );
       }
-    });
+    };
+    proxy.onResult((result: any) => handleResult(result));
 
     if (this.isStale(sub.id, token)) {
       try { proxy.dispose(); } catch {}
@@ -357,6 +543,15 @@ export class WakerSubscriptionManager {
     }
     this.proxies.set(sub.id, proxy);
     this.activeSubscriptions.set(sub.id, sub);
+    // After a restart this wakes on mentions written while the waker was down; on a new
+    // subscription it records the existing ones as history.
+    if (proxy.result !== undefined) {
+      try {
+        await handleResult(proxy.result, true);
+      } catch (e: any) {
+        this.logger.warn(`[waker] ${sub.id}: reading the opening result failed: ${e?.message ?? e}`);
+      }
+    }
     this.persist();
 
     this.logger.info(
@@ -435,7 +630,61 @@ export class WakerSubscriptionManager {
     this.activeSubscriptions.delete(id);
     this.pendingSubscriptions.delete(id);
     this.seenMessages.delete(id);
+    this.delivered.delete(id);
+    this.undelivered.delete(id);
+    this.wakeFailures.delete(id);
     if (persist) this.persist();
+  }
+
+  /** (Re)start the timer that offers `sub`'s undelivered mentions to `onWake` after `delayMs`. */
+  private scheduleMentionWake(sub: WakerSubscription, result: any, delayMs: number): void {
+    const existing = this.debounceTimers.get(sub.id);
+    if (existing) clearTimeout(existing);
+    this.debounceTimers.set(
+      sub.id,
+      setTimeout(() => {
+        this.debounceTimers.delete(sub.id);
+        void this.deliverMentions(sub, result);
+      }, delayMs),
+    );
+  }
+
+  /**
+   * Offer every undelivered mention of `sub` in one wake. On delivery they join the persisted
+   * seen set; on failure they stay undelivered and are offered again with backoff.
+   */
+  private async deliverMentions(sub: WakerSubscription, result: any): Promise<void> {
+    const pending = this.undelivered.get(sub.id);
+    if (!pending?.size || !this.activeSubscriptions.has(sub.id)) return;
+    const mentions = Array.from(pending.values());
+    let delivered: boolean;
+    try {
+      delivered = (await this.onWake(sub, result, mentions)) !== false;
+    } catch (e: any) {
+      this.logger.warn(`[waker] ${sub.id}: wake callback threw: ${e?.message ?? e}`);
+      delivered = false;
+    }
+    // Disposed while the wake was in flight: nothing left to retry or persist.
+    if (this.undelivered.get(sub.id) !== pending) return;
+    if (!delivered) {
+      const failures = (this.wakeFailures.get(sub.id) ?? 0) + 1;
+      this.wakeFailures.set(sub.id, failures);
+      const delay = Math.min(this.retryWakeMs * 2 ** (failures - 1), 60_000);
+      this.logger.warn(
+        `[waker] ${sub.id}: wake for ${mentions.length} mention(s) not delivered, offering again in ${delay}ms`,
+      );
+      // A newer result arriving meanwhile restarts the timer and joins this wake.
+      if (!this.debounceTimers.has(sub.id)) this.scheduleMentionWake(sub, result, delay);
+      return;
+    }
+    this.wakeFailures.delete(sub.id);
+    const done = this.delivered.get(sub.id) ?? new Set<string>();
+    for (const mention of mentions) {
+      pending.delete(mention.address);
+      done.add(mention.address);
+    }
+    this.delivered.set(sub.id, done);
+    this.persist();
   }
 
   /** Dispose all active subscriptions and drop anything still pending. */
@@ -463,10 +712,49 @@ export class WakerSubscriptionManager {
     return this.activeSubscriptions.has(id);
   }
 
+  /**
+   * Everything holding any of `addresses`, in one model query: a `Container`
+   * step in (#1446). The executor follows `ad4m://has_child` on any node and
+   * each class's own `children` relation on its instances, so the waker
+   * looks up no predicate. Failures count as none.
+   */
+  private async parentsOf(sub: WakerSubscription, addresses: string[]): Promise<string[]> {
+    if (!addresses.length) return [];
+    return this.containers(sub, { ids: [...new Set(addresses)], direction: "in" }, addresses);
+  }
+
+  /**
+   * The chain above an item's parents, nearest first, up to `ancestorDepth` levels: one
+   * transitive `Container` walk in from the parents, bounded by `maxDepth`. The executor walks
+   * containment as a graph, so each address comes once however many paths reach it, and a
+   * cycle ends. The item and its parents are never reported as ancestors.
+   */
+  private async ancestorsOf(sub: WakerSubscription, address: string, parents: string[]): Promise<string[]> {
+    if (!parents.length || this.ancestorDepth <= 0) return [];
+    const scope = { ids: parents, direction: "in", transitive: true, maxDepth: this.ancestorDepth };
+    const seen = new Set<string>([address, ...parents]);
+    return (await this.containers(sub, scope, parents)).filter((id) => !seen.has(id));
+  }
+
+  /** The ids of the `Container` rows `parent` scopes to, in the executor's order. */
+  private async containers(sub: WakerSubscription, parent: Record<string, unknown>, from: string[]): Promise<string[]> {
+    try {
+      const query = JSON.stringify({ parent, properties: [] });
+      const result = await this.perspectiveClient.modelQuery(sub.perspective, CONTAINER, query);
+      const instances: unknown = result?.instances;
+      if (!Array.isArray(instances)) return [];
+      return instances.map((row) => row?.id).filter((id): id is string => typeof id === "string");
+    } catch (err: any) {
+      this.logger.warn(`[waker] ${sub.id}: containment lookup failed for ${JSON.stringify(from)} — ${err?.message ?? err}`);
+      return [];
+    }
+  }
+
   private persist(): void {
     if (this.onPersist) {
       const seen: Record<string, string[]> = {};
-      for (const [id, set] of this.seenMessages) {
+      // Only what was delivered: anything else must wake again after a restart.
+      for (const [id, set] of this.delivered) {
         seen[id] = Array.from(set);
       }
       this.onPersist(this.getActive(), seen);

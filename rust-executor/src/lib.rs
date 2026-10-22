@@ -6,6 +6,8 @@ pub mod config;
 pub mod config_file;
 pub mod email_service;
 pub mod entanglement_service;
+#[cfg(unix)]
+pub mod fd_limit;
 mod globals;
 pub mod helpers;
 pub mod holochain_service;
@@ -333,6 +335,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(config.log_config.as_ref());
+
+    // Before any perspective store or language opens files.
+    #[cfg(unix)]
+    crate::fd_limit::raise_fd_limit_at_startup();
+
     config.prepare();
 
     if let Err(message) = config.check_admin_credential() {
@@ -570,16 +577,21 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     {
         info!("Initializing SFU service...");
         let gossip: std::sync::Arc<dyn crate::sfu::CascadeGossip> = build_sfu_gossip(&config).await;
-        // An IP, then port 0: a bare IPv6 like "::1" formatted as "{}:0"
-        // would not parse as a SocketAddr.
-        let bind_ip = crate::sfu::server::sfu_bind_ip(
+        let (bind_addr, public_ip) = crate::sfu::server::sfu_media_addrs(
             config.sfu_bind_addr.as_deref(),
             config.localhost.unwrap_or(true),
-        );
-        info!("SFU bind address: {}", bind_ip);
+            config.sfu_udp_port,
+            config.sfu_public_addr.as_deref(),
+        )
+        .unwrap_or_else(|message| {
+            error!("{}", message);
+            panic!("{}", message);
+        });
+        let fixed_port = Some(bind_addr.port()).filter(|port| *port != 0);
         let sfu_config = crate::sfu::server::SfuServerConfig {
-            bind_addr: std::net::SocketAddr::new(bind_ip, 0),
+            bind_addr,
             stun_server: config.sfu_stun_server.clone(),
+            public_ip,
             preferred_node: config.sfu_preferred_node.clone(),
             cascade_peer_dids: config
                 .sfu_cascade_peers
@@ -590,11 +602,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 .collect(),
         };
         match crate::sfu::SfuService::start(sfu_config, gossip).await {
-            Ok(svc) => info!(
-                "SFU service ready on UDP {} (reachability: {})",
-                svc.local_addr(),
-                svc.reachability()
-            ),
+            Ok(_) => {}
+            // A fixed port is what the router forwards: running without it
+            // would leave calls broken with nothing to say why.
+            Err(e) if fixed_port.is_some() => {
+                error!("{}", e);
+                panic!("{}", e);
+            }
             Err(e) => warn!("SFU service failed to start: {}", e),
         }
     }

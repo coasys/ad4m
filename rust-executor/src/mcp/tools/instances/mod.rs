@@ -36,9 +36,10 @@
 //! - [`update`] — `instance_update` + `instance_remove`
 //! - [`collections`] — `instance_add_to_collection` + `instance_remove_from_collection`
 //! - [`children`] — class-agnostic `add_child` / `get_children` on the
-//!   `ad4m://has_child` tree
+//!   containment tree (the built-in `Container`)
 //! - [`transcript`] — `instance_transcript`, a compact chronological reading
-//!   of one class's children under a node
+//!   of the children under a node that carry text, through the built-in
+//!   TextContent
 //! - [`commands`] — `execute_commands`, raw SDNA actions on an instance
 //! - [`validate`] — SHACL-derived property validation shared by every write
 //! - this file — the borrowed [`PropView`] over a class shape, class
@@ -91,11 +92,6 @@ pub(crate) const MAX_QUERY_LIMIT: usize = 500;
 /// How long class resolution waits for a class's SHACL to arrive over
 /// p-diff-sync on a freshly joined neighbourhood before reporting it as
 pub(super) const CLASS_SYNC_WAIT: Duration = Duration::from_secs(5);
-
-/// Predicate used for the optional `parent` argument on `instance_create` /
-/// `instance_query` — the same child link the per-class `{class}_create` /
-/// `{class}_list` tools use.
-pub(super) const HAS_CHILD: &str = "ad4m://has_child";
 
 // ============================================================================
 // Schema projection — SHACL shape → data an agent can read
@@ -388,6 +384,28 @@ pub(crate) async fn resolve_class(
             registered.join(", ")
         }
     )))
+}
+
+/// [`resolve_class`] for the collection tools. They write membership links
+/// at one class's predicate, so through an abstract class (#1435), which
+/// has no predicate of its own, they are refused.
+pub(crate) async fn resolve_writable_class(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+) -> Result<(String, Arc<ModelShape>), String> {
+    let (class_name, shape) = resolve_class(perspective, class_name).await?;
+    if perspective
+        .is_abstract_class(&class_name)
+        .map_err(|e| error_json(format!("{e:#}")))?
+    {
+        return Err(error_json(format!(
+            "'{class_name}' is an abstract class: collection membership is written through the \
+             record's own class, the `__subjectClass` a query on '{class_name}' returns. \
+             Through '{class_name}', instance_update sets its properties and instance_remove \
+             deletes the record."
+        )));
+    }
+    Ok((class_name, shape))
 }
 
 /// Run a model query for `class_name` and return `(instances, total_count)`.

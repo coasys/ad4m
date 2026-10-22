@@ -18,13 +18,13 @@ import {
   normalizeValue,
 } from "./hydration";
 import type {
-  Scope, IncludeMap, Query,
+  Scope, TraverseScope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
-import { isTraverseScope } from "./types";
+import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./types";
 
 
 
@@ -371,6 +371,37 @@ function jsonToModelInstance<T extends Ad4mModel>(
   }
 
   return instance;
+}
+
+
+/**
+ * Put `childId` under `parent`. A containment scope `{ id }` writes through the
+ * built-in `Container` (#1446): the executor runs the adder of the parent's own
+ * `children` relation when its class has one (a block's `we://child`), else
+ * writes `ad4m://has_child`. The other forms write their one predicate.
+ */
+async function linkToParent(
+  perspective: PerspectiveProxy,
+  parent: Exclude<Scope, TraverseScope>,
+  childCtor: Function,
+  childId: string,
+  batchId?: string,
+): Promise<void> {
+  if (isContainedScope(parent)) {
+    await perspective.updateSubject(
+      "ad4m://Container",
+      parent.id,
+      { children: { action: "adder", value: [childId] } },
+      batchId,
+    );
+    return;
+  }
+  const link = new Link({
+    source: parent.id,
+    predicate: resolveParentPredicate(parent, childCtor),
+    target: childId,
+  });
+  await perspective.add(link, 'shared', batchId);
 }
 
 /**
@@ -1074,12 +1105,23 @@ export class Ad4mModel {
    * Shape resolution happens server-side from the perspective's SHACL triples.
    * @internal
    */
+  /**
+   * The name the executor knows this class by: its class name, or a
+   * built-in abstract class's URI (`ad4m://TextContent`, #1446). The URI is
+   * the class's own static only: a subclass is a class of its own.
+   * @internal
+   */
+  static queriedAs(): string {
+    const builtinUri = Object.prototype.hasOwnProperty.call(this, 'builtinUri') ? (this as any).builtinUri : undefined;
+    return builtinUri || this.getModelMetadata().className;
+  }
+
   static prepareModelQueryParams(
     query: Query = {},
     classNameOverride?: string | null,
   ): { className: string; queryJson: string; metadata: ModelMetadata } {
     const metadata = this.getModelMetadata();
-    const className = classNameOverride || metadata.className;
+    const className = classNameOverride || this.queriedAs();
 
     // Expand includeAll: true to a full IncludeMap covering every forward relation.
     if (query.includeAll) {
@@ -1094,7 +1136,21 @@ export class Ad4mModel {
     }
 
     const queryInput: any = {};
-    if (query.parent) {
+    if (query.parent && isContainedScope(query.parent)) {
+      // Containment: the executor resolves the predicates from the installed
+      // classes, so only the id travels.
+      queryInput.parent = { id: query.parent.id };
+    } else if (query.parent && isContainmentTraversal(query.parent)) {
+      // A traversal over containment: no predicate travels either.
+      const t = query.parent;
+      const traverse: Record<string, unknown> = { ids: t.ids };
+      if (t.transitive !== undefined) traverse.transitive = t.transitive;
+      if (t.direction !== undefined) traverse.direction = t.direction;
+      if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
+      if (t.levels !== undefined) traverse.levels = t.levels;
+      if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
+      queryInput.parent = traverse;
+    } else if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
       // A traversal keeps its own shape on the wire: the executor reads `ids`,
       // and flattening it to one `id` here is how a request for a whole level
@@ -1114,6 +1170,7 @@ export class Ad4mModel {
         if (t.direction !== undefined) traverse.direction = t.direction;
         if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
         if (t.levels !== undefined) traverse.levels = t.levels;
+        if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
         queryInput.parent = traverse;
       } else {
         queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
@@ -1258,7 +1315,7 @@ export class Ad4mModel {
       merged.parent = JSON.parse(scopes[0]);
     }
     return {
-      classNames: classes.map((c) => c.getModelMetadata().className),
+      classNames: classes.map((c) => c.queriedAs()),
       queryJson: JSON.stringify(merged),
     };
   }
@@ -1608,10 +1665,30 @@ export class Ad4mModel {
     return String(value);
   }
 
+  /** A relation write on a row read through an abstract class (#1435). The
+   *  relation's predicate is the abstract class's, which no record's class
+   *  reads: the executor runs the adder, remover or setter of each of the
+   *  record's classes for the relation answering to `key`. */
+  private async relationThroughAbstract(
+    abstractName: string,
+    key: string,
+    action: 'adder' | 'remover' | 'setter',
+    value: any,
+    batchId?: string
+  ) {
+    const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
+    await this._perspective.updateSubject(abstractName, this._baseExpression, { [key]: { action, value: ids } }, batchId);
+  }
+
   private async setRelationValues(key: string, value: any, batchId?: string) {
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
+      return;
+    }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'setter', value, batchId);
       return;
     }
 
@@ -1638,6 +1715,11 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'adder', value, batchId);
+      return;
+    }
 
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generateRelationAction(key, 'adder');
@@ -1659,6 +1741,11 @@ export class Ad4mModel {
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
+      return;
+    }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'remover', value, batchId);
       return;
     }
 
@@ -1707,7 +1794,12 @@ export class Ad4mModel {
   async save(batchId?: string) {
     // Existing instance → update path (has been fetched / hydrated before)
     if (this._snapshot) {
-      await this.innerUpdate(true, batchId);
+      const abstractName = this.abstractName();
+      if (abstractName) {
+        await this.perspective.updateSubject(abstractName, this._baseExpression, this.changedValuesForDispatch(), batchId);
+      } else {
+        await this.innerUpdate(true, batchId);
+      }
       if (batchId) {
         // Batch hasn't been committed yet — getData() would fetch stale data
         // and overwrite in-memory values. Just refresh the snapshot so further
@@ -1719,7 +1811,15 @@ export class Ad4mModel {
       return;
     }
 
-    // New instance → create path
+    // New instance → create path. The executor refuses an abstract class
+    // too; refusing here keeps the error ahead of the batch.
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      throw new Error(
+        `'${abstractName}' is an abstract class and cannot be created. Create an instance of ` +
+        `a class that has its properties; querying '${abstractName}' reads it.`
+      );
+    }
     let batchCreatedHere = false;
     if(!batchId) {
       batchId = await this.perspective.createBatch()
@@ -1786,6 +1886,38 @@ export class Ad4mModel {
       // links (e.g. two competing "title" values).
       this.takeSnapshot();
     }
+  }
+
+  /** The name the executor knows the class by when it is abstract (#1435):
+   *  a built-in's URI (#1446). Through an abstract class, the executor
+   *  writes to the record's own classes. */
+  private abstractName(): string | undefined {
+    const ctor = this.constructor as typeof Ad4mModel & { isAbstract?: boolean };
+    return ctor.isAbstract ? ctor.queriedAs() : undefined;
+  }
+
+  private changedValues(): Record<string, any> {
+    return Object.fromEntries(this.changedFields().map((key) => [key, (this as any)[key]]));
+  }
+
+  /** `changedValues()` with each relation's members as IDs, as the relation
+   *  helpers send them: a member may be a model instance. An action envelope
+   *  (`{ action: "adder", value }`) keeps its action, as `innerUpdate()` runs
+   *  it; an action it does not know is a setter there, so it is one here. */
+  private changedValuesForDispatch(): Record<string, any> {
+    const relations = (this.constructor as typeof Ad4mModel).getModelMetadata().relations;
+    const ids = (value: any) =>
+      Array.isArray(value) ? value.map((v) => this.resolveRelationId(v)) : this.resolveRelationId(value);
+    return Object.fromEntries(
+      Object.entries(this.changedValues()).map(([key, value]) => {
+        if (!relations[key] || value == null) return [key, value];
+        if (value.action) {
+          const action = ["adder", "remover", "setter"].includes(value.action) ? value.action : "setter";
+          return [key, { action, value: ids(value.value) }];
+        }
+        return [key, ids(value)];
+      })
+    );
   }
 
   private cleanCopy() {
@@ -2048,7 +2180,9 @@ export class Ad4mModel {
    */
   async delete(batchId?: string) {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    const hasDestructor = Object.values(metadata.properties).some(
+    // Through an abstract class (#1435), `removeSubject` runs the destructors
+    // of the record's own classes.
+    const hasDestructor = !!this.abstractName() || Object.values(metadata.properties).some(
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
@@ -2152,14 +2286,7 @@ export class Ad4mModel {
     if (options?.parent && !options?.batchId) {
       const batchId = await perspective.createBatch();
       await instance.save(batchId);
-      const parent = requireSingleParent(options.parent);
-      const predicate = resolveParentPredicate(parent, this);
-      const link = new Link({
-        source: parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', batchId);
+      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, batchId);
       await perspective.commitBatch(batchId);
       // Hydrate the instance now that the batch has been committed (mirrors the
       // behaviour of save() when it manages its own batch).
@@ -2171,14 +2298,7 @@ export class Ad4mModel {
 
     // Create parent → child link if a parent scope was provided
     if (options?.parent) {
-      const parent = requireSingleParent(options.parent);
-      const predicate = resolveParentPredicate(parent, this);
-      const link = new Link({
-        source: parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', options?.batchId);
+      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, options?.batchId);
     }
 
     return instance;

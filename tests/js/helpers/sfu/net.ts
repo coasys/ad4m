@@ -13,6 +13,7 @@
 
 import { execSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { randomBytes } from "node:crypto";
 
 const DEFAULT_IFACE = process.env.WT_NET_IFACE ?? "lo";
 /** How tc gets root: `sudo -n` unless overridden (empty when already root, as in a test namespace). */
@@ -165,8 +166,6 @@ export async function leaseNet(
   };
 }
 
-const PARTITION_CHAIN = "WT_PARTITION";
-
 function iptablesAvailable(): boolean {
   if (process.platform !== "linux") return false;
   try {
@@ -182,57 +181,148 @@ export function iptablesPartitionAvailable(): boolean {
   return iptablesAvailable();
 }
 
+/** A partition installed by {@link dropTcpPorts}. */
+export interface TcpPartition {
+  /** The iptables chain holding this partition's rules. */
+  chain: string;
+  ports: number[];
+  /** Remove the chain and its rules; safe to call more than once. */
+  clear(): void;
+}
+
 /**
- * Install (or reset) an iptables chain that drops loopback TCP
- * traffic to the given ports.  Used by F4 to simulate a cluster
- * partition without going through any admin RPC.
+ * Install an iptables chain that drops loopback TCP traffic to the
+ * given ports.  Used by F4 to simulate a cluster partition without
+ * going through any admin RPC.
+ *
+ * Each call makes its own chain (`WT_P_<pid>_<random>`) holding one rule
+ * per port, so a concurrent run on the same host, with its own ports and
+ * its own chain, is neither partitioned nor un-partitioned by this one.
+ * The returned handle's `clear()` unhooks and deletes exactly that
+ * chain; it also runs on process exit, SIGINT and SIGTERM. A SIGKILL
+ * (a cancelled CI job, a step timeout) runs none of those, so each call
+ * first deletes the chains of processes that are no longer alive: a DROP
+ * left on a port the OS may hand to the next run lasts until the next F4,
+ * not until reboot.  Returns null when iptables is unavailable or
+ * installing failed (any part already installed is removed).
  */
-export function dropTcpPorts(ports: number[]): boolean {
-  if (!iptablesAvailable()) return false;
-  // Wipe + recreate the chain so repeated calls are idempotent.
+export function dropTcpPorts(ports: number[]): TcpPartition | null {
+  if (!iptablesAvailable()) return null;
+  removeOrphanedPartitions();
+  const chain = `WT_P_${process.pid}_${randomBytes(4).toString("hex")}`;
+  let cleared = false;
+  const onSignal = (signal: NodeJS.Signals) => {
+    clear();
+    // Re-raise when nobody else handles it, so the signal still ends the process.
+    if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+  };
+  const clear = () => {
+    if (cleared) return;
+    cleared = true;
+    process.off("exit", clear);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    removeChain(chain);
+  };
+  process.once("exit", clear);
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
   try {
-    execSync(`sudo -n iptables -D INPUT -j ${PARTITION_CHAIN}`, { stdio: "pipe" });
-  } catch {
-    /* not yet attached */
-  }
-  try {
-    execSync(`sudo -n iptables -F ${PARTITION_CHAIN}`, { stdio: "pipe" });
-  } catch {
-    /* chain may not exist */
-  }
-  try {
-    execSync(`sudo -n iptables -X ${PARTITION_CHAIN}`, { stdio: "pipe" });
-  } catch {
-    /* not present */
-  }
-  if (ports.length === 0) return true;
-  try {
-    execSync(`sudo -n iptables -N ${PARTITION_CHAIN}`, { stdio: "pipe" });
+    execSync(`sudo -n iptables -N ${chain}`, { stdio: "pipe" });
     for (const port of ports) {
       execSync(
-        `sudo -n iptables -A ${PARTITION_CHAIN} -p tcp --dport ${port} -j DROP`,
+        `sudo -n iptables -A ${chain} -i lo -p tcp --dport ${port} -j DROP`,
         { stdio: "pipe" },
       );
     }
-    execSync(`sudo -n iptables -I INPUT -j ${PARTITION_CHAIN}`, { stdio: "pipe" });
+    execSync(`sudo -n iptables -I INPUT -j ${chain}`, { stdio: "pipe" });
+    return { chain, ports: [...ports], clear };
+  } catch {
+    clear();
+    return null;
+  }
+}
+
+/** Unhook and delete one partition chain; each step tolerates a part already gone. */
+function removeChain(chain: string): void {
+  for (const command of [`-D INPUT -j ${chain}`, `-F ${chain}`, `-X ${chain}`]) {
+    try {
+      execSync(`sudo -n iptables ${command}`, { stdio: "pipe" });
+    } catch {
+      /* not attached, or already gone */
+    }
+  }
+}
+
+/** Delete every `WT_P_<pid>_*` chain whose process has exited. */
+function removeOrphanedPartitions(): void {
+  let rules: string;
+  try {
+    rules = execSync("sudo -n iptables -S", { stdio: "pipe" }).toString();
+  } catch {
+    return;
+  }
+  for (const [, chain, pid] of rules.matchAll(/^-N (WT_P_(\d+)_[0-9a-f]+)$/gm)) {
+    if (!processAlive(Number(pid))) removeChain(chain);
+  }
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: alive, owned by another user.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Whether `sudo -n iptables` can change the nat table. */
+export function natAvailable(): boolean {
+  try {
+    execSync("sudo -n iptables -t nat -L OUTPUT -n", { stdio: "pipe" });
     return true;
   } catch {
     return false;
   }
 }
 
-/** Clear the partition chain installed by `dropTcpPorts`. */
-export function clearPartition(): void {
-  if (!iptablesAvailable()) return;
+/** The two rules of {@link reachOnlyThrough}: `iptables -t <table> <action> <rule>`. */
+function onlyThroughRules(published: string, local: string, port: number): [string, string][] {
+  const tag = `-m comment --comment ad4m-e2e-only-through-${port}`;
+  return [
+    ["nat", `OUTPUT -p udp -d ${published} --dport ${port} ${tag} -j DNAT --to-destination ${local}:${port}`],
+    ["filter", `OUTPUT -p udp -d ${local} --dport ${port} -m conntrack ! --ctstate DNAT ${tag} -j DROP`],
+  ];
+}
+
+/**
+ * Make UDP `port` on `local` reachable only as `published:port`: traffic to
+ * `published:port` is translated to `local:port`, and traffic sent to
+ * `local:port` directly is dropped. Loopback, this one port only, so other
+ * processes on the host are not touched. Returns false when the rules cannot
+ * be installed (none are left behind).
+ */
+export function reachOnlyThrough(published: string, local: string, port: number): boolean {
+  clearReachOnlyThrough(published, local, port);
   try {
-    execSync(`sudo -n iptables -D INPUT -j ${PARTITION_CHAIN}`, { stdio: "pipe" });
+    for (const [table, rule] of onlyThroughRules(published, local, port)) {
+      execSync(`sudo -n iptables -t ${table} -A ${rule}`, { stdio: "pipe" });
+    }
+    return true;
   } catch {
-    /* not attached */
+    clearReachOnlyThrough(published, local, port);
+    return false;
   }
-  try {
-    execSync(`sudo -n iptables -F ${PARTITION_CHAIN}`, { stdio: "pipe" });
-  } catch {}
-  try {
-    execSync(`sudo -n iptables -X ${PARTITION_CHAIN}`, { stdio: "pipe" });
-  } catch {}
+}
+
+/** Remove what {@link reachOnlyThrough} installed. */
+export function clearReachOnlyThrough(published: string, local: string, port: number): void {
+  for (const [table, rule] of onlyThroughRules(published, local, port)) {
+    try {
+      execSync(`sudo -n iptables -t ${table} -D ${rule}`, { stdio: "pipe" });
+    } catch {
+      /* not installed */
+    }
+  }
 }

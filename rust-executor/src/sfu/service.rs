@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use super::cascade::{CascadeManager, CascadeSignal};
 use super::config_store;
 use super::gossip::{CascadeGossip, GossipTarget};
-use super::reachability::{check_reachability, SfuReachability};
+use super::reachability::SfuReachability;
 use super::room::{ParticipantId, RoomError, RoomId, RoomManager, SfuRoom};
 use super::server::{SfuCommand, SfuPeer, SfuServer, SfuServerConfig};
 use super::types::SfuMigrateEvent;
@@ -166,20 +166,13 @@ impl SfuService {
         config: SfuServerConfig,
         gossip: Arc<dyn CascadeGossip>,
     ) -> Result<Arc<Self>, String> {
-        let stun_server = config.stun_server.clone();
         let preferred_node = config.preferred_node.clone();
         let cascade_peer_dids = config.cascade_peer_dids.clone();
         let server = SfuServer::start(config)
             .await
             .map_err(|e| format!("Failed to start SFU server: {}", e))?;
 
-        info!("SFU service started on {}", server.local_addr);
-
-        // Probe public reachability via STUN, when a server is configured.
-        // Fast path returns immediately for private IPs; otherwise takes
-        // up to ~9 s (3 attempts × 3 s timeout).
-        let reachability = check_reachability(server.local_addr.ip(), stun_server.as_deref()).await;
-        info!("SFU reachability: {}", reachability);
+        let reachability = server.reachability.clone();
 
         // Pre-create the CascadeManager so the service has a single
         // consistent view; cascade is effectively no-op when the
@@ -851,6 +844,11 @@ impl SfuService {
         &self.reachability
     }
 
+    /// The public address offered next to the bind address, if any.
+    pub fn advertised_addr(&self) -> Option<std::net::SocketAddr> {
+        self.server.advertised.map(|a| a.addr)
+    }
+
     // ---- Room management ----
 
     /// Whether `room_id` may be opened: refused once the node, or the room's
@@ -1022,7 +1020,11 @@ impl SfuService {
         let offer: SdpOffer = serde_json::from_str(sdp_offer_json)
             .map_err(|e| format!("Invalid SDP offer: {}", e))?;
 
-        let (rtc, sdp_answer) = SfuServer::create_rtc_for_offer(offer, self.server.local_addr)?;
+        let (rtc, sdp_answer) = SfuServer::create_rtc_for_offer(
+            offer,
+            self.server.local_addr,
+            self.server.advertised.map(|a| a.addr),
+        )?;
 
         // SDP and RTC succeeded — create the room if needed and register
         // the participant in a single write-lock scope, so the capacity and

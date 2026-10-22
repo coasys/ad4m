@@ -8,18 +8,14 @@ use crate::api::runtime_ws::register_ws_handlers;
 use crate::api::ws_handler::HandlerMap;
 use crate::types::RequestContext;
 
-async fn error_code(method: &str, params: serde_json::Value, is_admin_credential: bool) -> u16 {
+/// The error code of `method` for the operator, or for an app token without capabilities.
+async fn error_code(method: &str, params: serde_json::Value, operator: bool) -> u16 {
     let mut map = HandlerMap::new();
     register_ws_handlers(&mut map);
-    let ctx = Arc::new(RequestContext {
-        capabilities: Ok(vec![]),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
-        is_admin_credential,
-        user_email: None,
-        user_did: None,
-        cancel_token: None,
-        connection_id: None,
+    let ctx = Arc::new(if operator {
+        RequestContext::operator_for_test()
+    } else {
+        RequestContext::app_for_test(vec![])
     });
     map.dispatch(method, params, ctx).await.unwrap_err().code
 }
@@ -88,16 +84,9 @@ async fn send_friend_message_is_not_implemented_and_stores_nothing() {
     use crate::agent::capabilities::RUNTIME_MESSAGES_CREATE_CAPABILITY;
     let mut map = HandlerMap::new();
     register_ws_handlers(&mut map);
-    let ctx = Arc::new(RequestContext {
-        capabilities: Ok(vec![RUNTIME_MESSAGES_CREATE_CAPABILITY.clone()]),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
-        is_admin_credential: false,
-        user_email: None,
-        user_did: None,
-        cancel_token: None,
-        connection_id: None,
-    });
+    let ctx = Arc::new(RequestContext::app_for_test(vec![
+        RUNTIME_MESSAGES_CREATE_CAPABILITY.clone(),
+    ]));
     let message = json!({ "did": "did:key:friend", "message": { "links": [] } });
     let err = map
         .dispatch("runtime.sendFriendMessage", message, ctx)
