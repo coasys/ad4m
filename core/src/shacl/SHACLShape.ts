@@ -187,11 +187,13 @@ export interface SHACLPropertyShape {
   local?: boolean;
 
   /**
-   * AD4M-specific: Shared links under `path` end only by tombstone (#1176).
+   * AD4M-specific: Shared links under `path` are never removed (#1176).
+   * `true`: they end by tombstone (flag `ad4m://monotonic`); `"roleGrant"`:
+   * only by role revocation (flag `ad4m://monotonic_role_grant`).
    * `fromLinks` reports the flag naming `path`; whether it declares anything
    * is the executor's call (author-gated), not this field's.
    */
-  monotonic?: boolean;
+  monotonic?: boolean | "roleGrant";
 
   /** AD4M-specific: Writable property */
   writable?: boolean;
@@ -609,7 +611,7 @@ export class SHACLShape {
       if (prop.monotonic) {
         links.push({
           source: propShapeId,
-          predicate: "ad4m://monotonic",
+          predicate: prop.monotonic === "roleGrant" ? "ad4m://monotonic_role_grant" : "ad4m://monotonic",
           target: Literal.from(prop.path).toUrl()
         });
       }
@@ -784,6 +786,14 @@ export class SHACLShape {
       const v = plain(source, predicate)?.replace(/^number:/, '');
       return v === undefined ? undefined : parse(v.replace(/\^\^.*$/, ''));
     };
+    // A declaration flag names the predicate itself; one naming another path
+    // is not this property's. A role-grant flag is the stricter, so it wins.
+    const monotonicFlag = (source: string, path: string): boolean | "roleGrant" | undefined => {
+      const names = (predicate: string) => links.some(l => l.source === source
+        && l.predicate === predicate && l.target === Literal.from(path).toUrl());
+      if (names("ad4m://monotonic_role_grant")) return "roleGrant";
+      return names("ad4m://monotonic") || undefined;
+    };
     // JSON payloads that fail to parse are dropped.
     const json = (source: string, predicate: string) => {
       const v = str(source, predicate);
@@ -830,8 +840,7 @@ export class SHACLShape {
         hasValue: hasValue?.startsWith('literal:string:') ? decodeURIComponent(hasValue.slice(15)) : hasValue,
         local: bool(id, "ad4m://local"),
         // The flag names the predicate itself; one naming another path is not this property's.
-        monotonic: links.some(l => l.source === id && l.predicate === "ad4m://monotonic"
-          && l.target === Literal.from(path).toUrl()) || undefined,
+        monotonic: monotonicFlag(id, path),
         writable: bool(id, "ad4m://writable"),
         resolveLanguage: str(id, "ad4m://resolveLanguage"),
         setter: json(id, "ad4m://setter"),

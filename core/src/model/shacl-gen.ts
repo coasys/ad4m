@@ -212,7 +212,7 @@ export function buildSHACL(
         }
 
         if (propMeta.monotonic) {
-            propShape.monotonic = true;
+            propShape.monotonic = propMeta.monotonic;
         }
 
         if (propMeta.writable !== undefined) {

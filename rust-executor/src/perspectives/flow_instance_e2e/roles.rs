@@ -574,13 +574,13 @@ async fn a_flow_definition_with_an_unreadable_role_gate_is_refused_before_it_is_
 }
 
 /// Register `ns://Task` again with its `owner` property declared
-/// `monotonic`, as the class author (this agent, the owner) would.
+/// `monotonic: "roleGrant"`, as the class author (this agent, the owner) would.
 async fn declare_owner_monotonic(f: &mut Fixture) {
     declare_monotonic(f, &["ns://owner"]).await;
 }
 
 /// Register `ns://Task` again with the properties under `paths` declared
-/// `monotonic`.
+/// `monotonic: "roleGrant"`.
 async fn declare_monotonic(f: &mut Fixture, paths: &[&str]) {
     use crate::perspectives::interpretation_test_support::TASK_SDNA;
     let shacl: serde_json::Value = serde_json::from_str(TASK_SDNA).expect("TASK_SDNA");
@@ -588,12 +588,12 @@ async fn declare_monotonic(f: &mut Fixture, paths: &[&str]) {
 }
 
 /// Register `shacl` as `ns://Task` with the properties under `paths`
-/// declared `monotonic`.
+/// declared `monotonic: "roleGrant"`, as a role class declares them.
 async fn register_task_class(f: &mut Fixture, mut shacl: serde_json::Value, paths: &[&str]) {
     use crate::perspectives::perspective_instance::SdnaType;
     for property in shacl["properties"].as_array_mut().expect("properties") {
         if paths.iter().any(|p| property["path"] == *p) {
-            property["monotonic"] = serde_json::Value::Bool(true);
+            property["monotonic"] = serde_json::json!("roleGrant");
         }
     }
     f.perspective
@@ -622,9 +622,9 @@ async fn owner_grants(f: &Fixture) -> Vec<LinkExpression> {
         .collect()
 }
 
-/// T4 (#1176). A role class that declares its DID property `monotonic`: the
-/// Shared grant survives a peer's removal and a local one, and a generic
-/// `ad4m://flow/retracted` tombstone from its own author does not end it
+/// T4 (#1176). A role class that declares its DID property `monotonic:
+/// "roleGrant"`: the Shared grant survives a peer's removal and a local one,
+/// and a generic `ad4m://retracted` tombstone from its own author does not end it
 /// either, so later votes still count. Only `role_grant_revoked` ends it, as
 /// of its timestamp. (Red without the flag: the peer's removal applies and
 /// the vote in the middle settles nothing.)

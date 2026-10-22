@@ -118,6 +118,31 @@ describe("Ad4mModel.getModelMetadata()", () => {
       .toEqual(["literal:string:test%3A%2F%2Ftype"]);
   });
 
+  it("emits a roleGrant property and flag under the role-grant flag (#1176)", () => {
+    @Model({ name: "RoleGrantRole" })
+    class RoleGrantRole extends Ad4mModel {
+      @Flag({ through: "test://role_type", value: "test://role", monotonic: "roleGrant" })
+      type: string = "";
+
+      @Property({ through: "test://role_member", monotonic: "roleGrant" })
+      member: string = "";
+
+      @Property({ through: "test://role_note", monotonic: true })
+      note: string = "";
+    }
+
+    const { shape } = (RoleGrantRole as any).generateSHACL();
+    const byPath = (p: string) => shape.properties.find((prop: any) => prop.path === p);
+    expect(byPath("test://role_type").monotonic).toBe("roleGrant");
+    expect(byPath("test://role_member").monotonic).toBe("roleGrant");
+    expect(byPath("test://role_note").monotonic).toBe(true);
+    const flags = (predicate: string) => shape.toLinks()
+      .filter((l: any) => l.predicate === predicate).map((l: any) => l.target).sort();
+    expect(flags("ad4m://monotonic_role_grant"))
+      .toEqual(["literal:string:test%3A%2F%2Frole_member", "literal:string:test%3A%2F%2Frole_type"]);
+    expect(flags("ad4m://monotonic")).toEqual(["literal:string:test%3A%2F%2Frole_note"]);
+  });
+
   it("should support NodeExpression transforms in properties", () => {
     // Transforms are now NodeExpression objects, not callable functions
     // The fileToDataUri and other builders are exported from @coasys/ad4m

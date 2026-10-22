@@ -212,17 +212,25 @@ describe('SHACLShape', () => {
     // executor's author-gated declaration. A flag naming another predicate
     // (a stale one after a `through` change) or a non-string target is
     // not this property's flag.
-    const withFlag = (target: string) => {
+    const withFlags = (...flags: [string, string][]) => {
       const shape = new SHACLShape('test://Model');
       shape.addProperty({ name: 'field', path: 'test://field' });
       const links = shape.toLinks();
       const propShape = links.find(l => l.predicate === 'sh://path' && l.target === 'test://field')!.source;
-      links.push({ source: propShape, predicate: 'ad4m://monotonic', target });
+      for (const [predicate, target] of flags) links.push({ source: propShape, predicate, target });
       return SHACLShape.fromLinks(links, 'test://ModelShape').properties[0].monotonic;
     };
+    const withFlag = (target: string) => withFlags(['ad4m://monotonic', target]);
 
     it('reads a flag naming the property path', () => {
       expect(withFlag('literal:string:test%3A%2F%2Ffield')).toBe(true);
+    });
+
+    it('reads a role-grant flag as "roleGrant", which wins over a plain flag', () => {
+      const field = 'literal:string:test%3A%2F%2Ffield';
+      expect(withFlags(['ad4m://monotonic_role_grant', field])).toBe('roleGrant');
+      expect(withFlags(['ad4m://monotonic', field], ['ad4m://monotonic_role_grant', field])).toBe('roleGrant');
+      expect(withFlags(['ad4m://monotonic_role_grant', 'literal:string:test%3A%2F%2Fold'])).toBeUndefined();
     });
 
     it('ignores a flag naming another predicate or not a string literal', () => {

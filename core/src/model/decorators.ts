@@ -287,6 +287,12 @@ export function buildConformanceFilter(
     }
 }
 
+/**
+ * How a monotonic property's links end: `true` by their author's tombstone,
+ * `"roleGrant"` only by role revocation. See `PropertyOptions.monotonic`.
+ */
+export type MonotonicOption = boolean | "roleGrant";
+
 export interface PropertyOptions {
     /**
      * The predicate of the property. All properties must have this option.
@@ -349,14 +355,19 @@ export interface PropertyOptions {
      * Declares the property's predicate monotonic: once written, a Shared
      * link under it cannot be removed by anyone, locally or by sync. A setter
      * that would replace an existing value is refused, so use it for add-only
-     * data such as role grants, and end a grant with a signed
-     * `ad4m://flow/role_grant_revoked` tombstone.
+     * data.
+     *
+     * - `true`: a link ends only by its author's signed `ad4m://retracted`
+     *   tombstone.
+     * - `"roleGrant"`: for the links of a role class. A link ends only by a
+     *   signed `ad4m://flow/role_grant_revoked` revocation, never by a
+     *   tombstone, so the role history votes are gated on is kept.
      *
      * Honoured only when the neighbourhood author registered the class (the
      * owner, while the perspective is not shared). A declaration stays once
      * made: changing `through` later leaves the old predicate monotonic too.
      */
-    monotonic?: boolean;
+    monotonic?: MonotonicOption;
 
     /**
      * Optional transform expression to modify the property value.
@@ -503,13 +514,13 @@ export interface FlagOptions {
 
     /**
      * Declares the flag's predicate monotonic, as `PropertyOptions.monotonic`
-     * does. Use it on a role class, whose instances a `fromRole` gate matches
-     * by their flag: otherwise a member can un-grant a role by removing the
-     * flag instead of the grant. The declaration is per predicate, so every
-     * class flagged through the same predicate can then no longer be
-     * deleted: give the role class a predicate of its own.
+     * does. Use `"roleGrant"` on a role class, whose instances a `fromRole`
+     * gate matches by their flag: otherwise a member can un-grant a role by
+     * removing the flag instead of the grant. The declaration is per
+     * predicate, so every class flagged through the same predicate can then
+     * no longer be deleted: give the role class a predicate of its own.
      */
-    monotonic?: boolean;
+    monotonic?: MonotonicOption;
 }
 
 /**
@@ -586,7 +597,7 @@ export function Flag(opts: FlagOptions) {
             flag: true,
             readOnly: true,
             writable: false,
-            ...(opts.monotonic && { monotonic: true }),
+            ...(opts.monotonic && { monotonic: opts.monotonic }),
         };
 
         // Write to WeakMap registry
@@ -827,7 +838,7 @@ export function Model(opts: ModelConfig) {
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
- * @param {boolean} [opts.monotonic] - Whether Shared links under the predicate end only by tombstone, never by removal
+ * @param {boolean | "roleGrant"} [opts.monotonic] - Shared links under the predicate are never removed; `true`: they end by tombstone, `"roleGrant"`: only by role revocation
  */
 export function Property(opts: PropertyOptions) {
     const required = opts.required ?? false;

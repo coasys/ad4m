@@ -27,7 +27,7 @@ export interface JSONSchemaProperty {
     resolveLanguage?: string;
     local?: boolean;
     /** See `PropertyOptions.monotonic` */
-    monotonic?: boolean;
+    monotonic?: boolean | "roleGrant";
     writable?: boolean;
     initial?: string;
   };
@@ -361,7 +361,7 @@ export function buildModelFromJSONSchema(
           writable: writable,
           ...(resolveLanguage !== undefined && { resolveLanguage }),
           ...(local !== undefined && { local }),
-          ...(monotonic && { monotonic: true }),
+          ...(monotonic && { monotonic }),
           ...(initial && { initial })
         };
         

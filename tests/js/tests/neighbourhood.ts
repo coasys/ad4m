@@ -7,15 +7,16 @@ import { expect } from "chai";
 
 let aliceP1: null | PerspectiveProxy = null;
 
-// #1176: a role class whose DID property is declared monotonic, so a grant
-// ends only by a signed revocation, never by a removal. Its flag is declared
-// too: removing it would drop the instance out of a role query.
+// #1176: a role class whose DID property is declared monotonic "roleGrant",
+// so a grant ends only by a signed revocation, never by a removal or a
+// tombstone. Its flag is declared too: removing it would drop the instance
+// out of a role query.
 @Model({ name: "MonotonicRoleGrant" })
 class MonotonicRoleGrant extends Ad4mModel {
-    @Flag({ through: "test://role/type", value: "test://role/grant", monotonic: true })
+    @Flag({ through: "test://role/type", value: "test://role/grant", monotonic: "roleGrant" })
     type: string = "";
 
-    @Property({ through: "test://role/member", monotonic: true })
+    @Property({ through: "test://role/member", monotonic: "roleGrant" })
     member: string = "";
 }
 let bobP1: null | PerspectiveHandle = null;
@@ -213,7 +214,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
             })
 
             // #1176: Alice, the neighbourhood author, registers a class with a
-            // `monotonic` property and writes a grant. Once her declaration has
+            // `monotonic: "roleGrant"` property and writes a grant. Once her declaration has
             // reached Bob, his executor refuses his removal of the grant, and
             // Alice keeps it. (That a flag from anyone but the author declares
             // nothing, and that a synced removal is dropped on ingest, are the
@@ -251,7 +252,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 // The declaration is part of the class's SHACL and syncs with it.
                 // No assertion here: without the flag it never arrives, and the
                 // refusal below is what fails.
-                const flag = new LinkQuery({predicate: 'ad4m://monotonic', target: Literal.from('test://role/member').toUrl()})
+                const flag = new LinkQuery({predicate: 'ad4m://monotonic_role_grant', target: Literal.from('test://role/member').toUrl()})
                 for (let tries = 0; tries < 30; tries++) {
                     if ((await bob.perspective.queryLinks(bobP.uuid, flag)).length > 0) break
                     await sleep(1000)
@@ -265,10 +266,11 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 }
                 expect(refusal, "Bob's removeLink must fail").to.not.be.null
                 expect(String(refusal?.message ?? refusal)).to.contain("is monotonic")
+                expect(String(refusal?.message ?? refusal)).to.contain("ad4m://flow/role_grant_revoked")
 
                 // The side door: removing the instance's flag instead.
                 const typeQuery = new LinkQuery({source: grant.id, predicate: 'test://role/type'})
-                const typeFlag = new LinkQuery({predicate: 'ad4m://monotonic', target: Literal.from('test://role/type').toUrl()})
+                const typeFlag = new LinkQuery({predicate: 'ad4m://monotonic_role_grant', target: Literal.from('test://role/type').toUrl()})
                 let bobType = await bob.perspective.queryLinks(bobP.uuid, typeQuery)
                 for (let tries = 0; (bobType.length < 1 || (await bob.perspective.queryLinks(bobP.uuid, typeFlag)).length < 1) && tries < 30; tries++) {
                     await sleep(1000)
