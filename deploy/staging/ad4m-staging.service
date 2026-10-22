@@ -25,6 +25,10 @@ ExecStart=%h/.local/share/ad4m-staging/current/ad4m-executor run --config %h/.co
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=60
+# Each perspective keeps its store's files open; the default soft limit of
+# 1024 ran out at about 40 perspectives. The executor raises its own soft
+# limit at startup as well; this sets it before the process starts.
+LimitNOFILE=65536
 
 [Install]
 WantedBy=default.target
