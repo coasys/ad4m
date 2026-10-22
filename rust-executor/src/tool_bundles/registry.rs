@@ -20,7 +20,9 @@
 //!
 //! **A record is seen by one call.** Each tool call runs in a fresh isolate of its own, started
 //! from the bundle's source and dropped after the call, so nothing a call hands the bundle is
-//! there for any other call, whoever makes it. The isolate kept per bundle reads what the bundle
+//! there for any other call, whoever makes it. A bundle runs one call at a time, as it did with a
+//! single isolate: calls made together wait their turn, so callers cannot multiply the memory a
+//! bundle may hold by calling at once. The isolate kept per bundle reads what the bundle
 //! exports and serves its documentation; it is never given a record.
 //!
 //! One registry per process ([`ToolBundleRegistry::global`]), like the executor's other
@@ -34,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use ts_rs::TS;
 
 /// One tool, as its bundle describes it.
@@ -93,20 +95,35 @@ pub struct FoundTool {
     address: String,
     source: Arc<str>,
     limits: SandboxLimits,
+    /// The bundle's one call slot.
+    calls: Arc<Semaphore>,
 }
 
 impl FoundTool {
     /// Call the tool with `input` (the record, the arguments, the author) and await its answer,
-    /// in a fresh isolate that ends with the call.
+    /// in a fresh isolate that ends with the call, once the bundle's call slot is free.
     pub async fn call(&self, input: Value) -> Result<Value, SandboxError> {
-        let sandbox =
-            BundleSandbox::start(self.address.clone(), self.source.clone(), self.limits).await?;
-        sandbox
-            .call(
-                &["toolsets", &self.toolset, "call"],
-                vec![json!(self.tool.name), input],
-            )
-            .await
+        let found = self.clone();
+        // On a task of its own, which holds the slot until the isolate has answered or been
+        // stopped: a caller that gives up must not free it while the isolate still runs.
+        tokio::spawn(async move {
+            let _slot = found
+                .calls
+                .acquire_owned()
+                .await
+                .map_err(|_| SandboxError::Closed("the bundle's calls were closed".into()))?;
+            let sandbox =
+                BundleSandbox::start(found.address.clone(), found.source.clone(), found.limits)
+                    .await?;
+            sandbox
+                .call(
+                    &["toolsets", &found.toolset, "call"],
+                    vec![json!(found.tool.name), input],
+                )
+                .await
+        })
+        .await
+        .unwrap_or_else(|e| Err(SandboxError::Closed(format!("the call's task failed: {e}"))))
     }
 }
 
@@ -129,6 +146,8 @@ struct Loaded {
     source: Arc<str>,
     /// Reads the bundle's documentation. Never given a record: see the module doc.
     sandbox: BundleSandbox,
+    /// One permit: the bundle runs one record call at a time.
+    calls: Arc<Semaphore>,
 }
 
 pub struct ToolBundleRegistry {
@@ -225,6 +244,7 @@ impl ToolBundleRegistry {
             bundle: bundle.clone(),
             source: Arc::from(source),
             sandbox,
+            calls: Arc::new(Semaphore::new(1)),
         });
         info!(
             "[tool-bundles] installed {} ({})",
@@ -316,6 +336,7 @@ impl ToolBundleRegistry {
                         address: l.bundle.address.clone(),
                         source: l.source.clone(),
                         limits: self.limits,
+                        calls: l.calls.clone(),
                     })
             })
         })

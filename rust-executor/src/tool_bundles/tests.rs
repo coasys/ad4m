@@ -1008,6 +1008,72 @@ async fn a_record_handed_to_a_tool_is_seen_by_no_other_call_and_no_documentation
     );
 }
 
+/// A tool that keeps its isolate busy for a while.
+const SLOW: &str = r#"
+export const toolsets = {
+  slow: {
+    appliesTo: ["Thing"],
+    tools: [{ name: "slow_spin", description: "d", parameters: {}, writes: false }],
+    call: async () => { const until = Date.now() + 300; while (Date.now() < until) {} return { text: "ok" }; },
+    docs: { list: async () => [], read: async () => "" },
+  },
+};
+"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn record_calls_on_one_bundle_run_one_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = std::sync::Arc::new(registry(dir.path()));
+    let address = registry.install(SLOW).await.unwrap().address;
+    // The isolate the registry keeps for the bundle's exports and docs.
+    assert_eq!(isolate_threads(&address), 1);
+
+    let calls: Vec<_> = (0..4)
+        .map(|_| {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                let tool = registry.find_tool("slow_spin").await.unwrap();
+                tool.call(json!({})).await
+            })
+        })
+        .collect();
+    let mut most = 0;
+    while calls.iter().any(|c| !c.is_finished()) {
+        most = most.max(isolate_threads(&address));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    for call in calls {
+        assert_eq!(call.await.unwrap(), Ok(json!({ "text": "ok" })));
+    }
+    assert_eq!(
+        most, 2,
+        "the kept isolate and one call's: concurrent calls must not each hold an isolate"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_call_given_up_on_keeps_its_turn_until_its_isolate_is_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = std::sync::Arc::new(registry(dir.path()));
+    let address = registry.install(SLOW).await.unwrap().address;
+    let tool = registry.find_tool("slow_spin").await.unwrap();
+
+    let given_up = tokio::spawn({
+        let tool = tool.clone();
+        async move { tool.call(json!({})).await }
+    });
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    given_up.abort();
+    let next = tokio::spawn(async move { tool.call(json!({})).await });
+    let mut most = 0;
+    while !next.is_finished() {
+        most = most.max(isolate_threads(&address));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(next.await.unwrap(), Ok(json!({ "text": "ok" })));
+    assert_eq!(most, 2, "the next call started while the given-up one still ran");
+}
+
 #[tokio::test]
 async fn the_registry_refuses_names_that_are_taken_or_reserved() {
     let dir = tempfile::tempdir().unwrap();

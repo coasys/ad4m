@@ -42,7 +42,10 @@ at boot.
   tool answers through the class setters, in one batch, as the calling agent.
 - Tool names are unique across the node; a toolset's doc topics sit under its own name and may
   not take an executor topic. Tests get a registry over a temp-dir store, never `~/.ad4m`.
-- A record is seen by one call: every tool call runs in a fresh isolate that ends with it. The
+- A record is seen by one call: every tool call runs in a fresh isolate that ends with it. A
+  bundle runs one record call at a time (`Loaded::calls`, one permit, held by the call's own task
+  until its isolate is done), so concurrent callers queue rather than each holding an isolate's
+  full memory cap. The
   isolate a bundle keeps installed reads its exports and serves its docs, and is never given a
   record. Bundle docs are served to authenticated callers only (`get_documentation` checks);
   the executor's own topics stay open.
