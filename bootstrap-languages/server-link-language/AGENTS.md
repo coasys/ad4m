@@ -56,6 +56,7 @@ src/sync.ts                     — commit / catch-up / bootstrap; the ONE inbou
 src/telepresence.ts              — online-agent roster + outbound signal/broadcast/status
 src/encryption.ts                 — room keys sealed to DIDs via the executor, key ring, AES-256-GCM link encryption
 src/room-keys.ts                   — admin rotation (seals to every ACL member) and any member's grants
+src/key-ring-setup.ts               — setupKeyRing's body: reads /keys, drops spoiled boxes only while the executor opens its own, sets the key ring state
 tests/*.test.ts                    — node:test + tsx, one file per pure module, all use mock adapters (no real network/WS/Deno)
 ```
 

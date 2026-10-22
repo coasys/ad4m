@@ -163,6 +163,7 @@ executor's language sandbox runs a full `deno_runtime` worker (not a bare
 | `src/telepresence.ts` | Online-agent roster + outbound signal/broadcast/status |
 | `src/encryption.ts` | Room keys sealed to DIDs (through the executor), key ring, AES-256-GCM link encryption |
 | `src/room-keys.ts` | Room admin's rotation and any member's grants of the versions it holds |
+| `src/key-ring-setup.ts` | Loads the key ring from `/keys`; drops a spoiled box only while the executor opens a box sealed to its own DID |
 | `index.ts` | Wires it all together behind `defineLanguage()` |
 
 ### The `emitPerspectiveDiff` rule
