@@ -35,6 +35,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `ai_service/` | Local (candle) + remote LLM/embedding/whisper models, AI tasks; `harness/` = tool-calling loop for interpretation | `src/ai_service/AGENTS.md` |
 | `prolog_service/` | Scryer Prolog engine pools. **Disabled by default** (`PROLOG_MODE`), kept as an option | `src/prolog_service/AGENTS.md` |
 | `languages/` + `js_core/` | Language runtime: one Deno isolate per Language on its own thread; install, templates, expressions | `src/languages/AGENTS.md`, `src/js_core/AGENTS.md` |
+| `tool_bundles/` | Tool bundles: an app's JS for its own records, one bare `JsRuntime` per bundle with two ops (random bytes, a log line); time limit on load and every call, memory cap on heap and ArrayBuffers; content-addressed store beside the languages directory | `src/tool_bundles/AGENTS.md` |
 | `holochain_service/` | Embedded Holochain conductor behind an actor channel; signal fan-in | `src/holochain_service/AGENTS.md` |
 | `agent/` | Agent keys/DID, signing, multi-user (managed agents by DID; a user's email is only the login name), `capabilities/` (auth tokens, capability defs) | — |
 | `db.rs` | All SQLite access (`rusqlite`), single `impl Ad4mDb`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | — |
@@ -48,16 +49,21 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **Services are global singletons** (`lazy_static`), e.g. `Ad4mDb::with_global_instance`,
   `AgentService::with_global_instance`, `LanguageController::global_instance()`,
   `AIService::global_instance().await`, `get_global_pubsub()`, `perspectives::get_perspective(uuid)`.
-  Do not add new ones; spec item 11 introduces `AppContext`.
+  Do not add new ones; spec item 11 introduces `AppContext`. The one exception since is
+  `ToolBundleRegistry::global()` (`tool_bundles/registry.rs`): the RPC handlers that install
+  bundles take nothing but the request, so until `AppContext` there is nowhere else for it. Move
+  it into `AppContext` with the rest; do not copy the pattern.
 - **Perspective links live in the per-perspective `SparqlStore`** (oxigraph), not SQLite.
   `PerspectiveInstance` is `Clone` and cheap: all state is behind `Arc`. `get_perspective()` returns a clone.
 - **Prolog is off.** `prolog_service::PROLOG_MODE` is `Disabled`; Prolog query paths return empty.
   Subject classes, flows and model queries run on SHACL + SPARQL (`perspectives/model_query`).
 - **Tokio vs std locks** are both used; check the import before assuming `.lock()` is async.
 - **JS ↔ Rust bridge**: `#[op2]` extensions in `js_core/*_extension.rs`, `holochain_service/`,
-  `runtime_service/`; JS side in the sibling `.js` file and `js_core/host.js`. Every JS runtime is a
-  language runtime, so third-party language code reaches every op: an op that signs must sign as
-  `get_runtime_agent_context()`, never as the main agent directly.
+  `runtime_service/`; JS side in the sibling `.js` file and `js_core/host.js`. Every Language
+  runtime gets every one of these extensions, so third-party language code reaches every op: an op
+  that signs must sign as `get_runtime_agent_context()`, never as the main agent directly. The one
+  other kind of JS runtime is a tool bundle's (`tool_bundles/sandbox.rs`), and it gets none of
+  them: only its own `tool_bundle_host` extension. Never register a `js_core` extension there.
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).
 - **Agents and sessions**: an executor hosts N agents, and **an agent is its DID**.
   `AgentContext` (`agent/mod.rs`) is `Main` (agent #0, `is_main_agent()`) or `Managed { did }`
