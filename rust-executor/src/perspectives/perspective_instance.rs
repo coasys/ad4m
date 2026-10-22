@@ -6688,6 +6688,12 @@ impl PerspectiveInstance {
             // to the claim (the min-DID claim still prevents doubles among peers
             // that escalate together).
             let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
+            // Only a shared perspective can receive a peer's claim.
+            let settle_ms = if self.persisted.lock().await.shared_url.is_some() {
+                crate::perspectives::auto_processor::claim::CLAIM_SETTLE_MS
+            } else {
+                0
+            };
             let outcome = match run_one_pass(
                 &mut perspective_clone,
                 cfg,
@@ -6695,7 +6701,7 @@ impl PerspectiveInstance {
                 now_ms,
                 context,
                 escalate,
-                crate::perspectives::auto_processor::claim::CLAIM_SETTLE_MS,
+                settle_ms,
             )
             .await
             {
