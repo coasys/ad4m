@@ -21,7 +21,7 @@ import * as auth from "./src/auth.js";
 import * as syncModule from "./src/sync.js";
 import * as telepresenceModule from "./src/telepresence.js";
 import { WsClient } from "./src/ws-client.js";
-import { buildKeyRing, type KeyRing } from "./src/encryption.js";
+import { buildKeyRing, opensOwnBoxes, type KeyRing } from "./src/encryption.js";
 import { grantMissingRoomKeys, rotateRoomKey } from "./src/room-keys.js";
 
 import {
@@ -134,6 +134,11 @@ async function setupKeyRing(): Promise<void> {
             return;
         }
         const { ring, spoiled } = buildKeyRing(keysRes.keys, getAgent());
+        if (spoiled.length > 0 && !opensOwnBoxes(getAgent(), myDid)) {
+            // The boxes failed because this executor cannot open any box now (a locked
+            // agent), not because they are spoiled: drop none, and try again later.
+            throw new Error(`this executor does not open a box sealed to ${myDid} right now`);
+        }
         // A spoiled box would block its version for good: drop it, and a member holding the
         // version grants it again.
         for (const version of spoiled) {
