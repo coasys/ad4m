@@ -18,7 +18,7 @@ Authentication (per MCP session, `McpContext.auth_token`):
 
 Listeners: the server runs in its own thread when `enable_mcp` is set, on `mcp_port` (default 3001). It adds HTTPS on `mcp_port + 1` when TLS is configured.
 
-Binding (`resolve_host`, `resolve_plain_host`, `start_tls_listener`), with no `--mcp-host` / `MCP_HOST`:
+Binding (`resolve_host`, `resolve_plain_host`, `start_tls_listener`), with no `MCP_HOST`:
 
 | Admin credential | TLS | Plain listener | HTTPS listener (`mcp_port + 1`) |
 |---|---|---|---|
@@ -27,7 +27,7 @@ Binding (`resolve_host`, `resolve_plain_host`, `start_tls_listener`), with no `-
 | set | configured, HTTPS bound | `127.0.0.1` | `0.0.0.0` |
 | set | configured, HTTPS not bound (port clash with the RPC HTTPS port, no port above, bind error) | `0.0.0.0` | not started |
 
-An explicit `--mcp-host` / `MCP_HOST` sets the plain listener's address in every row; without a credential and off loopback it only logs a warning. The HTTPS listener always binds `0.0.0.0` (`resolve_host`, `start_tls_listener` in [server.rs](../../../rust-executor/src/mcp/server.rs)).
+An explicit `MCP_HOST` environment variable sets the plain listener's address in every row; without a credential and off loopback it only logs a warning. The HTTPS listener always binds `0.0.0.0` (`resolve_host`, `start_tls_listener` in [server.rs](../../../rust-executor/src/mcp/server.rs)).
 
 The interpretation harness calls the same tools in the process (`mcp/tools/harness_bridge.rs`), with the dynamic tools included.
 
