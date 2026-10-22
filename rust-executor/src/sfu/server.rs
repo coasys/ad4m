@@ -105,6 +105,10 @@ pub const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(10);
 /// arrives only on the next poll.
 pub const ICE_RESTART_GRACE: Duration = Duration::from_secs(10);
 
+/// The most trickled candidates held while an ICE restart's offer waits for
+/// its answer. A client gathers a handful per network; later ones are dropped.
+const MAX_HELD_CANDIDATES: usize = 64;
+
 impl SfuPeer {
     pub fn new(
         id: ParticipantId,
@@ -200,7 +204,16 @@ impl SfuPeer {
     /// for its answer: the restart would discard it.
     pub fn add_remote_candidate(&mut self, candidate: Candidate) {
         match &mut self.ice_restart {
-            Some(restart) if restart.offer.is_some() => restart.candidates.push(candidate),
+            Some(restart) if restart.offer.is_some() => {
+                if restart.candidates.len() < MAX_HELD_CANDIDATES {
+                    restart.candidates.push(candidate);
+                } else {
+                    debug!(
+                        "SFU: peer {} trickled too many candidates during an ICE restart",
+                        self.id
+                    );
+                }
+            }
             _ => self.rtc.add_remote_candidate(candidate),
         }
     }
