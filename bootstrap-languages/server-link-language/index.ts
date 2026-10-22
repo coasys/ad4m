@@ -68,9 +68,10 @@ let keyRing: KeyRing | null = null;
 /**
  * - "none": room has no E2E — plaintext commits are fine.
  * - "ready": key ring acquired and decrypted — encrypted commits ready.
- * - "pending": room HAS E2E but this agent has no keys yet: no member
- *   holding one has been online since it joined. commit() refuses to
- *   send plaintext.
+ * - "pending": room HAS E2E but this agent holds no key it can open: no
+ *   member holding one has been online since it joined, or none of its
+ *   boxes opens (an older format). An admin in this state rotates.
+ *   commit() refuses to send plaintext.
  * - "error": E2E keys almost certainly exist but we could not get/open
  *   them. commit() refuses to send plaintext.
  */

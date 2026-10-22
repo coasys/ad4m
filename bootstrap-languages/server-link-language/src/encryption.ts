@@ -131,7 +131,8 @@ export type KeyRing = Map<number, Uint8Array>;
 /**
  * The versions sealed to this agent that open. A box that does not open (a
  * member granted a version sealed wrongly) is left out with a log line, so
- * it costs that version, not the room. Throws when none opens.
+ * it costs that version, not the room. When none opens, the ring is empty
+ * and the caller treats the agent as holding no key ("pending").
  */
 export function buildKeyRing(
     entries: KeysResponseEntry[],

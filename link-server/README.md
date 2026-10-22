@@ -315,9 +315,10 @@ could swap: a member's X25519 key follows from its DID.
 - **A member can spoil a grant.** The server cannot check the key inside a
   box. A member that grants a box holding a wrong key for a version stores the
   first box for that member and version; the recipient's language leaves the
-  version out of its key ring (it cannot open the links of that version) until
-  the box is removed. Only a member of the room can do this, and only for
-  versions it holds.
+  version out of its key ring and cannot open the links of that version. No
+  route removes a stored box, so this lasts. The next rotation gives the
+  recipient a new version sealed by the admin. Only a member of the room can
+  do this, and only for versions it holds.
 
 ### E2E encryption — other future requirements
 

@@ -155,8 +155,9 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   every sync, on `onPeerJoined`) and seals the versions it holds to ACL
   members lacking them (idempotent; the server keeps the first box per member
   and version and refuses versions the granter lacks). A member whose key
-  status is `pending` (no member holding a key has been online since it
-  joined) re-reads `/keys` on every sync, skipping the 10 s refresh cooldown
+  status is `pending` (no box it holds opens: no member holding a key has
+  been online since it joined, or its boxes are in an older format; an admin
+  in that state rotates) re-reads `/keys` on every sync, skipping the 10 s refresh cooldown
   (`refreshSkippedByCooldown`, src/key-ring-policy.ts), so it sees the room on
   the first sync after the grant. A version whose box does not open is left
   out of the ring (`buildKeyRing`), so one bad grant costs that version, not

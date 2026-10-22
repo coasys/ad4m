@@ -1,4 +1,4 @@
-//! What language code can sign, asked from inside a real language runtime.
+//! What language code can sign and open, asked from inside a real language runtime.
 //!
 //! Every JS runtime is a language runtime, and language code sees every service extension
 //! as a global. So these tests run JS through `LanguageRuntimeHandle` (bootstrap and all
