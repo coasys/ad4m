@@ -97,7 +97,8 @@ pub struct BundleSandbox {
 
 impl BundleSandbox {
     /// Start a sandbox and load `source`, an ES module, into it. Fails if the module does not
-    /// load. `name` is for logs and the module's URL, not an identity.
+    /// load, once the isolate it was loaded into has ended and released its memory. `name` is for
+    /// logs and the module's URL, not an identity.
     pub async fn start(
         name: impl Into<String>,
         source: impl Into<Arc<str>>,
@@ -110,13 +111,21 @@ impl BundleSandbox {
             live: Arc::new(Mutex::new(None)),
             threads: Arc::default(),
         };
-        let live = spawn_isolate(
+        let live = match spawn_isolate(
             &sandbox.name,
             sandbox.source.clone(),
             limits,
             &sandbox.threads,
         )
-        .await?;
+        .await
+        {
+            Ok(live) => live,
+            Err(e) => {
+                // A load that failed or was stopped leaves its thread tearing the isolate down.
+                sandbox.close().await;
+                return Err(e);
+            }
+        };
         *sandbox.live.lock().await = Some(live);
         Ok(sandbox)
     }
@@ -300,14 +309,20 @@ pub(super) mod running {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
-    fn threads() -> &'static Mutex<HashMap<String, usize>> {
-        static THREADS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    /// Per name: the threads running now, and the most that ever ran at once.
+    fn threads() -> &'static Mutex<HashMap<String, (usize, usize)>> {
+        static THREADS: OnceLock<Mutex<HashMap<String, (usize, usize)>>> = OnceLock::new();
         THREADS.get_or_init(Default::default)
     }
 
     /// The isolate threads of the sandbox called `name` that have not ended yet.
     pub fn count(name: &str) -> usize {
-        threads().lock().unwrap().get(name).copied().unwrap_or(0)
+        threads().lock().unwrap().get(name).map_or(0, |n| n.0)
+    }
+
+    /// The most isolate threads called `name` that were ever running at once; 0 if none started.
+    pub fn most(name: &str) -> usize {
+        threads().lock().unwrap().get(name).map_or(0, |n| n.1)
     }
 
     /// Counts its thread as running until dropped, which is when the thread ends.
@@ -315,11 +330,10 @@ pub(super) mod running {
 
     impl Thread {
         pub(super) fn start(name: &str) -> Self {
-            *threads()
-                .lock()
-                .unwrap()
-                .entry(name.to_string())
-                .or_default() += 1;
+            let mut threads = threads().lock().unwrap();
+            let (now, most) = threads.entry(name.to_string()).or_default();
+            *now += 1;
+            *most = (*most).max(*now);
             Self(name.to_string())
         }
     }
@@ -327,7 +341,7 @@ pub(super) mod running {
     impl Drop for Thread {
         fn drop(&mut self) {
             if let Some(n) = threads().lock().unwrap().get_mut(&self.0) {
-                *n -= 1;
+                n.0 -= 1;
             }
         }
     }
