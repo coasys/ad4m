@@ -2324,6 +2324,64 @@ mod tests {
         );
     }
 
+    /// Candidates the caller trickles while the restart's offer waits for its
+    /// answer are held, up to a cap, and handed over once the answer lands:
+    /// the restart would discard any added before it.
+    #[test]
+    fn candidates_trickled_during_a_restart_are_held_until_its_answer() {
+        let bind: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let mut caller = Rtc::builder().build(Instant::now());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        let (offer, pending) = change.apply().unwrap();
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind, None).unwrap();
+        caller
+            .sdp_api()
+            .accept_answer(pending, serde_json::from_str(&answer).unwrap())
+            .unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:caller".to_string(),
+            rtc,
+            false,
+        );
+        let candidate = |port: u16| {
+            Candidate::host(
+                SocketAddr::new("203.0.113.30".parse().unwrap(), port),
+                "udp",
+            )
+            .unwrap()
+        };
+
+        let now = Instant::now();
+        assert!(peer.restart_ice(now).is_none());
+        // Before the offer exists nothing is held: the restart has not begun.
+        peer.add_remote_candidate(candidate(49_999));
+        assert!(peer.ice_restart.as_ref().unwrap().candidates.is_empty());
+
+        let (offer, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
+        for port in 0..(MAX_HELD_CANDIDATES as u16 + 5) {
+            peer.add_remote_candidate(candidate(50_000 + port));
+        }
+        let held = &peer.ice_restart.as_ref().unwrap().candidates;
+        assert_eq!(held.len(), MAX_HELD_CANDIDATES);
+
+        let answer = caller
+            .sdp_api()
+            .accept_offer(serde_json::from_str(&offer).unwrap())
+            .unwrap();
+        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+            .unwrap();
+        assert!(peer.ice_restart.is_none(), "handed over with the answer");
+    }
+
     /// A fixed port is bound exactly; the STUN probe runs on that socket and
     /// the public address is advertised on it.
     #[tokio::test]
