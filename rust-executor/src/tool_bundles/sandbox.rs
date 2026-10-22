@@ -8,17 +8,25 @@
 //! filesystem, network, timer, agent or service op registered in the isolate, so there is nothing
 //! a bundle could reach by finding a way round the globals.
 //!
-//! Every call has a time limit and the isolate a heap cap. Either one being hit terminates the
-//! isolate; the call that hit it fails, and the next call starts a fresh one from the same source.
-//! A bundle holds no state a caller may rely on between calls, so nothing is lost but warm-up.
+//! Every call has a time limit, and so does loading the bundle. The isolate has a memory cap, on
+//! its V8 heap and on the ArrayBuffer memory it holds outside it. Either limit being hit terminates
+//! the isolate; the call that hit it fails, and the next call starts a fresh one from the same
+//! source. A bundle holds no state a caller may rely on between calls, so nothing is lost but
+//! warm-up.
+//!
+//! The time limit belongs to the call, not to whoever waits on it: a call runs as a task of its
+//! own, so a caller that stops waiting does not take the limit with it.
 
 use deno_core::{op2, v8, JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions};
 use log::{debug, error, info, warn};
 use rand::RngCore;
 use serde_json::Value;
+use std::alloc::Layout;
 use std::cell::Cell;
+use std::ffi::c_void;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -27,9 +35,10 @@ const BOOTSTRAP: &str = include_str!("bootstrap.js");
 /// How much a bundle may use before it is stopped.
 #[derive(Debug, Clone, Copy)]
 pub struct SandboxLimits {
-    /// How long one call may run, from being sent to being answered.
+    /// How long one call may run, from being sent to being answered, and how long the bundle
+    /// may take to load.
     pub call_timeout: Duration,
-    /// The most V8 heap the isolate may hold.
+    /// The most V8 heap the isolate may hold, and separately the most ArrayBuffer memory.
     pub max_heap_bytes: usize,
 }
 
@@ -118,9 +127,32 @@ impl BundleSandbox {
     }
 
     async fn send(&self, path: &[&str], args: Option<String>) -> Result<Value, SandboxError> {
+        let path: Vec<String> = path.iter().map(|p| p.to_string()).collect();
+        // Dropped with this future: how the call learns, before it reaches the isolate, that
+        // nobody is waiting for it any more.
+        let (_waiting, caller) = oneshot::channel::<()>();
+        let sandbox = self.clone();
+        tokio::spawn(async move { sandbox.run_call(path, args, caller).await })
+            .await
+            .unwrap_or_else(|e| Err(SandboxError::Closed(format!("the call's task failed: {e}"))))
+    }
+
+    /// One call, start to end, on a task of its own: its time limit is enforced even if the
+    /// caller is dropped while it runs.
+    async fn run_call(
+        &self,
+        path: Vec<String>,
+        args: Option<String>,
+        mut caller: oneshot::Receiver<()>,
+    ) -> Result<Value, SandboxError> {
         // Held for the whole call: the isolate runs one call at a time anyway, and a call that is
         // terminated must not let the next one reach the dying isolate.
         let mut live = self.live.lock().await;
+        if matches!(caller.try_recv(), Err(oneshot::error::TryRecvError::Closed)) {
+            return Err(SandboxError::Closed(
+                "the caller stopped waiting before the call began".into(),
+            ));
+        }
         if live.is_none() {
             info!("[tool-bundle:{}] starting a fresh isolate", self.name);
             *live = Some(spawn_isolate(&self.name, self.source.clone(), self.limits).await?);
@@ -129,7 +161,7 @@ impl BundleSandbox {
 
         let (reply, answer) = oneshot::channel();
         let request = Request {
-            path: path.iter().map(|p| p.to_string()).collect(),
+            path: path.clone(),
             args,
             reply,
         };
@@ -166,20 +198,24 @@ impl BundleSandbox {
 }
 
 /// Start an isolate on a thread of its own and load the bundle into it. Answers once the bundle
-/// has loaded, or why it did not.
+/// has loaded, or why it did not. Loading has the call time limit, and an isolate whose start is
+/// given up on is terminated, so bundle code never runs without a limit on it.
 async fn spawn_isolate(
     name: &str,
     source: Arc<str>,
     limits: SandboxLimits,
 ) -> Result<Live, SandboxError> {
     let (tx, rx) = mpsc::unbounded_channel::<Request>();
-    let (ready_tx, ready_rx) = oneshot::channel::<Result<v8::IsolateHandle, SandboxError>>();
+    let (handle_tx, handle_rx) = oneshot::channel::<v8::IsolateHandle>();
+    let (ready_tx, ready_rx) = oneshot::channel::<Result<(), SandboxError>>();
     let thread_name = format!("bundle-{}", name.chars().take(12).collect::<String>());
-    let name = name.to_string();
+    let thread_bundle = name.to_string();
 
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
+            #[cfg(test)]
+            let _running = running::Thread::start(&thread_bundle);
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -190,28 +226,117 @@ async fn spawn_isolate(
                     return;
                 }
             };
-            rt.block_on(run_isolate(name, source, limits, ready_tx, rx));
+            rt.block_on(run_isolate(
+                thread_bundle,
+                source,
+                limits,
+                handle_tx,
+                ready_tx,
+                rx,
+            ));
         })
         .map_err(|e| SandboxError::Closed(format!("could not start a thread: {e}")))?;
 
-    let isolate = ready_rx
-        .await
-        .map_err(|_| SandboxError::Closed("the isolate's thread ended while loading".into()))??;
-    Ok(Live { tx, isolate })
+    let ended = || SandboxError::Closed("the isolate's thread ended while loading".into());
+    // Published before any bundle code runs, and held so that from here on a dropped start
+    // terminates the load.
+    let isolate = TerminateOnDrop(Some(handle_rx.await.map_err(|_| ended())?));
+    match tokio::time::timeout(limits.call_timeout, ready_rx).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => return Err(e),
+        Ok(Err(_)) => return Err(ended()),
+        Err(_) => {
+            warn!(
+                "[tool-bundle:{}] loading ran past {:?}; terminating",
+                name, limits.call_timeout
+            );
+            return Err(SandboxError::Timeout(limits.call_timeout));
+        }
+    }
+    Ok(Live {
+        tx,
+        isolate: isolate.disarm(),
+    })
+}
+
+/// Under test: how many isolate threads are running per sandbox name, counted by the threads
+/// themselves, so a test can see a worker end on any platform.
+#[cfg(test)]
+pub(super) mod running {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn threads() -> &'static Mutex<HashMap<String, usize>> {
+        static THREADS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+        THREADS.get_or_init(Default::default)
+    }
+
+    /// The isolate threads of the sandbox called `name` that have not ended yet.
+    pub fn count(name: &str) -> usize {
+        threads().lock().unwrap().get(name).copied().unwrap_or(0)
+    }
+
+    /// Counts its thread as running until dropped, which is when the thread ends.
+    pub(super) struct Thread(String);
+
+    impl Thread {
+        pub(super) fn start(name: &str) -> Self {
+            *threads()
+                .lock()
+                .unwrap()
+                .entry(name.to_string())
+                .or_default() += 1;
+            Self(name.to_string())
+        }
+    }
+
+    impl Drop for Thread {
+        fn drop(&mut self) {
+            if let Some(n) = threads().lock().unwrap().get_mut(&self.0) {
+                *n -= 1;
+            }
+        }
+    }
+}
+
+/// Terminates the isolate when dropped, unless disarmed.
+struct TerminateOnDrop(Option<v8::IsolateHandle>);
+
+impl TerminateOnDrop {
+    fn disarm(mut self) -> v8::IsolateHandle {
+        self.0.take().expect("armed until disarmed")
+    }
+}
+
+impl Drop for TerminateOnDrop {
+    fn drop(&mut self) {
+        if let Some(isolate) = self.0.take() {
+            isolate.terminate_execution();
+        }
+    }
 }
 
 async fn run_isolate(
     name: String,
     source: Arc<str>,
     limits: SandboxLimits,
-    ready: oneshot::Sender<Result<v8::IsolateHandle, SandboxError>>,
+    handle: oneshot::Sender<v8::IsolateHandle>,
+    ready: oneshot::Sender<Result<(), SandboxError>>,
     mut rx: mpsc::UnboundedReceiver<Request>,
 ) {
+    let buffers = Arc::new(BufferBudget::new(limits.max_heap_bytes));
     let mut runtime = JsRuntime::new(RuntimeOptions {
         extensions: vec![tool_bundle_host::init()],
-        create_params: Some(v8::Isolate::create_params().heap_limits(0, limits.max_heap_bytes)),
+        create_params: Some(
+            v8::Isolate::create_params()
+                .heap_limits(0, limits.max_heap_bytes)
+                .array_buffer_allocator(buffers.allocator()),
+        ),
         ..Default::default()
     });
+    let _ = buffers
+        .isolate
+        .set(runtime.v8_isolate().thread_safe_handle());
 
     // Out of memory is a termination too, but reported as itself. The headroom granted is what
     // lets V8 unwind the terminated script instead of aborting the process.
@@ -226,32 +351,39 @@ async fn run_isolate(
         });
     }
 
-    let (invoker, namespace) = match load(&mut runtime, &name, &source).await {
+    // Before any bundle code runs, so its load can be stopped too. Nobody to stop it for means
+    // nobody waiting for it: then it is not loaded at all.
+    if handle
+        .send(runtime.v8_isolate().thread_safe_handle())
+        .is_err()
+    {
+        return;
+    }
+
+    let over_cap = || out_of_memory.get() || buffers.exceeded.load(Ordering::SeqCst);
+    let loaded = match load(&mut runtime, &name, &source).await {
+        _ if over_cap() => Err(SandboxError::OutOfMemory(limits.max_heap_bytes)),
+        loaded => loaded,
+    };
+    let (invoker, namespace) = match loaded {
         Ok(loaded) => loaded,
         Err(e) => {
-            let e = if out_of_memory.get() {
-                SandboxError::OutOfMemory(limits.max_heap_bytes)
-            } else {
-                e
-            };
             error!("[tool-bundle:{}] {}", name, e);
             let _ = ready.send(Err(e));
             return;
         }
     };
-    if ready
-        .send(Ok(runtime.v8_isolate().thread_safe_handle()))
-        .is_err()
-    {
+    if ready.send(Ok(())).is_err() {
         return;
     }
     debug!("[tool-bundle:{}] loaded", name);
 
     while let Some(request) = rx.recv().await {
         let outcome = invoke(&mut runtime, &invoker, &namespace, &request).await;
-        let terminated = runtime.v8_isolate().is_execution_terminating() || out_of_memory.get();
+        let terminated = runtime.v8_isolate().is_execution_terminating() || over_cap();
+        // Over the cap is a failure even if the bundle caught the error it got and answered.
         let outcome = match outcome {
-            Err(_) if out_of_memory.get() => Err(SandboxError::OutOfMemory(limits.max_heap_bytes)),
+            _ if over_cap() => Err(SandboxError::OutOfMemory(limits.max_heap_bytes)),
             other => other,
         };
         let _ = request.reply.send(outcome);
@@ -350,12 +482,136 @@ fn op_tool_bundle_random_values(#[buffer] buffer: &mut [u8]) {
 
 #[op2(fast)]
 fn op_tool_bundle_log(#[smi] level: u8, #[string] message: &str) {
+    let (level, line) = log_line(level, message);
+    log::log!(level, "{}", line);
+}
+
+/// The most of one log message a bundle gets into the node's log.
+const LOG_MESSAGE_CHARS: usize = 2000;
+
+/// What a bundle's `console` call writes to the node's log. A bundle does not choose how loud the
+/// node's log is: `console.debug` is a trace line and every other level a debug line naming it,
+/// cut to [`LOG_MESSAGE_CHARS`].
+pub(super) fn log_line(level: u8, message: &str) -> (log::Level, String) {
+    let message = match message.char_indices().nth(LOG_MESSAGE_CHARS) {
+        Some((cut, _)) => format!("{}…", &message[..cut]),
+        None => message.to_string(),
+    };
     match level {
-        0 => debug!("[tool-bundle] {}", message),
-        1 => info!("[tool-bundle] {}", message),
-        2 => warn!("[tool-bundle] {}", message),
-        _ => error!("[tool-bundle] {}", message),
+        0 => (log::Level::Trace, format!("[tool-bundle] {message}")),
+        1 => (log::Level::Debug, format!("[tool-bundle] info: {message}")),
+        2 => (log::Level::Debug, format!("[tool-bundle] warn: {message}")),
+        _ => (log::Level::Debug, format!("[tool-bundle] error: {message}")),
     }
+}
+
+/// The ArrayBuffer memory an isolate holds, which its heap limit does not count: every backing
+/// store V8 asks the isolate's allocator for comes from here, and past the limit it gets none and
+/// the isolate is terminated.
+struct BufferBudget {
+    limit: usize,
+    used: AtomicUsize,
+    exceeded: AtomicBool,
+    /// The isolate to terminate, set once it exists.
+    isolate: OnceLock<v8::IsolateHandle>,
+}
+
+impl BufferBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            used: AtomicUsize::new(0),
+            exceeded: AtomicBool::new(false),
+            isolate: OnceLock::new(),
+        }
+    }
+
+    /// The allocator to give the isolate. It holds the budget until V8 drops it.
+    fn allocator(self: &Arc<Self>) -> v8::UniqueRef<v8::Allocator> {
+        static VTABLE: v8::RustAllocatorVtable<BufferBudget> = v8::RustAllocatorVtable {
+            allocate: budget_allocate,
+            allocate_uninitialized: budget_allocate_uninitialized,
+            free: budget_free,
+            drop: budget_drop,
+        };
+        // SAFETY: the pointer is a strong count of this Arc, released by `budget_drop` when V8
+        // drops the allocator, so the budget outlives every call V8 makes through it.
+        unsafe { v8::new_rust_allocator(Arc::into_raw(self.clone()), &VTABLE) }
+    }
+
+    fn reserve(&self, len: usize) -> bool {
+        let reserved = self
+            .used
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+                used.checked_add(len).filter(|total| *total <= self.limit)
+            })
+            .is_ok();
+        if !reserved {
+            self.exceeded.store(true, Ordering::SeqCst);
+            if let Some(isolate) = self.isolate.get() {
+                isolate.terminate_execution();
+            }
+        }
+        reserved
+    }
+
+    fn release(&self, len: usize) {
+        self.used.fetch_sub(len, Ordering::SeqCst);
+    }
+}
+
+/// Every backing store is allocated with this layout and freed with the same, since V8 frees
+/// with the length it allocated.
+fn buffer_layout(len: usize) -> Option<Layout> {
+    Layout::from_size_align(len.max(1), 16).ok()
+}
+
+unsafe extern "C" fn budget_allocate(budget: &BufferBudget, len: usize) -> *mut c_void {
+    budget_alloc(budget, len, true)
+}
+
+unsafe extern "C" fn budget_allocate_uninitialized(
+    budget: &BufferBudget,
+    len: usize,
+) -> *mut c_void {
+    budget_alloc(budget, len, false)
+}
+
+fn budget_alloc(budget: &BufferBudget, len: usize, zeroed: bool) -> *mut c_void {
+    let Some(layout) = buffer_layout(len) else {
+        return std::ptr::null_mut();
+    };
+    if !budget.reserve(len) {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the layout has a non-zero size.
+    let data = unsafe {
+        if zeroed {
+            std::alloc::alloc_zeroed(layout)
+        } else {
+            std::alloc::alloc(layout)
+        }
+    };
+    if data.is_null() {
+        budget.release(len);
+    }
+    data.cast()
+}
+
+unsafe extern "C" fn budget_free(budget: &BufferBudget, data: *mut c_void, len: usize) {
+    if data.is_null() {
+        return;
+    }
+    if let Some(layout) = buffer_layout(len) {
+        // SAFETY: `data` came from `budget_alloc` with this same length, so this same layout.
+        unsafe { std::alloc::dealloc(data.cast(), layout) };
+        budget.release(len);
+    }
+}
+
+unsafe extern "C" fn budget_drop(budget: *const BufferBudget) {
+    // SAFETY: the strong count `allocator` handed to V8.
+    drop(unsafe { Arc::from_raw(budget) });
 }
 
 deno_core::extension!(

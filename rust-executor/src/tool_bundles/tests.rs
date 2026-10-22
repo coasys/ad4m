@@ -99,8 +99,9 @@ async fn a_promise_that_never_settles_is_an_error_not_a_hang() {
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
-/// What V8 provides with no host at all — ECMAScript's globals (`Temporal` included), `Intl`,
-/// `WebAssembly`.
+/// What V8 provides with no host at all — ECMAScript's globals (`Temporal` included) and `Intl` —
+/// less `WebAssembly`, which `bootstrap.js` removes: its memory is reserved outside anything the
+/// memory cap can count.
 const LANGUAGE_GLOBALS: &[&str] = &[
     "globalThis",
     "Infinity",
@@ -167,7 +168,6 @@ const LANGUAGE_GLOBALS: &[&str] = &[
     "WeakMap",
     "WeakRef",
     "WeakSet",
-    "WebAssembly",
     "Temporal",
 ];
 
@@ -255,6 +255,7 @@ async fn a_bundle_cannot_reach_the_host_load_code_or_wait_on_a_timer() {
             bootstrap: typeof global.__bootstrap,
             fetch: typeof fetch,
             timers: typeof setTimeout,
+            wasm: typeof global.WebAssembly,
             dynamicFile: await attempt(() => import("file:///etc/passwd")),
             dynamicNet: await attempt(() => import("https://example.com/x.js")),
           };
@@ -269,6 +270,7 @@ async fn a_bundle_cannot_reach_the_host_load_code_or_wait_on_a_timer() {
             "bootstrap": "undefined",
             "fetch": "undefined",
             "timers": "undefined",
+            "wasm": "undefined",
             "dynamicFile": "refused",
             "dynamicNet": "refused",
         }))
@@ -356,6 +358,292 @@ async fn a_call_past_the_heap_cap_is_stopped_and_the_next_gets_a_fresh_isolate()
     assert_eq!(sandbox.call(&["next"], vec![]).await, Ok(json!(1)));
 }
 
+/// Memory a bundle holds outside the V8 heap: the backing stores of ArrayBuffers of every kind.
+/// Resizable ones would be reserved by V8 itself, outside the allocator the cap counts, so a bundle
+/// cannot make one at all.
+const BUFFERS: &str = r#"
+const MiB = 1024 * 1024;
+const kept = [];
+const keep = (buffer) => { new Uint8Array(buffer).fill(1); kept.push(buffer); return kept.length; };
+const times = (count, make) => { for (let i = 0; i < count; i++) keep(make()); return kept.length; };
+export const ping = () => "pong";
+export const plain = (mib, count) => times(count, () => new ArrayBuffer(mib * MiB));
+export const typed = (mib, count) => times(count, () => new Uint8Array(mib * MiB).buffer);
+export const shared = (mib, count) => times(count, () => new SharedArrayBuffer(mib * MiB));
+export const resizable = (mib, count) => times(count, () => {
+  const buffer = new ArrayBuffer(0, { maxByteLength: mib * MiB });
+  buffer.resize(mib * MiB);
+  return buffer;
+});
+export const growable = (mib, count) => times(count, () => {
+  const buffer = new SharedArrayBuffer(0, { maxByteLength: mib * MiB });
+  buffer.grow(mib * MiB);
+  return buffer;
+});
+export const encoded = (mib, count) => {
+  const text = "x".repeat(4 * MiB);
+  return times((count * mib) / 4, () => new TextEncoder().encode(text).buffer) / (mib / 4);
+};
+export const caught = (mib, count) => { try { return times(count, () => new ArrayBuffer(mib * MiB)); } catch (e) { return "caught: " + e; } };
+"#;
+
+#[tokio::test]
+async fn buffers_of_every_kind_count_against_the_memory_cap() {
+    let limit = 64 * 1024 * 1024;
+    for kind in ["plain", "typed", "shared", "encoded", "caught"] {
+        let sandbox = start_with(
+            BUFFERS,
+            SandboxLimits {
+                max_heap_bytes: limit,
+                ..SandboxLimits::default()
+            },
+        )
+        .await;
+        // Within the cap is fine, and is kept between calls.
+        assert_eq!(
+            sandbox.call(&[kind], vec![json!(16), json!(2)]).await,
+            Ok(json!(2)),
+            "{kind}"
+        );
+        assert_eq!(
+            sandbox.call(&[kind], vec![json!(64), json!(8)]).await,
+            Err(SandboxError::OutOfMemory(limit)),
+            "{kind}"
+        );
+        assert_eq!(
+            sandbox.call(&["ping"], vec![]).await,
+            Ok(json!("pong")),
+            "{kind}"
+        );
+    }
+}
+
+/// Tamper with what `TextEncoder.encode` could look up while it copies the bytes it got from Rust,
+/// each way catching what it is handed, and encode 4 MiB `count` times.
+const TAMPERED_ENCODER: &str = r#"
+const MiB = 1024 * 1024;
+const caught = [];
+const text = "x".repeat(4 * MiB);
+const encodeMany = (count) => {
+  const encoder = new TextEncoder();
+  for (let i = 0; i < count; i++) encoder.encode(text);
+  return caught.length;
+};
+const typedArray = Object.getPrototypeOf(Uint8Array.prototype);
+export const viaConstructor = (count) => {
+  const real = globalThis.Uint8Array;
+  globalThis.Uint8Array = function () { return { set(source) { caught.push(source); } }; };
+  try { return encodeMany(count); } finally { globalThis.Uint8Array = real; }
+};
+export const viaSet = (count) => {
+  const real = typedArray.set;
+  typedArray.set = function (source) { caught.push(source); };
+  try { return encodeMany(count); } finally { typedArray.set = real; }
+};
+export const viaLength = (count) => {
+  const real = Object.getOwnPropertyDescriptor(typedArray, "length");
+  Object.defineProperty(typedArray, "length", {
+    configurable: true,
+    get() { caught.push(this); return real.get.call(this); },
+  });
+  try { return encodeMany(count); } finally { Object.defineProperty(typedArray, "length", real); }
+};
+"#;
+
+#[tokio::test]
+async fn a_bundle_cannot_catch_what_text_encoder_copies_from() {
+    let limit = 64 * 1024 * 1024;
+    for route in ["viaConstructor", "viaSet", "viaLength"] {
+        let sandbox = start_with(
+            TAMPERED_ENCODER,
+            SandboxLimits {
+                max_heap_bytes: limit,
+                ..SandboxLimits::default()
+            },
+        )
+        .await;
+        // 128 MiB encoded under a 64 MiB cap: the bundle keeps nothing it was not counted for.
+        assert_eq!(
+            sandbox.call(&[route], vec![json!(32)]).await,
+            Ok(json!(0)),
+            "{route}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_bundle_cannot_make_a_resizable_buffer_by_any_route() {
+    let limit = 64 * 1024 * 1024;
+    let sandbox = start_with(
+        BUFFERS,
+        SandboxLimits {
+            max_heap_bytes: limit,
+            ..SandboxLimits::default()
+        },
+    )
+    .await;
+    for kind in ["resizable", "growable"] {
+        let outcome = sandbox.call(&[kind], vec![json!(64), json!(8)]).await;
+        assert!(
+            matches!(&outcome, Err(SandboxError::Js(m)) if m.contains("resizable")),
+            "{kind}: {outcome:?}"
+        );
+    }
+    let probe = start(
+        r#"
+        export const probe = () => {
+          const resizable = (make) => { try { return make().resizable || make().growable || "fixed"; } catch { return "refused"; } };
+          const options = { maxByteLength: 1024 };
+          const viaInstance = new Uint8Array(1).buffer.constructor;
+          const viaPrototype = Object.getPrototypeOf(new ArrayBuffer(1)).constructor;
+          const viaSpecies = ArrayBuffer[Symbol.species];
+          class Sub extends ArrayBuffer {}
+          class SharedSub extends SharedArrayBuffer {}
+          const plain = new ArrayBuffer(8);
+          return {
+            global: resizable(() => new ArrayBuffer(8, options)),
+            instance: resizable(() => new viaInstance(8, options)),
+            prototype: resizable(() => new viaPrototype(8, options)),
+            species: resizable(() => new viaSpecies(8, options)),
+            reflect: resizable(() => Reflect.construct(viaInstance, [8, options])),
+            subclass: resizable(() => new Sub(8, options)),
+            shared: resizable(() => new SharedArrayBuffer(8, options)),
+            sharedInstance: resizable(() => new (new Int8Array(new SharedArrayBuffer(1)).buffer.constructor)(8, options)),
+            sharedSubclass: resizable(() => new SharedSub(8, options)),
+            stillBuffers: plain instanceof ArrayBuffer && new Sub(4) instanceof ArrayBuffer && ArrayBuffer.isView(new Uint8Array(plain)),
+            sliced: plain.slice(2).byteLength,
+            transferred: plain.transfer(4).byteLength,
+            name: ArrayBuffer.name + "/" + SharedArrayBuffer.name,
+          };
+        };
+        "#,
+    )
+    .await;
+    assert_eq!(
+        probe.call(&["probe"], vec![]).await,
+        Ok(json!({
+            "global": "refused",
+            "instance": "refused",
+            "prototype": "refused",
+            "species": "refused",
+            "reflect": "refused",
+            "subclass": "refused",
+            "shared": "refused",
+            "sharedInstance": "refused",
+            "sharedSubclass": "refused",
+            "stillBuffers": true,
+            "sliced": 6,
+            "transferred": 4,
+            "name": "ArrayBuffer/SharedArrayBuffer",
+        }))
+    );
+}
+
+/// How many isolate threads of the sandbox called `name` are still running, as the sandbox counts
+/// them under test: portable, and exact whatever the name's length.
+fn isolate_threads(name: &str) -> usize {
+    super::sandbox::running::count(name)
+}
+
+/// Wait up to `within` for `name`'s isolate thread to end. Answers whether it did.
+async fn isolate_thread_ends(name: &str, within: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < within {
+        if isolate_threads(name) == 0 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    isolate_threads(name) == 0
+}
+
+#[tokio::test]
+async fn a_bundle_that_never_finishes_loading_is_stopped_at_the_time_limit() {
+    init_v8_platform();
+    let limit = Duration::from_millis(500);
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        BundleSandbox::start(
+            "loadspin",
+            "while (true) {}\nexport const x = 1;".to_string(),
+            SandboxLimits {
+                call_timeout: limit,
+                ..SandboxLimits::default()
+            },
+        ),
+    )
+    .await
+    .expect("start answers instead of hanging");
+    assert_eq!(outcome.err(), Some(SandboxError::Timeout(limit)));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(isolate_thread_ends("loadspin", Duration::from_secs(3)).await);
+}
+
+#[tokio::test]
+async fn a_start_given_up_on_stops_the_isolate_it_was_loading() {
+    init_v8_platform();
+    let start = BundleSandbox::start(
+        "loadgone",
+        "while (true) {}\nexport const x = 1;".to_string(),
+        SandboxLimits {
+            // Far past the test, so only giving up on the start can stop it in time.
+            call_timeout: Duration::from_secs(600),
+            ..SandboxLimits::default()
+        },
+    );
+    assert!(tokio::time::timeout(Duration::from_millis(300), start)
+        .await
+        .is_err());
+    assert!(isolate_thread_ends("loadgone", Duration::from_secs(3)).await);
+}
+
+#[tokio::test]
+async fn a_call_is_stopped_at_the_time_limit_even_when_its_caller_has_gone() {
+    init_v8_platform();
+    let sandbox = BundleSandbox::start(
+        "callgone",
+        COUNTER.to_string(),
+        SandboxLimits {
+            call_timeout: Duration::from_millis(500),
+            ..SandboxLimits::default()
+        },
+    )
+    .await
+    .expect("fixture bundle loads");
+    let waiting = tokio::spawn({
+        let sandbox = sandbox.clone();
+        async move { sandbox.call(&["spin"], vec![]).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    assert_eq!(isolate_threads("callgone"), 1, "the call is still running");
+
+    // No second call: the limit alone has to stop it.
+    assert!(isolate_thread_ends("callgone", Duration::from_secs(3)).await);
+    assert_eq!(sandbox.call(&["next"], vec![]).await, Ok(json!(1)));
+}
+
+#[test]
+fn a_bundle_s_log_line_is_bounded_and_never_above_debug() {
+    use log::Level;
+    let (level, line) = super::sandbox::log_line(0, "quiet");
+    assert_eq!(
+        (level, line.as_str()),
+        (Level::Trace, "[tool-bundle] quiet")
+    );
+    for (asked, name) in [(1, "info"), (2, "warn"), (3, "error"), (200, "error")] {
+        let (level, line) = super::sandbox::log_line(asked, "loud");
+        assert_eq!(level, Level::Debug, "{asked}");
+        assert_eq!(line, format!("[tool-bundle] {name}: loud"));
+    }
+    let long = "é".repeat(5000);
+    let (_, line) = super::sandbox::log_line(1, &long);
+    assert!(line.chars().count() < 2100, "{}", line.chars().count());
+    assert!(line.ends_with('…'));
+}
+
 #[tokio::test]
 async fn calls_from_many_tasks_are_answered_in_turn() {
     let sandbox = start(API).await;
@@ -395,6 +683,25 @@ fn the_store_keeps_a_bundle_by_its_content_address() {
     assert!(!store.remove(&address).unwrap());
     assert_eq!(store.get(&address).unwrap(), None);
     assert_eq!(store.list().unwrap(), vec![other]);
+}
+
+#[test]
+fn putting_a_bundle_again_replaces_a_changed_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ToolBundleStore::new(dir.path());
+    let address = store.put("export const a = 1;").unwrap();
+    std::fs::write(
+        dir.path().join(format!("{address}.js")),
+        "export const a = 2;",
+    )
+    .unwrap();
+    assert!(store.get(&address).is_err());
+
+    assert_eq!(store.put("export const a = 1;").unwrap(), address);
+    assert_eq!(
+        store.get(&address).unwrap().as_deref(),
+        Some("export const a = 1;")
+    );
 }
 
 #[test]

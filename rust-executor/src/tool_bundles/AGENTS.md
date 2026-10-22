@@ -8,8 +8,8 @@ at boot.
 
 | File | Role |
 |---|---|
-| `sandbox.rs` | `BundleSandbox`: one bare `JsRuntime` per bundle on its own thread; `call(path, args)` / `read(path)`, JSON in and out; per-call time limit and heap cap |
-| `bootstrap.js` | Runs before the bundle: the only globals it gets beyond the language (`structuredClone`, `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `crypto.getRandomValues`, `console`), removes `Deno`, evaluates to the invoker |
+| `sandbox.rs` | `BundleSandbox`: one bare `JsRuntime` per bundle on its own thread; `call(path, args)` / `read(path)`, JSON in and out; time limit on the load and on each call, memory cap on the V8 heap and (through the isolate's ArrayBuffer allocator) on buffers |
+| `bootstrap.js` | Runs before the bundle: the only globals it gets beyond the language (`structuredClone`, `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `crypto.getRandomValues`, `console`), removes `Deno` and `WebAssembly`, makes `ArrayBuffer`/`SharedArrayBuffer` fixed-length only, evaluates to the invoker |
 | `store.rs` | `ToolBundleStore`: `<data>/tool_bundles/<address>.js`, addressed by `js_core::utils::content_address` |
 | `registry.rs` | `ToolBundleRegistry::global()`: install (a toolset name already taken replaces its bundle), `load_stored` at boot, `find_tool`, `read_doc`. Reached by `api/tool_bundles_ws.rs` and `mcp/tools/instances/record_tools.rs` |
 | `tests.rs` | Fixture bundles: calls, isolation, limits, store |
@@ -22,7 +22,20 @@ at boot.
 - No module loader: `import` inside a bundle fails. A bundle is one self-contained file.
 - No snapshot: `bootstrap.js` is executed at runtime, so changing it needs no `pnpm build`.
   Keep it pure ASCII.
-- A terminated isolate (time limit, heap cap) is never reused; the next call starts a new one.
+- A terminated isolate (time limit, memory cap) is never reused; the next call starts a new one.
+- No bundle code runs without a time limit: the isolate's handle is published before the bundle
+  is evaluated, loading has the call time limit, and a call runs as a task of its own so its limit
+  holds when the caller is dropped. A start that is given up on terminates its isolate.
+- Every byte a bundle can hold is counted by the heap limit or by the allocator's budget. Memory
+  V8 reserves on its own (`WebAssembly.Memory`, resizable buffers) is unreachable from a bundle,
+  and memory an op allocates in Rust is copied into a counted buffer before a bundle gets it
+  (`TextEncoder.encode`). A new global or op that hands out a buffer must keep this true; the
+  memory-cap tests in `tests.rs` pin each route.
+- `bootstrap.js` code that runs after the bundle has loaded (the globals it defines) uses only
+  intrinsics it captured before the bundle ran (`Reflect.apply`, a getter taken from its
+  descriptor, ...), never a global or prototype member looked up at call time: the bundle may
+  have replaced those. This matters most wherever it holds an uncounted Rust-backed buffer.
+- A bundle's `console` never logs above debug, and a line is cut to 2,000 characters.
 - Calls are typed: an export path and JSON arguments. Never build JS source with `format!`.
 - The store refuses any address that is not one, so a caller's string never names a path.
 - A bundle never touches a perspective. `call_record_tool` reads the record and writes what a

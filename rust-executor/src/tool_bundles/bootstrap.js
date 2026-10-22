@@ -15,6 +15,15 @@
   const randomValues = ops.op_tool_bundle_random_values;
   const log = ops.op_tool_bundle_log;
   const stringify = JSON.stringify;
+  // What encode needs, taken now, before any bundle code runs: a bundle can replace the globals
+  // and prototype members these come from, and encode must not look anything up through them.
+  const ReflectApply = Reflect.apply;
+  const ReflectConstruct = Reflect.construct;
+  const toString = String;
+  const Uint8ArrayIntrinsic = Uint8Array;
+  const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+  const typedArrayLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, "length").get;
+  const typedArraySet = typedArrayPrototype.set;
   const parse = JSON.parse;
   const resolved = Promise.resolve.bind(Promise);
 
@@ -40,7 +49,15 @@
       return "utf-8";
     }
     encode(input = "") {
-      return encodeUtf8(String(input));
+      // deno_core's encode answers with memory allocated in Rust, which the memory cap does not
+      // count; what the bundle keeps is a copy in memory the cap does. The Rust-backed array is
+      // only ever touched through the intrinsics taken above, never through anything a bundle
+      // could have replaced, so it cannot reach the bundle.
+      const encoded = encodeUtf8(toString(input));
+      const length = ReflectApply(typedArrayLength, encoded, []);
+      const bytes = ReflectConstruct(Uint8ArrayIntrinsic, [length]);
+      ReflectApply(typedArraySet, bytes, [encoded]);
+      return bytes;
     }
   }
 
@@ -144,6 +161,43 @@
     error: write(3),
   });
 
+  // A resizable ArrayBuffer or growable SharedArrayBuffer is reserved by V8 itself, outside the
+  // allocator the isolate's memory cap counts. So the constructors a bundle can reach make only
+  // fixed-length buffers: each replaces V8's on the global and as its prototype's constructor,
+  // which with species (a getter answering `this`) are the only ways to reach V8's.
+  const fixedLength = (Original) => {
+    const kind = Original.name;
+    const construct = Reflect.construct;
+    function Fixed(length, options) {
+      if (new.target === undefined) {
+        throw new TypeError("Constructor " + kind + " requires 'new'");
+      }
+      if (options !== undefined && options !== null && options.maxByteLength !== undefined) {
+        throw new TypeError("A tool bundle cannot make a resizable " + kind);
+      }
+      return construct(Original, [length], new.target);
+    }
+    for (const key of Reflect.ownKeys(Original)) {
+      if (key === "prototype") continue;
+      Object.defineProperty(Fixed, key, Object.getOwnPropertyDescriptor(Original, key));
+    }
+    Object.defineProperty(Fixed, "prototype", {
+      value: Original.prototype,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+    Object.defineProperty(Original.prototype, "constructor", {
+      value: Fixed,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+    define(kind, Fixed);
+  };
+  fixedLength(ArrayBuffer);
+  fixedLength(SharedArrayBuffer);
+
   define("TextEncoder", TextEncoder);
   define("TextDecoder", TextDecoder);
   define("atob", atob);
@@ -157,6 +211,9 @@
   delete globalThis.Deno;
   delete globalThis.__bootstrap;
   delete globalThis.queueMicrotask;
+  // V8's own, but a WebAssembly.Memory is reserved outside the allocator the isolate's memory
+  // cap counts, so a bundle could hold any amount of it. A bundle is plain JavaScript.
+  delete globalThis.WebAssembly;
 
   // How Rust reaches the bundle: walk an export path, then read what is there (args absent) or
   // call it with the JSON-encoded arguments, with the object it was found on as `this`. Both
