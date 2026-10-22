@@ -760,14 +760,19 @@ impl PerspectiveInstance {
     }
 
     /// [`Self::restore_monotonic_ended`] once the perspective is loaded and
-    /// its authority known.
+    /// its authority known. A non-empty restore queues an all-instance flow
+    /// pass: the links go in through the store, not a diff, and a sweep that
+    /// already recorded the missing grant would otherwise keep that record.
     pub(crate) async fn monotonic_restore_at_load(&self) {
         if !self.agent_did_ready().await {
             return;
         }
         match self.restore_monotonic_ended().await {
             Ok(0) => {}
-            Ok(n) => log::info!("{}: restored {n} monotonic link(s) at load", self.uuid),
+            Ok(n) => {
+                log::info!("{}: restored {n} monotonic link(s) at load", self.uuid);
+                self.schedule_every_instance_flow_pass();
+            }
             Err(e) => log::warn!("{}: restoring monotonic links at load: {e}", self.uuid),
         }
     }

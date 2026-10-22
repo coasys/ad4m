@@ -857,9 +857,15 @@ impl PerspectiveInstance {
             self.subscribed_queries_loop(),
             self.fallback_sync_loop(),
             self.auto_processor_supervisor(),
-            self.flow_pass_at_load(),
-            self.monotonic_restore_at_load(),
+            self.restore_then_sweep_at_load(),
         );
+    }
+
+    /// Restore kept grants, then queue the load sweep. Joining the two lets
+    /// the sweep record a missing grant before the restore writes it back.
+    async fn restore_then_sweep_at_load(&self) {
+        self.monotonic_restore_at_load().await;
+        self.flow_pass_at_load().await;
     }
 
     /// Dispatch between single-user (one main-agent loop) and multi-user

@@ -298,6 +298,17 @@ impl PerspectiveInstance {
         });
     }
 
+    /// Queue the same all-instance sweep [`Self::flow_pass_at_load`] queues,
+    /// without waiting for a DID. A restore that writes links straight into
+    /// the store calls this: that write does not go through a diff, so nothing
+    /// else queues the pass that must re-read the restored grant.
+    pub(crate) fn schedule_every_instance_flow_pass(&self) {
+        self.enqueue_flow_pass(FlowTouch {
+            every_instance: true,
+            ..FlowTouch::default()
+        });
+    }
+
     /// Waits until the agent has a DID; `false` if the perspective is torn
     /// down first.
     pub(crate) async fn agent_did_ready(&self) -> bool {

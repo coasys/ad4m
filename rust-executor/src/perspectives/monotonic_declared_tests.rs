@@ -1106,6 +1106,33 @@ async fn t6_a_stored_role_grant_declaration_restores_the_grant_on_reopen() {
     assert!(present(&reopened, &g), "the grant is restored on reopen");
 }
 
+/// A grant restored at load is invisible to a sweep that already recorded the
+/// missing grant. The restore itself must queue an all-instance pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn t6_restoring_a_grant_at_load_schedules_a_flow_pass() {
+    let (replica, _, g) = stored_declaration_without_its_restoration().await;
+
+    let handle = replica.persisted.lock().await.clone();
+    let mut reopened = PerspectiveInstance::new(handle, None);
+    reopened.sparql_store = replica.sparql_store.clone();
+    drop(replica);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        reopened.monotonic_restore_at_load(),
+    )
+    .await
+    .expect("restore at load");
+    assert!(present(&reopened, &g), "the grant is restored on reopen");
+    assert!(
+        !reopened
+            .flow_pass_queue
+            .lock()
+            .expect("flow pass queue")
+            .is_idle(),
+        "the restore queues a flow pass so a sweep that already ran cannot keep the missing grant"
+    );
+}
+
 /// The same declaration arriving again restores what it did not.
 #[tokio::test(flavor = "multi_thread")]
 async fn t6_a_stored_role_grant_declaration_arriving_again_restores_the_grant() {
