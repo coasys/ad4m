@@ -629,10 +629,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 
     LanguageController::init_global_instance();
 
-    // The tool bundles apps installed, each in a sandbox of its own. In the background: a bundle
-    // that fails to load is logged and left out, and nothing at boot waits for them.
-    tokio::spawn(crate::tool_bundles::ToolBundleRegistry::global().load_stored());
-
     // NOTE: system languages are loaded from the agent.generate/agent.unlock handlers:
     // the core ones inline, the conductor-dependent ones in `agent::conductor_startup`.
 

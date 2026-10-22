@@ -134,24 +134,9 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     let did =
         um::create_user(&email, &body.password).map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    {
-        use crate::agent::{AgentContext, AgentService};
-        use crate::types::domain::{Agent, Perspective as DomainPerspective};
-
-        let agent = Agent {
-            did: did.clone(),
-            direct_message_language: None,
-            perspective: Some(DomainPerspective { links: vec![] }),
-        };
-        AgentService::store_managed_agent_profile(&did, &agent).map_err(|e| {
-            WsRpcError::internal(format!("Failed to store user agent profile: {}", e))
-        })?;
-
-        let ctx = AgentContext::managed(did.clone());
-        if let Err(e) = AgentService::publish_agent_to_language(&ctx).await {
-            log::warn!("Failed to publish new user to agent language: {}", e);
-        }
-    }
+    um::init_user_profile(&did)
+        .await
+        .map_err(WsRpcError::internal)?;
 
     let code = um::create_verification_code(&email, "signup")
         .map_err(|e| WsRpcError::internal(e.to_string()))?;

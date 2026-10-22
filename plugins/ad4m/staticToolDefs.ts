@@ -701,7 +701,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "get_documentation",
-    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux \u2014 for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. Apps can install tools for their own records on this node; each set of them serves its own topics, and list_record_tools names the one to start from. The executor's own topics need no authentication; an app's topics do.",
+    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux \u2014 for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. topic='template' is the guide to editing a WE template with template_read and template_update, and names the topics under it (template/...) for its components and props.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GetDocumentationParams",
@@ -709,7 +709,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
       "type": "object",
       "properties": {
         "topic": {
-          "description": "Which document: \"overview\" (start here), \"usage\", \"flux\", \"models\"\nor \"architecture\" \u2014 or a topic an app's tools serve, as list_record_tools names them",
+          "description": "Which document: \"overview\" (start here), \"usage\", \"flux\", \"models\" or \"architecture\";\n\"template\" for editing a WE template, and the topics under it that it names",
           "type": "string"
         }
       },
@@ -719,55 +719,152 @@ export const STATIC_TOOL_DEFS: McpTool[] =
     }
   },
   {
-    "name": "list_record_tools",
-    "description": "List the tools apps have installed on this node for their own kinds of record \u2014 editing an app's page layouts, say. Each set of tools names the subject classes it works on, its documentation topic to read first (with get_documentation), and each tool's description, parameters and whether it writes. Call one with call_record_tool. Pass class_name to see only the tools for that class.",
+    "name": "template_read",
+    "description": "Read the template being edited. With no arguments: its version, and the template \u2014 whole, or as an outline of every node with the parts `about` names in full when it is too large to send \u2014 plus the space's own data models. With `ids`, those nodes in full; with `find`, the nodes whose type or text matches. Read the `template` documentation topic before a first edit.",
     "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "ListRecordToolsParams",
-      "description": "Parameters for listing the tools apps have installed",
       "type": "object",
       "properties": {
-        "class_name": {
-          "description": "Only the tools for this subject class. Omit for every installed tool.",
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Node ids, e.g. \"n12\"."
+        },
+        "find": {
           "type": "string",
-          "default": null,
-          "nullable": true
+          "description": "Text or a type to look for, e.g. \"Load more\"."
+        },
+        "about": {
+          "type": "string",
+          "description": "What the edit is about, in words \u2014 chooses which nodes of a large template come back in full."
+        },
+        "perspective_id": {
+          "type": "string",
+          "description": "Perspective UUID"
+        },
+        "base_uri": {
+          "type": "string",
+          "description": "URI of the Template record"
         }
-      }
+      },
+      "required": [
+        "perspective_id",
+        "base_uri"
+      ]
     }
   },
   {
-    "name": "call_record_tool",
-    "description": "Call a tool an app installed (see list_record_tools) on one record: base_uri is the record, of a class the tool works on; arguments are the tool's own, as its parameters describe. Answers with what the tool says. A tool that writes saves its change to the record as you, in one write \u2014 read its documentation first. Example: call_record_tool(perspective_id, base_uri='<id>', tool='template_read', arguments={}).",
+    "name": "template_update",
+    "description": "Apply patches to the template and SAVE them, as one change everybody sees. Put every patch an edit needs in one call. Pass the version template_read gave: a template that has changed since is refused. `dry_run` checks the patches without saving. Each patch targets a node by its id, with exactly one of node, insert, remove or split.",
     "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "CallRecordToolParams",
-      "description": "Parameters for calling an installed tool on one record",
       "type": "object",
       "properties": {
+        "version": {
+          "type": "number",
+          "description": "The version template_read answered with."
+        },
+        "patches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "targetId": {
+                "type": "string",
+                "description": "For node (update): the id of the node to merge into. For insert/remove: the id of the PARENT node whose children/routes array to modify. Use \"\" for root."
+              },
+              "node": {
+                "type": "object",
+                "description": "Partial node to merge (JSON Merge Patch). Absent keys preserved, null deletes a key. Mutually exclusive with insert/remove."
+              },
+              "insert": {
+                "type": "object",
+                "properties": {
+                  "children": {
+                    "type": "object",
+                    "properties": {
+                      "node": {
+                        "type": "object",
+                        "description": "The new node to insert."
+                      },
+                      "after": {
+                        "type": "string",
+                        "description": "ID of sibling to insert after. Omit to append."
+                      },
+                      "before": {
+                        "type": "string",
+                        "description": "ID of sibling to insert before."
+                      }
+                    },
+                    "required": [
+                      "node"
+                    ]
+                  },
+                  "routes": {
+                    "type": "object",
+                    "properties": {
+                      "node": {
+                        "type": "object",
+                        "description": "The new route node to insert."
+                      },
+                      "after": {
+                        "type": "string",
+                        "description": "ID of sibling route to insert after. Omit to append."
+                      },
+                      "before": {
+                        "type": "string",
+                        "description": "ID of sibling route to insert before."
+                      }
+                    },
+                    "required": [
+                      "node"
+                    ]
+                  }
+                },
+                "description": "Insert into children or routes array. Mutually exclusive with node/remove."
+              },
+              "remove": {
+                "type": "object",
+                "properties": {
+                  "children": {
+                    "type": "string",
+                    "description": "ID of child to remove."
+                  },
+                  "routes": {
+                    "type": "string",
+                    "description": "ID of route to remove."
+                  }
+                },
+                "description": "Remove from children or routes array by child ID. Mutually exclusive with node/insert."
+              },
+              "split": {
+                "type": "boolean",
+                "description": "targetId is a $ref: give THIS use of the shared shape a copy of its own, so a later patch to it changes nowhere else. Every other use keeps sharing the definition. Use it when a request means one of several places that currently look alike; patch the definition itself when it means all of them. The copy is returned with fresh ids, so patch it on the next turn. Mutually exclusive with node/insert/remove."
+              }
+            },
+            "required": [
+              "targetId"
+            ]
+          }
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Check the patches and save nothing."
+        },
         "perspective_id": {
-          "description": "Perspective UUID",
-          "type": "string"
+          "type": "string",
+          "description": "Perspective UUID"
         },
         "base_uri": {
-          "description": "URI of the record the tool works on",
-          "type": "string"
-        },
-        "tool": {
-          "description": "The tool's name, as list_record_tools gives it",
-          "type": "string"
-        },
-        "arguments": {
-          "description": "The tool's own arguments, as its parameters in list_record_tools describe them",
-          "type": "object",
-          "additionalProperties": true,
-          "default": {}
+          "type": "string",
+          "description": "URI of the Template record"
         }
       },
       "required": [
         "perspective_id",
         "base_uri",
-        "tool"
+        "version",
+        "patches"
       ]
     }
   }

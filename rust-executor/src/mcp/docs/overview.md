@@ -77,16 +77,16 @@ Every write is validated against the class schema before anything is
 written; a rejection names the property, the expected type and the
 cardinality, so fix what the error says rather than guessing.
 
-### Tools apps install for their own records
+### WE templates
 
 | Tool | What it does |
 | --- | --- |
-| `list_record_tools(class_name?)` | The tools apps have installed on this node for their kinds of record — editing an app's page layouts, say: the classes each set works on, its documentation topic to read first with `get_documentation`, and each tool's parameters |
-| `call_record_tool(perspective_id, base_uri, tool, arguments)` | Run one of them on one record. A tool that writes saves its change as you, all at once |
+| `template_read(perspective_id, base_uri, ...)` | Read a WE app's Template record: the template whole, or as an outline when it is large, and its version |
+| `template_update(perspective_id, base_uri, version, patches)` | Patch the template by WE's own rules and save it as you, all at once |
 
-Prefer these over `instance_update` for a class an app has tools for: the tool knows the app's
-rules for that record — what makes it valid, and what else has to change with it — where a raw
-property write does not.
+Use these, not `instance_update`, for a Template: they apply WE's rules for a template — what
+makes it valid, and that its version moves with it — where a raw property write does not.
+`get_documentation(topic="template")` is the guide; read it before a first edit.
 
 ### Tree and raw links
 

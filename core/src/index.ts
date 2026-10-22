@@ -11,7 +11,6 @@ export * from "./language/Language";
 export * from "./language/LanguageRef";
 export * from "./language/LanguageHandle";
 export * from "./language/LanguageMeta";
-export * from "./toolBundles/ToolBundlesClient";
 export * from "./links/Links";
 export * from "./Literal";
 export * from "./perspectives/Perspective";
