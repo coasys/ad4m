@@ -1693,24 +1693,6 @@ impl LanguageController {
             return Ok(Language::new(resolved_address));
         }
 
-        // A bundle on disk is one this executor templated, published or
-        // installed, and boot loads every one of them as it is: load it (or
-        // wait for the install already loading it), without asking the
-        // language language, which may not have it yet.
-        if languages_directory()
-            .join(&resolved_address)
-            .join("bundle.js")
-            .exists()
-        {
-            Self::install_language(resolved_address.clone())
-                .await
-                .map_err(|e| LanguageError::LoadError {
-                    address: resolved_address.clone(),
-                    message: format!("Failed to install language: {}", e),
-                })?;
-            return Ok(Language::new(resolved_address));
-        }
-
         // Get the language language address
         let language_language_address = {
             let sys = self.system_addresses.lock().await;
