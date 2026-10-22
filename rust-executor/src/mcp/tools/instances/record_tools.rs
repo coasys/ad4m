@@ -132,14 +132,7 @@ impl Ad4mMcpHandler {
             "args": Value::Object(p.arguments),
             "author": did_for_context(&agent_context).ok(),
         });
-        let answer = match found
-            .sandbox
-            .call(
-                &["toolsets", &found.toolset, "call"],
-                vec![json!(found.tool.name), input],
-            )
-            .await
-        {
+        let answer = match found.call(input).await {
             Ok(answer) => answer,
             Err(e) => return error_json(format!("'{}' failed: {e}", p.tool)),
         };

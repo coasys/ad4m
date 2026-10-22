@@ -7,8 +7,14 @@
 //!
 //! **A toolset name is owned by one bundle.** Installing a bundle that exports a name another
 //! bundle already does replaces that bundle — which is how an app ships a new release of its
-//! tools. A tool name must be unique across every installed toolset, since that is how a call
-//! names it.
+//! tools. A release must export every toolset of the bundle it replaces; one that would drop a
+//! toolset is refused, so a release cannot remove tools another toolset's users rely on. A tool
+//! name must be unique across every installed toolset, since that is how a call names it.
+//!
+//! **A record is seen by one call.** Each tool call runs in a fresh isolate of its own, started
+//! from the bundle's source and dropped after the call, so nothing a call hands the bundle is
+//! there for any other call, whoever makes it. The isolate kept per bundle reads what the bundle
+//! exports and serves its documentation; it is never given a record.
 //!
 //! One registry per process ([`ToolBundleRegistry::global`]), like the executor's other
 //! services: the RPC handlers that install bundles take no state but the request, so there is
@@ -20,7 +26,7 @@ use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 use ts_rs::TS;
 
@@ -71,13 +77,30 @@ pub struct InstalledBundle {
     pub toolsets: Vec<Toolset>,
 }
 
-/// A tool found by name: what to call it through, and what it is.
+/// A tool found by name: what it is, and the bundle to call it in.
 #[derive(Clone)]
 pub struct FoundTool {
-    pub sandbox: BundleSandbox,
     pub toolset: String,
     pub applies_to: Vec<String>,
     pub tool: BundleTool,
+    address: String,
+    source: Arc<str>,
+    limits: SandboxLimits,
+}
+
+impl FoundTool {
+    /// Call the tool with `input` (the record, the arguments, the author) and await its answer,
+    /// in a fresh isolate that ends with the call.
+    pub async fn call(&self, input: Value) -> Result<Value, SandboxError> {
+        let sandbox =
+            BundleSandbox::start(self.address.clone(), self.source.clone(), self.limits).await?;
+        sandbox
+            .call(
+                &["toolsets", &self.toolset, "call"],
+                vec![json!(self.tool.name), input],
+            )
+            .await
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -96,6 +119,8 @@ pub enum RegistryError {
 
 struct Loaded {
     bundle: InstalledBundle,
+    source: Arc<str>,
+    /// Reads the bundle's documentation. Never given a record: see the module doc.
     sandbox: BundleSandbox,
 }
 
@@ -178,6 +203,7 @@ impl ToolBundleRegistry {
         loaded.extend(kept);
         loaded.push(Loaded {
             bundle: bundle.clone(),
+            source: Arc::from(source),
             sandbox,
         });
         info!(
@@ -264,10 +290,12 @@ impl ToolBundleRegistry {
                     .iter()
                     .find(|t| t.name == name)
                     .map(|tool| FoundTool {
-                        sandbox: l.sandbox.clone(),
                         toolset: toolset.name.clone(),
                         applies_to: toolset.applies_to.clone(),
                         tool: tool.clone(),
+                        address: l.bundle.address.clone(),
+                        source: l.source.clone(),
+                        limits: self.limits,
                     })
             })
         })
