@@ -3074,3 +3074,63 @@ async fn a_record_tool_refuses_an_unknown_tool_and_a_record_of_another_class() {
         "{wrong}"
     );
 }
+
+/// A file-like property: its value is stored as an expression on a language rather than as a
+/// literal, so what is written is what that language takes — an object of bytes and type for a
+/// file — whatever the declared datatype says.
+const ATTACHMENT_SDNA: &str = r#"{
+  "target_class": "ns://Attachment",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Attachment"}
+  ],
+  "properties": [
+    {"path":"ns://attachment_title","name":"title","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://attachment_title","target":"value"}]},
+    {"path":"ns://attachment_file","name":"file","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "resolve_language":"QmzSYwdTestFileLanguage",
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://attachment_file","target":"value"}]}
+  ]
+}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_property_stored_through_a_language_takes_the_value_the_language_does() {
+    let (handler, uuid, _guard) = setup_with(&[("Attachment", ATTACHMENT_SDNA)], false).await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Attachment".into(),
+                properties: Some(props(&[("title", json!("notes"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let base_uri = created["base_uri"].as_str().expect("created").to_string();
+    let file =
+        json!({ "data_base64": "e30=", "name": "notes.json", "file_type": "application/json" });
+
+    let on_a_literal = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Attachment".into(),
+                base_uri: base_uri.clone(),
+                properties: props(&[("title", file.clone())]),
+            }))
+            .await,
+    );
+    assert!(on_a_literal.get("error").is_some(), "{on_a_literal}");
+
+    let on_a_file = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Attachment".into(),
+                base_uri,
+                properties: props(&[("file", file)]),
+            }))
+            .await,
+    );
+    assert_eq!(on_a_file["success"], true, "{on_a_file}");
+}

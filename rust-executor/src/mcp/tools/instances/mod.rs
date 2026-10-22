@@ -138,6 +138,16 @@ impl<'a> PropView<'a> {
         self.prop.is_required
     }
 
+    /// The language the value is stored through as an expression, when it is not a literal — a
+    /// file property's file-storage language, say. Such a value is what the language takes, which
+    /// need not be the declared datatype: a file is an object of its bytes and type.
+    pub(crate) fn stored_by_language(&self) -> Option<&'a str> {
+        self.prop
+            .resolve_language
+            .as_deref()
+            .filter(|language| *language != "literal")
+    }
+
     /// Multi-valued (collection or `*Many` relation).
     ///
     /// Relations are all `is_collection` in the shape (the pipeline hydrates
