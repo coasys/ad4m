@@ -583,7 +583,10 @@ async fn a_call_is_stopped_at_the_time_limit_even_when_its_caller_has_gone() {
 fn a_bundle_s_log_line_is_bounded_and_never_above_debug() {
     use log::Level;
     let (level, line) = super::sandbox::log_line(0, "quiet");
-    assert_eq!((level, line.as_str()), (Level::Trace, "[tool-bundle] quiet"));
+    assert_eq!(
+        (level, line.as_str()),
+        (Level::Trace, "[tool-bundle] quiet")
+    );
     for (asked, name) in [(1, "info"), (2, "warn"), (3, "error"), (200, "error")] {
         let (level, line) = super::sandbox::log_line(asked, "loud");
         assert_eq!(level, Level::Debug, "{asked}");
