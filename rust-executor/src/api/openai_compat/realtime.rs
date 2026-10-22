@@ -24,11 +24,11 @@
 //!
 //! Auth: the WS extractor reads the bearer JWT from the
 //! `Authorization` header *or* a `?token=` query param (per
-//! `AuthContext`).  Capabilities checked: `AI_TRANSCRIBE`.
+//! `RequestContext`).  Capabilities checked: `AI_TRANSCRIBE`.
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use base64::Engine;
 use futures::SinkExt;
@@ -36,21 +36,40 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
-use crate::agent::capabilities::{check_capability, AI_TRANSCRIBE_CAPABILITY};
+use crate::agent::capabilities::AI_TRANSCRIBE_CAPABILITY;
 use crate::ai_service::AIService;
-use crate::api::auth::AuthContext;
-use crate::types::ModelType;
+use crate::api::errors::ApiError;
+use crate::types::{ModelType, RequestContext};
 
-pub async fn realtime_ws(auth: AuthContext, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(auth, socket))
+/// A token that opens no session gets the upgrade, an `unauthorized` error event and a close
+/// with 1008, before any work: a browser cannot read the HTTP status of a refused upgrade.
+pub async fn realtime_ws(
+    caller: Result<RequestContext, ApiError>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    match caller {
+        Ok(caller) => ws.on_upgrade(move |socket| handle_socket(caller, socket)),
+        Err(ApiError::Unauthorized(reason)) => ws.on_upgrade(move |mut socket| async move {
+            let _ = send_error(&mut socket, "unauthorized", &reason).await;
+            let code = crate::api::ws_rpc::CLOSE_TOKEN_ENDED;
+            crate::api::ws_rpc::close_refused(socket, code, reason).await;
+        }),
+        Err(ApiError::Unavailable(reason)) => ws.on_upgrade(move |mut socket| async move {
+            let _ = send_error(&mut socket, "unavailable", &reason).await;
+            let code = crate::api::ws_rpc::CLOSE_TRY_AGAIN_LATER;
+            crate::api::ws_rpc::close_refused(socket, code, reason).await;
+        }),
+        Err(e) => e.into_response(),
+    }
 }
 
-async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
-    if let Err(e) = check_capability(&auth.capabilities, &AI_TRANSCRIBE_CAPABILITY) {
+async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
+    if let Err(e) = caller.require(&AI_TRANSCRIBE_CAPABILITY) {
         let _ = send_error(&mut socket, "forbidden", &e).await;
         let _ = socket.close().await;
         return;
     }
+    let session = caller.session.clone();
 
     let mut stream_id: Option<String> = None;
     let mut delta_rx: Option<broadcast::Receiver<String>> = None;
@@ -96,6 +115,13 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
             Ev::Ws(None) | Ev::Ws(Some(Err(_))) => break,
             Ev::Ws(Some(Ok(m))) => m,
         };
+
+        // Check the token again on every client message: expiry and revokeToken() end the
+        // session, as they do on the RPC socket.
+        if let Err(e) = session.check() {
+            let _ = send_error(&mut socket, "unauthorized", &e.to_string()).await;
+            break;
+        }
 
         let text = match msg {
             Message::Text(t) => t.to_string(),
@@ -169,14 +195,12 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
 
                 // Tear down any prior session before opening a new one.
                 if let Some(old_sid) = stream_id.take() {
-                    let _ = service
-                        .close_transcription_stream(&old_sid, &auth.auth_token)
-                        .await;
+                    let _ = service.close_transcription_stream(&old_sid, &caller).await;
                 }
                 delta_rx = None;
 
                 let sid = match service
-                    .open_transcription_stream(model_id.clone(), None, auth.auth_token.clone())
+                    .open_transcription_stream(model_id.clone(), None, &caller)
                     .await
                 {
                     Ok(id) => id,
@@ -236,7 +260,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                 };
                 if delta_rx.is_none() {
                     match service
-                        .feed_transcription_stream_with_broadcast(sid, samples, &auth.auth_token)
+                        .feed_transcription_stream_with_broadcast(sid, samples, &caller)
                         .await
                     {
                         Ok(rx) => delta_rx = Some(rx),
@@ -246,7 +270,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                     }
                 } else {
                     if let Err(e) = service
-                        .feed_transcription_stream(sid, samples, &auth.auth_token)
+                        .feed_transcription_stream(sid, samples, &caller)
                         .await
                     {
                         let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
@@ -275,9 +299,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
 
     if let Some(ref sid) = stream_id {
         if let Ok(service) = AIService::global_instance().await {
-            let _ = service
-                .close_transcription_stream(sid, &auth.auth_token)
-                .await;
+            let _ = service.close_transcription_stream(sid, &caller).await;
         }
     }
     let _ = socket.close().await;

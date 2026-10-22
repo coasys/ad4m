@@ -64,14 +64,14 @@ assume they are there; prefer the static tools below.
 
 | Tool | What it does |
 | --- | --- |
-| `instance_create(perspective_id, class_name, properties, base_uri?, parent?)` | Create an instance; `parent` also links it as an `ad4m://has_child` child (e.g. a Message into a Channel). Returns its `base_uri` |
-| `instance_query(perspective_id, class_name, filter?, parent?, limit?, offset?)` | List instances with property values; `filter` is a where clause, `parent` scopes to one node's children |
+| `instance_create(perspective_id, class_name, properties, base_uri?, parent?)` | Create an instance; `parent` also puts it under that node (e.g. a Message into a Channel), the way the node holds children. Returns its `base_uri` |
+| `instance_query(perspective_id, class_name, filter?, parent?, limit?, offset?)` | List instances with property values; `filter` is a where clause, `parent` scopes to what one node contains |
 | `instance_get(perspective_id, class_name, base_uri)` | One instance, fully resolved |
 | `instance_update(perspective_id, class_name, base_uri, properties)` | Set single-valued properties |
 | `instance_add_to_collection(perspective_id, class_name, base_uri, collection, item_uri)` | Add an item to a collection property |
 | `instance_remove_from_collection(perspective_id, class_name, base_uri, collection, item_uri)` | Remove an item from a collection property (the item itself stays) |
 | `instance_remove(perspective_id, class_name, base_uri)` | Delete an instance and every link touching it |
-| `instance_transcript(perspective_id, class_name, parent, limit?, text_property?)` | The newest N children of a class under a node as a readable transcript (timestamp, author name, text) — the way to read a conversation-shaped container, whatever the app calls it |
+| `instance_transcript(perspective_id, parent, limit?)` | The newest N children under a node that carry text, as a readable transcript (timestamp, author name, text). It reads through the built-in TextContent: every class with a `text` property or a property aliased to `text` — the way to read a conversation-shaped container, whatever the app calls its classes |
 
 Every write is validated against the class schema before anything is
 written; a rejection names the property, the expected type and the
@@ -81,8 +81,8 @@ cardinality, so fix what the error says rather than guessing.
 
 | Tool | What it does |
 | --- | --- |
-| `add_child(perspective_id, parent, child)` | Link any two nodes with `ad4m://has_child` (class-agnostic; e.g. a Channel under `ad4m://self`) |
-| `get_children(perspective_id, parent, limit?)` | Children of any node with timestamp and author, oldest first |
+| `add_child(perspective_id, parent, child)` | Put any node under another (class-agnostic; e.g. a Channel under `ad4m://self`): through the parent class's own `children` relation, else `ad4m://has_child` |
+| `get_children(perspective_id, parent, limit?)` | Children of any node, whatever their class and however the node holds them, with timestamp and author, oldest first |
 | `add_link` / `query_links` | Raw triples — rarely needed, see "classes, not links" below |
 | `execute_commands` | Run raw SDNA actions on an instance (escape hatch) *(direct MCP only)* |
 
@@ -119,10 +119,11 @@ cardinality, so fix what the error says rather than guessing.
 5. get_children(perspective_id, parent="ad4m://self")   → the containment tree: what the top-level
                                                           nodes are, whatever class they may be
    instance_query(perspective_id, class_name=<class>)   → …or list one class from step 4 by name
-6. instance_transcript(perspective_id, class_name=<item class>, parent=<container id>, limit=20)
-                                                        → read a container. In a flat space that
-                                                          declares no container class, the parent
-                                                          is "ad4m://self" itself
+6. instance_transcript(perspective_id, parent=<container id>, limit=20)
+                                                        → read a container's children that carry
+                                                          text. In a flat space that declares no
+                                                          container class, the parent is
+                                                          "ad4m://self" itself
 7. instance_create(perspective_id, class_name=<item class>, properties={…}, parent=<the SAME parent>)
                                                         → write into what you just read
 ```
@@ -207,7 +208,8 @@ publishing a neighbourhood subscribes you to mentions automatically. Only
 when talking to the executor's MCP endpoint directly do you use the raw
 builders (`generate_waker_query`, `get_mention_waker_config`) and register
 the query over the WebSocket API yourself. When woken with a perspective UUID
-and a parent id, read that container with `instance_transcript` — using the
-item class `describe_perspective` reports, which need not be called `Message`
-— skip your own items (compare `author` with `get_my_did`), and reply into the
+and a parent id, read that container with `instance_transcript(parent=<id>)` —
+or with `instance_query` and the item class `describe_perspective` reports,
+which need not be called `Message`, for one class's property maps — skip your
+own items (compare `author` with `get_my_did`), and reply into the
 **same** parent.

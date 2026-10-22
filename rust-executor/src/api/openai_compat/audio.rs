@@ -29,19 +29,16 @@ use super::errors::{OpenAIError, OpenAIJson, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::tts_passthrough;
 use super::types::{SpeechRequest, TranscriptionResponse};
-use crate::agent::capabilities::{
-    check_capability, AI_PROMPT_CAPABILITY, AI_TRANSCRIBE_CAPABILITY,
-};
+use crate::agent::capabilities::{AI_PROMPT_CAPABILITY, AI_TRANSCRIBE_CAPABILITY};
 use crate::ai_service::AIService;
-use crate::api::auth::AuthContext;
 use crate::billing::{bill_compute, check_compute_credits};
-use crate::types::ModelType;
+use crate::types::{ModelType, RequestContext};
 
 pub async fn transcriptions(
-    auth: AuthContext,
+    auth: RequestContext,
     mut multipart: Multipart,
 ) -> Result<Response, OpenAIError> {
-    check_capability(&auth.capabilities, &AI_TRANSCRIBE_CAPABILITY)
+    auth.require(&AI_TRANSCRIBE_CAPABILITY)
         .map_err(OpenAIError::forbidden)?;
 
     let mut model_field: Option<String> = None;
@@ -96,9 +93,8 @@ pub async fn transcriptions(
 
     let samples = audio_decode(&bytes, content_type.as_deref())?;
 
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        check_compute_credits(&email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -106,7 +102,7 @@ pub async fn transcriptions(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let text = service
-        .transcribe_buffer(model_id, samples, auth.auth_token.clone())
+        .transcribe_buffer(model_id, samples, &auth)
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
@@ -117,24 +113,24 @@ pub async fn transcriptions(
 }
 
 pub async fn speech(
-    auth: AuthContext,
+    auth: RequestContext,
     OpenAIJson(req): OpenAIJson<SpeechRequest>,
 ) -> Result<Response, OpenAIError> {
-    check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
+    auth.require(&AI_PROMPT_CAPABILITY)
+        .map_err(OpenAIError::forbidden)?;
 
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        check_compute_credits(&email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
         let amount = billing_amounts::speech_amount(req.input.chars().count());
-        bill_compute(&email, amount, "ai_tts", Some("v1/audio/speech"))?;
+        bill_compute(agent_did, amount, "ai_tts", Some("v1/audio/speech"))?;
     }
 
     let response_format = req
         .response_format
         .clone()
         .unwrap_or_else(|| "mp3".to_string());
-    let audio = tts_passthrough::synthesize(&auth, &req)
+    let audio = tts_passthrough::synthesize(&req)
         .await
         .map_err(|e| match e {
             tts_passthrough::TtsPassthroughError::NotConfigured => OpenAIError::not_implemented(

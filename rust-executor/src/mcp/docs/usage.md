@@ -23,8 +23,9 @@ types instead of juggling triples.
 
 Use `instance_create` / `instance_query` / `instance_get` / `instance_update` /
 `instance_add_to_collection` / `instance_remove_from_collection` /
-`instance_remove`, plus `instance_transcript` for reading, all with a
-`class_name` parameter. That is your default vocabulary.
+`instance_remove`, all with a `class_name` parameter, plus
+`instance_transcript` for reading the children of a node that carry text (it
+takes no class). That is your default vocabulary.
 
 **Why classes over raw links:** `add_link` writes exactly the triple you give
 it — it has no concept of "this one particular message" versus "this text".
@@ -87,7 +88,7 @@ instance_create(perspective_id, class_name="Message",
     base_uri is auto-generated when omitted. Returns the instance's id.
 
 instance_query(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
-  → instances that are ad4m://has_child children of parent, as raw property maps
+  → instances parent contains (see "Tree structure"), as raw property maps
     (id, author, timestamp, one key per property).
     There is NO order parameter: results come oldest-first, and limit keeps the
     OLDEST N — so this is not how you read "the latest messages"
@@ -97,10 +98,13 @@ instance_query(perspective_id, class_name="Message", parent="<channel-id>", limi
     ({"count": {"gt": 5}}, {"title": {"contains": "mcp"}}, {"owner": {"not": "…"}}),
     and OR / AND / NOT combinators; "id" filters on the instance URI.
 
-instance_transcript(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
+instance_transcript(perspective_id, parent="<channel-id>", limit=20)
   → the NEWEST N instances under parent, presented oldest-to-newest as a
-    plain-text transcript: timestamp, author display name and DID, and the text
-    property (body by default; override with text_property).
+    plain-text transcript: timestamp, author display name and DID, and the
+    text as stored (HTML or Markdown). It is one query on the built-in
+    abstract class TextContent: every class with a `text` property, or a
+    property aliased to `text`. A class that has neither is not in it; read
+    that class with instance_query.
     One call, no id juggling — read channels with this, not with instance_query.
     limit defaults to 50 and is capped at 500.
 
@@ -126,8 +130,12 @@ time.
 
 ## Tree structure
 
-Instances below a parent are linked via `ad4m://has_child`. The root of a
-perspective's tree is `ad4m://self`.
+A node contains its children through the built-in class `Container`: its
+`ad4m://has_child` links count whatever the node is, and when the node is an
+instance of a class whose `children` relation is its own (a block over
+`we://child`), that relation's links count too. A child can sit in several
+containers. The root of a perspective's tree is `ad4m://self`. Every tool below
+answers from this one rule; none of them asks you for a predicate.
 
 Not every perspective has a tree at all — a flat perspective (all instances
 directly in the perspective, no channels) is valid and common for simple
@@ -141,8 +149,10 @@ Two class-agnostic tools work on this tree directly:
   `parent="ad4m://self"` gives the top-level channels. `limit` defaults to 100,
   capped at 500. The parameter is `parent` — there is no `id` parameter and no
   `parent_address`.
-- `add_child(perspective_id, parent, child)` links an existing node under a
-  parent — for re-parenting, or for parents that are not instances.
+- `add_child(perspective_id, parent, child)` puts an existing node under a
+  parent — for re-parenting, or for parents that are not instances. The parent
+  decides how: its class's own `children` relation when it has one, else an
+  `ad4m://has_child` link.
 
 New instances do not need `add_child`: `instance_create(parent=…)` already
 writes the child link. Bare strings passed as `parent` / `child` are wrapped as
@@ -194,4 +204,4 @@ is what you filter your own messages by.
 | A query or `describe_perspective` comes back empty right after joining a neighbourhood | SHACL schema and Holochain data are still gossiping in. | Wait 3–5 minutes and retry. Nothing to fix. |
 | A write is rejected naming a property, a type or a cardinality | The class schema says otherwise. | Do not guess — the rejection is precise. Re-read `describe_perspective` and fix exactly what it named. |
 | An instance you created looks "uninitialized" to other agents | You called `instance_update` right after `instance_create` and the remove+re-add raced gossip. | Pass every property in the `instance_create` call. |
-| `instance_query` keeps returning the same old messages when you wanted the newest | `instance_query` has no `order` and its `limit` keeps the *oldest* N. | Use `instance_transcript` to read the newest N. |
+| `instance_query` keeps returning the same old messages when you wanted the newest | `instance_query` has no `order` and its `limit` keeps the *oldest* N. | Use `instance_transcript` to read the newest N children that carry text; for one class, page `instance_query` with `offset` (`total_count` minus N). |

@@ -100,4 +100,27 @@ describe("NeighbourhoodProxy", () => {
     expect(callbacks1).toBe(0);
     expect(callbacks2).toBe(1);
   });
+
+  // `perspective.getNeighbourhoodProxy()` passes no DID, and that is how apps reach sessions.
+  describe("createSession with no DID given", () => {
+    function proxyAnswering(did: string | null) {
+      const client = new NeighbourhoodClient("http://localhost:0", "test-token");
+      const callerDid = jest.spyOn(client, "callerDid").mockResolvedValue(did);
+      jest.spyOn(client, "sfuStatus").mockRejectedValue(new Error("no sfu"));
+      return { proxy: new NeighbourhoodProxy(client, "uuid"), callerDid };
+    }
+
+    it("asks the executor for the caller's DID, once", async () => {
+      const { proxy, callerDid } = proxyAnswering("did:key:me");
+      const session = await proxy.createSession("room", { neighbourhoodUrl: "neighbourhood://n" });
+      await proxy.createSession("room-2", { neighbourhoodUrl: "neighbourhood://n" });
+      expect(session).toBeDefined();
+      expect(callerDid).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses when the executor reports no DID", async () => {
+      const { proxy } = proxyAnswering(null);
+      await expect(proxy.createSession("room")).rejects.toThrow("no agent DID");
+    });
+  });
 });

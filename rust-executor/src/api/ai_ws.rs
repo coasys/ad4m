@@ -15,20 +15,23 @@ use crate::types::{
 };
 use base64::Engine;
 
+use super::guards::refuse_user_session;
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
-fn check_compute_credits_ws(auth_token: &str) -> Result<(), WsRpcError> {
+/// Refuses a request whose user has no compute credits left. A caller without a user
+/// (the operator, an app) pays nothing. `agent_did` is the managed agent the request acts as.
+fn check_compute_credits_ws(agent_did: Option<&str>) -> Result<(), WsRpcError> {
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
     if global_free {
         return Ok(());
     }
-    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
-        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+    if let Some(did) = agent_did {
+        let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(did))
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
-            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+            let credits = Ad4mDb::with_global_instance(|db| db.get_agent_credits(did))
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             if credits <= 0.0 {
                 return Err(WsRpcError::forbidden("Insufficient compute credits"));
@@ -41,16 +44,30 @@ fn check_compute_credits_ws(auth_token: &str) -> Result<(), WsRpcError> {
 // ── Models ──
 
 async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
+    ctx.require(&AI_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let _service = AIService::global_instance()
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let models = Ad4mDb::with_global_instance(|db| db.get_models())
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let models: Vec<Model> = Ad4mDb::with_global_instance(|db| db.get_models())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .into_iter()
+        .map(|model| model_for_session(model, &ctx))
+        .collect();
     Ok(serde_json::to_value(models)?)
+}
+
+/// A model as a session may see it. A user session sees the model but not its provider
+/// key: the key belongs to the executor's operator, and anyone holding it can spend on it.
+fn model_for_session(mut model: Model, ctx: &RequestContext) -> Model {
+    if ctx.user_did().is_some() {
+        if let Some(api) = model.api.as_mut() {
+            api.api_key = String::new();
+        }
+    }
+    model
 }
 
 /// `ai.discoverModels` — what does this endpoint serve, and does this key work?
@@ -59,24 +76,26 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// filling in the form and wants the list to pick from, before there is
 /// anything to list. Answers the provider's own model ids.
 ///
-/// Gated on AI_CREATE rather than AI_READ. It reads nothing of this node's,
+/// Gated on AI_CREATE rather than AI_READ. It reads nothing of this executor's,
 /// but it makes an outbound request to an arbitrary URL with an
 /// arbitrary key, which is the same authority adding a model carries and more
 /// than reading the models already configured.
 ///
 /// That includes the failure body. `list_models` puts the upstream response
 /// verbatim into its error, so a caller can point `baseUrl` at a host this
-/// node can reach and read what it answers. Deliberate, on two grounds: a
+/// executor can reach and read what it answers. Deliberate, on two grounds: a
 /// holder of AI_CREATE can already name an arbitrary URL and send it
 /// credentials, so this widens reach and not authority; and the body is the
 /// reason the endpoint is worth having, because a status alone does not
 /// separate a bad key from a bad model name from a host that is not an LLM.
-/// Revisit it if AI_CREATE is ever granted more widely than to the operator of
-/// the node — the reach is a cleaner read primitive than `addModel` plus a
+/// The default user capabilities include AI_CREATE, so the call also refuses
+/// user sessions: the reach is a cleaner read primitive than `addModel` plus a
 /// prompt, needing no model and no completion.
 async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // The executor sends a request to a URL the caller chooses.
+    refuse_user_session(&ctx, "ai.discoverModels")?;
 
     let base_url = params.require_str("baseUrl")?;
     let base_url = url::Url::parse(&base_url)
@@ -138,8 +157,10 @@ pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRp
 }
 
 async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Node-wide settings: every user's prompts go to the models and keys set here.
+    refuse_user_session(&ctx, "ai.addModel")?;
 
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
@@ -159,8 +180,9 @@ async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "ai.updateModel")?;
 
     let id = params.require_str("id")?;
     let model: ModelInput =
@@ -181,8 +203,9 @@ async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "ai.removeModel")?;
 
     let id = params.require_str("id")?;
 
@@ -199,8 +222,9 @@ async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "ai.setDefaultModel")?;
 
     let id = params.require_str("id")?;
     let body: SetDefaultModelRequest = serde_json::from_value(params.clone())
@@ -225,7 +249,7 @@ async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
+    ctx.require(&AI_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let model_type_str = params.require_str("modelType")?;
@@ -243,14 +267,16 @@ async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
         None
     };
 
-    Ok(serde_json::to_value(model)?)
+    Ok(serde_json::to_value(
+        model.map(|model| model_for_session(model, &ctx)),
+    )?)
 }
 
 async fn get_model_loading_status(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
+    ctx.require(&AI_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let model = params
@@ -268,7 +294,7 @@ async fn get_model_loading_status(
 // ── Tasks ──
 
 async fn list_tasks(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
+    ctx.require(&AI_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let tasks = AIService::get_tasks().map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -276,7 +302,7 @@ async fn list_tasks(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let task: AITaskInput =
@@ -296,7 +322,7 @@ async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
 }
 
 async fn update_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let task: AITask = serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
@@ -315,7 +341,7 @@ async fn update_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn remove_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let id = params.require_str("id")?;
@@ -335,9 +361,9 @@ async fn remove_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 // ── Prompt & Embed ──
 
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
+    ctx.require(&AI_PROMPT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(&ctx.auth_token)?;
+    check_compute_credits_ws(ctx.user_did())?;
 
     let body: PromptRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -347,7 +373,11 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let result = service
-        .prompt(body.task_id, body.prompt, Some(ctx.auth_token.clone()))
+        .prompt(
+            body.task_id,
+            body.prompt,
+            ctx.user_did().map(str::to_string),
+        )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -355,9 +385,9 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
+    ctx.require(&AI_PROMPT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(&ctx.auth_token)?;
+    check_compute_credits_ws(ctx.user_did())?;
 
     let body: EmbedRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -367,7 +397,7 @@ async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let embedding = service
-        .embed(body.model_id, body.text, Some(ctx.auth_token.clone()))
+        .embed(body.model_id, body.text, ctx.user_did().map(str::to_string))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -385,9 +415,9 @@ async fn open_transcription_stream(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
+    ctx.require(&AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(&ctx.auth_token)?;
+    check_compute_credits_ws(ctx.user_did())?;
 
     let body: AiTranscriptionOpenParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -397,11 +427,7 @@ async fn open_transcription_stream(
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let stream_id = service
-        .open_transcription_stream(
-            body.model_id,
-            body.params.map(|p| p.into()),
-            ctx.auth_token.clone(),
-        )
+        .open_transcription_stream(body.model_id, body.params.map(|p| p.into()), &ctx)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -412,7 +438,7 @@ async fn close_transcription_stream(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
+    ctx.require(&AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: AiTranscriptionCloseParams = serde_json::from_value(params)
@@ -423,7 +449,7 @@ async fn close_transcription_stream(
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     service
-        .close_transcription_stream(&body.stream_id, &ctx.auth_token)
+        .close_transcription_stream(&body.stream_id, &ctx)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -476,7 +502,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 // This endpoint receives raw PCM Float32 LE bytes via HTTP POST.
 // It cannot go through WS JSON, so it stays as a regular Axum handler.
 
-use super::auth::{AppState, AuthContext};
+use super::auth::AppState;
 use super::errors::ApiError;
 use axum::extract::State;
 use axum::response::Json;
@@ -487,14 +513,14 @@ use axum::response::Json;
 /// Stream IDs are passed via `X-Stream-Ids` header (comma-separated).
 pub async fn feed_transcription_stream(
     State(_state): State<AppState>,
-    auth: AuthContext,
+    context: RequestContext,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<String>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)
+    context
+        .require(&AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
-    check_compute_credits_ws(&context.auth_token).map_err(|e| ApiError::Forbidden(e.message))?;
+    check_compute_credits_ws(context.user_did()).map_err(|e| ApiError::Forbidden(e.message))?;
 
     let stream_ids_header = headers
         .get("x-stream-ids")
@@ -543,7 +569,7 @@ pub async fn feed_transcription_stream(
     let mut errors: Vec<String> = Vec::new();
     for stream_id in &stream_ids {
         if let Err(e) = service
-            .feed_transcription_stream(stream_id, audio_f32.clone(), &context.auth_token)
+            .feed_transcription_stream(stream_id, audio_f32.clone(), &context)
             .await
         {
             log::warn!("Error feeding stream {}: {}", stream_id, e);
@@ -668,4 +694,127 @@ pub struct AiTranscriptionOpenParams {
 #[ts(export)]
 pub struct AiTranscriptionCloseParams {
     pub stream_id: String,
+}
+
+#[cfg(test)]
+mod model_key_tests {
+    use super::*;
+    use crate::types::{ModelApi, ModelApiType};
+
+    fn remote_model() -> Model {
+        Model {
+            id: "m1".to_string(),
+            name: "Remote".to_string(),
+            api: Some(ModelApi {
+                base_url: url::Url::parse("https://api.example.org/v1").unwrap(),
+                api_key: "sk-provider-secret".to_string(),
+                model: "gpt".to_string(),
+                api_type: ModelApiType::OpenAi,
+                max_num_ctx: None,
+            }),
+            local: None,
+            model_type: ModelType::Llm,
+        }
+    }
+
+    /// A user session for the managed agent `agent_did`, else an app token, holding `caps`.
+    fn ctx_with(agent_did: Option<&str>, caps: Vec<Capability>) -> RequestContext {
+        match agent_did {
+            Some(did) => RequestContext::user_for_test(did, caps),
+            None => RequestContext::app_for_test(caps),
+        }
+    }
+
+    fn ctx(agent_did: Option<&str>) -> RequestContext {
+        ctx_with(agent_did, vec![])
+    }
+
+    #[test]
+    fn user_sessions_see_models_without_provider_keys() {
+        let model = model_for_session(remote_model(), &ctx(Some("did:key:ai-user")));
+        assert_eq!(model.api.as_ref().unwrap().api_key, "");
+        assert_eq!(model.api.as_ref().unwrap().model, "gpt");
+    }
+
+    // Goes through the `ai.getDefaultModel` handler, which returned the stored model
+    // unfiltered.
+    #[tokio::test]
+    async fn user_sessions_get_the_default_model_without_its_provider_key() {
+        use crate::types::ModelApiInput;
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let id = Ad4mDb::with_global_instance(|db| {
+            db.add_model(&ModelInput {
+                name: "Remote".to_string(),
+                api: Some(ModelApiInput {
+                    base_url: "https://api.example.org/v1".to_string(),
+                    api_key: "sk-provider-secret".to_string(),
+                    model: "gpt".to_string(),
+                    api_type: "OPEN_AI".to_string(),
+                    max_num_ctx: None,
+                }),
+                local: None,
+                model_type: ModelType::Llm,
+            })
+        })
+        .unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_default_model(ModelType::Llm, &id)).unwrap();
+        let session = |agent_did: Option<&str>| {
+            Arc::new(ctx_with(agent_did, vec![AI_READ_CAPABILITY.clone()]))
+        };
+        let params = serde_json::json!({ "modelType": "LLM" });
+
+        let user = get_default_model(params.clone(), session(Some("did:key:ai-user")))
+            .await
+            .unwrap();
+        assert_eq!(user["id"], id.as_str());
+        assert_eq!(user["api"]["apiKey"], "");
+
+        let operator = get_default_model(params, session(None)).await.unwrap();
+        assert_eq!(operator["api"]["apiKey"], "sk-provider-secret");
+    }
+
+    #[test]
+    fn operator_sessions_see_the_keys() {
+        let model = model_for_session(remote_model(), &ctx(None));
+        assert_eq!(model.api.as_ref().unwrap().api_key, "sk-provider-secret");
+    }
+}
+
+#[cfg(test)]
+mod compute_credit_tests {
+    use super::*;
+
+    // #1175: the check used to decode the caller's token again to find the user. It now
+    // takes the user the request resolved, so it needs no token.
+    #[test]
+    fn the_check_reads_the_credits_of_the_requests_user() {
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        let id = uuid::Uuid::new_v4();
+        let broke = format!("broke-{id}@example.org");
+        let funded = format!("funded-{id}@example.org");
+        let broke_did = format!("did:key:broke-{id}");
+        let funded_did = format!("did:key:funded-{id}");
+        let was_free = Ad4mDb::with_global_instance(|db| {
+            db.add_user(&broke, &broke_did, "pw")?;
+            db.add_user(&funded, &funded_did, "pw")?;
+            db.set_user_credits(&funded, 5.0)?;
+            let was_free = db.get_free_hosting_enabled()?;
+            db.set_free_hosting_enabled(false)?;
+            Ok::<_, anyhow::Error>(was_free)
+        })
+        .unwrap();
+
+        let results = (
+            check_compute_credits_ws(Some(&broke_did)),
+            check_compute_credits_ws(Some(&funded_did)),
+            check_compute_credits_ws(None),
+        );
+        Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(was_free)).unwrap();
+
+        assert_eq!(results.0.unwrap_err().code, 403, "a user without credits");
+        assert!(results.1.is_ok(), "a user with credits");
+        assert!(results.2.is_ok(), "a caller without a user pays nothing");
+    }
 }

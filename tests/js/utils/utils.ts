@@ -233,6 +233,8 @@ export async function startExecutor(dataPath: string,
     dynamicClassTools: boolean = false,
     runHolochain: boolean = true,
     sharedStores: boolean = true,
+    // Added to the executor's environment, e.g. `AD4M_<FLAG>` settings.
+    env: Record<string, string> = {},
 ): Promise<ChildProcess> {
     if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
@@ -313,11 +315,13 @@ export async function startExecutor(dataPath: string,
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
     else { args.push('--insecure-no-admin-credential'); }
 
-    return spawnExecutor(args, apiPort, { enableMcp });
+    return spawnExecutor(args, apiPort, { enableMcp, env });
 }
 
-/** The `ad4m-executor` binary the suites run. */
+/** The `ad4m-executor` binary the suites run: `EXECUTOR_PATH` if set (as in
+ *  the SFU wind tunnel's harness), else this checkout's release build. */
 export function executorBinary(): string {
+    if (process.env.EXECUTOR_PATH) return path.resolve(process.env.EXECUTOR_PATH);
     return path.resolve(__dirname, '..', '..', '..', 'target', 'release', 'ad4m-executor');
 }
 

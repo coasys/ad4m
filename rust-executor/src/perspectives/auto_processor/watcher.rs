@@ -92,13 +92,12 @@ impl LeaseGuard {
                         // Also refresh last_seen so the supervisor sees this
                         // user as still active during a long interpretation
                         // pass (fix for #1010: processing counts as liveness).
-                        if let Some(email) = &context.user_email {
-                            let email = email.clone();
+                        if let Some(did) = context.managed_did() {
                             if let Err(e) = crate::db::Ad4mDb::with_global_instance(|db| {
-                                db.update_user_last_seen(&email)
+                                db.update_agent_last_seen(did)
                             }) {
                                 log::debug!(
-                                    "lease heartbeat: update_user_last_seen({email}) failed: {e:#}"
+                                    "lease heartbeat: update_agent_last_seen({did}) failed: {e:#}"
                                 );
                             }
                         }
@@ -779,12 +778,10 @@ pub async fn run_one_pass(
     // Touch last_seen immediately so the supervisor sees activity before the
     // first heartbeat fires — a managed user running a long pass must not look
     // offline while doing the most active work it ever does (fix for #1010).
-    if let Some(email) = &context.user_email {
-        let email = email.clone();
-        if let Err(e) =
-            crate::db::Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&email))
+    if let Some(did) = context.managed_did() {
+        if let Err(e) = crate::db::Ad4mDb::with_global_instance(|db| db.update_agent_last_seen(did))
         {
-            log::debug!("run_one_pass: initial update_user_last_seen({email}) failed: {e:#}");
+            log::debug!("run_one_pass: initial update_agent_last_seen({did}) failed: {e:#}");
         }
     }
 
@@ -1173,6 +1170,12 @@ pub(crate) async fn write_mint_scope_links(
             anyhow::bail!(
                 "auto_processor `{processor_id}`: mint_scope must be a `Raw` scope \
                  (id + predicate); `Traverse` scopes describe a read and name no single parent"
+            );
+        }
+        Scope::Contained(_) => {
+            anyhow::bail!(
+                "auto_processor `{processor_id}`: mint_scope must be a `Raw` scope \
+                 (id + predicate); a containment scope `{{ id }}` names no predicate to write"
             );
         }
     };

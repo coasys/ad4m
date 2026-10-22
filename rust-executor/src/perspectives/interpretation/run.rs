@@ -662,6 +662,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         };
         let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
             perspective,
+            context,
             &flow_subjects,
             flow_filter,
         )
@@ -967,6 +968,10 @@ async fn run_flow_post_pass(
     // satisfied transition has already settled by the time the mint returns,
     // and this is what records it — the cache write and the fired marks.
     // Higher thresholds leave the proposal live for other agents' votes.
+    // The sweep takes the flow lock; the mint above does not, so a vote is
+    // never held up behind the semantic check's LLM call.
+    let lock = perspective.flow_pass_lock.clone();
+    let _passes = lock.lock().await;
     let recorded = crate::perspectives::flow_instance::pass::run_flow_consensus_pass(
         perspective,
         None,
@@ -984,6 +989,13 @@ async fn run_flow_post_pass(
             outcome.voters
         );
     }
+    crate::perspectives::flow_instance::pass::run_flow_pass_for_co_owners(
+        perspective,
+        context,
+        flow_filter,
+        None,
+    )
+    .await;
 
     minted
 }
@@ -1062,6 +1074,7 @@ pub async fn run_interpretation_with_harness_and_model(
     };
     let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
         perspective,
+        context,
         &flow_subjects,
         flow_filter,
     )
@@ -1092,15 +1105,12 @@ pub async fn run_interpretation_with_harness_and_model(
         .collect();
 
     // The AD4M MCP handler is the read-tool surface. Constructed here with a
-    // pass-scoped McpContext — admin-credential from env (matches the /v1
-    // openai-compat path; empty is none, as in `Ad4mConfig::prepare`) + a
-    // fresh per-pass auth-token slot. Every existing
-    // MCP tool (`query_*`, `get_*`, subject/perspective tools) becomes
-    // visible to the LLM through `Ad4mToolProvider`.
+    // pass-scoped McpContext — the admin credential of `harness_admin_credential`
+    // + a fresh per-pass auth-token slot. Every existing MCP tool (`query_*`,
+    // `get_*`, subject/perspective tools) becomes visible to the LLM through
+    // `Ad4mToolProvider`.
     let mcp_context = crate::mcp::server::McpContext {
-        admin_credential: crate::config::non_empty_credential(
-            std::env::var("AD4M_ADMIN_CREDENTIAL").ok(),
-        ),
+        admin_credential: harness_admin_credential(&auth_token),
         auth_token: Arc::new(tokio::sync::RwLock::new(auth_token.clone())),
         // The harness reaches tools through `list_tool_schemas` /
         // `call_tool_by_name`, which always include the dynamic per-class
@@ -1178,10 +1188,13 @@ pub async fn run_interpretation_with_harness_and_model(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
+    // A pass with a caller bills the user it acts as; the caller's token named that user. An
+    // executor-owned pass (no caller token) bills no one.
+    let bill_to = auth_token.and(context.managed_did().map(str::to_string));
     let bridge = Arc::new(
         crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
             Arc::new(service),
-            auth_token,
+            bill_to,
         ),
     );
 
@@ -1267,6 +1280,48 @@ pub async fn run_interpretation_with_harness_and_model(
         debug: None,
         flow_proposals,
     })
+}
+
+/// The admin credential the harness's MCP handler compares a pass's token with. A pass
+/// with a caller token uses the executor's configured credential, so an admin caller acts
+/// as the main agent, as on the RPC socket. An executor-owned pass (the auto-processor's,
+/// with no caller token) keeps the unauthenticated local path it always had: with a
+/// credential set, the handler would ask it to authenticate and hide its read tools.
+fn harness_admin_credential(auth_token: &Option<String>) -> Option<String> {
+    auth_token.as_ref()?;
+    // An empty env credential is none, as in `Ad4mConfig::prepare`.
+    crate::config::configured_admin_credential().or_else(|| {
+        crate::config::non_empty_credential(std::env::var("AD4M_ADMIN_CREDENTIAL").ok())
+    })
+}
+
+#[cfg(test)]
+mod harness_credential_tests {
+    use super::harness_admin_credential;
+    use crate::config::{set_global_config, Ad4mConfig};
+
+    #[test]
+    fn an_executor_owned_pass_keeps_the_unauthenticated_path() {
+        let config = Ad4mConfig {
+            admin_credential: Some("configured-admin".to_string()),
+            ..Ad4mConfig::default()
+        };
+        set_global_config(config);
+        assert_eq!(harness_admin_credential(&None), None);
+        set_global_config(Ad4mConfig::default());
+    }
+
+    #[test]
+    fn a_pass_with_a_caller_token_checks_it_against_the_configured_credential() {
+        let config = Ad4mConfig {
+            admin_credential: Some("configured-admin".to_string()),
+            ..Ad4mConfig::default()
+        };
+        set_global_config(config);
+        let credential = harness_admin_credential(&Some("configured-admin".to_string()));
+        assert_eq!(credential.as_deref(), Some("configured-admin"));
+        set_global_config(Ad4mConfig::default());
+    }
 }
 
 #[cfg(test)]
@@ -1948,8 +2003,16 @@ mod tests {
             "exactly one FlowInstance must spawn on the created Task"
         );
         assert_eq!(live[0].flow_uri, "delivery://DeliveryFlow");
+        let did = crate::agent::did_for_context(&ctx).expect("did");
         assert_eq!(
-            live[0].current_state, "identified",
+            crate::perspectives::flow_instance::replica_state::FlowReplicaState::current_state(
+                &perspective.uuid,
+                &did,
+                &live[0].instance_uri,
+            )
+            .expect("recorded state")
+            .as_deref(),
+            Some("identified"),
             "fresh instance starts in the flow's first state by value"
         );
     }

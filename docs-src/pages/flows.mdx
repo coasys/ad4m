@@ -62,11 +62,57 @@ Three consequences, all intended:
 - **Retracting a vote moves the flow back.** Withdraw the signature that settled an edge and the flow stands where it stood before you signed. That is the semantics, not a bug. See [Reject is not cancel](#reject-is-not-cancel).
 
 <Callout type="info" emoji="ℹ️">
-  The engine does write a `currentState` value onto each flow instance, but it
-  is a **cache for readers, never authority**. It is a `Local` link — it never
-  syncs — and nothing in the derivation reads it. Read it for display. Never
-  decide anything on it.
+  Each agent's executor does record the state it last derived for each flow
+  instance, but that record is a **cache for readers, never authority**. It is
+  not on the graph at all: it lives in the executor's own storage, per agent,
+  never syncs, and nothing in the derivation reads it. Read it for display
+  (`currentStateName`, `perspective.flowStates`). Never decide anything on it.
 </Callout>
+
+### Reading and following state
+
+The state cache and the record of which proposals fired are your executor's
+bookkeeping, kept per agent and outside the perspective. Two agents on the
+same executor — co-owners of one neighbourhood, say — each have their own, and
+neither can see the other's. A link query or a model query never returns them.
+A vote cast on that executor updates both before the call returns, so each
+co-owner reads the new state and gets its own event.
+
+- `FlowInstance.findAll` and `FlowInstance.start` fill `currentStateName` from
+  one batched read. A run you just started reads as its flow's first state.
+  A run your executor has not derived yet — one that synced in a moment ago —
+  reads `undefined`: show it as pending, and wait for its event.
+- `perspective.flowStates(instances?)` returns
+  `[{ instance, currentState, derivedAt }]` for the instances your executor
+  keeps bookkeeping for. `currentState` is `null` for a run you started that
+  has not been derived yet; an instance with no entry is one your executor has
+  not derived.
+- `perspective.flowFired(instance)` returns the proposals whose votes settled
+  an edge of that instance — its history, as your executor recorded it.
+- `perspective.onFlowStateChanged(({ instance, from, to, firedProposals, caughtUp }) => …)`
+  is called when an instance's state moves on your executor or an edge
+  settles. Only your own sockets receive it.
+
+```typescript
+const release = perspective.onFlowStateChanged(({ instance, from, to }) => {
+  console.log(`${instance}: ${from ?? "(not derived)"} → ${to}`);
+});
+for (const { instance, currentState } of await perspective.flowStates()) {
+  console.log(instance, currentState);
+}
+```
+
+When your executor first sees an instance that already has history — you
+joined the neighbourhood late, or upgraded from an executor that kept this
+bookkeeping as links — it records that history quietly: no outcomes and no
+fired proposals for transitions that settled before it was watching. It does
+send one event, with `caughtUp: true` and `from: null`, so a UI showing the
+run as pending learns its state. Every transition that settles after that is
+reported once. After a restart or an upgrade, the executor runs this pass over
+every run once its agent is known, so you do not have to touch each run first.
+
+On the wire these are `perspective.flowStates`, `perspective.flowFired` and
+the `flow-state-changed` event.
 
 ## States and transitions
 
@@ -259,7 +305,7 @@ after.outcomes;      // [] — Alice already voted
 
 *From `flow-task-handover.test.ts`, Part 1.*
 
-There is no "already fired" guard, and there must not be one. The `resolved_as → "fired"` mark the engine writes is a `Local` display index, never an input to the derivation.
+There is no "already fired" guard, and there must not be one. The fired mark the engine records (`perspective.flowFired`) is a per-agent display index, never an input to the derivation.
 
 ### Contention
 
@@ -423,15 +469,23 @@ consensusRule: {
 It is the same name and the same check as the [`producedByFlow` model-query filter](#producedbyflow-querying-what-a-flow-produced), with one difference: on a role, **both fields are required**. Without `state`, a run that settled into the flow's "rejected" state would grant what its "approved" state was meant to. A `producedByFlow` without `state` does not decode, and an undecodable rule refuses the edge rather than falling back to a default.
 
 <Callout type="warning" emoji="⚠️">
-  Spell the key exactly. The role query ignores keys it does not know, so a
-  misspelt key — or `grantedByFlow`, the name this gate had before it was
-  renamed — is silently dropped, and the gate falls back to plain `fromRole`.
-  That is fail-open, and it is tracked in
-  [#1144](https://github.com/coasys/ad4m/issues/1144). Until it is fixed, the
-  test that catches it is a negative one: a vote from a holder with no minted
-  receipt must **not** settle the edge (Part 3 below). A key that *is* known
-  but malformed does the opposite: `producedByFlow` without `state` refuses
-  the edge (above). The more obvious mistake is the one that fails open.
+  Spell the key exactly. A `consensusRule` with a key the engine does not
+  know — a misspelt key, or `grantedByFlow`, the name this gate had before it
+  was renamed — is refused, the same as a rule that does not decode. `addFlow`
+  refuses it up front: the call rejects with an error naming the state and
+  the key (for example `` unknown key `fromRole.grantedByFlow` (renamed to
+  `producedByFlow` in #1076) ``), and nothing of the definition is stored. A
+  definition that reached the store another way — synced from a peer, or
+  written before this check existed — is refused when it is read: the edge it
+  governs fires for nobody, and the executor log names the key. The key is
+  never dropped, so the gate never falls back to plain `fromRole`
+  ([#1144](https://github.com/coasys/ad4m/issues/1144); `flow-task-handover.test.ts`
+  Part 4). This covers every object in the rule: the rule itself, `fromRole`
+  and its `or` arms, `count`, `producedByFlow`, an object `linkedTo`, and
+  each object-valued `where` condition. It does not cover `requires` guards or
+  `context`, which still ignore unknown keys.
+  A key written twice anywhere in the rule (possible in a hand-written JSON
+  literal) is refused the same way; the last one does not win.
 </Callout>
 
 For each candidate instance, the gate asks whether a receipt under the granting flow's index verifies against this replica's own flow definitions, was minted for that flow, settled into `state` — the state the replica's own re-fold derives, not the one the receipt asserts — and names the instance by `(className, id)` among its outputs. The className is the one in *your* `fromRole` query, read from your own flow definition, never from anything the receipt or the carried evidence says. A node committed as a `Task` is not a produced `HandoverReviewerRole`, even with the same id.
@@ -496,12 +550,13 @@ The refusals a developer will meet, what each one means, and what to do:
 | a query or role gate on a flow whose receipt index holds more than 256 candidates | error: `ReceiptBudgetExceeded` | anyone can write index links, so over the budget the read refuses rather than truncates — a truncated read could hide the one genuine receipt | remove the junk links from the flow's receipt index; the error names the flow and the count |
 | a `fromRole` with `producedByFlow` and a `count` satisfied by zero (e.g. `{ max: 0 }`) | error: refusing to gate | a receipt that fails to verify would make the voter eligible, not ineligible | drop the `count`, or gate on a positive count |
 | a `fromRole` with `producedByFlow` but no `state` | the rule does not decode; the edge is refused | a grant without a named state would also be granted by a run that settled into "rejected" | name the state the granting run must settle into |
+| a `consensusRule` with a key the engine does not know (e.g. `grantedByFlow`, `formRole`, `count: { mxa }`), or a key written twice | `addFlow` rejects and stores nothing, naming the state and the key; a definition that arrived by sync is refused when read: the edge fires for nobody and the executor log names the key | a dropped key would widen the gate or remove it | fix the key named in the error |
 | a malformed `producedByFlow` filter (wrong shape, or nested inside OR/AND/NOT) | error | a filter that cannot be read must not admit everything | fix the filter shape: `{ flow, state? }` at the top level of `where` |
 
 Limits that are absences, not errors — do not go looking for these:
 
-- **No flow subscriptions.** There is no `onStateChange` or `onProposalAdded`. Poll `FlowInstance.findAll`, `proposals()`, or the `currentStateName` cache.
-- **No read that re-derives without voting.** `currentStateName` is the engine's cache. The calls that re-derive are the ones that act (`proposeTransition`, `acceptProposal`); their `derivedState` and their refusal messages name the derived state.
+- **No proposal subscriptions.** State changes have `onFlowStateChanged`; there is no `onProposalAdded`. Poll `proposals()`, or watch `link-added`.
+- **No read that re-derives without voting.** `currentStateName` and `flowStates` are the engine's cache. The calls that re-derive are the ones that act (`proposeTransition`, `acceptProposal`); their `derivedState` and their refusal messages name the derived state.
 - **No automatic receipt minting.** A settled run gets a receipt only when someone calls `mintFlowReceipt`.
 - **No direct fire.** An edge fires only by reaching quorum. `FlowTransition.actions` is declared and not executed.
 

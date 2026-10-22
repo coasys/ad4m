@@ -6,6 +6,7 @@ import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { baseUrl, pollUntil, startExecutor, runHcLocalServices, gracefulShutdown, sleep } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
+import { joinCall } from "../helpers/call-session.js";
 import { ChildProcess } from 'node:child_process';
 import { LinkQuery } from "@coasys/ad4m";
 import { v4 as uuidv4 } from 'uuid';
@@ -44,9 +45,9 @@ describe("Multi-User Simple integration tests", () => {
     before(async () => {
         [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
         registerPorts([apiPort, hcAdminPort, hcAppPort]);
-        if (!fs.existsSync(appDataPath)) {
-            fs.mkdirSync(appDataPath, { recursive: true });
-        }
+        // rmSync with force also clears a dangling symlink, which existsSync reports as missing.
+        fs.rmSync(appDataPath, { recursive: true, force: true });
+        fs.mkdirSync(appDataPath, { recursive: true });
 
         // Start local Holochain services
         let localServices = await runHcLocalServices();
@@ -305,8 +306,8 @@ describe("Multi-User Simple integration tests", () => {
             const user1Payload = JSON.parse(atob(user1Token.split('.')[1]));
             const user2Payload = JSON.parse(atob(user2Token.split('.')[1]));
 
-            expect(user1Payload.sub).to.equal("alice@example.com");
-            expect(user2Payload.sub).to.equal("bob@example.com");
+            expect(user1Payload.sub).to.equal(user1Result.did);
+            expect(user2Payload.sub).to.equal(user2Result.did);
         })
 
         it("should return correct user DID in agent.me", async () => {
@@ -694,6 +695,9 @@ describe("Multi-User Simple integration tests", () => {
             expect(user1Status.didDocument).to.be.a('string');
             expect(user2Status.didDocument).to.be.a('string');
             expect(user1Status.didDocument).to.not.equal(user2Status.didDocument);
+            // #1229: a managed user's DID document carries no private key.
+            expect(user1Status.didDocument).not.to.include('privateKey');
+            expect(user2Status.didDocument).not.to.include('privateKey');
 
             // Parse and validate DID documents
             const user1DidDoc = JSON.parse(user1Status.didDocument!);
@@ -1862,6 +1866,94 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("✅ Signal exchange between main agent and managed user works correctly");
         });
+
+        // Two users of one executor, both in a fresh neighbourhood whose link
+        // language is installed.
+        async function twoCoLocatedUsers(tag: string) {
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            const login = async (n: number) => {
+                const email = `${tag}${n}@example.com`;
+                await createTestUser(email, `password${n}`);
+                return new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser(email, `password${n}`));
+            };
+            const client1 = await login(1);
+            const client2 = await login(2);
+            const did1 = (await client1.agent.status()).did!;
+            const did2 = (await client2.agent.status()).did!;
+
+            const perspective1 = await client1.perspective.add(`${tag} neighbourhood`);
+            const linkLanguage = await client1.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({ uid: uuidv4(), name: tag }));
+            const neighbourhoodUrl = await client1.neighbourhood.publishFromPerspective(perspective1.uuid, linkLanguage.address, new Perspective([]));
+            await client2.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            const perspective2 = (await client2.perspective.all()).find(p => p.sharedUrl === neighbourhoodUrl)!;
+            await pollUntil(async () => {
+                const ready = ["LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED", "SYNCED"];
+                const s1 = (await client1.perspective.all()).find(p => p.uuid === perspective1.uuid)?.state;
+                const s2 = (await client2.perspective.all()).find(p => p.uuid === perspective2.uuid)?.state;
+                return ready.includes(s1 as string) && ready.includes(s2 as string);
+            }, { timeoutMs: 30000, label: "link language installed for both users" });
+            return { client1, client2, did1, did2, perspective1, perspective2 };
+        }
+
+        // Two users of one hosted executor start a call with default options
+        // (`auto`, which goes mesh without a public SFU). The mesh roster comes
+        // from presence, so each must see the other's in-call status through
+        // `onlineAgents`.
+        it("two users on one executor find each other in a call session", async function () {
+            this.timeout(120000);
+            const { client1, did1, did2, perspective1, perspective2 } = await twoCoLocatedUsers("call");
+
+            const call1 = await joinCall(await perspective1.getNeighbourhoodProxy(), "co-located-room");
+            const call2 = await joinCall(await perspective2.getNeighbourhoodProxy(), "co-located-room");
+            try {
+                await pollUntil(() => call1.roster.has(did2) && call2.roster.has(did1), {
+                    timeoutMs: 30000, label: "each user's call roster lists the other",
+                });
+                // Every member is hosted here, so `auto` may use this executor's SFU.
+                expect(await client1.neighbourhood.sfuServesAllMembers(perspective1.uuid)).to.be.true;
+            } finally {
+                await call1.session.destroy();
+                await call2.session.destroy();
+            }
+        });
+
+        // A call adds its presence link to the agent's status and takes it out
+        // again on leave: the app's own status links survive the call, and the
+        // others' rosters drop the agent that left.
+        it("a call keeps the app's own status and its end reaches the other user", async function () {
+            this.timeout(120000);
+            const { did1, did2, perspective1, perspective2 } = await twoCoLocatedUsers("leave");
+            const proxy1 = await perspective1.getNeighbourhoodProxy();
+            const proxy2 = await perspective2.getNeighbourhoodProxy();
+            await proxy1.setOnlineStatusU(new PerspectiveUnsignedInput([
+                { source: did1, predicate: "test://app/mood", target: "literal:string:busy" },
+            ]));
+            const predicatesOf = async (did: string) =>
+                ((await proxy2.onlineAgents()).find(a => a.did === did)?.status?.data?.links ?? [])
+                    .map((l: any) => l.data.predicate);
+
+            const call1 = await joinCall(proxy1, "leave-room");
+            const call2 = await joinCall(proxy2, "leave-room");
+            try {
+                await pollUntil(() => call1.roster.has(did2) && call2.roster.has(did1), {
+                    timeoutMs: 30000, label: "each user's call roster lists the other",
+                });
+                expect(await predicatesOf(did1)).to.include.members(["test://app/mood", "ad4m://session/in-call"]);
+
+                await call2.session.leave();
+                await pollUntil(() => call1.left.has(did2), {
+                    timeoutMs: 30000, label: "user 1's session sees user 2 leave",
+                });
+
+                await call1.session.leave();
+                const after = await predicatesOf(did1);
+                expect(after).to.include("test://app/mood");
+                expect(after).to.not.include("ad4m://session/in-call");
+            } finally {
+                await call1.session.destroy();
+                await call2.session.destroy();
+            }
+        });
     });
 
     describe("Multi-Node Multi-User Integration", () => {
@@ -1913,6 +2005,9 @@ describe("Multi-User Simple integration tests", () => {
             node2AdminClient = new Ad4mClient(baseUrl(node2GqlPort));
             await node2AdminClient.agent.generate("passphrase");
             await node2AdminClient.runtime.setMultiUserEnabled(true);
+
+            // Already on when the whole file runs; needed when this block runs alone (--grep).
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
 
             console.log("\n=== Creating users on Node 1 ===");
             // Create and login 2 users on node 1
@@ -2420,6 +2515,63 @@ describe("Multi-User Simple integration tests", () => {
             console.log("✅ All links have correct authors");
 
             console.log("\n✅ Cross-node link synchronization works correctly");
+        });
+
+        // Two users share node 1, a third is on node 2. Node 1's link language
+        // holds one status for the node, so node 2 must still see both node 1
+        // users in the call, and each node 1 user must see the other one and
+        // node 2's user.
+        it("users on a shared node and a remote node all find each other in a call session", async function () {
+            this.timeout(300000);
+            const perspective = await node1User1Client!.perspective.add("Mixed Call Neighbourhood");
+            const linkLanguage = await node1User1Client!.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL, JSON.stringify({ uid: uuidv4(), name: "Mixed Call" }));
+            const neighbourhoodUrl = await node1User1Client!.neighbourhood.publishFromPerspective(
+                perspective.uuid, linkLanguage.address, new Perspective([]));
+            await node1User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await node2User1Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000); // K2 space initialization after DNA install
+
+            // Same agent-info exchange as the tests above: no observable "K2 ready" state.
+            for (let attempt = 1; attempt <= 5; attempt++) {
+                try {
+                    const node1AgentInfos = await adminAd4mClient!.runtime.hcAgentInfos();
+                    const node2AgentInfos = await node2AdminClient!.runtime.hcAgentInfos();
+                    await adminAd4mClient!.runtime.hcAddAgentInfos(node2AgentInfos);
+                    await node2AdminClient!.runtime.hcAddAgentInfos(node1AgentInfos);
+                } catch (error) {
+                    console.log(`⚠️ Agent info exchange attempt ${attempt} failed:`, error);
+                }
+                if (attempt < 5) await sleep(3000);
+            }
+
+            const proxyFor = async (client: Ad4mClient) => {
+                const p = (await client.perspective.all()).find(p => p.sharedUrl === neighbourhoodUrl);
+                expect(p).to.not.be.undefined;
+                return await p!.getNeighbourhoodProxy();
+            };
+            const alice = await joinCall(await proxyFor(node1User1Client!), "mixed-room");
+            const bob = await joinCall(await proxyFor(node1User2Client!), "mixed-room");
+            const carol = await joinCall(await proxyFor(node2User1Client!), "mixed-room");
+            const sees = (call: { roster: Set<string> }, dids: string[]) => dids.every(d => call.roster.has(d));
+            try {
+                await pollUntil(() =>
+                    sees(alice, [node1User2Did, node2User1Did]) &&
+                    sees(bob, [node1User1Did, node2User1Did]) &&
+                    sees(carol, [node1User1Did, node1User2Did]),
+                {
+                    timeoutMs: 180000, intervalMs: 2000,
+                    label: "every call roster lists the other two",
+                });
+                // Carol is on node 2, so `auto` must not use node 1's SFU.
+                const perspective1 = (await node1User1Client!.perspective.all()).find(p => p.sharedUrl === neighbourhoodUrl)!;
+                expect(await node1User1Client!.neighbourhood.sfuServesAllMembers(perspective1.uuid)).to.be.false;
+            } finally {
+                console.log("rosters:", { alice: [...alice.roster], bob: [...bob.roster], carol: [...carol.roster] });
+                await alice.session.destroy();
+                await bob.session.destroy();
+                await carol.session.destroy();
+            }
         });
     });
 

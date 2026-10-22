@@ -241,6 +241,11 @@ pub(crate) fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usi
 /// `"flow"` shorthand. Authors who need a different edge write
 /// `{ via, to }` instead.
 const LINKED_TO_DEFAULT_PREDICATE: &str = "ad4m://has_child";
+/// The keys of an object `linkedTo`, `{ via, to }`. The role-gate reader
+/// refuses any other key (`shacl_parser::role_gate_keys`), so both read this.
+const LINKED_TO_VIA: &str = "via";
+const LINKED_TO_TO: &str = "to";
+pub(crate) const LINKED_TO_KEYS: &[&str] = &[LINKED_TO_VIA, LINKED_TO_TO];
 
 /// Substitute `$flow.base`, `$flow.uri` / `$flow.instance`, and `$did`
 /// in a `where` string. Delegates to [`FlowTokens::substitute`] — the
@@ -606,11 +611,11 @@ fn linked_to_parent(linked: &Value, record: &FlowInstanceRecord) -> Result<Value
         }
         Value::Object(obj) => {
             let via = obj
-                .get("via")
+                .get(LINKED_TO_VIA)
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("`linkedTo` object needs a string `via` predicate"))?;
             let to = obj
-                .get("to")
+                .get(LINKED_TO_TO)
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("`linkedTo` object needs `to` of `base` or `flow`"))?;
             let id = match to {
@@ -1322,7 +1327,11 @@ pub async fn run_engine_proposal_pass(
         // `currentState`, so a satisfied-but-unconsumed transition reappears
         // on every pass — checking duplicates first means it costs two link
         // queries per pass instead of one LLM call per pass.
-        if proposal_already_exists(perspective, transition).await {
+        let lookup = AgentProposals {
+            perspective,
+            agent_did: &acting_did,
+        };
+        if proposal_already_exists(&lookup, transition).await {
             log::debug!("run_engine_proposal_pass: {label} already proposed; skipping");
             continue;
         }
@@ -1380,11 +1389,13 @@ pub async fn run_engine_proposal_pass(
 /// `(evidence_hash, instance_uri, to_state)` — sorted by URI; empty when
 /// there is none.
 ///
-/// *Live* excludes any proposal carrying `resolved_as`: that is the recorded
-/// history of a consensus event, not an open proposal, and it must not
-/// suppress a re-mint. Without the exclusion a cyclic flow wedges — same
-/// graph → same seal → the already-settled proposal matches the whole key,
-/// so the mint is skipped and the edge can never fire on the next visit.
+/// *Live* excludes any proposal the lookup's agent has marked fired
+/// ([`ProposalLookup::fired_here`], the `FlowReplicaState` table since
+/// #1424): that is the recorded history of a consensus event, not an open
+/// proposal, and it must not suppress a re-mint. Without the exclusion a
+/// cyclic flow wedges — same graph → same seal → the already-settled proposal
+/// matches the whole key, so the mint is skipped and the edge can never fire
+/// on the next visit.
 ///
 /// The key deliberately carries **no proposer**. That is what lets a second
 /// agent find the one open proposal for an edge and co-sign it instead of
@@ -1444,17 +1455,11 @@ pub(crate) async fn find_live_proposals<S: ProposalLookup + ?Sized>(
                 .map(|links| links.iter().any(|l| l.data.target == want))
                 .map_err(|e| anyhow!("candidate lookup on {proposal_uri} failed ({e:#})"))
         };
-        let resolved = store
-            .get_proposal_links(&LinkQuery {
-                source: Some(proposal_uri.clone()),
-                predicate: Some(
-                    crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE.to_string(),
-                ),
-                ..Default::default()
-            })
+        if store
+            .fired_here(proposal_uri)
             .await
-            .map_err(|e| anyhow!("candidate lookup on {proposal_uri} failed ({e:#})"))?;
-        if !resolved.is_empty() {
+            .map_err(|e| anyhow!("fired-mark lookup on {proposal_uri} failed ({e:#})"))?
+        {
             continue;
         }
         if !links_to("ad4m://flow/instance", transition.instance_uri.clone()).await? {
@@ -1519,23 +1524,42 @@ pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
     }
 }
 
-/// The one perspective call the idempotency check needs, behind a trait so
-/// its fail-closed error path can be unit-tested against a stub.
+/// The two reads the idempotency check needs, behind a trait so its
+/// fail-closed error path can be unit-tested against a stub.
 #[async_trait]
 pub trait ProposalLookup: Send + Sync {
     async fn get_proposal_links(
         &self,
         query: &crate::types::LinkQuery,
     ) -> Result<Vec<crate::types::DecoratedLinkExpression>>;
+
+    /// Whether the lookup's agent has marked `proposal_uri` fired — settled
+    /// history rather than an open proposal.
+    async fn fired_here(&self, proposal_uri: &str) -> Result<bool>;
+}
+
+/// A perspective read as one agent: links from the shared graph, fired marks
+/// from that agent's own bookkeeping (`FlowReplicaState`).
+pub(crate) struct AgentProposals<'a> {
+    pub perspective: &'a PerspectiveInstance,
+    pub agent_did: &'a str,
 }
 
 #[async_trait]
-impl ProposalLookup for PerspectiveInstance {
+impl ProposalLookup for AgentProposals<'_> {
     async fn get_proposal_links(
         &self,
         query: &crate::types::LinkQuery,
     ) -> Result<Vec<crate::types::DecoratedLinkExpression>> {
-        self.get_links(query).await
+        self.perspective.get_links(query).await
+    }
+
+    async fn fired_here(&self, proposal_uri: &str) -> Result<bool> {
+        crate::perspectives::flow_instance::replica_state::FlowReplicaState::is_fired(
+            &self.perspective.uuid,
+            self.agent_did,
+            proposal_uri,
+        )
     }
 }
 
@@ -2471,6 +2495,40 @@ mod tests {
         }
     }
 
+    /// `linked_to_parent` reads every key in `LINKED_TO_KEYS`: without any
+    /// one of them the object is refused. With the role-gate reader refusing
+    /// every key outside the list (#1144), a stale name left in the list, or
+    /// a key read here but not listed, fails one of the two.
+    #[test]
+    fn linked_to_parent_reads_every_listed_key() {
+        let rec = record("ns://F", "ns://i", "s");
+        let full: serde_json::Map<String, Value> = LINKED_TO_KEYS
+            .iter()
+            .map(|k| {
+                (
+                    k.to_string(),
+                    json!(if *k == LINKED_TO_TO {
+                        "base"
+                    } else {
+                        "ns://has"
+                    }),
+                )
+            })
+            .collect();
+        assert_eq!(
+            linked_to_parent(&Value::Object(full.clone()), &rec).expect("all listed keys"),
+            json!({ "id": "ad4m://subject", "predicate": "ns://has" })
+        );
+        for key in LINKED_TO_KEYS {
+            let mut without = full.clone();
+            without.remove(*key);
+            assert!(
+                linked_to_parent(&Value::Object(without), &rec).is_err(),
+                "`{key}` is listed but linked_to_parent does not need it"
+            );
+        }
+    }
+
     const DELIVERY: &str = "delivery://DeliveryFlow";
 
     fn delivery(requires: Vec<ModelQuery>) -> HashMap<String, SHACLFlow> {
@@ -2780,6 +2838,10 @@ mod tests {
         use super::*;
         use crate::types::{DecoratedLinkExpression, LinkQuery};
 
+        /// Stands in for the fired-mark table in [`ScriptedStore`]: under this
+        /// key, a link whose source is a proposal means "marked fired here".
+        const FIRED_HERE: &str = "test://fired-here";
+
         /// Scripted store: `None` for a predicate = that lookup errors.
         struct ScriptedStore {
             by_predicate: HashMap<String, Option<Vec<DecoratedLinkExpression>>>,
@@ -2796,6 +2858,14 @@ mod tests {
                     Some(Some(links)) => Ok(links.clone()),
                     Some(None) => Err(anyhow!("transient store error")),
                     None => Ok(Vec::new()),
+                }
+            }
+
+            async fn fired_here(&self, proposal_uri: &str) -> Result<bool> {
+                match self.by_predicate.get(FIRED_HERE) {
+                    Some(Some(marks)) => Ok(marks.iter().any(|l| l.data.source == proposal_uri)),
+                    Some(None) => Err(anyhow!("transient table error")),
+                    None => Ok(false),
                 }
             }
         }
@@ -2966,15 +3036,11 @@ mod tests {
             );
             assert!(proposal_already_exists(&live, &transition()).await);
 
-            // A `resolved_as` mark makes it history, not a live proposal: it
-            // must not suppress a re-mint, or a cyclic flow wedges.
+            // A fired mark makes it history, not a live proposal: it must not
+            // suppress a re-mint, or a cyclic flow wedges.
             let settled = matching(vec![(
-                crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE.to_string(),
-                Some(vec![link(
-                    "proposal://1",
-                    crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE,
-                    "literal:string:fired",
-                )]),
+                FIRED_HERE.to_string(),
+                Some(vec![link("proposal://1", FIRED_HERE, "fired")]),
             )]);
             assert_eq!(
                 find_live_proposals(&settled, &transition())
@@ -2984,6 +3050,31 @@ mod tests {
                 "a settled proposal is history and must not be found as live"
             );
             assert!(!proposal_already_exists(&settled, &transition()).await);
+
+            // A leftover pre-#1424 `resolved_as` link is dead data: it no
+            // longer makes a proposal history.
+            let legacy_link = matching(vec![(
+                crate::perspectives::flow_instance::atom::LEGACY_RESOLVED_AS_PREDICATE.to_string(),
+                Some(vec![link(
+                    "proposal://1",
+                    crate::perspectives::flow_instance::atom::LEGACY_RESOLVED_AS_PREDICATE,
+                    "literal:string:fired",
+                )]),
+            )]);
+            assert_eq!(
+                find_live_proposals(&legacy_link, &transition())
+                    .await
+                    .expect("no error"),
+                vec!["proposal://1".to_string()],
+                "only this agent's table marks a proposal fired"
+            );
+
+            // The mark lookup fails closed like every other lookup here.
+            let mark_lookup_fails = matching(vec![(FIRED_HERE.to_string(), None)]);
+            assert!(find_live_proposals(&mark_lookup_fails, &transition())
+                .await
+                .is_err());
+            assert!(proposal_already_exists(&mark_lookup_fails, &transition()).await);
         }
 
         /// Two live proposals share the dedup key, because it carries no
