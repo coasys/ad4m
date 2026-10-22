@@ -24,7 +24,57 @@ fn main() {
         ALLIANCE_DNA_VERSION
     );
 
+    embed_git_commit();
     download_alliance_dna();
+}
+
+/// The commit this executor is built from, as `AD4M_GIT_COMMIT` (empty when unknown), so
+/// `runtime.info` can report it next to the version. The version alone says which release a build
+/// descends from; every build between two releases reports the same one.
+///
+/// An explicit `AD4M_GIT_COMMIT` wins, then CI's own variables, then `git rev-parse HEAD`. A build
+/// from a source tarball has no `.git` and reports no commit rather than failing.
+fn embed_git_commit() {
+    println!("cargo:rerun-if-env-changed=AD4M_GIT_COMMIT");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    println!("cargo:rerun-if-env-changed=CIRCLE_SHA1");
+
+    let from_env = ["AD4M_GIT_COMMIT", "GITHUB_SHA", "CIRCLE_SHA1"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|v| !v.is_empty()));
+
+    let commit = from_env.or_else(|| {
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let commit = git(&["rev-parse", "HEAD"])?;
+        // Re-run when HEAD moves: a checkout or a commit changes HEAD itself or the ref it points
+        // at, and a ref that has been packed lives in packed-refs. `--git-path` finds each file in a
+        // worktree as well as in a plain checkout. `rerun-if-changed=build.rs` above narrows the
+        // triggers to the files named, so without these a rebuild would keep the old commit.
+        for path in ["HEAD", "packed-refs"] {
+            if let Some(file) = git(&["rev-parse", "--git-path", path]) {
+                println!("cargo:rerun-if-changed={}", file);
+            }
+        }
+        if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"]) {
+            if let Some(file) = git(&["rev-parse", "--git-path", &reference]) {
+                println!("cargo:rerun-if-changed={}", file);
+            }
+        }
+        Some(commit)
+    });
+
+    println!(
+        "cargo:rustc-env=AD4M_GIT_COMMIT={}",
+        commit.unwrap_or_default()
+    );
 }
 
 fn download_alliance_dna() {
