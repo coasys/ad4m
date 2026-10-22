@@ -418,6 +418,59 @@ async fn buffers_of_every_kind_count_against_the_memory_cap() {
     }
 }
 
+/// Tamper with what `TextEncoder.encode` could look up while it copies the bytes it got from Rust,
+/// each way catching what it is handed, and encode 4 MiB `count` times.
+const TAMPERED_ENCODER: &str = r#"
+const MiB = 1024 * 1024;
+const caught = [];
+const text = "x".repeat(4 * MiB);
+const encodeMany = (count) => {
+  const encoder = new TextEncoder();
+  for (let i = 0; i < count; i++) encoder.encode(text);
+  return caught.length;
+};
+const typedArray = Object.getPrototypeOf(Uint8Array.prototype);
+export const viaConstructor = (count) => {
+  const real = globalThis.Uint8Array;
+  globalThis.Uint8Array = function () { return { set(source) { caught.push(source); } }; };
+  try { return encodeMany(count); } finally { globalThis.Uint8Array = real; }
+};
+export const viaSet = (count) => {
+  const real = typedArray.set;
+  typedArray.set = function (source) { caught.push(source); };
+  try { return encodeMany(count); } finally { typedArray.set = real; }
+};
+export const viaLength = (count) => {
+  const real = Object.getOwnPropertyDescriptor(typedArray, "length");
+  Object.defineProperty(typedArray, "length", {
+    configurable: true,
+    get() { caught.push(this); return real.get.call(this); },
+  });
+  try { return encodeMany(count); } finally { Object.defineProperty(typedArray, "length", real); }
+};
+"#;
+
+#[tokio::test]
+async fn a_bundle_cannot_catch_what_text_encoder_copies_from() {
+    let limit = 64 * 1024 * 1024;
+    for route in ["viaConstructor", "viaSet", "viaLength"] {
+        let sandbox = start_with(
+            TAMPERED_ENCODER,
+            SandboxLimits {
+                max_heap_bytes: limit,
+                ..SandboxLimits::default()
+            },
+        )
+        .await;
+        // 128 MiB encoded under a 64 MiB cap: the bundle keeps nothing it was not counted for.
+        assert_eq!(
+            sandbox.call(&[route], vec![json!(32)]).await,
+            Ok(json!(0)),
+            "{route}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_bundle_cannot_make_a_resizable_buffer_by_any_route() {
     let limit = 64 * 1024 * 1024;

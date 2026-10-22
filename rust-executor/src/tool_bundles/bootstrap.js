@@ -15,6 +15,15 @@
   const randomValues = ops.op_tool_bundle_random_values;
   const log = ops.op_tool_bundle_log;
   const stringify = JSON.stringify;
+  // What encode needs, taken now, before any bundle code runs: a bundle can replace the globals
+  // and prototype members these come from, and encode must not look anything up through them.
+  const ReflectApply = Reflect.apply;
+  const ReflectConstruct = Reflect.construct;
+  const toString = String;
+  const Uint8ArrayIntrinsic = Uint8Array;
+  const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+  const typedArrayLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, "length").get;
+  const typedArraySet = typedArrayPrototype.set;
   const parse = JSON.parse;
   const resolved = Promise.resolve.bind(Promise);
 
@@ -41,10 +50,13 @@
     }
     encode(input = "") {
       // deno_core's encode answers with memory allocated in Rust, which the memory cap does not
-      // count; what the bundle keeps is a copy in memory the cap does.
-      const encoded = encodeUtf8(String(input));
-      const bytes = new Uint8Array(encoded.length);
-      bytes.set(encoded);
+      // count; what the bundle keeps is a copy in memory the cap does. The Rust-backed array is
+      // only ever touched through the intrinsics taken above, never through anything a bundle
+      // could have replaced, so it cannot reach the bundle.
+      const encoded = encodeUtf8(toString(input));
+      const length = ReflectApply(typedArrayLength, encoded, []);
+      const bytes = ReflectConstruct(Uint8ArrayIntrinsic, [length]);
+      ReflectApply(typedArraySet, bytes, [encoded]);
       return bytes;
     }
   }

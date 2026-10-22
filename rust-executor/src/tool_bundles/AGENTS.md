@@ -30,6 +30,10 @@ at boot.
   and memory an op allocates in Rust is copied into a counted buffer before a bundle gets it
   (`TextEncoder.encode`). A new global or op that hands out a buffer must keep this true; the
   memory-cap tests in `tests.rs` pin each route.
+- `bootstrap.js` code that runs after the bundle has loaded (the globals it defines) uses only
+  intrinsics it captured before the bundle ran (`Reflect.apply`, a getter taken from its
+  descriptor, ...), never a global or prototype member looked up at call time: the bundle may
+  have replaced those. This matters most wherever it holds an uncounted Rust-backed buffer.
 - A bundle's `console` never logs above debug, and a line is cut to 2,000 characters.
 - Calls are typed: an export path and JSON arguments. Never build JS source with `format!`.
 - The store refuses any address that is not one, so a caller's string never names a path.
