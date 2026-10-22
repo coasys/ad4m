@@ -155,6 +155,9 @@ pub async fn ensure_processing_claim_class(
 /// and hang it off the shared batch node. `claimant` is instance *data*, so a
 /// test can simulate another peer's claim by passing an arbitrary DID (the link
 /// author stays `context`'s agent).
+///
+/// All links go in one batch, so a renewal replaces the claim's fields in a
+/// single commit.
 pub async fn write_claim(
     perspective: &mut PerspectiveInstance,
     processor: &str,
@@ -165,6 +168,7 @@ pub async fn write_claim(
 ) -> anyhow::Result<()> {
     ensure_processing_claim_class(perspective, context).await?;
     let node = claim_node(processor, key, claimant);
+    let batch = perspective.create_batch().await;
     perspective
         .create_subject(
             SubjectClassOption {
@@ -177,7 +181,7 @@ pub async fn write_claim(
                 "expires_at": expires_ms.to_string(),
                 "claim_status": STATUS_ACTIVE,
             })),
-            None,
+            Some(batch.clone()),
             context,
         )
         .await
@@ -190,11 +194,15 @@ pub async fn write_claim(
                 target: node,
             },
             LinkStatus::Shared,
-            None,
+            Some(batch.clone()),
             context,
         )
         .await
         .map_err(|e| anyhow::anyhow!("write_claim: add_link(has_claim) failed: {e:#}"))?;
+    perspective
+        .commit_batch(batch, context)
+        .await
+        .map_err(|e| anyhow::anyhow!("write_claim: commit_batch failed: {e:#}"))?;
     Ok(())
 }
 

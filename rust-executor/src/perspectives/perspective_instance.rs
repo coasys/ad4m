@@ -4228,6 +4228,21 @@ impl PerspectiveInstance {
         // and computes the verdict itself. Callers decorate *after* persist for
         // pubsub/prolog, rather than decorating and converting back here.
 
+        // One store transaction for the whole diff, so a batch lands as one
+        // write. On failure nothing was written; fall back to one link at a
+        // time.
+        match self
+            .sparql_store
+            .apply_diff(&diff.removals, &diff.additions)
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => log::warn!(
+                "Failed to apply link diff to SPARQL store in one transaction, \
+                 writing links one by one: {:?}",
+                e
+            ),
+        }
+
         // Removals first
         for removal in &diff.removals {
             if let Err(e) = self.sparql_store.remove_link(removal) {
