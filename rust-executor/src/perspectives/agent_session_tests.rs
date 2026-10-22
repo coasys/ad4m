@@ -4,7 +4,7 @@
 use super::agent_session::{
     converse, session_tools, AgentMessage, AgentSessionError, AgentSessionRequest,
 };
-use crate::ai_service::harness::provider::ToolSchema;
+use crate::ai_service::harness::provider::{ToolProvider, ToolSchema};
 use crate::ai_service::harness::{
     CompletionSource, CreditGate, HarnessCompletion, HarnessToolCall,
 };
@@ -285,6 +285,116 @@ async fn a_write_it_was_given_lands_in_its_own_perspective_only() {
     .unwrap();
     assert_eq!(reply.text, "done");
     assert_eq!(title(&f, &f.uuid, &f.note).await, "renamed");
+}
+
+/// Reads that name no perspective at all: the docs, the installed tools, who the caller is.
+const NAMES_NO_PERSPECTIVE: &[&str] = &["get_documentation", "list_record_tools", "get_my_did"];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_tool_a_session_can_offer_stays_in_its_perspective() {
+    let f = fixture().await;
+    let unbound: Vec<ToolSchema> =
+        crate::mcp::tools::provider_impl::Ad4mToolProvider::new(f.handler.clone())
+            .tools()
+            .await;
+    // Every write a caller may hand a session, at once.
+    let every_write: Vec<String> = super::agent_session::writable_tool_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let offered = session_tools(f.handler.clone(), &f.uuid, &every_write)
+        .tools()
+        .await;
+    assert!(offered.iter().any(|t| t.name == "instance_update"));
+
+    for tool in &offered {
+        let original = unbound
+            .iter()
+            .find(|t| t.name == tool.name)
+            .unwrap_or_else(|| panic!("{} is not a static tool", tool.name));
+        let properties = original.parameters["properties"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            properties.contains_key("perspective_id")
+                || NAMES_NO_PERSPECTIVE.contains(&tool.name.as_str()),
+            "{} is offered but is not bound to the session's perspective",
+            tool.name
+        );
+        let other_selector = properties.keys().find(|key| {
+            *key != "perspective_id"
+                && (key.contains("perspective") || key.contains("uuid") || key.ends_with("_url"))
+        });
+        assert!(
+            other_selector.is_none(),
+            "{} names a perspective by {other_selector:?}, which the session does not bind",
+            tool.name
+        );
+    }
+    for outside in [
+        "list_perspectives",
+        "add_perspective",
+        "neighbourhood_publish_from_perspective",
+        "neighbourhood_join_from_url",
+        "set_agent_profile",
+        "get_agent_public_perspective",
+    ] {
+        assert!(
+            offered.iter().all(|t| t.name != outside),
+            "offers {outside}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_in_one_perspective_cannot_publish_another() {
+    let f = fixture().await;
+    let messages = asked("share my other perspective");
+    let publish = vec!["neighbourhood_publish_from_perspective".to_string()];
+    let model = Scripted::new(vec![call(
+        "neighbourhood_publish_from_perspective",
+        json!({ "perspective_uuid": f.other, "link_language": "Qm" }),
+    )]);
+    let tools = session_tools(f.handler.clone(), &f.uuid, &publish);
+    let outcome = converse(
+        &request(&f, &messages, &publish),
+        tools,
+        model.clone(),
+        "m",
+        None,
+    )
+    .await;
+    assert!(
+        matches!(&outcome, Err(AgentSessionError::Invalid(m)) if m.contains("neighbourhood_publish_from_perspective")),
+        "{outcome:?}"
+    );
+    assert!(model.seen.lock().unwrap().is_empty(), "no model was asked");
+
+    // Named by the model in a session given every write a caller may give, it is refused too.
+    let every_write: Vec<String> = super::agent_session::writable_tool_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let model = Scripted::new(vec![call(
+        "neighbourhood_publish_from_perspective",
+        json!({ "perspective_uuid": f.other, "link_language": "Qm" }),
+    )]);
+    let tools = session_tools(f.handler.clone(), &f.uuid, &every_write);
+    converse(
+        &request(&f, &messages, &every_write),
+        tools,
+        model.clone(),
+        "m",
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        model.tool_results()[0].contains("not in the current provider's filtered surface"),
+        "{:?}",
+        model.tool_results()
+    );
 }
 
 struct Broke;

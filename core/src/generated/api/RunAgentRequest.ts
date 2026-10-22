@@ -11,8 +11,9 @@ messages: Array<AgentMessage>,
  */
 context?: Record<string, unknown>, 
 /**
- * Tools that write which the model may call — `instance_update`, `call_record_tool`. None
- * means a session that only reads.
+ * Tools that write which the model may call — `instance_update`, `call_record_tool`; only
+ * tools that write inside the perspective (`agent_session::SESSION_WRITES`). None means a
+ * session that only reads.
  */
 writeTools?: Array<string>, 
 /**

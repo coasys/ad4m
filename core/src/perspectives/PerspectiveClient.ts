@@ -298,9 +298,11 @@ export class PerspectiveClient {
     }
 
     /**
-     * A conversation with a model in this perspective, using the executor's own tools: every
-     * tool that reads, and only the writing tools named in `writeTools`. Runs as the caller, with
-     * the caller's capabilities, and answers with the model's final reply.
+     * A conversation with a model in this perspective, using the executor's own tools: the tools
+     * that read this perspective, and only the writing tools named in `writeTools`. Every tool a
+     * session offers acts on this perspective alone, so tools about other perspectives, the agent
+     * or the node (listing or publishing perspectives, the profile) are not available. Runs as the
+     * caller, with the caller's capabilities, and answers with the model's final reply.
      *
      * Defaults to {@link LONG_TIMEOUT_MS}: an agent may read documentation and make many tool
      * calls before it answers.
