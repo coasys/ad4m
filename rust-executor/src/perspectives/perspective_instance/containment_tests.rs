@@ -433,7 +433,7 @@ async fn a_containment_subscription_follows_new_edges_and_removals() {
     let parent = "ad4m://later-a-block";
     create(&mut p, &ctx, "Message", "ad4m://m3").await;
     let (mut sub, initial) = Sub::open(&p, "Message", json!({"parent": {"id": parent}})).await;
-    assert!(initial.contains("\"totalCount\":0"), "{initial}");
+    assert!(initial.contains("\"instances\":[]"), "{initial}");
 
     p.add_sdna(
         "Block".into(),
@@ -482,7 +482,7 @@ async fn a_containment_subscription_follows_new_edges_and_removals() {
         .await
         .expect("a removed containment link re-runs the subscription");
     assert!(
-        !update.contains("ad4m://m4") && update.contains("\"totalCount\":0"),
+        !update.contains("ad4m://m4") && update.contains("\"instances\":[]"),
         "{update}"
     );
 }
@@ -721,7 +721,8 @@ async fn a_containment_walk_follows_every_edge_nearest_first() {
 }
 
 /// The rows and `totalCount` of a query over `classes`.
-async fn query_page(p: &PerspectiveInstance, classes: &str, q: Value) -> (Vec<String>, u64) {
+async fn query_page(p: &PerspectiveInstance, classes: &str, mut q: Value) -> (Vec<String>, u64) {
+    q["count"] = json!(true);
     let json = p
         .model_query_classes(&QueryClasses::One(classes.into()), &q.to_string())
         .await
@@ -991,7 +992,7 @@ async fn a_containment_step_in_sees_a_holder_become_a_container() {
         json!({"parent": {"ids": [m], "direction": "in"}}),
     )
     .await;
-    assert!(initial.contains("\"totalCount\":0"), "{initial}");
+    assert!(initial.contains("\"instances\":[]"), "{initial}");
 
     // A Block elsewhere: holds no anchor, re-runs nothing.
     let other = "ad4m://other/r";
