@@ -46,7 +46,7 @@ impl RuntimeClient {
             .await
     }
 
-    pub async fn link_language_templates(&self) -> Result<Vec<String>> {
+    pub async fn link_language_templates(&self) -> Result<Vec<LanguageMeta>> {
         self.ws
             .call("runtime.linkLanguageTemplates", serde_json::json!({}))
             .await
