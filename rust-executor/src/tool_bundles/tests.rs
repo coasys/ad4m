@@ -607,7 +607,12 @@ async fn a_release_that_would_drop_another_toolset_of_the_bundle_it_replaces_is_
         matches!(&only_alpha, Err(RegistryError::Conflict(m)) if m.contains("beta")),
         "{only_alpha:?}"
     );
-    let names: Vec<String> = registry.toolsets().await.into_iter().map(|t| t.name).collect();
+    let names: Vec<String> = registry
+        .toolsets()
+        .await
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
     assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
     assert!(registry.find_tool("beta_tool").await.is_some());
     assert_eq!(
@@ -636,9 +641,7 @@ async fn an_install_that_cannot_be_stored_leaves_every_installed_bundle_in_place
 
     std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
     let unrelated = registry.install(&toolsets_bundle(&["beta"], 1)).await;
-    let replacing = registry
-        .install(&toolsets_bundle(&["alpha"], 2))
-        .await;
+    let replacing = registry.install(&toolsets_bundle(&["alpha"], 2)).await;
     std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     assert!(
