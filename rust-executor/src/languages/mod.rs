@@ -1109,6 +1109,23 @@ impl LanguageController {
         })
     }
 
+    /// The value a bundle gives a template variable that must be filled before
+    /// the language can work (the server link language's `UID`).
+    const UNFILLED_TEMPLATE_VALUE: &'static str = "<to-be-filled>";
+
+    /// The marked template variables (`//!@ad4m-template-variable`) still at
+    /// [`Self::UNFILLED_TEMPLATE_VALUE`] after templating, in source order.
+    pub(crate) fn unfilled_template_variables(source_lines: &[String]) -> Vec<String> {
+        let declaration = Regex::new(r#"(?:var|const|let) ([a-zA-Z0-9_-]+)\s*=\s*"(.*)""#).unwrap();
+        source_lines
+            .windows(2)
+            .filter(|pair| pair[0].contains("//!@ad4m-template-variable"))
+            .filter_map(|pair| declaration.captures(&pair[1]))
+            .filter(|c| &c[2] == Self::UNFILLED_TEMPLATE_VALUE)
+            .map(|c| c[1].to_string())
+            .collect()
+    }
+
     /// Apply template data to source language lines.
     /// Port of JS applyTemplateData method.
     pub(crate) fn apply_template_data(
@@ -1526,6 +1543,23 @@ impl LanguageController {
 
         // Apply template data to source lines
         Self::apply_template_data(&mut source_lines, &template_data);
+
+        // A variable the bundle marks as required but the caller did not fill
+        // would publish a language that runs inert (no room, every commit
+        // failing). Refuse instead, naming what was sent.
+        let unfilled = Self::unfilled_template_variables(&source_lines);
+        if !unfilled.is_empty() {
+            return Err(LanguageError::InvalidBundle {
+                message: format!(
+                    "template variable(s) {} left unfilled; the template data has {:?}",
+                    unfilled.join(", "),
+                    template_data
+                        .keys()
+                        .filter(|k| *k != "happ")
+                        .collect::<Vec<_>>()
+                ),
+            });
+        }
 
         // Remove happ from template_data before storing in meta.
         // Use shift_remove (not remove/swap_remove) to preserve sorted key order.
@@ -2875,6 +2909,35 @@ mod template_tests {
         data.insert("SERVER_URL".into(), json!("https://link.ad4m.dev"));
         LanguageController::apply_template_data(&mut lines, &data);
         assert_eq!(lines[2], r#"const SERVER_URL = "https://link.ad4m.dev""#);
+    }
+
+    #[test]
+    fn a_marked_variable_left_at_its_placeholder_is_reported() {
+        // A client that names the room ROOM_ID (WE builds before the language
+        // renamed it UID) leaves UID at its placeholder: the language would
+        // publish, run inert and never create a room.
+        let mut lines = make_source(&[
+            "//!@ad4m-template-variable",
+            r#"const SERVER_URL = "https://link.ad4m.dev";"#,
+            "//!@ad4m-template-variable",
+            r#"const UID = "<to-be-filled>";"#,
+        ]);
+        let mut data = serde_json::Map::new();
+        data.insert("ROOM_ID".into(), json!("abc-123"));
+        LanguageController::apply_template_data(&mut lines, &data);
+        assert_eq!(
+            LanguageController::unfilled_template_variables(&lines),
+            vec!["UID".to_string()]
+        );
+
+        let mut filled = make_source(&[
+            "//!@ad4m-template-variable",
+            r#"const UID = "<to-be-filled>";"#,
+        ]);
+        let mut data = serde_json::Map::new();
+        data.insert("UID".into(), json!("abc-123"));
+        LanguageController::apply_template_data(&mut filled, &data);
+        assert!(LanguageController::unfilled_template_variables(&filled).is_empty());
     }
 
     #[test]

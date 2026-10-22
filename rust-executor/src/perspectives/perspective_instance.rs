@@ -4,7 +4,7 @@ use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
-use super::update_perspective;
+use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::agent::{AgentContext, AgentService};
@@ -66,6 +66,7 @@ use uuid::Uuid;
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
 // Abstract classes: resolution cache, queries, subscriptions (#1435).
 mod abstract_classes;
+mod containment;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
 mod subscriptions;
@@ -82,6 +83,10 @@ mod subscription_tests;
 #[cfg(test)]
 #[path = "perspective_instance_abstract_tests.rs"]
 mod abstract_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance_pending_diffs_tests.rs"]
+mod pending_diffs_tests;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -1103,7 +1108,7 @@ impl PerspectiveInstance {
 
     /// Attach this neighbourhood's link language as soon as it can be: at
     /// once for a perspective that is one, the moment a publish makes it one
-    /// (`update_from_handle` wakes this loop), and with backoff while the
+    /// (`update_perspective_with` wakes this loop), and with backoff while the
     /// install fails. A private perspective waits without a timer.
     async fn ensure_link_language(&self) {
         let mut retry = LINK_LANGUAGE_RETRY_MIN;
@@ -1191,10 +1196,10 @@ impl PerspectiveInstance {
             .await;
         // Cache language→perspective mapping for fast signal routing
         {
-            let handle = self.persisted.lock().await.clone();
+            let handle = self.persisted.lock().await;
             crate::perspectives::register_link_language_perspective(
                 nh.data.link_language.clone(),
-                handle,
+                handle.clone(),
             );
         }
         if self.persisted.lock().await.state == PerspectiveState::NeighbourhoodCreationInitiated {
@@ -1268,11 +1273,15 @@ impl PerspectiveInstance {
         let uuid = self.uuid.clone();
         let mut interval = time::interval(Duration::from_millis(100));
         let mut last_diff_time = None;
+        // A failed commit waits 100 ms × 2^failures (at most 30 s) before
+        // the next attempt, instead of retrying on every tick.
+        let mut failures: u32 = 0;
+        let mut retry_at = Instant::now();
 
         while !self.is_teardown.load(Ordering::Acquire) {
             interval.tick().await;
 
-            if self.has_link_language().await {
+            if Instant::now() >= retry_at && self.has_link_language().await {
                 let (_, ids) = Ad4mDb::with_global_instance(|db| {
                     db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
                 })
@@ -1289,23 +1298,35 @@ impl PerspectiveInstance {
 
                 // Commit if either:
                 // 1. It's been MAX_PENDING_SECONDS since first diff in burst (don't collect longer than MAX_PENDING_SECONDS)
-                if last_diff_time.unwrap().elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
-                    if self.commit_pending_diffs().await.is_ok() {
-                        last_diff_time = None;
-                        log::debug!("💾 committed diffs after reaching 10s maximum wait time");
-                    }
+                let reason = if last_diff_time.unwrap().elapsed()
+                    >= Duration::from_secs(MAX_PENDING_SECONDS)
+                {
+                    format!("after the {}s maximum wait", MAX_PENDING_SECONDS)
                 // 2. It's been > 1s since last new diff (burst is over)
                 } else if !self.has_new_diffs_in_last_second().await {
-                    if self.commit_pending_diffs().await.is_ok() {
+                    "after 1s of inactivity".to_string()
+                // 3. We have collected MAX_PENDING_DIFFS_COUNT diffs
+                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT {
+                    format!("after collecting {}", MAX_PENDING_DIFFS_COUNT)
+                } else {
+                    continue;
+                };
+
+                match self.commit_pending_diffs().await {
+                    Ok(()) => {
                         last_diff_time = None;
-                        log::debug!("💾 committed diffs after 1s of inactivity");
+                        failures = 0;
+                        log::debug!("💾 committed diffs {}", reason);
                     }
-                // 3. We have collected more than 100 diffs
-                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT
-                    && self.commit_pending_diffs().await.is_ok()
-                {
-                    last_diff_time = None;
-                    log::debug!("💾 committed diffs after collecting 100");
+                    Err(e) => {
+                        let wait = Duration::from_millis((100 << failures.min(9)).min(30_000));
+                        failures += 1;
+                        retry_at = Instant::now() + wait;
+                        log::warn!(
+                            "💾 perspective {}: committing pending diffs failed, retrying in {:?}: {:#}",
+                            uuid, wait, e
+                        );
+                    }
                 }
             }
         }
@@ -1358,7 +1379,9 @@ impl PerspectiveInstance {
                         log::debug!("✅ 💾 successfully committed pending diffs");
                         Ok(())
                     }
-                    Err(e) => Err(e),
+                    // The batch this commit sent: the size cap can make it smaller
+                    // than the queue.
+                    Err(e) => Err(e.context(format!("a batch of {} diffs", pending_ids.len()))),
                 }
             } else {
                 Ok(()) // Keep diffs if no link language
@@ -1551,10 +1574,9 @@ impl PerspectiveInstance {
 
     pub async fn update_perspective_state(&self, state: PerspectiveState) -> Result<(), AnyError> {
         if self.persisted.lock().await.state != state {
-            let mut handle = self.persisted.lock().await.clone();
-            handle.state = state.clone();
-
-            update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
+            let handle = update_perspective_with(&self.uuid, |h| h.state = state.clone())
+                .await
+                .map_err(|e| anyhow!(e))?;
 
             get_global_pubsub()
                 .await
@@ -1578,21 +1600,11 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn update_from_handle(&self, handle: PerspectiveHandle) {
-        let link_language = |h: &PerspectiveHandle| {
-            h.neighbourhood
-                .as_ref()
-                .map(|nh| nh.data.link_language.clone())
-        };
-        let mut persisted = self.persisted.lock().await;
-        let changed = link_language(&persisted) != link_language(&handle);
-        *persisted = handle;
-        // A publish sets the link language here; wake the loop to attach it.
-        // Only on a change: the loop writes its own state through here and
-        // must not cut its backoff short.
-        if changed {
-            self.wakes.link_language.notify_one();
-        }
+    /// Wakes the link-language loop: a change set or replaced the handle's link language
+    /// (a publish). Only `update_perspective_with` calls it, and only on such a change: the
+    /// loop writes its own state through there and must not cut its backoff short.
+    pub(crate) fn link_language_changed(&self) {
+        self.wakes.link_language.notify_one();
     }
 
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
@@ -4060,6 +4072,12 @@ impl PerspectiveInstance {
         // An abstract class (#1435) reads the concrete classes that have its
         // names, each through its view; none of them is an empty result.
         let targets = self.read_targets(classes, &query_input)?;
+        if let Some(edges) = &targets.containment {
+            super::model_query::containment::set_containment(&mut query_input, edges);
+        }
+        self.resolve_container_children(classes, &mut query_input)
+            .await?;
+        let named = classes;
         let classes = &targets.classes;
         if classes.names().is_empty() {
             return serde_json::to_string(&super::model_query::ModelQueryResult {
@@ -4070,10 +4088,14 @@ impl PerspectiveInstance {
                 deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
             });
         }
+        // A built-in's own rows (`Container`) are read through its view.
         let shapes = classes
             .names()
             .iter()
-            .map(|class_name| Ok((class_name.clone(), self.get_shape(class_name)?)))
+            .map(|class_name| match targets.views.get(class_name) {
+                Some(view) => Ok((class_name.clone(), view.clone())),
+                None => Ok((class_name.clone(), self.get_shape(class_name)?)),
+            })
             .collect::<Result<Vec<_>, AnyError>>()?;
         let resolver = self.shape_resolver();
 
@@ -4165,6 +4187,9 @@ impl PerspectiveInstance {
             self.get_shape_or_wait(&missing.class_name, remaining)
                 .await?;
         };
+        let mut result = result;
+        self.finish_container_rows(named, &query_input, &mut result)
+            .await?;
 
         serde_json::to_string(&result).map_err(|e| {
             deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -6984,17 +7009,19 @@ mod tests {
     /// What `neighbourhood_publish_from_perspective` writes: a neighbourhood
     /// on a link language this executor has never loaded.
     async fn publish(instance: &PerspectiveInstance) {
-        let mut handle = instance.persisted.lock().await.clone();
-        handle.shared_url = Some(format!("neighbourhood://{}", Uuid::new_v4()));
-        handle.neighbourhood = Some(crate::types::DecoratedNeighbourhoodExpression {
-            data: crate::types::domain::Neighbourhood {
-                link_language: format!("QmNotLoaded{}", Uuid::new_v4().simple()),
+        update_perspective_with(&instance.uuid, |h| {
+            h.shared_url = Some(format!("neighbourhood://{}", Uuid::new_v4()));
+            h.neighbourhood = Some(crate::types::DecoratedNeighbourhoodExpression {
+                data: crate::types::domain::Neighbourhood {
+                    link_language: format!("QmNotLoaded{}", Uuid::new_v4().simple()),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        });
-        handle.state = PerspectiveState::NeighbourhoodCreationInitiated;
-        update_perspective(&handle).await.unwrap();
+            });
+            h.state = PerspectiveState::NeighbourhoodCreationInitiated;
+        })
+        .await
+        .unwrap();
     }
 
     async fn state_of(instance: &PerspectiveInstance) -> PerspectiveState {
