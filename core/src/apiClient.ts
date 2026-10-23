@@ -68,8 +68,10 @@ const PING_INTERVAL_MS = 10_000
 
 /** The slowest link a socket is given time for. The executor reads a ping
  *  only after the frames sent before it, so a ping left unanswered counts as
- *  silence only once what the socket sent since it was last heard from could
- *  have crossed this link, if that takes longer than PING_INTERVAL_MS. */
+ *  silence only once everything the socket sent before that ping could have
+ *  crossed this link, if that takes longer than PING_INTERVAL_MS. Messages
+ *  that come in meanwhile do not shorten this: they say nothing about how far
+ *  an upload has got. */
 const SLOWEST_LINK_BYTES_PER_MS = 16 // 16 kB/s
 
 /** How long `checkConnection` waits for the open socket to say anything
@@ -165,8 +167,12 @@ export class ApiClient {
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
     /** When the open socket was first pinged since it last delivered a message; null while none is unanswered. */
     private _wsPingedAt: number | null = null
-    /** What the open socket sent since it last delivered a message, in characters. */
-    private _wsUnheardBytes = 0
+    /** When that ping could have reached the executor, which reads it only after what the socket sent before it. */
+    private _wsPingArrivesBy = 0
+    /** When everything the open socket sent so far could have crossed a SLOWEST_LINK_BYTES_PER_MS link.
+     *  A message from the socket does not move it back: hearing from the executor says nothing
+     *  about how much of a large upload has reached it. */
+    private _wsSentBy = 0
     /** A `checkConnection` probe waiting for the open socket to say anything; null when none. */
     private _wsProbeTimer: ReturnType<typeof setTimeout> | null = null
     // The executor sends a socket only the events it asked for (`events.watch`).
@@ -224,7 +230,6 @@ export class ApiClient {
         ws.onmessage = (event) => {
             if (this._ws === ws) {
                 this._wsPingedAt = null
-                this._wsUnheardBytes = 0
                 this._endProbe()
             }
             let parsed: Record<string, unknown>
@@ -388,24 +393,29 @@ export class ApiClient {
     private _startPing(ws: WebSocket): void {
         this._stopPing()
         this._wsPingedAt = null
-        this._wsUnheardBytes = 0
+        this._wsSentBy = 0
         this._wsPingTimer = setInterval(() => {
             if (this._ws !== ws) return
             // A probe has its own, shorter deadline and decides for this ping.
             if (this._wsProbeTimer) return
+            const ping = JSON.stringify({ type: 'ping' })
             if (this._wsPingedAt === null) {
-                this._wsPingedAt = Date.now()
-            } else if (Date.now() - this._wsPingedAt >= Math.max(PING_INTERVAL_MS, this._wsUnheardBytes / SLOWEST_LINK_BYTES_PER_MS)) {
+                this._wsPingedAt = performance.now()
+                this._send(ws, ping)
+                this._wsPingArrivesBy = this._wsSentBy
+                return
+            }
+            if (performance.now() >= Math.max(this._wsPingedAt + PING_INTERVAL_MS, this._wsPingArrivesBy)) {
                 this._dropSilentSocket(ws)
                 return
             }
-            this._send(ws, JSON.stringify({ type: 'ping' }))
+            this._send(ws, ping)
         }, PING_INTERVAL_MS)
     }
 
-    /** Send on `ws`, counting what the open socket has sent since it was last heard from. */
+    /** Send on `ws`, counting how long what the open socket sent could take to cross the slowest link. */
     private _send(ws: WebSocket, text: string): void {
-        if (this._ws === ws) this._wsUnheardBytes += utf8Length(text)
+        if (this._ws === ws) this._wsSentBy = Math.max(this._wsSentBy, performance.now()) + utf8Length(text) / SLOWEST_LINK_BYTES_PER_MS
         ws.send(text)
     }
 
@@ -413,7 +423,7 @@ export class ApiClient {
      *  closed now. Its close event can take minutes on a dead connection,
      *  since the close frame gets no answer either; `_onClose` ignores it then. */
     private _dropSilentSocket(ws: WebSocket): void {
-        console.warn(`WebSocket silent for ${Date.now() - (this._wsPingedAt ?? Date.now())} ms after a ping; reconnecting`)
+        console.warn(`WebSocket silent for ${performance.now() - (this._wsPingedAt ?? performance.now())} ms after a ping; reconnecting`)
         this._onClose(ws)
         ws.close()
     }
@@ -666,10 +676,13 @@ export class ApiClient {
     checkConnection(deadlineMs = CHECK_CONNECTION_DEADLINE_MS): void {
         const ws = this._ws
         if (!ws || ws.readyState !== 1 /* OPEN */ || this._wsProbeTimer) return
-        this._wsPingedAt ??= Date.now()
+        const first = this._wsPingedAt === null
+        if (first) this._wsPingedAt = performance.now()
         this._send(ws, JSON.stringify({ type: 'ping' }))
+        if (first) this._wsPingArrivesBy = this._wsSentBy
         // Any message from the socket ends the probe (`onmessage` → `_endProbe`).
-        const wait = Math.max(deadlineMs, this._wsUnheardBytes / SLOWEST_LINK_BYTES_PER_MS)
+        // The ping reaches the executor only after what was sent before it.
+        const wait = Math.max(deadlineMs, this._wsSentBy - performance.now())
         this._wsProbeTimer = setTimeout(() => {
             this._wsProbeTimer = null
             if (this._ws !== ws) return

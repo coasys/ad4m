@@ -323,7 +323,7 @@ export interface RpcMethods {
   "runtime.importData": { params: ImportRequest; result: RuntimeImportResult };
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
-  "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<string> };
+  "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<LanguageMeta> };
   "runtime.networkMetrics": { params: Record<string, never>; result: string };
   "runtime.notifications": { params: Record<string, never>; result: Array<Notification> };
   "runtime.openLink": { params: OpenLinkRequest; result: boolean };

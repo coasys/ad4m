@@ -390,19 +390,68 @@ describe('ApiClient notices a socket that went silent', () => {
         expect(socket(0).readyState).toBe(1)
     })
 
+    it('keeps the time a large write needs when other messages come in while it is still going out', async () => {
+        // Hearing from the executor says nothing about how far the upload got:
+        // a 600 kB write takes 37.5 s at 16 kB/s, whatever arrives meanwhile.
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 }))
+        await jest.advanceTimersByTimeAsync(1_000)
+        socket(0).reply({ type: 'agent-updated' })
+        await jest.advanceTimersByTimeAsync(14_000)
+        socket(0).reply({ type: 'agent-updated' })
+        await jest.advanceTimersByTimeAsync(15_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(write()).toBe('pending')
+        // Once the write could have crossed and the ping after it is still unanswered: dropped.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(0).readyState).toBe(2)
+        expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+    })
+
+    it('does not give a silent socket more time for what it sent after its unanswered ping', async () => {
+        // Those frames queue behind the ping, so they cannot delay its pong.
+        open()
+        socket(0).open()
+        for (let t = 0; t < 20_000; t += 2_000) {
+            call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(20_000) }, { timeoutMs: 120_000 })
+            await jest.advanceTimersByTimeAsync(2_000)
+        }
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('judges a new socket by its own pings, not by its predecessor\'s', async () => {
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+        await jest.advanceTimersByTimeAsync(500)
+        socket(1).open()
+        // Its first tick pings; nothing has gone unanswered on it yet.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(1).sent.some(m => m.type === 'ping')).toBe(true)
+        expect(socket(1).readyState).toBe(1)
+    })
+
     it('pings a quiet socket before it counts as silent, even when the timer fires late', async () => {
         // A socket with no traffic hears nothing until its first ping is answered.
         // Silence is counted from that ping, not from the last message.
         open()
         socket(0).open()
         await jest.advanceTimersByTimeAsync(9_990)
-        jest.setSystemTime(Date.now() + 50) // the interval fires 40 ms late
-        await jest.advanceTimersByTimeAsync(10)
-        expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
-        expect(socket(0).readyState).toBe(1)
-        // Unanswered for a whole interval after that ping: dropped.
-        await jest.advanceTimersByTimeAsync(10_000)
-        expect(socket(0).readyState).toBe(2)
+        // The interval fires 40 ms late.
+        const now = performance.now.bind(performance)
+        const late = jest.spyOn(performance, 'now').mockImplementation(() => now() + 50)
+        try {
+            await jest.advanceTimersByTimeAsync(10)
+            expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
+            expect(socket(0).readyState).toBe(1)
+            // Unanswered for a whole interval after that ping: dropped.
+            await jest.advanceTimersByTimeAsync(10_000)
+            expect(socket(0).readyState).toBe(2)
+        } finally {
+            late.mockRestore()
+        }
     })
 
     it('ignores events that reach a socket after it was dropped', async () => {
