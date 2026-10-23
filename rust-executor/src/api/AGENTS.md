@@ -119,8 +119,10 @@ Notes on some methods:
 - `Operator`: `runtime.importData` writes rows as they are in the file, granted notifications
   and password hashes included. The stubs `user.credits` and `runtime.unyt*` answer 501 to the
   operator until each gets a handler and its real guard.
-- `runtime.exportData` (`Executor`) of one perspective checks `get_perspective_with_access` in
-  its handler (a `db` export names none), so an app exports only the main agent's perspectives.
+- `runtime.exportData` (`Executor`) has two kinds. A `perspective` export checks
+  `get_perspective_with_access` in its handler, so an app exports only the main agent's
+  perspectives. A `db` export names no perspective and checks nothing past the guard: it writes
+  the whole executor database (`export_all_to_json`) for any session the guard admits.
 - `Cap` methods that read executor-wide data users read today: `agent.getTrustedAgents`,
   `ai.models`, `language.*` reads, link-language templates,
   `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Executor` would refuse
