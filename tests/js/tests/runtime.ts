@@ -52,8 +52,9 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
         it('CRUD for known LinkLanguage templates', async () => {
             const ad4mClient = testContext.ad4mClient!
 
-            const addresses = await ad4mClient.runtime.knownLinkLanguageTemplates();
-            expect(addresses).to.eql([ DIFF_SYNC_OFFICIAL ])
+            const templates = await ad4mClient.runtime.knownLinkLanguageTemplates();
+            expect(templates.map(t => t.address)).to.eql([ DIFF_SYNC_OFFICIAL ])
+            expect(templates[0].possibleTemplateParams).to.eql([ "uid", "name", "description" ])
 
             const addAddresses = await ad4mClient.runtime.addKnownLinkLanguageTemplates(["Qm123", "Qmabc"]);
             expect(addAddresses).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ].sort())
@@ -62,8 +63,9 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             const addDuplicate = await ad4mClient.runtime.addKnownLinkLanguageTemplates(["Qm123", "Qmabc"]);
             expect(addDuplicate).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ].sort())
 
+            // Qm123 and Qmabc were never published: without a meta they are left out.
             const get = await ad4mClient.runtime.knownLinkLanguageTemplates();
-            expect(get).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ].sort())
+            expect(get.map(t => t.address)).to.eql([ DIFF_SYNC_OFFICIAL ])
 
             const deleted = await ad4mClient.runtime.removeKnownLinkLanguageTemplates(["Qm123"])
             expect(deleted).to.eql([ DIFF_SYNC_OFFICIAL, "Qmabc" ].sort())
@@ -72,7 +74,7 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             expect(deleted2).to.eql([ DIFF_SYNC_OFFICIAL ])
 
             const getPostDelete = await ad4mClient.runtime.knownLinkLanguageTemplates();
-            expect(getPostDelete).to.eql([ DIFF_SYNC_OFFICIAL  ])
+            expect(getPostDelete.map(t => t.address)).to.eql([ DIFF_SYNC_OFFICIAL ])
         })
 
         it('CRUD for friends', async () => {
@@ -107,8 +109,8 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
 
             await ad4mClient.runtime.addFriends(["did:test:1", "did:test:2"]);
 
-            const addresses = await ad4mClient.runtime.knownLinkLanguageTemplates();
-            expect(addresses).to.eql([ DIFF_SYNC_OFFICIAL ])
+            const templates = await ad4mClient.runtime.knownLinkLanguageTemplates();
+            expect(templates.map(t => t.address)).to.eql([ DIFF_SYNC_OFFICIAL ])
 
             const initalAgents = await ad4mClient.runtime.getTrustedAgents();
             expect(initalAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT ].sort())
@@ -127,7 +129,8 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             const deleted = await ad4mClient.runtime.removeFriends(["did:test:1", "agentPubKey", "Qm123"])
             expect(deleted).to.eql(["did:test:2" ])
 
-            const postDeleteAddresses = await ad4mClient.runtime.knownLinkLanguageTemplates()
+            // Adding none returns every stored address, published or not.
+            const postDeleteAddresses = await ad4mClient.runtime.addKnownLinkLanguageTemplates([])
             expect(postDeleteAddresses).to.eql([ DIFF_SYNC_OFFICIAL, 'Qm123', 'Qmabc' ].sort())
 
             const postDeleteAgents = await ad4mClient.runtime.getTrustedAgents()

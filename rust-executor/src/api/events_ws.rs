@@ -42,7 +42,7 @@
 //! | `sfu-migrate`                 | (inline)      | `targetDid`            | SFU cascade rebalance: rejoin elsewhere (`acceptRedirect` joins only) |
 //! | `sfu-data`                    | (inline)      | the room's other agents on this executor | SFU data channel message |
 //! | `sfu-room-roster`             | (inline)      | the participants it lists | Who is in a call room now         |
-//! | `flow-state-changed`          | (inline)      | `agentDid`, if an owner | A flow instance's state moved on that agent's replica (#1424) |
+//! | `flow-state-changed`          | (inline)      | `agentDid` if it reads the perspective; else the main agent's to `Operator` | A flow instance's state moved on that agent's replica (#1424) |
 //!
 //! Every session also needs the event's capability (`Event::capability`).
 

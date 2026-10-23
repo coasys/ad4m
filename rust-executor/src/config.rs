@@ -185,7 +185,9 @@ pub struct Ad4mConfig {
     /// Bearer token for internal API authentication (outbound: executor → platform Worker).
     /// MUST differ from `admin_credential` (inbound: client → executor) to maintain
     /// trust boundary separation. See the assertion in lib.rs::run().
-    pub internal_api_token: Option<String>,
+    /// Serialises as `"<redacted>"`, like `admin_credential`.
+    #[serde(serialize_with = "crate::secret::serialize_redacted")]
+    pub internal_api_token: Option<Secret>,
 }
 
 impl Ad4mConfig {
@@ -233,7 +235,7 @@ impl Ad4mConfig {
                 .and_then(|v| v.parse().ok());
         }
         if self.internal_api_token.is_none() {
-            self.internal_api_token = std::env::var("INTERNAL_API_TOKEN").ok();
+            self.internal_api_token = Secret::non_empty(std::env::var("INTERNAL_API_TOKEN").ok());
         }
 
         // Validate shared-backend URLs use HTTPS (or approved local addresses)

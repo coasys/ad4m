@@ -1318,14 +1318,15 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
     }
     let deferred: Vec<_> = peer.deferred_tracks.drain(..).collect();
 
-    // Filter out tracks already plumbed — must happen before
-    // borrowing rtc via sdp_api().
+    // Filter out tracks already plumbed, and repeats: a track is queued
+    // again each time this peer opens one of its own while an offer is
+    // pending. Must happen before borrowing rtc via sdp_api().
+    let mut queued = HashSet::new();
     let to_add: Vec<_> = deferred
         .into_iter()
         .filter(|(origin_pid, origin_mid, _, _)| {
-            !peer
-                .tracks_out_rev
-                .contains_key(&(origin_pid.clone(), *origin_mid))
+            let track = (origin_pid.clone(), *origin_mid);
+            !peer.tracks_out_rev.contains_key(&track) && queued.insert(track)
         })
         .collect();
 
@@ -1497,6 +1498,35 @@ mod tests {
             }
         }
         assert!(offer_send_only(&mut Rtc::new(Instant::now()), &[]).is_none());
+    }
+
+    /// A track queued twice while an offer was pending (a peer that opens
+    /// a second track has every other peer's tracks queued for it again)
+    /// goes out on one m-line, not one per time it was queued.
+    #[test]
+    fn a_track_queued_twice_is_offered_once() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:target".to_string(),
+            rtc,
+            false,
+        );
+        let origin = ParticipantId::next();
+        let origin_mid = Mid::from("0");
+        for _ in 0..2 {
+            peer.deferred_tracks.push((
+                origin.clone(),
+                origin_mid,
+                MediaKind::Audio,
+                "did:key:origin".to_string(),
+            ));
+        }
+        let (_, mapping) = apply_deferred_tracks(&mut peer).expect("the track is offered");
+        assert_eq!(mapping.len(), 1, "{mapping:?}");
+        assert_eq!(peer.tracks_out.len(), 1);
     }
 
     /// Behind NAT the answer offers the bound socket and the public address
