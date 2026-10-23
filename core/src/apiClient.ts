@@ -80,9 +80,10 @@ const SLOWEST_LINK_BYTES_PER_MS = 16 // 16 kB/s
 const PONG_RETURN_MS = 5_000
 
 /** How long `checkConnection` waits for the open socket to say anything
- *  after its ping (longer if a large write sent before it may still be on
- *  the way, as for the periodic ping). On a working path the pong is one
- *  round trip away. */
+ *  after its ping. If a large write sent before it may still be on the way,
+ *  the wait lasts until that write could have crossed, as for the periodic
+ *  ping, and half of this more for the pong. On a working path the pong is
+ *  one round trip away. */
 const CHECK_CONNECTION_DEADLINE_MS = 2_000
 
 /** The bytes `text` takes as UTF-8, as a WebSocket text frame sends it. */
@@ -686,8 +687,9 @@ export class ApiClient {
         this._send(ws, JSON.stringify({ type: 'ping' }))
         if (first) this._wsPingArrivesBy = this._wsSentBy
         // Any message from the socket ends the probe (`onmessage` → `_endProbe`).
-        // The ping reaches the executor only after what was sent before it.
-        const wait = Math.max(deadlineMs, this._wsSentBy - performance.now())
+        // The ping reaches the executor only after what was sent before it,
+        // and its pong gets half the deadline to come back after that.
+        const wait = Math.max(deadlineMs, this._wsSentBy - performance.now() + deadlineMs / 2)
         this._wsProbeTimer = setTimeout(() => {
             this._wsProbeTimer = null
             if (this._ws !== ws) return

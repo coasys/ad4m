@@ -547,6 +547,21 @@ describe('ApiClient checkConnection', () => {
         await expect(read).resolves.toEqual(['p'])
     })
 
+    it('gives the probe\'s pong time to come back after a large write sent before it could have crossed', async () => {
+        // The write could have crossed at about 37.5 s; the pong comes back 100 ms later.
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 }))
+        await jest.advanceTimersByTimeAsync(1_000)
+        client.checkConnection()
+        await jest.advanceTimersByTimeAsync(36_600)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ type: 'pong' })
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(write()).toBe('pending')
+    })
+
     it('keeps a socket that answers the ping', async () => {
         TestSocket.answersPings = true
         const changed = jest.fn()
