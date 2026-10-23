@@ -192,14 +192,19 @@ impl PendingRequests {
         let for_target = pending.values().filter(|r| same_target(&r.target)).count();
         // A share that is all approved takes no more. The operator may approve a request for
         // no agent (`may_approve`), so that share can fill too: such a request is then dropped
-        // and answered like an agent's, as when the store is full, so the answer reveals no
-        // accounts.
+        // and gets the answer of an agent with nothing waiting, so the answer reveals no
+        // accounts. That agent is taken while the store has room or holds an unapproved
+        // request to evict (one of the fullest target's), and refused when all are approved.
         if for_target >= MAX_PENDING_REQUESTS_PER_TARGET {
             match oldest_unapproved(&pending, &same_target) {
                 Some(id) => {
                     pending.remove(&id);
                 }
-                None if target == RequestTarget::NoAgent => return Ok(()),
+                None if target == RequestTarget::NoAgent => {
+                    let admitted = pending.len() < MAX_PENDING_REQUESTS
+                        || pending.values().any(|r| r.code.is_none());
+                    return if admitted { Ok(()) } else { Err(too_many()) };
+                }
                 None => return Err(too_many()),
             }
         }
@@ -685,6 +690,51 @@ mod tests {
             .is_ok());
         assert!(!pending.contains("none"));
         assert_eq!(pending.len(), 2 * MAX_PENDING_REQUESTS_PER_TARGET + 1);
+    }
+
+    // A store full of approved requests, the share of no agent among them: a request for an
+    // email without an account is answered as one for an agent with nothing waiting. Both are
+    // refused while every request is approved, and both are admitted once one is not.
+    #[test]
+    fn a_saturated_store_answers_no_agent_as_an_agent_with_an_empty_share() {
+        let pending = PendingRequests::default();
+        let approve = |id: &str, target: RequestTarget| {
+            pending
+                .request(id.into(), AuthInfo::default(), target, 0)
+                .unwrap();
+            pending
+                .approve(id, AuthInfo::default(), "123456".into(), 0)
+                .unwrap();
+        };
+        for i in 0..MAX_PENDING_REQUESTS_PER_TARGET {
+            approve(&format!("n{i}"), RequestTarget::NoAgent);
+        }
+        let agents = MAX_PENDING_REQUESTS / MAX_PENDING_REQUESTS_PER_TARGET - 1;
+        for a in 0..agents {
+            let agent = AgentContext::managed(format!("did:key:z6MkAgent{a}"));
+            for i in 0..MAX_PENDING_REQUESTS_PER_TARGET {
+                approve(&format!("a{a}-{i}"), agent.clone().into());
+            }
+        }
+        assert_eq!(pending.len(), MAX_PENDING_REQUESTS);
+
+        let empty = AgentContext::managed("did:key:z6MkEmpty".into());
+        let ask = |id: &str, target: RequestTarget| {
+            pending.request(id.into(), AuthInfo::default(), target, 0)
+        };
+        assert!(ask("empty", empty.clone().into()).is_err());
+        assert!(ask("none", RequestTarget::NoAgent).is_err());
+        assert_eq!(pending.len(), MAX_PENDING_REQUESTS);
+
+        // One unapproved request: the agent evicts it, the request for no agent is dropped.
+        pending.lock().get_mut("a0-0").unwrap().code = None;
+        assert!(ask("none", RequestTarget::NoAgent).is_ok());
+        assert!(!pending.contains("none"));
+        assert!(pending.contains("a0-0"));
+        assert!(ask("empty", empty.into()).is_ok());
+        assert!(pending.contains("empty"));
+        assert!(!pending.contains("a0-0"));
+        assert_eq!(pending.len(), MAX_PENDING_REQUESTS);
     }
 
     // Requests for emails without an agent are silent and live a day; a flood of them used to
