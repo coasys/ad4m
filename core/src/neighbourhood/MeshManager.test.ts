@@ -1519,6 +1519,43 @@ describe("recovering a pair that did not connect", () => {
         expect(networkListeners.size).toBe(0)
     })
 
+    it("does not charge network-change restarts to a pair's repair budget", async () => {
+        // A network change judges no pair lost. Several in a row (Wi-Fi flapping)
+        // must not leave a pair that then fails without any repair.
+        const clock = makeClock()
+        const networkListeners = new Set<() => void>()
+        const onNetworkChange = (cb: () => void) => {
+            networkListeners.add(cb)
+            return () => { networkListeners.delete(cb) }
+        }
+        // The restart offers go out on a path that is gone: none is answered.
+        let pathGone = false
+        const alice = await makeMesh(bus, "did:alice", CALL_ID, {
+            now: clock.now,
+            onNetworkChange,
+            drop: (payload) => pathGone && (payload as { kind?: string }).kind === "description",
+        })
+        const bob = await makeMesh(bus, "did:bob", CALL_ID, { now: clock.now })
+        for (const m of [alice, bob]) m.mesh.setRoster(["did:alice", "did:bob"])
+        await settleAll()
+        alice.live().setConnectionState("connected")
+        pathGone = true
+
+        for (let n = 0; n < MAX_RECOVERY_ATTEMPTS + 1; n += 1) {
+            for (const cb of networkListeners) cb()
+            await settle()
+        }
+        const restarts = alice.recoveries.length
+        alice.live().setConnectionState("failed")
+        await settle()
+        clock.advance(RECOVERY_INTERVAL_MS + 1)
+        alice.mesh.tick()
+        await settle()
+
+        expect(alice.recoveries.length).toBe(restarts + 1)
+        expect(alice.recoveries.at(-1)).toMatchObject({ rung: "ice-restart", attempts: 1 })
+    })
+
     it("checks the executor socket when a pair goes disconnected", async () => {
         // The signals of every rung go over that socket; a dead one is found in
         // seconds, and its reconnect restarts every pair through onNetworkChange.

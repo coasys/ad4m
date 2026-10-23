@@ -1328,8 +1328,9 @@ export class MeshManager {
         const at = this.now()
         for (const [peerId, slot] of this.slots) {
             if (!slot.remoteReady || typeof slot.pc.restartIce !== "function") continue
+            // Spaced from the sweep's next rung, but not charged to the pair's
+            // budget: a network change judges no pair lost.
             slot.lastAttempt = at
-            slot.attempts += 1
             try {
                 slot.pc.restartIce()
                 this.emit("peer-recovery", peerId, { rung: "ice-restart", attempts: slot.attempts })

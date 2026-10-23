@@ -101,7 +101,8 @@ pub const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(10);
 
 /// How long a peer whose client asked for an ICE restart is kept, from the
 /// request, however long it was disconnected before. The restart's answer
-/// ends it sooner: ICE goes back to checking, which stops the disconnect clock.
+/// ends it and restarts the disconnect clock: ICE checks again, but its state
+/// arrives only on the next poll.
 pub const ICE_RESTART_GRACE: Duration = Duration::from_secs(10);
 
 impl SfuPeer {
@@ -235,6 +236,13 @@ impl SfuPeer {
             .is_some_and(|restart| restart.offer.is_some())
         {
             if let Some(restart) = self.ice_restart.take() {
+                // ICE checks again from here, but its state arrives only on
+                // the next poll, after the disconnect sweep: restart the clock.
+                if accepted.is_ok() {
+                    if let Some(since) = self.disconnected_since.as_mut() {
+                        *since = Instant::now();
+                    }
+                }
                 for candidate in restart.candidates {
                     self.rtc.add_remote_candidate(candidate);
                 }
@@ -2218,6 +2226,54 @@ mod tests {
             .unwrap();
         assert!(peer.ice_restart.is_none());
         assert!(!peer.has_deferred_changes());
+    }
+
+    /// The event loop applies commands, then drops peers that stayed
+    /// disconnected, and only then polls str0m for the ICE state the answer
+    /// starts. A restart answered after the disconnect grace ran out must
+    /// not be dropped in between: its answer restarts the clock.
+    #[test]
+    fn a_restart_answered_late_keeps_the_peer_until_ice_reports() {
+        let bind: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let mut caller = Rtc::builder().build(Instant::now());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        let (offer, pending) = change.apply().unwrap();
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind, None).unwrap();
+        caller
+            .sdp_api()
+            .accept_answer(pending, serde_json::from_str(&answer).unwrap())
+            .unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:caller".to_string(),
+            rtc,
+            false,
+        );
+        let now = Instant::now();
+        let lost_at = now.checked_sub(ICE_DISCONNECT_GRACE + Duration::from_secs(5)).unwrap();
+        peer.on_ice_state(IceConnectionState::Disconnected, lost_at);
+        assert!(peer.restart_ice(lost_at + ICE_DISCONNECT_GRACE).is_none());
+        let (offer, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
+        assert!(!peer.stayed_disconnected(now), "the restart extends the grace");
+
+        let answer = caller
+            .sdp_api()
+            .accept_offer(serde_json::from_str(&offer).unwrap())
+            .unwrap();
+        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+            .unwrap();
+        assert!(
+            !peer.stayed_disconnected(Instant::now()),
+            "dropped between the answer and its ICE state"
+        );
     }
 
     /// A fixed port is bound exactly; the STUN probe runs on that socket and
