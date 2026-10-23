@@ -17,8 +17,8 @@ use crate::runtime_service::notification_access::{
 };
 use crate::runtime_service::RuntimeService;
 use crate::types::domain::{ComputeLogEntry, ImportResult};
-use crate::types::{Notification, NotificationView};
 use crate::types::{LanguageMeta, PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
+use crate::types::{Notification, NotificationView};
 
 use super::guards::refuse_user_session;
 use super::perspectives_ws::get_perspective_or_404;
