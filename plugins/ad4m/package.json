@@ -15,7 +15,7 @@
   },
   "keywords": ["openclaw", "ad4m", "mcp", "p2p", "holochain", "neighbourhoods"],
   "scripts": {
-    "build": "esbuild index.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/index.cjs",
+    "build": "node build.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build",
     "test": "vitest run",

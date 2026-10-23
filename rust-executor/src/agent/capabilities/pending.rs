@@ -132,6 +132,10 @@ impl std::fmt::Display for RedeemError {
     }
 }
 
+fn too_many() -> String {
+    "Too many capability requests are waiting; try again later".to_string()
+}
+
 /// Pending requests by request id. Every request, approval and redemption also deletes the
 /// expired ones, so no separate sweeper runs.
 #[derive(Default)]
@@ -186,9 +190,17 @@ impl PendingRequests {
             };
         let same_target = |t: &RequestTarget| *t == target;
         let for_target = pending.values().filter(|r| same_target(&r.target)).count();
+        // A share that is all approved takes no more. The operator may approve a request for
+        // no agent (`may_approve`), so that share can fill too: such a request is then dropped
+        // and answered like an agent's, as when the store is full, so the answer reveals no
+        // accounts.
         if for_target >= MAX_PENDING_REQUESTS_PER_TARGET {
-            if let Some(id) = oldest_unapproved(&pending, &same_target) {
-                pending.remove(&id);
+            match oldest_unapproved(&pending, &same_target) {
+                Some(id) => {
+                    pending.remove(&id);
+                }
+                None if target == RequestTarget::NoAgent => return Ok(()),
+                None => return Err(too_many()),
             }
         }
         if pending.len() >= MAX_PENDING_REQUESTS {
@@ -226,11 +238,7 @@ impl PendingRequests {
                 {
                     return Ok(());
                 }
-                None => {
-                    return Err(
-                        "Too many capability requests are waiting; try again later".to_string()
-                    )
-                }
+                None => return Err(too_many()),
             }
         }
         let expires_at = now + request_ttl(&target);
@@ -636,6 +644,47 @@ mod tests {
         let newest = MAX_PENDING_REQUESTS - MAX_PENDING_REQUESTS_PER_TARGET + 2;
         assert!(!pending.contains(&format!("r{}", newest - 1)));
         assert!(pending.contains(&format!("r{newest}")));
+    }
+
+    // A target whose share is all approved requests gets no more, even with room in the store:
+    // an agent approving its own requests must not fill the store and lock out the others.
+    #[test]
+    fn a_target_with_its_share_approved_is_refused_while_others_are_admitted() {
+        let pending = PendingRequests::default();
+        for i in 0..MAX_PENDING_REQUESTS_PER_TARGET {
+            approved(&pending, &format!("a{i}"), 0);
+        }
+        assert!(pending
+            .request("over".into(), AuthInfo::default(), main(), 0)
+            .is_err());
+        assert!(!pending.contains("over"));
+        assert_eq!(pending.len(), MAX_PENDING_REQUESTS_PER_TARGET);
+        let alice = AgentContext::managed("did:key:z6MkAlice".into());
+        assert!(pending
+            .request("alice".into(), AuthInfo::default(), alice, 0)
+            .is_ok());
+
+        // The share of no agent, approved in full by the operator, drops the next request for
+        // no agent, answered as one for an agent.
+        for i in 0..MAX_PENDING_REQUESTS_PER_TARGET {
+            let id = format!("n{i}");
+            pending
+                .request(id.clone(), AuthInfo::default(), RequestTarget::NoAgent, 0)
+                .unwrap();
+            pending
+                .approve(&id, AuthInfo::default(), "123456".into(), 0)
+                .unwrap();
+        }
+        assert!(pending
+            .request(
+                "none".into(),
+                AuthInfo::default(),
+                RequestTarget::NoAgent,
+                0
+            )
+            .is_ok());
+        assert!(!pending.contains("none"));
+        assert_eq!(pending.len(), 2 * MAX_PENDING_REQUESTS_PER_TARGET + 1);
     }
 
     // Requests for emails without an agent are silent and live a day; a flood of them used to

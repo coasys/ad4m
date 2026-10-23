@@ -11,13 +11,14 @@ use crate::agent::AgentService;
 use crate::db::Ad4mDb;
 use crate::globals::{AD4M_COMMIT, AD4M_VERSION};
 use crate::holochain_service::get_holochain_service;
+use crate::languages::LanguageController;
 use crate::runtime_service::notification_access::{
     caller_may_manage, granted_after_update, owner_may_read,
 };
 use crate::runtime_service::RuntimeService;
 use crate::types::domain::{ComputeLogEntry, ImportResult};
 use crate::types::{Notification, NotificationView};
-use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
+use crate::types::{LanguageMeta, PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
 use super::guards::Guard;
 use super::perspectives_ws::get_perspective_or_404;
@@ -436,14 +437,18 @@ async fn delete_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
 
 // ── Link Language Templates ──
 
+/// Every known link-language template with its meta, so a client choosing
+/// one needs no `language.meta` call per template.
 async fn get_link_language_templates(
     _params: Value,
     _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let templates = RuntimeService::with_global_instance(|runtime| {
-        Ok::<Vec<String>, WsRpcError>(runtime.get_know_link_languages())
-    })?;
-    Ok(serde_json::to_value(templates)?)
+    let addresses =
+        RuntimeService::with_global_instance(|runtime| runtime.get_know_link_languages());
+    let metas = LanguageController::global_instance()
+        .language_metas(&addresses)
+        .await;
+    Ok(serde_json::to_value(metas)?)
 }
 
 async fn add_link_language_templates(
@@ -793,8 +798,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         delete_notification,
     )
     .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
-    // Link language templates. The executor's list, which users read too.
-    map.method::<NoParams, Vec<String>>(
+    // Link language templates, with their metas. The executor's list, which users read too.
+    map.method::<NoParams, Vec<LanguageMeta>>(
         "runtime.linkLanguageTemplates",
         get_link_language_templates,
     )

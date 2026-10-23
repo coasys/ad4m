@@ -2,11 +2,18 @@ mod byte_array;
 pub mod capability;
 mod conductor_languages;
 pub mod error;
+#[cfg(test)]
+mod install_tests;
+/// How long one request to the language language may take before an install
+/// gives up on it. Its store is consistent, so this bounds a request that
+/// hangs, not a wait for a value to appear.
+const LANGUAGE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub mod language;
 pub mod language_context;
 pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
+mod metas;
 #[cfg(test)]
 mod signing_reach_tests;
 pub mod wasm_delegate;
@@ -18,6 +25,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::events::Event;
+use crate::logging::span;
 use crate::pubsub::get_global_pubsub;
 use crate::runtime_service::RuntimeService;
 use crate::types::Address;
@@ -69,6 +77,19 @@ fn sorted_json_string(val: &JsonValue) -> String {
     }
 }
 
+/// Removes a directory tree when dropped: a temp dir that must go on every exit path.
+struct RemoveDirOnDrop(PathBuf);
+
+impl Drop for RemoveDirOnDrop {
+    fn drop(&mut self) {
+        if let Err(e) = fs::remove_dir_all(&self.0) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!("Could not remove temp dir {}: {}", self.0.display(), e);
+            }
+        }
+    }
+}
+
 /// Tracks addresses of system languages (language language, agent, neighbourhood, perspective)
 #[derive(Debug, Clone, Default)]
 pub struct SystemLanguageAddresses {
@@ -97,6 +118,9 @@ pub struct LanguageController {
 
     // Cached language names (address -> name)
     language_names: Arc<TokioMutex<HashMap<String, String>>>,
+
+    // One lock per address `install_language` has seen: one install of a language at a time
+    installs: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
 }
 
 impl LanguageController {
@@ -122,6 +146,7 @@ impl LanguageController {
             system_addresses: Arc::new(TokioMutex::new(SystemLanguageAddresses::default())),
             language_aliases: Arc::new(TokioMutex::new(HashMap::new())),
             language_names: Arc::new(TokioMutex::new(HashMap::new())),
+            installs: Arc::new(TokioMutex::new(HashMap::new())),
         }
     }
 
@@ -222,6 +247,7 @@ impl LanguageController {
         );
 
         // Spawn dedicated runtime in its own thread (sandboxed to storage_directory)
+        let starting = span(format!("loadLanguage.runtimeStart {}", language_address));
         let runtime_handle = LanguageRuntimeHandle::spawn(
             language_address.clone(),
             storage_directory.clone(),
@@ -243,10 +269,12 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to load language module: {}", e),
             })?;
+        drop(starting);
         info!("Module loaded for language {}", language_address);
 
         // Initialize the language with context
         info!("Initializing language {}", language_address);
+        let initializing = span(format!("loadLanguage.init {}", language_address));
         runtime_handle
             .load_language(language_context_json)
             .await
@@ -254,6 +282,7 @@ impl LanguageController {
                 address: language_address.clone(),
                 message: format!("Failed to initialize language: {}", e),
             })?;
+        drop(initializing);
 
         // Query the language name now that the constructor has run
         let mut runtime_handle = runtime_handle;
@@ -275,10 +304,13 @@ impl LanguageController {
         capability::register_capabilities(&language_address, capabilities);
         info!("Callbacks registered for {}", label);
 
-        // Cache the language name for use by other log sites
+        // Cache the language name for use by other log sites, unless one was
+        // set for it already (`set_language_name`, e.g. a templated name)
         if let Some(name) = &runtime_handle.language_name {
             let mut names = self.language_names.lock().await;
-            names.insert(language_address.clone(), name.clone());
+            names
+                .entry(language_address.clone())
+                .or_insert_with(|| name.clone());
         }
 
         // Store the runtime handle
@@ -827,9 +859,20 @@ impl LanguageController {
         Ok(())
     }
 
+    /// Load `language`, fetching its bundle first if it is not on disk. One
+    /// install per address runs at a time: a caller that arrives during one
+    /// waits for it and then finds the language loaded.
     pub async fn install_language(language: Address) -> Result<(), AnyError> {
         log::debug!("install_language called for: {}", language);
         let controller = Self::global_instance();
+        let lock = controller
+            .installs
+            .lock()
+            .await
+            .entry(language.clone())
+            .or_default()
+            .clone();
+        let _installing = lock.lock().await;
 
         // Check if the language is already loaded in Rust runtimes
         if controller.is_language_loaded(&language).await {
@@ -837,160 +880,131 @@ impl LanguageController {
             return Ok(());
         }
 
-        let language_dir = languages_directory().join(&language);
+        let bundle_path = controller.fetch_language(&language).await?;
+
+        // Load into a per-language Deno runtime
+        let _loading = span(format!("installLanguage.load {}", language));
+        controller
+            .load_language(bundle_path, false)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "install_language: failed to load language runtime for {}: {}",
+                    language,
+                    e
+                )
+            })?;
+        info!("install_language: loaded language runtime for {}", language);
+        Ok(())
+    }
+
+    /// Make sure `language`'s bundle is on disk and hashes to its address,
+    /// fetching it from the language language if it is not there; returns its
+    /// path. Does not load it.
+    async fn fetch_language(&self, language: &str) -> Result<PathBuf, AnyError> {
+        let language_dir = languages_directory().join(language);
         let meta_path = language_dir.join("meta.json");
         let bundle_path = language_dir.join("bundle.js");
 
-        // Check if the language language is loaded on the Rust side
+        // A bundle whose hash is not its address must not be installed: a
+        // neighbourhood published with it would name a link language that no
+        // executor can use.
+        let verify = |source: &str| {
+            let hash = self.calculate_language_hash(source);
+            if hash == language {
+                return Ok(());
+            }
+            error!(
+                "install_language: hash mismatch for {} (computed {}), not installing",
+                language, hash
+            );
+            Err(anyhow::anyhow!(
+                "install_language: hash mismatch for {} (computed {}). \
+                 The language language returned source that does not match \
+                 the requested content address; refusing to install.",
+                language,
+                hash
+            ))
+        };
+
+        if bundle_path.exists() {
+            verify(&fs::read_to_string(&bundle_path)?)?;
+            return Ok(bundle_path);
+        }
+
         let language_language_address = {
-            let sys = controller.system_addresses.lock().await;
+            let sys = self.system_addresses.lock().await;
             sys.language_language.clone()
         };
+        let Some(ll_addr) = language_language_address.as_ref() else {
+            return Err(anyhow::anyhow!(
+                "install_language: no source available for {}",
+                language
+            ));
+        };
+        let language_lit = serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
 
-        // Get meta: from disk or from language language with retry
-        let meta: Option<JsonValue> = if meta_path.exists() {
-            let content = fs::read_to_string(&meta_path)?;
-            Some(serde_json::from_str(&content)?)
-        } else if let Some(ref ll_addr) = language_language_address {
-            // Fetch from language language with retry logic (up to 10 retries)
-            let language_lit =
-                serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
-            let meta_script = format!(
-                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
-                language_lit
-            );
-
-            let mut meta_result = None;
-            for retry in 0..10 {
-                match controller.execute_on_language(ll_addr, &meta_script).await {
-                    Ok(result) => {
-                        if let Ok(val) = serde_json::from_str::<JsonValue>(&result) {
-                            if !val.is_null() {
-                                meta_result = Some(val);
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "Error getting language meta from language language: {}\nRetrying...",
-                            e
-                        );
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5000 * (retry + 1))).await;
-            }
-
-            meta_result.and_then(|expr| expr.get("data").cloned())
-        } else {
-            None
+        // The language language's store is consistent, so one request decides:
+        // a miss means the language was never published. The timeout only ends
+        // a request that hangs; `ensure_link_language` tries a failed install
+        // again later.
+        let ask = |script: String| async move {
+            tokio::time::timeout(
+                LANGUAGE_FETCH_TIMEOUT,
+                self.execute_on_language(ll_addr, &script),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "install_language: the language language timed out after {:?}",
+                    LANGUAGE_FETCH_TIMEOUT
+                )
+            })?
+            .map_err(anyhow::Error::from)
         };
 
-        // Get bundle source: from disk or from language language
-        let source = if bundle_path.exists() {
-            Some(fs::read_to_string(&bundle_path)?)
-        } else if let Some(ref ll_addr) = language_language_address {
-            // Match the meta fetch retry policy: up to 10 attempts with
-            // linear backoff. Previously the source fetch was one-shot,
-            // which meant that if the language language was still warming
-            // up the meta call could succeed on retry N while the source
-            // call failed instantly on the first attempt, aborting the
-            // whole install with a confusing "no source available" error
-            // even though a retry would have succeeded.
-            let language_lit =
-                serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
-            let source_script = format!(
-                r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
-                language_lit
-            );
-
-            let mut source_result: Option<String> = None;
-            for retry in 0..10 {
-                match controller
-                    .execute_on_language(ll_addr, &source_script)
-                    .await
-                {
-                    Ok(s) => {
-                        // A language-language that returns null/undefined
-                        // for an unknown address stringifies to the literal
-                        // "null" / "undefined" here. Treat those as
-                        // "source not available" — but still retry in case
-                        // the LL is mid-warmup and hasn't yet materialized
-                        // the expression.
-                        let trimmed = s.trim();
-                        if !(trimmed.is_empty() || trimmed == "null" || trimmed == "undefined") {
-                            source_result = Some(s);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Error getting language source from language language: {}\nRetrying...",
-                            e
-                        );
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5000 * (retry + 1))).await;
-            }
-
-            source_result
-        } else {
-            None
-        };
-
-        // If we have source, save and load into a per-language runtime
-        if let Some(source) = source {
-            // Compute hash and verify it matches the expected address.
-            //
-            // Previously this returned Ok(()) on mismatch, which left
-            // callers (e.g. `neighbourhood_publish_from_perspective_with_context`
-            // in neighbourhoods.rs) believing the language had been
-            // installed even though nothing was loaded. The neighbourhood
-            // would then be published referencing a link_language that
-            // this node could not actually use, surfacing much later as
-            // a mysterious sync failure. Propagate the hash mismatch as
-            // a hard error so the caller knows the install did not
-            // happen.
-            let hash = controller.calculate_language_hash(&source);
-            if hash != language {
-                error!("install_language: COULDN'T VERIFY HASH OF LANGUAGE!");
-                error!("install_language: Address: {}", language);
-                error!("install_language: Computed hash: {}", hash);
-                error!("install_language: LANGUAGE WILL NOT BE INSTALLED");
-                return Err(anyhow::anyhow!(
-                    "install_language: hash mismatch for {} (computed {}). \
-                     The language language returned source that does not match \
-                     the requested content address; refusing to install.",
-                    language,
-                    hash
-                ));
-            }
-
-            // Save language bundle to disk
-            let (_saved_hash, saved_bundle_path) =
-                controller.save_language_bundle(&source, meta.as_ref())?;
-            info!("install_language: saved language bundle for {}", language);
-
-            // Load into a per-language Deno runtime
-            controller
-                .load_language(saved_bundle_path, false)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "install_language: failed to load language runtime for {}: {}",
-                        language,
-                        e
-                    )
-                })?;
-            info!("install_language: loaded language runtime for {}", language);
-        } else {
+        let fetching = span(format!("installLanguage.fetchSource {}", language));
+        let source = ask(format!(
+            r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
+            language_lit
+        ))
+        .await?;
+        drop(fetching);
+        // An unknown address comes back as null/undefined, stringified.
+        let trimmed = source.trim();
+        if trimmed.is_empty() || trimmed == "null" || trimmed == "undefined" {
             return Err(anyhow::anyhow!(
                 "install_language: no source available for {}",
                 language
             ));
         }
+        verify(&source)?;
 
-        Ok(())
+        // Meta is optional: it is only stored beside the bundle, so a failed
+        // read does not stop the install.
+        let meta: Option<JsonValue> = if meta_path.exists() {
+            Some(serde_json::from_str(&fs::read_to_string(&meta_path)?)?)
+        } else {
+            let _fetching = span(format!("installLanguage.fetchMeta {}", language));
+            match ask(format!(
+                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
+                language_lit
+            ))
+            .await
+            {
+                Ok(result) => serde_json::from_str::<JsonValue>(&result)
+                    .ok()
+                    .and_then(|expression| expression.get("data").cloned()),
+                Err(e) => {
+                    warn!("install_language: no meta for {}: {}", language, e);
+                    None
+                }
+            }
+        };
+
+        let (_saved_hash, saved_bundle_path) = self.save_language_bundle(&source, meta.as_ref())?;
+        info!("install_language: saved language bundle for {}", language);
+        Ok(saved_bundle_path)
     }
 
     pub async fn create_neighbourhood(neighbourhood: Neighbourhood) -> Result<Address, AnyError> {
@@ -1251,16 +1265,13 @@ impl LanguageController {
         // `integration-tests-js` job.
         //
         // A per-call UUID suffix keeps each invocation on its own dir, so
-        // concurrent templates can't race on the same path. The cleanup at
-        // the end of the function still removes the per-call dir, and an
-        // earlier-failing call leaves a uniquely-named orphan rather than
-        // poisoning the next one.
+        // concurrent templates can't race on the same path. The guard removes
+        // the per-call dir on every way out of this function, failures
+        // included.
         let temp_templating_path =
             std::env::temp_dir().join(format!("{}-{}", source_language_hash, uuid::Uuid::new_v4()));
-        if temp_templating_path.exists() {
-            let _ = fs::remove_dir_all(&temp_templating_path);
-        }
         fs::create_dir_all(&temp_templating_path)?;
+        let _remove_temp_dir = RemoveDirOnDrop(temp_templating_path.clone());
 
         let temp_happ_path = temp_templating_path.join("happ.happ");
 
@@ -1433,9 +1444,6 @@ impl LanguageController {
         let happ_bytes = fs::read(&pack_happ_path)?;
         let base64_string = BASE64_STANDARD.encode(&happ_bytes);
 
-        // Cleanup temp directory
-        let _ = fs::remove_dir_all(&temp_templating_path);
-
         Ok(Some(base64_string))
     }
 
@@ -1463,9 +1471,11 @@ impl LanguageController {
             r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
             source_language_hash_lit
         );
+        let reading = span("applyTemplate.templateMeta");
         let meta_result = self
             .execute_on_language(&language_language_address, &meta_script)
             .await?;
+        drop(reading);
 
         let meta_expression: JsonValue =
             serde_json::from_str(&meta_result).map_err(|e| LanguageError::SerializationError {
@@ -1483,9 +1493,11 @@ impl LanguageController {
             r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
             source_language_hash_lit
         );
+        let reading = span("applyTemplate.templateSource");
         let source_language = self
             .execute_on_language(&language_language_address, &source_script)
             .await?;
+        drop(reading);
 
         // Same nullish-stringification guard as install_language_from_address:
         // a language language returning null/undefined for an unknown hash
@@ -1519,9 +1531,11 @@ impl LanguageController {
         template_data = sorted_data;
 
         // Read and template Holochain DNA
+        let templating = span("applyTemplate.dna");
         let happ_code = self
             .read_and_template_holochain_dna(&source_lines, &template_data, source_language_hash)
             .await?;
+        drop(templating);
 
         if let Some(happ_code) = happ_code {
             info!("setting happCode in templateData");
@@ -2885,6 +2899,36 @@ impl LanguageController {
 mod template_tests {
     use super::*;
     use serde_json::json;
+
+    /// The temp dir a DNA templating call works in goes on every exit, not only on
+    /// success: here the happ does not decode, before the conductor is needed.
+    #[tokio::test]
+    async fn a_failed_dna_template_leaves_no_temp_dir() {
+        let source_hash = format!("QmTemplateCleanup{}", uuid::Uuid::new_v4().simple());
+        let lines = make_source(&[r#"var happ = "not base64!";"#]);
+
+        let result = LanguageController::new()
+            .read_and_template_holochain_dna(&lines, &serde_json::Map::new(), &source_hash)
+            .await;
+
+        assert!(
+            matches!(result, Err(LanguageError::InvalidBundle { .. })),
+            "{:?}",
+            result
+        );
+        let left: Vec<_> = fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&source_hash)
+            })
+            .map(|entry| entry.path())
+            .collect();
+        assert!(left.is_empty(), "left behind: {:?}", left);
+    }
 
     fn make_source(lines: &[&str]) -> Vec<String> {
         lines.iter().map(|s| s.to_string()).collect()

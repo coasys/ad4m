@@ -6,6 +6,8 @@ pub mod config;
 pub mod config_file;
 pub mod email_service;
 pub mod entanglement_service;
+#[cfg(unix)]
+pub mod fd_limit;
 mod globals;
 pub mod helpers;
 pub mod holochain_service;
@@ -336,6 +338,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(config.log_config.as_ref());
+
+    // Before any perspective store or language opens files.
+    #[cfg(unix)]
+    crate::fd_limit::raise_fd_limit_at_startup();
+
     config.prepare();
 
     if let Err(message) = config.check_admin_credential() {
@@ -374,7 +381,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     .as_ref()
                     .expect("INTERNAL_API_TOKEN required for shared backends");
                 info!("Initialising shared wallet backend at {}", url);
-                Arc::new(crate::wallet::SharedWallet::new(url.clone(), token.clone()))
+                // The Worker's bearer token: the shared wallet sends it on every call.
+                Arc::new(crate::wallet::SharedWallet::new(
+                    url.clone(),
+                    token.expose().to_string(),
+                ))
             }
             _ => {
                 info!("Initialising local wallet backend");
@@ -400,7 +411,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     .as_ref()
                     .expect("INTERNAL_API_TOKEN required for shared backends");
                 info!("Initialising shared database backend at {}", url);
-                Arc::new(crate::db_backend::SharedDb::new(url.clone(), token.clone()))
+                // The Worker's bearer token: the shared database sends it on every call.
+                Arc::new(crate::db_backend::SharedDb::new(
+                    url.clone(),
+                    token.expose().to_string(),
+                ))
             }
             _ => {
                 info!("Initialising local database backend");
@@ -429,7 +444,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         if let (Some(internal), Some(admin)) =
             (&config.internal_api_token, &config.admin_credential)
         {
-            if admin.expose_for_compare(internal) {
+            if admin.expose_for_compare(internal.expose()) {
                 panic!(
                     "INTERNAL_API_TOKEN must differ from ADMIN_CREDENTIAL in shared mode. \
                      Using the same value collapses two trust boundaries."
