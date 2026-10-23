@@ -9,7 +9,7 @@ use super::{labelled_json, method_error, Ad4mMcpHandler};
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
 use crate::languages::LanguageController;
-use crate::types::{Perspective, PerspectiveHandle};
+use crate::types::{LanguageMeta, Perspective, PerspectiveHandle};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -56,7 +56,8 @@ impl Ad4mMcpHandler {
         description = "List available link language templates that can be used when publishing a neighbourhood. Each template is a P2P synchronization engine. Returns address, name, and description for each template. Pass the address as `link_language` when calling `neighbourhood_publish_from_perspective`."
     )]
     pub async fn list_link_language_templates(&self) -> String {
-        let addresses: Vec<String> = match self
+        // The method answers each template's meta already (#1517).
+        let metas: Vec<LanguageMeta> = match self
             .call(
                 "runtime.linkLanguageTemplates",
                 json!({}),
@@ -64,13 +65,11 @@ impl Ad4mMcpHandler {
             )
             .await
         {
-            Ok(addresses) => addresses,
+            Ok(metas) => metas,
             Err(e) => return e,
         };
 
-        let templates: Vec<_> = LanguageController::global_instance()
-            .language_metas(&addresses)
-            .await
+        let templates: Vec<_> = metas
             .into_iter()
             .map(|m| {
                 json!({
@@ -412,6 +411,71 @@ mod guard_tests {
         assert_eq!(status(&refused), Some(403), "{refused}");
         assert!(!refused.contains("template"), "no clone ran: {refused}");
         crate::perspectives::remove_perspective(&uuid).await;
+    }
+
+    // `runtime.linkLanguageTemplates` answers each template's meta (#1517); the tool decoded
+    // the result as addresses, so any non-empty list failed. The matrix lists no template.
+    #[tokio::test]
+    async fn listing_templates_answers_each_template_meta() {
+        use crate::languages::language_runtime::LanguageOperation;
+        use crate::languages::language_runtime_handle::LanguageRuntimeHandle;
+        use crate::mcp::tools::test_support::RuntimeService;
+        use crate::runtime_service::RuntimeService as Service;
+
+        setup();
+        let _runtime = RuntimeService::start();
+        let template = format!("QmMcpTemplate{}", uuid::Uuid::new_v4().simple());
+        Service::with_global_instance(|s| s.add_know_link_language(vec![template.clone()]));
+
+        // A language language that has the template's meta.
+        let controller = LanguageController::global_instance();
+        let ll = format!("QmFakeLanguageLanguage{}", uuid::Uuid::new_v4().simple());
+        let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        controller
+            .set_runtime_for_test(
+                &ll,
+                Some(LanguageRuntimeHandle::from_channel(ll.clone(), tx)),
+            )
+            .await;
+        let previous = controller
+            .system_addresses
+            .lock()
+            .await
+            .language_language
+            .replace(ll.clone());
+        let asked = format!("expressionGet(\"{template}\")");
+        tokio::spawn(async move {
+            while let Some(request) = requests.recv().await {
+                let LanguageOperation::Execute(script, _) = &request.operation else {
+                    continue;
+                };
+                let answer = if script.contains(&asked) {
+                    Ok(r#"{"author":"did:test:t","data":{"name":"T","description":"t","possibleTemplateParams":["uid","name"]}}"#.to_string())
+                } else {
+                    Err("no such expression".to_string())
+                };
+                let _ = request.response_tx.send(answer);
+            }
+        });
+
+        let answer = handler_as(operator()).list_link_language_templates().await;
+
+        controller.system_addresses.lock().await.language_language = previous;
+        controller.set_runtime_for_test(&ll, None).await;
+        Service::with_global_instance(|s| s.remove_know_link_language(vec![template.clone()]));
+
+        let listed: serde_json::Value = serde_json::from_str(&answer).expect(&answer);
+        let ours: Vec<_> = listed["templates"]
+            .as_array()
+            .expect(&answer)
+            .iter()
+            .filter(|t| t["address"] == template.as_str())
+            .collect();
+        assert_eq!(ours.len(), 1, "{answer}");
+        assert_eq!(ours[0]["name"], "T");
+        assert_eq!(ours[0]["description"], "t");
+        assert_eq!(ours[0]["author"], "did:test:t");
+        assert_eq!(ours[0]["possible_template_params"], json!(["uid", "name"]));
     }
 }
 
