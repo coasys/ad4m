@@ -17,7 +17,7 @@ The executor keeps all its state under one **app data path** (default `~/.ad4m`)
 | `ad4m_db.sqlite` | `Ad4mDb`: perspective handles, diffs, users, settings, trusted agents, friends, entanglement proofs, notifications, AI models and tasks, billing, email codes | `Ad4mDb` |
 | `perspectives/<uuid>/` | Oxigraph (RocksDB) store of one perspective | see [Oxigraph store](../../perspectives/links/oxigraph-store.md) |
 | `ad4m/languages/` | installed language bundles and settings | see [Installing languages](../../languages/runtime/installing/README.md) |
-| `ad4m/h/c`, `ad4m/h/d` | Holochain conductor config and data | Holochain service |
+| `ad4m/h/c` | Holochain conductor data (its `data_root_path`) | Holochain service |
 | `apps_data.json` | app grants: request id → app info, JWT, revoked flag; a JSON file, not a SQLite table | `apps_map` (path set by `run()`) |
 | `mainnet_seed.seed` | bootstrap seed (system language addresses) | `ad4m-executor init` ([init.rs](../../../rust-executor/src/init.rs)) |
 

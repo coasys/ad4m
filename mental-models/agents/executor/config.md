@@ -27,8 +27,8 @@ Settings that decide who the operator is and who can connect:
 | `auto_permit_cap_requests` | `true` for `ad4m-executor run` without a config file, else `false` | approve every app capability request without the operator |
 | `enable_mcp` (file: `mcp_enabled`), `mcp_port` | `false`, `3001` | MCP server |
 | `port` | `12000` | RPC port |
-| `wallet_backend`, `db_backend` | local | `shared` for hosted mode |
-| `internal_api_token` | none | executor → hosting service; must differ from `admin_credential` |
+| `wallet_backend`, `db_backend` (environment `WALLET_BACKEND`, `DB_BACKEND`) | local | `shared` for hosted mode |
+| `internal_api_token` (environment `INTERNAL_API_TOKEN`) | none | executor → hosting service; in hosted mode it must differ from `admin_credential` |
 
 The multi-user flag lives in a `settings` row of SQLite. `run()` sets it when `enable_multi_user` is true; `user.setMultiUserEnabled` changes it at runtime. A restart with `enable_multi_user` off leaves the row as it is ([lib.rs](../../../rust-executor/src/lib.rs)).
 

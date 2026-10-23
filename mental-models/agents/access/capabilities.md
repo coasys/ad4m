@@ -19,7 +19,7 @@ Built-in sets:
 | Set | Who gets it | Content |
 |---|---|---|
 | `ALL_CAPABILITY` | operator | `{*, [*], [*]}` |
-| `anonymous_capabilities()` | no token | `agent/AUTHENTICATE`, `runtime.user_management/READ_ENABLED`; plus `CREATE`, `LOGIN`, `VERIFY` on user management when multi-user mode is on |
+| `anonymous_capabilities()` | no token | `agent/AUTHENTICATE`, `runtime.user_management/READ` on pointer `enabled`; plus `CREATE`, `LOGIN`, `VERIFY` on user management when multi-user mode is on |
 | `get_user_default_capabilities()` | every managed-agent login | agent read/create/update/sign/subscribe, expressions, languages, perspectives `*`, neighbourhoods, runtime social features, hosting, AI read/create/prompt/transcribe; not `user_management/READ`, `agent/PERMIT` or `runtime/QUIT` |
 | the app's request | an approved app | whatever the app asked for and the operator approved |
 | JWT without a capability list | — | `agent/AUTHENTICATE` only |

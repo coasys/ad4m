@@ -13,7 +13,7 @@ A **model class** is a TypeScript class that extends `Ad4mModel` and carries dec
 | `Message.register(perspective)`, `Ad4mModel.registerAll(perspective, [..])` | `generateSHACL()` from the decorators → `PerspectiveProxy.ensureSubjectClass(es)` | `perspective.addSdna` (one class, or `entries` for several; type `subject_class`) |
 | `new Message(perspective); m.save()` (new) | open a batch, `createSubject` with the initial values, relations, `commitBatch` | `perspective.createSubject`, `executeCommands`, `commitBatch` |
 | `m.save()` (fetched), `Message.update(..)` | only the changed fields, through each property's setter or adder actions | `perspective.executeCommands` (`updateSubject` for an abstract class) |
-| `m.delete()` | destructor actions | `perspective.removeSubject` |
+| `m.delete()` | destructor actions, or for a class without a destructor the links of its own predicates; then every incoming link | `perspective.removeSubject` or `perspective.removeLinks` |
 | `Message.findAll(perspective, query)`, `findOne`, `count`, `paginate` | `prepareModelQueryParams` → class name + query JSON | `perspective.modelQuery` |
 | `Message.query(perspective).where(..).subscribe(cb)`, `useLiveQuery` | `ModelQueryBuilder` → `LiveQuery` (applies deltas, resyncs on a gap, a lag or a reconnect) | `perspective.modelSubscribe`, `resyncSubscription` ([Live queries](../../../perspectives/querying/live-queries.md)) |
 | `Ad4mModel.transaction(perspective, fn)` | one batch for every call that passes `tx.batchId` | `createBatch` / `commitBatch` ([Link write path](../../../perspectives/links/write-path.md)) |

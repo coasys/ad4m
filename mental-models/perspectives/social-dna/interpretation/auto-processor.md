@@ -12,7 +12,7 @@ An **auto-processor** is an `AutoProcessor` instance in a perspective that makes
 2. Each perspective runs `auto_processor_supervisor`. It runs one watch loop as the main agent. In multi-user mode it also runs one loop per managed agent whose `last_seen` is inside the online window (`MANAGED_USER_ONLINE_WINDOW_S`, 600 s: twice `LAST_SEEN_WRITE_THROTTLE_S`), re-checked every 5 s. This covers every such managed agent, also one that does not own the perspective; a non-owner stands down at election.
 3. Each tick (`run_auto_processor_tick`): load processors, gather turns from the source query minus turns already in an `InterpretationRun.sources` (the cursor), debounce and batch (`WatcherState`).
 4. For a ready batch: `elect_author` picks the first batch author, in message order, who is this agent or online (`online_agents`, where a co-owner counts as online for 300 s after its `last_seen`; [Presence and signals](../../neighbourhoods/presence-and-signals.md)). If that is someone else, stand down.
-5. The winner writes a `ProcessingClaim` (shared link) for the batch key. A live claim from a peer means back off. The claim syncs like any link, so two peers can both claim before either sees the other's claim; then the lowest DID wins.
+5. The winner writes a `ProcessingClaim` (shared link) for the batch key, then reads every live claim for that batch: the lowest DID goes on, the others back off (`try_claim`). Claims sync like any link, so a claim that has not arrived yet is not counted: two peers that claim in the same sync round can both run the batch.
 6. Run interpretation (single shot, or the harness when `max_tool_calls > 0`) and its flow passes; emit step events (`auto-processor-event`).
 
 </details>

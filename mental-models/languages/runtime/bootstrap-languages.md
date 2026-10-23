@@ -12,7 +12,7 @@ When the seed languages load (the executor's whole boot order is on [Executor st
 
 1. `init` writes the seed to `<data>/mainnet_seed.seed` (the built-in `mainnet_seed.json`, or `--network-bootstrap-seed <file>`). `RuntimeService::init_global_instance` reads it.
 2. On agent generate or unlock (`agent_ws.rs`), `load_core_system_languages` loads the language language from the inline bundle, then the agent, neighbourhood and perspective languages by address, in parallel, and registers the aliases.
-3. In the background, `conductor_startup.rs` starts the Holochain conductor (unless `run_holochain` is false) and then runs `load_link_and_installed_languages`: the known link languages, then every other `languages/<addr>/bundle.js`.
+3. With `run_holochain`, `conductor_startup.rs` starts the Holochain conductor in the background and then runs `load_link_and_installed_languages` (not with `language_language_only`): the known link languages, then every other `languages/<addr>/bundle.js`. Without `run_holochain`, neither runs at unlock.
 
 The default seed, built by `ad4m dev generate-bootstrap` from `cli/seed_proto.json`:
 

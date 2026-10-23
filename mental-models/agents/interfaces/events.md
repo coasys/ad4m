@@ -28,11 +28,11 @@ socket: /api/v1/ws (with live-query updates)  or  /api/v1/ws/events (events only
 | `agent-status-changed`, `agent-updated`, `flow-state-changed`, `transcription-text`, `auto-processor-event` | the one agent the event names |
 | `signal` | the recipient DID; a broadcast is published once per owner ([Presence and signals](../../perspectives/neighbourhoods/presence-and-signals.md)); a signal with no recipient (or a payload that does not parse) goes to every socket that receives events (step 1) (`matches_signal_recipient` in [events_ws.rs](../../../rust-executor/src/api/events_ws.rs)) |
 | `notification-triggered` | the notification's owner ([Live queries](../../perspectives/querying/live-queries.md)) |
-| `apps-changed`, capability requests in `exception-occurred` | sessions with `agent/PERMIT` |
+| `apps-changed`, capability requests and notification install requests in `exception-occurred` | sessions with `agent/PERMIT` |
 | `sfu-*` | sessions with `neighbourhood/READ`, and only the named participant or room member ([SFU](../executor/services/sfu.md)) |
 | `hosting-user-info-changed` | the user it names (by email); the operator and main agent see all |
 | `model-loading-status`, `message-received`, other exceptions | every session that receives events |
-| `query-subscription-update` | only the RPC connection that opened the live query |
+| `query-subscription-update` | only the RPC connection that opened the live query, whatever its event interest |
 
 1. Only an authenticated session (operator or a grant) gets a stream on `/api/v1/ws`. An anonymous socket gets none. `/api/v1/ws/events` also needs `agent/READ`.
 2. `events.watch` replaces the socket's interest; `events.unwatch` clears it. Some event types carry `perspectiveUuid` (`EventSpec.scoped`). For those, a list of UUIDs narrows the interest to those perspectives.

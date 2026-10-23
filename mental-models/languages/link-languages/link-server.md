@@ -1,8 +1,8 @@
 # Link server
 
-The **link server** is a self-hosted Node.js process, separate from the executor, that stores the links of **link-server rooms** for the [server link language](server-link-language.md). It runs on Fastify, `ws` and `better-sqlite3`, with one SQLite file. A room's active links are a set keyed by link hash; every commit also goes into an append-only diff log. Agents authenticate with their `did:key` and get a JWT backed by a session row.
+The **link server** is a self-hosted Node.js process, separate from the executor, that stores the links of **link-server rooms** for the [server link language](server-link-language.md). It runs on Fastify, `ws` and `better-sqlite3`, with one SQLite file. A room's active links are a set keyed by link hash; every commit also goes into a diff log that keeps the newest `maxDiffsPerRoom` (10 000) diffs per room. Agents authenticate with their `did:key` and get a JWT backed by a session row.
 
-**Why:** A community can run it on small hardware with no other services. The revision is a content hash of the sorted active link hashes, so two rooms with the same links have the same revision. The server never parses link data, so encrypted and plaintext rooms use one code path.
+**Why:** A community can run it on small hardware with no other services. The revision is the XOR of the active link hashes, so two rooms with the same links have the same revision. The server never decrypts link data, so encrypted and plaintext rooms use one code path.
 
 **Parent:** [Link languages](README.md)
 
