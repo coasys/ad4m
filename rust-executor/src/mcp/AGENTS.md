@@ -51,8 +51,8 @@ causes no side effect.
 | Tool | RPC method |
 |---|---|
 | `list_perspectives`, `add_perspective` | `perspective.all`, `perspective.create` |
-| `add_link`, `add_child` | `perspective.addLink` |
-| `query_links`, `get_children`, `get_flows` | `perspective.queryLinks` |
+| `add_link` | `perspective.addLink` |
+| `query_links`, `get_flows` | `perspective.queryLinks` |
 | `add_model`, `add_flow` | `perspective.addSdna` |
 | `execute_commands` | `perspective.executeCommands` |
 | `flow_proposal_accept`, `flow_proposal_reject`, `flow_valid_outputs` | `perspective.acceptFlowProposal`, `.rejectFlowProposal`, `.flowValidOutputs` |
@@ -80,8 +80,8 @@ causes no side effect.
   another perspective, the operator's list, functional round trips). A new tool goes into
   its `tools()` list or its `NOT_WRAPPED` list; `every_tool_is_classified` fails otherwise.
 - Tools with no RPC method keep their own logic: `describe_perspective`, the `instance_*`
-  tools, `instance_transcript`, `flow_state`, `flow_actions`, `generate_waker_query`,
-  `get_mention_waker_config`, `get_documentation`, `auth_status`, and the dynamic per-class
+  tools, `instance_transcript`, `add_child` and `get_children` (the built-in `Container`),
+  `flow_state`, `flow_actions`, `generate_waker_query`, `get_mention_waker_config`, `get_documentation`, `auth_status`, and the dynamic per-class
   tools. Those that take a perspective get it through `get_readable_perspective` /
   `get_writable_perspective`, which run the guard of the perspective RPC methods,
   `Guard::perspective(perspective_query_capability | perspective_update_capability)`, on the
