@@ -12,6 +12,7 @@ On the perspective side, sync is four background loops on each neighbourhood `Pe
 |---|---|
 | `Private` | no neighbourhood |
 | `NeighbourhoodCreationInitiated` | after publish |
+| `NeighbourhoodJoinInitiated` | after a join, until the link language loads or its install fails |
 | `LinkLanguageFailedToInstall` | install failed; retried after 0.5 s, doubling up to 30 s |
 | `LinkLanguageInstalledButNotSynced` | language loaded, or the last `sync()` failed |
 | `Synced` | `sync()` succeeded, or the language lacks the `PerspectiveSync` language capability |

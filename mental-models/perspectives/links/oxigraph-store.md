@@ -2,7 +2,7 @@
 
 Each perspective has one **Oxigraph store** (`SparqlStore`): an RDF store on RocksDB at `{data}/perspectives/{uuid}/sparql_store`. The store keeps each link as one direct triple `source predicate target`, plus an RDF 1.2 **reifier** node that carries the link's author, timestamp, proof, signature verdict and status.
 
-**Why:** The direct triple lets plain SPARQL and model queries match data as ordinary RDF. The reifier keeps the metadata that makes a link a signed expression, without hiding the triple behind it. One store per perspective keeps perspectives independent: removing a perspective removes a directory. Each store is its own RocksDB instance, so the number of open files grows with the number of perspectives.
+**Why:** The direct triple lets plain SPARQL and model queries match data as ordinary RDF. The reifier keeps the metadata that makes a link a signed expression, without hiding the triple behind it. One store per perspective keeps perspectives independent: removing a perspective removes a directory. Each store is its own RocksDB instance, so the number of open files grows with the number of perspectives. Each store opens with `max_open_files` 266 (`SPARQL_STORE_MAX_OPEN_FILES`): at most about 274 descriptors, about 70 for a typical store.
 
 **Parent:** [Links and store](README.md)
 

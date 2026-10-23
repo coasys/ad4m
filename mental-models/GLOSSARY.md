@@ -250,7 +250,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Perspective language** (`bootstrap-languages/perspective-language/`, alias `perspective`): The system language meant for perspective snapshots; a stub that stores nothing today. [Neighbourhood and perspective languages](languages/other-kinds/neighbourhood-and-perspective-languages.md)
 
-**Perspective state** (`PerspectiveState`): Where a perspective stands with its neighbourhood: `Private`, `NeighbourhoodCreationInitiated`, `LinkLanguageFailedToInstall`, `LinkLanguageInstalledButNotSynced` or `Synced`. [Neighbourhood sync](perspectives/neighbourhoods/sync.md) — not: sync state
+**Perspective state** (`PerspectiveState`): Where a perspective stands with its neighbourhood: `Private`, `NeighbourhoodCreationInitiated`, `NeighbourhoodJoinInitiated`, `LinkLanguageFailedToInstall`, `LinkLanguageInstalledButNotSynced` or `Synced`. [Neighbourhood sync](perspectives/neighbourhoods/sync.md) — not: sync state
 
 **Principal** (`Principal` in `agent/session.rs`): The kind of caller behind a session: operator, agent or anonymous. [Sessions](agents/access/sessions.md)
 
