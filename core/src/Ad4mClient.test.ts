@@ -193,7 +193,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.grantNotification': true,
     'runtime.deleteNotification': true,
     'runtime.setStatus': true,
-    'runtime.linkLanguageTemplates': ['lang://template1'],
+    'runtime.linkLanguageTemplates': [{ address: 'template1', name: 'Template 1', possibleTemplateParams: ['uid', 'name'] }],
     'runtime.addLinkLanguageTemplates': ['lang://template1', 'lang://template2'],
     'runtime.removeLinkLanguageTemplates': ['lang://template1'],
     'runtime.hcAgentInfos': ['hc-agent-info-1', 'hc-agent-info-2'],
@@ -1137,9 +1137,9 @@ describe('RuntimeClient', () => {
         expect(result).toEqual(['did:trusted:1']);
     });
 
-    test('knownLinkLanguageTemplates() returns templates', async () => {
+    test('knownLinkLanguageTemplates() returns each template with its meta', async () => {
         const templates = await ad4m.runtime.knownLinkLanguageTemplates();
-        expect(templates).toEqual(['lang://template1']);
+        expect(templates.map(t => [t.address, t.possibleTemplateParams])).toEqual([['template1', ['uid', 'name']]]);
     });
 
     test('hcAgentInfos() returns agent infos list', async () => {

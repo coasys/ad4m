@@ -20,6 +20,11 @@ cd .. && pnpm run test-main                        # JS integration suites again
 ```
 
 `--release` and `--test-threads=1` are required (see `.claude/skills/rust-executor-testing.md`).
+
+**Where a create or join spends its time:** `grep 'timing:'` in the executor log. Each line is
+`timing: <step> [address] <ms>ms` (`logging::span`), logged when the step ends. `applyTemplate`,
+`publish` and `join` are the totals of the three calls; `applyTemplate.*`, `publish.*`,
+`installLanguage.*`, `loadLanguage.*` and `holochain.*` are their steps.
 Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call real LLMs.
 
 ## Module map (what lives where)
@@ -51,6 +56,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   Do not add new ones; spec item 11 introduces `AppContext`.
 - **Perspective links live in the per-perspective `SparqlStore`** (oxigraph), not SQLite.
   `PerspectiveInstance` is `Clone` and cheap: all state is behind `Arc`. `get_perspective()` returns a clone.
+- **Open files.** Each perspective's RocksDB store holds about 70 descriptors and at most 274
+  (see `perspectives/AGENTS.md`), so a 256 soft `RLIMIT_NOFILE` ran out at about a dozen
+  perspectives ("Too many open files"). The executor raises its soft limit at startup in
+  `fd_limit::raise_fd_limit_at_startup` (#1462); do not add another.
 - **Prolog is off.** `prolog_service::PROLOG_MODE` is `Disabled`; Prolog query paths return empty.
   Subject classes, flows and model queries run on SHACL + SPARQL (`perspectives/model_query`).
 - **Tokio vs std locks** are both used; check the import before assuming `.lock()` is async.
