@@ -560,17 +560,7 @@ struct TestLanguageLanguage {
 impl TestLanguageLanguage {
     async fn install() -> Self {
         crate::test_utils::init_v8_platform();
-        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-        let dir = DIR.get_or_init(|| {
-            let dir = tempfile::tempdir().unwrap();
-            crate::utils::set_languages_directory(dir.path().to_str().unwrap());
-            dir
-        });
-        assert!(
-            crate::utils::languages_directory().starts_with(dir.path()),
-            "the languages directory was set before this test, to {:?}",
-            crate::utils::languages_directory()
-        );
+        crate::test_utils::test_languages_directory();
 
         let controller = LanguageController::global_instance();
         let (template_address, _) = controller

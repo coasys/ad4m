@@ -100,7 +100,7 @@ export default function flowReplicaJoinTests(
         const bobDid = (await bob.agent.me()).did;
 
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
-        await testContext.makeAllNodesKnown();
+        await testContext.makeAllNodesKnown([alice, aliceHandle.uuid], [bob, bobHandle.uuid]);
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
         // The payload as the executor sent it: the client adds `type`.
         const forInstance = () =>

@@ -82,6 +82,10 @@ mod subscription_tests;
 mod abstract_tests;
 
 #[cfg(test)]
+#[path = "perspective_instance_join_tests.rs"]
+mod join_tests;
+
+#[cfg(test)]
 #[path = "perspective_instance_pending_diffs_tests.rs"]
 mod pending_diffs_tests;
 
@@ -6511,6 +6515,7 @@ impl PerspectiveInstance {
                 now_ms,
                 context,
                 escalate,
+                crate::perspectives::auto_processor::claim::CLAIM_SETTLE_MS,
             )
             .await
             {
