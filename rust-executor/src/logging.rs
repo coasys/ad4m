@@ -49,6 +49,21 @@ impl LogLevel {
     }
 }
 
+/// Times one step: logs `timing: <label> <ms>ms` at info when dropped, also
+/// when the step returns early with an error. `drop(span)` ends a step that
+/// is not the rest of its scope.
+pub struct Span(String, std::time::Instant);
+
+pub fn span(label: impl Into<String>) -> Span {
+    Span(label.into(), std::time::Instant::now())
+}
+
+impl Drop for Span {
+    fn drop(&mut self) {
+        log::info!("timing: {} {}ms", self.0, self.1.elapsed().as_millis());
+    }
+}
+
 /// Get default log configuration as HashMap - single source of truth
 pub fn get_default_log_config() -> std::collections::HashMap<String, String> {
     let mut defaults = std::collections::HashMap::new();

@@ -4,6 +4,27 @@ use crate::agent::AgentService;
 use crate::config::{set_global_config, Ad4mConfig};
 use crate::wallet::{try_init_wallet_backend, LocalWallet, WalletBackend};
 
+/// The languages directory for tests that write bundles: a temp dir, set the
+/// first time a test asks for it. The languages directory is process-wide and
+/// can be set only once, so every such test shares this one; bundles live
+/// under their own address, so they do not collide. Panics if something set
+/// the directory elsewhere first, rather than writing under the home directory.
+pub fn test_languages_directory() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        crate::utils::set_languages_directory(dir.path().to_str().unwrap());
+        dir
+    });
+    let languages = crate::utils::languages_directory();
+    assert!(
+        languages.starts_with(dir.path()),
+        "the languages directory was set before this test, to {:?}",
+        languages
+    );
+    languages
+}
+
 pub fn setup_wallet() {
     let local = Arc::new(LocalWallet::new());
     local.generate_keypair("main").expect("generate main key");

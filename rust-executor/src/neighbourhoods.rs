@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::languages::LanguageController;
+use crate::logging::span;
 use crate::perspectives::{
     add_perspective, all_perspectives, get_perspective, update_perspective_with,
 };
@@ -30,9 +31,16 @@ pub async fn neighbourhood_publish_from_perspective_with_context(
     meta: Perspective,
     context: &AgentContext,
 ) -> Result<String, AnyError> {
+    let _total = span(format!("publish {}", link_language));
     let perspective = get_perspective(uuid).ok_or(anyhow!("Perspective not found"))?;
 
+    // The creator's link language loads before the URL exists: loading it is
+    // what claims the neighbourhood's backing store (a server-link room makes
+    // its first member the admin), so a joiner must not get there first. If
+    // `apply_template` is still installing it, this waits for that install.
+    let installing = span(format!("publish.linkLanguageInstall {}", link_language));
     LanguageController::install_language(link_language.clone()).await?;
+    drop(installing);
 
     let neighbourhood = Neighbourhood {
         link_language,
@@ -40,17 +48,22 @@ pub async fn neighbourhood_publish_from_perspective_with_context(
     };
 
     // Create neighbourhood with context
+    let creating = span("publish.createNeighbourhood");
     let neighbourhood_address =
         LanguageController::create_neighbourhood_with_context(neighbourhood, context).await?;
+    drop(creating);
 
     let neighbourhood_url = format!("neighbourhood://{}", neighbourhood_address);
+    let reading = span("publish.readNeighbourhood");
     let neighbourhood_exp = LanguageController::get_neighbourhood(neighbourhood_address)
         .await?
         .ok_or(anyhow!("Could not retrieve NeigbourhoodExpression which was just created. Problem with Neighbourhood language"))?;
+    drop(reading);
 
     // Add shared perspective to original perspective and then update controller.
     // Initialize owners list with the creator's DID if not already set
     let creator_did = did_for_context(context)?;
+    let updating = span("publish.updateHandle");
     update_perspective_with(&perspective.uuid, |h| {
         h.shared_url = Some(neighbourhood_url.clone());
         h.neighbourhood = Some(neighbourhood_exp);
@@ -63,6 +76,7 @@ pub async fn neighbourhood_publish_from_perspective_with_context(
     })
     .await
     .map_err(|e| anyhow!(e))?;
+    drop(updating);
 
     // Ensure any existing shared links are committed to the link language
     // This is critical for early links created before neighbourhood sharing
@@ -75,10 +89,25 @@ pub async fn _install_neighbourhood(url: String) -> Result<PerspectiveHandle, An
     install_neighbourhood_with_context(url, &crate::agent::AgentContext::main_agent()).await
 }
 
+/// Tell `perspective`'s link language its owners without waiting for it.
+/// In p-diff-sync that is a Holochain zome call queued behind everything else
+/// the language's runtime is doing, which on a busy executor holds a join RPC
+/// past the client's timeout. The join is already recorded (database and
+/// owners list); `update_local_agents` reads the owners when it sends, logs a
+/// failure, and the next registration (another join, or the link language's
+/// own attach) sends the full owners list again.
+fn register_owners_in_background(
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+) {
+    let perspective = perspective.clone();
+    tokio::spawn(async move { perspective.update_local_agents().await });
+}
+
 pub async fn install_neighbourhood_with_context(
     url: String,
     context: &crate::agent::AgentContext,
 ) -> Result<PerspectiveHandle, AnyError> {
+    let _total = span(format!("join {}", url));
     let perspectives = all_perspectives();
 
     // Check if neighbourhood already exists
@@ -104,10 +133,10 @@ pub async fn install_neighbourhood_with_context(
                     .map_err(|e| anyhow!(e))?;
 
                 // Update link language with new owners list
-                p.update_local_agents().await;
+                register_owners_in_background(p);
 
                 log::info!(
-                    "Added agent {} to existing neighbourhood {}. Link language has been updated with new owners.",
+                    "Added agent {} to existing neighbourhood {}. Registering the new owners with the link language in the background.",
                     user_did,
                     url
                 );
@@ -128,10 +157,10 @@ pub async fn install_neighbourhood_with_context(
                     .map_err(|e| anyhow!(e))?;
 
                 // Update link language with new owners list
-                p.update_local_agents().await;
+                register_owners_in_background(p);
 
                 log::info!(
-                    "Added main agent to existing neighbourhood {}. Link language has been updated with new owners.",
+                    "Added main agent to existing neighbourhood {}. Registering the new owners with the link language in the background.",
                     url
                 );
                 return Ok(handle.clone());
@@ -151,26 +180,12 @@ pub async fn install_neighbourhood_with_context(
     );
     let neighbourhood = neighbourhood_exp.unwrap();
 
-    // Install the link language before checking its availability.
-    // This fetches the bundle from the language-language and loads it on the JS side.
-    if let Err(e) =
-        LanguageController::install_language(neighbourhood.data.link_language.clone()).await
-    {
-        log::warn!(
-            "Failed to install link language {}: {}",
-            neighbourhood.data.link_language,
-            e
-        );
-    }
-
-    let state = if LanguageController::language_by_address(neighbourhood.data.link_language.clone())
-        .await?
-        .is_some()
-    {
-        PerspectiveState::LinkLanguageInstalledButNotSynced
-    } else {
-        PerspectiveState::LinkLanguageFailedToInstall
-    };
+    // The link language is installed by the new perspective's
+    // `ensure_link_language`, not here: fetching a language another executor
+    // has just published can take until its deadline, and loading a Holochain
+    // one installs an app. The state goes on to LinkLanguageInstalledButNotSynced
+    // and Synced, or LinkLanguageFailedToInstall, and each change is an event.
+    let state = PerspectiveState::NeighbourhoodJoinInitiated;
 
     log::info!(
         "Core.install_neighbourhood(): Creating perspective {}, {:?}, {:?}",
