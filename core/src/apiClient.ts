@@ -69,10 +69,15 @@ const PING_INTERVAL_MS = 10_000
 /** The slowest link a socket is given time for. The executor reads a ping
  *  only after the frames sent before it, so a ping left unanswered counts as
  *  silence only once everything the socket sent before that ping could have
- *  crossed this link, if that takes longer than PING_INTERVAL_MS. Messages
- *  that come in meanwhile do not shorten this: they say nothing about how far
- *  an upload has got. */
+ *  crossed this link and PONG_RETURN_MS more have passed, if that takes longer
+ *  than PING_INTERVAL_MS. Messages that come in meanwhile do not shorten this:
+ *  they say nothing about how far an upload has got. */
 const SLOWEST_LINK_BYTES_PER_MS = 16 // 16 kB/s
+
+/** How long a pong gets to come back after its ping could have been read
+ *  behind a large write. Shorter than PING_INTERVAL_MS, so the few ms a small
+ *  frame adds before a ping on an idle socket never cost a ping interval. */
+const PONG_RETURN_MS = 5_000
 
 /** How long `checkConnection` waits for the open socket to say anything
  *  after its ping (longer if a large write sent before it may still be on
@@ -405,7 +410,7 @@ export class ApiClient {
                 this._wsPingArrivesBy = this._wsSentBy
                 return
             }
-            if (performance.now() >= Math.max(this._wsPingedAt + PING_INTERVAL_MS, this._wsPingArrivesBy)) {
+            if (performance.now() >= Math.max(this._wsPingedAt + PING_INTERVAL_MS, this._wsPingArrivesBy + PONG_RETURN_MS)) {
                 this._dropSilentSocket(ws)
                 return
             }
