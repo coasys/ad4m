@@ -69,15 +69,21 @@ const PING_INTERVAL_MS = 10_000
 /** The slowest link a socket is given time for. The executor reads a ping
  *  only after the frames sent before it, so a ping left unanswered counts as
  *  silence only once everything the socket sent before that ping could have
- *  crossed this link, if that takes longer than PING_INTERVAL_MS. Messages
- *  that come in meanwhile do not shorten this: they say nothing about how far
- *  an upload has got. */
+ *  crossed this link and PONG_RETURN_MS more have passed, if that takes longer
+ *  than PING_INTERVAL_MS. Messages that come in meanwhile do not shorten this:
+ *  they say nothing about how far an upload has got. */
 const SLOWEST_LINK_BYTES_PER_MS = 16 // 16 kB/s
 
+/** How long a pong gets to come back after its ping could have been read
+ *  behind a large write. Shorter than PING_INTERVAL_MS, so the few ms a small
+ *  frame adds before a ping on an idle socket never cost a ping interval. */
+const PONG_RETURN_MS = 5_000
+
 /** How long `checkConnection` waits for the open socket to say anything
- *  after its ping (longer if a large write sent before it may still be on
- *  the way, as for the periodic ping). On a working path the pong is one
- *  round trip away. */
+ *  after its ping. If a large write sent before it may still be on the way,
+ *  the wait lasts until that write could have crossed, as for the periodic
+ *  ping, and half of this more for the pong. On a working path the pong is
+ *  one round trip away. */
 const CHECK_CONNECTION_DEADLINE_MS = 2_000
 
 /** The bytes `text` takes as UTF-8, as a WebSocket text frame sends it. */
@@ -405,7 +411,7 @@ export class ApiClient {
                 this._wsPingArrivesBy = this._wsSentBy
                 return
             }
-            if (performance.now() >= Math.max(this._wsPingedAt + PING_INTERVAL_MS, this._wsPingArrivesBy)) {
+            if (performance.now() >= Math.max(this._wsPingedAt + PING_INTERVAL_MS, this._wsPingArrivesBy + PONG_RETURN_MS)) {
                 this._dropSilentSocket(ws)
                 return
             }
@@ -681,8 +687,9 @@ export class ApiClient {
         this._send(ws, JSON.stringify({ type: 'ping' }))
         if (first) this._wsPingArrivesBy = this._wsSentBy
         // Any message from the socket ends the probe (`onmessage` → `_endProbe`).
-        // The ping reaches the executor only after what was sent before it.
-        const wait = Math.max(deadlineMs, this._wsSentBy - performance.now())
+        // The ping reaches the executor only after what was sent before it,
+        // and its pong gets half the deadline to come back after that.
+        const wait = Math.max(deadlineMs, this._wsSentBy - performance.now() + deadlineMs / 2)
         this._wsProbeTimer = setTimeout(() => {
             this._wsProbeTimer = null
             if (this._ws !== ws) return

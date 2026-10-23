@@ -403,10 +403,27 @@ describe('ApiClient notices a socket that went silent', () => {
         await jest.advanceTimersByTimeAsync(15_000)
         expect(socket(0).readyState).toBe(1)
         expect(write()).toBe('pending')
-        // Once the write could have crossed and the ping after it is still unanswered: dropped.
+        // The ping could reach the executor at 37.5 s; its pong gets 5 s more to come back.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(0).readyState).toBe(1)
+        // Still unanswered at the next tick: dropped.
         await jest.advanceTimersByTimeAsync(10_000)
         expect(socket(0).readyState).toBe(2)
         expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+    })
+
+    it('gives a ping that waited behind a large write time for its pong to come back', async () => {
+        // The write could have crossed at about 39.94 s, just before the 40 s tick.
+        // The ping after it is read then, and its pong comes back 100 ms later.
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(638_900) }, { timeoutMs: 120_000 }))
+        await jest.advanceTimersByTimeAsync(40_040)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ type: 'pong' })
+        await jest.advanceTimersByTimeAsync(15_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(write()).toBe('pending')
     })
 
     it('does not give a silent socket more time for what it sent after its unanswered ping', async () => {
@@ -528,6 +545,21 @@ describe('ApiClient checkConnection', () => {
         expect(sent).toContain('perspective.all')
         socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
         await expect(read).resolves.toEqual(['p'])
+    })
+
+    it('gives the probe\'s pong time to come back after a large write sent before it could have crossed', async () => {
+        // The write could have crossed at about 37.5 s; the pong comes back 100 ms later.
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 }))
+        await jest.advanceTimersByTimeAsync(1_000)
+        client.checkConnection()
+        await jest.advanceTimersByTimeAsync(36_600)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ type: 'pong' })
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(write()).toBe('pending')
     })
 
     it('keeps a socket that answers the ping', async () => {

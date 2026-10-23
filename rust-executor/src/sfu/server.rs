@@ -105,6 +105,10 @@ pub const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(10);
 /// arrives only on the next poll.
 pub const ICE_RESTART_GRACE: Duration = Duration::from_secs(10);
 
+/// The most trickled candidates held while an ICE restart's offer waits for
+/// its answer. A client gathers a handful per network; later ones are dropped.
+const MAX_HELD_CANDIDATES: usize = 64;
+
 impl SfuPeer {
     pub fn new(
         id: ParticipantId,
@@ -200,7 +204,16 @@ impl SfuPeer {
     /// for its answer: the restart would discard it.
     pub fn add_remote_candidate(&mut self, candidate: Candidate) {
         match &mut self.ice_restart {
-            Some(restart) if restart.offer.is_some() => restart.candidates.push(candidate),
+            Some(restart) if restart.offer.is_some() => {
+                if restart.candidates.len() < MAX_HELD_CANDIDATES {
+                    restart.candidates.push(candidate);
+                } else {
+                    debug!(
+                        "SFU: peer {} trickled too many candidates during an ICE restart",
+                        self.id
+                    );
+                }
+            }
             _ => self.rtc.add_remote_candidate(candidate),
         }
     }
@@ -2309,6 +2322,92 @@ mod tests {
             !peer.stayed_disconnected(Instant::now()),
             "dropped between the answer and its ICE state"
         );
+    }
+
+    /// Candidates the caller trickles while the restart's offer waits for its
+    /// answer are held, up to a cap, and handed over once the answer lands:
+    /// the restart would discard any added before it.
+    #[test]
+    fn candidates_trickled_during_a_restart_are_held_until_its_answer() {
+        let bind: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let mut caller = Rtc::builder().build(Instant::now());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        let (offer, pending) = change.apply().unwrap();
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind, None).unwrap();
+        caller
+            .sdp_api()
+            .accept_answer(pending, serde_json::from_str(&answer).unwrap())
+            .unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:caller".to_string(),
+            rtc,
+            false,
+        );
+        let candidate = |port: u16| {
+            Candidate::host(
+                SocketAddr::new("203.0.113.30".parse().unwrap(), port),
+                "udp",
+            )
+            .unwrap()
+        };
+
+        let now = Instant::now();
+        assert!(peer.restart_ice(now).is_none());
+        // Before the offer exists nothing is held: the restart has not begun.
+        peer.add_remote_candidate(candidate(49_999));
+        assert!(peer.ice_restart.as_ref().unwrap().candidates.is_empty());
+
+        let (offer, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
+        for port in 0..(MAX_HELD_CANDIDATES as u16 + 5) {
+            peer.add_remote_candidate(candidate(50_000 + port));
+        }
+        let held = &peer.ice_restart.as_ref().unwrap().candidates;
+        assert_eq!(held.len(), MAX_HELD_CANDIDATES);
+
+        let answer = caller
+            .sdp_api()
+            .accept_offer(serde_json::from_str(&offer).unwrap())
+            .unwrap();
+        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+            .unwrap();
+        assert!(peer.ice_restart.is_none(), "handed over with the answer");
+    }
+
+    /// A restart whose offer went stale is forgotten with it: the next
+    /// request makes a fresh offer instead of republishing one the SFU no
+    /// longer waits on, and candidates go to str0m again.
+    #[test]
+    fn a_stale_restart_offer_ends_the_restart() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:caller".to_string(),
+            rtc,
+            false,
+        );
+        let now = Instant::now();
+        assert!(peer.restart_ice(now).is_none());
+        let (first, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
+
+        peer.drop_stale_offer();
+        assert!(peer.ice_restart.is_none());
+        assert!(
+            peer.restart_ice(now).is_none(),
+            "a new restart, not the stale offer"
+        );
+        let (second, _) = apply_deferred_tracks(&mut peer).expect("offered afresh");
+        assert_ne!(second, first);
     }
 
     /// A fixed port is bound exactly; the STUN probe runs on that socket and
