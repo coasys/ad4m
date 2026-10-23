@@ -20,7 +20,6 @@ use futures::stream::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
@@ -138,8 +137,8 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
         track_last_seen(did).await;
     }
 
-    let (mut ws_sink, ws_stream) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (ws_sink, ws_stream) = socket.split();
+    let (tx, rx) = mpsc::unbounded_channel::<String>();
 
     // A socket without a token gets no events: a stream that never yields.
     let events: EventStream = if may_receive_events(&ctx) {
@@ -160,50 +159,17 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
     let conn = Connection::new(handler_map, ctx, tx);
 
     // ── Writer task ─────────────────────────────────────────────────────
-    let writer_session_over = conn.session_over.clone();
-    let unheard = Arc::new(AtomicU64::new(0));
-    let written = unheard.clone();
-    let mut write_handle = tokio::spawn(async move {
-        use futures::SinkExt;
-        let mut ping = tokio::time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
-        loop {
-            tokio::select! {
-                biased;
-                _ = writer_session_over.cancelled() => {
-                    // Deliver what is already queued (the 401 reply), then close.
-                    while let Ok(msg) = rx.try_recv() {
-                        if ws_sink.send(Message::Text(msg.into())).await.is_err() {
-                            return;
-                        }
-                    }
-                    let close = CloseFrame {
-                        code: CLOSE_TOKEN_ENDED,
-                        reason: "token expired or revoked".into(),
-                    };
-                    let _ = ws_sink.send(Message::Close(Some(close))).await;
-                    return;
-                }
-                msg = rx.recv() => match msg {
-                    Some(msg) => {
-                        written.fetch_add(msg.len() as u64, Ordering::Relaxed);
-                        if ws_sink.send(Message::Text(msg.into())).await.is_err() {
-                            return;
-                        }
-                    }
-                    None => return,
-                },
-                _ = ping.tick() => {
-                    if ws_sink.send(Message::Ping(Default::default())).await.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-    });
+    let liveness = Arc::new(std::sync::Mutex::new(Liveness::new(Instant::now())));
+    let mut write_handle = tokio::spawn(write_to(
+        ws_sink,
+        rx,
+        conn.session_over.clone(),
+        liveness.clone(),
+    ));
 
     // Text frames until the socket closes, errors or goes silent; pongs, pings
     // and binary frames count as heard and are skipped.
-    let incoming = until_silent(ws_stream, unheard)
+    let incoming = until_silent(ws_stream, liveness)
         .take_while(|msg| {
             futures::future::ready(matches!(msg, Ok(m) if !matches!(m, Message::Close(_))))
         })
@@ -226,7 +192,8 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
 }
 
 /// How often the executor sends its client a WebSocket ping. Every client answers
-/// one by itself, so a live client is heard from at least this often.
+/// one by itself, so a live client is heard from at least this often, once what
+/// the executor wrote before the ping has reached it.
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 
 /// How long a client may send no frame at all before its connection ends. After
@@ -239,22 +206,132 @@ const SILENCE_LIMIT: Duration = Duration::from_secs(60);
 /// that could have crossed this link, if that takes longer than SILENCE_LIMIT.
 const SLOWEST_LINK_BYTES_PER_SEC: u64 = 16_000;
 
+/// How long a pong gets to come back after its ping could have reached the
+/// client behind a large write.
+const PONG_RETURN: Duration = Duration::from_secs(5);
+
+/// How long `bytes` take to cross a SLOWEST_LINK_BYTES_PER_SEC link.
+fn crossing(bytes: usize) -> Duration {
+    Duration::from_micros(bytes as u64 * 1_000_000 / SLOWEST_LINK_BYTES_PER_SEC)
+}
+
+/// What the executor knows about whether its client is still there. The writer
+/// counts what it sends; the reader notes each frame.
+#[derive(Debug)]
+struct Liveness {
+    /// When the client was last heard from.
+    heard_at: Instant,
+    /// When everything written so far could have crossed the slowest link. A
+    /// frame from the client does not move it back: hearing from the client says
+    /// nothing about how much of a large reply it has read.
+    sent_by: Instant,
+    /// When the first ping written since the client was last heard could have
+    /// reached it; `None` while no ping went out since. Writes after that ping
+    /// do not move it: they queue behind it, so they cannot delay its pong.
+    ping_arrives_by: Option<Instant>,
+}
+
+impl Liveness {
+    fn new(now: Instant) -> Self {
+        Liveness {
+            heard_at: now,
+            sent_by: now,
+            ping_arrives_by: None,
+        }
+    }
+
+    fn wrote(&mut self, bytes: usize, now: Instant) {
+        self.sent_by = self.sent_by.max(now) + crossing(bytes);
+    }
+
+    fn pinged(&mut self, now: Instant) {
+        self.sent_by = self.sent_by.max(now);
+        self.ping_arrives_by.get_or_insert(self.sent_by);
+    }
+
+    fn heard(&mut self, now: Instant) {
+        self.heard_at = now;
+        self.ping_arrives_by = None;
+    }
+
+    /// When the client counts as gone if it has not been heard from: SILENCE_LIMIT
+    /// after it was last heard, or PONG_RETURN after the ping sent since then
+    /// could have reached it, whichever is later. Until that ping goes out, after
+    /// what was written so far could have reached it.
+    fn deadline(&self) -> Instant {
+        let reached_by = self.ping_arrives_by.unwrap_or(self.sent_by);
+        (self.heard_at + SILENCE_LIMIT).max(reached_by + PONG_RETURN)
+    }
+}
+
+/// Send what `rx` carries to `sink`, and a ping every PING_INTERVAL, until `rx`
+/// closes or a send fails. Once the session is over, deliver what is already
+/// queued (the 401 reply), then close.
+async fn write_to<S>(
+    mut sink: S,
+    mut rx: mpsc::UnboundedReceiver<String>,
+    session_over: CancellationToken,
+    liveness: Arc<std::sync::Mutex<Liveness>>,
+) where
+    S: futures::Sink<Message> + Unpin,
+{
+    use futures::SinkExt;
+    let mut ping = tokio::time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
+    // A send that blocks for longer than an interval is followed by one ping, not a burst.
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            _ = session_over.cancelled() => {
+                while let Ok(msg) = rx.try_recv() {
+                    if sink.send(Message::Text(msg.into())).await.is_err() {
+                        return;
+                    }
+                }
+                let close = CloseFrame {
+                    code: CLOSE_TOKEN_ENDED,
+                    reason: "token expired or revoked".into(),
+                };
+                let _ = sink.send(Message::Close(Some(close))).await;
+                return;
+            }
+            // Before the queue: with replies or events always waiting, a ping
+            // would otherwise never go out. It fires at most once an interval.
+            _ = ping.tick() => {
+                liveness.lock().unwrap().pinged(Instant::now());
+                if sink.send(Message::Ping(Default::default())).await.is_err() {
+                    return;
+                }
+            }
+            msg = rx.recv() => match msg {
+                Some(msg) => {
+                    liveness.lock().unwrap().wrote(msg.len(), Instant::now());
+                    if sink.send(Message::Text(msg.into())).await.is_err() {
+                        return;
+                    }
+                }
+                None => return,
+            },
+        }
+    }
+}
+
 /// `frames` until the client has been silent for longer than a live one could
-/// be: [`SILENCE_LIMIT`], extended while `unheard` (bytes written to it since it
-/// was last heard from) could still be on the way. Each frame clears `unheard`.
-fn until_silent<S>(frames: S, unheard: Arc<AtomicU64>) -> impl futures::Stream<Item = S::Item>
+/// be ([`Liveness::deadline`]).
+fn until_silent<S>(
+    frames: S,
+    liveness: Arc<std::sync::Mutex<Liveness>>,
+) -> impl futures::Stream<Item = S::Item>
 where
     S: futures::Stream + Unpin,
 {
-    futures::stream::unfold((frames, Instant::now()), move |(mut frames, heard_at)| {
-        let unheard = unheard.clone();
+    futures::stream::unfold(frames, move |mut frames| {
+        let liveness = liveness.clone();
         async move {
             loop {
-                let in_flight = Duration::from_secs(
-                    unheard.load(Ordering::Relaxed) / SLOWEST_LINK_BYTES_PER_SEC,
-                );
-                let deadline = heard_at + SILENCE_LIMIT.max(in_flight);
+                let deadline = liveness.lock().unwrap().deadline();
                 if Instant::now() >= deadline {
+                    let heard_at = liveness.lock().unwrap().heard_at;
                     log::info!(
                         "WS RPC: client silent for {:?}; ending the connection",
                         deadline - heard_at
@@ -263,8 +340,8 @@ where
                 }
                 // Woken at the deadline, check it again: more may have been written.
                 if let Ok(frame) = tokio::time::timeout_at(deadline, frames.next()).await {
-                    unheard.store(0, Ordering::Relaxed);
-                    return frame.map(|frame| (frame, (frames, Instant::now())));
+                    liveness.lock().unwrap().heard(Instant::now());
+                    return frame.map(|frame| (frame, frames));
                 }
             }
         }
@@ -976,75 +1053,178 @@ mod socket_tests {
 #[cfg(test)]
 mod liveness_tests {
     //! A client that stops sending frames is let go: its stream of frames ends, and
-    //! `serve` then ends the connection's subscriptions and its event queue.
+    //! `serve` then ends the connection's subscriptions and its event queue. A
+    //! client still reading a large reply on a slow link is not.
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
     use tokio::time::Instant;
 
-    /// When the stream ends, measured from `start`.
+    fn fresh() -> Arc<std::sync::Mutex<Liveness>> {
+        Arc::new(std::sync::Mutex::new(Liveness::new(Instant::now())))
+    }
+
+    fn secs(s: f64) -> Duration {
+        Duration::from_secs_f64(s)
+    }
+
+    /// When the stream ends, measured from `start`. A stream still going after
+    /// 1000 s fails the test instead of running for ever on the paused clock.
     async fn ended_after<S: futures::Stream + Unpin>(mut frames: S, start: Instant) -> Duration {
-        while frames.next().await.is_some() {}
+        let drained = async { while frames.next().await.is_some() {} };
+        tokio::time::timeout(Duration::from_secs(1000), drained)
+            .await
+            .expect("the client was never let go");
         start.elapsed()
+    }
+
+    /// Frames sent at the given times after the start, then silence, the socket held open.
+    fn frames_at(times: Vec<f64>) -> impl futures::Stream<Item = ()> + Unpin {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let start = Instant::now();
+        tokio::spawn(async move {
+            for t in times {
+                tokio::time::sleep_until(start + secs(t)).await;
+                let _ = tx.send(());
+            }
+            std::future::pending::<()>().await;
+        });
+        tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_silent_client_is_let_go_after_the_limit() {
         let start = Instant::now();
-        let frames = until_silent(futures::stream::pending::<()>(), Arc::default());
+        let frames = until_silent(futures::stream::pending::<()>(), fresh());
         assert_eq!(ended_after(Box::pin(frames), start).await, SILENCE_LIMIT);
     }
 
     #[tokio::test(start_paused = true)]
     async fn every_frame_restarts_the_limit() {
-        let (tx, rx) = mpsc::unbounded_channel();
         let start = Instant::now();
-        let frames = Box::pin(until_silent(
-            tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
-            Arc::default(),
-        ));
-        tokio::spawn(async move {
-            for _ in 0..3 {
-                tokio::time::sleep(SILENCE_LIMIT - Duration::from_secs(1)).await;
-                let _ = tx.send(());
-            }
-            // Held open, but silent from here.
-            std::future::pending::<()>().await;
-        });
-        let last_heard = (SILENCE_LIMIT - Duration::from_secs(1)) * 3;
-        assert_eq!(ended_after(frames, start).await, last_heard + SILENCE_LIMIT);
-    }
-
-    /// A pong waits behind what the executor wrote before its ping, so a large
-    /// reply on a slow link is not silence.
-    #[tokio::test(start_paused = true)]
-    async fn what_was_written_since_the_client_was_heard_extends_the_limit() {
-        let unheard = Arc::new(AtomicU64::new(0));
-        let start = Instant::now();
-        let frames = Box::pin(until_silent(
-            futures::stream::pending::<()>(),
-            unheard.clone(),
-        ));
-        let writer = unheard.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(50)).await;
-            // 1.6 MB written: 100 s on the slowest link.
-            writer.fetch_add(1_600_000, Ordering::Relaxed);
-        });
-        assert_eq!(ended_after(frames, start).await, Duration::from_secs(100));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_frame_from_the_client_clears_what_was_written() {
-        let unheard = Arc::new(AtomicU64::new(1_600_000));
-        let start = Instant::now();
-        let frames = until_silent(
-            futures::stream::iter([()]).chain(futures::stream::pending()),
-            unheard.clone(),
+        let step = SILENCE_LIMIT.as_secs_f64() - 1.0;
+        let frames = until_silent(frames_at(vec![step, 2.0 * step, 3.0 * step]), fresh());
+        assert_eq!(
+            ended_after(Box::pin(frames), start).await,
+            secs(3.0 * step) + SILENCE_LIMIT
         );
-        let mut frames = Box::pin(frames);
-        assert!(frames.next().await.is_some());
-        assert_eq!(unheard.load(Ordering::Relaxed), 0);
-        assert_eq!(ended_after(frames, start).await, SILENCE_LIMIT);
+    }
+
+    /// A 3.2 MB reply needs 200 s at 16 kB/s. A request the client sends at 1 s
+    /// says nothing about how much of the reply it has read.
+    #[tokio::test(start_paused = true)]
+    async fn an_unrelated_frame_does_not_take_a_large_reply_s_time() {
+        let liveness = fresh();
+        let start = Instant::now();
+        liveness.lock().unwrap().wrote(3_200_000, start);
+        let frames = until_silent(frames_at(vec![1.0]), liveness);
+        assert_eq!(
+            ended_after(Box::pin(frames), start).await,
+            secs(200.0) + PONG_RETURN
+        );
+    }
+
+    /// 1.6 MB written at 50 s cannot have crossed before 150 s.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_write_is_given_its_time_from_when_it_was_written() {
+        let liveness = fresh();
+        let start = Instant::now();
+        let frames = until_silent(futures::stream::pending::<()>(), liveness.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(secs(50.0)).await;
+            liveness.lock().unwrap().wrote(1_600_000, Instant::now());
+        });
+        assert_eq!(
+            ended_after(Box::pin(frames), start).await,
+            secs(150.0) + PONG_RETURN
+        );
+    }
+
+    /// Once a ping is out, what is written after it queues behind it and cannot
+    /// delay its pong: a client that stopped reading is let go even while events
+    /// keep coming.
+    #[tokio::test(start_paused = true)]
+    async fn writes_after_an_unanswered_ping_do_not_postpone_the_end() {
+        let liveness = fresh();
+        let start = Instant::now();
+        liveness.lock().unwrap().wrote(1_600_000, start);
+        let frames = until_silent(futures::stream::pending::<()>(), liveness.clone());
+        tokio::spawn(async move {
+            for t in 1.. {
+                tokio::time::sleep_until(start + secs(t as f64)).await;
+                let mut liveness = liveness.lock().unwrap();
+                // 16 kB a second, as fast as the link drains.
+                liveness.wrote(16_000, Instant::now());
+                if t == 20 {
+                    liveness.pinged(Instant::now());
+                }
+            }
+        });
+        // At 20 s the link is busy until 120 s (100 s of reply, 20 s of events).
+        assert_eq!(
+            ended_after(Box::pin(frames), start).await,
+            secs(120.0) + PONG_RETURN
+        );
+    }
+
+    /// The writer and the reader together: a 3.2 MB reply, a request at 1 s, and
+    /// the pong to the 20 s ping, which reaches the client behind the reply at
+    /// 200 s and comes back half a second later. The client then goes silent.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_client_reading_a_large_reply_keeps_its_connection() {
+        let liveness = fresh();
+        let start = Instant::now();
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let sink = futures::sink::drain::<Message>();
+        tokio::spawn(write_to(
+            sink,
+            rx,
+            CancellationToken::new(),
+            liveness.clone(),
+        ));
+        tx.send("x".repeat(3_200_000)).unwrap();
+        let frames = until_silent(frames_at(vec![1.0, 200.5]), liveness);
+        assert_eq!(
+            ended_after(Box::pin(frames), start).await,
+            secs(200.5) + SILENCE_LIMIT
+        );
+        drop(tx);
+    }
+
+    /// With replies queued without a break, the writer still sends a ping each
+    /// interval: it is the client's chance to be heard.
+    #[tokio::test(start_paused = true)]
+    async fn the_writer_pings_while_replies_are_queued() {
+        let start = Instant::now();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<(Duration, bool)>::new()));
+        let record = sent.clone();
+        // Each send takes a second: a slow link.
+        let sink = Box::pin(futures::sink::unfold((), move |(), msg: Message| {
+            let record = record.clone();
+            async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let ping = matches!(msg, Message::Ping(_));
+                record.lock().unwrap().push((start.elapsed(), ping));
+                Ok::<_, std::convert::Infallible>(())
+            }
+        }));
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        for _ in 0..100 {
+            tx.send("reply".to_string()).unwrap();
+        }
+        let writer = tokio::spawn(write_to(sink, rx, CancellationToken::new(), fresh()));
+        tokio::time::sleep(PING_INTERVAL + Duration::from_secs(2)).await;
+        let first_ping = sent
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, ping)| *ping)
+            .map(|(at, _)| *at);
+        assert!(
+            first_ping.is_some_and(|at| at <= PING_INTERVAL + Duration::from_secs(2)),
+            "first ping at {:?}",
+            first_ping
+        );
+        drop(tx);
+        writer.abort();
     }
 }
