@@ -340,7 +340,30 @@ pub fn login_user(email: &str, password: &str, app_name: &str) -> Result<String,
     generate_user_jwt(email, app_name)
 }
 
-/// Full signup flow: check multi-user, create user, generate verification code, send email.
+/// Stores the empty profile a new managed agent starts with and publishes it to the agent
+/// language. Without a stored profile every read of the agent fails with "User profile not
+/// found", the mention waker config included, until the agent sets one.
+pub async fn init_user_profile(did: &str) -> Result<(), String> {
+    use crate::agent::{AgentContext, AgentService};
+    use crate::types::domain::{Agent, Perspective as DomainPerspective};
+
+    let agent = Agent {
+        did: did.to_string(),
+        direct_message_language: None,
+        perspective: Some(DomainPerspective { links: vec![] }),
+    };
+    AgentService::store_managed_agent_profile(did, &agent)
+        .map_err(|e| format!("Failed to store user agent profile: {}", e))?;
+
+    let ctx = AgentContext::managed(did.to_string());
+    if let Err(e) = AgentService::publish_agent_to_language(&ctx).await {
+        log::warn!("Failed to publish new user to agent language: {}", e);
+    }
+    Ok(())
+}
+
+/// Full signup flow: check multi-user, create user and its profile, generate verification
+/// code, send email.
 pub async fn signup_user(
     email: &str,
     password: &str,
@@ -350,6 +373,7 @@ pub async fn signup_user(
         return Err("Multi-user mode is not enabled".to_string());
     }
     let did = create_user(email, password)?;
+    init_user_profile(&did).await?;
     let code = create_verification_code(email, "signup")?;
     send_verification_email(email, &code, "signup", app_name).await?;
     Ok(did)
@@ -557,5 +581,26 @@ mod tests {
         if was_unlocked {
             backend.unlock(test_pass).expect("restore wallet unlock");
         }
+    }
+
+    /// An agent that signed up through MCP had no stored profile, unlike one made by
+    /// `user.create`, so the mention waker config failed with "User profile not found"
+    /// until the agent set a profile (found in the waker live test on ba49d15).
+    #[tokio::test]
+    async fn signup_stores_the_new_agents_profile() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let _multi_user = crate::test_utils::MultiUserMode::on();
+
+        let did = signup_user("signup-profile@example.org", "a-password", None)
+            .await
+            .expect("signup");
+
+        let profile = crate::agent::AgentService::load_managed_agent_profile(&did)
+            .expect("profile lookup")
+            .expect("signup leaves a profile");
+        assert_eq!(profile.did, did);
+        let context = crate::agent::AgentContext::managed(did.clone());
+        assert!(crate::agent::AgentService::get_agent_for_context(&context).is_ok());
     }
 }

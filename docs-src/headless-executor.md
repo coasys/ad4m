@@ -130,7 +130,8 @@ Expected: no output. `readlink ~/.local/share/ad4m/current` prints
    executor at the copies, so the secrets are in no environment or argument
    list. `ConditionPathExists=` lets the unit skip, instead of failing in a
    loop, until a build is installed. With an admin credential set, MCP
-   binds `0.0.0.0` unless `MCP_HOST` says otherwise.
+   binds `0.0.0.0` unless `MCP_HOST` says otherwise. Every perspective keeps
+   its store's files open, so `LimitNOFILE=` lifts the 1024 default.
 
    ```bash
    mkdir -p ~/.config/systemd/user && cat > ~/.config/systemd/user/ad4m-executor.service <<'EOF'
@@ -152,6 +153,7 @@ Expected: no output. `readlink ~/.local/share/ad4m/current` prints
    Restart=on-failure
    RestartSec=10
    TimeoutStopSec=60
+   LimitNOFILE=65536
 
    [Install]
    WantedBy=default.target

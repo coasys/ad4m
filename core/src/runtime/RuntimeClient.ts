@@ -2,6 +2,7 @@ import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
 import type { HostRate, UnytVersionInfo } from "../generated/api"
+import { LanguageMeta } from "../language/LanguageMeta"
 
 export class RuntimeClient {
     #apiClient: ApiClient
@@ -46,7 +47,9 @@ export class RuntimeClient {
         return this.#apiClient.call('runtime.removeLinkLanguageTemplates', { addresses })
     }
 
-    async knownLinkLanguageTemplates(): Promise<string[]> {
+    /** Every link-language template the executor knows, with its meta (name, description,
+     *  `possibleTemplateParams`). A template whose meta cannot be read is left out. */
+    async knownLinkLanguageTemplates(): Promise<LanguageMeta[]> {
         return this.#apiClient.call('runtime.linkLanguageTemplates', {})
     }
 

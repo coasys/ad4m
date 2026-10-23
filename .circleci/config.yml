@@ -999,3 +999,5 @@ workflows:
       - integration-tests-sfu:
           requires:
             - llm-e2e
+          # One wind tunnel on Marvin at a time, even if a nightly is triggered twice.
+          serial-group: << pipeline.project.slug >>/nightly-sfu
