@@ -68,8 +68,6 @@ export interface NetLease {
    * the host are not touched. Replaces this lease's previous impairment.
    */
   impair(ports: (number | SocketPort)[], opts: NetemOptions): void;
-  /** Add `ports` to the current impairment, without lifting it for the others meanwhile. */
-  extend(ports: (number | SocketPort)[]): void;
   /** Remove the impairment; the lease stays held. */
   clear(): void;
   /** Remove the impairment and let the next run have the interface. */
@@ -162,15 +160,6 @@ export async function leaseNet(
       } catch (e) {
         clear();
         throw new Error(`could not impair ports ${describePorts(ports)} on ${iface}: ${(e as Error).message}`);
-      }
-    },
-    extend(ports) {
-      held();
-      try {
-        filter(ports);
-      } catch (e) {
-        clear();
-        throw new Error(`could not add ports ${describePorts(ports)} to the impairment on ${iface}: ${(e as Error).message}`);
       }
     },
     clear,

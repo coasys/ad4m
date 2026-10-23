@@ -314,12 +314,12 @@ export class ApiClient {
             if (this._ws !== ws) return
             const ping = JSON.stringify({ type: 'ping' })
             if (this._wsPingedAt === null) {
-                this._wsPingedAt = Date.now()
+                this._wsPingedAt = performance.now()
                 this._send(ws, ping)
                 this._wsPingArrivesBy = this._wsSentBy
                 return
             }
-            if (Date.now() >= Math.max(this._wsPingedAt + PING_INTERVAL_MS, this._wsPingArrivesBy)) {
+            if (performance.now() >= Math.max(this._wsPingedAt + PING_INTERVAL_MS, this._wsPingArrivesBy)) {
                 this._dropSilentSocket(ws)
                 return
             }
@@ -329,7 +329,7 @@ export class ApiClient {
 
     /** Send on `ws`, counting how long what the open socket sent could take to cross the slowest link. */
     private _send(ws: WebSocket, text: string): void {
-        if (this._ws === ws) this._wsSentBy = Math.max(this._wsSentBy, Date.now()) + utf8Length(text) / SLOWEST_LINK_BYTES_PER_MS
+        if (this._ws === ws) this._wsSentBy = Math.max(this._wsSentBy, performance.now()) + utf8Length(text) / SLOWEST_LINK_BYTES_PER_MS
         ws.send(text)
     }
 
@@ -337,7 +337,7 @@ export class ApiClient {
      *  closed now. Its close event can take minutes on a dead connection,
      *  since the close frame gets no answer either; `_onClose` ignores it then. */
     private _dropSilentSocket(ws: WebSocket): void {
-        console.warn(`WebSocket silent for ${Date.now() - (this._wsPingedAt ?? Date.now())} ms after a ping; reconnecting`)
+        console.warn(`WebSocket silent for ${performance.now() - (this._wsPingedAt ?? performance.now())} ms after a ping; reconnecting`)
         this._onClose(ws)
         ws.close()
     }

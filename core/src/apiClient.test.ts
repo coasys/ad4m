@@ -439,13 +439,19 @@ describe('ApiClient notices a socket that went silent', () => {
         open()
         socket(0).open()
         await jest.advanceTimersByTimeAsync(9_990)
-        jest.setSystemTime(Date.now() + 50) // the interval fires 40 ms late
-        await jest.advanceTimersByTimeAsync(10)
-        expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
-        expect(socket(0).readyState).toBe(1)
-        // Unanswered for a whole interval after that ping: dropped.
-        await jest.advanceTimersByTimeAsync(10_000)
-        expect(socket(0).readyState).toBe(2)
+        // The interval fires 40 ms late.
+        const now = performance.now.bind(performance)
+        const late = jest.spyOn(performance, 'now').mockImplementation(() => now() + 50)
+        try {
+            await jest.advanceTimersByTimeAsync(10)
+            expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
+            expect(socket(0).readyState).toBe(1)
+            // Unanswered for a whole interval after that ping: dropped.
+            await jest.advanceTimersByTimeAsync(10_000)
+            expect(socket(0).readyState).toBe(2)
+        } finally {
+            late.mockRestore()
+        }
     })
 
     it('ignores events that reach a socket after it was dropped', async () => {
