@@ -2288,11 +2288,16 @@ mod tests {
             false,
         );
         let now = Instant::now();
-        let lost_at = now.checked_sub(ICE_DISCONNECT_GRACE + Duration::from_secs(5)).unwrap();
+        let lost_at = now
+            .checked_sub(ICE_DISCONNECT_GRACE + Duration::from_secs(5))
+            .unwrap();
         peer.on_ice_state(IceConnectionState::Disconnected, lost_at);
         assert!(peer.restart_ice(lost_at + ICE_DISCONNECT_GRACE).is_none());
         let (offer, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
-        assert!(!peer.stayed_disconnected(now), "the restart extends the grace");
+        assert!(
+            !peer.stayed_disconnected(now),
+            "the restart extends the grace"
+        );
 
         let answer = caller
             .sdp_api()
