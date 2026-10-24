@@ -42,6 +42,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `languages/` + `js_core/` | Language runtime: one Deno isolate per Language on its own thread; install, templates, expressions | `src/languages/AGENTS.md`, `src/js_core/AGENTS.md` |
 | `holochain_service/` | Embedded Holochain conductor behind an actor channel; signal fan-in | `src/holochain_service/AGENTS.md` |
 | `agent/` | Agent keys/DID, signing, multi-user (managed agents by DID; a user's email is only the login name), `capabilities/` (auth tokens, capability defs) | — |
+| `identity/` | `did:scid:coasys:1` on the executor: `KelCache` (key logs on `ad4m-hash-chain`'s `SqliteChainStore` in `ad4m_db.sqlite`), the agent-language backend, the operator record and first-link rule, `ClaimService`, the `identity.*` calls (handlers in `api/identity_ws.rs`), the `identity-fork` event | `src/identity/AGENTS.md` |
 | `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
 | `db_backend.rs` | `SharedDb` HTTP backend for stateless/hosted mode; only used when `config.db_backend == "shared"` | — |
 | `pubsub.rs` | Global broadcast bus: one channel of typed events (`events.rs`: `Topic`, `Audience`, `Event`) for every event (live query updates too, as `Event::for_connection`); feeds `api/events_ws.rs` | `src/api/AGENTS.md` |
@@ -145,6 +146,18 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `keystoreFingerprint` (the saved keys) into `agent.json`, and the fallback to the backup runs
   only while the backup holds exactly those keys. Write the agent file only through
   `AgentService::save` / `try_save`.
+- **Identity** (`identity/`): an agent's device key (the wallet key) may speak
+  for a `did:scid` whose log lists it; the master key and the 12 words never reach the executor
+  (apps hold them through `ad4m-identity-client`). Logs come only through the agent language
+  (`Capability::Identity*`, refused on any other language) and are kept after `fold` in
+  `KelCache`; a head counts only under a key of the config's `identity.storeKeys`, and
+  `identity.storeUrl` becomes the agent language's `storeUrl` setting at load. A different event
+  at a held seq or a shorter log records a fork, keeps the history and fires `identity-fork`.
+  `ad4m-executor init --operator <did:scid>` records the operator (`operator_record`, never
+  replaced by `init`); `identity.claimOffer` (operator only) claims with the main wallet key and
+  refuses `already-linked` / `no-operator` / `first-link` inside
+  `ClaimService::claim_for_main`. `agent.status` and `agent.get` gain `identity`; `did` stays the
+  device `did:key`.
 
 ## Do / don't
 

@@ -29,6 +29,10 @@ const hcLanguages = {
   },
   "server-link-language": {
     bundle: "../../bootstrap-languages/server-link-language/build/bundle.js"
+  },
+  // The agent language on the identity store; the identity suite seeds it (identity.test.ts).
+  "centralized-agent-language": {
+    bundle: "../../bootstrap-languages/centralized-agent-language/build/bundle.js"
   }
 };
 
@@ -51,6 +55,10 @@ const localLanguages = {
   },
   "server-link-language": {
     bundle: "../../bootstrap-languages/server-link-language/build/bundle.js"
+  },
+  // The agent language on the identity store; the identity suite seeds it (identity.test.ts).
+  "centralized-agent-language": {
+    bundle: "../../bootstrap-languages/centralized-agent-language/build/bundle.js"
   }
 };
 

@@ -309,6 +309,23 @@ pub struct RunArgs {
         value_parser = non_empty(StringValueParser::new())
     )]
     pub sfu_preferred_node: Option<String>,
+    /// The identity store's base URL (`identity.storeUrl`), given to the agent language.
+    /// Default: the agent language's own (the production store).
+    #[arg(
+        long,
+        env = "AD4M_IDENTITY_STORE_URL",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub identity_store_url: Option<String>,
+    /// The identity store's head keys (`identity.storeKeys`, Ed25519 multikeys), comma
+    /// separated: a head from the store counts only when one of them signed it.
+    #[arg(
+        long,
+        env = "AD4M_IDENTITY_STORE_KEYS",
+        value_delimiter = ',',
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub identity_store_keys: Option<Vec<String>>,
 }
 
 /// Only the literal `true` enables the insecure mode; the usual "off"
@@ -356,6 +373,11 @@ impl RunArgs {
         overlay(&mut file.sfu_udp_port, &self.sfu_udp_port);
         overlay(&mut file.sfu_public_addr, &self.sfu_public_addr);
         overlay(&mut file.sfu_stun_server, &self.sfu_stun_server);
+        if self.identity_store_url.is_some() || self.identity_store_keys.is_some() {
+            let identity = file.identity.get_or_insert_with(Default::default);
+            overlay(&mut identity.store_url, &self.identity_store_url);
+            overlay(&mut identity.store_keys, &self.identity_store_keys);
+        }
         overlay(
             &mut file.auto_permit_cap_requests,
             &self.auto_permit_cap_requests,
@@ -702,6 +724,13 @@ pub(crate) mod tests {
             "stun.b.example:3478",
             "stun.c.example:3478",
         ),
+        (
+            "/identity/storeUrl",
+            "AD4M_IDENTITY_STORE_URL",
+            "--identity-store-url",
+            "http://127.0.0.1:8081",
+            "http://127.0.0.1:8082",
+        ),
     ];
 
     /// For every row of [`OVERRIDABLE`]: the variable alone, the flag alone,
@@ -738,6 +767,10 @@ pub(crate) mod tests {
             sfu_udp_port: Some(40000),
             sfu_public_addr: Some("203.0.113.10".into()),
             sfu_stun_server: Some("stun.a.example:3478".into()),
+            identity: Some(rust_executor::config_file::IdentityFileSettings {
+                store_url: Some("http://127.0.0.1:8080".into()),
+                store_keys: Some(vec!["z6MkA".into()]),
+            }),
         };
         let file_json = serde_json::to_value(&file).unwrap();
         let config = write_config(&dir, &file_json.to_string());
@@ -758,6 +791,8 @@ pub(crate) mod tests {
             "/log_config/holochain",
             "/multi_user_config/smtp_config",
             "/multi_user_config/tls_config/enabled",
+            // A list: `identity_store_keys_take_a_comma_separated_list` covers it.
+            "/identity/storeKeys",
         ];
         for key in keys.iter().filter(|key| !flagless.contains(&key.as_str())) {
             assert!(
@@ -792,6 +827,42 @@ pub(crate) mod tests {
                 "{flag} over {var}"
             );
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `--identity-store-keys` / `AD4M_IDENTITY_STORE_KEYS` take a comma-separated list and
+    /// replace the file's, the flag over the variable; both identity keys reach the config.
+    #[test]
+    fn identity_store_keys_take_a_comma_separated_list() {
+        let _env = lock_env();
+        let dir = scratch_dir("identity-keys");
+        let config = write_config(
+            &dir,
+            r#"{"identity": {"storeUrl": "http://127.0.0.1:8080", "storeKeys": ["z6MkA"]}}"#,
+        );
+        let keys = |argv: &[&str], env: &[(&'static str, &str)]| {
+            let mut full = vec!["--config", config.as_str()];
+            full.extend_from_slice(argv);
+            resolve(&full, env).unwrap().config.identity_store_keys
+        };
+        let list = |items: &[&str]| Some(items.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(keys(&[], &[]), list(&["z6MkA"]));
+        assert_eq!(
+            keys(&[], &[("AD4M_IDENTITY_STORE_KEYS", "z6MkB,z6MkC")]),
+            list(&["z6MkB", "z6MkC"])
+        );
+        assert_eq!(
+            keys(
+                &["--identity-store-keys", "z6MkD"],
+                &[("AD4M_IDENTITY_STORE_KEYS", "z6MkB")]
+            ),
+            list(&["z6MkD"])
+        );
+        let resolved = resolve(&["--config", &config], &[]).unwrap().config;
+        assert_eq!(
+            resolved.identity_store_url.as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1016,7 +1087,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 39, "every flag of run has a variable");
+        assert_eq!(checked, 41, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

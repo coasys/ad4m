@@ -228,6 +228,18 @@ fn params(method: &str, fx: &Fixture) -> Value {
             json!({ "neighbourhoodUrl": "neighbourhood://leak" })
         }
         "sfu.servesAllMembers" => json!({ "uuid": uuid }),
+        "identity.log" => {
+            json!({ "did": "did:scid:coasys:1:QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG" })
+        }
+        "identity.joinStatus" => json!({ "offerId": "leak-offer" }),
+        "identity.offers" => json!({ "request": {
+            "req": {
+                "did": "did:scid:coasys:1:QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+                "keyId": "m0", "kelSeq": 0, "kelHash": "Qm", "method": "GET",
+                "path": "/v1/offers/Qm", "bodyHash": "Qm", "nonce": "n", "expires": 1,
+            },
+            "sig": "z",
+        } }),
         _ => json!({}),
     }
 }

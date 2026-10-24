@@ -16,6 +16,7 @@ executor/scripts/note-ipfs-hash
 executor/scripts/perspective-diff-sync-hash
 tests/js/scripts/perspective-diff-sync-hash
 tests/js/scripts/server-link-language-hash
+tests/js/scripts/centralized-agent-language-hash
 executorsrc/tests/publishing-agent/ad4m/data/db.json
 .DS_Store
 tests/js/ad4m/users/*

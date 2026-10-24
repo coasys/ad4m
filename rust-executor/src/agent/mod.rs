@@ -1187,7 +1187,21 @@ impl AgentService {
             is_initialized: self.is_initialized(),
             is_unlocked: self.is_unlocked(),
             error: None,
+            // The identity lives in the executor database: callers that answer a status fill it
+            // (`with_identity`), so this needs no database lock under the agent lock.
+            identity: None,
         }
+    }
+}
+
+impl AgentStatus {
+    /// The status with `identity` read for its `did` from the executor database.
+    pub fn with_identity(mut self) -> AgentStatus {
+        self.identity = self
+            .did
+            .as_deref()
+            .and_then(crate::identity::service::identity_of_agent);
+        self
     }
 }
 
