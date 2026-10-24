@@ -46,7 +46,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'agent.sign': 'signed-message-data',
     'agent.isLocked': false,
-    'agent.requestCapability': 'request-id-123',
+    'agent.requestCapability': (p: Record<string, unknown>) =>
+        'agent' in p ? `request-for-${p.agent}` : 'request-id-123',
     'agent.permitCapability': 'permitted-token',
     'agent.generateJwt': 'jwt-token-abc',
     'agent.getApps': [{ requestId: 'app1', auth: {}, token: 'tok', revoked: false }],
@@ -500,6 +501,13 @@ describe('AgentClient', () => {
     test('requestCapability() returns request ID', async () => {
         const id = await ad4m.agent.requestCapability({ appName: 'test', appDesc: 'test', appDomain: 'test', appUrl: 'test', capabilities: [] } as any);
         expect(id).toBe('request-id-123');
+    });
+
+    // #1399: the request names the agent the app asks to act as; without one, no `agent`
+    // param goes out (the executor's main agent).
+    test('requestCapability() passes the requested agent', async () => {
+        const id = await ad4m.agent.requestCapability({ appName: 'test', appDesc: 'test', appDomain: 'test', appUrl: 'test', capabilities: [] } as any, 'alice@example.org');
+        expect(id).toBe('request-for-alice@example.org');
     });
 
     test('permitCapability() returns token', async () => {
@@ -1184,6 +1192,22 @@ describe('RuntimeClient', () => {
         expect(notifications).toEqual([]);
     });
 
+    test('updateNotification() without webhookAuth sends none, so the stored one stays', async () => {
+        const result = await ad4m.runtime.updateNotification('notif-1', {
+            description: 'd',
+            appName: 'a',
+            appUrl: 'https://app.test',
+            appIconPath: '',
+            trigger: 'SELECT ?s WHERE { ?s ?p ?o }',
+            perspectiveIds: ['p1'],
+            webhookUrl: 'https://webhook.test',
+        });
+        expect(result).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.updateNotification');
+        expect(lastRpcCall!.params.id).toBe('notif-1');
+        expect('webhookAuth' in lastRpcCall!.params).toBe(false);
+    });
+
     test('grantNotification() grants a notification', async () => {
         const result = await ad4m.runtime.grantNotification('notif-1');
         expect(result).toBe(true);
@@ -1491,7 +1515,7 @@ describe('Ad4mClient', () => {
         const notification = {
             notification: {
                 id: 'n-1', granted: true, description: 'd', appName: 'a', appUrl: 'u', appIconPath: 'i',
-                trigger: 'q', perspectiveIds: ['uuid-a'], webhookUrl: '', webhookAuth: '', ownerDid: 'did:key:owner',
+                trigger: 'q', perspectiveIds: ['uuid-a'], webhookUrl: '', hasWebhookAuth: false, ownerDid: 'did:key:owner',
             },
             perspectiveId: 'uuid-a', triggerMatch: '[]',
         };

@@ -31,6 +31,7 @@ use super::capabilities::{
 use super::grants::{Grants, LiveGrant};
 use super::{did_for_context, AgentContext, AgentService};
 use crate::events::{Audience, Event};
+use crate::secret::Secret;
 
 /// The id of a JWT: its `nonce` claim, a fresh v4 UUID per token. It names the token's grant.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -117,7 +118,7 @@ impl Session {
     /// The identity of a caller that presents `token` on a listener with this reach.
     pub fn open(
         token: &str,
-        admin_credential: &Option<String>,
+        admin_credential: &Option<Secret>,
         reach: ListenerReach,
     ) -> Result<Session, AuthError> {
         if is_admin_credential_token_on(token, admin_credential, reach) {
@@ -401,8 +402,8 @@ mod resolution_tests {
 
     const ADMIN: &str = "the-admin-credential";
 
-    fn admin() -> Option<String> {
-        Some(ADMIN.to_string())
+    fn admin() -> Option<Secret> {
+        Some(Secret::from(ADMIN))
     }
 
     fn app_token(capabilities: Option<Vec<Capability>>) -> String {
@@ -678,7 +679,7 @@ mod resolution_tests {
             "MCP acts as the main agent on a token that names a user"
         );
         assert!(
-            crate::agent::capabilities::capabilities_from_token(legacy, admin()).is_err(),
+            crate::agent::capabilities::capabilities_from_token(legacy, &admin()).is_err(),
             "MCP grants the main agent's app capabilities to a token that names a user"
         );
     }

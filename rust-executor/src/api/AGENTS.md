@@ -85,8 +85,8 @@ from the global config where `agent.requestCapability` uses it.
   on it); an event without a perspective needs the grant on `*`. Approval requests carry
   AGENT_PERMIT instead (`Event::approval_request`). An app acts as the main agent, so without the
   capability an app approved for AI or one perspective got every perspective's events. A user
-  token holds every topic's capability but `apps-changed`'s (AGENT_PERMIT) and the operator may
-  do anything, so only narrower tokens lose events. A new topic picks its capability in the same
+  token holds every topic's capability (AGENT_PERMIT on its own agent included, #1399) and the
+  operator may do anything, so only narrower tokens lose events. A new topic picks its capability in the same
   exhaustive `match`. No check takes a lock or parses the payload. The stream builder takes the
   socket's interest (`Connection::interest()`). Only authenticated sessions
   (`Session::is_authenticated`: not anonymous) get a stream. The stream ends at the first event
@@ -124,9 +124,9 @@ from the global config where `agent.requestCapability` uses it.
   (`Audience::agent`; a status without a DID, before `agent.generate()`, to everyone).
   `apps-changed` (`Event::apps_changed`) and the approval exceptions (`CapabilityRequested`,
   `InstallNotificationRequest`, `Event::approval_request`) go to the DID of the agent the
-  approval is for (the main agent today; #1399 passes a managed agent) with capability
-  AGENT_PERMIT: the operator and main-agent apps whose token holds it, whether or not they
-  subscribe to exceptions. Other exceptions go to everyone (`Event::exception`) with the
+  approval is for (the agent a capability request names, #1399) with capability AGENT_PERMIT:
+  for the main agent the operator and main-agent apps whose token holds it, for a managed agent
+  that user's sessions (users hold AGENT_PERMIT), whether or not they subscribe to exceptions. Other exceptions go to everyone (`Event::exception`) with the
   exception subscription's capability.
 - Every socket (RPC, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
   `Session::check()` again on each request and each delivered event, so revocation and expiry end
@@ -151,6 +151,43 @@ from the global config where `agent.requestCapability` uses it.
   operator; another agent's grant answers as missing. `user.logout` revokes the caller's grant;
   `user.revokeAllSessions` revokes every grant on that user's agent. `agent.getApps` lists the
   grants of `acts_as()`.
+- Capability flow (#1399, executor side; `agent/capabilities/mod.rs` + `pending.rs`):
+  1. `agent.requestCapability { authInfo, agent? }` (anyone, AGENT_AUTH): `agent` is a managed
+     user's email or an agent's DID, absent = the main agent (`requested_agent` returns a
+     `RequestTarget`: an agent keyed by DID, D16). An email resolves to its user's DID there,
+     read-only (`AgentService::did_for_email_read_only`: a shared database's record is read,
+     not imported; the import waits for the user's login); an email no user has is still
+     taken, as `RequestTarget::NoAgent`, so the answer reveals no accounts: it reaches nobody,
+     only the operator may approve it, its code mints nothing, and it expires after 24 hours
+     like a managed agent's. An unknown DID is 400; an app name, description, domain, URL or
+     icon over 1 KiB is 400. The request is a `PendingRequest` in memory only: never on disk,
+     1024 at most and 64 per target (all `NoAgent` requests are one target). Past a limit a
+     new request evicts an unapproved one, oldest first: for no agent, then for its own
+     target, then (for an agent below its share) the target holding the most; never an
+     approved one, so when none may go it is refused (429; MCP's `request_capability` answers
+     `success: false`). A target whose 64 are all approved takes no more, though the store has
+     room; a request for no agent is then dropped and answered as one for an agent with nothing
+     waiting: `Ok` while the store has room or an unapproved request, 429 when all are
+     approved. A request lives 10 minutes for the main agent and 24 hours for a managed agent, restarted at approval. Its approval request goes to the target agent's DID
+     (`Event::approval_request`). Every request waits for that owner: the declared app name
+     and domain are the caller's claim and approve nothing. `AuthInfo.user_email` on the
+     request and the grant is only a display hint (the owner's email, from `email_for_did`).
+  2. `agent.permitCapability { auth }`: the handler checks `may_approve` (the operator, or a
+     session acting as the request's agent, the same DID, with AGENT_PERMIT); anyone else
+     reads the request as missing (404). The approver may grant fewer capabilities than asked,
+     and no more than it holds (`caps_within`: each approved capability keeps its overlap with
+     the held ones, so several actions or `*` on one pointer narrow rather than drop); the target is
+     fixed by the request. It returns a six-digit code, stored as a `Secret`. PR 5 moves this
+     owner check into the method's guard.
+  3. `agent.generateJwt { requestId, rand }` (anyone): `PendingRequests::redeem` checks the code
+     and mints the grant on the request's agent in one locked step, with the approved
+     capabilities capped at that agent's own (`grant_caps_for`: a managed agent holds its user's
+     capabilities). The request goes only when the grant exists; a failed mint (locked wallet,
+     database) leaves it approved and redeemable. Five wrong codes delete it; a code redeems
+     once. `apps-changed` then goes to the grant's agent.
+  `capabilities::request_capability`, `permit_capability` and `generate_capability_token` are the
+  same steps for MCP (`mcp/tools/auth.rs`, which auto-permits only when `caller_can_permit` says
+  the caller may approve for the target) and the dev-mode auto-permit.
 - Live queries: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision }`
   (revision 0, or later if a write landed while the first result was computed: the subscription is
   registered first);

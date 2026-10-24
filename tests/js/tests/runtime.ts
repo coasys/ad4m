@@ -221,7 +221,9 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
                         expect(requestedNotification.trigger).to.equal(notification.trigger);
                         expect(requestedNotification.perspectiveIds).to.eql(notification.perspectiveIds);
                         expect(requestedNotification.webhookUrl).to.equal(notification.webhookUrl);
-                        expect(requestedNotification.webhookAuth).to.equal(notification.webhookAuth);
+                        // The request shows only whether a webhook credential is set.
+                        expect(requestedNotification.hasWebhookAuth).to.be.true;
+                        expect(exception.addon).to.not.include(notification.webhookAuth);
                     }
                     // Automatically resolve without needing to manually manage a Promise
                     return null;

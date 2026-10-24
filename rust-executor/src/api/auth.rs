@@ -3,12 +3,13 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 use super::errors::ApiError;
 use crate::agent::capabilities::ListenerReach;
 use crate::agent::session::AuthError;
+use crate::secret::Secret;
 use crate::types::RequestContext;
 
 /// AppState shared across all API handlers.
 #[derive(Clone)]
 pub struct AppState {
-    pub admin_credential: Option<String>,
+    pub admin_credential: Option<Secret>,
 }
 
 /// REST and the OpenAI-compatible API open a session per request from the `Authorization`
@@ -133,7 +134,7 @@ mod session_tests {
             .unwrap();
         let (mut parts, _) = request.into_parts();
         let state = AppState {
-            admin_credential: Some("the-admin-credential".to_string()),
+            admin_credential: Some("the-admin-credential".into()),
         };
         let ctx = RequestContext::from_request_parts(&mut parts, &state)
             .await
@@ -164,7 +165,7 @@ mod session_tests {
         }
         let (mut parts, _) = request.body(()).unwrap().into_parts();
         let state = AppState {
-            admin_credential: Some("the-admin-credential".to_string()),
+            admin_credential: Some("the-admin-credential".into()),
         };
         RequestContext::from_request_parts(&mut parts, &state).await
     }
@@ -179,7 +180,7 @@ mod session_tests {
         let token = crate::test_utils::keyless_user_token("rest.nokey@example.org");
         let refused = RequestContext::open(
             &token,
-            &Some("the-admin-credential".to_string()),
+            &Some("the-admin-credential".into()),
             ListenerReach::Network,
         );
         assert!(

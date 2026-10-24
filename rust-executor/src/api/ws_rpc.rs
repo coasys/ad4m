@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::capabilities::*;
 use crate::agent::session::AuthError;
+use crate::secret::Secret;
 use crate::types::RequestContext;
 
 use super::auth::AppState;
@@ -76,7 +77,7 @@ pub async fn ws_rpc(
 /// does not load): the socket then closes at once with [`CLOSE_TOKEN_ENDED`].
 fn connection_context(
     token: &str,
-    admin_credential: &Option<String>,
+    admin_credential: &Option<Secret>,
     reach: ListenerReach,
 ) -> Result<Arc<RequestContext>, AuthError> {
     let mut ctx = RequestContext::open(token, admin_credential, reach)?;
@@ -541,7 +542,7 @@ mod connection_context_tests {
         for token in &refused {
             for reach in [ListenerReach::Loopback, ListenerReach::Network] {
                 assert!(
-                    connection_context(token, &Some(ADMIN.to_string()), reach).is_err(),
+                    connection_context(token, &Some(ADMIN.into()), reach).is_err(),
                     "token {token:.20}…, {reach:?}"
                 );
             }
@@ -554,7 +555,7 @@ mod connection_context_tests {
     fn every_connection_gets_its_own_connection_id() {
         setup_wallet();
         setup_agent();
-        let admin = Some(ADMIN.to_string());
+        let admin = Some(crate::secret::Secret::from(ADMIN.to_string()));
         let a = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
         let b = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
         assert!(a.connection_id.is_some());
@@ -569,8 +570,7 @@ mod connection_context_tests {
         setup_agent();
         let token = jwt(Some(vec![AGENT_READ_CAPABILITY.clone()]));
 
-        let ctx =
-            connection_context(&token, &Some(ADMIN.to_string()), ListenerReach::Network).unwrap();
+        let ctx = connection_context(&token, &Some(ADMIN.into()), ListenerReach::Network).unwrap();
         assert!(ctx.session.check().is_ok());
         revoke(&token);
         assert_eq!(
@@ -597,7 +597,7 @@ mod connection_context_tests {
             crate::agent::AgentContext::managed(user_did),
         ];
         for (token, expected) in tokens.iter().zip(expected) {
-            let ctx = connection_context(token, &Some(ADMIN.to_string()), ListenerReach::Network)
+            let ctx = connection_context(token, &Some(ADMIN.into()), ListenerReach::Network)
                 .unwrap_or_else(|e| panic!("token {token:.20}… opens a session: {e}"));
             assert_eq!(ctx.acts_as(), expected, "token {token:.20}…");
         }
@@ -613,7 +613,7 @@ mod event_gate_tests {
 
     /// Whether a socket that presents `token` on a listener with `reach` gets an event stream.
     fn gets_events(token: &str, admin: Option<&str>, reach: ListenerReach) -> bool {
-        let admin = admin.map(str::to_string);
+        let admin = admin.map(Secret::from);
         Session::open(token, &admin, reach)
             .unwrap()
             .is_authenticated()
@@ -678,7 +678,7 @@ mod socket_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = crate::api::api_router(AppState {
-            admin_credential: Some(ADMIN.to_string()),
+            admin_credential: Some(ADMIN.into()),
         });
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         addr
