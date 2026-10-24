@@ -18,6 +18,7 @@
   "neighbourhoods": "Neighbourhoods",
   "social-dna": "Social DNA",
   "flows": "Flows",
+  "monotonic-links": "Monotonic Links",
   "multi-user": "Multi-User Mode",
   "--dev": {
     "type": "separator",
