@@ -99,8 +99,6 @@ pub fn api_router(state: AppState) -> Router {
         Router::new()
             // ── WebSocket RPC (primary client transport) ──
             .route("/ws", get(ws_rpc::ws_rpc))
-            // ── WebSocket Events (event stream) ──
-            .route("/ws/events", get(events_ws::events_ws))
             // ── HTTP-only: binary transcription feed (can't go through WS JSON) ──
             .route(
                 "/ai/transcription/feed",

@@ -2054,13 +2054,17 @@ mod tests {
             links[0].data.target
         );
 
-        while let Ok(json) = rx.try_recv() {
-            let ev: AutoProcessorEvent = serde_json::from_str(&json).expect("event json");
-            assert!(
-                !(ev.perspective_uuid == p.uuid && ev.step == AutoProcessorStep::Processed),
-                "a failed re-read must not emit Processed"
-            );
-        }
+        // The pass has ended, so every event it emitted is already queued.
+        let processed = super::super::events::next_event_matching(
+            &mut rx,
+            std::time::Duration::from_millis(100),
+            |ev| ev.perspective_uuid == p.uuid && ev.step == AutoProcessorStep::Processed,
+        )
+        .await;
+        assert!(
+            processed.is_none(),
+            "a failed re-read must not emit Processed"
+        );
     }
 
     // ---- write_mint_scope_links -------------------------------------------

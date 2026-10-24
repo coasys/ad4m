@@ -7,7 +7,7 @@
 //! (default `bindings/`); `pnpm run generate:api-types` in `core/` points it
 //! at `core/src/generated/api/`.
 //!
-//! Also writes `Events.ts` — every event the events socket emits, with the
+//! Also writes `Events.ts` — every event the executor emits, with the
 //! TypeScript type of its payload, and the perspective-scoped ones.
 //!
 //! `request.cancel` and `ping` are handled inline by the socket reader, not
@@ -58,13 +58,17 @@ pub(crate) fn render_events(specs: &[EventSpec]) -> String {
     }
     out.push_str("\n/** Every event the executor emits: its payload (the message without `type`). */\nexport interface EventMap {\n");
     for s in specs {
-        out.push_str(&format!("  \"{}\": {};\n", s.name, s.payload.name));
+        out.push_str(&format!(
+            "  \"{}\": {};\n",
+            s.topic.as_str(),
+            s.payload.name
+        ));
     }
     out.push_str("}\n\nexport type EventName = keyof EventMap;\n\n");
     let scoped: Vec<String> = specs
         .iter()
         .filter(|s| s.scoped)
-        .map(|s| format!("\"{}\"", s.name))
+        .map(|s| format!("\"{}\"", s.topic.as_str()))
         .collect();
     out.push_str("/** Events about one perspective: they carry `perspectiveUuid`. */\n");
     out.push_str(&format!(
@@ -77,7 +81,7 @@ pub(crate) fn render_events(specs: &[EventSpec]) -> String {
         specs
             .iter()
             .filter(|s| s.scoped)
-            .map(|s| s.name.to_string()),
+            .map(|s| s.topic.as_str().to_string()),
     ));
     out.push_str("]);\n");
     out

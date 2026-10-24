@@ -3,12 +3,13 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 use super::errors::ApiError;
 use crate::agent::capabilities::ListenerReach;
 use crate::agent::session::AuthError;
+use crate::secret::Secret;
 use crate::types::RequestContext;
 
 /// AppState shared across all API handlers.
 #[derive(Clone)]
 pub struct AppState {
-    pub admin_credential: Option<String>,
+    pub admin_credential: Option<Secret>,
 }
 
 /// REST and the OpenAI-compatible API open a session per request from the `Authorization`
@@ -133,7 +134,7 @@ mod session_tests {
             .unwrap();
         let (mut parts, _) = request.into_parts();
         let state = AppState {
-            admin_credential: Some("the-admin-credential".to_string()),
+            admin_credential: Some("the-admin-credential".into()),
         };
         let ctx = RequestContext::from_request_parts(&mut parts, &state)
             .await
@@ -164,7 +165,7 @@ mod session_tests {
         }
         let (mut parts, _) = request.body(()).unwrap().into_parts();
         let state = AppState {
-            admin_credential: Some("the-admin-credential".to_string()),
+            admin_credential: Some("the-admin-credential".into()),
         };
         RequestContext::from_request_parts(&mut parts, &state).await
     }
@@ -179,7 +180,7 @@ mod session_tests {
         let token = crate::test_utils::keyless_user_token("rest.nokey@example.org");
         let refused = RequestContext::open(
             &token,
-            &Some("the-admin-credential".to_string()),
+            &Some("the-admin-credential".into()),
             ListenerReach::Network,
         );
         assert!(
@@ -195,24 +196,23 @@ mod session_tests {
     async fn the_http_extractor_answers_401_for_a_token_that_opens_no_session() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
-        let revoked = crate::agent::capabilities::token::generate_jwt(
-            "a revoked app".to_string(),
-            3600,
-            crate::agent::capabilities::AuthInfo::default(),
-        )
-        .unwrap();
-        let request_id = format!("extractor-{}", uuid::Uuid::new_v4());
-        let app = crate::agent::capabilities::AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth: crate::agent::capabilities::AuthInfo::default(),
-        };
-        crate::agent::capabilities::apps_map::insert_app(request_id.clone(), app, revoked.clone())
-            .unwrap();
-        crate::agent::capabilities::apps_map::revoke_app(&request_id).unwrap();
+        let revoked = crate::test_utils::granted_token(crate::agent::capabilities::AuthInfo {
+            app_name: "a revoked app".to_string(),
+            ..Default::default()
+        });
+        let grants = crate::agent::grants::Grants::global();
+        grants.revoke(&grants.find(&revoked)).unwrap();
+        let (ungranted, _) =
+            crate::agent::capabilities::token::sign_token("no grant".to_string(), 3600, None)
+                .unwrap();
 
         let expired = crate::test_utils::expired_user_token("rest.expired@example.org");
-        for token in [revoked.as_str(), expired.as_str(), "not-a-jwt"] {
+        for token in [
+            revoked.as_str(),
+            expired.as_str(),
+            ungranted.as_str(),
+            "not-a-jwt",
+        ] {
             match extract(token).await {
                 Err(ApiError::Unauthorized(reason)) => assert!(!reason.is_empty()),
                 Err(other) => panic!("token {token:.20}…: expected 401, got {other:?}"),
