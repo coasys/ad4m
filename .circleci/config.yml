@@ -985,10 +985,12 @@ workflows:
 
   # Nightly against `dev`. An API trigger (or a Project Trigger) sets
   # `run-nightly-llm`. In-config cron does not reach this project.
-  # Same resource class (Marvin) so Ollama is local. The SFU wind tunnel
-  # waits for llm-e2e: four runners share this host, and both jobs build
-  # Rust. A halted llm-e2e is success, so a quiet night still runs the tunnel.
-  # An llm-e2e failure skips the tunnel that night.
+  # Same resource class (Marvin) so Ollama is local. llm-e2e and the SFU
+  # wind tunnel start together and do not build on each other's result:
+  # an llm-e2e failure must not skip the tunnel, and a tunnel failure must
+  # not skip llm-e2e. Three API triggers fire this pipeline every night on
+  # one host. Each job has its own serial group, so a second trigger waits
+  # instead of sharing ports, DIDs and the GPU with the first.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
@@ -996,8 +998,6 @@ workflows:
           # Provides `CIRCLECI_API_TOKEN` for the skip-if-unchanged preflight.
           context:
             - nightly-llm-e2e
+          serial-group: << pipeline.project.slug >>/nightly-llm
       - integration-tests-sfu:
-          requires:
-            - llm-e2e
-          # One wind tunnel on Marvin at a time, even if a nightly is triggered twice.
           serial-group: << pipeline.project.slug >>/nightly-sfu
