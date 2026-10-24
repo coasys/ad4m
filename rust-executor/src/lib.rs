@@ -11,6 +11,7 @@ pub mod fd_limit;
 mod globals;
 pub mod helpers;
 pub mod holochain_service;
+pub mod identity;
 pub mod js_core;
 pub mod mcp;
 pub mod perspective_snapshot;
@@ -501,6 +502,24 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .as_str(),
     )
     .expect("Failed to initialize Ad4mDb");
+
+    // The key-log cache lives in the same database file (AR-01 4.8).
+    {
+        let db_path = std::path::Path::new(
+            config
+                .app_data_path
+                .as_ref()
+                .expect("App data path not set in Ad4mConfig"),
+        )
+        .join("ad4m_db.sqlite");
+        let settings = crate::identity::IdentitySettings {
+            store_url: config.identity_store_url.clone(),
+            store_keys: config.identity_store_keys.clone().unwrap_or_default(),
+        };
+        if let Err(e) = crate::identity::init(&db_path, &settings) {
+            return failed_start(format!("Could not open the key-log cache: {e}"));
+        }
+    }
 
     // Set multi-user mode before starting services to avoid race condition
     if let Some(enable_multi_user) = config.enable_multi_user {

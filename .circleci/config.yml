@@ -675,6 +675,38 @@ jobs:
           path: /tmp/test-artifacts
           destination: test-logs
 
+  # Identity slice 1: a real identity-store and three executors (create, link,
+  # first-link refusal, revoke, fork on a shorter log, cache after restart).
+  # No Holochain. The suite builds identity-store and the holder example with cargo.
+  integration-tests-identity:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - setup_integration_test_environment:
+          local: true
+      - run:
+          name: Run identity integration tests (identity-store, three executors)
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-identity 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p /tmp/test-artifacts
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
   # Multi-node suites that need Holochain: links syncing between executors
   # through p-diff-sync (tests/js/tests/integration.test.ts).
   integration-tests-multi-node-holochain:
@@ -965,6 +997,9 @@ workflows:
           requires:
             - build
       - integration-tests-multi-node-server-link:
+          requires:
+            - build
+      - integration-tests-identity:
           requires:
             - build
       - integration-tests-multi-node-holochain:

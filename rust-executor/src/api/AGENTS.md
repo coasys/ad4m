@@ -143,7 +143,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-193 methods: Cap 72, Executor 33, Open 5, Operator 16, Owns 67.
+203 methods: Cap 81, Executor 33, Open 5, Operator 17, Owns 67.
 
 | Method | Guard |
 |---|---|
@@ -198,6 +198,16 @@ the guard checked:
 | `hosting.setHotWallet` | `Cap(agent:UPDATE)` |
 | `hosting.wallet` | `Executor(runtime.hosting:READ)` |
 | `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
+| `identity.claimOffer` | `Operator` |
+| `identity.cosignIncept` | `Cap(agent:SIGN)` |
+| `identity.devices` | `Cap(agent:READ)` |
+| `identity.joinStatus` | `Cap(agent:READ)` |
+| `identity.log` | `Cap(agent:READ)` |
+| `identity.offers` | `Cap(agent:READ)` |
+| `identity.openOffer` | `Cap(agent:UPDATE)` |
+| `identity.powParams` | `Cap(agent:READ)` |
+| `identity.publish` | `Cap(agent:UPDATE)` |
+| `identity.status` | `Cap(agent:READ)` |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |

@@ -37,7 +37,12 @@ type RpcHandler = unknown | ((params: Record<string, unknown>) => unknown);
 const MOCK_RESPONSES: Record<string, RpcHandler> = {
     // ── Agent ──
     'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
-    'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true },
+    'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true, identity: 'did:scid:coasys:1:QmTest' },
+    // ── Identity ──
+    'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, vouched: false, head: null, fork: null },
+    'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, echo: p }),
+    'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, vouched: false, fork: null }),
+    'identity.devices': [],
     'agent.generate': { did: 'did:test:generated', didDocument: 'doc', isInitialized: true, isUnlocked: true },
     'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
     'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
@@ -552,7 +557,7 @@ describe('AgentClient', () => {
         const callback = jest.fn();
         freshClient.on('agent-status-changed', ({ agent }) => callback(agent));
 
-        const status = { did: 'did:test:status', didDocument: null, error: null, isInitialized: true, isUnlocked: false };
+        const status = { did: 'did:test:status', didDocument: null, error: null, isInitialized: true, isUnlocked: false, identity: null };
         lastOf(MockWebSocket.instances).emit(event('agent-status-changed', { agent: status }));
 
         expect(callback.mock.calls).toEqual([[status]]);
@@ -1234,6 +1239,35 @@ describe('RuntimeClient', () => {
     });
 });
 
+// ===================== IDENTITY TESTS =====================
+describe('IdentityClient', () => {
+    test('status() calls identity.status', async () => {
+        const status = await ad4m.identity.status();
+        expect(lastRpcCall!.type).toBe('identity.status');
+        expect(status.did).toBe('did:scid:coasys:1:QmTest');
+        expect(status.keyId).toBe('d1');
+    });
+
+    test('claimOffer() sends the offer and the hint', async () => {
+        const claimed = await ad4m.identity.claimOffer('coasys:offer:1:abc', 'server');
+        expect(lastRpcCall!.type).toBe('identity.claimOffer');
+        expect(lastRpcCall!.params.offer).toBe('coasys:offer:1:abc');
+        expect(lastRpcCall!.params.hint).toBe('server');
+        expect(claimed.matchCode).toBe('R7K Q2M');
+    });
+
+    test('log() sends the did, from and fresh', async () => {
+        await ad4m.identity.log('did:scid:coasys:1:QmTest', 2, true);
+        expect(lastRpcCall!.params).toMatchObject({ did: 'did:scid:coasys:1:QmTest', from: 2, fresh: true });
+    });
+
+    test('agent.status() carries the identity beside the device did', async () => {
+        const status = await ad4m.agent.status();
+        expect(status.did).toBe('did:test:123');
+        expect(status.identity).toBe('did:scid:coasys:1:QmTest');
+    });
+});
+
 // ===================== AI TESTS =====================
 describe('AIClient', () => {
     test('getModels() returns models', async () => {
@@ -1521,7 +1555,7 @@ describe('Ad4mClient', () => {
         };
         const ws = lastOf(MockWebSocket.instances);
         ws.emit(event('agent-updated', { agent: { did: 'did:test:upd', directMessageLanguage: null, perspective: null } }));
-        ws.emit(event('agent-status-changed', { agent: { did: 'did:test:upd', didDocument: null, error: null, isInitialized: true, isUnlocked: true } }));
+        ws.emit(event('agent-status-changed', { agent: { did: 'did:test:upd', didDocument: null, error: null, isInitialized: true, isUnlocked: true, identity: 'did:scid:coasys:1:QmTest' } }));
         ws.emit(event('apps-changed', {
             requestId: 'app1', token: 'tok', revoked: null,
             auth: { appName: 'a', appDesc: 'd', appDomain: null, appUrl: null, appIconPath: null, capabilities: null, userEmail: null },

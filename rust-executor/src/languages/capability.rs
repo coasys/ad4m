@@ -309,6 +309,25 @@ mod tests {
 
     const AGENT: &str = "QmAgentLanguage";
 
+    /// The language bootstrap copies a list of flat exports onto the language instance that
+    /// detection inspects: an export missing from that list is never detected, whatever the
+    /// language exports (the identity calls were missing at first).
+    #[test]
+    fn the_bootstrap_copies_every_capability_export_onto_the_instance() {
+        let bootstrap = include_str!("../js_core/language_bootstrap.js");
+        let start = bootstrap
+            .find("const flatExportNames = [")
+            .expect("language_bootstrap.js lists its flat exports");
+        let list = &bootstrap[start..start + bootstrap[start..].find("];").unwrap()];
+        for cap in Capability::ALL {
+            let name = cap.export_name();
+            assert!(
+                list.contains(&format!("\"{name}\"")),
+                "language_bootstrap.js does not copy {name} onto the language instance"
+            );
+        }
+    }
+
     #[test]
     fn every_capability_round_trips_through_its_wire_name() {
         let mut names = HashSet::new();

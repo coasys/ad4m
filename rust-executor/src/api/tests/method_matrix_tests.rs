@@ -608,7 +608,40 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "sfu.ensureMembership",
         || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "did": "did:key:z6Mk" }),
     ),
+    // The identity calls (AR-01 4.10, AR-02 4.15).
+    ("identity.log", || json!({ "did": "did:scid:coasys:1:Qm" })),
+    ("identity.cosignIncept", || json!({ "event": {} })),
+    ("identity.publish", || json!({ "events": [] })),
+    (
+        "identity.openOffer",
+        || json!({ "signedOffer": signed_offer() }),
+    ),
+    ("identity.offers", || json!({ "request": signed_request() })),
+    (
+        "identity.claimOffer",
+        || json!({ "offer": "coasys:offer:1:x" }),
+    ),
+    ("identity.joinStatus", || json!({ "offerId": "o" })),
 ];
+
+fn signed_offer() -> Value {
+    json!({
+        "offer": { "scid": "Qm", "offerId": "o", "kind": "node", "commit": "Qm", "expires": 1 },
+        "by": { "keyId": "m0", "kelSeq": 0, "kelHash": "Qm" },
+        "sig": "z",
+    })
+}
+
+fn signed_request() -> Value {
+    json!({
+        "req": {
+            "did": "did:scid:coasys:1:Qm", "keyId": "m0", "kelSeq": 0, "kelHash": "Qm",
+            "method": "GET", "path": "/v1/offers/Qm", "bodyHash": "Qm", "nonce": "n",
+            "expires": 1,
+        },
+        "sig": "z",
+    })
+}
 
 fn sfu_neighbourhood() -> Value {
     json!({ "neighbourhoodUrl": "neighbourhood://Qm" })
@@ -1010,6 +1043,7 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
     assert_eq!(
         operator_methods,
         vec![
+            "identity.claimOffer",
             "runtime.grantNotification",
             "runtime.importData",
             "runtime.openLink",
