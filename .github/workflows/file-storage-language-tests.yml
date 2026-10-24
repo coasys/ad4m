@@ -18,10 +18,10 @@ jobs:
       image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
 
     - name: Cache Rust dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@v6
       with:
         path: |
           ~/.cargo/bin/
@@ -47,7 +47,7 @@ jobs:
 
     - name: Save Rust cache
       if: success()
-      uses: actions/cache/save@v3
+      uses: actions/cache/save@v6
       with:
         path: |
           ~/.cargo/bin/
