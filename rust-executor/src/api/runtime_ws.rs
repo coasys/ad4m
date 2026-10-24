@@ -17,16 +17,16 @@ use crate::runtime_service::notification_access::{
 };
 use crate::runtime_service::RuntimeService;
 use crate::types::domain::{ComputeLogEntry, ImportResult};
-use crate::types::Notification;
 use crate::types::{LanguageMeta, PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
+use crate::types::{Notification, NotificationView};
 
 use super::guards::refuse_user_session;
 use super::perspectives_ws::get_perspective_or_404;
 use super::types::{
     AddAgentInfosRequest, ExportRequest, FriendsListRequest, HostRate, ImportRequest,
-    LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput, OpenLinkRequest,
-    SetHostRatesRequest, SetStatusRequest, SetUnytMembraneProofRequest, UnytVersionInfo,
-    VerifySignatureRequest,
+    LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput,
+    NotificationUpdateInput, OpenLinkRequest, SetHostRatesRequest, SetStatusRequest,
+    SetUnytMembraneProofRequest, UnytVersionInfo, VerifySignatureRequest,
 };
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -403,9 +403,12 @@ async fn list_notifications(_params: Value, ctx: Arc<RequestContext>) -> Result<
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let dids = notification_dids(&ctx)?;
-    let notifications =
+    let notifications: Vec<NotificationView> =
         Ad4mDb::with_global_instance(|db| db.get_notifications_for_owner(&dids.caller))
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            .map_err(|e| WsRpcError::internal(e.to_string()))?
+            .iter()
+            .map(Notification::view)
+            .collect();
 
     Ok(serde_json::to_value(notifications)?)
 }
@@ -443,11 +446,14 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let id = params.require_str("id")?;
-    let body: NotificationInput = serde_json::from_value(params.clone())
+    let body: NotificationUpdateInput = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let dids = notification_dids(&ctx)?;
     let stored = notification_for_caller(&id, &dids)?;
     check_notification_perspectives(&body.perspective_ids, &stored.owner_did, &dids, &ctx).await?;
+    let webhook_auth = stored
+        .webhook_auth_after_update(&body.webhook_url, body.webhook_auth)
+        .map_err(|refusal| WsRpcError::bad_request(refusal.to_string()))?;
 
     let notification = Notification {
         id: id.clone(),
@@ -458,7 +464,7 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         trigger: body.trigger,
         perspective_ids: body.perspective_ids,
         webhook_url: body.webhook_url,
-        webhook_auth: body.webhook_auth,
+        webhook_auth,
         granted: granted_after_update(&stored, &dids.caller, &dids.main_agent),
         owner_did: stored.owner_did,
     };
@@ -851,7 +857,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, Vec<SentMessage>>("runtime.outbox", get_outbox)
         .read();
     // Notifications
-    map.method::<NoParams, Vec<Notification>>("runtime.notifications", list_notifications)
+    map.method::<NoParams, Vec<NotificationView>>("runtime.notifications", list_notifications)
         .read();
     map.method::<NotificationInput, String>("runtime.createNotification", create_notification);
     map.method::<RuntimeUpdateNotificationParams, bool>(
@@ -974,7 +980,7 @@ pub struct RuntimeUpdateNotificationParams {
     pub id: String,
     #[serde(flatten)]
     #[ts(flatten)]
-    pub notification: NotificationInput,
+    pub notification: NotificationUpdateInput,
 }
 
 #[derive(Deserialize, TS)]

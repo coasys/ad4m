@@ -120,7 +120,9 @@ export default function aiTests(testContext: TestContext) {
                 expect(addedApiModel).to.exist
                 expect(addedApiModel?.id).to.equal(addApiResult)
                 expect(addedApiModel?.api?.baseUrl).to.equal("https://api.example.com/")
-                expect(addedApiModel?.api?.apiKey).to.equal("test-api-key")
+                // The executor never returns a provider key, only whether one is set.
+                expect(addedApiModel?.api?.hasApiKey).to.be.true
+                expect(JSON.stringify(models)).to.not.include("test-api-key")
                 expect(addedApiModel?.api?.model).to.equal("llama")
                 expect(addedApiModel?.api?.apiType).to.equal("OPEN_AI")
 
@@ -229,7 +231,8 @@ export default function aiTests(testContext: TestContext) {
                 expect(retrievedModel?.name).to.equal("UpdatedModel")
                 expect(retrievedModel?.local).to.be.null
                 expect(retrievedModel?.api?.baseUrl).to.equal("https://api.example.com/v2")
-                expect(retrievedModel?.api?.apiKey).to.equal("updated-api-key")
+                expect(retrievedModel?.api?.hasApiKey).to.be.true
+                expect(JSON.stringify(updatedModels)).to.not.include("updated-api-key")
                 expect(retrievedModel?.api?.model).to.equal("gpt-4")
                 expect(retrievedModel?.api?.apiType).to.equal("OPEN_AI")
                 expect(retrievedModel?.modelType).to.equal("LLM")

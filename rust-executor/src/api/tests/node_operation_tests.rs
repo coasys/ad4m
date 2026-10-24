@@ -12,8 +12,9 @@ use crate::agent::capabilities::get_user_default_capabilities;
 use crate::agent::{signing_key_id, signing_key_id_for_context, AgentContext, AgentService};
 use crate::api::ws_handler::build_handler_map;
 use crate::db::Ad4mDb;
+use crate::events::{Audience, Event, Topic};
 use crate::languages::LanguageController;
-use crate::pubsub::{get_global_pubsub, AGENT_UPDATED_TOPIC};
+use crate::pubsub::get_global_pubsub;
 use crate::types::{Agent, ModelApiInput, ModelInput, ModelType, RequestContext};
 
 /// A user session on the managed agent `did`, with the default user capabilities.
@@ -277,12 +278,16 @@ async fn a_user_sets_their_own_dm_language_not_the_nodes() {
 }
 
 /// Every `agent-updated` event received so far that names `did`.
-fn announced_for(events: &mut tokio::sync::broadcast::Receiver<String>, did: &str) -> Vec<Value> {
+/// Each goes to that agent only.
+fn announced_for(
+    events: &mut tokio::sync::broadcast::Receiver<Arc<Event>>,
+    did: &str,
+) -> Vec<Value> {
     let mut announced = Vec::new();
-    while let Ok(message) = events.try_recv() {
-        let event: Value = serde_json::from_str(&message).unwrap();
-        if event["did"] == json!(did) {
-            announced.push(event);
+    while let Ok(event) = events.try_recv() {
+        if event.topic == Topic::AgentUpdated && event.payload["did"] == json!(did) {
+            assert_eq!(event.audience, Audience::Dids(vec![did.to_string()]));
+            announced.push(event.payload.clone());
         }
     }
     announced
@@ -293,10 +298,7 @@ async fn one_profile_update_with_both_fields_stores_and_announces_once() {
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
     let user = TestUser::new("both.fields");
-    let mut events = get_global_pubsub()
-        .await
-        .subscribe(&AGENT_UPDATED_TOPIC)
-        .await;
+    let mut events = get_global_pubsub().await.subscribe_events();
 
     let returned = call(
         "agent.updateProfile",
@@ -466,14 +468,14 @@ async fn a_user_reads_only_their_own_compute_log() {
 }
 
 #[tokio::test]
-async fn the_default_model_hides_its_key_from_users_only() {
+async fn the_default_model_never_shows_its_key() {
     Ad4mDb::init_global_instance(":memory:").unwrap();
     let id = Ad4mDb::with_global_instance(|db| {
         let id = db.add_model(&ModelInput {
             name: "Remote".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.example.org/v1".to_string(),
-                api_key: "sk-provider-secret".to_string(),
+                api_key: Some("sk-provider-secret".into()),
                 model: "gpt".to_string(),
                 api_type: "OpenAi".to_string(),
                 max_num_ctx: None,
@@ -494,18 +496,19 @@ async fn the_default_model_hides_its_key_from_users_only() {
     )
     .await
     .expect("a user may read the default model");
-    assert_eq!(as_user["id"], json!(id));
-    assert_eq!(as_user["api"]["model"], json!("gpt"));
-    assert_eq!(
-        as_user["api"]["apiKey"],
-        json!(""),
-        "a user session must not see the operator's provider key"
-    );
-
     let as_operator = call("ai.getDefaultModel", params, operator_session())
         .await
         .expect("the operator reads the default model");
-    assert_eq!(as_operator["api"]["apiKey"], json!("sk-provider-secret"));
+
+    for model in [as_user, as_operator] {
+        assert_eq!(model["id"], json!(id));
+        assert_eq!(model["api"]["model"], json!("gpt"));
+        assert_eq!(model["api"]["hasApiKey"], json!(true));
+        assert!(
+            !model.to_string().contains("sk-provider-secret"),
+            "no session reads the provider key back: {model}"
+        );
+    }
 }
 
 /// The template the test languages are cloned from.
