@@ -9,7 +9,9 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 use super::{PerspectiveInstance, SubscribedQuery};
-use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+use crate::agent::{did_for_context, AgentContext};
+use crate::events::{Audience, Event, Topic};
+use crate::pubsub::get_global_pubsub;
 
 impl PerspectiveInstance {
     /// Resync after a revision gap (`perspective.resyncSubscription`): the
@@ -75,15 +77,23 @@ impl PerspectiveInstance {
         })
     }
 
-    /// Publish one update on the `query-subscription-update` topic:
+    /// Publish one `query-subscription-update` event:
     /// `{ perspectiveUuid, uuid, subscriptionId, revision, ... }`
-    /// (`QuerySubscriptionUpdate`) plus the change (see
-    /// [`result_delta`]) plus `connectionId`, which the RPC socket uses to
-    /// deliver it to the subscription's own connection only.
-    pub(super) async fn send_delta_update(
+    /// (`QuerySubscriptionUpdate`) plus the change (see [`result_delta`]).
+    ///
+    /// It goes to the socket of the RPC connection that opened the query
+    /// (`Event::for_connection`), and there only if that socket's session is
+    /// in the audience and may query the perspective. The audience is the
+    /// subscriber (`SubscribedQuery::subscriber`, `None` for the main agent)
+    /// while it is one of the perspective's owners
+    /// ([`super::super::event_recipients`], read here): the query ran as the
+    /// subscriber, so a co-owner does not get its results, and an agent that
+    /// lost the perspective gets nothing more.
+    pub(crate) async fn send_delta_update(
         &self,
         subscription_id: String,
         connection_id: String,
+        subscriber: Option<String>,
         revision: u64,
         mut payload: Map<String, Value>,
     ) {
@@ -91,14 +101,19 @@ impl PerspectiveInstance {
         payload.insert("uuid".into(), json!(self.uuid));
         payload.insert("subscriptionId".into(), json!(subscription_id));
         payload.insert("revision".into(), json!(revision));
-        payload.insert("connectionId".into(), json!(connection_id));
-        get_global_pubsub()
-            .await
-            .publish(
-                &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
-                &Value::Object(payload).to_string(),
-            )
-            .await;
+        let main = || did_for_context(&AgentContext::main_agent()).ok();
+        let subscriber = subscriber.or_else(main);
+        let audience = super::super::event_recipients(&*self.persisted.lock().await)
+            .into_iter()
+            .filter(|owner| Some(owner) == subscriber.as_ref())
+            .collect();
+        let event = Event::new(
+            Topic::PerspectiveQuerySubscription,
+            Audience::Dids(audience),
+            Value::Object(payload),
+        )
+        .for_connection(connection_id);
+        get_global_pubsub().await.publish_event(event);
     }
 
     /// End one subscription that `connection_id` opened. `false` when there
@@ -229,8 +244,9 @@ mod tests {
     use super::super::ChangedPredicates;
     use super::result_delta;
     use crate::agent::AgentContext;
+    use crate::events::Topic;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
-    use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+    use crate::pubsub::get_global_pubsub;
     use crate::types::{Link, LinkStatus};
     use serde_json::{json, Value};
     use std::time::Duration;
@@ -320,21 +336,23 @@ mod tests {
         .unwrap();
     }
 
-    /// Updates published for `id` after one subscription check.
+    /// Updates published for `id` after one subscription check: each payload,
+    /// with the event's routing key (`Event::connection`) as `connectionId`.
     async fn updates_after_check(p: &super::PerspectiveInstance, id: &str) -> Vec<Value> {
-        let mut rx = get_global_pubsub()
-            .await
-            .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-            .await;
+        let mut rx = get_global_pubsub().await.subscribe_events();
         p.check_subscribed_queries(ChangedPredicates::CheckAll)
             .await;
         let mut out = vec![];
         let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
-        while let Ok(Ok(msg)) = tokio::time::timeout_at(deadline, rx.recv()).await {
-            let v: Value = serde_json::from_str(&msg).unwrap();
-            if v["subscriptionId"] == id {
-                out.push(v);
+        while let Ok(Ok(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            if event.topic != Topic::PerspectiveQuerySubscription
+                || event.payload["subscriptionId"] != id
+            {
+                continue;
             }
+            let mut v = event.payload.clone();
+            v["connectionId"] = json!(event.connection);
+            out.push(v);
         }
         out
     }
@@ -344,7 +362,7 @@ mod tests {
         let (mut p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
         let query = r#"{"includeUnverified": true}"#.to_string();
         let (id, _, initial) = p
-            .model_subscribe_and_query("Todo".into(), query.clone(), "c".into())
+            .model_subscribe_and_query("Todo".into(), query.clone(), "c".into(), None)
             .await
             .unwrap();
         let initial: Value = serde_json::from_str(&initial).unwrap();
@@ -385,7 +403,10 @@ mod tests {
     async fn resync_state_matches_the_last_update() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (id, _, _) = p.subscribe_and_query(q.clone(), "c".into()).await.unwrap();
+        let (id, _, _) = p
+            .subscribe_and_query(q.clone(), "c".into(), None)
+            .await
+            .unwrap();
         let (revision, result) = p.subscription_state(&id, "c").await.unwrap();
         assert_eq!((revision, super::result_json(&result)), (0, json!([])));
 
@@ -407,7 +428,7 @@ mod tests {
     async fn a_write_while_the_first_result_is_computed_is_reported() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let query = super::SubscribedQuery::new(q.clone(), "c".into());
+        let query = super::SubscribedQuery::new(q.clone(), "c".into(), None);
         // The first result is read, then a write and its check land before
         // the subscribe completes.
         let stale = p.sparql_query(q).unwrap();
@@ -429,14 +450,17 @@ mod tests {
     async fn each_subscriber_gets_its_own_subscription_from_revision_zero() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (first, _, _) = p.subscribe_and_query(q.clone(), "c".into()).await.unwrap();
+        let (first, _, _) = p
+            .subscribe_and_query(q.clone(), "c".into(), None)
+            .await
+            .unwrap();
         add(&mut p, "test://a", "test://p", "test://b").await;
         assert_eq!(
             updates_after_check(&p, &first).await[0]["revision"],
             json!(1)
         );
 
-        let (second, _, _) = p.subscribe_and_query(q, "c".into()).await.unwrap();
+        let (second, _, _) = p.subscribe_and_query(q, "c".into(), None).await.unwrap();
         assert_ne!(first, second, "not shared");
         assert_eq!(p.subscription_state(&second, "c").await.unwrap().0, 0);
     }
@@ -445,7 +469,7 @@ mod tests {
     async fn a_prolog_live_query_is_refused_and_not_registered() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let err = p
-            .subscribe_and_query(r#"triple(X, _, "test://b")."#.into(), "c".into())
+            .subscribe_and_query(r#"triple(X, _, "test://b")."#.into(), "c".into(), None)
             .await
             .expect_err("a Prolog live query is refused");
         assert_eq!(err.to_string(), super::super::PROLOG_LIVE_QUERY_UNSUPPORTED);

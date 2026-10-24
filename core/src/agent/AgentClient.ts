@@ -279,6 +279,20 @@ export class AgentClient {
     return this.#apiClient.call('user.verifyEmail', { email, code, verificationType });
   }
 
+  /** Revokes this client's user token. The executor then closes the client's sockets. */
+  async logout(): Promise<boolean> {
+    return this.#apiClient.call('user.logout', {});
+  }
+
+  /**
+   * Revokes every token of a user issued up to now, this client's own included, and closes
+   * their sockets. A user leaves out `email` (or names themselves); the operator names the
+   * user. Tokens from a later login work.
+   */
+  async revokeAllSessions(email?: string): Promise<boolean> {
+    return this.#apiClient.call('user.revokeAllSessions', email === undefined ? {} : { email });
+  }
+
   // Hosting methods
   async hostingUserInfo(): Promise<HostingUserInfo> {
     const info = (await this.#apiClient.call('hosting.info', {})).userInfo ?? {
