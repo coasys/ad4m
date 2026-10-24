@@ -4523,7 +4523,7 @@ impl PerspectiveInstance {
                 let payload = NotificationTriggeredEvent {
                     perspective_uuid: uuid.clone(),
                     notification: TriggeredNotification {
-                        notification: notification.clone(),
+                        notification: notification.view(),
                         perspective_id: uuid.clone(),
                         trigger_match,
                     },
@@ -4548,7 +4548,8 @@ impl PerspectiveInstance {
                     let client = reqwest::Client::new();
                     let res = client
                         .post(&notification.webhook_url)
-                        .bearer_auth(&notification.webhook_auth)
+                        // The webhook is the credential's one receiver.
+                        .bearer_auth(notification.webhook_auth.expose())
                         .header("Content-Type", "application/json")
                         .body(message.clone())
                         .send()

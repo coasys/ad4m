@@ -17,6 +17,7 @@ pub mod perspective_snapshot;
 pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
+pub mod secret;
 pub mod sfu;
 pub mod unyt_service;
 pub mod user_management;
@@ -52,6 +53,7 @@ use crate::{
     languages::LanguageController, runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
+pub use secret::Secret;
 
 #[cfg(unix)]
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
@@ -379,7 +381,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     .as_ref()
                     .expect("INTERNAL_API_TOKEN required for shared backends");
                 info!("Initialising shared wallet backend at {}", url);
-                Arc::new(crate::wallet::SharedWallet::new(url.clone(), token.clone()))
+                // The Worker's bearer token: the shared wallet sends it on every call.
+                Arc::new(crate::wallet::SharedWallet::new(
+                    url.clone(),
+                    token.expose().to_string(),
+                ))
             }
             _ => {
                 info!("Initialising local wallet backend");
@@ -405,7 +411,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     .as_ref()
                     .expect("INTERNAL_API_TOKEN required for shared backends");
                 info!("Initialising shared database backend at {}", url);
-                Arc::new(crate::db_backend::SharedDb::new(url.clone(), token.clone()))
+                // The Worker's bearer token: the shared database sends it on every call.
+                Arc::new(crate::db_backend::SharedDb::new(
+                    url.clone(),
+                    token.expose().to_string(),
+                ))
             }
             _ => {
                 info!("Initialising local database backend");
@@ -434,7 +444,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         if let (Some(internal), Some(admin)) =
             (&config.internal_api_token, &config.admin_credential)
         {
-            if internal == admin {
+            if admin.expose_for_compare(internal.expose()) {
                 panic!(
                     "INTERNAL_API_TOKEN must differ from ADMIN_CREDENTIAL in shared mode. \
                      Using the same value collapses two trust boundaries."

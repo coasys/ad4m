@@ -524,16 +524,17 @@ mod tests {
     }
 
     // A user token holds every topic's capability on every perspective, so the capability
-    // check takes no event from a user session. The operator may do anything. The exception
-    // is `apps-changed`: approving apps (AGENT_PERMIT) is not in a user token yet.
+    // check takes no event from a user session. The operator may do anything. `apps-changed`
+    // included: users approve apps for their own agent (AGENT_PERMIT, #1399); the audience
+    // keeps another agent's approvals from them.
     #[test]
-    fn a_user_token_holds_the_capability_of_every_topic_but_app_approvals() {
+    fn a_user_token_holds_the_capability_of_every_topic() {
         let user = caps::get_user_default_capabilities();
         for topic in Topic::ALL {
             for perspective in [None, Some("p")] {
                 let cap = topic.capability(perspective);
                 let held = caps::capability_matches(&user, &cap);
-                assert_eq!(held, topic != Topic::AppsChanged, "{topic}: {cap:?}");
+                assert!(held, "{topic}: {cap:?}");
             }
         }
     }
