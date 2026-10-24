@@ -109,13 +109,14 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             ?getter ?hasValue ?className
             ?relationKind ?targetClassName
             ?whereFilter ?wherePredicates ?filterEnabled
-            ?transform ?interpretationHint ?identity ?ordering
+            ?transform ?interpretationHint ?identity ?ordering ?disjoint
         WHERE {{
             <{shape_uri}> <sh://property> ?propUri .
             ?propUri <sh://path> ?path .
             ?propUri <rdf://type> ?propType .
             OPTIONAL {{ ?propUri <ad4m://interpretation_hint> ?interpretationHint . }}
             OPTIONAL {{ ?propUri <ad4m://identity> ?identity . }}
+            OPTIONAL {{ ?propUri <sh://disjoint> ?disjoint . }}
             OPTIONAL {{ ?propUri <sh://datatype> ?datatype . }}
             OPTIONAL {{ ?propUri <sh://minCount> ?minCount . }}
             OPTIONAL {{ ?propUri <sh://maxCount> ?maxCount . }}
@@ -203,6 +204,17 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             .map(decode_literal_string_target)
             .map(|v| v == "true")
             .unwrap_or(false);
+
+        // `sh:disjoint` is multi-valued, so it fans out into one row per
+        // path: collect it from every row of this property, not just the first.
+        let mut disjoint: Vec<String> = Vec::new();
+        for row in rows.iter() {
+            if let Some(other) = row["disjoint"].as_str() {
+                if !disjoint.iter().any(|d| d == other) {
+                    disjoint.push(other.to_string());
+                }
+            }
+        }
 
         let min_count = parse_count_literal(first["minCount"].as_str());
         let max_count = parse_count_literal(first["maxCount"].as_str());
@@ -332,6 +344,8 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 max_count: max_count.map(|m| m as usize),
                 target_class_name: resolved_target_class_name,
                 target_class_uri: target_class_uri.clone().unwrap_or_default(),
+                required: min_count.unwrap_or(0) >= 1,
+                disjoint,
             });
         } else {
             properties.push(ShapeProperty {
@@ -712,6 +726,8 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                     max_count,
                     target_class_name,
                     target_class_uri,
+                    required: false,
+                    disjoint: Vec::new(),
                 });
             }
         }

@@ -88,6 +88,12 @@ pub struct PropertyShape {
     /// property node when `Some(true)`. No identity declared ⇒ no dedup.
     #[serde(default)]
     pub identity: Option<bool>,
+    /// SHACL `sh:disjoint`: paths of other properties on the same class whose
+    /// values may never overlap this one's (the two ends of an edge record).
+    /// Emitted as one `sh://disjoint` link per path, and enforced by the
+    /// interpreter when it writes an instance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disjoint: Vec<String>,
     /// CRDT ordering strategy for a collection relation, from
     /// `@HasMany({ ordering: { strategy } })`. Emitted as an `ad4m://ordering`
     /// link on the property node, which is the only place
@@ -1781,6 +1787,16 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://identity".to_string()),
                 target: "literal:string:true".to_string(),
+            });
+        }
+
+        // `sh:disjoint` names a property path, so the target is the other
+        // property's predicate IRI rather than a literal.
+        for other in &prop.disjoint {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("sh://disjoint".to_string()),
+                target: other.clone(),
             });
         }
 

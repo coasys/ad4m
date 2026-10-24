@@ -335,6 +335,43 @@ export function buildSHACL(
             relShape.maxCount = relMeta.maxCount;
         }
 
+        // Both constraints are about stored links. A getter-only relation (no
+        // `through`) has none: its path is the synthetic `ad4m://getter/...`
+        // above, which nothing writes. `disjoint` there checks nothing, and
+        // `required` is worse — conformance demands a link on that path, so
+        // every query of the class comes back empty.
+        if ((relMeta.required || relMeta.disjoint?.length) && !relMeta.predicate) {
+            throw new Error(
+                `${subjectName}.${relName}: required and disjoint need a stored relation (\`through\`); ` +
+                    `a getter-only relation has no links to check`,
+            );
+        }
+
+        if (relMeta.required) {
+            relShape.minCount = 1;
+        }
+
+        // `sh:disjoint` names a property *path*, so each sibling relation named
+        // in the decorator is resolved to its predicate here. A name that is
+        // not a forward relation of this class with a predicate is a
+        // declaration error: refusing it is better than a constraint that
+        // silently checks nothing. A `@BelongsTo*` is the case that looks
+        // valid — it has a predicate — but stores its edge on the other node,
+        // so the executor would look for links this record never holds.
+        if (relMeta.disjoint?.length) {
+            relShape.disjoint = relMeta.disjoint.map((other) => {
+                const sibling = allRelationsMeta[other];
+                const forward = sibling?.kind === 'hasOne' || sibling?.kind === 'hasMany';
+                if (!sibling?.predicate || !forward) {
+                    throw new Error(
+                        `${subjectName}.${relName}: disjoint names '${other}', which is not a forward relation ` +
+                            `(@HasOne / @HasMany with a predicate) of ${subjectName}`,
+                    );
+                }
+                return sibling.predicate;
+            });
+        }
+
         // Encode opt-out of type filtering (default true; only emit when false).
         if (relMeta.filter === false) {
             relShape.filter = false;

@@ -1,7 +1,7 @@
 use super::{
     apply_with_overlay, build_interpretation_input, build_speaker_name_map, class_label,
-    ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
-    identity_property, normalize_identity, parse_interpretation_output,
+    enforce_relation_constraints, ensure_interpretation_task_for_model, existing_instance_context,
+    existing_relation_links, identity_property, normalize_identity, parse_interpretation_output,
     plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
     ExistingInstances, ExistingLinks, InterpretationOp, InterpretationOutput,
     InterpretationRunCursor, TranscriptTurn,
@@ -808,6 +808,8 @@ pub async fn run_interpretation_with_strategy_and_model(
             perspective,
             shapes,
             ops,
+            &existing_ctx,
+            &existing_links,
             &task,
             run_id,
             ran_at,
@@ -869,6 +871,8 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
     ops: Vec<InterpretationOp>,
+    existing: &ExistingInstances,
+    existing_links: &ExistingLinks,
     task: &crate::types::AITask,
     run_id: String,
     ran_at: String,
@@ -879,6 +883,10 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
     flow_subjects: &[String],
     flow_filter: Option<&[String]>,
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    // Both paths' ops meet here, so this is the one place the classes'
+    // `sh:minCount` / `sh:disjoint` are enforced: a record that breaks them is
+    // never written, whichever path proposed it.
+    let ops = enforce_relation_constraints(ops, shapes, existing, existing_links);
     // Captured before `ops` moves into the apply: the spawn pass below is
     // scoped to *created* instances (design §10 v1), and the returned
     // `bases` mix created and updated indistinguishably.
@@ -1253,6 +1261,8 @@ pub async fn run_interpretation_with_harness_and_model(
         perspective,
         shapes,
         ops,
+        &existing_ctx,
+        &existing_links,
         &task,
         run_id,
         ran_at,
@@ -1951,6 +1961,8 @@ mod tests {
             p,
             shapes,
             ops,
+            &ExistingInstances::new(),
+            &ExistingLinks::new(),
             &tail_task(),
             uuid::Uuid::new_v4().to_string(),
             "1700000000000".to_string(),
