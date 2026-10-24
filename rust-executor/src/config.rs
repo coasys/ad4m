@@ -162,6 +162,12 @@ pub struct Ad4mConfig {
     /// DID of the cascade node that takes redirected joins first. Unset:
     /// the least-loaded node.
     pub sfu_preferred_node: Option<String>,
+    /// `identity.storeUrl`: the identity store's base URL, given to the agent language as its
+    /// `storeUrl` setting. Unset: the language's default store.
+    pub identity_store_url: Option<String>,
+    /// `identity.storeKeys`: the store keys (Ed25519 multikeys) a head from the store must be
+    /// signed by. A list, so the store's key can rotate.
+    pub identity_store_keys: Option<Vec<String>>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -538,6 +544,8 @@ impl Ad4mConfig {
             sfu_udp_port: None,
             sfu_public_addr: None,
             sfu_preferred_node: None,
+            identity_store_url: None,
+            identity_store_keys: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,

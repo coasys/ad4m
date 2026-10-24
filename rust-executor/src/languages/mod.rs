@@ -734,6 +734,17 @@ impl LanguageController {
         if !language_language_only {
             // Step 2: Load other system languages
             let agent_language = RuntimeService::with_global_instance(|rs| rs.get_agent_language());
+            // The agent language reads its store URL from its settings at load.
+            if let Err(e) = crate::identity::write_agent_language_settings(
+                &languages_directory(),
+                &agent_language,
+                &crate::identity::settings_from_config(),
+            ) {
+                error!(
+                    "Could not write the agent language's storeUrl setting: {}",
+                    e
+                );
+            }
             let neighbourhood_language =
                 RuntimeService::with_global_instance(|rs| rs.get_neighbourhood_language());
             let perspective_language =

@@ -44,6 +44,7 @@ extern crate rustyline;
 extern crate tokio;
 
 mod formatting;
+mod identity;
 mod startup;
 mod util;
 
@@ -120,6 +121,25 @@ enum Domain {
         data_path: Option<String>,
         #[arg(short, long, action)]
         network_bootstrap_seed: Option<String>,
+        /// The did:scid of the identity that operates this executor. Recorded only while the
+        /// data folder has no operator; another identity never replaces it (only the recorded
+        /// operator can).
+        #[arg(long)]
+        operator: Option<String>,
+    },
+    /// Join an identity: claim an offer link (or offer string) its app opened, show the match
+    /// code, and wait until the app confirms. Needs the operator's admin credential
+    /// (`--admin-credential` or AD4M_ADMIN_CREDENTIAL) and an operator recorded with
+    /// `init --operator`.
+    Claim {
+        /// The offer link (`https://coasys.id/o#coasys:offer:1:…`) or the offer string.
+        offer: String,
+        /// A name for this executor the app shows on its confirm card.
+        #[arg(long)]
+        hint: Option<String>,
+        /// Claim and print the match code, without waiting for the confirmation.
+        #[arg(long, action)]
+        no_wait: bool,
     },
     Run(RunArgs),
     /// Inspect the settings `run` would start with
@@ -148,8 +168,10 @@ async fn main() -> Result<()> {
     if let Domain::Init {
         data_path,
         network_bootstrap_seed,
+        operator,
     } = args.domain
     {
+        let db = identity::database_path(data_path.as_deref());
         match rust_executor::init::init(data_path, network_bootstrap_seed) {
             Ok(()) => println!("Successfully initialized AD4M executor!"),
             Err(e) => {
@@ -157,8 +179,37 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         };
+        if let Some(operator) = operator {
+            if let Err(e) = identity::record_operator(&db, &operator) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
         return Ok(());
     };
+
+    if let Domain::Claim {
+        offer,
+        hint,
+        no_wait,
+    } = args.domain
+    {
+        let executor_url = match args.executor_url {
+            Some(url) => url,
+            None => startup::get_executor_url()?,
+        };
+        // No credential: an executor started with --insecure-no-admin-credential, where the
+        // empty token on loopback is the operator.
+        let token = args
+            .admin_credential
+            .or_else(|| std::env::var("AD4M_ADMIN_CREDENTIAL").ok())
+            .unwrap_or_default();
+        if let Err(e) = identity::claim(&executor_url, &token, &offer, hint, no_wait).await {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     if let Domain::Config {
         command: ConfigCommand::Print(run_args),

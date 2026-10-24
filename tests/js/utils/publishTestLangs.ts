@@ -17,6 +17,7 @@ const publishingBootstrapSeedPath = path.resolve(__dirname, '..', 'publishBootst
 const bootstrapSeedPath = path.resolve(__dirname, '..', 'bootstrapSeed.json');
 const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'perspective-diff-sync-hash');
 const serverLinkLanguageHashPath = path.resolve(__dirname, '..', 'scripts', 'server-link-language-hash');
+const centralizedAgentLanguageHashPath = path.resolve(__dirname, '..', 'scripts', 'centralized-agent-language-hash');
 // Local mode: skip Holochain when preparing local-only test environments.
 // Set LOCAL_MODE=true in the prepare-test-local npm scripts.
 const localMode = process.env.LOCAL_MODE === 'true';
@@ -32,6 +33,8 @@ const languagesToPublish = {
     // aren't code-templated — they get through to the language meta so tests
     // can assert on `socialContext.name` the same way they do for p-diff-sync.
     "server-link-language": {name: "server-link-language", description: "", possibleTemplateParams: ["SERVER_URL", "UID", "name", "description"]} as LanguageMetaInput,
+    // The agent language on the identity store; the identity suite seeds it.
+    "centralized-agent-language": {name: "centralized-agent-language", description: "", possibleTemplateParams: []} as LanguageMetaInput,
 }
 
 const languageHashes = {
@@ -39,7 +42,8 @@ const languageHashes = {
     "perspectiveLanguage": "",
     "neighbourhoodLanguage": "",
     "perspectiveDiffSync": "",
-    "serverLinkLanguage": ""
+    "serverLinkLanguage": "",
+    "centralizedAgentLanguage": ""
 }
 
 // Kill the listening process on each port (TCP:LISTEN filter ensures we only
@@ -77,6 +81,7 @@ function injectSystemLanguages() {
 function injectLangAliasHashes() {
     fs.writeFileSync(perspectiveDiffSyncHashPath, languageHashes["perspectiveDiffSync"]);
     fs.writeFileSync(serverLinkLanguageHashPath, languageHashes["serverLinkLanguage"]);
+    fs.writeFileSync(centralizedAgentLanguageHashPath, languageHashes["centralizedAgentLanguage"]);
 }
 
 async function publish() {
@@ -146,6 +151,9 @@ async function publish() {
             }
             if (language === "server-link-language") {
                 languageHashes["serverLinkLanguage"] = publishedLang.address;
+            }
+            if (language === "centralized-agent-language") {
+                languageHashes["centralizedAgentLanguage"] = publishedLang.address;
             }
         }
         injectSystemLanguages();

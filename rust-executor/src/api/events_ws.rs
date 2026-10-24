@@ -43,6 +43,7 @@
 //! | `sfu-data`                    | (inline)      | the room's other agents on this executor | SFU data channel message |
 //! | `sfu-room-roster`             | (inline)      | the participants it lists | Who is in a call room now         |
 //! | `flow-state-changed`          | (inline)      | `agentDid` if it reads the perspective; else the main agent's to `Operator` | A flow instance's state moved on that agent's replica (#1424) |
+//! | `identity-fork`               | (inline)      | the local agents that speak for the identity | The key-log cache found two logs (a different event at a held seq, or a shorter log) and kept its own (a shorter log never truncates a held one) |
 //!
 //! Every session also needs the event's capability (`Event::capability`).
 
@@ -134,6 +135,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::sfu::SfuDataMessage>(SfuData, false),
         EventSpec::of::<crate::sfu::SfuRoomRoster>(SfuRoomRoster, false),
         EventSpec::of::<FlowStateChangedEvent>(FlowStateChanged, true),
+        EventSpec::of::<crate::identity::types::IdentityForkEvent>(IdentityFork, false),
     ]
 }
 
@@ -262,7 +264,8 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::SfuMigrate
         | Topic::SfuData
         | Topic::SfuRoomRoster
-        | Topic::FlowStateChanged => None,
+        | Topic::FlowStateChanged
+        | Topic::IdentityFork => None,
     }
 }
 
@@ -2237,6 +2240,15 @@ mod event_spec_tests {
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
                     participants: vec!["did:a".into()],
+                }),
+            ),
+            (
+                Topic::IdentityFork,
+                serde_json::to_value(crate::identity::types::IdentityForkEvent {
+                    did: "did:scid:coasys:1:Qm".into(),
+                    seq: 1,
+                    ours: "QmA".into(),
+                    theirs: "QmB".into(),
                 }),
             ),
         ];

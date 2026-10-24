@@ -1,0 +1,52 @@
+[package]
+name = "ad4m-identity-client"
+version = "0.1.0"
+edition = "2021"
+description = "The master-key side of did:scid:coasys:1 for apps: the vault, the master signer, and the create, link and revoke flows through the executor"
+license = "CAL-1.0"
+homepage = "https://ad4m.dev"
+repository = "https://github.com/coasys/ad4m"
+publish = false
+
+[features]
+default = []
+# `MemoryVault`: master keys in memory. Tests only; never in a release build.
+test-vault = []
+# `ExecutorRpc` for `ad4m-client`'s WebSocket client (native only).
+ws = ["dep:ad4m-client"]
+
+[[example]]
+name = "holder"
+required-features = ["ws", "test-vault"]
+
+[dependencies]
+# The words make master keys here, never on a node (the executor enables `build` only).
+ad4m-identity-core = { path = "../ad4m-identity-core", features = ["build", "words"] }
+ad4m-hash-chain = { path = "../ad4m-hash-chain" }
+# The identity wire types the executor's identity calls carry (the agent language's JSON).
+ad4m-ldk = { path = "../ad4m-ldk/rust" }
+async-trait = "0.1.92"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0.12"
+zeroize = "1.8"
+ed25519-dalek = { version = "2.2.0", features = ["zeroize"] }
+bs58 = "0.5.1"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+ad4m-client = { path = "../rust-client", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2.17", features = ["js"] }
+
+[dev-dependencies]
+# The flow tests use `MemoryVault`.
+ad4m-identity-client = { path = ".", features = ["test-vault"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+identity-store = { path = "../identity-store" }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1.5"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3.27.0"
+base64 = "0.22.1"

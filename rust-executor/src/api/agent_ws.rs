@@ -84,7 +84,7 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
                 perspective: Some(DomainPerspective { links: vec![] }),
             },
         };
-        return Ok(serde_json::to_value(agent)?);
+        return Ok(serde_json::to_value(with_identity(agent))?);
     }
 
     // Fallback to main agent for admin/legacy mode.
@@ -103,7 +103,13 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
         Ok::<Agent, WsRpcError>(agent)
     })?;
 
-    Ok(serde_json::to_value(agent)?)
+    Ok(serde_json::to_value(with_identity(agent))?)
+}
+
+/// `agent.get`'s answer: the profile, and the `did:scid` its device key speaks for.
+fn with_identity(agent: Agent) -> crate::identity::types::AgentWithIdentity {
+    let identity = crate::identity::service::identity_of_agent(&agent.did);
+    crate::identity::types::AgentWithIdentity { agent, identity }
 }
 
 /// agent.apps — the grants of the agent the caller acts as: a user lists the apps (and
@@ -729,22 +735,26 @@ async fn get_agent_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
             WsRpcError::internal(format!("Failed to get DID document for user: {}", e))
         })?;
 
-        return Ok(serde_json::to_value(AgentStatus {
-            did: Some(did),
-            did_document: Some(serde_json::Value::String(
-                serde_json::to_string(&did_document).map_err(|e| {
-                    WsRpcError::internal(format!("Failed to serialize DID document: {}", e))
-                })?,
-            )),
-            error: None,
-            is_initialized: true,
-            is_unlocked: true,
-        })?);
+        return Ok(serde_json::to_value(
+            AgentStatus {
+                did: Some(did),
+                did_document: Some(serde_json::Value::String(
+                    serde_json::to_string(&did_document).map_err(|e| {
+                        WsRpcError::internal(format!("Failed to serialize DID document: {}", e))
+                    })?,
+                )),
+                error: None,
+                is_initialized: true,
+                is_unlocked: true,
+                identity: None,
+            }
+            .with_identity(),
+        )?);
     }
 
     // Fallback to main agent status
     let status = AgentService::with_global_instance(|agent_service| agent_service.dump());
-    Ok(serde_json::to_value(status)?)
+    Ok(serde_json::to_value(status.with_identity())?)
 }
 
 /// agent.isLocked — check if agent is locked
@@ -925,7 +935,7 @@ async fn entanglement_proof_preflight(
 /// Message types match the client SDK's `apiClient.call()` type strings.
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     // The caller's own agent: a user's, else the main agent.
-    map.method::<NoParams, Agent>("agent.get", get_agent)
+    map.method::<NoParams, crate::identity::types::AgentWithIdentity>("agent.get", get_agent)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     // The grants on the caller's own agent (without tokens).
