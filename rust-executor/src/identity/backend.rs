@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use ad4m_ldk::identity::{
     AppendRequest, Claim, ClaimReceipt, ForbiddenReason, IdentityErrorCode, LogPage, OfferListing,
-    OfferOpened, OfferProgress, PowParams, RateLimitScope, SignedHead, SignedOffer, SignedRequest,
+    OfferOpened, OfferProgress, RateLimitScope, SignedHead, SignedOffer, SignedRequest,
 };
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -80,9 +80,7 @@ impl From<IdentityErrorCode> for IdentityError {
 #[async_trait]
 pub trait IdentityBackend: Send + Sync {
     async fn log(&self, did: &str, from: u64) -> Result<Option<LogPage>, IdentityError>;
-    async fn head(&self, did: &str) -> Result<Option<SignedHead>, IdentityError>;
     async fn append(&self, did: &str, req: &AppendRequest) -> Result<SignedHead, IdentityError>;
-    async fn pow_params(&self) -> Result<PowParams, IdentityError>;
     async fn open_offer(&self, offer: &SignedOffer) -> Result<OfferOpened, IdentityError>;
     async fn list_offers(
         &self,
@@ -197,17 +195,9 @@ impl IdentityBackend for AgentLanguageBackend {
             .await
     }
 
-    async fn head(&self, did: &str) -> Result<Option<SignedHead>, IdentityError> {
-        self.call(Capability::IdentityHead, &[did.into()]).await
-    }
-
     async fn append(&self, did: &str, req: &AppendRequest) -> Result<SignedHead, IdentityError> {
         self.call(Capability::IdentityAppend, &[did.into(), json(req)?])
             .await
-    }
-
-    async fn pow_params(&self) -> Result<PowParams, IdentityError> {
-        self.call(Capability::IdentityPowParams, &[]).await
     }
 
     async fn open_offer(&self, offer: &SignedOffer) -> Result<OfferOpened, IdentityError> {

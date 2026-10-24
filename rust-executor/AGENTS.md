@@ -155,8 +155,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   at a held seq or a shorter log records a fork, keeps the history and fires `identity-fork`.
   `ad4m-executor init --operator <did:scid>` records the operator (`operator_record`, never
   replaced by `init`); `identity.claimOffer` (operator only) claims with the main wallet key and
-  refuses `no-operator` / `first-link` inside `ClaimService::claim_for_main`. `agent.status` and
-  `agent.get` gain `identity`; `did` stays the device `did:key`.
+  refuses `already-linked` / `no-operator` / `first-link` inside
+  `ClaimService::claim_for_main`. `agent.status` and `agent.get` gain `identity`; `did` stays the
+  device `did:key`.
 
 ## Do / don't
 

@@ -13,7 +13,7 @@ The key event log (KEL) is one chain type on `ad4m-hash-chain`: `Event` implemen
 | `src/policy.rs` | `KelPolicy` (`genesis`, `apply`), `FoldError`, `FormatError` |
 | `src/state.rs` | `KeyState`, `KeyRecord`: `key_valid_at`, `key_valid_at_time`, `bot_scope_at`, `current_master`, `key_id_of`, `next_device_id`, `encryption_keys_at` |
 | `src/keys.rs` | X25519 multikeys; key-type checks |
-| `src/domain.rs` | the signing-domain registry and labels of AR-01 4.2; `signing_bytes`, `verify_signed`, `check_domain` |
+| `src/domain.rs` | the signing-domain registry and labels of AR-01 4.2; `signing_bytes`, `verify_signed`, `check_domain`; `LINK_DOMAIN`, `HEAD_DOMAIN`, `REQUEST_DOMAIN`; `HeadStatement` (what the store signs for a head; the store signs it, executors verify it) |
 | `src/pow.rs` | `Pow`, `solve`, `solve_range`, `check` (the brake's proof of work, bound to the SCID) |
 | `src/link.rs` | AR-02 4.3–4.5: `Offer`, `SignedOffer`, `Claim`, `ClaimBody`, `ClaimView`, `OfferState`, `LinkError`; `offer_commit`, `sign_offer`/`verify_offer`, `make_claim`/`verify_claim`, `check_secret`, `match_code`, `check_add` (rule A7's conditions 2–5), `OfferString` (offer string and link), `DeviceString` |
 | `src/build.rs` | feature `build`: `*_unsigned` builders, `signing_input`, `attach_proof`, `Signer`, `cosign`, `incept_human`, `add_claimed`, `revoke`, `scope`, `rotate`, `sign_domain` |

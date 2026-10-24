@@ -5,9 +5,7 @@
 
 mod common;
 
-use ad4m_hash_chain::store::{
-    entries_since, ChainStore, MemoryChainStore, Since, StoreError, StoredEntry,
-};
+use ad4m_hash_chain::store::{ChainStore, MemoryChainStore, StoreError, StoredEntry};
 use ad4m_hash_chain::{fold, import, ChainPolicy, ForkEvidence, Head, ImportOutcome};
 use common::*;
 use std::sync::Arc;
@@ -39,10 +37,6 @@ async fn contract_suite<S: ChainStore + 'static>(make: impl Fn() -> S) {
     assert_eq!(store.head(TY, &chain).await.unwrap(), None);
     assert_eq!(store.range(TY, &chain, 0, 10).await.unwrap(), vec![]);
     assert_eq!(store.forks(TY, &chain).await.unwrap(), vec![]);
-    assert_eq!(
-        entries_since(&store, TY, &chain, None, 10).await.unwrap(),
-        Since::Unknown
-    );
 
     // A new chain appends with expect = None; a second None is a conflict with the head.
     let h2 = store.append(TY, &chain, None, &rows[..3]).await.unwrap();
@@ -112,48 +106,13 @@ async fn contract_suite<S: ChainStore + 'static>(make: impl Fn() -> S) {
     assert_eq!(back, entries);
     assert_eq!(fold(&TestPolicy, &back).unwrap().head(), h5);
 
-    // entries_since.
-    match entries_since(&store, TY, &chain, None, 2).await.unwrap() {
-        Since::Entries { entries, head } => {
-            assert_eq!(entries, rows[..2].to_vec());
-            assert_eq!(head, h5);
-        }
-        other => panic!("{other:?}"),
-    }
-    match entries_since(&store, TY, &chain, Some(&head_of(&rows[3])), 10)
-        .await
-        .unwrap()
-    {
-        Since::Entries { entries, head } => {
-            assert_eq!(entries, rows[4..].to_vec());
-            assert_eq!(head, h5);
-        }
-        other => panic!("{other:?}"),
-    }
-    match entries_since(&store, TY, &chain, Some(&h5), 10)
-        .await
-        .unwrap()
-    {
-        Since::Entries { entries, .. } => assert!(entries.is_empty()),
-        other => panic!("{other:?}"),
-    }
     let theirs = next_entry(&entries[2], "their 3", &signing_key(1), None);
-    let their_head = Head {
-        seq: 3,
-        hash: ad4m_hash_chain::entry_hash(&theirs).unwrap(),
-    };
     let fork = ForkEvidence {
         chain: chain.clone(),
         seq: 3,
         ours: rows[3].hash.clone(),
-        theirs: their_head.hash.clone(),
+        theirs: ad4m_hash_chain::entry_hash(&theirs).unwrap(),
     };
-    assert_eq!(
-        entries_since(&store, TY, &chain, Some(&their_head), 10)
-            .await
-            .unwrap(),
-        Since::Diverged(fork.clone())
-    );
 
     // record_fork keeps both; recording twice keeps one.
     let mut held = fold(&TestPolicy, &entries).unwrap();

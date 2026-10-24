@@ -9,8 +9,8 @@ lets its executor co-sign and publish them. No custody key (decision 21.5).
 |---|---|
 | `src/lib.rs` | `Clock`, `Random` (the surface passes both: no clock or randomness of its own), `SystemClock` (not wasm32), `OsRandom`, `ClientError` |
 | `src/secret.rs` | `Secret<T>`: zeroed on drop, `Debug` prints `<redacted>`, no `Serialize`, no `Clone` |
-| `src/vault.rs` | `Vault`, `Unlocked` (one unlock per flow, 300 s), `MasterSigner` (`Signer` + `index`), `KeySigner`, `MasterUse`, `VaultStatus`, `VaultError`; `MemoryVault` (tests and feature `test-vault`, never in a release build) |
-| `src/executor.rs` | `ExecutorRpc` (one RPC call), `ViaExecutor` (the typed `identity.*` calls: status, log, powParams, cosignIncept, publish, openOffer, offers, claimOffer, joinStatus); feature `ws`: `ExecutorRpc` for `ad4m-client`'s `WsRpcClient` |
+| `src/vault.rs` | `Vault`, `Unlocked` (one unlock per flow, 300 s), `MasterSigner` (`Signer` + `index`), `KeySigner`, `MasterUse` (`Link`, `Revoke`), `VaultError`; the trait has `store_master` and `unlock` only; `MemoryVault` (tests and feature `test-vault`, never in a release build) |
+| `src/executor.rs` | `ExecutorRpc` (one RPC call), `ViaExecutor` (the typed `identity.*` calls the flows make: status, log, cosignIncept, publish, openOffer, offers; claiming is the joining executor's call, `ad4m-executor claim`); feature `ws`: `ExecutorRpc` for `ad4m-client`'s `WsRpcClient` |
 | `src/flows/create.rs` | `CreateFlow` (words shown → two typed back → `finish`): master #0, `incept` listing the executor's key as `d1`, `identity.cosignIncept`, fold, `identity.publish`, then the vault keeps master #0 |
 | `src/flows/link.rs` | `LinkFlow`: `open` (offer signed by the current master at the head, offer link), `wait_for_claim` (master-signed list requests; the match code), `confirm` (the `add` that spends the claim) |
 | `src/flows/revoke.rs` | `revoke` (a `revoke` signed by the current master), `key_id_of` |

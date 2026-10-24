@@ -46,14 +46,12 @@ pub struct OperatorRecordRow {
     pub set_by: OperatorSetBy,
 }
 
-/// A claim this executor made for one of its agents, until the offer ends (`identity.joinStatus`).
+/// A claim this executor made for its main agent, until the offer ends (`identity.joinStatus`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JoinRow {
     pub offer_id: String,
     /// The identity's SCID.
     pub scid: String,
-    /// The managed agent that claimed; `None`: the main agent.
-    pub agent_did: Option<String>,
     pub claimed_at: u64,
 }
 
@@ -82,7 +80,6 @@ pub(crate) fn create_identity_tables(conn: &Connection) -> rusqlite::Result<()> 
          CREATE TABLE IF NOT EXISTS identity_joins (
             offer_id TEXT PRIMARY KEY,
             scid TEXT NOT NULL,
-            agent_did TEXT,
             claimed_at INTEGER NOT NULL
          );",
     )
@@ -142,16 +139,6 @@ impl Ad4mDb {
         operator_record_in(&self.conn)
     }
 
-    /// Sets the operator record only while it is empty; answers the record as it stands.
-    pub fn set_operator_record_if_empty(
-        &self,
-        scid: &str,
-        set_at: u64,
-        set_by: OperatorSetBy,
-    ) -> Ad4mDbResult<OperatorRecordRow> {
-        set_operator_record_if_empty_in(&self.conn, scid, set_at, set_by)
-    }
-
     /// The SCID the local agent `agent_did` (its `did:key`) speaks for, if any.
     pub fn agent_identity(&self, agent_did: &str) -> Ad4mDbResult<Option<String>> {
         Ok(self
@@ -194,14 +181,8 @@ impl Ad4mDb {
     /// Remembers a claim this executor made, so `identity.joinStatus` can follow it.
     pub fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO identity_joins (offer_id, scid, agent_did, claimed_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                join.offer_id,
-                join.scid,
-                join.agent_did,
-                to_sql(join.claimed_at)
-            ],
+            "INSERT OR REPLACE INTO identity_joins (offer_id, scid, claimed_at) VALUES (?1, ?2, ?3)",
+            params![join.offer_id, join.scid, to_sql(join.claimed_at)],
         )?;
         Ok(())
     }
@@ -211,14 +192,13 @@ impl Ad4mDb {
         Ok(self
             .conn
             .query_row(
-                "SELECT offer_id, scid, agent_did, claimed_at FROM identity_joins WHERE offer_id = ?1",
+                "SELECT offer_id, scid, claimed_at FROM identity_joins WHERE offer_id = ?1",
                 params![offer_id],
                 |row| {
                     Ok(JoinRow {
                         offer_id: row.get(0)?,
                         scid: row.get(1)?,
-                        agent_did: row.get(2)?,
-                        claimed_at: from_sql(row.get(3)?),
+                        claimed_at: from_sql(row.get(2)?),
                     })
                 },
             )
@@ -241,15 +221,23 @@ mod tests {
     fn the_operator_record_is_set_once() {
         let (_dir, db) = db();
         assert_eq!(db.operator_record().unwrap(), None);
-        let set = db
-            .set_operator_record_if_empty("did:scid:coasys:1:QmA", 10, OperatorSetBy::Cli)
-            .unwrap();
+        let set = set_operator_record_if_empty_in(
+            &db.conn,
+            "did:scid:coasys:1:QmA",
+            10,
+            OperatorSetBy::Cli,
+        )
+        .unwrap();
         assert_eq!(set.scid, "did:scid:coasys:1:QmA");
         assert_eq!(set.set_by, OperatorSetBy::Cli);
         // A second identity does not replace it: the caller sees the record that stands.
-        let again = db
-            .set_operator_record_if_empty("did:scid:coasys:1:QmB", 20, OperatorSetBy::Cli)
-            .unwrap();
+        let again = set_operator_record_if_empty_in(
+            &db.conn,
+            "did:scid:coasys:1:QmB",
+            20,
+            OperatorSetBy::Cli,
+        )
+        .unwrap();
         assert_eq!(again, set);
         assert_eq!(db.operator_record().unwrap(), Some(set));
     }
@@ -277,7 +265,6 @@ mod tests {
         let join = JoinRow {
             offer_id: "offer".into(),
             scid: "QmA".into(),
-            agent_did: None,
             claimed_at: 5,
         };
         db.add_join(&join).unwrap();

@@ -9,7 +9,7 @@
 //! that log valid at the head.
 
 use ad4m_hash_chain::{decode_ed25519_multikey, decode_proof_value, MAX_SAFE_INTEGER};
-use ad4m_identity_core::{scid_of, verify_signed};
+use ad4m_identity_core::{scid_of, verify_signed, LINK_DOMAIN};
 use ad4m_ldk::identity::AgentRecord;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
@@ -19,20 +19,12 @@ use crate::error::ApiError;
 use crate::request::{Incoming, Signer};
 use crate::Store;
 
-/// The record signature's domain.
-pub const RECORD_DOMAIN: &str = "coasys:link";
-
-/// The value a record's signature covers.
-pub fn record_value(record: &AgentRecord) -> Value {
-    json!({ "profile": record.profile, "version": record.version, "anchor": record.anchor })
-}
-
-/// True when `record.sig` is `key`'s signature of [`record_value`].
-pub fn record_signed_by(record: &AgentRecord, key: &str) -> bool {
+/// True when `record.sig` is `key`'s `coasys:link` signature of `record.signed_value()`.
+fn record_signed_by(record: &AgentRecord, key: &str) -> bool {
     let Some(sig) = decode_proof_value(&record.sig) else {
         return false;
     };
-    verify_signed(RECORD_DOMAIN, &record_value(record), key, &sig)
+    verify_signed(LINK_DOMAIN, &record.signed_value(), key, &sig)
 }
 
 fn signature_refused() -> ApiError {

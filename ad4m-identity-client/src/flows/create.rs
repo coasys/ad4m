@@ -158,9 +158,7 @@ pub async fn create_from_seed<R: ExecutorRpc>(
             "the incept names another master".into(),
         ));
     }
-    let head = executor
-        .publish(std::slice::from_ref(&cosigned), None, None)
-        .await?;
+    let head = executor.publish(std::slice::from_ref(&cosigned)).await?;
     let scid = cosigned.scid.clone();
     vault.store_master(&scid, 0, Secret::new(master.to_bytes()))?;
     Ok(Created {

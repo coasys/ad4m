@@ -136,7 +136,6 @@ import type { PerspectiveUpdateParams } from "./PerspectiveUpdateParams";
 import type { PerspectiveUpdateSubjectParams } from "./PerspectiveUpdateSubjectParams";
 import type { PerspectiveUuidParams } from "./PerspectiveUuidParams";
 import type { PerspectiveVerifyFlowReceiptParams } from "./PerspectiveVerifyFlowReceiptParams";
-import type { PowParams } from "./PowParams";
 import type { PromptRequest } from "./PromptRequest";
 import type { ProposeOutcome } from "./ProposeOutcome";
 import type { PublishLanguageRequest } from "./PublishLanguageRequest";
@@ -261,7 +260,6 @@ export interface RpcMethods {
   "identity.log": { params: LogParams; result: IdentityLog };
   "identity.offers": { params: OffersParams; result: Array<OfferListing> };
   "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
-  "identity.powParams": { params: Record<string, never>; result: PowParams };
   "identity.publish": { params: PublishParams; result: SignedHead };
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
@@ -437,7 +435,6 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "identity.joinStatus",
   "identity.log",
   "identity.offers",
-  "identity.powParams",
   "identity.status",
   "language.all",
   "language.get",

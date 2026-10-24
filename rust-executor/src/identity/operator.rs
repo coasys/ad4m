@@ -3,9 +3,10 @@
 //! The record names the identity that operates this executor: `ad4m-executor init --operator
 //! <did:scid>` sets it while it is empty, and a different value never replaces it (decision
 //! 22.7: only the recorded operator changes it, through `runtime.setOperator`, which slice 1
-//! does not have). Every claim for the main agent while its key is in no log runs
+//! does not have). A claim for the main agent while its key is in no valid log runs
 //! [`first_link_check`] (in `ClaimService::claim_for_main`): only an offer of the recorded
-//! identity passes.
+//! identity passes. While the key is valid in a log, `claim_for_main` refuses every offer
+//! (`already-linked`).
 
 use std::path::Path;
 
@@ -22,33 +23,22 @@ pub enum FirstLinkRefusal {
     FirstLink { operator: String, offer: String },
 }
 
-impl FirstLinkRefusal {
-    /// The refusal's name on the wire (`no-operator`, `first-link`).
-    pub fn name(&self) -> &'static str {
-        match self {
-            FirstLinkRefusal::NoOperator => "no-operator",
-            FirstLinkRefusal::FirstLink { .. } => "first-link",
-        }
-    }
-}
-
 /// `OperatorRecord::admits_first_link` (AR-04 4.9.3): true only when the record is set and
 /// names `offer_did`.
 pub fn admits_first_link(record: Option<&OperatorRecordRow>, offer_did: &str) -> bool {
     record.is_some_and(|r| r.scid == offer_did)
 }
 
-/// The checks `claim_for_main` runs before it claims: an operator record must exist, and while
-/// the main key is in no valid log (`linked` false) the offer must be of the recorded identity.
+/// The check `claim_for_main` runs before it claims, while the main key is in no valid log: an
+/// operator record must exist and the offer must be of the recorded identity.
 pub fn first_link_check(
     record: Option<&OperatorRecordRow>,
-    linked: bool,
     offer_did: &str,
 ) -> Result<(), FirstLinkRefusal> {
     let Some(record) = record else {
         return Err(FirstLinkRefusal::NoOperator);
     };
-    if linked || admits_first_link(Some(record), offer_did) {
+    if admits_first_link(Some(record), offer_did) {
         return Ok(());
     }
     Err(FirstLinkRefusal::FirstLink {
@@ -89,19 +79,17 @@ pub fn record_operator_at_init(
     Ok(record)
 }
 
-/// The operator record in the executor database at `db_path`, if set.
-pub fn operator_at(db_path: &Path) -> Result<Option<OperatorRecordRow>, OperatorInitError> {
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| OperatorInitError::Database(e.to_string()))?;
-    crate::db::operator_record_in(&conn).map_err(|e| OperatorInitError::Database(e.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const A: &str = "did:scid:coasys:1:QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
     const B: &str = "did:scid:coasys:1:QmT78zSuBmuS4z925WZfrqQ1qHaJ56DQaTfyMUF7F8ff5o";
+
+    fn operator_at(db_path: &Path) -> Option<OperatorRecordRow> {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        crate::db::operator_record_in(&conn).unwrap()
+    }
 
     fn record(scid: &str) -> OperatorRecordRow {
         OperatorRecordRow {
@@ -120,21 +108,11 @@ mod tests {
 
     #[test]
     fn the_first_link_check_refuses_no_operator_and_a_stranger() {
-        assert_eq!(
-            first_link_check(None, false, A),
-            Err(FirstLinkRefusal::NoOperator)
-        );
-        // Linked or not, no record means no link route.
-        assert_eq!(
-            first_link_check(None, true, A),
-            Err(FirstLinkRefusal::NoOperator)
-        );
-        assert_eq!(first_link_check(Some(&record(A)), false, A), Ok(()));
-        let refusal = first_link_check(Some(&record(A)), false, B).unwrap_err();
-        assert_eq!(refusal.name(), "first-link");
+        assert_eq!(first_link_check(None, A), Err(FirstLinkRefusal::NoOperator));
+        assert_eq!(first_link_check(Some(&record(A)), A), Ok(()));
+        let refusal = first_link_check(Some(&record(A)), B).unwrap_err();
+        assert!(matches!(refusal, FirstLinkRefusal::FirstLink { .. }));
         assert!(refusal.to_string().starts_with("first-link"));
-        // Once the main key is in a log, later links follow AR-02, not the first-link rule.
-        assert_eq!(first_link_check(Some(&record(A)), true, B), Ok(()));
     }
 
     #[test]
@@ -145,7 +123,7 @@ mod tests {
             record_operator_at_init(&db, "did:key:z6Mk", 1),
             Err(OperatorInitError::NotAnIdentity(_))
         ));
-        assert_eq!(operator_at(&db).unwrap(), None);
+        assert_eq!(operator_at(&db), None);
         assert_eq!(record_operator_at_init(&db, A, 1).unwrap().scid, A);
         // The same identity again is fine; the record keeps its first time.
         assert_eq!(record_operator_at_init(&db, A, 2).unwrap().set_at, 1);
@@ -155,6 +133,6 @@ mod tests {
         }
         let msg = record_operator_at_init(&db, B, 3).unwrap_err().to_string();
         assert!(msg.contains("Only that identity can change it"), "{msg}");
-        assert_eq!(operator_at(&db).unwrap().unwrap().scid, A);
+        assert_eq!(operator_at(&db).unwrap().scid, A);
     }
 }

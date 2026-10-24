@@ -1,5 +1,5 @@
 //! Agent profiles on the shared store's agent records (AR-01 4.9, decision 21.1), in place of
-//! the Node server at mock.ad4m.dev. The Rust port of `../agents.ts`.
+//! the Node server at mock.ad4m.dev.
 //!
 //! - `create` publishes the running agent's profile under its `did:key`: an `AgentRecord`
 //!   whose `sig` is the agent key's signature (through the host's `agentSign`) of the
@@ -11,15 +11,12 @@
 //!   anchor, valid and without the bot mark at the head. Any other record is ignored (`None`).
 
 use ad4m_hash_chain::{decode_ed25519_multikey, decode_proof_value, encode_proof_value};
-use ad4m_identity_core::{fold_json, verify_signed, KelChain};
+use ad4m_identity_core::{fold_json, verify_signed, KelChain, LINK_DOMAIN};
 use ad4m_ldk::identity::{AgentRecord, IdentityErrorCode, LogPage};
 use ad4m_ldk::prelude::{Expression, ExpressionProof, LanguageError, LanguageResult};
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use crate::store::{segment, Http, Store, SCID_PREFIX};
-
-/// The record signature's domain (AR-01 4.2).
-pub const RECORD_DOMAIN: &str = "coasys:link";
+use crate::store::{segment, Http, Store};
 
 /// The running agent, as the host gives it.
 pub trait AgentKey {
@@ -30,14 +27,9 @@ pub trait AgentKey {
     fn now_ms(&self) -> u64;
 }
 
-/// The value a record's signature covers.
-pub fn record_value(record: &AgentRecord) -> Value {
-    json!({ "profile": record.profile, "version": record.version, "anchor": record.anchor })
-}
-
 fn signature_holds(record: &AgentRecord, key: &str) -> bool {
     decode_proof_value(&record.sig)
-        .is_some_and(|sig| verify_signed(RECORD_DOMAIN, &record_value(record), key, &sig))
+        .is_some_and(|sig| verify_signed(LINK_DOMAIN, &record.signed_value(), key, &sig))
 }
 
 fn invalid(reason: impl Into<String>) -> LanguageError {
@@ -103,7 +95,7 @@ pub fn did_key_record(
         anchor: None,
         sig: String::new(),
     };
-    let bytes = ad4m_identity_core::signing_bytes(RECORD_DOMAIN, &record_value(&record))
+    let bytes = ad4m_identity_core::signing_bytes(LINK_DOMAIN, &record.signed_value())
         .map_err(|_| invalid("profile"))?;
     let sig: [u8; 64] = agent
         .sign(&bytes)?
@@ -195,7 +187,7 @@ async fn verified<H: Http>(
             && record.anchor.is_none()
             && signature_holds(record, key));
     }
-    if !record.did.starts_with(SCID_PREFIX) {
+    if !record.did.starts_with(ad4m_identity_core::DID_PREFIX) {
         return Ok(false);
     }
     let (Some(anchor), Some(key)) = (&record.anchor, record.signed_by.strip_prefix("did:key:"))
@@ -261,6 +253,7 @@ pub fn iso_time_ms(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn iso_time_matches_known_dates() {

@@ -8,7 +8,8 @@ use ad4m_hash_chain::{decode_proof_value, encode_proof_value, verify_proof, Proo
 use ad4m_identity_core::build;
 use ad4m_identity_core::domain::{check_domain, Scheme, LABELS, SIGNING_DOMAINS};
 use ad4m_identity_core::{
-    signing_bytes, verify_signed, ChainError, DomainError, FoldError, Proof, KEL_DOMAIN,
+    signing_bytes, verify_signed, ChainError, DomainError, FoldError, HeadStatement, Proof,
+    KEL_DOMAIN,
 };
 use common::*;
 use serde_json::{json, Value};
@@ -161,4 +162,42 @@ fn signing_bytes_are_jcs_with_the_domain() {
         String::from_utf8(bytes).unwrap(),
         r#"{"domain":"coasys:head","hash":"Qm1","seq":4}"#
     );
+}
+
+/// The store signs a head and an executor verifies it with the one `HeadStatement`: the bytes
+/// are pinned, and a head counts only under a trusted key and only for what was signed.
+#[test]
+fn a_head_statement_verifies_only_under_a_trusted_key() {
+    let store = sk("store");
+    let did = format!("did:key:{}", mk(&store));
+    let statement = HeadStatement {
+        scid: "QmS",
+        seq: 4,
+        hash: "Qm1",
+        time: 7,
+        store: &did,
+    };
+    let bytes = statement.signing_bytes().unwrap();
+    assert_eq!(
+        String::from_utf8(bytes.clone()).unwrap(),
+        format!(
+            r#"{{"domain":"coasys:head","hash":"Qm1","scid":"QmS","seq":4,"store":"{did}","time":7}}"#
+        )
+    );
+    let sig = encode_proof_value(&ed25519_dalek::Signer::sign(&store, &bytes).to_bytes());
+    assert!(statement.verify(&sig, &[mk(&store)]));
+    assert!(!statement.verify(&sig, &[mk(&sk("other"))]));
+    assert!(!statement.verify(&sig, &[]));
+    let moved = HeadStatement {
+        seq: 5,
+        ..statement
+    };
+    assert!(!moved.verify(&sig, &[mk(&store)]));
+    // A store field that is not a did:key names no key.
+    let bare = mk(&store);
+    let no_did = HeadStatement {
+        store: &bare,
+        ..statement
+    };
+    assert!(!no_did.verify(&sig, &[mk(&store)]));
 }

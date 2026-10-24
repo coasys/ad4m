@@ -60,7 +60,6 @@ pub struct IdentityStatus {
     /// The seq of the event that revoked the device key, if one did.
     #[ts(type = "number | null")]
     pub revoked: Option<u64>,
-    pub vouched: bool,
     /// The last head of the log the cache accepted.
     pub head: Option<SignedHead>,
     /// The first fork the cache recorded for the log.
@@ -92,26 +91,7 @@ pub struct IdentityLog {
     pub events: Vec<Value>,
     /// The last head of the log the cache accepted from the agent language.
     pub head: Option<SignedHead>,
-    pub vouched: bool,
     pub fork: Option<ForkRecord>,
-}
-
-/// A proof of work on a new log with no note (AR-01 4.7).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct Pow {
-    pub nonce: String,
-    pub bits: u8,
-}
-
-/// `identity.powParams`: the store's proof-of-work cost.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PowParams {
-    pub bits: u8,
-    pub previous_bits: u8,
-    #[ts(type = "number")]
-    pub changed_at: u64,
 }
 
 /// `identity.cosignIncept` params.
@@ -122,18 +102,13 @@ pub struct CosignInceptParams {
     pub event: Value,
 }
 
-/// `identity.publish` params.
+/// `identity.publish` params. No vouching token or proof of work in slice 1: the store admits a
+/// new log without one.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishParams {
     /// Signed events that continue the log's head (or start a log), as JSON.
     pub events: Vec<Value>,
-    #[ts(optional)]
-    #[serde(default)]
-    pub vouch: Option<String>,
-    #[ts(optional)]
-    #[serde(default)]
-    pub pow: Option<Pow>,
 }
 
 /// What an offer is for: `node` is an executor.
@@ -278,9 +253,6 @@ pub struct OfferListing {
 pub struct ClaimOfferParams {
     /// The offer string (`coasys:offer:1:…`) or the offer link (`https://coasys.id/o#…`).
     pub offer: String,
-    #[ts(optional)]
-    #[serde(default)]
-    pub can_keep_master: Option<bool>,
     /// A name for this device the holder sees on the confirm card (at most 64 characters).
     #[ts(optional)]
     #[serde(default)]
@@ -319,63 +291,22 @@ pub struct JoinStatus {
     pub seq: Option<u64>,
 }
 
-/// Whether a device holds the master key (`false | "offered" | true`). Slice 1 has no private
-/// record, so the executor never knows: always `false`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, TS)]
-#[ts(type = "false | \"offered\" | true")]
-pub enum HoldsMaster {
-    No,
-    Offered,
-    Yes,
-}
-
-impl Serialize for HoldsMaster {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            HoldsMaster::No => s.serialize_bool(false),
-            HoldsMaster::Offered => s.serialize_str("offered"),
-            HoldsMaster::Yes => s.serialize_bool(true),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for HoldsMaster {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        match Value::deserialize(d)? {
-            Value::Bool(false) => Ok(HoldsMaster::No),
-            Value::Bool(true) => Ok(HoldsMaster::Yes),
-            Value::String(s) if s == "offered" => Ok(HoldsMaster::Offered),
-            other => Err(serde::de::Error::custom(format!(
-                "holdsMaster is false, \"offered\" or true, not {other}"
-            ))),
-        }
-    }
-}
-
-/// A bot key's scope and pause.
+/// A bot key's scope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct BotView {
     pub can: Vec<String>,
     #[ts(type = "number")]
     pub expires: u64,
-    pub paused: bool,
 }
 
-/// One device key of the identity (AR-02 4.15). The names come from the private record, which
-/// slice 1 does not have: they are `null`.
+/// One device key of the identity, from its log (AR-02 4.15). Names, places and the master-key
+/// holders come from the private record, which slice 1 does not have.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceView {
     pub key_id: String,
     pub sign: String,
-    pub name: Option<String>,
-    pub kind: Option<String>,
-    pub place: Option<String>,
-    pub address: Option<String>,
-    pub operator: Option<String>,
-    pub runs_executor: bool,
-    pub holds_master: HoldsMaster,
     pub bot: Option<BotView>,
     #[ts(type = "number | null")]
     pub expires: Option<u64>,
@@ -458,20 +389,5 @@ mod tests {
             ldk,
             ad4m_ldk::identity::OfferState::Claimed { .. }
         ));
-    }
-
-    #[test]
-    fn holds_master_is_false_offered_or_true() {
-        assert_eq!(serde_json::to_value(HoldsMaster::No).unwrap(), json!(false));
-        assert_eq!(
-            serde_json::to_value(HoldsMaster::Offered).unwrap(),
-            json!("offered")
-        );
-        assert_eq!(serde_json::to_value(HoldsMaster::Yes).unwrap(), json!(true));
-        assert_eq!(
-            serde_json::from_value::<HoldsMaster>(json!("offered")).unwrap(),
-            HoldsMaster::Offered
-        );
-        assert!(serde_json::from_value::<HoldsMaster>(json!("yes")).is_err());
     }
 }

@@ -5,9 +5,7 @@
 //! `ad4m-client`'s WebSocket client serves it natively (feature `ws`).
 
 use ad4m_identity_core::Event;
-use ad4m_ldk::identity::{
-    OfferListing, OfferOpened, Pow, PowParams, SignedHead, SignedOffer, SignedRequest,
-};
+use ad4m_ldk::identity::{OfferListing, OfferOpened, SignedHead, SignedOffer, SignedRequest};
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -36,7 +34,6 @@ pub struct IdentityStatus {
     pub device_enc: String,
     pub key_id: Option<String>,
     pub revoked: Option<u64>,
-    pub vouched: bool,
     pub head: Option<SignedHead>,
     pub fork: Option<ForkRecord>,
 }
@@ -57,29 +54,7 @@ pub struct IdentityLog {
     pub did: String,
     pub events: Vec<Value>,
     pub head: Option<SignedHead>,
-    pub vouched: bool,
     pub fork: Option<ForkRecord>,
-}
-
-/// `identity.claimOffer`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaimOfferResult {
-    pub did: String,
-    pub offer_id: String,
-    pub match_code: String,
-    pub kind: String,
-    pub expires: u64,
-}
-
-/// `identity.joinStatus`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JoinStatus {
-    pub state: String,
-    pub did: Option<String>,
-    pub key_id: Option<String>,
-    pub seq: Option<u64>,
 }
 
 /// The executor's identity calls, typed.
@@ -140,10 +115,6 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
             })
     }
 
-    pub async fn pow_params(&self) -> Result<PowParams, RpcError> {
-        self.call("identity.powParams", json!({})).await
-    }
-
     /// Adds the executor's device-key proof to `incept`.
     pub async fn cosign_incept(&self, incept: &Event) -> Result<Event, RpcError> {
         let value: Value = self
@@ -158,20 +129,11 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
         })
     }
 
-    pub async fn publish(
-        &self,
-        events: &[Event],
-        vouch: Option<&str>,
-        pow: Option<&Pow>,
-    ) -> Result<SignedHead, RpcError> {
-        let mut params = json!({ "events": json_of(&events)? });
-        if let Some(vouch) = vouch {
-            params["vouch"] = json!(vouch);
-        }
-        if let Some(pow) = pow {
-            params["pow"] = json_of(pow)?;
-        }
-        self.call("identity.publish", params).await
+    /// Appends signed events through the executor (no vouching token or proof of work in
+    /// slice 1: the store admits a new log without one).
+    pub async fn publish(&self, events: &[Event]) -> Result<SignedHead, RpcError> {
+        self.call("identity.publish", json!({ "events": json_of(&events)? }))
+            .await
     }
 
     pub async fn open_offer(&self, offer: &SignedOffer) -> Result<OfferOpened, RpcError> {
@@ -192,24 +154,6 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
             json!({ "request": json_of(request)?, "wait": wait }),
         )
         .await
-    }
-
-    /// Claims an offer for the executor's main agent (the operator's call).
-    pub async fn claim_offer(
-        &self,
-        offer: &str,
-        hint: Option<&str>,
-    ) -> Result<ClaimOfferResult, RpcError> {
-        let mut params = json!({ "offer": offer });
-        if let Some(hint) = hint {
-            params["hint"] = json!(hint);
-        }
-        self.call("identity.claimOffer", params).await
-    }
-
-    pub async fn join_status(&self, offer_id: &str) -> Result<JoinStatus, RpcError> {
-        self.call("identity.joinStatus", json!({ "offerId": offer_id }))
-            .await
     }
 }
 

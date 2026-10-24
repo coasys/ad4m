@@ -321,6 +321,16 @@ async fn offer_state(
     ok(changed.unwrap_or(first))
 }
 
+/// `a == b` in a time that depends on the lengths only, so the feed token cannot be guessed
+/// byte by byte from response times.
+fn same_secret(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |diff, (x, y)| diff | (x ^ y))
+            == 0
+}
+
 async fn feed(
     State(store): Shared,
     headers: HeaderMap,
@@ -331,7 +341,7 @@ async fn feed(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     match (&store.settings.feed_token, token) {
-        (Some(want), Some(got)) if want == got => {}
+        (Some(want), Some(got)) if same_secret(want, got) => {}
         _ => return Err(ApiError::unauthorized()),
     }
     let after = number(&q, "after")?.unwrap_or(0);
@@ -354,4 +364,17 @@ async fn feed(
         .and_then(|i| i["cursor"].as_u64())
         .unwrap_or(after);
     ok(json!({ "items": items, "next": next }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_secret;
+
+    #[test]
+    fn the_feed_token_matches_only_itself() {
+        assert!(same_secret("tok-123", "tok-123"));
+        assert!(!same_secret("tok-123", "tok-124"));
+        assert!(!same_secret("tok-123", "tok-12"));
+        assert!(!same_secret("", "x"));
+    }
 }

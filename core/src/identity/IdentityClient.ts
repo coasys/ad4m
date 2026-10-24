@@ -6,8 +6,6 @@ import type { IdentityStatus } from "../generated/api/IdentityStatus";
 import type { JoinStatus } from "../generated/api/JoinStatus";
 import type { OfferListing } from "../generated/api/OfferListing";
 import type { OfferOpened } from "../generated/api/OfferOpened";
-import type { Pow } from "../generated/api/Pow";
-import type { PowParams } from "../generated/api/PowParams";
 import type { SignedHead } from "../generated/api/SignedHead";
 import type { SignedOffer } from "../generated/api/SignedOffer";
 import type { SignedRequest } from "../generated/api/SignedRequest";
@@ -36,18 +34,14 @@ export class IdentityClient {
         return this.#apiClient.call("identity.log", { did, from, fresh });
     }
 
-    async powParams(): Promise<PowParams> {
-        return this.#apiClient.call("identity.powParams", {});
-    }
-
     /** Adds this agent's device-key proof to an `incept` that lists its key. */
     async cosignIncept(event: unknown): Promise<unknown> {
         return this.#apiClient.call("identity.cosignIncept", { event: event as any });
     }
 
     /** Appends signed events through the agent language. */
-    async publish(events: unknown[], vouch?: string, pow?: Pow): Promise<SignedHead> {
-        return this.#apiClient.call("identity.publish", { events: events as any[], vouch, pow });
+    async publish(events: unknown[]): Promise<SignedHead> {
+        return this.#apiClient.call("identity.publish", { events: events as any[] });
     }
 
     async openOffer(signedOffer: SignedOffer): Promise<OfferOpened> {
@@ -60,8 +54,8 @@ export class IdentityClient {
     }
 
     /** Claims an offer link for this executor (the operator only). */
-    async claimOffer(offer: string, hint?: string, canKeepMaster?: boolean): Promise<ClaimOfferResult> {
-        return this.#apiClient.call("identity.claimOffer", { offer, hint, canKeepMaster });
+    async claimOffer(offer: string, hint?: string): Promise<ClaimOfferResult> {
+        return this.#apiClient.call("identity.claimOffer", { offer, hint });
     }
 
     async joinStatus(offerId: string): Promise<JoinStatus> {

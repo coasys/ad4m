@@ -101,7 +101,6 @@ pub struct KelCache {
 const META_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS identity_heads (
     scid TEXT PRIMARY KEY,
     head TEXT NOT NULL,
-    vouched INTEGER NOT NULL,
     accepted_at INTEGER NOT NULL
 )";
 
@@ -127,13 +126,6 @@ impl KelCache {
         Self::with(store, meta, store_keys)
     }
 
-    /// A cache in memory, for tests.
-    pub fn open_in_memory(store_keys: Vec<String>) -> Result<Self, CacheError> {
-        let store = SqliteChainStore::open_in_memory().map_err(storage)?;
-        let meta = Connection::open_in_memory().map_err(storage)?;
-        Self::with(store, meta, store_keys)
-    }
-
     fn with(
         store: SqliteChainStore,
         meta: Connection,
@@ -153,10 +145,6 @@ impl KelCache {
     /// Calls `listener` for each fork recorded for the first time.
     pub fn set_fork_listener(&mut self, listener: ForkListener) {
         self.on_fork = Some(listener);
-    }
-
-    pub fn store_keys(&self) -> &[String] {
-        &self.store_keys
     }
 
     /// The cached log of `scid` (memory, else rebuilt from the database with `fold`).
@@ -195,29 +183,29 @@ impl KelCache {
             .collect()
     }
 
-    /// The last signed head accepted for `scid`, and whether the store marked the log vouched.
-    pub fn accepted_head(&self, scid: &str) -> Result<Option<(SignedHead, bool)>, CacheError> {
+    /// The last signed head accepted for `scid`.
+    pub fn accepted_head(&self, scid: &str) -> Result<Option<SignedHead>, CacheError> {
         let meta = self.meta.lock().map_err(storage)?;
-        let row: Option<(String, i64)> = meta
+        let row: Option<String> = meta
             .query_row(
-                "SELECT head, vouched FROM identity_heads WHERE scid = ?1",
+                "SELECT head FROM identity_heads WHERE scid = ?1",
                 params![scid],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .optional()
             .map_err(storage)?;
-        row.map(|(head, vouched)| Ok((serde_json::from_str(&head).map_err(storage)?, vouched != 0)))
+        row.map(|head| serde_json::from_str(&head).map_err(storage))
             .transpose()
     }
 
-    fn accept_head(&self, head: &SignedHead, vouched: bool) -> Result<(), CacheError> {
+    fn accept_head(&self, head: &SignedHead) -> Result<(), CacheError> {
         let text = serde_json::to_string(head).map_err(storage)?;
         let meta = self.meta.lock().map_err(storage)?;
         meta.execute(
-            "INSERT INTO identity_heads (scid, head, vouched, accepted_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(scid) DO UPDATE SET head = ?2, vouched = ?3, accepted_at = ?4
-             WHERE excluded.head != identity_heads.head OR excluded.vouched != identity_heads.vouched",
-            params![head.scid, text, vouched as i64, now() as i64],
+            "INSERT INTO identity_heads (scid, head, accepted_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(scid) DO UPDATE SET head = ?2, accepted_at = ?3
+             WHERE excluded.head != identity_heads.head",
+            params![head.scid, text, now() as i64],
         )
         .map_err(storage)?;
         Ok(())
@@ -364,7 +352,6 @@ impl KelCache {
         &self,
         scid: &str,
         head: &SignedHead,
-        vouched: bool,
         events: &[Event],
     ) -> Result<Option<Head>, CacheError> {
         if !verify_head(head, &self.store_keys) {
@@ -391,10 +378,7 @@ impl KelCache {
                 return Err(CacheError::Fork(fork));
             }
         }
-        match self.ingest_locked(&mut chains, scid, events).await {
-            Ok(_) => {}
-            Err(e) => return Err(e),
-        }
+        self.ingest_locked(&mut chains, scid, events).await?;
         let Some(chain) = chains.get(scid) else {
             return Ok(None);
         };
@@ -411,14 +395,15 @@ impl KelCache {
             return Err(CacheError::Fork(fork));
         }
         if ours.seq == head.seq {
-            self.accept_head(head, vouched)?;
+            self.accept_head(head)?;
         }
         Ok(Some(ours))
     }
 
     /// Refreshes `did`'s log from the agent language: reads the pages from the cached head on
     /// (the head's own event included, so a different event there shows as a fork) and accepts
-    /// them with [`KelCache::accept`]. One fetch per identity at a time.
+    /// them with [`KelCache::accept`]. One fetch per identity at a time; the identity's gate is
+    /// dropped when no other fetch waits on it, so looking up many identities keeps no state.
     pub async fn refresh(
         &self,
         backend: &dyn IdentityBackend,
@@ -432,10 +417,27 @@ impl KelCache {
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        let _one_fetch = gate.lock().await;
-        let did = ad4m_identity_core::did_of(&scid);
+        let result = {
+            let _one_fetch = gate.lock().await;
+            self.fetch(backend, &scid).await
+        };
+        let mut fetching = self.fetching.lock().await;
+        // The map's handle and ours: nobody else waits on this gate.
+        if Arc::strong_count(&gate) <= 2 {
+            fetching.remove(&scid);
+        }
+        result
+    }
+
+    /// The pages of [`KelCache::refresh`], under the identity's gate.
+    async fn fetch(
+        &self,
+        backend: &dyn IdentityBackend,
+        scid: &str,
+    ) -> Result<KelChain, CacheError> {
+        let did = ad4m_identity_core::did_of(scid);
         loop {
-            let cached = self.chain(&scid).await?;
+            let cached = self.chain(scid).await?;
             let from = cached.as_ref().map_or(0, |c| c.head().seq);
             let Some(page) = backend.log(&did, from).await? else {
                 return match cached {
@@ -443,7 +445,7 @@ impl KelCache {
                     Some(chain) => {
                         let ours = chain.head();
                         let fork = ForkEvidence {
-                            chain: scid.clone(),
+                            chain: scid.to_string(),
                             seq: ours.seq,
                             ours: ours.hash,
                             theirs: String::new(),
@@ -460,12 +462,10 @@ impl KelCache {
                 .map(Event::from_json)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| CacheError::Fold(ChainError::Policy(e)))?;
-            let reached = self
-                .accept(&scid, &page.head, page.vouched, &events)
-                .await?;
+            let reached = self.accept(scid, &page.head, &events).await?;
             match reached {
                 Some(head) if head.seq >= page.head.seq => {
-                    return self.chain(&scid).await?.ok_or(CacheError::NotFound);
+                    return self.chain(scid).await?.ok_or(CacheError::NotFound);
                 }
                 // A page holds at most PAGE events: read on from where it ended.
                 Some(head) if head.seq > from || cached.is_none() => continue,
@@ -488,11 +488,18 @@ pub(crate) mod tests {
     use ad4m_identity_core::{DeviceKey, KeyLife};
     use ad4m_ldk::identity::{
         AppendRequest, Claim, ClaimReceipt, LogPage, OfferListing, OfferOpened, OfferProgress,
-        PowParams, SignedOffer, SignedRequest,
+        SignedOffer, SignedRequest,
     };
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A cache in memory, trusting heads signed by `store_keys`.
+    pub(crate) fn in_memory(store_keys: Vec<String>) -> KelCache {
+        let store = SqliteChainStore::open_in_memory().unwrap();
+        let meta = Connection::open_in_memory().unwrap();
+        KelCache::with(store, meta, store_keys).unwrap()
+    }
 
     /// A person's log built with the core's builders: master m0 and one device d1.
     pub(crate) struct TestLog {
@@ -582,14 +589,8 @@ pub(crate) mod tests {
                 pauses: vec![],
             }))
         }
-        async fn head(&self, _did: &str) -> Result<Option<SignedHead>, IdentityError> {
-            unimplemented_call("head")
-        }
         async fn append(&self, _: &str, _: &AppendRequest) -> Result<SignedHead, IdentityError> {
             unimplemented_call("append")
-        }
-        async fn pow_params(&self) -> Result<PowParams, IdentityError> {
-            unimplemented_call("pow_params")
         }
         async fn open_offer(&self, _: &SignedOffer) -> Result<OfferOpened, IdentityError> {
             unimplemented_call("open_offer")
@@ -642,13 +643,12 @@ pub(crate) mod tests {
         let mut log = TestLog::new(1);
         log.revoke_d1();
         let store = FakeStore::new(log.events.clone());
-        let cache = KelCache::open_in_memory(vec![store.key.multikey()]).unwrap();
+        let cache = in_memory(vec![store.key.multikey()]);
         let chain = cache.refresh(&store, &log.scid()).await.unwrap();
         assert_eq!(chain.head(), log.chain().head());
         assert_eq!(chain.state().keys["d1"].revoked, Some(1));
-        let (head, vouched) = cache.accepted_head(&log.scid()).unwrap().unwrap();
+        let head = cache.accepted_head(&log.scid()).unwrap().unwrap();
         assert_eq!(head.seq, 1);
-        assert!(!vouched);
         // Up to date: a second refresh changes nothing.
         cache.refresh(&store, &log.scid()).await.unwrap();
         assert_eq!(cache.stored_events(&log.scid(), 0).await.unwrap().len(), 2);
@@ -658,7 +658,7 @@ pub(crate) mod tests {
     async fn a_head_under_an_unknown_key_is_refused() {
         let log = TestLog::new(1);
         let store = FakeStore::new(log.events.clone());
-        let cache = KelCache::open_in_memory(vec![TestStoreKey::new(3).multikey()]).unwrap();
+        let cache = in_memory(vec![TestStoreKey::new(3).multikey()]);
         assert!(matches!(
             cache.refresh(&store, &log.scid()).await,
             Err(CacheError::BadHeadSignature)
@@ -676,7 +676,7 @@ pub(crate) mod tests {
         let mut log = TestLog::new(1);
         log.revoke_d1();
         let store = FakeStore::new(log.events.clone());
-        let mut cache = KelCache::open_in_memory(vec![store.key.multikey()]).unwrap();
+        let mut cache = in_memory(vec![store.key.multikey()]);
         let forks = counting_cache(&mut cache);
         cache.refresh(&store, &log.scid()).await.unwrap();
 
@@ -700,7 +700,7 @@ pub(crate) mod tests {
         assert_eq!(cache.forks(&log.scid()).await.unwrap().len(), 1);
         let kept = cache.chain(&log.scid()).await.unwrap().unwrap();
         assert_eq!(kept.head(), log.chain().head(), "the cached history stays");
-        assert_eq!(cache.accepted_head(&log.scid()).unwrap().unwrap().0.seq, 1);
+        assert_eq!(cache.accepted_head(&log.scid()).unwrap().unwrap().seq, 1);
     }
 
     #[tokio::test]
@@ -708,7 +708,7 @@ pub(crate) mod tests {
         let mut log = TestLog::new(1);
         log.revoke_d1();
         let store = FakeStore::new(log.events.clone());
-        let mut cache = KelCache::open_in_memory(vec![store.key.multikey()]).unwrap();
+        let mut cache = in_memory(vec![store.key.multikey()]);
         let forks = counting_cache(&mut cache);
         cache.refresh(&store, &log.scid()).await.unwrap();
 
@@ -739,7 +739,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn events_that_do_not_fold_are_refused_and_change_nothing() {
         let mut log = TestLog::new(1);
-        let cache = KelCache::open_in_memory(vec![]).unwrap();
+        let cache = in_memory(vec![]);
         cache.ingest(&log.scid(), &log.events[..1]).await.unwrap();
         log.revoke_d1();
         let mut forged = log.events[1].clone();
@@ -777,7 +777,7 @@ pub(crate) mod tests {
         let calls = store.log_calls.load(Ordering::SeqCst);
         let chain = cache.chain(&log.scid()).await.unwrap().unwrap();
         assert_eq!(chain.head(), log.chain().head());
-        assert_eq!(cache.accepted_head(&log.scid()).unwrap().unwrap().0.seq, 1);
+        assert_eq!(cache.accepted_head(&log.scid()).unwrap().unwrap().seq, 1);
         assert_eq!(store.log_calls.load(Ordering::SeqCst), calls);
     }
 
@@ -785,7 +785,7 @@ pub(crate) mod tests {
     async fn concurrent_refreshes_of_one_identity_fetch_once() {
         let log = TestLog::new(1);
         let store = Arc::new(FakeStore::new(log.events.clone()));
-        let cache = Arc::new(KelCache::open_in_memory(vec![store.key.multikey()]).unwrap());
+        let cache = Arc::new(in_memory(vec![store.key.multikey()]));
         let mut tasks = Vec::new();
         for _ in 0..20 {
             let (cache, store, did) = (cache.clone(), store.clone(), log.scid());
@@ -801,5 +801,24 @@ pub(crate) mod tests {
         assert_eq!(store.log_calls.load(Ordering::SeqCst), 20);
         assert_eq!(cache.stored_events(&log.scid(), 0).await.unwrap().len(), 1);
         assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
+        assert!(
+            cache.fetching.lock().await.is_empty(),
+            "the last fetch drops the gate"
+        );
+    }
+
+    /// Looking up identities the store does not hold (any caller can name any DID) leaves no
+    /// state behind.
+    #[tokio::test]
+    async fn refreshes_of_unknown_identities_keep_no_gate() {
+        let store = FakeStore::new(vec![]);
+        let cache = in_memory(vec![store.key.multikey()]);
+        for seed in 1..=5 {
+            assert!(matches!(
+                cache.refresh(&store, &TestLog::new(seed).scid()).await,
+                Err(CacheError::NotFound)
+            ));
+        }
+        assert!(cache.fetching.lock().await.is_empty());
     }
 }

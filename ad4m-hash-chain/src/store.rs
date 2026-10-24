@@ -1,5 +1,5 @@
-//! Storage of chains (feature `store`): the [`ChainStore`] trait, [`entries_since`] for sync,
-//! and [`MemoryChainStore`]. The SQLite adapter is [`SqliteChainStore`] (feature `sqlite`).
+//! Storage of chains (feature `store`): the [`ChainStore`] trait and [`MemoryChainStore`]. The
+//! SQLite adapter is [`SqliteChainStore`] (feature `sqlite`).
 //!
 //! A store checks no hash, link or proof: the caller runs `Chain::append` or `import` first.
 //! It checks only that an append continues the head the caller expects, so two writers that
@@ -87,64 +87,6 @@ pub trait ChainStore: Send + Sync {
     ) -> Result<(), StoreError>;
     /// Every fork recorded for the chain, in seq order.
     async fn forks(&self, ty: ChainType, chain: &ChainId) -> Result<Vec<ForkEvidence>, StoreError>;
-}
-
-/// What a holder sends a peer that knows the chain up to `known`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Since {
-    /// The entries after `known` (at most `limit`), and our head.
-    Entries {
-        entries: Vec<StoredEntry>,
-        head: Head,
-    },
-    /// `known` names a hash we do not hold at that seq.
-    Diverged(ForkEvidence),
-    /// We hold no entry of the chain.
-    Unknown,
-}
-
-/// The entries after `known`, or the fork if `known` names a hash we do not hold at that seq.
-/// A `known` past our head gives no entries and our head: the caller compares the heads.
-pub async fn entries_since<S: ChainStore>(
-    store: &S,
-    ty: ChainType,
-    chain: &ChainId,
-    known: Option<&Head>,
-    limit: u32,
-) -> Result<Since, StoreError> {
-    let Some(head) = store.head(ty, chain).await? else {
-        return Ok(Since::Unknown);
-    };
-    let from = match known {
-        None => 0,
-        Some(known) if known.seq > head.seq => {
-            return Ok(Since::Entries {
-                entries: Vec::new(),
-                head,
-            })
-        }
-        Some(known) => {
-            let at = store.range(ty, chain, known.seq, 1).await?;
-            let ours = at
-                .into_iter()
-                .next()
-                .filter(|e| e.seq == known.seq)
-                .ok_or_else(|| {
-                    StoreError::Backend(format!("store has a head but no entry at {}", known.seq))
-                })?;
-            if ours.hash != known.hash {
-                return Ok(Since::Diverged(ForkEvidence {
-                    chain: chain.clone(),
-                    seq: known.seq,
-                    ours: ours.hash,
-                    theirs: known.hash.clone(),
-                }));
-            }
-            known.seq + 1
-        }
-    };
-    let entries = store.range(ty, chain, from, limit).await?;
-    Ok(Since::Entries { entries, head })
 }
 
 /// Checks that `entries` run on from `expect` without a hole, and gives the new head.

@@ -7,7 +7,7 @@
 //! that need the master key also require `keyId` to be the current master's.
 
 use ad4m_hash_chain::{decode_proof_value, hash_bytes};
-use ad4m_identity_core::{scid_of, verify_signed, KelChain};
+use ad4m_identity_core::{scid_of, verify_signed, KelChain, REQUEST_DOMAIN};
 use ad4m_ldk::identity::SignedRequest;
 use base64::Engine;
 use rusqlite::params;
@@ -18,8 +18,6 @@ use crate::Store;
 
 /// The header that carries a signed request.
 pub const REQUEST_HEADER: &str = "x-coasys-request";
-/// The signing domain of signed requests.
-pub const REQUEST_DOMAIN: &str = "coasys:store-request";
 /// How far ahead a request's `expires` may lie.
 pub const MAX_AHEAD_S: u64 = 300;
 /// How long a nonce is remembered.

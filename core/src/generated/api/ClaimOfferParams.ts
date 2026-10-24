@@ -7,7 +7,7 @@ export type ClaimOfferParams = {
 /**
  * The offer string (`coasys:offer:1:…`) or the offer link (`https://coasys.id/o#…`).
  */
-offer: string, canKeepMaster?: boolean, 
+offer: string, 
 /**
  * A name for this device the holder sees on the confirm card (at most 64 characters).
  */

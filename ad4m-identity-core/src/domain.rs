@@ -191,3 +191,43 @@ pub fn verify_signed<T: Serialize>(domain: &str, value: &T, key: &str, signature
     };
     key.verify_strict(&bytes, &signature).is_ok()
 }
+
+/// The signing domain of links and agent records whose author key sits in a log.
+pub const LINK_DOMAIN: &str = "coasys:link";
+/// The signing domain of the store's signed heads.
+pub const HEAD_DOMAIN: &str = "coasys:head";
+/// The signing domain of signed requests to the store.
+pub const REQUEST_DOMAIN: &str = "coasys:store-request";
+
+/// What a store signs for a log's head under [`HEAD_DOMAIN`] (AR-01 4.5.2): `store` is the
+/// store key's `did:key`. The store signs it; executors check it against `identity.storeKeys`.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct HeadStatement<'a> {
+    pub scid: &'a str,
+    pub seq: u64,
+    pub hash: &'a str,
+    pub time: u64,
+    pub store: &'a str,
+}
+
+impl HeadStatement<'_> {
+    /// The bytes the store key signs: [`signing_bytes`] under [`HEAD_DOMAIN`].
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, DomainError> {
+        signing_bytes(HEAD_DOMAIN, self)
+    }
+
+    /// True when `sig` (a proof value) is the signature of the `store` key over the statement
+    /// and that key is one of `trusted` (multikeys).
+    pub fn verify(&self, sig: &str, trusted: &[String]) -> bool {
+        let Some(key) = self.store.strip_prefix("did:key:") else {
+            return false;
+        };
+        if !trusted.iter().any(|t| t == key) {
+            return false;
+        }
+        let Some(sig) = ad4m_hash_chain::decode_proof_value(sig) else {
+            return false;
+        };
+        verify_signed(HEAD_DOMAIN, self, key, &sig)
+    }
+}

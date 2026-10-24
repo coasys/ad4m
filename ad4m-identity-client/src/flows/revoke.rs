@@ -31,9 +31,7 @@ pub async fn revoke<R: ExecutorRpc>(
     }
     let unlocked = vault.unlock(&scid, MasterUse::Revoke, clock.now())?;
     let event = revoke_event(&chain, unlocked.signer(clock.now())?, key_ids)?;
-    Ok(executor
-        .publish(std::slice::from_ref(&event), None, None)
-        .await?)
+    Ok(executor.publish(std::slice::from_ref(&event)).await?)
 }
 
 /// The id of the device key `device_key` (a multikey) in the log of `did`, if the log lists it.

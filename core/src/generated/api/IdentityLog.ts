@@ -14,4 +14,4 @@ events: Array<JsonValue>,
 /**
  * The last head of the log the cache accepted from the agent language.
  */
-head: SignedHead | null, vouched: boolean, fork: ForkRecord | null, };
+head: SignedHead | null, fork: ForkRecord | null, };

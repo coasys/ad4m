@@ -12,7 +12,7 @@ identity core, not here).
 | `src/jcs.rs` | RFC 8785 canonical JSON; refuses floats and integers outside ±(2^53 − 1) |
 | `src/codec.rs` | SHA-256 multihash (`0x12 0x20`, base58btc, no multibase prefix, `Qm…`), Ed25519 multikey (`z6Mk…`), proof value |
 | `src/proof.rs` | `Proof`, `signing_input`, `verify_proof`, `verify_proof_json` (`eddsa-jcs-2022` with `domain`) |
-| `src/store.rs` | feature `store`: `ChainStore`, `StoredEntry`, `StoreError`, `entries_since`, `MemoryChainStore` |
+| `src/store.rs` | feature `store`: `ChainStore`, `StoredEntry`, `StoreError`, `MemoryChainStore` |
 | `src/store/sqlite.rs` | feature `sqlite`: `SqliteChainStore` (tables `chain_heads`, `chain_entries`, `chain_forks`), `append_in(&Transaction, …)` |
 | `src/wasm.rs` | feature `wasm`: wasm-bindgen `entryHash`, `compare` |
 | `vectors/*.json` | shared vectors; every build target must give the same answers |

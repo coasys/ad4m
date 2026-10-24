@@ -22,7 +22,7 @@ pub use executor::{ExecutorRpc, RpcError, ViaExecutor};
 pub use secret::Secret;
 #[cfg(any(test, feature = "test-vault"))]
 pub use vault::MemoryVault;
-pub use vault::{MasterSigner, MasterUse, Unlocked, Vault, VaultError, VaultStatus};
+pub use vault::{MasterSigner, MasterUse, Unlocked, Vault, VaultError};
 
 /// Unix seconds, from the surface.
 pub trait Clock {

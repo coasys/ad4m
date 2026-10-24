@@ -193,6 +193,13 @@ commands:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
           no_output_timeout: 30m
+      - run:
+          # The identity suite's tools: the integration runners compile no Rust.
+          name: Build identity-store and the identity test holder
+          command: |
+            cargo build --release -p identity-store
+            cargo build --release -p ad4m-identity-client --example holder --features ws,test-vault
+          no_output_timeout: 30m
 
   build_integration_inputs:
     description: "Build the bootstrap languages with the pinned hc (after build_adam)"
@@ -231,13 +238,14 @@ commands:
             set -eo pipefail
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             src="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
-            for bin in ad4m ad4m-executor; do
+            for bin in ad4m ad4m-executor identity-store holder; do
               test -s "$src/$bin" || { echo "missing $src/$bin: rerun build"; exit 1; }
             done
-            mkdir -p target/release
+            mkdir -p target/release/examples
             # Remove before copy: unlinking avoids ETXTBSY if a previous executor still holds the binary
-            rm -f target/release/ad4m target/release/ad4m-executor
-            cp "$src/ad4m" "$src/ad4m-executor" target/release/
+            rm -f target/release/ad4m target/release/ad4m-executor target/release/identity-store target/release/examples/holder
+            cp "$src/ad4m" "$src/ad4m-executor" "$src/identity-store" target/release/
+            cp "$src/holder" target/release/examples/holder
 
   restore_integration_inputs:
     description: "Restore the JS build outputs and hc toolchain that build produced (bootstrap languages, link-server, core, ALDK)"
@@ -386,10 +394,11 @@ jobs:
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
             mkdir -p "$dst"
-            for bin in ad4m ad4m-executor; do
+            for bin in ad4m ad4m-executor identity-store examples/holder; do
               # `a && b` inside a loop does not stop the step under bash -e.
-              cp "target/release/$bin" "$dst/$bin.tmp" || exit 1
-              mv "$dst/$bin.tmp" "$dst/$bin"
+              name="$(basename "$bin")"
+              cp "target/release/$bin" "$dst/$name.tmp" || exit 1
+              mv "$dst/$name.tmp" "$dst/$name"
             done
       # The executor for this commit, for use outside this host. Written on the runner's
       # magnetic disk and served at https://executor.ad4m.dev/<commit>/manifest.json.

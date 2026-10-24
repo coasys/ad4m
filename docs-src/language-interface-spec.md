@@ -447,8 +447,8 @@ Rules for an implementation:
   `/v1/agents/{did}` routes.
 
 The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the
-calls it makes in slice 1 are `log`, `head`, `append`, `powParams`, `openOffer`,
-`listOffers`, `claimOffer` and `offerState`.
+calls it makes in slice 1 are `log`, `append`, `openOffer`, `listOffers`, `claimOffer` and
+`offerState`; the language serves the others for apps and later slices.
 
 ### 5.9 Token (agent language only, interfaces only)
 

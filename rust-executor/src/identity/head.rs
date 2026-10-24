@@ -1,29 +1,19 @@
 //! The store's signed heads (`coasys:head`, AR-01 4.5.2, cache rule 4): a head counts only when
 //! one of the store keys in the executor's config (`identity.storeKeys`) signed it.
 
-use ad4m_hash_chain::decode_proof_value;
-use ad4m_identity_core::verify_signed;
+use ad4m_identity_core::HeadStatement;
 use ad4m_ldk::identity::SignedHead;
-use serde_json::json;
-
-/// The signing domain of the store's heads.
-pub const HEAD_DOMAIN: &str = "coasys:head";
 
 /// True when `head` is signed by its `store` key and that key is one of `trusted` (multikeys).
 pub fn verify_head(head: &SignedHead, trusted: &[String]) -> bool {
-    let Some(key) = head.store.strip_prefix("did:key:") else {
-        return false;
-    };
-    if !trusted.iter().any(|t| t == key) {
-        return false;
+    HeadStatement {
+        scid: &head.scid,
+        seq: head.seq,
+        hash: &head.hash,
+        time: head.time,
+        store: &head.store,
     }
-    let Some(sig) = decode_proof_value(&head.sig) else {
-        return false;
-    };
-    let value = json!({
-        "scid": head.scid, "seq": head.seq, "hash": head.hash, "time": head.time, "store": head.store,
-    });
-    verify_signed(HEAD_DOMAIN, &value, key, &sig)
+    .verify(&head.sig, trusted)
 }
 
 #[cfg(test)]
@@ -31,7 +21,6 @@ pub(crate) mod test_store_key {
     //! A store head key for tests, signing as `identity-store` does.
     use super::*;
     use ad4m_hash_chain::{encode_ed25519_multikey, encode_proof_value};
-    use ad4m_identity_core::signing_bytes;
     use ed25519_dalek::SigningKey;
 
     pub struct TestStoreKey(pub SigningKey);
@@ -47,9 +36,15 @@ pub(crate) mod test_store_key {
 
         pub fn sign_head(&self, scid: &str, seq: u64, hash: &str, time: u64) -> SignedHead {
             let store = format!("did:key:{}", self.multikey());
-            let value =
-                json!({ "scid": scid, "seq": seq, "hash": hash, "time": time, "store": store });
-            let bytes = signing_bytes(HEAD_DOMAIN, &value).unwrap();
+            let bytes = HeadStatement {
+                scid,
+                seq,
+                hash,
+                time,
+                store: &store,
+            }
+            .signing_bytes()
+            .unwrap();
             let sig = ed25519_dalek::Signer::sign(&self.0, &bytes).to_bytes();
             SignedHead {
                 scid: scid.to_string(),

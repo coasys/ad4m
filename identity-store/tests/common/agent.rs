@@ -10,14 +10,14 @@ use ad4m_identity_core::link::{
     claim_view, make_claim, offer_commit, sign_offer, Claim, ClaimView, Offer, OfferKind, SignedBy,
     SignedOffer,
 };
+use ad4m_identity_core::REQUEST_DOMAIN;
 use ad4m_identity_core::{
     commitment, did_of, encode_x25519_multikey, fold, signing_bytes, BotScope, DeviceKey, Event,
     KelChain, KelPolicy, KeyLife, Op,
 };
 use ad4m_ldk::identity::{AgentRecord, Anchor, RequestBody, SignedRequest};
 use ed25519_dalek::SigningKey;
-use identity_store::agents::{record_value, RECORD_DOMAIN};
-use identity_store::request::{encode_header, REQUEST_DOMAIN};
+use identity_store::request::encode_header;
 use serde_json::Value;
 
 /// A key from a label: `sha256(label)` as the Ed25519 secret.
@@ -327,7 +327,7 @@ impl Person {
 
 /// The record signature (`coasys:link` over `{profile, version, anchor}`) by `signer`.
 pub fn sign_record(record: &AgentRecord, signer: &SigningKey) -> String {
-    let bytes = signing_bytes(RECORD_DOMAIN, &record_value(record)).unwrap();
+    let bytes = signing_bytes(ad4m_identity_core::LINK_DOMAIN, &record.signed_value()).unwrap();
     encode_proof_value(&Signer::sign(signer, &bytes))
 }
 

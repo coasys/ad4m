@@ -21,6 +21,19 @@ use tower::ServiceExt;
 
 use agent::{Device, Person};
 
+/// True when `head` is signed by its `store` key and that key is one of `trusted`, as an
+/// executor checks it.
+pub fn verify_head(head: &ad4m_ldk::identity::SignedHead, trusted: &[String]) -> bool {
+    ad4m_identity_core::HeadStatement {
+        scid: &head.scid,
+        seq: head.seq,
+        hash: &head.hash,
+        time: head.time,
+        store: &head.store,
+    }
+    .verify(&head.sig, trusted)
+}
+
 /// The store's clock at the start of every test.
 pub const T0: u64 = 1_800_000_000;
 

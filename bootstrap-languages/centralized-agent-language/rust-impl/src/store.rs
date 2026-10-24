@@ -1,5 +1,4 @@
-//! The agent language's identity interface on the shared store (AR-01 4.9, AR-02 4.16), the
-//! Rust port of `../store.ts`.
+//! The agent language's identity interface on the shared store (AR-01 4.9, AR-02 4.16).
 //!
 //! Each call is one store route. The language signs nothing and holds no key: events, offers,
 //! claims and signed requests pass through unchanged; a `SignedRequest` travels in the
@@ -24,7 +23,6 @@ use serde_json::Value;
 /// The production store (AR-01 4.5.3), used when the settings name none.
 pub const DEFAULT_STORE_URL: &str = "https://store.coasys.org";
 pub const REQUEST_HEADER: &str = "X-Coasys-Request";
-pub const SCID_PREFIX: &str = "did:scid:coasys:1:";
 
 /// What the host's `httpFetch` answers.
 #[derive(Debug, Clone)]
@@ -177,11 +175,9 @@ fn unavailable() -> ad4m_ldk::prelude::LanguageError {
     IdentityErrorCode::Unavailable.into()
 }
 
-/// The SCID of a `did:scid`; anything else is refused as `invalid`.
+/// The SCID of a `did:scid:coasys:1`; anything else is refused as `invalid`.
 pub fn scid_of(did: &str) -> LanguageResult<&str> {
-    did.strip_prefix(SCID_PREFIX)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| invalid("did"))
+    ad4m_identity_core::scid_of(did).ok_or_else(|| invalid("did"))
 }
 
 /// The store client over a host's `httpFetch`.

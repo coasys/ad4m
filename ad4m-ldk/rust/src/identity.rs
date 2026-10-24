@@ -150,6 +150,13 @@ pub struct AgentRecord {
     pub sig: String,
 }
 
+impl AgentRecord {
+    /// What `sig` covers under the `coasys:link` scheme: `{profile, version, anchor}`.
+    pub fn signed_value(&self) -> serde_json::Value {
+        serde_json::json!({ "profile": self.profile, "version": self.version, "anchor": self.anchor })
+    }
+}
+
 /// The platform's note that it checked one email address for this identity (AR-01 4.6).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

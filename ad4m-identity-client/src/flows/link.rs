@@ -13,7 +13,7 @@
 use ad4m_hash_chain::{encode_proof_value, hash_bytes};
 use ad4m_identity_core::build::add_claimed;
 use ad4m_identity_core::link::{self, ClaimView, Offer, OfferKind, OfferString, SignedBy};
-use ad4m_identity_core::{signing_bytes, KelChain};
+use ad4m_identity_core::{signing_bytes, KelChain, REQUEST_DOMAIN};
 use ad4m_ldk::identity::{OfferState, RequestBody, SignedHead, SignedRequest};
 use serde_json::json;
 
@@ -21,9 +21,6 @@ use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::secret::Secret;
 use crate::vault::{MasterUse, Unlocked, Vault};
 use crate::{fold, ClientError, Clock, Random};
-
-/// The signing domain of requests to the store.
-pub const REQUEST_DOMAIN: &str = "coasys:store-request";
 
 /// How long a signed list request stays valid (the store takes at most 300 s).
 const REQUEST_TTL_S: u64 = 60;
@@ -84,11 +81,9 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             .to_string();
         let chain = chain_of(executor, did).await?;
         let unlocked = vault.unlock(&scid, MasterUse::Link, clock.now())?;
-        let mut s = [0u8; link::SECRET_LEN];
-        random.fill(&mut s);
-        let secret = Secret::new(s);
-        s = [0; link::SECRET_LEN];
-        let _ = s;
+        let mut s = zeroize::Zeroizing::new([0u8; link::SECRET_LEN]);
+        random.fill(&mut s[..]);
+        let secret = Secret::new(*s);
         let offer = Offer {
             scid: scid.clone(),
             offer_id: b58_random(random, link::OFFER_ID_LEN),
@@ -233,9 +228,6 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         let chain = chain_of(self.executor, &self.did).await?;
         let signer = self.unlocked.signer(self.clock.now())?;
         let event = add_claimed(&chain, signer, &self.offer, &claimed.claim, None)?;
-        Ok(self
-            .executor
-            .publish(std::slice::from_ref(&event), None, None)
-            .await?)
+        Ok(self.executor.publish(std::slice::from_ref(&event)).await?)
     }
 }

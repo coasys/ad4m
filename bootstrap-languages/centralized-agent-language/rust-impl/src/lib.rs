@@ -1,8 +1,7 @@
 //! # Centralized Agent Expression Store, Rust ALDK port
 //!
 //! The closed beta's agent language (AR-01 4.9): agent profiles and the identity interface on
-//! the shared identity store. Ports `../index.ts` (with `../store.ts` and `../agents.ts`) onto
-//! the Rust ALDK; `pnpm build` ships this port.
+//! the shared identity store, on the Rust ALDK; `pnpm build` ships it.
 //!
 //! - [`store`]: the identity calls, one store route each; the language signs nothing.
 //! - [`agents`]: `expressionCreate`/`expressionGet` on the store's `/v1/agents/{did}`, in

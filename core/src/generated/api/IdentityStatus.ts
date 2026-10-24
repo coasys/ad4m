@@ -26,7 +26,7 @@ keyId: string | null,
 /**
  * The seq of the event that revoked the device key, if one did.
  */
-revoked: number | null, vouched: boolean, 
+revoked: number | null, 
 /**
  * The last head of the log the cache accepted.
  */

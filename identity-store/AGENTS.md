@@ -21,8 +21,8 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `src/offers.rs` | the offer routes, the claim route, the device's state poll, rule A7's store side (`check_spend`, `spend`, `supersede`) |
 | `src/request.rs` | signed requests (`X-Coasys-Request`): checks, nonce replay guard, `percent_decode` |
 | `src/agents.rs` | agent records under a `did:key` or a `did:scid` |
-| `src/head.rs` | `StoreKey` (key file, `keygen`), `sign_head`, `verify_head` |
-| `src/routes.rs` | the axum router, body limit, CORS, waits, the feed |
+| `src/head.rs` | `StoreKey` (key file, `keygen`), `sign_head` (the core's `HeadStatement`; executors verify it with the same type) |
+| `src/routes.rs` | the axum router, body limit, CORS, waits, the feed (token compared in constant time) |
 | `src/error.rs` | `ApiError`: every refusal as a status and a JSON body with an `error` name |
 | `tests/common/agent.rs` | a test person: fixed keys, a log built with the core's builders, offers, claims, signed requests, records |
 | `tests/common/mod.rs` | `TestStore`: a real store on a temp file with an injected clock, called through the router |

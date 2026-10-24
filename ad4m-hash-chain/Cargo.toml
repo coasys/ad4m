@@ -10,7 +10,7 @@ publish = false
 
 [features]
 default = []
-# The async `ChainStore` trait, `entries_since` and `MemoryChainStore`.
+# The async `ChainStore` trait and `MemoryChainStore`.
 store = ["dep:async-trait"]
 # `SqliteChainStore` on rusqlite (tables chain_heads, chain_entries, chain_forks).
 sqlite = ["store", "dep:rusqlite"]

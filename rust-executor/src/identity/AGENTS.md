@@ -9,11 +9,11 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`), `write_agent_language_settings`, the `identity-fork` publisher |
 | `backend.rs` | `IdentityBackend`, `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
 | `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh`, `ingest`, `accept`, forks |
-| `head.rs` | `verify_head` (`coasys:head` under a key of `identity.storeKeys`) |
+| `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner` |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
-| `claim.rs` | `ClaimService::claim_for_main` (first-link rule, claim with the main wallet key), `join_status` |
-| `service.rs` | `IdentityService`: status, log, powParams, cosignIncept, publish, openOffer, offers, devices; error mapping |
+| `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key, never `canKeepMaster`), `join_status` (the main agent's claims only) |
+| `service.rs` | `IdentityService`: status, log, cosignIncept, publish, openOffer, offers, devices; error mapping |
 | `types.rs` | the RPC contracts (ts-rs) mirroring `ad4m_ldk::identity`'s JSON, `IdentityForkEvent`, `AgentWithIdentity` |
 
 Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` → SCID),
@@ -28,7 +28,8 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
 - A head from the agent language counts only under `identity.storeKeys`; `ingest` takes events
   from any source with no head.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
-  first-link rule itself: `no-operator` without a record, `first-link` for another identity.
+  first-link rule itself: `already-linked` while the main key is valid in a log, `no-operator`
+  without a record, `first-link` for another identity.
 - An agent keeps the first identity it joined (`identity_agents`); `agent.status` and
   `agent.get` carry it as `identity`, `did` stays the device `did:key`.
 

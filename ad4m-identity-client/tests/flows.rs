@@ -181,7 +181,6 @@ impl ExecutorRpc for TestExecutor {
                     "deviceEnc": self.device_enc(),
                     "keyId": key_id,
                     "revoked": revoked,
-                    "vouched": false,
                     "head": null,
                     "fork": null,
                 }))
@@ -240,8 +239,7 @@ impl ExecutorRpc for TestExecutor {
                 let scid = ad4m_identity_core::scid_of(did).unwrap();
                 let page = self.log(scid).await?;
                 Ok(json!({
-                    "did": did, "events": page["events"], "head": page["head"],
-                    "vouched": page["vouched"], "fork": null,
+                    "did": did, "events": page["events"], "head": page["head"], "fork": null,
                 }))
             }
             "identity.openOffer" => {
@@ -378,6 +376,28 @@ fn shown(screen: CreateScreen) -> Vec<String> {
     }
 }
 
+/// `identity.claimOffer` on the joining executor (the operator's call; the CLI makes it).
+async fn claim(
+    b: &ViaExecutor<TestExecutor>,
+    offer: &str,
+    hint: Option<&str>,
+) -> Result<Value, RpcError> {
+    b.rpc()
+        .call(
+            "identity.claimOffer",
+            json!({ "offer": offer, "hint": hint }),
+        )
+        .await
+}
+
+/// `identity.joinStatus` on the joining executor.
+async fn join(b: &ViaExecutor<TestExecutor>, offer_id: &Value) -> Value {
+    b.rpc()
+        .call("identity.joinStatus", json!({ "offerId": offer_id }))
+        .await
+        .unwrap()
+}
+
 /// `create` on `executor` with fixed words; answers the identity.
 async fn create(executor: &ViaExecutor<TestExecutor>, vault: &MemoryVault, entropy: u8) -> String {
     let (mut flow, screen) = CreateFlow::from_words(words::from_entropy(&[entropy; 16]));
@@ -427,7 +447,8 @@ async fn create_makes_an_identity_that_lists_the_executor_as_d1() {
     assert_eq!(status.key_id.as_deref(), Some("d1"));
     let events = a.events(&created.did).await.unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(vault.status(&created.scid).unwrap().master_index, Some(0));
+    let kept = vault.unlock(&created.scid, MasterUse::Link, 0).unwrap();
+    assert_eq!(kept.signer(0).unwrap().index(), 0);
     // The master key is the words' master #0, and the log commits to master #1.
     let seed = words::seed(&words::from_entropy(&{
         let mut e = [0u8; 16];
@@ -486,26 +507,23 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     assert_eq!(parsed.store, STORE_URL);
 
     // The second executor claims the link and shows its match code.
-    let claimed_b = b.claim_offer(&flow.link(), Some("server")).await.unwrap();
-    assert_eq!(claimed_b.did, did);
-    assert_eq!(claimed_b.kind, "node");
-    assert_eq!(
-        b.join_status(&claimed_b.offer_id).await.unwrap().state,
-        "claimed"
-    );
+    let claimed_b = claim(&b, &flow.link(), Some("server")).await.unwrap();
+    assert_eq!(claimed_b["did"], did);
+    assert_eq!(claimed_b["kind"], "node");
+    assert_eq!(join(&b, &claimed_b["offerId"]).await["state"], "claimed");
 
     // The holder sees the claim and the same code, then confirms.
     let claimed = flow.wait_for_claim().await.unwrap();
-    assert_eq!(claimed.match_code, claimed_b.match_code);
+    assert_eq!(claimed.match_code, claimed_b["matchCode"]);
     assert_eq!(claimed.device_key, b.rpc().device_key());
     assert_eq!(claimed.hint.as_deref(), Some("server"));
     let head = flow.confirm(&claimed).await.unwrap();
     assert_eq!(head.seq, 1);
 
-    let joined = b.join_status(&claimed_b.offer_id).await.unwrap();
+    let joined = join(&b, &claimed_b["offerId"]).await;
     assert_eq!(
-        (joined.state.as_str(), joined.key_id.as_deref(), joined.seq),
-        ("spent", Some("d2"), Some(1))
+        (&joined["state"], &joined["keyId"], &joined["seq"]),
+        (&json!("spent"), &json!("d2"), &json!(1))
     );
     assert_eq!(b.status().await.unwrap().did.as_deref(), Some(did.as_str()));
     // One unlock served the whole link: offer, list requests and the add.
@@ -530,10 +548,10 @@ async fn revoke_ends_the_second_executors_key() {
     )
     .await
     .unwrap();
-    let claimed_b = b.claim_offer(&flow.offer_string(), None).await.unwrap();
+    let claimed_b = claim(&b, &flow.offer_string(), None).await.unwrap();
     let claimed = flow.wait_for_claim().await.unwrap();
     flow.confirm(&claimed).await.unwrap();
-    b.join_status(&claimed_b.offer_id).await.unwrap();
+    join(&b, &claimed_b["offerId"]).await;
 
     let d2 = key_id_of(&a, &did, &b.rpc().device_key())
         .await
@@ -567,7 +585,7 @@ async fn revoke_ends_the_second_executors_key() {
     )
     .await
     .unwrap();
-    let refused = b.claim_offer(&again.link(), None).await.unwrap_err();
+    let refused = claim(&b, &again.link(), None).await.unwrap_err();
     assert_eq!(refused.code, 409, "{refused:?}");
 }
 

@@ -60,14 +60,13 @@ impl ClaimService<'_> {
         let offer = parse_offer(&params.offer)?;
         let offer_did = did_of(&offer.scid);
         let record = db(|db| db.operator_record())?;
-        let linked = self.main_is_linked().await?;
-        if linked {
+        if self.main_is_linked().await? {
             return Err(error(
                 409,
                 "already-linked: this executor's key speaks for an identity already",
             ));
         }
-        first_link_check(record.as_ref(), linked, &offer_did).map_err(first_link_error)?;
+        first_link_check(record.as_ref(), &offer_did).map_err(first_link_error)?;
         if let Some(ours) = &self.identity.store_url {
             if store_base(ours) != store_base(&offer.store) {
                 return Err(WsRpcError::bad_request(format!(
@@ -88,7 +87,8 @@ impl ClaimService<'_> {
             secret,
             &signer,
             enc,
-            params.can_keep_master.unwrap_or(false),
+            // An executor never keeps the master key (AR-02 4.6.1).
+            false,
             params.hint.clone(),
         )
         .map_err(|e| WsRpcError::bad_request(format!("invalid: {e}")))?;
@@ -105,7 +105,6 @@ impl ClaimService<'_> {
             db.add_join(&JoinRow {
                 offer_id: offer.offer_id.clone(),
                 scid: offer.scid.clone(),
-                agent_did: None,
                 claimed_at: now(),
             })
         })?;
@@ -118,15 +117,16 @@ impl ClaimService<'_> {
         })
     }
 
-    /// `identity.joinStatus`: the state of a claim this executor made for `agent`; on `spent`,
-    /// takes the log and records that the agent speaks for the identity.
+    /// `identity.joinStatus`: the state of a claim this executor made for its main agent (the
+    /// only agent that claims in slice 1); on `spent`, takes the log and records that the main
+    /// agent speaks for the identity. A managed agent has no claims.
     pub async fn join_status(
         &self,
         agent: &AgentContext,
         offer_id: &str,
     ) -> Result<JoinStatus, WsRpcError> {
         let join = db(|db| db.join(offer_id))?
-            .filter(|j| j.agent_did.as_deref() == agent.managed_did())
+            .filter(|_| agent.is_main_agent())
             .ok_or_else(|| WsRpcError::not_found("not-found: no claim of this agent"))?;
         let did = did_of(&join.scid);
         let (_, key) = device_key(agent).map_err(WsRpcError::internal)?;

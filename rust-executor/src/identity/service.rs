@@ -11,12 +11,12 @@ use ad4m_identity_core::{did_of, Event, Op};
 use serde_json::Value;
 
 use super::backend::{IdentityBackend, IdentityError};
-use super::cache::{scid_from, CacheError, KelCache};
+use super::cache::{CacheError, KelCache};
 use super::device::{device_key, enc_key_of, WalletSigner};
 use super::operator::FirstLinkRefusal;
 use super::types::{
-    convert, BotView, DeviceView, ForkRecord, HoldsMaster, IdentityLog, IdentityStatus,
-    OfferListing, OfferOpened, PowParams, PublishParams, SignedHead, SignedOffer, SignedRequest,
+    convert, BotView, DeviceView, ForkRecord, IdentityLog, IdentityStatus, OfferListing,
+    OfferOpened, PublishParams, SignedHead, SignedOffer, SignedRequest,
 };
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
@@ -171,7 +171,6 @@ impl IdentityService {
             device_enc: enc,
             key_id: None,
             revoked: None,
-            vouched: false,
             head: None,
             fork: None,
         };
@@ -188,9 +187,8 @@ impl IdentityService {
                 .and_then(|id| state.keys.get(id))
                 .and_then(|record| record.revoked);
         }
-        if let Some((head, vouched)) = self.cache.accepted_head(&scid).map_err(cache_error)? {
+        if let Some(head) = self.cache.accepted_head(&scid).map_err(cache_error)? {
             status.head = Some(mirror_head(&head)?);
-            status.vouched = vouched;
         }
         status.fork = first_fork(&self.cache.forks(&scid).await.map_err(cache_error)?);
         Ok(status)
@@ -220,19 +218,9 @@ impl IdentityService {
         Ok(IdentityLog {
             did: did_of(&scid),
             events,
-            head: accepted
-                .as_ref()
-                .map(|(head, _)| mirror_head(head))
-                .transpose()?,
-            vouched: accepted.is_some_and(|(_, vouched)| vouched),
+            head: accepted.as_ref().map(mirror_head).transpose()?,
             fork: first_fork(&self.cache.forks(&scid).await.map_err(cache_error)?),
         })
-    }
-
-    /// `identity.powParams`.
-    pub async fn pow_params(&self) -> Result<PowParams, WsRpcError> {
-        let params = self.backend.pow_params().await.map_err(backend_error)?;
-        convert(&params).map_err(|e| WsRpcError::internal(e.to_string()))
     }
 
     /// `identity.cosignIncept`: adds `agent`'s device-key proof to an `incept` that lists that
@@ -338,13 +326,8 @@ impl IdentityService {
         let did = did_of(&scid);
         let request = ad4m_ldk::identity::AppendRequest {
             events: params.events.clone(),
-            vouch: params.vouch.clone(),
-            pow: params
-                .pow
-                .as_ref()
-                .map(convert)
-                .transpose()
-                .map_err(|e| WsRpcError::bad_request(e.to_string()))?,
+            vouch: None,
+            pow: None,
         };
         let head = match self.backend.append(&did, &request).await {
             Ok(head) => head,
@@ -353,12 +336,7 @@ impl IdentityService {
             }
             Err(e) => return Err(backend_error(e)),
         };
-        let vouched = self
-            .cache
-            .accepted_head(&scid)
-            .map_err(cache_error)?
-            .is_some_and(|(_, v)| v);
-        match self.cache.accept(&scid, &head, vouched, &events).await {
+        match self.cache.accept(&scid, &head, &events).await {
             Ok(_) => {}
             // The cache lacks the log's earlier events: read the whole log.
             Err(CacheError::Gap { .. }) => {
@@ -458,17 +436,9 @@ pub fn device_views(state: &ad4m_identity_core::KeyState, this: &str) -> Vec<Dev
             DeviceView {
                 key_id: record.id.clone(),
                 sign: record.sign.clone(),
-                name: None,
-                kind: None,
-                place: None,
-                address: None,
-                operator: None,
-                runs_executor: false,
-                holds_master: HoldsMaster::No,
                 bot: scope.map(|s| BotView {
                     can: s.can.clone(),
                     expires: s.expires,
-                    paused: false,
                 }),
                 expires: record.expires.or(scope.map(|s| s.expires)),
                 added_seq: record.added,
@@ -501,11 +471,6 @@ pub fn parse_offer(text: &str) -> Result<OfferString, WsRpcError> {
     parsed.map_err(|e| WsRpcError::bad_request(format!("invalid: the offer: {e}")))
 }
 
-/// `scid_from` re-exported for the RPC layer.
-pub fn scid_of_did(did: &str) -> &str {
-    scid_from(did)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,7 +490,6 @@ mod tests {
         assert_eq!(d1.added_seq, 0);
         assert_eq!(d1.revoked_seq, Some(1));
         assert!(d1.this_device);
-        assert_eq!(d1.holds_master, HoldsMaster::No);
         assert!(device_views(chain.state(), "z6MkOther")
             .iter()
             .all(|v| !v.this_device));

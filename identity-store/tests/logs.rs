@@ -9,11 +9,11 @@ use ad4m_identity_core::link::OfferKind;
 use ad4m_identity_core::{pow, BotScope};
 use ad4m_ldk::identity::{KeyIndexEntry, LogPage, SignedHead};
 use axum::http::StatusCode;
-use identity_store::{verify_head, Fault, Settings};
+use identity_store::{Fault, Settings};
 use serde_json::{json, Value};
 
 use common::agent::{did_key_record, key, multikey, Device, Person};
-use common::{TestStore, T0};
+use common::{verify_head, TestStore, T0};
 
 fn head_of(body: &Value) -> SignedHead {
     serde_json::from_value(body["head"].clone()).unwrap()

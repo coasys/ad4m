@@ -2,18 +2,15 @@
 //!
 //! A signed head proves what the store said about a log at a time: `sig` is the store key's
 //! Ed25519 signature of `signing_bytes("coasys:head", {scid, seq, hash, time, store})`, where
-//! `store` is the store key's `did:key`. Executors check it against `identity.storeKeys`.
+//! `store` is the store key's `did:key` (`ad4m_identity_core::HeadStatement`). Executors check it
+//! against `identity.storeKeys`.
 
 use std::path::Path;
 
-use ad4m_hash_chain::{decode_proof_value, encode_ed25519_multikey, encode_proof_value, Multikey};
-use ad4m_identity_core::{signing_bytes, verify_signed};
+use ad4m_hash_chain::{encode_ed25519_multikey, encode_proof_value, Multikey};
+use ad4m_identity_core::HeadStatement;
 use ad4m_ldk::identity::SignedHead;
 use ed25519_dalek::SigningKey;
-use serde_json::{json, Value};
-
-/// The signing domain of heads.
-pub const HEAD_DOMAIN: &str = "coasys:head";
 
 /// The store's Ed25519 head key.
 pub struct StoreKey {
@@ -89,8 +86,15 @@ impl StoreKey {
     /// Signs the head of `scid` at `seq`/`hash`, at `time`.
     pub fn sign_head(&self, scid: &str, seq: u64, hash: &str, time: u64) -> SignedHead {
         let store = self.did();
-        let value = head_value(scid, seq, hash, time, &store);
-        let bytes = signing_bytes(HEAD_DOMAIN, &value)
+        let statement = HeadStatement {
+            scid,
+            seq,
+            hash,
+            time,
+            store: &store,
+        };
+        let bytes = statement
+            .signing_bytes()
             .expect("a head of strings and safe integers has a canonical form");
         let sig = ed25519_dalek::Signer::sign(&self.key, &bytes).to_bytes();
         SignedHead {
@@ -102,25 +106,6 @@ impl StoreKey {
             sig: encode_proof_value(&sig),
         }
     }
-}
-
-fn head_value(scid: &str, seq: u64, hash: &str, time: u64, store: &str) -> Value {
-    json!({ "scid": scid, "seq": seq, "hash": hash, "time": time, "store": store })
-}
-
-/// True when `head` is signed by its `store` key and that key is one of `trusted` (multikeys).
-pub fn verify_head(head: &SignedHead, trusted: &[Multikey]) -> bool {
-    let Some(key) = head.store.strip_prefix("did:key:") else {
-        return false;
-    };
-    if !trusted.iter().any(|t| t == key) {
-        return false;
-    }
-    let Some(sig) = decode_proof_value(&head.sig) else {
-        return false;
-    };
-    let value = head_value(&head.scid, head.seq, &head.hash, head.time, &head.store);
-    verify_signed(HEAD_DOMAIN, &value, key, &sig)
 }
 
 #[cfg(unix)]
@@ -148,6 +133,17 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn verify_head(head: &SignedHead, trusted: &[Multikey]) -> bool {
+        HeadStatement {
+            scid: &head.scid,
+            seq: head.seq,
+            hash: &head.hash,
+            time: head.time,
+            store: &head.store,
+        }
+        .verify(&head.sig, trusted)
+    }
 
     #[test]
     fn a_head_verifies_under_its_key_only() {

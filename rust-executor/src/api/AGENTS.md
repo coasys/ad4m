@@ -143,7 +143,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-203 methods: Cap 81, Executor 33, Open 5, Operator 17, Owns 67.
+202 methods: Cap 80, Executor 33, Open 5, Operator 17, Owns 67.
 
 | Method | Guard |
 |---|---|
@@ -205,7 +205,6 @@ the guard checked:
 | `identity.log` | `Cap(agent:READ)` |
 | `identity.offers` | `Cap(agent:READ)` |
 | `identity.openOffer` | `Cap(agent:UPDATE)` |
-| `identity.powParams` | `Cap(agent:READ)` |
 | `identity.publish` | `Cap(agent:UPDATE)` |
 | `identity.status` | `Cap(agent:READ)` |
 | `language.all` | `Cap(language:READ)` |

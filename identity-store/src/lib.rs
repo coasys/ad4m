@@ -27,7 +27,7 @@ pub mod request;
 pub mod routes;
 
 pub use error::ApiError;
-pub use head::{verify_head, StoreKey};
+pub use head::StoreKey;
 pub use routes::router;
 
 /// The store's clock in unix seconds. Tests inject their own.

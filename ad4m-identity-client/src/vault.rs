@@ -14,39 +14,12 @@ use crate::secret::Secret;
 /// How long one unlock serves a flow (AR-03 4.2 rule 2).
 pub const UNLOCK_TTL_S: u64 = 300;
 
-/// Why the surface asks for the unlock; shown in the OS prompt where the OS allows it.
+/// Why the surface asks for the unlock; shown in the OS prompt where the OS allows it. Slice 1's
+/// flows unlock for a link and a revocation (`create` stores master #0 without an unlock).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MasterUse {
-    Create,
     Link,
     Revoke,
-    Rotate,
-    Scope,
-    PauseRecordWrite,
-    TakeMaster,
-    Rewrap,
-    PasswordChange,
-    RemoveFromDevice,
-    DeleteAccount,
-    ConfirmRequest,
-}
-
-/// How the surface unlocks its vault.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UnlockKind {
-    TouchIdOrPassword,
-    Passphrase,
-    Biometry,
-    DevicePasscode,
-    BrowserSession,
-}
-
-/// What the vault holds for an identity (no prompt).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VaultStatus {
-    /// The index of the master key held, if any.
-    pub master_index: Option<u32>,
-    pub unlock: UnlockKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -97,8 +70,6 @@ impl Unlocked {
 
 /// The custody of master keys on one surface.
 pub trait Vault: Send + Sync {
-    /// What the vault holds for `scid` (no prompt).
-    fn status(&self, scid: &str) -> Result<VaultStatus, VaultError>;
     /// Stores master `index` for `scid`, replacing an older index.
     fn store_master(
         &self,
@@ -109,10 +80,6 @@ pub trait Vault: Send + Sync {
     /// One unlock (one prompt where the OS needs it) for a flow that uses the master key `why`.
     /// `now` starts the unlock's [`UNLOCK_TTL_S`].
     fn unlock(&self, scid: &str, why: MasterUse, now: u64) -> Result<Unlocked, VaultError>;
-    /// Deletes the master key (the device may receive one again).
-    fn delete_master(&self, scid: &str) -> Result<(), VaultError>;
-    /// Deletes the whole custody record of `scid`.
-    fn forget(&self, scid: &str) -> Result<(), VaultError>;
 }
 
 /// A master key in memory: an Ed25519 key that zeroes on drop.
@@ -181,14 +148,6 @@ mod memory {
     }
 
     impl Vault for MemoryVault {
-        fn status(&self, scid: &str) -> Result<VaultStatus, VaultError> {
-            let keys = self.keys.lock().map_err(poisoned)?;
-            Ok(VaultStatus {
-                master_index: keys.get(scid).map(|(index, _)| *index),
-                unlock: UnlockKind::Passphrase,
-            })
-        }
-
         fn store_master(
             &self,
             scid: &str,
@@ -209,15 +168,6 @@ mod memory {
                 now,
             ))
         }
-
-        fn delete_master(&self, scid: &str) -> Result<(), VaultError> {
-            self.keys.lock().map_err(poisoned)?.remove(scid);
-            Ok(())
-        }
-
-        fn forget(&self, scid: &str) -> Result<(), VaultError> {
-            self.delete_master(scid)
-        }
     }
 
     #[cfg(test)]
@@ -227,13 +177,11 @@ mod memory {
         #[test]
         fn an_unlock_serves_one_flow_until_it_expires() {
             let vault = MemoryVault::new();
-            assert_eq!(vault.status("Qm").unwrap().master_index, None);
             assert!(matches!(
                 vault.unlock("Qm", MasterUse::Link, 0),
                 Err(VaultError::NotFound)
             ));
             vault.store_master("Qm", 0, Secret::new([3; 32])).unwrap();
-            assert_eq!(vault.status("Qm").unwrap().master_index, Some(0));
             let unlocked = vault.unlock("Qm", MasterUse::Link, 100).unwrap();
             let signer = unlocked.signer(100 + UNLOCK_TTL_S - 1).unwrap();
             assert_eq!(signer.index(), 0);
@@ -246,8 +194,6 @@ mod memory {
                 Err(VaultError::Expired)
             ));
             assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
-            vault.forget("Qm").unwrap();
-            assert_eq!(vault.status("Qm").unwrap().master_index, None);
         }
     }
 }

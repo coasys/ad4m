@@ -18,11 +18,18 @@ function targetDir(): string {
         : path.join(REPO_ROOT, "target");
 }
 
-/** Builds `identity-store` and the test holder (debug builds; a few seconds when cached). */
+const storeBinary = () => path.join(targetDir(), "release", "identity-store");
+const holderBinary = () => path.join(targetDir(), "release", "examples", "holder");
+
+/**
+ * Release builds of `identity-store` and the test holder. CI's `build` job builds and stashes
+ * them (the integration runners compile no Rust); locally this builds them when missing.
+ */
 export function buildIdentityTools() {
+    if (existsSync(storeBinary()) && existsSync(holderBinary())) return;
     const opts = { cwd: REPO_ROOT, stdio: "inherit" as const };
-    execSync("cargo build -p identity-store", opts);
-    execSync("cargo build -p ad4m-identity-client --example holder --features ws,test-vault", opts);
+    execSync("cargo build --release -p identity-store", opts);
+    execSync("cargo build --release -p ad4m-identity-client --example holder --features ws,test-vault", opts);
 }
 
 /** A running identity-store. `restart` keeps its port, key and database file. */
@@ -46,7 +53,7 @@ export class IdentityStore {
     }
 
     private async run() {
-        const binary = path.join(targetDir(), "debug", "identity-store");
+        const binary = storeBinary();
         const child = spawn(binary, ["serve"], {
             stdio: ["ignore", "pipe", "pipe"],
             env: {
@@ -125,7 +132,7 @@ export class Holder {
     private waiting: ((line: string) => void)[] = [];
 
     constructor() {
-        const binary = path.join(targetDir(), "debug", "examples", "holder");
+        const binary = holderBinary();
         this.child = spawn(binary, [], { stdio: ["pipe", "pipe", "inherit"] });
         this.lines = readline.createInterface({ input: this.child.stdout! });
         this.lines.on("line", (line) => {

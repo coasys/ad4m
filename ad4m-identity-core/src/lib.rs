@@ -28,7 +28,10 @@ pub mod words;
 pub use ad4m_hash_chain::{
     Chain, ChainError, ChainPolicy, Entry, ForkEvidence, Hash, Head, ImportOutcome, Multikey, Proof,
 };
-pub use domain::{signing_bytes, verify_signed, DomainError};
+pub use domain::{
+    signing_bytes, verify_signed, DomainError, HeadStatement, HEAD_DOMAIN, LINK_DOMAIN,
+    REQUEST_DOMAIN,
+};
 pub use event::{BotScope, DeviceKey, Event, KeyLife, Kind, Op, BOT_ACTIONS};
 pub use keys::{
     decode_x25519_multikey, encode_x25519_multikey, is_ed25519_multikey, is_x25519_multikey,
