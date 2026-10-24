@@ -32,7 +32,11 @@ import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as auth from "../src/auth.js";
 import * as store from "../src/store.js";
 import * as syncModule from "../src/sync.js";
-import type { LinkExpression, PerspectiveDiff } from "../src/types.js";
+import * as api from "../src/api.js";
+import { buildKeyRing, bytesToHex, generateRoomKey, hexToBytes, sealToDid } from "../src/encryption.js";
+import { grantMissingRoomKeys, rotateRoomKey } from "../src/room-keys.js";
+import type { LinkExpression, PerspectiveDiff, SealedBox } from "../src/types.js";
+import { openSealed } from "./sealed-box.js";
 
 // Link-server imports — test helpers to boot a real server, and auth
 // utilities for DID construction + the SHA-256 pre-hash convention.
@@ -99,6 +103,11 @@ class RealAgent implements AgentAdapter {
     const hashed = hashMessageForVerify(payload);
     const sig = ed25519.sign(hashed, this.privateKey);
     return Buffer.from(sig).toString("hex");
+  }
+
+  /** The executor's `agentOpenSealed`, with this agent's key. */
+  openSealed(sealed: SealedBox): string {
+    return bytesToHex(openSealed(sealed, this.privateKey));
   }
 
   static create(): RealAgent {
@@ -446,5 +455,117 @@ describe("integration: performSync", () => {
     const result = await syncModule.performSync();
     assert.deepEqual(result, { additions: [], removals: [] });
     assert.ok(syncStates.includes("Synced"), "must report Synced state");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Room keys: sealed to DIDs, rotated by the admin, granted by any member
+// ---------------------------------------------------------------------------
+
+describe("integration: room keys", () => {
+  const roomId = "room-keys-room";
+
+  /** Authenticates `agent` as the language would, and returns its token. */
+  async function signIn(serverUrl: string, agent: RealAgent): Promise<string> {
+    wireClient(serverUrl, roomId, agent);
+    return auth.getValidToken();
+  }
+
+  async function admit(serverUrl: string, adminToken: string, did: string): Promise<void> {
+    const res = await fetch(`${serverUrl}/rooms/${roomId}/acl`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ action: "add", did }),
+    });
+    assert.equal(res.status, 200);
+  }
+
+  async function ringOf(serverUrl: string, agent: RealAgent) {
+    const token = await signIn(serverUrl, agent);
+    const keys = await api.fetchRoomKeys({ serverUrl, roomId }, token);
+    return buildKeyRing(keys?.keys ?? [], agent).ring;
+  }
+
+  it("the admin seals a new version to every ACL member, including one that never connected", async () => {
+    const server = await bootServer();
+    const admin = RealAgent.create();
+    const member = RealAgent.create();
+    const adminToken = await signIn(server.url, admin);
+    await admit(server.url, adminToken, member.did());
+
+    const rotated = await rotateRoomKey({ serverUrl: server.url, roomId }, adminToken);
+    assert.equal(rotated?.version, 1);
+    assert.deepEqual(rotated?.recipients.sort(), [admin.did(), member.did()].sort());
+
+    const adminRing = await ringOf(server.url, admin);
+    const memberRing = await ringOf(server.url, member);
+    assert.deepEqual([...memberRing.keys()], [1]);
+    assert.deepEqual(memberRing.get(1), adminRing.get(1), "both hold the same room key");
+  });
+
+  it("a member who is not the admin grants the versions it holds, and only those", async () => {
+    const server = await bootServer();
+    const admin = RealAgent.create();
+    const bob = RealAgent.create();
+    const carol = RealAgent.create();
+    const config = { serverUrl: server.url, roomId };
+
+    const adminToken = await signIn(server.url, admin);
+    await rotateRoomKey(config, adminToken); // version 1: the admin alone
+    await admit(server.url, adminToken, bob.did());
+    await rotateRoomKey(config, adminToken); // version 2: the admin and Bob
+    await admit(server.url, adminToken, carol.did()); // Carol: no version, never connected
+
+    const bobRing = await ringOf(server.url, bob);
+    assert.deepEqual([...bobRing.keys()], [2]);
+    const bobToken = await signIn(server.url, bob);
+    const bobGrants = await grantMissingRoomKeys(config, bobToken, bobRing, bob.did());
+    assert.deepEqual(bobGrants, [{ did: carol.did(), versions: [2] }], "Bob grants Carol the version he holds");
+
+    const adminRing = await ringOf(server.url, admin);
+    const adminGrants = await grantMissingRoomKeys(config, await signIn(server.url, admin), adminRing, admin.did());
+    assert.deepEqual(
+      adminGrants.map((g) => [g.did, g.versions]).sort(),
+      [[bob.did(), [1]], [carol.did(), [1]]].sort(),
+      "the admin fills in version 1",
+    );
+
+    const carolRing = await ringOf(server.url, carol);
+    assert.deepEqual([...carolRing.keys()].sort(), [1, 2]);
+    assert.deepEqual(carolRing.get(1), adminRing.get(1));
+    assert.deepEqual(carolRing.get(2), adminRing.get(2));
+
+    const again = await grantMissingRoomKeys(config, await signIn(server.url, bob), await ringOf(server.url, bob), bob.did());
+    assert.deepEqual(again, [], "nobody lacks a version any more");
+  });
+
+  it("a wrong key a member grants is spoiled, dropped, and replaced by an honest grant", async () => {
+    const server = await bootServer();
+    const admin = RealAgent.create();
+    const mallory = RealAgent.create();
+    const late = RealAgent.create();
+    const config = { serverUrl: server.url, roomId };
+
+    const adminToken = await signIn(server.url, admin);
+    await admit(server.url, adminToken, mallory.did());
+    await rotateRoomKey(config, adminToken); // version 1: the admin and Mallory
+    await admit(server.url, adminToken, late.did());
+
+    // Mallory holds version 1, so the server lets her grant it: she seals a key of her own.
+    await api.grantKeys(config, await signIn(server.url, mallory), late.did(), [
+      { version: 1, encryptedKey: sealToDid(late.did(), generateRoomKey()) },
+    ]);
+    const lateToken = await signIn(server.url, late);
+    const first = buildKeyRing((await api.fetchRoomKeys(config, lateToken))?.keys ?? [], late);
+    assert.equal(first.ring.size, 0, "the wrong key is not taken");
+    assert.deepEqual(first.spoiled, [1]);
+
+    await api.deleteRoomKey(config, lateToken, 1);
+    const adminRing = await ringOf(server.url, admin);
+    const grants = await grantMissingRoomKeys(config, await signIn(server.url, admin), adminRing, admin.did());
+    assert.deepEqual(grants, [{ did: late.did(), versions: [1] }], "the dropped version is missing again");
+
+    const lateRing = await ringOf(server.url, late);
+    assert.deepEqual(lateRing.get(1), adminRing.get(1), "the newcomer now holds the room's key");
   });
 });

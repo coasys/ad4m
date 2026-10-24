@@ -12,3 +12,11 @@ export function commitNeedsKeyRetry(status: KeyRingStatus): boolean {
 export function refreshSkippedByCooldown(status: KeyRingStatus, msSinceLast: number, cooldownMs: number): boolean {
     return status !== "pending" && msSinceLast < cooldownMs;
 }
+
+// An admin holding no room key it can open ("none": the room has none yet;
+// "pending": none sealed to it opens) mints one — once a run. A box it just
+// sealed to its own DID that does not open means its executor cannot open
+// any, so another version would only pile up unopened keys.
+export function adminRotates(status: KeyRingStatus, rotatedThisRun: boolean): boolean {
+    return !rotatedThisRun && (status === "none" || status === "pending");
+}

@@ -111,19 +111,25 @@ self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 
 | Method & path | Purpose |
 |---|---|
-| `POST /rooms/:roomId/auth` | DID challenge-response. Step 1: `{did}` → `{challenge}`. Step 2: `{did, challenge, signature, x25519PublicKey?}` → `{token}` |
+| `POST /rooms/:roomId/auth` | DID challenge-response. Step 1: `{did}` → `{challenge}`. Step 2: `{did, challenge, signature}` → `{token}` |
 | `POST /rooms/:roomId/commit` | Push a `{additions, removals}` diff |
 | `GET /rooms/:roomId/sync?since=<sequence>` | Pull diffs newer than `sequence` → `{diffs[], revision, sequence}` |
 | `GET /rooms/:roomId/render` | Full current snapshot → `{links[], revision}` |
 | `GET /rooms/:roomId/peers` | Connected agent DIDs → `{peers: string[]}` |
 | `GET /rooms/:roomId/revision` | `{revision, sequence}` |
-| `GET /rooms/:roomId/acl` | `{admin, members}` |
-| `GET /rooms/:roomId/keys` | This agent's sealed room key → `{encryptedKey, version}` (E2E rooms only) |
+| `GET /rooms/:roomId/acl` | `{admin, members: [{did}]}` |
+| `GET /rooms/:roomId/keys` | This agent's sealed room key versions → `{keys: [{encryptedKey, version, commitment}], e2e_enabled}` (E2E rooms only) |
+| `POST /rooms/:roomId/keys/rotate` | Room admin: `{keys, commitment}`, a new version sealed to every ACL member and the commitment to its key (`roomKeyCommitment`) |
+| `DELETE /rooms/:roomId/keys/:version` | Any member: drops its own box for a version whose key does not match the commitment, so a holder grants it again |
+| `GET /rooms/:roomId/keys/missing` | Any member: `{membersNeedingHistoricalKeys: [{did, missingVersions}]}` |
+| `POST /rooms/:roomId/keys/grant` | Any member: `{targetDid, keys: [{version, encryptedKey}]}`, only versions the caller holds |
 
 ### WebSocket — `/rooms/:roomId/ws`
 
 Server → client: `diff`, `telepresence-signal`, `telepresence-broadcast`,
-`online-agents`, `peer-joined`, `peer-left`.
+`online-agents`, `peer-joined`, `peer-left`, `status-changed`,
+`keys-granted {versions}` (to the grantee's sockets after a stored grant: the
+language refreshes its key ring and catches up), `auth-error`.
 Client → server: `telepresence-signal`, `telepresence-broadcast`,
 `set-online-status`.
 
@@ -138,7 +144,7 @@ executor's language sandbox runs a full `deno_runtime` worker (not a bare
 
 - **Pure** (`src/types.ts`, `src/store.ts`, `src/adapters.ts`, `src/api.ts`,
   `src/auth.ts`, `src/sync.ts`, `src/ws-client.ts`, `src/telepresence.ts`,
-  `src/encryption.ts`) — no `ad4m:host` imports. Everything talks to the
+  `src/encryption.ts`, `src/room-keys.ts`) — no `ad4m:host` imports. Everything talks to the
   outside world through the `Transport` / `StorageAdapter` / `AgentAdapter`
   / `RuntimeAdapter` / `WebSocketFactory` interfaces in `src/adapters.ts`,
   swapped for mocks in tests.
@@ -155,7 +161,8 @@ executor's language sandbox runs a full `deno_runtime` worker (not a bare
 | `src/ws-client.ts` | WebSocket lifecycle: connect, typed message dispatch, send queue, exponential-backoff reconnect |
 | `src/sync.ts` | Commit (stored locally once the server accepted it, not echoed back) / catch-up sync / cold-start bootstrap; the single inbound-diff choke point |
 | `src/telepresence.ts` | Online-agent roster + outbound signal/broadcast/status |
-| `src/encryption.ts` | X25519 key derivation, sealed room-key exchange, AES-256-GCM link encryption |
+| `src/encryption.ts` | Room keys sealed to DIDs (through the executor), key ring, AES-256-GCM link encryption |
+| `src/room-keys.ts` | Room admin's rotation and any member's grants of the versions it holds |
 | `index.ts` | Wires it all together behind `defineLanguage()` |
 
 ### The `emitPerspectiveDiff` rule
@@ -189,22 +196,18 @@ inbound-diff path.
 See the doc comment at the top of `src/encryption.ts` for the full design;
 summary:
 
-- **No raw private key in the sandbox.** The Deno language sandbox never
-  exposes the agent's Ed25519 private key — only a black-box
-  `agentSignStringHex(payload)` signing call. Since EdDSA signatures are
-  deterministic (RFC 8032), this language derives a stable X25519 keypair
-  as `x25519(sha256(sign(FIXED_DOMAIN_SEPARATED_MESSAGE)))`. Nobody without
-  the agent's cooperation (via the host's signing service) can reproduce it.
-- **Public key exchange.** There's no separate "register my E2E public key"
-  endpoint in the server API this language targets, so the derived X25519
-  public key rides along as an additive `x25519PublicKey` field on step 2 of
-  the auth flow — the one point the agent already proves DID ownership to
-  the server. A server that doesn't care about E2E just ignores the field.
-- **Room key distribution.** `GET /rooms/:roomId/keys` returns a
-  `SealedRoomKeyEnvelope` object (JSON with `ephemeralPublicKey`, `nonce`,
-  and `ciphertext` as hex strings) as the `encryptedKey` field — the same
-  shape `libsodium`'s `crypto_box_seal` produces. Only the intended
-  recipient's derived private key can open it.
+- **Room keys are sealed to DIDs.** A member's X25519 key is the Montgomery
+  form of the Ed25519 key in its `did:key`, so it follows from the DID; the
+  language never sees an agent secret. It seals itself (`sealToDid`) and
+  opens with the executor's `agentOpenSealed` host import, which opens only
+  boxes sealed to the agent the language runs for
+  (`docs-src/host-contract.md` "Sealed boxes": ephemeral X25519 ECDH,
+  HKDF-SHA256, AES-256-GCM, hex `{ephemeralPublicKey, nonce, ciphertext}`).
+  Auth carries no key.
+- **Distribution.** The room admin seals each new version to every ACL
+  member, including members that never connected. Any member holding a
+  version grants it to an ACL member lacking it (`src/room-keys.ts`); the
+  server accepts a grant only of versions the granter holds.
 - **Link confidentiality.** Once a room key is available,
   `encryptLinkForWire` / `decryptLinkFromWire` protect a link's
   `{source, predicate, target}` payload with AES-256-GCM (fresh nonce per
@@ -218,10 +221,8 @@ summary:
   wrong key), `commit()` refuses to send plaintext rather than risk leaking
   data into a room that expects encryption.
 
-The `encryptedKey` wire framing (JSON `SealedRoomKeyEnvelope`) and the
-`x25519PublicKey` auth field are shared conventions between this client and
-`link-server`. Both are isolated in `src/encryption.ts` / `src/api.ts` /
-`src/auth.ts`.
+The `encryptedKey` wire framing (JSON `SealedBox`) is the executor's sealed
+box; `link-server` only checks its shape.
 
 ## Template variables
 
@@ -244,8 +245,8 @@ source code.
 
 E2E encryption activates automatically — the admin's language instance
 generates the initial room key during `init()` when no E2E exists yet.
-Non-admin members receive keys via the admin's automatic grants (on
-`peer-joined` and after every sync); a member waiting for its first keys
+Members receive later keys from any member holding them (grants run on
+`peer-joined`, at init and after every sync); a member waiting for its first keys
 re-checks `/keys` on every sync, without the 10 s refresh cooldown.
 There is no plaintext mode.
 
