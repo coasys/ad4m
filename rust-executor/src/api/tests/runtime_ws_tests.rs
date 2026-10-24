@@ -146,7 +146,7 @@ async fn unyt_stubs_answer_the_operator_not_implemented() {
 // Free hosting is a billing decision for the whole executor: an app approved for "quit" may not
 // switch it (#1328). The refusal comes before the handler, so the shared DB stays untouched.
 #[tokio::test]
-async fn set_free_hosting_enabled_needs_the_admin_credential() {
+async fn set_free_hosting_enabled_refuses_an_app_without_every_capability() {
     use crate::agent::capabilities::RUNTIME_QUIT_CAPABILITY;
     let mut map = HandlerMap::new();
     register_ws_handlers(&mut map);
