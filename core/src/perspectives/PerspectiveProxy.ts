@@ -917,6 +917,11 @@ export class PerspectiveProxy {
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
+
+    /** Drops an open batch without applying it; see {@link PerspectiveClient.discardBatch}. */
+    async discardBatch(batchId: string): Promise<boolean> {
+        return await this.#client.discardBatch(this.#handle.uuid, batchId)
+    }
     /**
      * Retrieves and renders an Expression referenced in this perspective.
      * 
@@ -1011,8 +1016,7 @@ export class PerspectiveProxy {
      * ```
      */
     async getSingleTarget(query: LinkQuery): Promise<string|void> {
-        delete query.target
-        const foundLinks = await this.get(query)
+        const foundLinks = await this.get(new LinkQuery({ ...query, target: undefined }))
         if(foundLinks.length)
             return foundLinks[0].data.target
         else

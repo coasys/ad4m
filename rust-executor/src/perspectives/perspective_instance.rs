@@ -478,6 +478,10 @@ impl SubscribedQuery {
 /// A batch with its creation timestamp, for timeout-based cleanup.
 struct TimestampedBatch {
     diff: PerspectiveDiff,
+    /// `(old, new)` pairs staged by `update_link`. Each half also sits in
+    /// `diff`, so batch-aware reads see it; `commit_batch` publishes a pair
+    /// whose halves are both still there as one update.
+    updates: Vec<(LinkExpression, LinkExpression)>,
     created_at: Instant,
 }
 
@@ -1970,6 +1974,37 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Publish one `link-updated` event, to all of the perspective's
+    /// `event_recipients`, for each `(old, new)` pair, and queue the
+    /// flow-definition sweep that `pubsub_publish_diff` queues for other
+    /// writes (once for the whole set).
+    async fn publish_link_updates(
+        &self,
+        updates: &[(DecoratedLinkExpression, DecoratedLinkExpression)],
+    ) {
+        if updates.is_empty() {
+            return;
+        }
+        let (olds, news): (Vec<_>, Vec<_>) = updates.iter().cloned().unzip();
+        self.schedule_flow_pass_on_definition_change(&DecoratedPerspectiveDiff::from(news, olds));
+
+        // Only the recipients come from the handle; the lock is released before publishing.
+        let owners = super::event_recipients(&*self.persisted.lock().await);
+
+        // One event per update, to all of the owners.
+        for (old_link, new_link) in updates {
+            super::publish_to_owners(
+                Topic::LinkUpdated,
+                owners.clone(),
+                PerspectiveLinkUpdatedEvent {
+                    perspective_uuid: self.uuid.clone(),
+                    old_link: old_link.clone(),
+                    new_link: new_link.clone(),
+                },
+            );
+        }
+    }
+
     pub async fn add_link_expression(
         &mut self,
         link_expression: LinkExpression,
@@ -2286,24 +2321,24 @@ impl PerspectiveInstance {
         let new_link_expression =
             LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
 
+        // Both links keep the stored status.
+        let mut stored_new = new_link_expression.clone();
+        stored_new.status = Some(link_status.clone());
+        let mut stored_old = old_link.clone();
+        stored_old.status = Some(link_status.clone());
+
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
-            let diff = &mut batch.diff;
 
-            diff.removals.push(old_link.clone());
-            let mut new_link_expr = new_link_expression.clone();
-            new_link_expr.status = Some(link_status.clone());
-            diff.additions.push(new_link_expr.clone());
+            batch.diff.removals.push(stored_old.clone());
+            batch.diff.additions.push(stored_new.clone());
+            batch.updates.push((stored_old, stored_new.clone()));
 
-            Ok(DecoratedLinkExpression::from((new_link_expr, link_status)))
+            Ok(DecoratedLinkExpression::from((stored_new, link_status)))
         } else {
-            let mut stored_new = new_link_expression.clone();
-            stored_new.status = Some(link_status.clone());
-            let mut stored_old = old_link.clone();
-            stored_old.status = Some(link_status.clone());
             let diff = PerspectiveDiff::from(vec![stored_new], vec![stored_old]);
             let decorated_new_link_expression =
                 DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
@@ -2318,22 +2353,13 @@ impl PerspectiveInstance {
             self.persist_link_diff(&diff).await?;
 
             // Queue the Prolog fact update and the notification + live-query checks
-            self.update_prolog_engines(decorated_diff.clone()).await;
+            self.update_prolog_engines(decorated_diff).await;
 
-            // An update publishes its own topic rather than going through
-            // `pubsub_publish_diff`, so it queues the definition sweep here.
-            self.schedule_flow_pass_on_definition_change(&decorated_diff);
-
-            // One event, to all of the owners.
-            super::publish_to_owners(
-                Topic::LinkUpdated,
-                super::event_recipients(&handle),
-                PerspectiveLinkUpdatedEvent {
-                    perspective_uuid: handle.uuid.clone(),
-                    old_link: decorated_old_link.clone(),
-                    new_link: decorated_new_link_expression.clone(),
-                },
-            );
+            self.publish_link_updates(&[(
+                decorated_old_link,
+                decorated_new_link_expression.clone(),
+            )])
+            .await;
 
             if link_status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&diff);
@@ -6604,6 +6630,7 @@ impl PerspectiveInstance {
                     additions: Vec::new(),
                     removals: Vec::new(),
                 },
+                updates: Vec::new(),
                 created_at: now,
             },
         );
@@ -6625,18 +6652,12 @@ impl PerspectiveInstance {
         batch_uuid: String,
         context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
-        //let commit_start = std::time::Instant::now();
-        //log::info!("🔄 BATCH COMMIT: Starting batch commit for batch_uuid: {}", batch_uuid);
-        //let batch_retrieval_start = std::time::Instant::now();
-
-        // Get the diff without holding lock during the entire operation
-        let diff = {
-            let mut batch_store = self.batch_store.write().await;
-
-            match batch_store.remove(&batch_uuid) {
-                Some(batch) => batch.diff,
-                None => return Err(anyhow!("No batch found with given UUID")),
-            }
+        // Take the batch out of the store without holding the lock for the commit
+        let TimestampedBatch {
+            mut diff, updates, ..
+        } = match self.batch_store.write().await.remove(&batch_uuid) {
+            Some(batch) => batch,
+            None => return Err(anyhow!("No batch found with given UUID")),
         };
         #[cfg(test)]
         if self.fail_next_commit.swap(false, Ordering::SeqCst) {
@@ -6644,115 +6665,101 @@ impl PerspectiveInstance {
             return Err(anyhow!("injected fault (test seam): commit_batch failed"));
         }
 
-        //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
-        //    batch_retrieval_start.elapsed(), diff.additions.len(), diff.removals.len());
-
-        //let processing_start = std::time::Instant::now();
-        let mut shared_diff = DecoratedPerspectiveDiff {
-            additions: Vec::new(),
-            removals: Vec::new(),
-        };
-        let mut local_diff = DecoratedPerspectiveDiff {
-            additions: Vec::new(),
-            removals: Vec::new(),
-        };
+        // An update whose halves are both still staged commits as an update.
+        // Later work in the batch may have dropped one half; then the other
+        // stays a plain addition or removal.
+        let updates: Vec<(LinkExpression, LinkExpression)> = updates
+            .into_iter()
+            .filter(|(old, new)| {
+                let (Some(r), Some(a)) = (
+                    diff.removals.iter().position(|l| l == old),
+                    diff.additions.iter().position(|l| l == new),
+                ) else {
+                    return false;
+                };
+                diff.removals.remove(r);
+                diff.additions.remove(a);
+                true
+            })
+            .collect();
 
         let mut persist_diff = PerspectiveDiff::empty();
+        // Only Shared links reach the link language.
+        let mut shared_diff = PerspectiveDiff::empty();
+        // Additions and removals, published as ADDED / REMOVED.
+        let mut published = DecoratedPerspectiveDiff {
+            additions: Vec::new(),
+            removals: Vec::new(),
+        };
 
-        // Process additions
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
             let signed_expr = create_signed_expression(link.data.normalize(), context)?;
             let mut stored = LinkExpression::from(signed_expr);
             stored.status = Some(status.clone());
             persist_diff.additions.push(stored.clone());
-            let decorated = DecoratedLinkExpression::from((stored, status.clone()));
-
-            match status {
-                LinkStatus::Shared => shared_diff.additions.push(decorated),
-                LinkStatus::Local => local_diff.additions.push(decorated),
+            if status == LinkStatus::Shared {
+                shared_diff.additions.push(stored.clone());
             }
+            published
+                .additions
+                .push(DecoratedLinkExpression::from((stored, status)));
         }
 
-        // Process removals
         for link in diff.removals {
             let status = link.status.clone().unwrap_or(LinkStatus::Shared);
             persist_diff.removals.push(link.clone());
-            let decorated = DecoratedLinkExpression::from((link, status.clone()));
-            match status {
-                LinkStatus::Shared => shared_diff.removals.push(decorated),
-                LinkStatus::Local => local_diff.removals.push(decorated),
+            if status == LinkStatus::Shared {
+                shared_diff.removals.push(link.clone());
             }
+            published
+                .removals
+                .push(DecoratedLinkExpression::from((link, status)));
         }
 
-        //log::info!("🔄 BATCH COMMIT: Link processing took {:?} - shared: {} add/{} rem, local: {} add/{} rem",
-        //    processing_start.elapsed(),
-        //    shared_diff.additions.len(), shared_diff.removals.len(),
-        //    local_diff.additions.len(), local_diff.removals.len());
-
-        // Apply shared changes
-        if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
-            //let db_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting DB operations for shared changes");
-
-            // Commit to link language (SPARQL store will be updated later via persist_link_diff)
-            if self.has_link_language().await {
-                //let link_lang_start = std::time::Instant::now();
-                //log::info!("🔄 BATCH COMMIT: Starting link language commit");
-
-                let perspective_diff = PerspectiveDiff {
-                    additions: shared_diff
-                        .additions
-                        .iter()
-                        .map(|l| l.clone().into())
-                        .collect(),
-                    removals: shared_diff
-                        .removals
-                        .iter()
-                        .map(|l| l.clone().into())
-                        .collect(),
-                };
-                self.spawn_commit_and_handle_error(&perspective_diff);
-
-                //log::info!("🔄 BATCH COMMIT: Link language commit spawned in {:?}", link_lang_start.elapsed());
+        // Both halves of an update carry the stored status `update_link` gave them.
+        let mut combined_diff = published.clone();
+        let mut updated = Vec::new();
+        for (old, new) in updates {
+            let status = new.status.clone().unwrap_or_default();
+            persist_diff.removals.push(old.clone());
+            persist_diff.additions.push(new.clone());
+            if status == LinkStatus::Shared {
+                shared_diff.removals.push(old.clone());
+                shared_diff.additions.push(new.clone());
             }
+            let old = DecoratedLinkExpression::from((old, status.clone()));
+            let new = DecoratedLinkExpression::from((new, status));
+            combined_diff.removals.push(old.clone());
+            combined_diff.additions.push(new.clone());
+            updated.push((old, new));
         }
 
-        // Create combined diff for prolog update, SPARQL store update, and return value
-        let combined_diff = DecoratedPerspectiveDiff {
-            additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
-            removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
-        };
+        if (!shared_diff.additions.is_empty() || !shared_diff.removals.is_empty())
+            && self.has_link_language().await
+        {
+            self.spawn_commit_and_handle_error(&shared_diff);
+        }
 
         // Only update storage / subscription engines when there are changes.
         // The SPARQL store must be updated first so any subscription re-checks
         // triggered by update_prolog_engines() see the committed batch state.
         if !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty() {
-            //let prolog_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting DB + prolog updates - {} add, {} rem",
-            //    combined_diff.additions.len(), combined_diff.removals.len());
-
             self.persist_link_diff(&persist_diff).await?;
 
             // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(combined_diff.clone()).await;
 
-            // Publish link-added/-removed/-updated to WS subscribers.
-            // The single-mutation paths (add_link / link_mutations /
-            // diff_from_link_language) publish their diff synchronously before
-            // spawning the prolog update, and spawn_prolog_facts_update
-            // deliberately skips publishing to avoid double-delivery on those
-            // paths. commit_batch never went through that publish step, so
-            // batched diffs were never reaching WS subscribers — that's what
-            // this call restores.
-            self.pubsub_publish_diff(&combined_diff).await;
-
-            //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
+            // Publish link-added/-removed/-updated to WS subscribers. The
+            // single-mutation paths publish their own diff, and
+            // spawn_prolog_facts_update deliberately does not (no double
+            // delivery there), so a batch must publish here or its links never
+            // reach WS subscribers. Updates go out as `link-updated`, not as a
+            // removal plus an addition.
+            self.pubsub_publish_diff(&published).await;
+            self.publish_link_updates(&updated).await;
         }
 
-        //log::info!("🔄 BATCH COMMIT: Total batch commit took {:?}", commit_start.elapsed());
-
-        // Return combined diff
         Ok(combined_diff)
     }
 }
@@ -9710,6 +9717,104 @@ mod tests {
             link.target,
             msg
         );
+    }
+
+    /// M9: a link updated inside a batch reaches subscribers as one
+    /// `link-updated` event to all of the owners on commit, not as a removal
+    /// plus an addition, and both links keep the stored status.
+    #[tokio::test]
+    async fn test_commit_batch_publishes_batched_update_as_link_updated() {
+        let mut perspective = setup().await;
+        let owners = vec![
+            "did:test:owner-a".to_string(),
+            "did:test:owner-b".to_string(),
+        ];
+        perspective.persisted.lock().await.owners = Some(owners.clone());
+        let old: LinkExpression = perspective
+            .add_link(
+                create_link(),
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap()
+            .into();
+        let new_link = create_link();
+
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .update_link(
+                old.clone(),
+                new_link.clone(),
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut rx = pubsub.subscribe_events();
+
+        perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
+
+        // The event channel is global: keep only this perspective's events.
+        let uuid = perspective.uuid.clone();
+        let mut mine = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if event.perspective.as_deref() == Some(uuid.as_str()) {
+                mine.push(event);
+            }
+        }
+        let of = |topic: Topic| {
+            mine.iter()
+                .filter(|e| e.topic == topic)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert!(of(Topic::LinkAdded).is_empty(), "no ADDED for an update");
+        assert!(
+            of(Topic::LinkRemoved).is_empty(),
+            "no REMOVED for an update"
+        );
+        let updated = of(Topic::LinkUpdated);
+        assert_eq!(updated.len(), 1, "one UPDATED for the update");
+        match &updated[0].audience {
+            crate::events::Audience::Dids(dids) => {
+                let mut dids = dids.clone();
+                dids.sort();
+                assert_eq!(dids, owners, "the UPDATED goes to all of the owners");
+            }
+            _ => panic!("the UPDATED goes to the owners' DIDs"),
+        }
+        for event in &updated {
+            let v = &event.payload;
+            assert_eq!(v["oldLink"]["data"]["target"], old.data.target.as_str());
+            assert_eq!(v["newLink"]["data"]["target"], new_link.target.as_str());
+            assert_eq!(v["oldLink"]["status"], "LOCAL");
+            assert_eq!(v["newLink"]["status"], "LOCAL");
+        }
+
+        let stored = perspective
+            .get_links(&LinkQuery {
+                source: Some(new_link.source.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].status, Some(LinkStatus::Local));
+        let old_left = perspective
+            .get_links(&LinkQuery {
+                source: Some(old.data.source.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(old_left.is_empty(), "the old link is removed");
     }
 
     /// Regression: paginated `get_links(limit=N)` must use the bounded-heap

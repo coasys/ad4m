@@ -38,49 +38,25 @@ export class Perspective {
         return { links: perspective.links.map(linkExpressionToWire) }
     }
     
-    /** Convenience function for filtering links just like with PerspectiveProxy */
+    /** Convenience function for filtering links just like with PerspectiveProxy.
+     *  Applies every filter of `query`; returns copies, so changing a result
+     *  does not change this snapshot. */
     get(query: LinkQuery): LinkExpression[] {
-        if(!query || !query.source && !query.predicate && !query.target) {
-            return this.links
-        }
-        
-        if(query.source) {
-            let result = JSON.parse(JSON.stringify(this.links))
-            // @ts-ignore
-            if(query.target) result = result.filter(l => l.data.target === query.target)
-            // @ts-ignore
-            if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
-            //@ts-ignore
-            if (query.fromDate) result = result.filter(l => new Date(l.timestamp) >= query.fromDate!)
-            //@ts-ignore
-            if (query.untilDate) result = result.filter(l => new Date(l.timestamp) <= query.untilDate!)
-            // console.debug("result", result)
-            if (query.limit) result = result.slice(0, query.limit);
-            return result
-        }
-
-        // console.debug("getLinks 3")
-
-        if(query.target) {
-            //@ts-ignore
-            let result = JSON.parse(JSON.stringify(this.links))
-            // @ts-ignore
-            if(query.predicate) result = result.filter(l => l.data.predicate === query.predicate)
-            //@ts-ignore
-            if (query.fromDate) result = result.filter(l => new Date(l.timestamp) >= query.fromDate!)
-            //@ts-ignore
-            if (query.untilDate) result = result.filter(l => new Date(l.timestamp) <= query.untilDate!)
-            if (query.limit) result = result.slice(0, query.limit);
-            return result
-        }
-
-        // console.debug("getLinks 4")
-
-        //@ts-ignore
-        let result = JSON.parse(JSON.stringify(this.links))
-        result = result.filter(link => link.data.predicate === query.predicate)
-        if (query.limit) result = result.slice(0, query.limit)
-        return result
+        const { source, predicate, target, fromDate, untilDate, limit } = query ?? {} as LinkQuery
+        // Dates may arrive as strings (a plain-object query), as PerspectiveProxy accepts.
+        const from = fromDate ? new Date(fromDate).getTime() : undefined
+        const until = untilDate ? new Date(untilDate).getTime() : undefined
+        let result = this.links.filter(l =>
+            (!source || l.data.source === source) &&
+            (!predicate || l.data.predicate === predicate) &&
+            (!target || l.data.target === target) &&
+            (from === undefined || new Date(l.timestamp).getTime() >= from) &&
+            (until === undefined || new Date(l.timestamp).getTime() <= until))
+        if (limit) result = result.slice(0, limit)
+        // A JSON copy, not structuredClone: a framework may hold this snapshot
+        // in a reactive Proxy (Vue reactive(), Svelte 5 $state), and
+        // structuredClone throws DataCloneError on a Proxy.
+        return result.map(l => Object.setPrototypeOf(JSON.parse(JSON.stringify(l)), Object.getPrototypeOf(l)))
     }
 
     /** Convenience function to get the target of the first link that matches the given query
@@ -88,8 +64,7 @@ export class Perspective {
      * and the target of that link is what you are looking for.
      */
     getSingleTarget(query: LinkQuery): string|void {
-        delete query.target
-        const foundLinks = this.get(query)
+        const foundLinks = this.get(new LinkQuery({ ...query, target: undefined }))
         if(foundLinks.length)
             return foundLinks[0].data.target
         else
