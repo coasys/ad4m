@@ -1,0 +1,42 @@
+[package]
+name = "ad4m-hash-chain"
+version = "0.1.0"
+edition = "2021"
+description = "Append-only hash chains of signed JSON entries: entry hash, links, eddsa-jcs-2022 proofs, fold, import, fork detection"
+license = "CAL-1.0"
+homepage = "https://ad4m.dev"
+repository = "https://github.com/coasys/ad4m"
+publish = false
+
+[features]
+default = []
+# The async `ChainStore` trait, `entries_since` and `MemoryChainStore`.
+store = ["dep:async-trait"]
+# `SqliteChainStore` on rusqlite (tables chain_heads, chain_entries, chain_forks).
+sqlite = ["store", "dep:rusqlite"]
+# wasm-bindgen exports `entryHash` and `compare`.
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10.8"
+bs58 = "0.5.1"
+ed25519-dalek = "2.2.0"
+thiserror = "2.0.12"
+async-trait = { version = "0.1.92", optional = true }
+# Same rusqlite line as rust-executor: the workspace converges on libsqlite3-sys 0.38
+# (see the root Cargo.toml). Do not pin another major here.
+rusqlite = { version = "0.40.0", optional = true }
+wasm-bindgen = { version = "0.2.127", optional = true }
+js-sys = { version = "0.3.104", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = "1.11.0"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync"] }
+tempfile = "3.27.0"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+js-sys = "0.3.104"
+wasm-bindgen = "0.2.127"
