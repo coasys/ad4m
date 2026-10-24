@@ -14,14 +14,14 @@
 | `neighbourhood.onlineAgents` | the link language's online agents, by the link language's own rule (bundles unpacked, each bundled status kept only if its signature verifies), plus co-owners whose `last_seen` is less than 300 s old (`LOCAL_ONLINE_THRESHOLD_SECS`); an authenticated API call writes `last_seen` at most once per 300 s (`LAST_SEEN_WRITE_THROTTLE_S`) |
 | `neighbourhood.ownOnlineStatus` | the caller's last status on this executor |
 | `neighbourhood.otherAgents` | the link language's `others()` plus all `owners`, without the caller; needs neighbourhood READ, and when the perspective has an `owners` list, the caller must be on it (no `owners` list: no owner check) |
-| `neighbourhood.sendSignal` | signed payload; if the recipient is an owner on this executor, publish locally; else send through the link language |
-| `neighbourhood.sendBroadcast` | publish locally to each managed-agent owner and to the main agent (unless it sent it), then broadcast through the link language; with `loopback` it is also published to every owner as if it came from the link language |
+| `neighbourhood.sendSignal` | signed payload; if the perspective is shared and the recipient is one of its owners (the main agent for an unowned perspective), publish locally; else send through the link language |
+| `neighbourhood.sendBroadcast` | publish locally to each owner (the main agent for an unowned perspective), except the main agent when it sent it, then broadcast through the link language; with `loopback` it is also published to every owner as if it came from the link language |
 
 Payloads: with `signed: true` (default) the caller sends link expressions and the executor signs the perspective around them. With `signed: false` the caller sends bare links; the executor signs each link and then the perspective (`build_signed_perspective`).
 
 `hosted_status` is a process-wide map in memory. After a restart, it is empty until each agent sets a status again.
 
-Inbound: the link language calls `handle_telepresence_signal_from_link_language`, which marks each signature valid or invalid (`verify_signatures`) and publishes on the neighbourhood signal topic for the recipient (or every owner). A cached language → perspective mapping keeps this path fast.
+Inbound: the link language calls `handle_telepresence_signal_from_link_language`, which marks each signature valid or invalid (`verify_signatures`) and publishes a `signal` event to the recipient, or one copy to each owner when there is none (`publish_telepresence_signal`). A recipient that is not an owner gets nothing. A cached language → perspective mapping keeps this path fast.
 
 </details>
 

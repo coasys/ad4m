@@ -17,7 +17,7 @@ Local write (`add_link` → `add_link_expression`):
 5. `persist_link_diff` → `SparqlStore` (removals first, then additions).
 6. `update_prolog_engines(diff)` → `spawn_prolog_facts_update`: in a spawned task, set the notification and live-query flags and record the changed predicates.
 7. If `Shared`: `spawn_commit_and_handle_error` starts `commit` in a spawned task and does not wait for it. A commit that fails becomes a pending diff ([Neighbourhood sync](../neighbourhoods/sync.md)).
-8. `pubsub_publish_diff`: queue a flow pass if a flow definition changed, drop derived shapes if SHACL changed, seed bookkeeping for newly minted flow instances, then emit `link-added` / `link-removed` events once **per owner DID** ([Events](../../agents/interfaces/events.md)).
+8. `pubsub_publish_diff`: queue a flow pass if a flow definition changed, drop derived shapes if SHACL changed, seed bookkeeping for newly minted flow instances, then emit one `link-added` / `link-removed` event to all owners (`publish_to_owners`; the main agent for an unowned perspective) ([Events](../../agents/interfaces/events.md)).
 
 `link_mutations` (also behind `addLinks` and `removeLinks`) runs the same steps for many links, emits events before it commits, and commits only the shared part.
 
@@ -30,7 +30,7 @@ Batch: `perspective.createBatch` → writes with `batchId` → `perspective.comm
 <details><summary>Where in the code</summary>
 
 - [perspectives/perspective_instance.rs](../../../rust-executor/src/perspectives/perspective_instance.rs): `add_link`, `add_link_expression`, `add_links`, `link_mutations`, `update_link`, `remove_link(s)`, `persist_link_diff`, `update_prolog_engines`, `spawn_prolog_facts_update`, `pubsub_publish_diff`, `diff_from_link_language`, `create_batch`, `commit_batch`, `discard_batch`.
-- [pubsub.rs](../../../rust-executor/src/pubsub.rs): topic constants; events reach clients through `api/events_ws.rs` ([Events](../../agents/interfaces/events.md)).
+- [events.rs](../../../rust-executor/src/events.rs): `Topic`, `Audience`, `Event`; events reach clients through `api/events_ws.rs` ([Events](../../agents/interfaces/events.md)).
 - [api/perspectives_ws.rs](../../../rust-executor/src/api/perspectives_ws.rs): the RPC handlers and their credit checks (`check_credits`, `reserve_credits`).
 - [billing.rs](../../../rust-executor/src/billing.rs): `check_compute_credits`, `bill_compute`.
 - Guide: [docs-src/pages/developer-guides/batch-operations.mdx](../../../docs-src/pages/developer-guides/batch-operations.mdx).

@@ -4,7 +4,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Abstract class** (`model_query/abstract_classes.rs`, built-in `ad4m://TextContent`): A subject class that reads the instances of several concrete classes, sends each write to the record's own classes, and cannot be created. [Subject classes](perspectives/social-dna/subject-classes.md)
 
-**Access check** (`ctx.require`, `get_perspective_with_access`, `refuse_user_session`): The code in a handler, MCP tool, event filter or language op that applies a session's grant to one call, as a capability check plus an ownership check. [Access checks](agents/access/checks.md) — not: guard (a guard is a flow term)
+**Access check** (`ctx.require`, `get_perspective_with_access`, `refuse_user_session`): The code in a handler, MCP tool, event delivery or language op that applies a session's grant to one call, as a capability check plus an ownership check. [Access checks](agents/access/checks.md) — not: guard (a guard is a flow term)
 
 **ACL** (`acl` table in `link-server/src/db.ts`): The list of DIDs admitted to one link-server room, checked on every request. [Link server](languages/link-languages/link-server.md)
 
@@ -39,6 +39,8 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 **App grant** (`generate_capability_token`): A JWT that the executor issues to an app after the operator approves the app's capability request. [App grants](agents/access/app-grants.md) — not: cap token
 
 **Apps registry** (`apps_map.rs`, file `apps_data.json`): The file that records every issued app grant with its app info and revoked flag, for listing and revocation. [App grants](agents/access/app-grants.md)
+
+**Audience** (`Audience` in `events.rs`): Who may receive one event: some DIDs, everyone, or the operator; the publisher names it. [Events](agents/interfaces/events.md)
 
 **Auto-processor** (`AutoProcessorConfig`, `auto_processor_supervisor`): A declared instance in a perspective that makes the executor run interpretation by itself on new messages in a scope. [Auto-processor](perspectives/social-dna/interpretation/auto-processor.md)
 
@@ -86,7 +88,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Entanglement proof** (`EntanglementProof`, `entanglement_service`): Signatures in both directions that link the main agent's DID to another key, such as a device key or a Holochain agent key. [Signing and verification](agents/identity/signing-and-verification.md)
 
-**Event** (`events_ws::events`, `event_specs()`): A typed message that the executor pushes on a socket that asked for it with `events.watch`. [Events](agents/interfaces/events.md) — not: subscription (that is a live query), notification
+**Event** (`Event` and `Topic` in `events.rs`, `event_specs()`): A typed message that the executor pushes on a socket that asked for it with `events.watch`, to the sessions in its audience that hold its capability. [Events](agents/interfaces/events.md) — not: subscription (that is a live query), notification
 
 **Event interest** (`events.watch`, `events.unwatch`, `EventInterest` in `api/event_interest.rs`): The event types, each optionally narrowed to some perspectives, that one socket asked for; a socket with no interest gets no events. [Events](agents/interfaces/events.md)
 
@@ -256,7 +258,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Processing claim** (`ProcessingClaim`, `try_claim`): A shared link that an executor writes before it runs an auto-processor batch, so that peers back off. [Auto-processor](perspectives/social-dna/interpretation/auto-processor.md)
 
-**Pub/sub topic** (`PubSub`, `*_TOPIC` in `rust-executor/src/pubsub.rs`): A named in-process broadcast channel on which executor code publishes a change once; every socket's event stream reads it. [Events](agents/interfaces/events.md)
+**Pub/sub topic** (`Topic` in `rust-executor/src/events.rs`, `PubSub`): The kind of an event, with its wire name. Executor code publishes each event once on the one in-process broadcast channel; every socket's event stream reads it. [Events](agents/interfaces/events.md)
 
 **Public perspective** (`Agent.perspective`): The signed links in an agent profile that describe the agent. [Agent profiles](agents/identity/profiles.md)
 
