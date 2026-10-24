@@ -209,67 +209,67 @@
   "domains": [
     {
       "name": "coasys:kel",
-      "owner": "AR-01",
+      "owner": "identity",
       "scheme": "data-integrity"
     },
     {
       "name": "coasys:link",
-      "owner": "AR-01",
+      "owner": "identity",
       "scheme": "domain-field"
     },
     {
       "name": "coasys:store-request",
-      "owner": "AR-01",
+      "owner": "identity",
       "scheme": "domain-field"
     },
     {
       "name": "coasys:head",
-      "owner": "AR-01",
+      "owner": "identity",
       "scheme": "domain-field"
     },
     {
       "name": "coasys:vouch",
-      "owner": "AR-01",
+      "owner": "identity",
       "scheme": "domain-field"
     },
     {
       "name": "coasys:offer",
-      "owner": "AR-02",
+      "owner": "device linking",
       "scheme": "domain-field"
     },
     {
       "name": "coasys:claim",
-      "owner": "AR-02",
+      "owner": "device linking",
       "scheme": "domain-field"
     },
     {
       "name": "coasys:pause",
-      "owner": "AR-02",
+      "owner": "device linking",
       "scheme": "domain-field"
     },
     {
       "name": "coasys:inbox",
-      "owner": "AR-02",
+      "owner": "device linking",
       "scheme": "domain-field"
     },
     {
       "name": "coasys:session",
-      "owner": "AR-04",
+      "owner": "executor hosting",
       "scheme": "domain-field"
     },
     {
       "name": "coasys:account",
-      "owner": "AR-03",
+      "owner": "wrapped-key store",
       "scheme": "domain-field"
     },
     {
       "name": "coasys:room-key",
-      "owner": "AR-08",
+      "owner": "server link language",
       "scheme": "domain-field"
     },
     {
       "name": "coasys:bot-grant",
-      "owner": "AR-04",
+      "owner": "executor hosting",
       "scheme": "domain-field"
     }
   ],

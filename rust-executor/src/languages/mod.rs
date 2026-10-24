@@ -2218,7 +2218,7 @@ impl LanguageController {
 
     /// The language to call `cap` on, for a caller that names `address`.
     /// Identity and token capabilities resolve only to the language at
-    /// `system_addresses.agent_language` (AR-01 4.9, 4.9.1); for any other
+    /// `system_addresses.agent_language`; for any other
     /// address they answer `NotAgentLanguage`. Other capabilities resolve to
     /// `address` itself.
     pub async fn language_for_capability(
@@ -2231,7 +2231,7 @@ impl LanguageController {
         Ok(Language::new(address.to_string()))
     }
 
-    /// The agent language, for an identity or token capability (AR-01 4.9).
+    /// The agent language, for an identity or token capability.
     pub async fn agent_language_for(
         &self,
         cap: capability::Capability,

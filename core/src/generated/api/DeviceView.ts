@@ -2,8 +2,8 @@
 import type { BotView } from "./BotView";
 
 /**
- * One device key of the identity, from its log (AR-02 4.15). Names, places and the master-key
- * holders come from the private record, which slice 1 does not have.
+ * One device key of the identity, from its log. Names, places and the master-key holders
+ * will come from the private record, which the executor does not have yet.
  */
 export type DeviceView = { keyId: string, sign: string, bot: BotView | null, expires: number | null, addedSeq: number, revokedSeq: number | null, 
 /**

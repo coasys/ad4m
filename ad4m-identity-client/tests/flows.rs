@@ -573,7 +573,8 @@ async fn revoke_ends_the_second_executors_key() {
     assert_eq!(a.status().await.unwrap().revoked, None);
     assert_eq!(vault.unlocks(), vec![MasterUse::Link, MasterUse::Revoke]);
 
-    // A revoked key cannot join again: the store keeps every key it ever listed (A4).
+    // A revoked key cannot join again: the store keeps every key it ever listed (the store's
+    // one-key check).
     let again = LinkFlow::open(
         &a,
         &vault,

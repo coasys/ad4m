@@ -1,6 +1,6 @@
 # `did:scid:coasys:1` — format 1 of the Coasys key log
 
-Status: draft for review (AR-01 4.2–4.4, 4.7; implementation details ad4m/06 and ad4m/07).
+Status: draft for review.
 Reference implementation: `ad4m-identity-core` on `ad4m-hash-chain`. Test vectors:
 `ad4m-identity-core/vectors/*.json`. Every build of the core (native, `wasm32`, with and
 without features) must give the answers the vectors hold.
@@ -51,7 +51,7 @@ members, and no others:
 | `op` | Members | Signed by |
 |---|---|---|
 | `incept` | `kind: "human"`, `master` (signing multikey), `next` (commitment), `add` (one or more device keys, no bot key) | master #0 and each listed device key |
-| `add` | `add` (exactly one device key), `offer` (offer id), `coSig` (the claim co-signature, AR-02) | the current master key |
+| `add` | `add` (exactly one device key), `offer` (offer id), `coSig` (the claim co-signature of device linking) | the current master key |
 | `revoke` | `revoke` (one or more device key ids) | the current master key |
 | `rotate` | `master` (the revealed key), `salt`, `next` (commitment or `null`), `revoke` (device key ids; left out when empty) | the revealed key |
 | `scope` | `key` (a bot key id), `can`, `expires` | the current master key |
@@ -67,8 +67,9 @@ A device key has one of three flat forms, and no other member:
 The first is valid until revoked; the second (`KeyLife::Until`) until revoked or until
 `expires` (unix seconds); the third is a bot key with its actions (`read`, `write`, `join`) and
 its expiry. A log holds nothing else: no names, device models, addresses, endpoints, emails
-or free text. The private record (AR-02) holds names. `fold` does not read `offer` or `coSig`;
-the store checks them against the claim (AR-02, rule A7).
+or free text. The private record, kept outside the log, holds names. `fold` does not read `offer` or
+`coSig`; the store checks them against the claim (the claim check, listed in
+`identity-store/AGENTS.md`).
 
 ## 4. Hashes, the SCID and proofs
 
@@ -95,7 +96,7 @@ rule. Each rule names the error that the reference implementation returns
 - **P1** No floating-point number (`Format(Float)`) and no integer at or above 2^53
   (`Format(BigInteger)`) anywhere in the event.
 - **P2** `format` is `"coasys/1"` (`Format(Version)`).
-- **P3** `op` is one of the five (`Format(UnknownOp)`); the event holds only the members of §3
+- **P3** `op` is one of the five (`Format(UnknownOp)`); the event holds only the members of section 3
   for its op (`Format(UnknownField)`); each member has its type (`Format(Missing)`,
   `Format(Type)`).
 - **P4** A device key holds only `id`, `sign`, `enc`, `kind`, `can`, `expires`
@@ -115,7 +116,7 @@ rule. Each rule names the error that the reference implementation returns
 
 **Event #0**:
 
-- **K1** It is an `incept` (`Format(NotIncept)`), and its `scid` is the SCID of §4
+- **K1** It is an `incept` (`Format(NotIncept)`), and its `scid` is the SCID of section 4
   (`Format(Scid)`).
 - **K2** `master` is an Ed25519 signing key (`UnsupportedKeyType`); `next` is a SHA-256
   multihash (`Format(BadHash)`); `add` lists at least one key (`Format(EmptyAdd)`).
@@ -177,9 +178,9 @@ and the seq that ended it, the bot scopes per seq, `next`, and `ended`.
 ## 7. Signing domains
 
 Every signature names its domain and every verifier states the domain it expects. Log events
-sign with the Data Integrity proof of §4 under `coasys:kel`. Every other domain signs
+sign with the Data Integrity proof of section 4 under `coasys:kel`. Every other domain signs
 `JCS(value + {"domain": domain})` with Ed25519 (the value is an object without a `domain`
-member). The registry (AR-01 4.2) is `ad4m_identity_core::domain::SIGNING_DOMAINS`:
+member). The registry is `ad4m_identity_core::domain::SIGNING_DOMAINS`:
 `coasys:kel`, `coasys:link`, `coasys:store-request`, `coasys:head`, `coasys:vouch`,
 `coasys:offer`, `coasys:claim`, `coasys:pause`, `coasys:inbox`, `coasys:session`,
 `coasys:account`, `coasys:room-key`, `coasys:bot-grant`. These labels enter a hash or a key
@@ -190,14 +191,15 @@ derivation and are never signing domains; every signing API refuses them: `coasy
 
 - 12 BIP-39 English words (128 bits of entropy); the BIP-39 seed with an empty passphrase.
 - Master key *n*: SLIP-0010 Ed25519 at the hardened path `m/7133'/0'/n'` (provisional until
-  this spec merges, AR-01 4.4).
+  this spec is accepted).
 - `salt_n = HKDF-SHA256(ikm = seed, salt = "coasys/1", info = "next-salt/" ‖ n)[0..16]`, with *n*
   in decimal ASCII (`next-salt/1`).
 - #0 commits to master 1 with `salt_1`; the rotation to master *n* reveals master *n* and
   `salt_n` and commits to master *n*+1 with `salt_{n+1}`. The words alone reproduce every
   commitment; no device stores the next key or its salt.
 - The private record's recovery key: `HKDF-SHA256(ikm = seed, salt = "coasys/1", info =
-  "record-recovery")`, 32 bytes, as an X25519 secret (AR-02 4.9).
+  "record-recovery")`, 32 bytes, as an X25519 secret, so the words alone recover the private
+  record.
 - Device keys and their X25519 keys come from random bytes, never from the words.
 
 ## 9. Proof of work for a log with no vouching note
@@ -218,7 +220,7 @@ listed key, so one proof admits one log.
 - `fold` refuses unknown fields so that no personal data enters a log by accident. `offer` and
   `coSig` are opaque to `fold`.
 - The core reads no clock. Expiries are compared with the caller's trusted time; the store
-  refuses an `expires` in the past or more than 400 days ahead (AR-02 4.3.4).
+  refuses an `expires` in the past or more than 400 days ahead.
 
 ## 11. Test vectors
 

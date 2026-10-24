@@ -1,4 +1,5 @@
-//! The brake's proof of work for a new log with no vouching note (AR-01 4.7): a 16-byte
+//! The brake's proof of work for a new log with no vouching note (section 9 of
+//! `docs-src/identity/did-scid-coasys-1.md`): a 16-byte
 //! `nonce` such that `sha256("coasys:pow" ‖ scid ‖ nonce)` has at least `bits` leading zero
 //! bits. The proof binds to the SCID, which covers master #0, the next-key commitment and every
 //! listed device key, so one proof admits one log. The store keeps no state for a proof.
@@ -6,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// The hash prefix (a label, not a signing domain: AR-01 4.2).
+/// The hash prefix (a label, not a signing domain: see [`crate::domain::LABELS`]).
 pub const POW_LABEL: &str = "coasys:pow";
 /// The nonce length in bytes.
 pub const NONCE_LEN: usize = 16;

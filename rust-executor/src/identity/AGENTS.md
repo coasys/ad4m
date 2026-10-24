@@ -1,6 +1,6 @@
 # identity/ — agent guide
 
-The executor's side of `did:scid:coasys:1` (AR-01 4.8, 4.10; AR-02 4.15; AR-04 4.9): which
+The executor's side of `did:scid:coasys:1`: which
 identity each local agent's device key speaks for, the key logs it checked, and the
 `identity.*` calls (registered with their guards in `api/identity_ws.rs`).
 
@@ -21,9 +21,10 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
 
 ## Invariants
 
-- Logs arrive only through the agent language (decision 14.1); nothing here speaks HTTP.
+- Logs arrive only through the agent language, so a deployment can swap the store behind it;
+  nothing here speaks HTTP.
 - The cache only extends a log. A different event at a held seq, or a signed head below the
-  cached one (a shorter log, decision 14.2), records a fork, appends nothing and fires
+  cached one (a shorter log never truncates a held one), records a fork, appends nothing and fires
   `identity-fork` once per fork, to the sessions of the identity's local agents.
 - A head from the agent language counts only under `identity.storeKeys`; `ingest` takes events
   from any source with no head.
@@ -35,5 +36,6 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
 
 ## Do not
 
-- Do not read the words or a master key here, or add a call that carries one (AR-01 R48).
+- Do not read the words or a master key here, or add a call that carries one: the executor
+  holds device keys only.
 - Do not trust a store's hash or head: `import`/`fold` and `verify_head` decide.

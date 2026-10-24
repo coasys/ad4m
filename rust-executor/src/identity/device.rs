@@ -1,4 +1,4 @@
-//! An agent's device key as the key log sees it (AR-01 4.10): the wallet key (`main` for the
+//! An agent's device key as the key log sees it: the wallet key (`main` for the
 //! main agent, the DID for a managed agent), its multikey, the X25519 `enc` key `did_key`
 //! derives from it (no second secret), and a [`Signer`] that signs with the wallet.
 

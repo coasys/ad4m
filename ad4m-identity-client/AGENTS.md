@@ -1,9 +1,10 @@
 # ad4m-identity-client — agent guide
 
-The master-key side of `did:scid:coasys:1` for apps (AR-03 4.2–4.5; identity plan PR 1.1).
+The master-key side of `did:scid:coasys:1` for apps.
 The executor holds device keys only; an app (the desktop custody service, later the phone and
 the auth domain) holds the words and master keys through this crate, builds the events, and
-lets its executor co-sign and publish them. No custody key (decision 21.5).
+lets its executor co-sign and publish them. No custody key: no service keeps a copy of a
+master key for the person.
 
 | File | What |
 |---|---|
@@ -22,13 +23,13 @@ lets its executor co-sign and publish them. No custody key (decision 21.5).
 - **The words and master keys never reach an executor or a log.** No `ViaExecutor` call takes
   or returns one. Master keys live in a `Vault`; a flow reads one only through `Unlocked`.
 - **One unlock per flow** (`Vault::unlock`): linking signs the offer, the list requests and the
-  `add` under one unlock. AR-03 4.3.2 writes the vault as `with_unlocked(callback)`; the flows
-  are async across network calls, so the unlock is a guard the flow holds instead.
+  `add` under one unlock. A callback (`with_unlocked(callback)`) would fit a synchronous flow; the
+  flows are async across network calls, so the unlock is a guard the flow holds instead.
 - The client re-checks what it reads: every log goes through `fold` here too.
 - The core (no features) builds for `wasm32-unknown-unknown`; keep `tokio`, sockets and the
   system clock out of it (they sit behind `ws`, in examples and tests).
-- `create` publishes no proof of work: slice 1's store admits a `#0` without one (identity plan
-  PR 1.1); the brake and the `pow` step come in slice 3.
+- `create` publishes no proof of work: the store has no brake yet and admits a `#0` without
+  one; the `pow` step comes with the brake.
 
 ## Tests
 

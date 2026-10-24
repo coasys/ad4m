@@ -163,10 +163,10 @@ pub struct Ad4mConfig {
     /// the least-loaded node.
     pub sfu_preferred_node: Option<String>,
     /// `identity.storeUrl`: the identity store's base URL, given to the agent language as its
-    /// `storeUrl` setting (AR-01 4.9). Unset: the language's default store.
+    /// `storeUrl` setting. Unset: the language's default store.
     pub identity_store_url: Option<String>,
     /// `identity.storeKeys`: the store keys (Ed25519 multikeys) a head from the store must be
-    /// signed by (AR-01 4.8.2 rule 4). A list, so the store's key can rotate.
+    /// signed by. A list, so the store's key can rotate.
     pub identity_store_keys: Option<Vec<String>>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).

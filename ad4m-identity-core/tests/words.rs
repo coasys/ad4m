@@ -1,4 +1,4 @@
-//! The 12 words and master-key derivation (AR-01 4.4, R14).
+//! The 12 words and master-key derivation (section 8 of the format spec).
 #![cfg(all(feature = "words", feature = "build"))]
 
 mod common;

@@ -1,6 +1,7 @@
-//! `KelPolicy`: the key log as a chain type on `ad4m-hash-chain` (AR-01 4.3.2, rules 2–10 of
-//! 4.3.3). The module checks canonical form, `seq`, `prev` and the chain id first; the policy
-//! then decides who must sign and what the event may do.
+//! `KelPolicy`: the key log as a chain type on `ad4m-hash-chain` (rules K1–K15 in
+//! section 5 of `docs-src/identity/did-scid-coasys-1.md`). The module checks canonical form,
+//! `seq`, `prev` and the chain id first; the policy then decides who must sign and what the
+//! event may do.
 
 use ad4m_hash_chain::{decode_hash, verify_proof, ChainId, ChainPolicy, Hash, Multikey, Proof};
 use std::collections::BTreeMap;
@@ -150,7 +151,7 @@ impl ChainPolicy for KelPolicy {
     const TYPE: &'static str = "coasys:kel";
     const DOMAIN: &'static str = KEL_DOMAIN;
 
-    /// Rule 2 (SCID) and the `incept` signers. The chain id is the SCID.
+    /// Event #0 (spec rules K1–K4): the SCID and the `incept` signers. The chain id is the SCID.
     fn genesis(&self, event: &Event) -> Result<(ChainId, KeyState), FoldError> {
         check_format(event)?;
         let Op::Incept {
@@ -210,7 +211,8 @@ impl ChainPolicy for KelPolicy {
         event.scid.clone()
     }
 
-    /// Rules 3–10. Calls `verify_proof` with the key that `KeyState` names and the domain "coasys:kel".
+    /// Spec rules K5–K15. Calls `verify_proof` with the key that `KeyState` names and the
+    /// domain "coasys:kel".
     fn apply(&self, state: &mut KeyState, event: &Event) -> Result<(), FoldError> {
         if state.ended {
             return Err(FoldError::Ended);
@@ -268,7 +270,7 @@ impl ChainPolicy for KelPolicy {
                 });
                 state.next = next.clone();
                 if next.is_none() {
-                    // Rule 9: every key stops at this seq.
+                    // `next: null` ends the log: every key stops at this seq.
                     state.ended = true;
                     for record in state.masters.iter_mut().chain(state.keys.values_mut()) {
                         record.revoked.get_or_insert(seq);
@@ -324,7 +326,7 @@ fn check_actions(can: &[String]) -> Result<(), FoldError> {
     }
 }
 
-/// Rules 6, 7, 8 and 10 for one listed key, then adds it at `seq`.
+/// Spec rules K7, K8, K9 and K15 for one listed key, then adds it at `seq`.
 fn insert_key(state: &mut KeyState, key: &DeviceKey, seq: u64) -> Result<(), FoldError> {
     let want = state.next_device_id();
     if key.id != want {
@@ -386,7 +388,7 @@ fn require_master(state: &KeyState, event: &Event) -> Result<(), FoldError> {
     )
 }
 
-/// Rules 3 and 4: each listed signer has exactly one proof, naming `<did>#<id>`, purpose
+/// Spec rules K4 and K10: each listed signer has exactly one proof, naming `<did>#<id>`, purpose
 /// `assertionMethod`, domain `coasys:kel`, that verifies under its key. Any other proof fails.
 fn check_signers(did: &str, event: &Event, signers: &[(KeyId, Multikey)]) -> Result<(), FoldError> {
     for (id, key) in signers {

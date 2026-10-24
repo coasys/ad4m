@@ -1,7 +1,7 @@
-//! `ad4m-identity-client`: the master-key side of `did:scid:coasys:1` for apps (AR-03 4.2–4.5,
-//! identity plan PR 1.1). The executor never holds a master key or the words; an app does,
-//! through this library: a [`Vault`] keeps master keys, a [`MasterSigner`] signs with one, and
-//! the flows build the events the executor co-signs and publishes.
+//! `ad4m-identity-client`: the master-key side of `did:scid:coasys:1` for apps. The executor
+//! never holds a master key or the words; an app does, through this library: a [`Vault`] keeps
+//! master keys, a [`MasterSigner`] signs with one, and the flows build the events the executor
+//! co-signs and publishes.
 //!
 //! - [`flows::create`]: new words, master #0, an `incept` listing the executor's device key as
 //!   `d1`, the executor's co-signature, publish, then the vault keeps master #0.
@@ -9,9 +9,9 @@
 //!   the match code both sides show, and the `add` that spends the claim.
 //! - [`flows::revoke`]: a `revoke` signed by the current master key, published.
 //!
-//! No custody key (decision 21.5). The library has no clock, randomness or network of its
-//! own: [`Clock`], [`Random`] and [`executor::ExecutorRpc`] come in from the surface, so the
-//! same code runs natively and in WASM.
+//! No custody key: no service keeps a copy of a master key for the person. The library has no
+//! clock, randomness or network of its own: [`Clock`], [`Random`] and [`executor::ExecutorRpc`]
+//! come in from the surface, so the same code runs natively and in WASM.
 
 pub mod executor;
 pub mod flows;

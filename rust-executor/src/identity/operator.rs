@@ -1,9 +1,9 @@
-//! The operator record and the first-link rule (AR-04 4.9, decision D5 of decisions §20.3).
+//! The operator record and the first-link rule.
 //!
 //! The record names the identity that operates this executor: `ad4m-executor init --operator
-//! <did:scid>` sets it while it is empty, and a different value never replaces it (decision
-//! 22.7: only the recorded operator changes it, through `runtime.setOperator`, which slice 1
-//! does not have). A claim for the main agent while its key is in no valid log runs
+//! <did:scid>` sets it while it is empty, and a different value never replaces it (only the
+//! recorded operator may change it, through a `runtime.setOperator` call that does not exist
+//! yet). A claim for the main agent while its key is in no valid log runs
 //! [`first_link_check`] (in `ClaimService::claim_for_main`): only an offer of the recorded
 //! identity passes. While the key is valid in a log, `claim_for_main` refuses every offer
 //! (`already-linked`).
@@ -23,7 +23,7 @@ pub enum FirstLinkRefusal {
     FirstLink { operator: String, offer: String },
 }
 
-/// `OperatorRecord::admits_first_link` (AR-04 4.9.3): true only when the record is set and
+/// `OperatorRecord::admits_first_link`: true only when the record is set and
 /// names `offer_did`.
 pub fn admits_first_link(record: Option<&OperatorRecordRow>, offer_did: &str) -> bool {
     record.is_some_and(|r| r.scid == offer_did)
@@ -52,7 +52,7 @@ pub fn first_link_check(
 pub enum OperatorInitError {
     #[error("{0} is not a did:scid:coasys:1 identity")]
     NotAnIdentity(String),
-    /// The record names another identity (AR-04 4.9.2's stop message).
+    /// The record names another identity (`init --operator` stops with this message).
     #[error("This executor's operator is {0}. Only that identity can change it. To start with a new operator, use a new data folder.")]
     Recorded(String),
     #[error("the executor database: {0}")]
@@ -60,7 +60,8 @@ pub enum OperatorInitError {
 }
 
 /// Records `did` as the operator in the executor database at `db_path` while the record is
-/// empty. The same identity again is fine; another one stops with AR-04's message.
+/// empty. The same identity again is fine; another one stops with
+/// [`OperatorInitError::Recorded`]'s message.
 pub fn record_operator_at_init(
     db_path: &Path,
     did: &str,

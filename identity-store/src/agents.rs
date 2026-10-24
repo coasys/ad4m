@@ -1,12 +1,12 @@
-//! Agent records (AR-01 4.5.2 and 4.5.3, decision 21.1): today's agent profile under a
+//! Agent records: today's agent profile under a
 //! `did:key` or a `did:scid`.
 //!
 //! The record signature uses the `coasys:link` scheme over `{profile, version, anchor}`
 //! (`anchor` is `null` for a `did:key` record), by the device key `signedBy` names. A
 //! `did:key` record is signed by that key itself and needs no signed request; a bot key may
-//! write it only while its scope is in force (rule A5). A `did:scid` record comes with a signed
-//! request of that identity, names an anchor in its log, and is signed by a non-bot key of
-//! that log valid at the head.
+//! write it only while its scope is in force (the bot-scope check). A `did:scid` record comes
+//! with a signed request of that identity, names an anchor in its log, and is signed by a
+//! non-bot key of that log valid at the head.
 
 use ad4m_hash_chain::{decode_ed25519_multikey, decode_proof_value, MAX_SAFE_INTEGER};
 use ad4m_identity_core::{scid_of, verify_signed, LINK_DOMAIN};
@@ -149,7 +149,7 @@ impl Store {
         Ok(())
     }
 
-    /// Rule A5: a bot key writes its own record only while its scope is in force.
+    /// The bot-scope check: a bot key writes its own record only while its scope is in force.
     fn check_bot_writer(&self, key: &str, now: u64) -> Result<(), ApiError> {
         let conn = self.db.lock()?;
         let Some(scid) = db::key_owner(&conn, key)? else {

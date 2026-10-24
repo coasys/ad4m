@@ -1,8 +1,10 @@
 //! [`IdentityBackend`]: the executor's view of the agent language's identity interface
-//! (AR-01 4.8.1, 4.9; AR-02 4.16). The one implementation, [`AgentLanguageBackend`], calls the
+//! (section 5.8 of `docs-src/language-interface-spec.md`). The one implementation,
+//! [`AgentLanguageBackend`], calls the
 //! language at `system_addresses.agent_language` through
 //! `LanguageController::agent_language_for`, which refuses any other language. Nothing in the
-//! executor calls the store's HTTP routes directly (decision 14.1).
+//! executor calls the store's HTTP routes directly, so a deployment can swap
+//! the store behind the language.
 
 use std::time::Duration;
 
@@ -18,12 +20,12 @@ use serde_json::Value;
 use crate::languages::capability::Capability;
 use crate::languages::LanguageController;
 
-/// How long one call may take before it counts as `Unavailable` (AR-01 4.8.2 rule 7 asks 5 s
-/// for reads; the language's own host timeout is 10 s, so a slow store answers `unavailable`
+/// How long one call may take before it counts as `Unavailable` (a read should answer within
+/// 5 s; the language's own host timeout is 10 s, so a slow store answers `unavailable`
 /// from the language first).
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// How the identity interface refused or failed (AR-01 4.8.1).
+/// How the identity interface refused or failed.
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum IdentityError {
     /// `409` with the store's head: the append does not continue it.
@@ -76,7 +78,7 @@ impl From<IdentityErrorCode> for IdentityError {
     }
 }
 
-/// The agent language's identity calls the executor makes in slice 1.
+/// The agent language's identity calls the executor makes today.
 #[async_trait]
 pub trait IdentityBackend: Send + Sync {
     async fn log(&self, did: &str, from: u64) -> Result<Option<LogPage>, IdentityError>;

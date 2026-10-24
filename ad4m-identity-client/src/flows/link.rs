@@ -1,5 +1,5 @@
-//! `link` (AR-02 4.2, steps 1, 2, 4 and 5 on the holder's side): add a device or an executor to
-//! the identity.
+//! `link`, the holder's side: add a device or an executor to the identity. The device's side
+//! (the claim) runs on the executor (`identity.claimOffer`).
 //!
 //! 1. [`LinkFlow::open`]: one unlock of the vault for the whole flow; an offer signed by the
 //!    current master key at the log's head (`identity.openOffer`); the offer link carries the

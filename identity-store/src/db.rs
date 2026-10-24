@@ -1,4 +1,4 @@
-//! The SQLite file: the hash-chain module's tables and the store's own (AR-01 4.5.1, AR-02 4.3.5).
+//! The SQLite file: the hash-chain module's tables and the store's own.
 //!
 //! The store keeps one connection behind a mutex; every write runs in one immediate
 //! transaction. Reads replay a log from `chain_entries` with the identity core each time: a log
@@ -198,7 +198,8 @@ pub(crate) fn put_head(conn: &Connection, head: &SignedHead) -> Result<(), ApiEr
     Ok(())
 }
 
-/// The identity a signing key sits in, if any (rule A4 looks across every log).
+/// The identity a signing key sits in, if any (the one-key check looks across every
+/// log).
 pub fn key_owner(conn: &Connection, sign: &str) -> Result<Option<String>, ApiError> {
     Ok(conn
         .query_row(

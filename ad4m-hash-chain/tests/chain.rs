@@ -1,4 +1,4 @@
-//! Order and links, tampering, forks and out-of-order import (build plan 5.18.9).
+//! Order and links, tampering, forks and out-of-order import.
 #![cfg(not(target_arch = "wasm32"))]
 
 mod common;

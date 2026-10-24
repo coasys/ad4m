@@ -1,14 +1,15 @@
-//! `identity-store`: the shared store of `did:scid:coasys:1` key logs (AR-01 4.5) with the
-//! offers and claims of device linking (AR-02 4.3).
+//! `identity-store`: the shared store of `did:scid:coasys:1` key logs with the offers and
+//! claims of device linking.
 //!
 //! One SQLite file holds the hash-chain module's tables (`chain_heads`, `chain_entries`,
 //! `chain_forks`, type `coasys:kel`) and the store's own (`logs`, `heads`, `keys`, `agents`,
 //! `nonces`, `feed`, `offers`, `claims`). The store replays every event with the identity core
 //! before it appends, and commits each append with its head, key-index rows, feed items and
-//! the claim it spends in one transaction (rule A6). It can withhold an event, never forge one:
-//! every client checks the events' own signatures again.
+//! the claim it spends in one transaction (the one-transaction rule of
+//! `identity-store/AGENTS.md`). It can withhold an event, never forge one: every client checks
+//! the events' own signatures again.
 //!
-//! Slice 1 leaves out the brake's buckets, vouching notes and the sign-up pairing (slice 3):
+//! The store has no brake buckets, vouching notes or sign-up pairing yet:
 //! see [`log::admit_new_log`] for where the brake attaches.
 
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -46,8 +47,8 @@ pub fn system_clock() -> Clock {
 /// What an operator configures.
 #[derive(Clone, Debug)]
 pub struct Settings {
-    /// `POW_BITS`: the proof-of-work cost published at `GET /v1/pow` (default 22). In slice 1 a
-    /// new log needs no proof; a proof that is sent must meet it.
+    /// `POW_BITS`: the proof-of-work cost published at `GET /v1/pow` (default 22). Without a
+    /// brake a new log needs no proof; a proof that is sent must meet it.
     pub pow_bits: u8,
     /// `FEED_TOKEN`: the mirror token of `GET /v1/feed`. None: the feed answers `401` to all.
     pub feed_token: Option<String>,
@@ -66,7 +67,7 @@ impl Default for Settings {
 }
 
 /// A point inside a write where a test makes the store fail, to check that the write's
-/// transaction leaves nothing behind (AR-01 R18, AR-02 R7).
+/// transaction leaves nothing behind (an append, a claim's spend).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Fault {

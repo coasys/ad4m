@@ -33,7 +33,7 @@ const languagesToPublish = {
     // aren't code-templated — they get through to the language meta so tests
     // can assert on `socialContext.name` the same way they do for p-diff-sync.
     "server-link-language": {name: "server-link-language", description: "", possibleTemplateParams: ["SERVER_URL", "UID", "name", "description"]} as LanguageMetaInput,
-    // The agent language on the identity store (AR-01 4.9); the identity suite seeds it.
+    // The agent language on the identity store; the identity suite seeds it.
     "centralized-agent-language": {name: "centralized-agent-language", description: "", possibleTemplateParams: []} as LanguageMetaInput,
 }
 

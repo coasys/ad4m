@@ -1,8 +1,8 @@
 # ad4m-identity-core — agent guide
 
-The identity core of `did:scid:coasys:1` (AR-01 4.2–4.4, 4.7; build plan PR 1.1, "Key log").
+The identity core of `did:scid:coasys:1`.
 The key event log (KEL) is one chain type on `ad4m-hash-chain`: `Event` implements its
-`Entry`, `KelPolicy` holds rules 2–10 of AR-01 4.3.3, and `fold` gives a `KelChain`
+`Entry`, `KelPolicy` holds the spec's rules K1–K15, and `fold` gives a `KelChain`
 (`Chain<KelPolicy>`) whose `state()` is the `KeyState`. The format spec with every rule is
 `docs-src/identity/did-scid-coasys-1.md`; the vectors are `vectors/*.json`.
 
@@ -13,9 +13,9 @@ The key event log (KEL) is one chain type on `ad4m-hash-chain`: `Event` implemen
 | `src/policy.rs` | `KelPolicy` (`genesis`, `apply`), `FoldError`, `FormatError` |
 | `src/state.rs` | `KeyState`, `KeyRecord`: `key_valid_at`, `key_valid_at_time`, `bot_scope_at`, `current_master`, `key_id_of`, `next_device_id`, `encryption_keys_at` |
 | `src/keys.rs` | X25519 multikeys; key-type checks |
-| `src/domain.rs` | the signing-domain registry and labels of AR-01 4.2; `signing_bytes`, `verify_signed`, `check_domain`; `LINK_DOMAIN`, `HEAD_DOMAIN`, `REQUEST_DOMAIN`; `HeadStatement` (what the store signs for a head; the store signs it, executors verify it) |
+| `src/domain.rs` | the signing-domain registry and labels (spec section 7); `signing_bytes`, `verify_signed`, `check_domain`; `LINK_DOMAIN`, `HEAD_DOMAIN`, `REQUEST_DOMAIN`; `HeadStatement` (what the store signs for a head; the store signs it, executors verify it) |
 | `src/pow.rs` | `Pow`, `solve`, `solve_range`, `check` (the brake's proof of work, bound to the SCID) |
-| `src/link.rs` | AR-02 4.3–4.5: `Offer`, `SignedOffer`, `Claim`, `ClaimBody`, `ClaimView`, `OfferState`, `LinkError`; `offer_commit`, `sign_offer`/`verify_offer`, `make_claim`/`verify_claim`, `check_secret`, `match_code`, `check_add` (rule A7's conditions 2–5), `OfferString` (offer string and link), `DeviceString` |
+| `src/link.rs` | device linking: `Offer`, `SignedOffer`, `Claim`, `ClaimBody`, `ClaimView`, `OfferState`, `LinkError`; `offer_commit`, `sign_offer`/`verify_offer`, `make_claim`/`verify_claim`, `check_secret`, `match_code`, `check_add` (conditions 2–5 of the store's claim check, `identity-store/AGENTS.md`), `OfferString` (offer string and link), `DeviceString` |
 | `src/build.rs` | feature `build`: `*_unsigned` builders, `signing_input`, `attach_proof`, `Signer`, `cosign`, `incept_human`, `add_claimed`, `revoke`, `scope`, `rotate`, `sign_domain` |
 | `src/words.rs` | feature `words`: `generate`, `parse`, `seed`, `master_key`, `salt`, `next_commitment`, `recovery_secret`, `derive_ed25519` |
 | `src/wasm.rs` | feature `wasm`: the `KelChain` class (`fold`, `import`) and `KelHandle` |

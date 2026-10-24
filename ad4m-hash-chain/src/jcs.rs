@@ -1,9 +1,10 @@
 //! RFC 8785 JSON Canonicalization Scheme (JCS), restricted to the values a chain entry may hold.
 //!
 //! A hashed or signed object holds no floating-point number and no integer outside
-//! ±(2^53 − 1) (AR-01 4.2). With floats refused, JCS reduces to: no whitespace, object
-//! members sorted by the UTF-16 code units of their names, strings escaped as ECMAScript's
-//! `JSON.stringify` escapes them, integers in plain decimal.
+//! ±(2^53 − 1) (section 2 of `docs-src/identity/did-scid-coasys-1.md`). With floats refused,
+//! JCS reduces to: no whitespace, object members sorted by the UTF-16 code units of their
+//! names, strings escaped as ECMAScript's `JSON.stringify` escapes them, integers in plain
+//! decimal.
 
 use serde_json::{Map, Value};
 

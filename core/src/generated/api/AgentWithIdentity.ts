@@ -2,8 +2,8 @@
 import type { DecoratedPerspective } from "./DecoratedPerspective";
 
 /**
- * `agent.get`: the agent's profile, and the identity its device key speaks for (AR-01 4.10:
- * `did` stays the device `did:key`).
+ * `agent.get`: the agent's profile, and the identity its device key speaks for (`did`
+ * stays the device `did:key`).
  */
 export type AgentWithIdentity = { 
 /**

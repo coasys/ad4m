@@ -2,6 +2,6 @@
 import type { RequestBody } from "./RequestBody";
 
 /**
- * A request signed by a key of the identity (`X-Coasys-Request`, AR-01 4.5.2).
+ * A request signed by a key of the identity (`X-Coasys-Request`).
  */
 export type SignedRequest = { req: RequestBody, sig: string, };

@@ -1,4 +1,5 @@
-//! W3C Data Integrity proofs with the `eddsa-jcs-2022` cryptosuite (AR-01 4.3.3 rule 3).
+//! W3C Data Integrity proofs with the `eddsa-jcs-2022` cryptosuite (section 4 of
+//! `docs-src/identity/did-scid-coasys-1.md`).
 //!
 //! The key signs `sha256(JCS(proof config)) ‖ sha256(JCS(entry without "proof"))`, where the
 //! proof config is the proof without `proofValue` (plus the entry's `@context` when it has

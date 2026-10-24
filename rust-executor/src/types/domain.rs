@@ -151,7 +151,7 @@ pub struct AgentStatus {
     pub is_initialized: bool,
     pub is_unlocked: bool,
     /// The `did:scid` the agent's device key speaks for, or `null`. `did` stays the device
-    /// `did:key` (AR-01 4.10, decision 21.4).
+    /// `did:key`, so links and profiles keep the author they had.
     #[serde(default)]
     pub identity: Option<String>,
 }

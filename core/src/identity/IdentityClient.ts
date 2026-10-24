@@ -11,7 +11,7 @@ import type { SignedOffer } from "../generated/api/SignedOffer";
 import type { SignedRequest } from "../generated/api/SignedRequest";
 
 /**
- * The executor's `did:scid:coasys:1` calls (AR-01 4.10, AR-02 4.15).
+ * The executor's `did:scid:coasys:1` calls.
  *
  * The executor holds device keys only. Master keys and the 12 words stay with the app
  * (`ad4m-identity-client`), which signs the events and offers these calls pass on.

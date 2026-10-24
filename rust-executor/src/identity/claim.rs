@@ -1,11 +1,12 @@
-//! `ClaimService` (AR-02 4.15): the executor's side of a link. It answers an offer with one of
+//! `ClaimService`: the executor's side of a link. It answers an offer with one of
 //! its wallet keys and that key's `enc` key, co-signs the claim, and follows the offer until the
 //! holder's `add` lists the key.
 //!
-//! `claim_for_main` claims with the main wallet key and first runs AR-04's first-link rule
+//! `claim_for_main` claims with the main wallet key and first runs the first-link rule
 //! (`operator::first_link_check`): every path that claims for the main agent calls it, the
-//! `identity.claimOffer` handler today and the pre-join ticket path of a later slice, so the
-//! rule never depends on an RPC guard. `claim_for_tenant` (AR-05) comes with hosts.
+//! `identity.claimOffer` handler today and a pre-join ticket path when one exists, so the
+//! rule never depends on an RPC guard. Claims for a hosted tenant's agent are not
+//! here yet.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::did_of;
@@ -51,8 +52,8 @@ impl ClaimService<'_> {
 
     /// Claims `params.offer` with the main wallet key. Refuses `no-operator` with no operator
     /// record and `first-link` while the main key is in no log and the offer is not of the
-    /// recorded operator (AR-04 4.9.3); `already-linked` while the main key speaks for an
-    /// identity (a revoked key needs a new main key, AR-02's `identity.rekey`).
+    /// recorded operator; `already-linked` while the main key speaks for an
+    /// identity (a revoked key needs a new main key, which no call makes yet).
     pub async fn claim_for_main(
         &self,
         params: &ClaimOfferParams,
@@ -87,7 +88,7 @@ impl ClaimService<'_> {
             secret,
             &signer,
             enc,
-            // An executor never keeps the master key (AR-02 4.6.1).
+            // An executor never keeps the master key: `canKeepMaster` is false.
             false,
             params.hint.clone(),
         )
@@ -118,7 +119,7 @@ impl ClaimService<'_> {
     }
 
     /// `identity.joinStatus`: the state of a claim this executor made for its main agent (the
-    /// only agent that claims in slice 1); on `spent`, takes the log and records that the main
+    /// only agent that claims today); on `spent`, takes the log and records that the main
     /// agent speaks for the identity. A managed agent has no claims.
     pub async fn join_status(
         &self,

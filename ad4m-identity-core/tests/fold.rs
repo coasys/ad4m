@@ -1,5 +1,5 @@
-//! `fold` refuses each crafted case (AR-01 8.1, R5, R6, R10, R13), and the typed and JSON
-//! paths agree. Wrong `seq` and `prev` are the module's `ChainError`; the rest are
+//! `fold` refuses each crafted case (the rules of section 5 of the format spec), and the typed
+//! and JSON paths agree. Wrong `seq` and `prev` are the module's `ChainError`; the rest are
 //! `ChainError::Policy(FoldError)`.
 #![cfg(feature = "build")]
 

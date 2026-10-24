@@ -1,4 +1,5 @@
-//! Logs: the append with admission rules A1–A7 (AR-01 4.5.4), log pages, heads and the key index.
+//! Logs: the append with the admission checks of `identity-store/AGENTS.md`, log pages, heads
+//! and the key index.
 
 use ad4m_hash_chain::store::{SqliteChainStore, StoreError, StoredEntry};
 use ad4m_hash_chain::Head;
@@ -17,7 +18,7 @@ use crate::{Fault, Store};
 pub const MAX_EVENTS: usize = 32;
 /// Events per log page.
 pub const PAGE_EVENTS: u32 = 256;
-/// The furthest ahead an `expires` in an `incept` or `add` may lie (AR-02 4.3.4).
+/// The furthest ahead an `expires` in an `incept` or `add` may lie: 400 days.
 pub const MAX_KEY_LIFE_S: u64 = 400 * 86_400;
 
 fn chain_error(e: &ChainError<FoldError>) -> ApiError {
@@ -32,10 +33,12 @@ fn chain_error(e: &ChainError<FoldError>) -> ApiError {
     ApiError::invalid(&name, e.to_string())
 }
 
-/// How a new log with no vouching note is admitted (AR-01 4.7). Slice 1 has no brake: no
+/// How a new log with no vouching note is admitted (section 9 of
+/// `docs-src/identity/did-scid-coasys-1.md`). There is no brake yet: no
 /// bucket per address, no store-wide ceiling and no required proof of work. A proof that is
-/// sent must still meet `POW_BITS`, so the request format and the client's work stay those of
-/// AR-01. Slice 3 adds the buckets and makes the proof required here, before any replay.
+/// sent must still meet `POW_BITS`, so the request format and the client's work stay those
+/// of the format. The brake adds the buckets and makes the proof required here, before any
+/// replay.
 pub fn admit_new_log(
     scid: &str,
     proof: Option<&ad4m_ldk::identity::Pow>,
@@ -56,7 +59,8 @@ pub fn admit_new_log(
     Ok(())
 }
 
-/// The store's own check of rule 8: an `expires` in an `incept` or `add` neither in the past
+/// The store's own check of expiries (the core reads no clock): an `expires` in an `incept` or
+/// `add` neither in the past
 /// nor more than 400 days ahead, by the store's clock.
 fn check_expires(event: &Event, now: u64) -> Result<(), ApiError> {
     let keys: &[DeviceKey] = match &event.op {
@@ -136,7 +140,7 @@ impl Store {
         let new_log = stored.is_none();
         let first = &events[0];
 
-        // A1, A2, A3: continuity, a new log's admission, replay.
+        // The continuity check, the new-log admission and the replay check.
         let mut chain: KelChain;
         let mut befores = Vec::with_capacity(events.len());
         let rest: &[Event];
@@ -154,7 +158,7 @@ impl Store {
                 chain = KelChain::genesis(&KelPolicy, first).map_err(|e| chain_error(&e))?;
                 admit_new_log(scid, req.pow.as_ref(), self.settings.pow_bits)?;
                 if req.vouch.is_some() {
-                    // No vouching service is configured before slice 3: nothing is committed.
+                    // No vouching service exists yet: nothing is committed.
                     return Err(ApiError::unavailable("vouch-unavailable"));
                 }
                 befores.push(None);
@@ -183,7 +187,7 @@ impl Store {
             befores.push(Some(before));
         }
 
-        // Rule 8 by the store's clock, A4 one key in one identity, A7 an add spends a claim.
+        // Expiries by the store's clock, the one-key check and the claim check.
         let mut spends = Vec::new();
         let mut supersede = false;
         for (event, before) in events.iter().zip(&befores) {
@@ -203,13 +207,15 @@ impl Store {
             }
         }
 
-        // A6: the events, the head, the key index, the feed and the spent claims in one transaction.
+        // The one-transaction rule: the events, the head, the key index, the feed and the spent
+        // claims in one transaction.
         let entries = events
             .iter()
             .map(|e| StoredEntry::from_entry(e, now))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| ApiError::invalid("malformed", e.to_string()))?;
-        // A1: `expect` is the head the request continues, read from the request itself.
+        // The continuity check: `expect` is the head the request continues, read from the
+        // request itself.
         let expect = match (&first.prev, first.seq) {
             (Some(prev), seq) if seq > 0 => Some(Head {
                 seq: seq - 1,
@@ -270,7 +276,7 @@ impl Store {
             events,
             appended_at,
             head,
-            // No vouching notes before slice 3: `vouched` reads false and `note` is empty.
+            // No vouching notes yet: `vouched` reads false and `note` is empty.
             note: None,
             vouched: false,
             pauses: Vec::new(),

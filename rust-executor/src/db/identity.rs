@@ -1,4 +1,4 @@
-//! The executor's identity rows (AR-01 4.10, AR-02 4.15, AR-04 4.9): the operator record,
+//! The executor's identity rows: the operator record,
 //! which identity each local agent speaks for, and the claims this executor made and waits on.
 //! The key logs themselves live in the hash-chain tables of the same file (`identity::cache`).
 //!
@@ -8,7 +8,7 @@
 use super::{Ad4mDb, Ad4mDbResult};
 use rusqlite::{params, Connection, OptionalExtension};
 
-/// How the operator record was set (AR-04 4.2.1, `operator_record.set_by`).
+/// How the operator record was set (`operator_record.set_by`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperatorSetBy {
     /// The desktop app's first run (`runtime.setOperator` on an empty record).
@@ -134,7 +134,7 @@ impl Ad4mDb {
         create_identity_tables(conn)
     }
 
-    /// The operator record, if set (AR-04 4.9.1).
+    /// The operator record, if set.
     pub fn operator_record(&self) -> Ad4mDbResult<Option<OperatorRecordRow>> {
         operator_record_in(&self.conn)
     }

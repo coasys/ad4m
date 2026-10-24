@@ -1,6 +1,7 @@
 # ad4m-hash-chain — agent guide
 
-The generic module under the key log (identity build plan 5.18, AR-01 4.2 and 4.3.3).
+The generic module under the key log of `did:scid:coasys:1`
+(`docs-src/identity/did-scid-coasys-1.md`, sections 2, 4 and 5).
 It stores and checks append-only, **linear** chains of signed JSON entries. It knows
 bytes, hashes, signatures, order and forks; it does not know what an entry means. A
 chain type gives the meaning through `ChainPolicy` (the KEL's `KelPolicy` lives in the

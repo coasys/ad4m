@@ -1,5 +1,5 @@
-//! Offers and claims (AR-02 4.3): the offer routes, the claim route, the device's state poll,
-//! and rule A7's store side (a `Claimed` offer, spent in the append's transaction).
+//! Offers and claims: the offer routes, the claim route, the device's state poll,
+//! and the store's side of the claim check (a `Claimed` offer, spent in the append's transaction).
 //!
 //! An offer's time-based states are applied when the store next touches the identity's
 //! offers: an `open` offer past `expires`, and a `claimed` one past `expires + 300 s`, become
@@ -132,8 +132,9 @@ fn offer_state(conn: &Connection, scid: &str, row: &OfferRow) -> Result<OfferSta
     })
 }
 
-/// Rule A7, conditions 1–5: the `add` names a `Claimed` offer of this SCID, and the core's
-/// `check_add` passes against the state before the event. Any failure is `403 {error:"claim"}`.
+/// The claim check, conditions 1–5 (`identity-store/AGENTS.md`): the `add` names a `Claimed`
+/// offer of this SCID, and the core's `check_add` passes against the state before the event.
+/// Any failure is `403 {error:"claim"}`.
 pub(crate) fn check_spend(
     conn: &Connection,
     scid: &str,
@@ -154,7 +155,7 @@ pub(crate) fn check_spend(
     check_add(&row.signed, &claim, before, event, now).map_err(|e| refuse(&e.to_string()))
 }
 
-/// Rule A7, condition 6: the offer becomes `Spent { seq }` and the claim's row goes.
+/// The claim check, condition 6: the offer becomes `Spent { seq }` and the claim's row goes.
 pub(crate) fn spend(
     conn: &Connection,
     scid: &str,
@@ -174,7 +175,8 @@ pub(crate) fn spend(
     Ok(())
 }
 
-/// A `rotate` supersedes every open and claimed offer of the identity (AR-02 R8).
+/// A `rotate` supersedes every open and claimed offer of the identity: an offer signed by the
+/// old master no longer speaks for it.
 pub(crate) fn supersede(conn: &Connection, scid: &str, now: u64) -> Result<(), ApiError> {
     conn.execute(
         "UPDATE offers SET state = 'superseded', ended_at = ?2 WHERE scid = ?1 AND state IN ('open', 'claimed')",

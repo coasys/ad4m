@@ -1,6 +1,7 @@
-//! Key encodings of format 1 (AR-01 4.2): Ed25519 signing multikeys (`z6Mk…`) come from the
-//! hash-chain module; X25519 encryption multikeys (`z6LS…`) live here. Every other key type,
-//! the reserved P-256 passkey key included, is refused.
+//! Key encodings of format 1 (section 2 of `docs-src/identity/did-scid-coasys-1.md`): Ed25519
+//! signing multikeys (`z6Mk…`) come from the hash-chain module; X25519 encryption multikeys
+//! (`z6LS…`) live here. Every other key type, the reserved P-256 passkey key included, is
+//! refused.
 
 use ad4m_hash_chain::{decode_ed25519_multikey, Multikey};
 

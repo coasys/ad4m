@@ -1,4 +1,4 @@
-//! Offers and claims (AR-02 4.3–4.5): how a holder of the current master key lets a new device
+//! Offers and claims: how a holder of the current master key lets a new device
 //! put its key into the log.
 //!
 //! The holder opens an [`Offer`] (a commit of a 32-byte secret `s`, an expiry, an optional bound
@@ -7,7 +7,7 @@
 //! device makes a [`Claim`]: its signing key, its X25519 key, `s`, and a co-signature over
 //! [`ClaimBody`] (domain `coasys:claim`). Both sides show the [`match_code`]; the holder then
 //! appends the `add` that spends the claim (`build::add_claimed`), and the store checks it with
-//! [`check_add`] (rule A7).
+//! [`check_add`] (the claim check of `identity-store/AGENTS.md`).
 //!
 //! Pure functions: no I/O, no clock (callers pass `now`), no randomness (callers draw `s` and
 //! the offer id).
@@ -37,7 +37,7 @@ pub const OFFER_DOMAIN: &str = "coasys:offer";
 pub const CLAIM_DOMAIN: &str = "coasys:claim";
 /// The prefix of the offer commit `sha256("coasys:offer" ‖ s)` (a hash input, not a signature).
 pub const OFFER_COMMIT_PREFIX: &str = "coasys:offer";
-/// The match code's hash label (AR-01 4.2, second table).
+/// The match code's hash label (one of [`crate::domain::LABELS`]).
 pub const MATCH_LABEL: &str = "coasys:match";
 /// The prefix of an offer string.
 pub const OFFER_STRING_PREFIX: &str = "coasys:offer:1:";
@@ -149,7 +149,7 @@ pub struct ClaimView {
     pub claimed_at: u64,
 }
 
-/// The state of an offer (AR-02 4.3.3). Only `Open` and `Claimed` are live.
+/// The state of an offer. Only `Open` and `Claimed` are live.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum OfferState {
@@ -468,10 +468,10 @@ fn base32(bytes: &[u8]) -> String {
     out
 }
 
-/// Rule A7's conditions 2–5 (AR-02 4.3.2) for `event`, an `add` appended on `before` that names
-/// `offer`, whose stored claim is `claim`. The store checks condition 1 (a `Claimed` offer of the
-/// same SCID) when it reads the offer, and condition 6 (spend the claim, close the offer) when it
-/// commits.
+/// Conditions 2–5 of the claim check (`identity-store/AGENTS.md`) for `event`, an `add`
+/// appended on `before` that names `offer`, whose stored claim is `claim`. The store checks
+/// condition 1 (a `Claimed` offer of the same SCID) when it reads the offer, and condition 6
+/// (spend the claim, close the offer) when it commits.
 pub fn check_add(
     offer: &SignedOffer,
     claim: &ClaimView,

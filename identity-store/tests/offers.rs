@@ -1,4 +1,4 @@
-//! AR-02 8.2: offers, claims, the device's state poll and rule A7, on a real store over a
+//! Offers, claims, the device's state poll and the claim check, on a real store over a
 //! temporary SQLite file.
 
 mod common;
@@ -197,7 +197,8 @@ async fn rule_a7_fails_on_each_condition_alone() {
         "claim"
     );
 
-    // 6 (with A6): a failure after the event insert leaves the offer claimed and the log as it was.
+    // Condition 6 with the one-transaction rule: a failure after the event insert leaves the
+    // offer claimed and the log as it was.
     t.store.inject_fault(Fault::AfterEvents);
     let add = alice.add_claimed(&offer.offer, &view, None);
     let reply = t.append(&alice.scid(), &[&add]).await;

@@ -99,7 +99,7 @@
     "commit": "QmYaNuQLt6Cd2vRiVBqKn3YC9Q9fTuAtRLukhk6GpM4G3p",
     "s": "BhW1AHkQTp8xYHCAVGNdubJwmXEEddiN9ADmXeecSM3c"
   },
-  "description": "Offers and claims (AR-02 4.3-4.5): commit = multihash(sha256(\"coasys:offer\" || s)); the offer signature is Ed25519 over signing_bytes(\"coasys:offer\", {offer, by}); the claim co-signature over signing_bytes(\"coasys:claim\", ClaimBody); the match code is base32(sha256(JCS({scid, offerId, deviceKey, domain: \"coasys:match\"})))[0..6] in two groups of three; offer and device strings are prefix + base58btc(JCS(value)).",
+  "description": "Offers and claims: commit = multihash(sha256(\"coasys:offer\" || s)); the offer signature is Ed25519 over signing_bytes(\"coasys:offer\", {offer, by}); the claim co-signature over signing_bytes(\"coasys:claim\", ClaimBody); the match code is base32(sha256(JCS({scid, offerId, deviceKey, domain: \"coasys:match\"})))[0..6] in two groups of three; offer and device strings are prefix + base58btc(JCS(value)).",
   "deviceString": {
     "string": "coasys:device:1:2LFzH65pa42H7Lfri2zQGwEkPwdHDX7t75rQ1nGtd2wJBn5RCCAQJUE1RNQkJ5bkfuS7shjA4ZDYh4DHUGi3NPt6Ct4zn3DrRGt2YZso1mmWbeqVSnksfDtya9P5sjopWFh6Z2fBpNUXubn5EyqP1rz2urWwRdj8VQb1JCWma22Q7z2y86YZwLKW8XME6LxXYh5z7bqQgXNUevfdxPG2S2qdpjrfgbAUyEeQkRrExRvisbL7Jhg2ujFCtmVMtZ5gosdnPfaZWkWBveW3AgXo5QmjvswxnWf431Q28",
     "value": {

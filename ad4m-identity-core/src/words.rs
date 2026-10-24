@@ -1,11 +1,12 @@
-//! The 12 words and master-key derivation (feature `words`; AR-01 4.4).
+//! The 12 words and master-key derivation (feature `words`; section 8 of
+//! `docs-src/identity/did-scid-coasys-1.md`).
 //!
 //! - 12 BIP-39 English words, 128 bits of entropy; the BIP-39 seed with an empty passphrase.
 //! - Master key *n*: SLIP-0010 Ed25519 at the hardened path `m/7133'/0'/n'`.
 //! - `salt_n = HKDF-SHA256(ikm = seed, salt = "coasys/1", info = "next-salt/" ‖ n)[0..16]`,
 //!   with *n* in decimal ASCII; the commitment carries it as base58btc.
 //! - The private record's recovery key: `HKDF-SHA256(ikm = seed, salt = "coasys/1",
-//!   info = "record-recovery")`, 32 bytes, as an X25519 secret (AR-02 4.9).
+//!   info = "record-recovery")`, 32 bytes, as an X25519 secret.
 //!
 //! The words make master *n* and `salt_n` for every *n*, so a restore with the words alone
 //! reproduces every commitment and no device stores the next key or its salt. Device keys never
@@ -254,7 +255,8 @@ pub fn next_commitment(seed: &Seed, n: u32) -> Result<(Hash, String), WordsError
     Ok((commitment(&multikey, &salt), salt))
 }
 
-/// The private record's recovery key (AR-02 4.9; decision 22.1).
+/// The private record's recovery key: the words alone recover the record that holds the
+/// identity's names, so it derives from the seed, not from a device.
 pub fn recovery_secret(seed: &Seed) -> StaticSecret {
     let mut out = Zeroizing::new([0u8; 32]);
     hkdf(seed, RECOVERY_INFO, &mut out[..]);

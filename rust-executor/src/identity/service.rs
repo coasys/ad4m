@@ -1,4 +1,4 @@
-//! The operations behind the `identity.*` RPC calls (AR-01 4.10, AR-02 4.15). The handlers in
+//! The operations behind the `identity.*` RPC calls. The handlers in
 //! `api/identity_ws.rs` parse params and call these with the session's agent
 //! (`RequestContext::acts_as()`); each call reaches logs only through [`IdentityBackend`] and
 //! keeps what it learns in the [`KelCache`].
@@ -412,8 +412,8 @@ impl IdentityService {
         convert(&listings).map_err(|e| WsRpcError::internal(e.to_string()))
     }
 
-    /// `identity.devices`: the identity's device keys, from the log (no private record in
-    /// slice 1, so no names).
+    /// `identity.devices`: the identity's device keys, from the log (the executor has no
+    /// private record yet, so no names).
     pub async fn devices(&self, agent: &AgentContext) -> Result<Vec<DeviceView>, WsRpcError> {
         let (agent_did, key) = device_key(agent).map_err(WsRpcError::internal)?;
         let Some(scid) = db(|db| db.agent_identity(&agent_did))? else {

@@ -1,4 +1,4 @@
-//! Token wire types (AR-01 4.9.1, interfaces only). The same types live in
+//! Token wire types (interfaces only). The same types live in
 //! `ad4m-ldk/js/src/types.ts`. Accounts are DIDs, amounts are decimal
 //! strings, and the interface carries no signature: the language signs
 //! through its context, as it does for expressions.

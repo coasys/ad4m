@@ -72,7 +72,7 @@ fn later(chain: &KelChain, op: Op) -> Result<Event, BuildError> {
     })
 }
 
-/// Event #0 of a person's log with its SCID (rule 2) and no proof. Device ids must run `d1`, `d2`, ….
+/// Event #0 of a person's log with its SCID (spec section 4) and no proof. Device ids must run `d1`, `d2`, ….
 pub fn incept_unsigned(
     master: &Multikey,
     next: Hash,
@@ -227,10 +227,11 @@ fn signed_by_master(
     Ok(event)
 }
 
-/// The `add` that spends `claim` on `offer` (AR-02 4.3.2), signed by the current master key.
+/// The `add` that spends `claim` on `offer`, signed by the current master key.
 /// The key takes the next device id. A bot offer copies `offer.bot` into the key's bot mark;
 /// a device or node offer gives a standing key, or a `KeyLife::Until` key when `expires` is set
-/// (AR-02 4.3.4). A bot offer without a scope, or `expires` on a bot offer, is refused.
+/// (the store refuses one more than 400 days ahead). A bot offer without a scope, or `expires`
+/// on a bot offer, is refused.
 pub fn add_claimed(
     chain: &KelChain,
     master: &dyn Signer,

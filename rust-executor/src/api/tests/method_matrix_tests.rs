@@ -608,7 +608,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "sfu.ensureMembership",
         || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "did": "did:key:z6Mk" }),
     ),
-    // The identity calls (AR-01 4.10, AR-02 4.15).
+    // The identity calls.
     ("identity.log", || json!({ "did": "did:scid:coasys:1:Qm" })),
     ("identity.cosignIncept", || json!({ "event": {} })),
     ("identity.publish", || json!({ "events": [] })),

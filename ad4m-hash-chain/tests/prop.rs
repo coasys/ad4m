@@ -1,5 +1,5 @@
 //! Property: for random valid chains, `fold` of all entries equals `genesis` then `append`
-//! one by one, and equals `import` in random (shuffled) batch sizes (build plan 5.18.9).
+//! one by one, and equals `import` in random (shuffled) batch sizes.
 #![cfg(not(target_arch = "wasm32"))]
 
 mod common;

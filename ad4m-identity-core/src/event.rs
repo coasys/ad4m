@@ -1,4 +1,5 @@
-//! The five events of a key log (AR-01 4.3.1, 4.3.2) and their strict JSON form.
+//! The five events of a key log (section 3 of `docs-src/identity/did-scid-coasys-1.md`) and
+//! their strict JSON form.
 //!
 //! An event is parsed only through [`Event::from_json`] (the serde `Deserialize` impl calls it),
 //! which refuses unknown ops, unknown fields, floats, integers at or above 2^53, `kind` other
@@ -13,7 +14,7 @@ use serde_json::{Map, Value};
 use crate::policy::{FoldError, FormatError};
 use crate::KeyId;
 
-/// One key-log event. Its fields do not change (AR-01 4.3.2).
+/// One key-log event. Its fields do not change: a new field is a new format.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
     pub format: String,
@@ -34,7 +35,8 @@ pub enum Op {
         next: Hash,
         add: Vec<DeviceKey>,
     },
-    /// Exactly one key. `co_sig` is the new key's claim co-signature (AR-02); `fold` does not read it.
+    /// Exactly one key. `co_sig` is the new key's claim co-signature; `fold` does not
+    /// read it.
     Add {
         add: Vec<DeviceKey>,
         offer: String,
@@ -93,7 +95,7 @@ pub enum KeyLife {
 }
 
 /// A bot key's actions and expiry. `expires` is unix seconds; `can` holds `"read"`,
-/// `"write"`, `"join"` (AR-04 4.14).
+/// `"write"`, `"join"` (spec rule K15).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BotScope {
     pub can: Vec<String>,
@@ -214,7 +216,8 @@ const COMMON_FIELDS: &[&str] = &["format", "scid", "seq", "prev", "op", "proof"]
 const DEVICE_KEY_FIELDS: &[&str] = &["id", "sign", "enc", "kind", "can", "expires"];
 
 impl Event {
-    /// Parses one event from JSON under the format-1 rules (AR-01 4.3.3 rule 10, R13).
+    /// Parses one event from JSON under the parsing rules P1–P6 of the format
+    /// spec.
     pub fn from_json(value: &Value) -> Result<Event, FoldError> {
         check_canonical(value)?;
         let map = value

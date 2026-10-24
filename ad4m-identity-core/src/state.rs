@@ -1,5 +1,5 @@
-//! The replayed state of one log (AR-01 4.3.2). The head and the hash at each seq live in
-//! `KelChain`, not here.
+//! The replayed state of one log (section 6 of `docs-src/identity/did-scid-coasys-1.md`). The
+//! head and the hash at each seq live in `KelChain`, not here.
 
 use ad4m_hash_chain::{Hash, Multikey};
 use serde::{Deserialize, Serialize};
@@ -109,7 +109,7 @@ impl KeyState {
             .map(|r| &r.id)
     }
 
-    /// The id the next added device key must carry (`d1`, `d2`, …; rule 6).
+    /// The id the next added device key must carry (`d1`, `d2`, …; spec rule K7).
     pub fn next_device_id(&self) -> KeyId {
         format!("d{}", self.keys.len() + 1)
     }

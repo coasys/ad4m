@@ -1,11 +1,13 @@
-//! `ad4m-identity-core`: the `did:scid:coasys:1` identity core (AR-01 4.2–4.4, 4.7).
+//! `ad4m-identity-core`: the `did:scid:coasys:1` identity core. The format spec
+//! is `docs-src/identity/did-scid-coasys-1.md`; its rule ids (P1, L1, K1, …) are those of its
+//! section 5.
 //!
 //! The key event log (KEL) is one chain type on `ad4m-hash-chain`: [`Event`] implements its
-//! `Entry`, [`KelPolicy`] holds rules 2–10 of AR-01 4.3.3, and [`fold`] gives a [`KelChain`]
+//! `Entry`, [`KelPolicy`] holds the spec's rules K1–K15, and [`fold`] gives a [`KelChain`]
 //! whose `state()` is the [`KeyState`]. The core does no I/O and reads no clock (callers pass
 //! `now`); it draws randomness only in `words::generate`. Features: `build` (event builders),
 //! `words` (the 12 words and master-key derivation), `wasm` (wasm-bindgen exports). [`link`]
-//! holds offers, claims and the match code (AR-02 4.3–4.5).
+//! holds offers, claims and the match code of device linking.
 
 use serde_json::{json, Value};
 
@@ -43,7 +45,7 @@ pub use state::{KeyRecord, KeyState};
 pub const FORMAT: &str = "coasys/1";
 /// The prefix of every identity.
 pub const DID_PREFIX: &str = "did:scid:coasys:1:";
-/// The value of `scid` in event #0 while its SCID is computed (rule 2).
+/// The value of `scid` in event #0 while its SCID is computed (spec section 4).
 pub const SCID_PLACEHOLDER: &str = "{SCID}";
 /// The signing domain of log events.
 pub const KEL_DOMAIN: &str = "coasys:kel";
@@ -56,7 +58,7 @@ pub type KeyId = String;
 /// One log on the hash-chain module: `head()` and `hash_at()` give the head and the hash at each seq.
 pub type KelChain = Chain<KelPolicy>;
 
-/// `ad4m_hash_chain::fold::<KelPolicy>`: order and links in the module, rules 2–10 in `KelPolicy`.
+/// `ad4m_hash_chain::fold::<KelPolicy>`: order and links in the module, rules K1–K15 in `KelPolicy`.
 pub fn fold(events: &[Event]) -> Result<KelChain, ChainError<FoldError>> {
     ad4m_hash_chain::fold(&KelPolicy, events)
 }
@@ -91,9 +93,9 @@ fn parse_events(events: &[Value]) -> Result<Vec<Event>, ChainError<FoldError>> {
         .collect()
 }
 
-/// The `ChainErrorCode` JSON of a fold or import error (build plan 5.18.4). A KEL refusal is
-/// `{"code": "policy", "reason": <FoldError name>, "detail": <message>}`, plus `"format":
-/// <FormatError name>` for a `FoldError::Format`.
+/// The `ChainErrorCode` JSON of a fold or import error, as the wasm exports throw it. A KEL
+/// refusal is `{"code": "policy", "reason": <FoldError name>, "detail": <message>}`, plus
+/// `"format": <FormatError name>` for a `FoldError::Format`.
 pub fn error_code(e: &ChainError<FoldError>) -> Value {
     match e {
         ChainError::Policy(fold) => {
@@ -114,8 +116,8 @@ pub fn event_hash(event: &Event) -> Result<Hash, FormatError> {
     ad4m_hash_chain::entry_hash(event).map_err(FormatError::from)
 }
 
-/// Rule 2: the hash of event #0 with `"scid": "{SCID}"` and no proof. The `scid` and `proof`
-/// that `event0` holds are ignored.
+/// The SCID (spec section 4, rule K1): the hash of event #0 with `"scid": "{SCID}"` and no
+/// proof. The `scid` and `proof` that `event0` holds are ignored.
 pub fn derive_scid(event0: &Event) -> Result<String, FormatError> {
     let mut body = event0.clone();
     body.scid = SCID_PLACEHOLDER.to_string();
@@ -140,8 +142,9 @@ pub fn verification_method(did: &str, key_id: &str) -> String {
     format!("{did}#{key_id}")
 }
 
-/// Rule 5: the commitment to a master key, `multihash_b58(sha256(JCS({"key": key, "salt": salt})))`,
-/// where `salt` is base58btc (no multibase prefix) of the 16-byte salt.
+/// The next-key commitment (spec section 4):
+/// `multihash_b58(sha256(JCS({"key": key, "salt": salt})))`, where `salt` is base58btc (no
+/// multibase prefix) of the 16-byte salt.
 pub fn commitment(key: &str, salt: &str) -> Hash {
     // An object of two strings holds no number, so it always has a canonical form.
     let text = ad4m_hash_chain::canonical_json(&json!({ "key": key, "salt": salt }))

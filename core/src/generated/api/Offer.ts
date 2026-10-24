@@ -3,6 +3,6 @@ import type { OfferKind } from "./OfferKind";
 import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
- * An offer (AR-02 4.3.1). Absent fields are left out: the signature covers the JCS form.
+ * An offer. Absent fields are left out: the signature covers the JCS form.
  */
 export type Offer = { scid: string, offerId: string, kind: OfferKind, commit: string, expires: number, deviceKey?: string, bot?: JsonValue, };

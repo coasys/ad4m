@@ -1,4 +1,4 @@
-//! AR-01 8.2: logs, heads, the key index, signed requests, limits and agent records, on a real
+//! Logs, heads, the key index, signed requests, limits and agent records, on a real
 //! store over a temporary SQLite file.
 
 mod common;
@@ -361,7 +361,7 @@ async fn signed_requests_expired_replayed_wrong_body_bot_key_and_revoked_key_are
     let d1 = alice.device_key(1);
     let later = t.now() + 60;
 
-    // A good request by a device key reaches the vouching step: no vouching service in slice 1.
+    // A good request by a device key reaches the vouching step: no vouching service exists yet.
     let good = alice.request("d1", &d1, "POST", &path, &body, later);
     let reply = send(good.clone()).await;
     assert_eq!(
@@ -470,7 +470,7 @@ async fn a_new_log_with_no_note_passes_without_a_proof_and_a_sent_proof_must_mee
     let reply = t.post(&path, &both).await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
     assert_eq!(reply.body["error"], "vouch-and-pow");
-    // A token: no vouching service in slice 1, nothing committed.
+    // A token: no vouching service exists yet, nothing committed.
     let reply = t
         .post(&path, &json!({ "events": events, "vouch": "tok" }))
         .await;
@@ -497,7 +497,7 @@ async fn a_new_log_with_no_note_passes_without_a_proof_and_a_sent_proof_must_mee
         )
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    // No proof at all: 200 (slice 1 has no brake).
+    // No proof at all: 200 (the store has no brake yet).
     t.publish(&bob).await;
     let page = t.get(&format!("/v1/logs/{}", bob.scid())).await.body;
     assert_eq!(page["vouched"], false);

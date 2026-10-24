@@ -1,5 +1,5 @@
-//! Signing domains (AR-01 4.2, R3, R58): a log proof never verifies as a link, request, head
-//! or note signature, and the reverse; labels are never signing domains.
+//! Signing domains (section 7 of the format spec): a log proof never verifies as a link,
+//! request, head or note signature, and the reverse; labels are never signing domains.
 #![cfg(feature = "build")]
 
 mod common;

@@ -1,5 +1,5 @@
 //! The `ChainStore` contract suite, run on `MemoryChainStore` and `SqliteChainStore`
-//! (build plan 5.18.9), plus the SQLite-only checks: forks after reopening the file, two
+//! (the same cases on both), plus the SQLite-only checks: forks after reopening the file, two
 //! connections racing, and `append_in` rolling back with its transaction.
 #![cfg(all(feature = "store", not(target_arch = "wasm32")))]
 

@@ -1,5 +1,5 @@
 //! Refusals and failures as HTTP answers. Every body is JSON with an `error` name; the agent
-//! language maps the status and the body onto `IdentityErrorCode` (AR-01 4.9).
+//! language maps the status and the body onto `IdentityErrorCode`.
 
 use ad4m_ldk::identity::SignedHead;
 use axum::http::{header, HeaderValue, StatusCode};
@@ -51,7 +51,7 @@ impl ApiError {
         )
     }
 
-    /// `409 {error:"key-taken", key}` (rule A4).
+    /// `409 {error:"key-taken", key}` (the one-key check).
     pub fn key_taken(key: &str) -> Self {
         Self::new(
             StatusCode::CONFLICT,

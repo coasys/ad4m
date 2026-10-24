@@ -1,7 +1,7 @@
-//! Contract of the identity and token interfaces (AR-01 4.5.2, 4.9, 4.9.1;
-//! AR-02 4.3.1, 4.16): a test language implements `IdentityCapability` and
-//! `TokenCapability` and expands through `ad4m_language!`; the wire types
-//! carry AR-01's JSON field names exactly and round-trip through serde.
+//! Contract of the identity and token interfaces (sections 5.8 and 5.9 of
+//! `docs-src/language-interface-spec.md`): a test language implements
+//! `IdentityCapability` and `TokenCapability` and expands through `ad4m_language!`; the wire types
+//! carry the store's JSON field names exactly and round-trip through serde.
 //!
 //! The shims marshal through `JsValue` and only run inside WASM, so the
 //! test calls the trait methods directly and checks that the shims expand.

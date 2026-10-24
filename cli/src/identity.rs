@@ -1,6 +1,6 @@
-//! `ad4m-executor init --operator <did>` and `ad4m-executor claim <link>` (identity slice 1,
-//! AR-04 4.9.2, AR-02 4.10.5): name the identity that operates this executor, and join it by
-//! claiming an offer link that identity's app opened.
+//! `ad4m-executor init --operator <did>` and `ad4m-executor claim <link>`: name the identity
+//! that operates this executor, and join it by claiming an offer link that identity's app
+//! opened.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -51,7 +51,7 @@ struct Join {
 }
 
 /// How long after the offer's expiry the holder may still confirm
-/// (`ad4m_identity_core::link::CONFIRM_GRACE_S`, AR-02 4.3.1).
+/// (`ad4m_identity_core::link::CONFIRM_GRACE_S`).
 const CONFIRM_GRACE_S: u64 = 300;
 
 /// Claims `offer` on the executor at `executor_url` (the operator's credential `token`), prints

@@ -1,4 +1,4 @@
-//! AR-01 8.5 and AR-02 8.3 for the Rust port: the same cases as `../tests/language.test.ts`,
+//! The Rust port's acceptance tests: the same cases as `../tests/language.test.ts`,
 //! run natively against a real `identity-store` process on a temporary SQLite file. The host's
 //! `httpFetch` is a plain HTTP/1.1 client that records every call; the test person's apps are
 //! `identity-store/examples/test_agent.rs`.

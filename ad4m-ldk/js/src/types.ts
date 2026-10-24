@@ -83,7 +83,7 @@ export interface JsonObject {
     [key: string]: JsonValue;
 }
 
-// ----- Identity wire types (AR-01 4.5.2, AR-02 4.3.1) -----
+// ----- Identity wire types -----
 //
 // Shared by the store, the executor and the agent language. Events travel
 // as opaque JSON objects: the store and the executor read them with the
@@ -102,7 +102,7 @@ export interface SignedHead {
     sig: string;
 }
 
-/** A bot key's pause record (AR-02 4.10.6). */
+/** A bot key's pause record: the bot's owner stops the bot without revoking its key. */
 export interface PauseRecord {
     scid: string;
     /** A bot key. */
@@ -128,7 +128,7 @@ export interface LogPage {
     pauses: PauseRecord[];
 }
 
-/** A proof of work on a new log with no note (AR-01 4.7). */
+/** A proof of work on a new log with no note (section 9 of `docs-src/identity/did-scid-coasys-1.md`). */
 export interface Pow {
     /** base58btc, 16 bytes. */
     nonce: string;
@@ -189,7 +189,7 @@ export interface SignedRequest {
     sig: string;
 }
 
-/** The log position a signature by a logged key names (AR-01 4.8.3). */
+/** The log position a signature by a logged key names: the verdict on the signature is taken at that seq. */
 export interface Anchor {
     kelDid: string;
     keyId: string;
@@ -316,7 +316,8 @@ export interface OfferProgress {
 }
 
 /**
- * The agent language's identity interface (AR-01 4.9, AR-02 4.16).
+ * The agent language's identity interface (section 5.8 of
+ * `docs-src/language-interface-spec.md`).
  * Each call maps to one store route. The language signs nothing and holds
  * no key: signed events and requests pass through unchanged. A refusal
  * throws an `IdentityError` carrying an `IdentityErrorCode`.
@@ -371,7 +372,7 @@ export type IdentityErrorCode =
     | { code: "not-found" }
     | { code: "unavailable" };
 
-// ----- Token interface (AR-01 4.9.1, interfaces only) -----
+// ----- Token interface (interfaces only) -----
 
 /** A decimal string: no floats, no 2^53 limit. */
 export interface Amount {

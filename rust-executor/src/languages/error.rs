@@ -31,7 +31,7 @@ pub enum LanguageError {
     EventLoopPanic { address: String, message: String },
 
     /// An identity or token capability asked of a language that is not the
-    /// agent language (AR-01 4.9: those run only on the agent language)
+    /// agent language (those run only on the agent language)
     NotAgentLanguage {
         address: String,
         capability: &'static str,

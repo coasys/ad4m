@@ -109,7 +109,8 @@ impl SqliteChainStore {
     }
 
     /// [`ChainStore::append`] inside the caller's transaction, so the caller commits the
-    /// append with its own writes (the shared store's rule A6) or rolls all of them back.
+    /// append with its own writes (the identity store's one-transaction rule) or rolls all of
+    /// them back.
     /// On `Err` this writes nothing (it runs inside its own savepoint).
     pub fn append_in(
         tx: &Transaction<'_>,

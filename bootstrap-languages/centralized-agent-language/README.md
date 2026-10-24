@@ -1,6 +1,7 @@
 # centralized-agent-language
 
-The closed beta's AD4M agent language (AR-01 4.9, AR-02 4.16). It keeps agent profiles and
+The closed beta's AD4M agent language (the identity interface of
+`docs-src/language-interface-spec.md`, section 5.8). It keeps agent profiles and
 serves the identity interface, both on the shared identity store (`identity-store/`):
 
 - `expressionCreate` / `expressionGet`: agent records at `PUT`/`GET /v1/agents/{did}` (no
@@ -13,7 +14,7 @@ serves the identity interface, both on the shared identity store (`identity-stor
   The language signs nothing; a `SignedRequest` travels in `X-Coasys-Request`; every body goes
   out as the argument's canonical JSON (so a signer hashes `JCS(body)`); HTTP statuses map one
   to one onto `IdentityErrorCode`, and a network failure is `unavailable`.
-- No token interface: the executor answers `disabled` (AR-01 4.9.1).
+- No token interface: the executor answers `disabled`.
 
 The store's base URL is the `storeUrl` language setting (`{"storeUrl": "https://…"}`), read on
 every call; without it, `https://store.coasys.org`.

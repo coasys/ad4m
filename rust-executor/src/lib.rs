@@ -503,7 +503,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     )
     .expect("Failed to initialize Ad4mDb");
 
-    // The key-log cache lives in the same database file (AR-01 4.8).
+    // The key-log cache lives in the same database file.
     {
         let db_path = std::path::Path::new(
             config

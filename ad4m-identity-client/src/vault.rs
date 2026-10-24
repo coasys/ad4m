@@ -1,20 +1,20 @@
 //! The vault holds master keys; [`MasterSigner`] signs with one without giving its bytes out
-//! (AR-03 4.3.2). Every use of a master key opens the vault once for a whole flow
+//! Every use of a master key opens the vault once for a whole flow
 //! ([`Vault::unlock`]: one prompt per change to the identity) and the flow's [`Unlocked`]
 //! guard expires after [`UNLOCK_TTL_S`] and wipes the key when it drops.
 //!
-//! Implementations: `DesktopVault` (the desktop shell), `PhoneVault`, `WebVault` (later
-//! slices), and [`MemoryVault`] for tests (feature `test-vault`, never in a release build).
+//! Implementations: `DesktopVault` (the desktop shell), `PhoneVault` and `WebVault` (neither
+//! written yet), and [`MemoryVault`] for tests (feature `test-vault`, never in a release build).
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::Multikey;
 
 use crate::secret::Secret;
 
-/// How long one unlock serves a flow (AR-03 4.2 rule 2).
+/// How long one unlock serves a flow: five minutes, then the surface asks again.
 pub const UNLOCK_TTL_S: u64 = 300;
 
-/// Why the surface asks for the unlock; shown in the OS prompt where the OS allows it. Slice 1's
+/// Why the surface asks for the unlock; shown in the OS prompt where the OS allows it. The
 /// flows unlock for a link and a revocation (`create` stores master #0 without an unlock).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MasterUse {

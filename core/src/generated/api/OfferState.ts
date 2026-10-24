@@ -2,6 +2,6 @@
 import type { ClaimView } from "./ClaimView";
 
 /**
- * An offer's state (AR-02 4.3.3).
+ * An offer's state.
  */
 export type OfferState = { "state": "open" } | { "state": "claimed", claim: ClaimView, } | { "state": "spent", seq: number, } | { "state": "expired" } | { "state": "cancelled" } | { "state": "contested" } | { "state": "locked" } | { "state": "superseded" };

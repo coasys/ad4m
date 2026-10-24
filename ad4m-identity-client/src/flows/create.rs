@@ -1,4 +1,4 @@
-//! `create` (AR-03 4.8.1, AR-01 S1): make an identity on this surface for its executor.
+//! `create`: make an identity on this surface for its executor.
 //!
 //! 1. New words; the surface shows them ([`CreateScreen::ShowWords`]).
 //! 2. The person types two of them back ([`CreateScreen::ConfirmWords`]); the words are wiped,
@@ -6,7 +6,7 @@
 //! 3. Master #0 and the commitment to master #1 from the seed; an `incept` listing the
 //!    executor's device key as `d1` with its `enc` key (`identity.status`); the executor adds
 //!    its proof (`identity.cosignIncept`); the client folds the event; `identity.publish`.
-//! 4. The vault keeps master #0 (after the publish, AR-03 4.8.1: a cancelled unlock leaves
+//! 4. The vault keeps master #0 (after the publish, so a cancelled unlock leaves
 //!    nothing in the store).
 
 use ad4m_identity_core::build::{incept_human, Signer};

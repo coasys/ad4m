@@ -1,6 +1,6 @@
 //! # Centralized Agent Expression Store, Rust ALDK port
 //!
-//! The closed beta's agent language (AR-01 4.9): agent profiles and the identity interface on
+//! The closed beta's agent language: agent profiles and the identity interface on
 //! the shared identity store, on the Rust ALDK; `pnpm build` ships it.
 //!
 //! - [`store`]: the identity calls, one store route each; the language signs nothing.
@@ -9,7 +9,7 @@
 //!
 //! The store's base URL is the `storeUrl` language setting (the executor fills it from
 //! `identity.storeUrl`), read on every call; without one, the production store. The language
-//! does not implement the token interface: the executor answers `disabled` (AR-01 4.9.1).
+//! does not implement the token interface: the executor answers `disabled`.
 
 pub mod agents;
 pub mod store;

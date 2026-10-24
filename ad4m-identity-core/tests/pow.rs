@@ -1,4 +1,4 @@
-//! The proof of work bound to the SCID (AR-01 4.7, R30).
+//! The proof of work bound to the SCID (section 9 of the format spec).
 
 use ad4m_identity_core::pow::{self, Pow};
 

@@ -1,4 +1,5 @@
-//! Byte encodings fixed by `did:scid:coasys:1` (AR-01 4.2): the SHA-256 multihash in
+//! Byte encodings fixed by `did:scid:coasys:1` (section 2 of
+//! `docs-src/identity/did-scid-coasys-1.md`): the SHA-256 multihash in
 //! base58btc without a multibase prefix, the Ed25519 multikey and the proof value.
 
 use sha2::{Digest, Sha256};

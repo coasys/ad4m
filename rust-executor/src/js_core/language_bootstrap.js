@@ -379,9 +379,9 @@ async function initLanguage(contextJson) {
         "languageGetSource", "getByAuthor", "getAll", "settingsIcon",
         // Holochain signal routing — also installed on globalThis below
         "handleHolochainSignal",
-        // Identity (AR-01 4.9, AR-02 4.16) and token (AR-01 4.9.1): the executor calls these
-        // only on the agent language. Every `Capability::export_name` must be listed here, or
-        // detection never sees it (capability.rs tests check this list).
+        // Identity and token (docs-src/language-interface-spec.md, 5.8 and 5.9): the
+        // executor calls these only on the agent language. Every `Capability::export_name`
+        // must be listed here, or detection never sees it (capability.rs tests check this list).
         "identityLog", "identityHead", "identityAppend", "identityKeyOwner",
         "identityPowParams", "identityAttachNote", "identityPutAgent",
         "identityOpenOffer", "identityListOffers", "identityCancelOffer",

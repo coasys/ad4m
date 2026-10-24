@@ -1,4 +1,4 @@
-//! The store's head key and its signed heads (`coasys:head`, AR-01 4.2 and 4.5.2).
+//! The store's head key and its signed heads (domain `coasys:head`).
 //!
 //! A signed head proves what the store said about a log at a time: `sig` is the store key's
 //! Ed25519 signature of `signing_bytes("coasys:head", {scid, seq, hash, time, store})`, where

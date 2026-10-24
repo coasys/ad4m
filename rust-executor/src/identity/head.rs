@@ -1,4 +1,4 @@
-//! The store's signed heads (`coasys:head`, AR-01 4.5.2, cache rule 4): a head counts only when
+//! The store's signed heads (`coasys:head`): a head counts only when
 //! one of the store keys in the executor's config (`identity.storeKeys`) signed it.
 
 use ad4m_identity_core::HeadStatement;

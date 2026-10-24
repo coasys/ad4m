@@ -1,7 +1,7 @@
-//! The `identity.*` WS RPC calls (AR-01 4.10, AR-02 4.15) with the guards of AR-04 4.9.5's
-//! table. "The agent's own session" is `Cap(…)` with the handler acting for
-//! `RequestContext::acts_as()`: the main agent for the operator and the main agent's apps, the
-//! managed agent for a user. The work is in `identity::service`.
+//! The `identity.*` WS RPC calls with their guards (the table in
+//! `tests::every_identity_call_has_its_guard`). "The agent's own session" is `Cap(…)` with the
+//! handler acting for `RequestContext::acts_as()`: the main agent for the operator and the main
+//! agent's apps, the managed agent for a user. The work is in `identity::service`.
 
 use std::sync::Arc;
 
@@ -122,7 +122,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     // Claims for the main agent with its wallet key: the operator only. The first-link rule
-    // runs inside `claim_for_main` (AR-04 4.9.3).
+    // runs inside `claim_for_main`, so it never depends on this guard.
     map.method::<ClaimOfferParams, ClaimOfferResult>("identity.claimOffer", claim_offer)
         .guard(Guard::Operator);
     map.method::<JoinStatusParams, JoinStatus>("identity.joinStatus", join_status)
@@ -138,7 +138,9 @@ mod tests {
     use super::*;
     use crate::agent::capabilities::Capability;
 
-    /// Each call carries the guard AR-04 4.9.5 assigns it.
+    /// Each call carries its guard: reads the agent read capability, co-signing the agent sign
+    /// capability, writes the agent update capability, and a claim for the main agent the
+    /// operator.
     #[test]
     fn every_identity_call_has_its_guard() {
         let mut map = HandlerMap::new();

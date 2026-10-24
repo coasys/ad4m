@@ -1,10 +1,10 @@
-//! Signed requests (AR-01 4.5.2): header `X-Coasys-Request` = base64url(JCS(SignedRequest)).
+//! Signed requests: header `X-Coasys-Request` = base64url(JCS(SignedRequest)).
 //!
 //! A request passes when its key is valid at the store's head by the store's clock and carries
 //! no bot mark; `kelSeq`/`kelHash` name a position the store holds; `expires` lies ahead, at
 //! most 5 minutes; `method`, `path` and `bodyHash` match the request; the nonce is new in the
-//! last 10 minutes; and the key's `coasys:store-request` signature verifies. Routes of AR-02
-//! that need the master key also require `keyId` to be the current master's.
+//! last 10 minutes; and the key's `coasys:store-request` signature verifies. Routes that need
+//! the master key (the offer routes) also require `keyId` to be the current master's.
 
 use ad4m_hash_chain::{decode_proof_value, hash_bytes};
 use ad4m_identity_core::{scid_of, verify_signed, KelChain, REQUEST_DOMAIN};
@@ -26,9 +26,10 @@ pub const NONCE_WINDOW_S: u64 = 600;
 /// Which keys a route accepts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Signer {
-    /// A non-bot device key or the current master key (AR-01 routes, decision 21.3).
+    /// A non-bot device key or the current master key (log, note and agent-record
+    /// routes). A bot key never signs a request.
     AnyKey,
-    /// Only the current master key (AR-02's offer routes).
+    /// Only the current master key (the offer routes).
     Master,
 }
 

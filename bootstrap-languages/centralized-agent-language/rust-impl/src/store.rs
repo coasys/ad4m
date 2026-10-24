@@ -1,4 +1,5 @@
-//! The agent language's identity interface on the shared store (AR-01 4.9, AR-02 4.16).
+//! The agent language's identity interface on the shared store (section 5.8 of
+//! `docs-src/language-interface-spec.md`).
 //!
 //! Each call is one store route. The language signs nothing and holds no key: events, offers,
 //! claims and signed requests pass through unchanged; a `SignedRequest` travels in the
@@ -20,7 +21,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 
-/// The production store (AR-01 4.5.3), used when the settings name none.
+/// The production store, used when the settings name none.
 pub const DEFAULT_STORE_URL: &str = "https://store.coasys.org";
 pub const REQUEST_HEADER: &str = "X-Coasys-Request";
 
@@ -69,7 +70,8 @@ fn forbidden_reason(error: &str) -> Option<ForbiddenReason> {
     })
 }
 
-/// The refusal an HTTP answer carries (AR-01 4.9: statuses map one to one).
+/// The refusal an HTTP answer carries (statuses map one to one onto
+/// `IdentityErrorCode`).
 pub fn refusal_of(status: u16, text: &str) -> IdentityErrorCode {
     let body: Value = serde_json::from_str(text).unwrap_or(Value::Null);
     let error = body

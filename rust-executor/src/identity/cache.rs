@@ -1,17 +1,16 @@
-//! [`KelCache`]: the key logs this executor checked, kept in the executor database (AR-01 4.8,
-//! cache rules of 4.8.2).
+//! [`KelCache`]: the key logs this executor checked, kept in the executor database.
 //!
 //! The events sit in the hash-chain module's `SqliteChainStore` tables (type `coasys:kel`) in
 //! `ad4m_db.sqlite`; the last signed head the cache accepted for each log sits beside them in
 //! `identity_heads`. Every event passes the identity core's `import` (order, links, every rule
 //! of the log) before it is stored, and the store only ever extends a log.
 //!
-//! Rule 3: the cache accepts only events that continue its head. A different event at a seq it
-//! holds, or a store that answers a shorter log (a signed head below the cached one, decision
-//! 14.2), records a fork with `record_fork`, appends nothing, keeps the cached history and calls
-//! the fork listener once per new fork (the executor publishes `identity-fork`). Rule 4: a head
-//! from the agent language counts only under a key of `identity.storeKeys`; events that arrive
-//! through [`KelCache::ingest`] need none.
+//! Extend only: the cache accepts only events that continue its head. A different event at a
+//! seq it holds, or a store that answers a shorter log (a signed head below the cached one: a
+//! shorter log never truncates a held one), records a fork with `record_fork`, appends nothing,
+//! keeps the cached history and calls the fork listener once per new fork (the executor
+//! publishes `identity-fork`). Signed heads: a head from the agent language counts only under a
+//! key of `identity.storeKeys`; events that arrive through [`KelCache::ingest`] need none.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -92,7 +91,7 @@ pub struct KelCache {
     /// `identity_heads`: the last signed head accepted per log.
     meta: StdMutex<Connection>,
     chains: Mutex<HashMap<String, KelChain>>,
-    /// One fetch per identity at a time (rule 2).
+    /// One fetch per identity at a time, so concurrent callers share one store round trip.
     fetching: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     store_keys: Vec<String>,
     on_fork: Option<ForkListener>,
@@ -246,7 +245,7 @@ impl KelCache {
     }
 
     /// Events from any source (a store, a space, another executor, an app): the same checks,
-    /// no head signature (AR-01 4.8.1). `events` are of one log and may come in any order.
+    /// no head signature. `events` are of one log and may come in any order.
     pub async fn ingest(&self, scid: &str, events: &[Event]) -> Result<Ingested, CacheError> {
         let mut chains = self.chains.lock().await;
         self.ingest_locked(&mut chains, scid, events).await
@@ -346,7 +345,7 @@ impl KelCache {
     }
 
     /// Takes a signed head and the events that reach it from the agent language: the head must
-    /// verify (rule 4); a head below the cached one is a fork (decision 14.2); the events must
+    /// verify under `identity.storeKeys`; a head below the cached one is a fork; the events must
     /// continue the cached log up to the head. Then the head is the log's accepted head.
     pub async fn accept(
         &self,

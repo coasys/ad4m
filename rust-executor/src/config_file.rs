@@ -224,7 +224,7 @@ pub struct ExecutorConfigFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sfu_stun_server: Option<String>,
     /// `identity.storeUrl` and `identity.storeKeys`: the identity store the agent language
-    /// reaches and the keys its heads must be signed by (AR-01 4.8.2, 4.9).
+    /// reaches and the keys its heads must be signed by.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentityFileSettings>,
 }

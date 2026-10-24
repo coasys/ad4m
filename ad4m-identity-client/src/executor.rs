@@ -1,4 +1,4 @@
-//! The store client through the executor (AR-03 4.3.3, `ViaExecutor`): every log read, append
+//! The store client through the executor (`ViaExecutor`): every log read, append
 //! and offer goes through the executor's `identity.*` calls, so the executor checks what it
 //! passes and keeps its cache current. The transport is [`ExecutorRpc`]: the desktop custody
 //! service calls its executor over the shell's loopback channel with the admin credential;
@@ -129,8 +129,8 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
         })
     }
 
-    /// Appends signed events through the executor (no vouching token or proof of work in
-    /// slice 1: the store admits a new log without one).
+    /// Appends signed events through the executor (no vouching token or proof of work:
+    /// the store has no brake yet and admits a new log without one).
     pub async fn publish(&self, events: &[Event]) -> Result<SignedHead, RpcError> {
         self.call("identity.publish", json!({ "events": json_of(&events)? }))
             .await

@@ -1,4 +1,4 @@
-//! `revoke` (AR-02 4.12, slice 1): end device keys of the identity with a `revoke` signed by
+//! `revoke`: end device keys of the identity with a `revoke` signed by
 //! the current master key, published through the executor. The revoked keys stop speaking
 //! for the person from that event on; their earlier signatures keep their verdicts.
 

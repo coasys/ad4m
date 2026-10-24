@@ -3,6 +3,6 @@
 /**
  * Two different events at one seq of a log, as the cache recorded them. For a store that
  * answers a shorter log, `seq` is the cache's head, `ours` its hash and `theirs` the hash of the
- * head the store signed (decision 14.2).
+ * head the store signed (a shorter log never truncates the cached one).
  */
 export type ForkRecord = { seq: number, ours: string, theirs: string, };

@@ -2,8 +2,8 @@
 import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
- * `identity.publish` params. No vouching token or proof of work in slice 1: the store admits a
- * new log without one.
+ * `identity.publish` params. No vouching token or proof of work: the store has no brake yet
+ * and admits a new log without one.
  */
 export type PublishParams = { 
 /**

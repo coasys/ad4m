@@ -33,7 +33,7 @@ pub enum Capability {
     TelepresenceSendBroadcast,
     LanguageGetSource,
     HolochainSignal,
-    // Identity (AR-01 4.9; offer and claim calls of AR-02 4.16). Agent language only.
+    // Identity, with the offer and claim calls of device linking. Agent language only.
     IdentityLog,
     IdentityHead,
     IdentityAppend,
@@ -46,7 +46,7 @@ pub enum Capability {
     IdentityCancelOffer,
     IdentityClaimOffer,
     IdentityOfferState,
-    // Token (AR-01 4.9.1, interfaces only). Agent language only.
+    // Token (interfaces only). Agent language only.
     TokenAssets,
     TokenBalance,
     TokenSend,
@@ -166,7 +166,8 @@ impl Capability {
     }
 
     /// Identity and token capabilities run only on the language at
-    /// `system_addresses.agent_language` (AR-01 4.9, 4.9.1).
+    /// `system_addresses.agent_language`, so a third-party language that exports them is never
+    /// asked.
     pub fn agent_language_only(self) -> bool {
         matches!(
             self,
@@ -287,7 +288,7 @@ pub fn detection_script() -> String {
 }
 
 /// The guard for identity and token capabilities: they run only on the
-/// language at `system_addresses.agent_language` (AR-01 4.9, 4.9.1). Any
+/// language at `system_addresses.agent_language`. Any
 /// other capability passes for any language.
 pub fn check_capability_target(
     cap: Capability,

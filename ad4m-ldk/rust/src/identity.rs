@@ -1,5 +1,5 @@
-//! Identity wire types (AR-01 4.5.2, AR-02 4.3.1) and the refusals of the
-//! agent language's identity interface (AR-01 4.9).
+//! Identity wire types and the refusals of the agent language's identity
+//! interface (section 5.8 of `docs-src/language-interface-spec.md`).
 //!
 //! Shared by the store, the executor and the agent language. The same
 //! types live in `ad4m-ldk/js/src/types.ts`. Events travel as opaque JSON
@@ -10,7 +10,8 @@
 //!
 //! JSON field names are camelCase. An absent optional field is `null`,
 //! except on the signed offer and claim, whose absent fields are left out
-//! as AR-02 4.3.1 fixes (their signatures cover the JCS form).
+//! (their signatures cover the JCS form, so a `null` would change the
+//! signed bytes).
 
 use serde::{Deserialize, Serialize};
 
@@ -55,7 +56,8 @@ pub struct AppendRequest {
     pub pow: Option<Pow>,
 }
 
-/// A proof of work on a new log with no note (AR-01 4.7).
+/// A proof of work on a new log with no note (section 9 of
+/// `docs-src/identity/did-scid-coasys-1.md`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pow {
@@ -91,7 +93,7 @@ pub struct KeyIndexEntry {
     /// An Until key's expiry, or the bot scope's.
     #[serde(default)]
     pub expires: Option<u64>,
-    /// A bot key under a pause record in force (AR-02); false for every other key.
+    /// A bot key under a pause record in force; false for every other key.
     #[serde(default)]
     pub paused: bool,
     /// The position the answer describes.
@@ -122,7 +124,8 @@ pub struct RequestBody {
     pub expires: u64,
 }
 
-/// The log position a signature by a logged key names (AR-01 4.8.3).
+/// The log position a signature by a logged key names: the verdict on the
+/// signature is taken at that seq.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Anchor {
@@ -157,7 +160,7 @@ impl AgentRecord {
     }
 }
 
-/// The platform's note that it checked one email address for this identity (AR-01 4.6).
+/// The platform's note that it checked one email address for this identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VouchNote {
@@ -180,7 +183,8 @@ pub struct SignedBy {
     pub kel_hash: String,
 }
 
-/// A bot key's pause record (AR-02 4.10.6).
+/// A bot key's pause record: the bot's owner stops the bot without revoking
+/// its key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PauseRecord {

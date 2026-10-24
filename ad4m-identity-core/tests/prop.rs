@@ -1,4 +1,4 @@
-//! Property test (AR-01 8.1, R11, R12): for random valid logs, `key_valid_at` and
+//! Property test: for random valid logs, `key_valid_at` and
 //! `key_valid_at_time` match a reference model built from the event list alone.
 #![cfg(all(feature = "build", not(target_arch = "wasm32")))]
 

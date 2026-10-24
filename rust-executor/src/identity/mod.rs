@@ -1,4 +1,4 @@
-//! The executor's side of `did:scid:coasys:1` (AR-01 4.8 and 4.10, AR-02 4.15, AR-04 4.9): which
+//! The executor's side of `did:scid:coasys:1`: which
 //! identity each local agent's device key speaks for, the key logs it checked, and the
 //! `identity.*` calls. See `AGENTS.md` in this directory.
 //!
@@ -67,7 +67,8 @@ pub fn service() -> Result<Arc<IdentityService>, WsRpcError> {
     })
 }
 
-/// `identity-fork`, to the sessions of the identity's local agents (decision 14.2).
+/// `identity-fork`, to the sessions of the identity's local agents, when the cache finds two
+/// logs for one identity.
 fn publish_fork(did: &str, fork: &ad4m_identity_core::ForkEvidence) {
     let scid = cache::scid_from(did).to_string();
     let agents = crate::db::Ad4mDb::with_global_instance(|db| db.agents_of_identity(&scid))

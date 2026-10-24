@@ -1,4 +1,5 @@
-//! Offers, claims, offer strings and rule A7 (AR-02 4.3–4.5; AR-02 8.1 R1, R2, R10–R12, R37, R47).
+//! Offers, claims, offer strings and the core's part of the store's claim check
+//! (`link::check_add`).
 #![cfg(feature = "build")]
 
 mod common;

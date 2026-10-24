@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-// The identity and token wire types (AR-01 4.5.2, 4.9.1) live in their own
+// The identity and token wire types live in their own
 // modules and are part of the language data shapes.
 pub use crate::identity::*;
 pub use crate::token::*;

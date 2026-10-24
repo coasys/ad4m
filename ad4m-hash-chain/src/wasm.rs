@@ -1,4 +1,4 @@
-//! wasm-bindgen exports of the `HashChain` TypeScript surface (build plan 5.18.4):
+//! wasm-bindgen exports of the `HashChain` TypeScript surface:
 //! `entryHash(entry: object): string` and `compare(ours, theirs, from, chain): Compare`.
 //! Errors are thrown as a `ChainErrorCode` object (`{ code: "malformed", reason }`).
 //! A chain type's `fold` and `import` are exported by the crate that holds its policy.

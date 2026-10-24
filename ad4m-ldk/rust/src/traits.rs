@@ -72,7 +72,8 @@ pub trait ExpressionCapability: Language {
 }
 
 /// `identity` capability — the agent language's identity interface
-/// (AR-01 4.9, with AR-02 4.16's offer and claim calls). Each call maps to
+/// (section 5.8 of `docs-src/language-interface-spec.md`), with the offer
+/// and claim calls of device linking. Each call maps to
 /// one store route. The language signs nothing and holds no key: signed
 /// events and requests pass through unchanged. A refusal is an
 /// [`IdentityErrorCode`] converted into the `LanguageError`
@@ -157,9 +158,10 @@ pub trait IdentityCapability: Language {
     ) -> impl std::future::Future<Output = LanguageResult<OfferProgress>>;
 }
 
-/// `token` capability — the agent language's token interface (AR-01
-/// 4.9.1, interfaces only). Accounts are DIDs and amounts decimal strings;
-/// the language signs through its context. A refusal is a
+/// `token` capability — the agent language's token interface
+/// (section 5.9 of `docs-src/language-interface-spec.md`, interfaces only).
+/// Accounts are DIDs and amounts decimal strings; the language signs
+/// through its context. A refusal is a
 /// [`TokenErrorCode`] converted into the `LanguageError`. Transfers reach
 /// the executor as the `token-transfer` language signal
 /// (`runtime::emit_token_transfer`).

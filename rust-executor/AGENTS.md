@@ -146,7 +146,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `keystoreFingerprint` (the saved keys) into `agent.json`, and the fallback to the backup runs
   only while the backup holds exactly those keys. Write the agent file only through
   `AgentService::save` / `try_save`.
-- **Identity** (`identity/`, AR-01 4.8 and 4.10): an agent's device key (the wallet key) may speak
+- **Identity** (`identity/`): an agent's device key (the wallet key) may speak
   for a `did:scid` whose log lists it; the master key and the 12 words never reach the executor
   (apps hold them through `ad4m-identity-client`). Logs come only through the agent language
   (`Capability::Identity*`, refused on any other language) and are kept after `fold` in

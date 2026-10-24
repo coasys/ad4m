@@ -400,7 +400,7 @@ For Languages that store other languages (the Language Language).
 
 ### 5.8 Identity (agent language only)
 
-The agent language's identity interface (AR-01 4.9, AR-02 4.16): the calls the executor makes
+The agent language's identity interface: the calls the executor makes
 to read, append and resolve `did:scid:coasys:1` key logs and to pass offers and claims. The
 closed beta's `centralized-agent-language` maps each call to one route of the shared identity
 store (`identity-store`); a later Holochain or Holograph agent language serves the same calls.
@@ -432,8 +432,8 @@ Rules for an implementation:
 
 - **It signs nothing and holds no key.** Events, offers, claims and signed requests pass
   through unchanged; a `SignedRequest` travels in the `X-Coasys-Request` header. Events are
-  opaque JSON objects (decision 24.4): the language never reads one; the executor and the
-  store check each with the identity core.
+  opaque JSON objects, so a new event format needs no new language: the language never reads
+  one; the executor and the store check each with the identity core.
 - **Refusals map one to one** onto `IdentityErrorCode` (`conflict` with the store's head,
   `key-taken`, `forbidden` with a reason, `invalid`, `rate-limited`, `gone` with the offer's
   state, `not-found`, `unavailable`). A refusal crosses the runtime as a language error whose
@@ -447,12 +447,12 @@ Rules for an implementation:
   `/v1/agents/{did}` routes.
 
 The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the
-calls it makes in slice 1 are `log`, `append`, `openOffer`, `listOffers`, `claimOffer` and
-`offerState`; the language serves the others for apps and later slices.
+calls it makes today are `log`, `append`, `openOffer`, `listOffers`, `claimOffer` and
+`offerState`; the language serves the others for apps and for later executor features.
 
 ### 5.9 Token (agent language only, interfaces only)
 
-The token interface (AR-01 4.9.1, decision 24.5): accounts are DIDs, amounts are decimal
+The token interface: accounts are DIDs, amounts are decimal
 strings (`Amount { value, decimals }`, no floats), and the interface carries no signature (the
 language signs through its context, as for expressions). Same routing rule as identity: the
 executor calls these only on the agent language.

@@ -1,5 +1,5 @@
 /**
- * Identity slice 1 (identity plan, Part 3; AR-01 8.4, AR-02 8.2, AR-04's D5 test): executors
+ * Identity end to end (create, link, the first-link refusal, revoke, fork, restart): executors
  * with no Holochain, a real identity-store this suite starts on a temp file, and the
  * centralized agent language seeded as every executor's agent language.
  *
@@ -47,7 +47,7 @@ interface Node {
     client: Ad4mClient;
 }
 
-describe("Identity slice 1: create, link, refuse a stranger, revoke, fork, restart", function () {
+describe("Identity: create, link, refuse a stranger, revoke, fork, restart", function () {
     this.timeout(600_000);
 
     let store: IdentityStore;

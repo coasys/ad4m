@@ -1,4 +1,4 @@
-//! Agent profiles on the shared store's agent records (AR-01 4.9, decision 21.1), in place of
+//! Agent profiles on the shared store's agent records, in place of
 //! the Node server at mock.ad4m.dev.
 //!
 //! - `create` publishes the running agent's profile under its `did:key`: an `AgentRecord`

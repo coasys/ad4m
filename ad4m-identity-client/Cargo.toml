@@ -2,7 +2,7 @@
 name = "ad4m-identity-client"
 version = "0.1.0"
 edition = "2021"
-description = "The master-key side of did:scid:coasys:1 for apps: the vault, the master signer, and the create, link and revoke flows through the executor (AR-03 4.2-4.5)"
+description = "The master-key side of did:scid:coasys:1 for apps: the vault, the master signer, and the create, link and revoke flows through the executor"
 license = "CAL-1.0"
 homepage = "https://ad4m.dev"
 repository = "https://github.com/coasys/ad4m"
@@ -10,7 +10,7 @@ publish = false
 
 [features]
 default = []
-# `MemoryVault`: master keys in memory. Tests only; never in a release build (AR-03 4.3.2).
+# `MemoryVault`: master keys in memory. Tests only; never in a release build.
 test-vault = []
 # `ExecutorRpc` for `ad4m-client`'s WebSocket client (native only).
 ws = ["dep:ad4m-client"]

@@ -1,4 +1,4 @@
-//! Key validity over seqs and time (AR-01 rules 8 and 9, R9, R11, R12, R54).
+//! Key validity over seqs and time (section 6 of the format spec).
 #![cfg(feature = "build")]
 
 mod common;

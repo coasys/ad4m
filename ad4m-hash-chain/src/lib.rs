@@ -3,7 +3,7 @@
 //! The module knows bytes, hashes, signatures, order and forks. It does not know what an
 //! entry means: a chain type gives the meaning through [`ChainPolicy`]. The core does no
 //! I/O, reads no clock and draws no randomness; storage adapters sit behind the `store` and
-//! `sqlite` features. Design: identity build plan 5.18, AR-01 4.2 and 4.3.3.
+//! `sqlite` features. The key log built on it: `docs-src/identity/did-scid-coasys-1.md`.
 
 use serde::de::DeserializeOwned;
 use serde::ser::SerializeMap;
@@ -124,7 +124,7 @@ impl<E: std::error::Error + 'static> std::error::Error for ChainError<E> {
 }
 
 impl<E: fmt::Display> ChainError<E> {
-    /// The TypeScript `ChainErrorCode` of this error (build plan 5.18.4).
+    /// The TypeScript `ChainErrorCode` of this error (the JSON the wasm exports throw).
     pub fn code(&self) -> Value {
         match self {
             ChainError::Seq { want, got } => json!({"code": "seq", "want": want, "got": got}),
@@ -461,7 +461,7 @@ pub fn import<P: ChainPolicy>(
     Ok(ImportOutcome::Appended { head: at, count })
 }
 
-// The TypeScript shapes of build plan 5.18.4: `{ kind: "same" }`, `{ kind: "fork", fork }`, …
+// The TypeScript shapes the wasm exports return: `{ kind: "same" }`, `{ kind: "fork", fork }`, …
 
 impl Serialize for Compare {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

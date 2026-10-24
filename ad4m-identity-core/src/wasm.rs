@@ -1,4 +1,4 @@
-//! wasm-bindgen exports of the `KelChain` TypeScript surface (build plan 5.18.4):
+//! wasm-bindgen exports of the `KelChain` TypeScript surface:
 //!
 //! ```ts
 //! class KelChain { static fold(events: object[]): KelHandle;                  // throws ChainErrorCode

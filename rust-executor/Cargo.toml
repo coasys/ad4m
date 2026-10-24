@@ -132,7 +132,7 @@ fs_extra = "1.3.0"
 os_info = "3.7.0"
 semver = "1.0.17"
 did-key = "0.2.1"
-# The key log (AR-01 4.8): the hash-chain module's SQLite store for the KelCache, the identity
+# The key log: the hash-chain module's SQLite store for the KelCache, the identity
 # core's fold, builders and offer/claim module (never `words`: no node makes the words), and
 # the identity wire types the agent language speaks.
 ad4m-hash-chain = { path = "../ad4m-hash-chain", features = ["sqlite"] }

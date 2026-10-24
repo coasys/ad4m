@@ -1,4 +1,4 @@
-//! A test person's apps over JSON lines, for the agent language suites (AR-01 8.5): the
+//! A test person's apps over JSON lines, for the agent language suites: the
 //! TypeScript language's tests and the Rust port's tests drive it to make real key-log events,
 //! offers, claims, signed requests and agent records with the identity core, then send them
 //! through the language to a real store.

@@ -687,7 +687,7 @@ jobs:
           path: /tmp/test-artifacts
           destination: test-logs
 
-  # Identity slice 1: a real identity-store and three executors (create, link,
+  # Identity end to end: a real identity-store and three executors (create, link,
   # first-link refusal, revoke, fork on a shorter log, cache after restart).
   # No Holochain. The suite builds identity-store and the holder example with cargo.
   integration-tests-identity:

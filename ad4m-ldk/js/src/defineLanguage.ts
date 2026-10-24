@@ -100,10 +100,12 @@ export interface LanguageSpec {
     query?: PerspectiveQueryCapability;
     peers?: PeersCapability;
     telepresence?: TelepresenceCapability;
-    /** The agent language's identity interface (AR-01 4.9). The executor
+    /** The agent language's identity interface (section 5.8 of
+     *  `docs-src/language-interface-spec.md`). The executor
      *  calls it only on the language at `system_addresses.agent_language`. */
     identity?: IdentitySpec;
-    /** The agent language's token interface (AR-01 4.9.1), agent language only. */
+    /** The agent language's token interface (section 5.9 of the same spec), agent
+     *  language only. */
     token?: TokenSpec;
 
     /** Holochain signal handler (spec §8). The runtime routes Holochain

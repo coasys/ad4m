@@ -1,4 +1,4 @@
-//! The format spec's vectors (AR-01 8.1, R1, R2, R4), recomputed from their inputs. Runs on
+//! The format spec's vectors (section 11), recomputed from their inputs. Runs on
 //! native and on wasm32-unknown-unknown (wasm-bindgen-test under Node). The words part of
 //! `commitment.json` needs the `words` feature.
 #![cfg(feature = "build")]

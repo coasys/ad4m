@@ -2,7 +2,7 @@
 name = "identity-store"
 version = "0.1.0"
 edition = "2021"
-description = "The shared store of did:scid:coasys:1 key logs: logs, signed heads, the key index, agent records, offers and claims (AR-01 4.5, AR-02 4.3)"
+description = "The shared store of did:scid:coasys:1 key logs: logs, signed heads, the key index, agent records, offers and claims"
 license = "CAL-1.0"
 homepage = "https://ad4m.dev"
 repository = "https://github.com/coasys/ad4m"
@@ -15,7 +15,7 @@ path = "src/main.rs"
 [dependencies]
 ad4m-hash-chain = { path = "../ad4m-hash-chain", features = ["sqlite"] }
 ad4m-identity-core = { path = "../ad4m-identity-core", features = ["build"] }
-# The wire types shared with the executor and the agent language (AR-01 4.5.2).
+# The wire types shared with the executor and the agent language (`ad4m_ldk::identity`).
 ad4m-ldk = { path = "../ad4m-ldk/rust" }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }

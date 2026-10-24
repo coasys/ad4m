@@ -1,12 +1,12 @@
-# The shared identity store (AR-01 4.5) as a container image. Build from the repo root:
+# The shared identity store as a container image. Build from the repo root:
 #
 #   docker build -f identity-store/Dockerfile -t identity-store .
 #   docker run -p 8080:8080 -v identity-store-data:/data identity-store
 #
 # The store keeps its SQLite file and its head key under /data. On first start it makes the
-# key and prints its public multikey on the "listening" line; AR-09 keeps the key as a secret
-# and mounts it instead (IDENTITY_STORE_KEY). `identity-store keygen` makes a key without
-# serving.
+# key and prints its public multikey on the "listening" line; a production deployment keeps
+# the key as a secret and mounts it instead (IDENTITY_STORE_KEY). `identity-store keygen`
+# makes a key without serving.
 
 FROM rust:1.96.1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev \

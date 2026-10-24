@@ -1,4 +1,5 @@
-//! The registry of signing domains and of the labels that are not signing domains (AR-01 4.2).
+//! The registry of signing domains and of the labels that are not signing domains (section 7
+//! of `docs-src/identity/did-scid-coasys-1.md`).
 //!
 //! Every signature names its domain, and a verifier states the domain it expects, so a
 //! signature made for one purpose never verifies for another. Log events use Data Integrity
@@ -25,96 +26,98 @@ pub enum Scheme {
 pub struct Domain {
     pub name: &'static str,
     pub signs: &'static str,
+    /// The part of the system whose messages the domain signs.
     pub owner: &'static str,
     pub scheme: Scheme,
 }
 
-/// The signature table of AR-01 4.2. A specification that needs a new domain adds a row there and here.
+/// The signature table (section 7 of `docs-src/identity/did-scid-coasys-1.md`). A part of the
+/// system that needs a new domain adds a row there and here.
 pub const SIGNING_DOMAINS: &[Domain] = &[
     Domain {
         name: "coasys:kel",
         signs: "log events",
-        owner: "AR-01",
+        owner: "identity",
         scheme: Scheme::DataIntegrity,
     },
     Domain {
         name: "coasys:link",
         signs: "links whose author key sits in a log",
-        owner: "AR-01",
+        owner: "identity",
         scheme: Scheme::DomainField,
     },
     Domain {
         name: "coasys:store-request",
         signs: "signed requests to the shared store",
-        owner: "AR-01",
+        owner: "identity",
         scheme: Scheme::DomainField,
     },
     Domain {
         name: "coasys:head",
         signs: "the store's signed heads",
-        owner: "AR-01",
+        owner: "identity",
         scheme: Scheme::DomainField,
     },
     Domain {
         name: "coasys:vouch",
         signs: "vouching notes",
-        owner: "AR-01",
+        owner: "identity",
         scheme: Scheme::DomainField,
     },
     Domain {
         name: "coasys:offer",
         signs: "offers",
-        owner: "AR-02",
+        owner: "device linking",
         scheme: Scheme::DomainField,
     },
     Domain {
         name: "coasys:claim",
         signs: "claim co-signatures",
-        owner: "AR-02",
+        owner: "device linking",
         scheme: Scheme::DomainField,
     },
     Domain {
         name: "coasys:pause",
         signs: "bot pause records",
-        owner: "AR-02",
+        owner: "device linking",
         scheme: Scheme::DomainField,
     },
     Domain {
         name: "coasys:inbox",
         signs: "device inbox messages",
-        owner: "AR-02",
+        owner: "device linking",
         scheme: Scheme::DomainField,
     },
     Domain {
         name: "coasys:session",
         signs: "key statements for a login on an executor, and the executor's sign-in to the hosting index",
-        owner: "AR-04",
+        owner: "executor hosting",
         scheme: Scheme::DomainField,
     },
     Domain {
         name: "coasys:account",
         signs: "signed requests to the wrapped-key store",
-        owner: "AR-03",
+        owner: "wrapped-key store",
         scheme: Scheme::DomainField,
     },
     Domain {
         name: "coasys:room-key",
         signs: "the server link language's signature over its X25519 public key",
-        owner: "AR-08",
+        owner: "server link language",
         scheme: Scheme::DomainField,
     },
     Domain {
         name: "coasys:bot-grant",
         signs: "a bot grant, signed by the owner's current master key",
-        owner: "AR-04",
+        owner: "executor hosting",
         scheme: Scheme::DomainField,
     },
 ];
 
-/// The second table of AR-01 4.2: strings that enter a hash or a key derivation. No key signs
+/// The labels: strings that enter a hash or a key derivation. No key signs
 /// them as a domain. (`coasys:offer` is also used as a hash prefix, but it is a signing domain
-/// first, so it sits in [`SIGNING_DOMAINS`]; the HPKE `info` strings of the device inbox are
-/// AR-02's and carry no fixed name here.)
+/// first, so it sits in [`SIGNING_DOMAINS`]; the HPKE `info` strings of the device inbox
+/// belong to device linking and carry no fixed name here.)
 pub const LABELS: &[&str] = &[
     "coasys:pow",
     "coasys:pair-id:1",
@@ -199,7 +202,7 @@ pub const HEAD_DOMAIN: &str = "coasys:head";
 /// The signing domain of signed requests to the store.
 pub const REQUEST_DOMAIN: &str = "coasys:store-request";
 
-/// What a store signs for a log's head under [`HEAD_DOMAIN`] (AR-01 4.5.2): `store` is the
+/// What a store signs for a log's head under [`HEAD_DOMAIN`]: `store` is the
 /// store key's `did:key`. The store signs it; executors check it against `identity.storeKeys`.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct HeadStatement<'a> {

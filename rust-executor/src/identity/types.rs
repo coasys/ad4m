@@ -1,4 +1,4 @@
-//! The `identity.*` RPC contracts (AR-01 4.10, AR-02 4.15) and the `identity-fork` event.
+//! The `identity.*` RPC contracts and the `identity-fork` event.
 //!
 //! The agent language speaks `ad4m_ldk::identity`'s wire types; these mirror the ones an RPC
 //! method carries, with `ts_rs` for the SDK, and serialise to the same JSON (camelCase,
@@ -34,7 +34,7 @@ pub struct SignedHead {
 
 /// Two different events at one seq of a log, as the cache recorded them. For a store that
 /// answers a shorter log, `seq` is the cache's head, `ours` its hash and `theirs` the hash of the
-/// head the store signed (decision 14.2).
+/// head the store signed (a shorter log never truncates the cached one).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ForkRecord {
@@ -102,8 +102,8 @@ pub struct CosignInceptParams {
     pub event: Value,
 }
 
-/// `identity.publish` params. No vouching token or proof of work in slice 1: the store admits a
-/// new log without one.
+/// `identity.publish` params. No vouching token or proof of work: the store has no brake yet
+/// and admits a new log without one.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishParams {
@@ -120,7 +120,7 @@ pub enum OfferKind {
     Bot,
 }
 
-/// An offer (AR-02 4.3.1). Absent fields are left out: the signature covers the JCS form.
+/// An offer. Absent fields are left out: the signature covers the JCS form.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Offer {
@@ -157,7 +157,7 @@ pub struct SignedOffer {
     pub sig: String,
 }
 
-/// A request signed by a key of the identity (`X-Coasys-Request`, AR-01 4.5.2).
+/// A request signed by a key of the identity (`X-Coasys-Request`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedRequest {
@@ -220,7 +220,7 @@ pub struct ClaimView {
     pub claimed_at: u64,
 }
 
-/// An offer's state (AR-02 4.3.3).
+/// An offer's state.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum OfferState {
@@ -300,8 +300,8 @@ pub struct BotView {
     pub expires: u64,
 }
 
-/// One device key of the identity, from its log (AR-02 4.15). Names, places and the master-key
-/// holders come from the private record, which slice 1 does not have.
+/// One device key of the identity, from its log. Names, places and the master-key holders
+/// will come from the private record, which the executor does not have yet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceView {
@@ -330,8 +330,8 @@ pub struct IdentityForkEvent {
     pub theirs: String,
 }
 
-/// `agent.get`: the agent's profile, and the identity its device key speaks for (AR-01 4.10:
-/// `did` stays the device `did:key`).
+/// `agent.get`: the agent's profile, and the identity its device key speaks for (`did`
+/// stays the device `did:key`).
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct AgentWithIdentity {
     #[serde(flatten)]

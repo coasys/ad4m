@@ -135,7 +135,7 @@ function testLanguage() {
     return { lang, calls, fire: (t: TokenTransfer) => transferSink?.(t) };
 }
 
-test("identity and token: flat exports carry the AR-01 names", () => {
+test("identity and token: flat exports carry the interface's names", () => {
     const { lang } = testLanguage();
     const identityNames = [
         "identityLog", "identityHead", "identityAppend", "identityKeyOwner",

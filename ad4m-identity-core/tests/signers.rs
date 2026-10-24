@@ -1,4 +1,4 @@
-//! Who signs (AR-01 rule 4, R7, R8): `add`, `revoke` and `scope` by the current master only;
+//! Who signs (format spec rules K10–K14): `add`, `revoke` and `scope` by the current master only;
 //! `rotate` by the revealed key with the committed salt; master *n* fails after the rotation.
 #![cfg(feature = "build")]
 

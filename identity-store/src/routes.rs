@@ -1,4 +1,4 @@
-//! The HTTP routes (AR-01 4.5.3, AR-02 4.3.6), base path `/v1`, JSON bodies.
+//! The HTTP routes (listed in `identity-store/AGENTS.md`), base path `/v1`, JSON bodies.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -173,9 +173,9 @@ async fn key_owner(
     }
 }
 
-/// `POST /v1/notes/{scid}`. The signed request is checked as AR-01 4.6 route 2 says (a non-bot
-/// device key valid at the head, or the current master key); then the store would redeem the
-/// token with the vouching service. Slice 1 configures none, so a valid request gets
+/// `POST /v1/notes/{scid}`. The signed request must come from a non-bot
+/// device key valid at the head, or from the current master key; then the store would redeem the
+/// token with the vouching service. No vouching service exists yet, so a valid request gets
 /// `503 {error:"vouch-unavailable"}` and nothing is stored.
 async fn attach_note(
     State(store): Shared,

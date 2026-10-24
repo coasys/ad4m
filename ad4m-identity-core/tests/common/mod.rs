@@ -1006,7 +1006,7 @@ fn check_domains(file: &Value) {
     }
 }
 
-// ----- Offers and claims (AR-02 4.3–4.5) -----
+// ----- Offers and claims -----
 
 /// The fixed offer secret `s`.
 pub fn link_secret() -> [u8; 32] {
@@ -1094,7 +1094,7 @@ fn build_link() -> Value {
     };
     let claim_bytes = signing_bytes(CLAIM_DOMAIN, &claim_body(&scid, &claim)).unwrap();
     json!({
-        "description": "Offers and claims (AR-02 4.3-4.5): commit = multihash(sha256(\"coasys:offer\" || s)); the offer signature is Ed25519 over signing_bytes(\"coasys:offer\", {offer, by}); the claim co-signature over signing_bytes(\"coasys:claim\", ClaimBody); the match code is base32(sha256(JCS({scid, offerId, deviceKey, domain: \"coasys:match\"})))[0..6] in two groups of three; offer and device strings are prefix + base58btc(JCS(value)).",
+        "description": "Offers and claims: commit = multihash(sha256(\"coasys:offer\" || s)); the offer signature is Ed25519 over signing_bytes(\"coasys:offer\", {offer, by}); the claim co-signature over signing_bytes(\"coasys:claim\", ClaimBody); the match code is base32(sha256(JCS({scid, offerId, deviceKey, domain: \"coasys:match\"})))[0..6] in two groups of three; offer and device strings are prefix + base58btc(JCS(value)).",
         "log": log.json(),
         "now": LINK_NOW,
         "commit": {"s": bs58::encode(s).into_string(), "commit": offer_commit(&s)},

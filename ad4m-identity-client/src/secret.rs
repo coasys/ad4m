@@ -1,5 +1,5 @@
 //! [`Secret`]: a secret value that zeroes itself, never prints, never serialises and never
-//! clones (AR-03 4.3.6). A secret leaves the client only into a vault's own storage call.
+//! clones. A secret leaves the client only into a vault's own storage call.
 
 use std::fmt;
 
