@@ -15,6 +15,7 @@ The key event log (KEL) is one chain type on `ad4m-hash-chain`: `Event` implemen
 | `src/keys.rs` | X25519 multikeys; key-type checks |
 | `src/domain.rs` | the signing-domain registry and labels of AR-01 4.2; `signing_bytes`, `verify_signed`, `check_domain` |
 | `src/pow.rs` | `Pow`, `solve`, `solve_range`, `check` (the brake's proof of work, bound to the SCID) |
+| `src/link.rs` | AR-02 4.3–4.5: `Offer`, `SignedOffer`, `Claim`, `ClaimBody`, `ClaimView`, `OfferState`, `LinkError`; `offer_commit`, `sign_offer`/`verify_offer`, `make_claim`/`verify_claim`, `check_secret`, `match_code`, `check_add` (rule A7's conditions 2–5), `OfferString` (offer string and link), `DeviceString` |
 | `src/build.rs` | feature `build`: `*_unsigned` builders, `signing_input`, `attach_proof`, `Signer`, `cosign`, `incept_human`, `add_claimed`, `revoke`, `scope`, `rotate`, `sign_domain` |
 | `src/words.rs` | feature `words`: `generate`, `parse`, `seed`, `master_key`, `salt`, `next_commitment`, `recovery_secret`, `derive_ed25519` |
 | `src/wasm.rs` | feature `wasm`: the `KelChain` class (`fold`, `import`) and `KelHandle` |
@@ -53,4 +54,8 @@ The wasm runner must match the locked `wasm-bindgen` (see `ad4m-hash-chain/AGENT
 install it). `tests/vectors_fresh.rs` fails when the committed vectors differ from what the
 generator builds; after an intended change regenerate and review the diff:
 `AD4M_IDENTITY_WRITE_VECTORS=1 cargo test -p ad4m-identity-core --all-features --test vectors_fresh`.
+`tests/link.rs` covers offers, claims, the match code, `add_claimed` and each condition of
+`check_add`; `vectors/link.json` pins the offer commit, the claim and offer signing bytes,
+the match code, the offer and device strings, and the `add` events (device and bot) that
+spend a claim.
 `tests/fold.rs` has one test per refusal case and fails if a case in `refusal_cases()` has none.

@@ -9,7 +9,8 @@ use ad4m_hash_chain::{encode_proof_value, Hash, Multikey, Proof};
 use serde::Serialize;
 
 use crate::domain::{signing_bytes, DomainError};
-use crate::event::{BotScope, DeviceKey, Event, Kind, Op};
+use crate::event::{BotScope, DeviceKey, Event, KeyLife, Kind, Op};
+use crate::link::{ClaimView, Offer, OfferKind};
 use crate::policy::FormatError;
 use crate::{
     commitment, derive_scid, did_of, verification_method, KelChain, KeyId, FORMAT, KEL_DOMAIN,
@@ -46,6 +47,8 @@ pub enum BuildError {
     NextMismatch,
     #[error("the event already carries a proof by {0}")]
     AlreadySigned(KeyId),
+    #[error("a bot offer adds a bot key with its scope; no other offer carries a scope")]
+    OfferShape,
 }
 
 /// `seq`, `prev` and `scid` of the event after the chain's head.
@@ -224,16 +227,31 @@ fn signed_by_master(
     Ok(event)
 }
 
-/// The `add` that spends a claim (AR-02): one key, its offer id and the claim's co-signature,
-/// signed by the current master key.
+/// The `add` that spends `claim` on `offer` (AR-02 4.3.2), signed by the current master key.
+/// The key takes the next device id. A bot offer copies `offer.bot` into the key's bot mark;
+/// a device or node offer gives a standing key, or a `KeyLife::Until` key when `expires` is set
+/// (AR-02 4.3.4). A bot offer without a scope, or `expires` on a bot offer, is refused.
 pub fn add_claimed(
     chain: &KelChain,
     master: &dyn Signer,
-    device: DeviceKey,
-    offer: &str,
-    co_sig: &str,
+    offer: &Offer,
+    claim: &ClaimView,
+    expires: Option<u64>,
 ) -> Result<Event, BuildError> {
-    let event = add_unsigned(chain, device, offer, co_sig)?;
+    let life = match (offer.kind, &offer.bot, expires) {
+        (OfferKind::Bot, Some(scope), None) => KeyLife::Bot(scope.clone()),
+        (OfferKind::Bot, _, _) => return Err(BuildError::OfferShape),
+        (_, Some(_), _) => return Err(BuildError::OfferShape),
+        (_, None, Some(at)) => KeyLife::Until(at),
+        (_, None, None) => KeyLife::Standing,
+    };
+    let device = DeviceKey {
+        id: chain.state().next_device_id(),
+        sign: claim.device_key.clone(),
+        enc: claim.enc_key.clone(),
+        life,
+    };
+    let event = add_unsigned(chain, device, &offer.offer_id, &claim.co_sig)?;
     signed_by_master(chain, master, event)
 }
 

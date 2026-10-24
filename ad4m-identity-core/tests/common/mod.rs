@@ -5,6 +5,12 @@
 use ad4m_hash_chain::{encode_ed25519_multikey, sha256, verify_proof};
 use ad4m_identity_core::build::{self, Signer};
 use ad4m_identity_core::domain::{LABELS, SIGNING_DOMAINS};
+use ad4m_identity_core::link::{
+    check_add, check_secret, claim_body, claim_view, decode_secret, make_claim, match_code,
+    match_input, offer_commit, offer_signing_bytes, sign_offer, verify_claim, verify_offer, Claim,
+    ClaimView, DeviceString, Offer, OfferKind, OfferString, SignedBy, SignedOffer, CLAIM_DOMAIN,
+    OFFER_TTL_S,
+};
 use ad4m_identity_core::{
     commitment, derive_scid, encode_x25519_multikey, error_code, event_hash, fold, fold_json, pow,
     signing_bytes, verify_signed, BotScope, DeviceKey, Event, FoldError, KelChain, KelPolicy,
@@ -122,7 +128,10 @@ impl Log {
     pub fn add_event(&self, life: KeyLife) -> Event {
         let id = self.chain.state().next_device_id();
         let key = device(id_number(&id), life);
-        build::add_claimed(&self.chain, &master(self.n), key, "offer-1", "z3coSig").unwrap()
+        let mut event = build::add_unsigned(&self.chain, key, "offer-1", "z3coSig").unwrap();
+        let id = self.chain.state().current_master().unwrap().id.clone();
+        sign(&mut event, &id, &master(self.n));
+        event
     }
 
     pub fn add(&mut self, life: KeyLife) -> String {
@@ -611,7 +620,15 @@ fn unhex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-pub const VECTOR_NAMES: &[&str] = &["log", "fold", "proofs", "commitment", "pow", "domains"];
+pub const VECTOR_NAMES: &[&str] = &[
+    "log",
+    "fold",
+    "proofs",
+    "commitment",
+    "pow",
+    "domains",
+    "link",
+];
 
 /// The fixed entropy of the words vector.
 pub const WORDS_ENTROPY: [u8; 16] = [
@@ -628,6 +645,7 @@ pub fn build_vectors() -> Vec<(&'static str, Value)> {
         ("commitment", build_commitment()),
         ("pow", build_pow()),
         ("domains", build_domains()),
+        ("link", build_link()),
     ]
 }
 
@@ -807,6 +825,7 @@ pub fn check_vector_file(name: &str, file: &Value) {
         "commitment" => check_commitment(file),
         "pow" => check_pow(file),
         "domains" => check_domains(file),
+        "link" => check_link(file),
         other => panic!("unknown vector file {other}"),
     }
 }
@@ -985,4 +1004,185 @@ fn check_domains(file: &Value) {
         };
         assert_eq!(name, refusal["error"], "{domain}");
     }
+}
+
+// ----- Offers and claims (AR-02 4.3–4.5) -----
+
+/// The fixed offer secret `s`.
+pub fn link_secret() -> [u8; 32] {
+    sha256(b"offer secret")
+}
+
+/// The fixed offer id: 16 bytes, base58btc.
+pub fn link_offer_id() -> String {
+    bs58::encode(&sha256(b"offer id")[..16]).into_string()
+}
+
+/// The time the link fixtures are issued at.
+pub const LINK_NOW: u64 = 1_700_000_000;
+
+/// An offer of `kind` on `log`'s identity, issued at [`LINK_NOW`], expiring 300 s later.
+pub fn link_offer(log: &Log, kind: OfferKind, bot: Option<BotScope>) -> Offer {
+    Offer {
+        scid: log.chain.state().scid.clone(),
+        offer_id: link_offer_id(),
+        kind,
+        commit: offer_commit(&link_secret()),
+        expires: LINK_NOW + OFFER_TTL_S,
+        device_key: None,
+        bot,
+    }
+}
+
+/// The position of the current master at the head of `log`.
+pub fn signed_by(log: &Log) -> SignedBy {
+    let head = log.chain.head();
+    SignedBy {
+        key_id: log.chain.state().current_master().unwrap().id.clone(),
+        kel_seq: head.seq,
+        kel_hash: head.hash,
+    }
+}
+
+/// `offer` signed by `log`'s current master at its head.
+pub fn signed_offer(log: &Log, offer: Offer) -> SignedOffer {
+    sign_offer(offer, signed_by(log), &master(log.n)).unwrap()
+}
+
+/// The claim of device key `d<n>` on the fixed offer.
+pub fn link_claim(log: &Log, n: u32, can_keep_master: bool) -> Claim {
+    make_claim(
+        &log.chain.state().scid,
+        &link_offer_id(),
+        link_secret(),
+        &dev(n),
+        enc(&format!("d{n}")),
+        can_keep_master,
+        Some("Pixel 8".into()),
+    )
+    .unwrap()
+}
+
+fn build_link() -> Value {
+    let log = Log::new();
+    let scid = log.chain.state().scid.clone();
+    let s = link_secret();
+    let offer = signed_offer(&log, link_offer(&log, OfferKind::Device, None));
+    let claim = link_claim(&log, 2, true);
+    let view = claim_view(&claim, LINK_NOW + 10);
+    let add = build::add_claimed(&log.chain, &master(0), &offer.offer, &view, None).unwrap();
+    let bot_scope = BotScope {
+        can: vec!["read".into()],
+        expires: 1_800_000_000,
+    };
+    let bot_offer = signed_offer(&log, link_offer(&log, OfferKind::Bot, Some(bot_scope)));
+    let bot_add =
+        build::add_claimed(&log.chain, &master(0), &bot_offer.offer, &view, None).unwrap();
+    let offer_string = OfferString {
+        store: "https://store.coasys.org".into(),
+        scid: scid.clone(),
+        offer_id: link_offer_id(),
+        s: bs58::encode(s).into_string(),
+    };
+    let device_string = DeviceString {
+        sign: mk(&dev(2)),
+        enc: enc("d2"),
+        r: bs58::encode(&sha256(b"device r")[..16]).into_string(),
+        exp: LINK_NOW + 300,
+        hint: Some("Pixel 8".into()),
+        store: "https://store.coasys.org".into(),
+    };
+    let claim_bytes = signing_bytes(CLAIM_DOMAIN, &claim_body(&scid, &claim)).unwrap();
+    json!({
+        "description": "Offers and claims (AR-02 4.3-4.5): commit = multihash(sha256(\"coasys:offer\" || s)); the offer signature is Ed25519 over signing_bytes(\"coasys:offer\", {offer, by}); the claim co-signature over signing_bytes(\"coasys:claim\", ClaimBody); the match code is base32(sha256(JCS({scid, offerId, deviceKey, domain: \"coasys:match\"})))[0..6] in two groups of three; offer and device strings are prefix + base58btc(JCS(value)).",
+        "log": log.json(),
+        "now": LINK_NOW,
+        "commit": {"s": bs58::encode(s).into_string(), "commit": offer_commit(&s)},
+        "signedOffer": offer,
+        "offerSigningBytes": String::from_utf8(offer_signing_bytes(&offer.offer, &offer.by).unwrap()).unwrap(),
+        "masterKey": mk(&master(0)),
+        "claim": claim,
+        "claimSigningBytes": String::from_utf8(claim_bytes).unwrap(),
+        "claimView": view,
+        "match": {
+            "scid": scid,
+            "offerId": link_offer_id(),
+            "deviceKey": mk(&dev(2)),
+            "input": String::from_utf8(match_input(&scid, &link_offer_id(), &mk(&dev(2)))).unwrap(),
+            "code": match_code(&scid, &link_offer_id(), &mk(&dev(2))),
+        },
+        "addClaimed": json(&add),
+        "botOffer": bot_offer,
+        "botAddClaimed": json(&bot_add),
+        "offerString": {"value": offer_string, "string": offer_string.encode(), "link": offer_string.link()},
+        "deviceString": {"value": device_string, "string": device_string.encode()},
+    })
+}
+
+fn check_link(file: &Value) {
+    let events: Vec<Value> = serde_json::from_value(file["log"].clone()).unwrap();
+    let chain = fold_json(&events).unwrap();
+    let now = file["now"].as_u64().unwrap();
+    let s = decode_secret(file["commit"]["s"].as_str().unwrap()).unwrap();
+    assert_eq!(offer_commit(&s), file["commit"]["commit"].as_str().unwrap());
+
+    let offer: SignedOffer = serde_json::from_value(file["signedOffer"].clone()).unwrap();
+    let bytes = offer_signing_bytes(&offer.offer, &offer.by).unwrap();
+    assert_eq!(
+        bytes,
+        file["offerSigningBytes"].as_str().unwrap().as_bytes()
+    );
+    assert_eq!(
+        chain.state().current_master().unwrap().sign,
+        file["masterKey"].as_str().unwrap()
+    );
+    verify_offer(&offer, &chain, now).unwrap();
+
+    let claim: Claim = serde_json::from_value(file["claim"].clone()).unwrap();
+    let claim_bytes =
+        signing_bytes(CLAIM_DOMAIN, &claim_body(&chain.state().scid, &claim)).unwrap();
+    assert_eq!(
+        claim_bytes,
+        file["claimSigningBytes"].as_str().unwrap().as_bytes()
+    );
+    verify_claim(&chain.state().scid, &claim).unwrap();
+    assert!(check_secret(&offer.offer, &claim));
+    let view: ClaimView = serde_json::from_value(file["claimView"].clone()).unwrap();
+    assert_eq!(view, claim_view(&claim, view.claimed_at));
+
+    let m = &file["match"];
+    let (scid, offer_id, key) = (
+        m["scid"].as_str().unwrap(),
+        m["offerId"].as_str().unwrap(),
+        m["deviceKey"].as_str().unwrap(),
+    );
+    assert_eq!(
+        match_input(scid, offer_id, key),
+        m["input"].as_str().unwrap().as_bytes()
+    );
+    assert_eq!(match_code(scid, offer_id, key), m["code"].as_str().unwrap());
+
+    for (offer_key, add_key) in [("signedOffer", "addClaimed"), ("botOffer", "botAddClaimed")] {
+        let offer: SignedOffer = serde_json::from_value(file[offer_key].clone()).unwrap();
+        let add = Event::from_json(&file[add_key]).unwrap();
+        let mut extended = chain.clone();
+        extended.append(&KelPolicy, &add).unwrap();
+        check_add(&offer, &view, chain.state(), &add, now).unwrap();
+    }
+
+    let string: OfferString = serde_json::from_value(file["offerString"]["value"].clone()).unwrap();
+    assert_eq!(
+        string.encode(),
+        file["offerString"]["string"].as_str().unwrap()
+    );
+    assert_eq!(string.link(), file["offerString"]["link"].as_str().unwrap());
+    assert_eq!(OfferString::parse(&string.encode()).unwrap(), string);
+    assert_eq!(OfferString::parse_link(&string.link()).unwrap(), string);
+    let device: DeviceString =
+        serde_json::from_value(file["deviceString"]["value"].clone()).unwrap();
+    assert_eq!(
+        device.encode(),
+        file["deviceString"]["string"].as_str().unwrap()
+    );
+    assert_eq!(DeviceString::parse(&device.encode()).unwrap(), device);
 }

@@ -1,0 +1,186 @@
+{
+  "addClaimed": {
+    "add": [
+      {
+        "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+        "id": "d2",
+        "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+      }
+    ],
+    "coSig": "z26rD3QALkEC3wYFhhFnYvYQvTHm9kHt58SwkJ16p6XQ4WbBMu4KjT3iiUN1PzYutvoTAQmwZPMbB7UTd5THY7DqL",
+    "format": "coasys/1",
+    "offer": "TpTwGZwLZ3MB973zpcsj5V",
+    "op": "add",
+    "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+    "proof": [
+      {
+        "cryptosuite": "eddsa-jcs-2022",
+        "domain": "coasys:kel",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "z2DQBbiDPqhufDmu4LiBoH6bY8ChRXVDnrey5xpfv3buzFg1e5YhSumBHpD2EPq6izgZDBzuTZkkCndwJgwt1z5p4",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+      }
+    ],
+    "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+    "seq": 1
+  },
+  "botAddClaimed": {
+    "add": [
+      {
+        "can": [
+          "read"
+        ],
+        "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+        "expires": 1800000000,
+        "id": "d2",
+        "kind": "bot",
+        "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+      }
+    ],
+    "coSig": "z26rD3QALkEC3wYFhhFnYvYQvTHm9kHt58SwkJ16p6XQ4WbBMu4KjT3iiUN1PzYutvoTAQmwZPMbB7UTd5THY7DqL",
+    "format": "coasys/1",
+    "offer": "TpTwGZwLZ3MB973zpcsj5V",
+    "op": "add",
+    "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+    "proof": [
+      {
+        "cryptosuite": "eddsa-jcs-2022",
+        "domain": "coasys:kel",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "z3L1AuRbjGmgu67LbvgtLJYu6CE1LbSQCKfydajUy8Ji4vdqX2TQLu2thTGEM2rvpMyxVB5NSCKGj1rHxSunwWs7W",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+      }
+    ],
+    "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+    "seq": 1
+  },
+  "botOffer": {
+    "by": {
+      "kelHash": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+      "kelSeq": 0,
+      "keyId": "m0"
+    },
+    "offer": {
+      "bot": {
+        "can": [
+          "read"
+        ],
+        "expires": 1800000000
+      },
+      "commit": "QmYaNuQLt6Cd2vRiVBqKn3YC9Q9fTuAtRLukhk6GpM4G3p",
+      "expires": 1700000300,
+      "kind": "bot",
+      "offerId": "TpTwGZwLZ3MB973zpcsj5V",
+      "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p"
+    },
+    "sig": "z5zeS6vJ9tCJVR4FLfioSbhUHi4ZFkYRzCRqm87hs7KN2MwSauRc3pv6VZeSeppDJVDdJEXXRzWVV9Gwg375CFXXi"
+  },
+  "claim": {
+    "canKeepMaster": true,
+    "coSig": "z26rD3QALkEC3wYFhhFnYvYQvTHm9kHt58SwkJ16p6XQ4WbBMu4KjT3iiUN1PzYutvoTAQmwZPMbB7UTd5THY7DqL",
+    "deviceKey": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr",
+    "encKey": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+    "hint": "Pixel 8",
+    "offerId": "TpTwGZwLZ3MB973zpcsj5V",
+    "s": "BhW1AHkQTp8xYHCAVGNdubJwmXEEddiN9ADmXeecSM3c"
+  },
+  "claimSigningBytes": "{\"canKeepMaster\":true,\"deviceKey\":\"z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr\",\"domain\":\"coasys:claim\",\"encKey\":\"z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n\",\"offerId\":\"TpTwGZwLZ3MB973zpcsj5V\",\"scid\":\"QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p\"}",
+  "claimView": {
+    "canKeepMaster": true,
+    "claimedAt": 1700000010,
+    "coSig": "z26rD3QALkEC3wYFhhFnYvYQvTHm9kHt58SwkJ16p6XQ4WbBMu4KjT3iiUN1PzYutvoTAQmwZPMbB7UTd5THY7DqL",
+    "deviceKey": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr",
+    "encKey": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+    "hint": "Pixel 8"
+  },
+  "commit": {
+    "commit": "QmYaNuQLt6Cd2vRiVBqKn3YC9Q9fTuAtRLukhk6GpM4G3p",
+    "s": "BhW1AHkQTp8xYHCAVGNdubJwmXEEddiN9ADmXeecSM3c"
+  },
+  "description": "Offers and claims (AR-02 4.3-4.5): commit = multihash(sha256(\"coasys:offer\" || s)); the offer signature is Ed25519 over signing_bytes(\"coasys:offer\", {offer, by}); the claim co-signature over signing_bytes(\"coasys:claim\", ClaimBody); the match code is base32(sha256(JCS({scid, offerId, deviceKey, domain: \"coasys:match\"})))[0..6] in two groups of three; offer and device strings are prefix + base58btc(JCS(value)).",
+  "deviceString": {
+    "string": "coasys:device:1:2LFzH65pa42H7Lfri2zQGwEkPwdHDX7t75rQ1nGtd2wJBn5RCCAQJUE1RNQkJ5bkfuS7shjA4ZDYh4DHUGi3NPt6Ct4zn3DrRGt2YZso1mmWbeqVSnksfDtya9P5sjopWFh6Z2fBpNUXubn5EyqP1rz2urWwRdj8VQb1JCWma22Q7z2y86YZwLKW8XME6LxXYh5z7bqQgXNUevfdxPG2S2qdpjrfgbAUyEeQkRrExRvisbL7Jhg2ujFCtmVMtZ5gosdnPfaZWkWBveW3AgXo5QmjvswxnWf431Q28",
+    "value": {
+      "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+      "exp": 1700000300,
+      "hint": "Pixel 8",
+      "r": "HEtkUQvb8LqPRpB1jE32Zs",
+      "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr",
+      "store": "https://store.coasys.org"
+    }
+  },
+  "log": [
+    {
+      "add": [
+        {
+          "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+          "id": "d1",
+          "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+        }
+      ],
+      "format": "coasys/1",
+      "kind": "human",
+      "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+      "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+      "op": "incept",
+      "prev": null,
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+        },
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+        }
+      ],
+      "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+      "seq": 0
+    }
+  ],
+  "masterKey": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+  "match": {
+    "code": "GUU DE7",
+    "deviceKey": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr",
+    "input": "{\"deviceKey\":\"z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr\",\"domain\":\"coasys:match\",\"offerId\":\"TpTwGZwLZ3MB973zpcsj5V\",\"scid\":\"QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p\"}",
+    "offerId": "TpTwGZwLZ3MB973zpcsj5V",
+    "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p"
+  },
+  "now": 1700000000,
+  "offerSigningBytes": "{\"by\":{\"kelHash\":\"QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71\",\"kelSeq\":0,\"keyId\":\"m0\"},\"domain\":\"coasys:offer\",\"offer\":{\"commit\":\"QmYaNuQLt6Cd2vRiVBqKn3YC9Q9fTuAtRLukhk6GpM4G3p\",\"expires\":1700000300,\"kind\":\"device\",\"offerId\":\"TpTwGZwLZ3MB973zpcsj5V\",\"scid\":\"QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p\"}}",
+  "offerString": {
+    "link": "https://coasys.id/o#coasys:offer:1:gkCAigBSd97we4MNZV785UsDarie6uqU1gsANcfL3fYhBCu3s4sm9PaM5PciNPrWne32Lguf5kJHDXB3DKTdaAwu8j2qyJV3WT1to5gWzU5oLY5s4TbwjWSH3GFaZTgHQrE2foz4nEbj1TLET91a4x8x6J1YTvUwjzfNfm1zRAb324SpXq5vPoPxZKcpcvKsc5eJc47WZUKJDEnD8UEf35TaKtxKcMFxxo8uHQ5bJPopztqMohv",
+    "string": "coasys:offer:1:gkCAigBSd97we4MNZV785UsDarie6uqU1gsANcfL3fYhBCu3s4sm9PaM5PciNPrWne32Lguf5kJHDXB3DKTdaAwu8j2qyJV3WT1to5gWzU5oLY5s4TbwjWSH3GFaZTgHQrE2foz4nEbj1TLET91a4x8x6J1YTvUwjzfNfm1zRAb324SpXq5vPoPxZKcpcvKsc5eJc47WZUKJDEnD8UEf35TaKtxKcMFxxo8uHQ5bJPopztqMohv",
+    "value": {
+      "offerId": "TpTwGZwLZ3MB973zpcsj5V",
+      "s": "BhW1AHkQTp8xYHCAVGNdubJwmXEEddiN9ADmXeecSM3c",
+      "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+      "store": "https://store.coasys.org"
+    }
+  },
+  "signedOffer": {
+    "by": {
+      "kelHash": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+      "kelSeq": 0,
+      "keyId": "m0"
+    },
+    "offer": {
+      "commit": "QmYaNuQLt6Cd2vRiVBqKn3YC9Q9fTuAtRLukhk6GpM4G3p",
+      "expires": 1700000300,
+      "kind": "device",
+      "offerId": "TpTwGZwLZ3MB973zpcsj5V",
+      "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p"
+    },
+    "sig": "z3xxd44ZCufX3wDLPesE8zm57hQsrs8cqYZu3r7NzbTYAQShgD6CgRk1cw2yvhNDXJoHQvjrbtefpFmEvZczHMkxB"
+  }
+}

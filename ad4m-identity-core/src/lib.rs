@@ -4,7 +4,8 @@
 //! `Entry`, [`KelPolicy`] holds rules 2–10 of AR-01 4.3.3, and [`fold`] gives a [`KelChain`]
 //! whose `state()` is the [`KeyState`]. The core does no I/O and reads no clock (callers pass
 //! `now`); it draws randomness only in `words::generate`. Features: `build` (event builders),
-//! `words` (the 12 words and master-key derivation), `wasm` (wasm-bindgen exports).
+//! `words` (the 12 words and master-key derivation), `wasm` (wasm-bindgen exports). [`link`]
+//! holds offers, claims and the match code (AR-02 4.3–4.5).
 
 use serde_json::{json, Value};
 
@@ -14,6 +15,7 @@ mod policy;
 mod state;
 
 pub mod domain;
+pub mod link;
 pub mod pow;
 
 #[cfg(feature = "build")]

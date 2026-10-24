@@ -15,6 +15,7 @@ const FILES: &[(&str, &str)] = &[
     ("commitment", include_str!("../vectors/commitment.json")),
     ("pow", include_str!("../vectors/pow.json")),
     ("domains", include_str!("../vectors/domains.json")),
+    ("link", include_str!("../vectors/link.json")),
 ];
 
 #[test]
