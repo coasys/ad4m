@@ -151,10 +151,15 @@ function fakeApi() {
     const log: string[] = []
     const offerHandlers = new Set<(e: SfuCallRenegotiationOffer) => void>()
     const rosterHandlers = new Set<(r: SfuRoomRoster) => void>()
+    const networkHandlers = new Set<() => void>()
     const api = {
         log,
         offerHandlers,
         rosterHandlers,
+        networkHandlers,
+        emitNetworkChange() {
+            for (const handler of networkHandlers) handler()
+        },
         emitOffer(event: SfuCallRenegotiationOffer) {
             for (const handler of offerHandlers) handler(event)
         },
@@ -192,6 +197,15 @@ function fakeApi() {
                 rosterHandlers.delete(handler)
             }
         }),
+        sfuCallRestartIce: jest.fn(async () => {
+            log.push("sfuCallRestartIce")
+            return true
+        }),
+        onNetworkChange: jest.fn((handler: () => void) => {
+            networkHandlers.add(handler)
+            return () => { networkHandlers.delete(handler) }
+        }),
+        checkConnection: jest.fn(() => {}),
         sfuAddIceCandidate: jest.fn(async () => true),
         sfuSendData: jest.fn(async () => true),
         subscribeSfuDataChannel: jest.fn(() => () => {}),
@@ -292,6 +306,23 @@ test("a second offer waits until the first one is answered", async () => {
     answered.resolve(true)
     await flush()
     expect(pc.remoteSdps()).toEqual(["server-answer", "first", "second"])
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
+})
+
+test("an offer the executor sends again after it was answered is not answered twice", async () => {
+    // A second restart request while the restart's offer waits gets that
+    // offer again. The executor takes one answer per offer: a second answer
+    // would land on its next offer and leave it with stale ICE credentials.
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+
+    api.emitOffer(offer("restart"))
+    api.emitOffer(offer("restart"))
+    api.emitOffer(offer("next"))
+    await flush()
+
+    expect(currentPc().remoteSdps()).toEqual(["server-answer", "restart", "next"])
     expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
 })
 
@@ -674,4 +705,212 @@ test("leaving during a reconnect stops it before it joins again", async () => {
     await flush()
 
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+})
+
+// ── Recovering on the same connection ───────────────────────────────────────
+
+const fakeTimers = () => jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+
+test("ICE disconnected asks the executor for an ICE restart at once and answers the offer it sends", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+        api.log.length = 0
+
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledWith(URL, ROOM)
+
+        // The restart arrives as a server offer, on the same connection.
+        api.emitOffer(offer("restart-offer"))
+        await flush()
+        expect(currentPc().remoteSdps()).toContain("restart-offer")
+        await iceState("checking")
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(30_000)
+
+        expect(api.log).toEqual(["sfuCallRestartIce", "sfuCallAnswerServerOffer"])
+        expect(FakePeerConnection.instances).toHaveLength(1)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("ICE disconnected also checks the executor socket once, with the restart", async () => {
+    // A network switch the platform announces nothing for: the restart may
+    // go out on a dead socket, and only the check finds that out quickly.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+        api.log.length = 0
+
+        await iceState("disconnected")
+        expect(api.checkConnection).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        // Connected again: no further check.
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(api.checkConnection).toHaveBeenCalledTimes(1)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a restart that has not brought the connection back after 5 s falls back to a rebuild", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        await iceState("disconnected")
+        await jest.advanceTimersByTimeAsync(4_900)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(200)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a refused restart also waits for the timeout before rebuilding", async () => {
+    // An executor without `sfu.callRestartIce`: a blip that heals keeps the call.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        api.sfuCallRestartIce.mockRejectedValue(new Error("unknown method"))
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        await iceState("disconnected")
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+
+        await iceState("disconnected")
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a network change restarts ICE even while the connection still looks connected", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        api.emitNetworkChange()
+        await flush()
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        // Still connected when the timeout comes: nothing to rebuild.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a network change asks again during a restart, and its timeout starts over", async () => {
+    // ICE noticed first, and its restart went out over the old network:
+    // the network change is the one that can reach the executor.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        await iceState("disconnected")
+        await jest.advanceTimersByTimeAsync(3_000)
+        api.emitNetworkChange()
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+
+        await jest.advanceTimersByTimeAsync(4_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("ICE going disconnected during a restart does not ask again", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitNetworkChange()
+        await iceState("disconnected")
+        await iceState("checking")
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        // Once that one settled, a new disconnect restarts again.
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(5_000)
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("ICE failed still rebuilds at once, ending a restart in flight", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        await iceState("disconnected")
+        await iceState("failed")
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        // The restart's timeout does not rebuild the new connection again.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("leave stops listening for network changes and drops a restart in flight", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        expect(api.networkHandlers.size).toBe(1)
+        await iceState("disconnected")
+        await manager.leave()
+
+        expect(api.networkHandlers.size).toBe(0)
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a rebuild listens for network changes once, not once per join", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    await iceState("failed")
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    expect(api.networkHandlers.size).toBe(1)
 })

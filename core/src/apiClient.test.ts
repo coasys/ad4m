@@ -17,6 +17,11 @@ class TestSocket {
     static autoOpen = false
     /** Fire onclose some time after close(), like browsers and `ws`. */
     static asyncClose = false
+    /** close() never fires onclose: a dead TCP connection, whose close frame
+     *  no peer answers, can stay CLOSING for minutes. */
+    static closeHangs = false
+    /** Answer `ping` with `pong`, as the executor does while calls run. */
+    static answersPings = true
 
     readyState = 0
     sent: AnyMsg[] = []
@@ -29,9 +34,17 @@ class TestSocket {
         TestSocket.instances.push(this)
         if (TestSocket.autoOpen) queueMicrotask(() => this.open())
     }
-    send(data: string) { this.sent.push(JSON.parse(data)) }
+    send(data: string) {
+        const msg = JSON.parse(data)
+        this.sent.push(msg)
+        if (msg.type === 'ping' && TestSocket.answersPings) {
+            queueMicrotask(() => { if (this.readyState === 1) this.reply({ type: 'pong' }) })
+        }
+    }
     close() {
-        if (TestSocket.asyncClose) {
+        if (TestSocket.closeHangs) {
+            this.readyState = 2
+        } else if (TestSocket.asyncClose) {
             this.readyState = 2
             setTimeout(() => this.drop(), 5)
         } else {
@@ -56,6 +69,8 @@ beforeEach(() => {
     TestSocket.instances = []
     TestSocket.autoOpen = true
     TestSocket.asyncClose = false
+    TestSocket.closeHangs = false
+    TestSocket.answersPings = true
     client = new ApiClient(url, undefined, TestSocket as unknown as new (url: string) => WebSocket)
 })
 afterEach(() => client.closeAll())
@@ -302,6 +317,443 @@ describe('ApiClient retries idempotent reads once after a reconnect', () => {
         reconnect(0)
         socket(1).drop()
         await expect(read).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+    })
+})
+
+describe('ApiClient notices a socket that went silent', () => {
+    // A network switch leaves the old socket OPEN: no FIN or RST ever arrives,
+    // so no close event comes, and nothing the client sends gets an answer.
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        TestSocket.closeHangs = true
+        TestSocket.answersPings = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => jest.useRealTimers())
+
+    it('drops a socket whose ping goes unanswered and redials; a pending write fails, a pending read is resent', async () => {
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u' }, { timeoutMs: 120_000 }))
+        const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
+        expect(socket(0).sent.map(m => m.type)).toEqual(['events.watch', 'perspective.addLink', 'perspective.all'])
+
+        // Silent from here on: no pong, no reply, no close event.
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
+        expect(socket(0).readyState).toBe(2)
+        expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+
+        await jest.advanceTimersByTimeAsync(500)
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        const sent = socket(1).sent.map(m => m.type)
+        expect(sent).toContain('events.watch')
+        expect(sent).toContain('perspective.all')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+
+        const next = call<number>('agent.status')
+        socket(1).reply({ id: socket(1).sent.at(-1)!.id, result: 1 })
+        await expect(next).resolves.toBe(1)
+
+        // The dead socket's close event, if it ever comes, leaves its successor alone.
+        socket(0).drop()
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(socket(1).readyState).toBe(1)
+    })
+
+    it('keeps a socket while a large write it sent may still be crossing a slow link', async () => {
+        // The executor reads a ping only after the frame sent before it, so a
+        // 600 kB write on a slow link holds the pong back for as long as the
+        // write takes. That silence is not a dead socket.
+        open()
+        socket(0).open()
+        const write = call<string>('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 })
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ id: socket(0).sent.find(m => m.type === 'perspective.addLink')!.id, result: 'done' })
+        await expect(write).resolves.toBe('done')
+        // Once heard from, the socket is held to the usual deadline again.
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('counts a write in the UTF-8 bytes it is sent as, not in characters', async () => {
+        // 300 000 two-byte characters go out as 600 kB.
+        open()
+        socket(0).open()
+        void call('perspective.addLink', { uuid: 'u', blob: 'é'.repeat(300_000) }, { timeoutMs: 120_000 }).catch(() => {})
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('keeps the time a large write needs when other messages come in while it is still going out', async () => {
+        // Hearing from the executor says nothing about how far the upload got:
+        // a 600 kB write takes 37.5 s at 16 kB/s, whatever arrives meanwhile.
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 }))
+        await jest.advanceTimersByTimeAsync(1_000)
+        socket(0).reply({ type: 'agent-updated' })
+        await jest.advanceTimersByTimeAsync(14_000)
+        socket(0).reply({ type: 'agent-updated' })
+        await jest.advanceTimersByTimeAsync(15_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(write()).toBe('pending')
+        // Once the write could have crossed and the ping after it is still unanswered: dropped.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(0).readyState).toBe(2)
+        expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+    })
+
+    it('does not give a silent socket more time for what it sent after its unanswered ping', async () => {
+        // Those frames queue behind the ping, so they cannot delay its pong.
+        open()
+        socket(0).open()
+        for (let t = 0; t < 20_000; t += 2_000) {
+            call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(20_000) }, { timeoutMs: 120_000 })
+            await jest.advanceTimersByTimeAsync(2_000)
+        }
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('judges a new socket by its own pings, not by its predecessor\'s', async () => {
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+        await jest.advanceTimersByTimeAsync(500)
+        socket(1).open()
+        // Its first tick pings; nothing has gone unanswered on it yet.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(1).sent.some(m => m.type === 'ping')).toBe(true)
+        expect(socket(1).readyState).toBe(1)
+    })
+
+    it('pings a quiet socket before it counts as silent, even when the timer fires late', async () => {
+        // A socket with no traffic hears nothing until its first ping is answered.
+        // Silence is counted from that ping, not from the last message.
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(9_990)
+        // The interval fires 40 ms late.
+        const now = performance.now.bind(performance)
+        const late = jest.spyOn(performance, 'now').mockImplementation(() => now() + 50)
+        try {
+            await jest.advanceTimersByTimeAsync(10)
+            expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
+            expect(socket(0).readyState).toBe(1)
+            // Unanswered for a whole interval after that ping: dropped.
+            await jest.advanceTimersByTimeAsync(10_000)
+            expect(socket(0).readyState).toBe(2)
+        } finally {
+            late.mockRestore()
+        }
+    })
+
+    it('ignores events that reach a socket after it was dropped', async () => {
+        const seen = jest.fn()
+        client.on('agent-updated', seen)
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+        socket(0).reply({ type: 'agent-updated' })
+        expect(seen).not.toHaveBeenCalled()
+    })
+
+    it('keeps a socket that answers its pings or sends anything else', async () => {
+        open()
+        socket(0).open()
+        // Replies by hand: a pong after some pings, an event after the others.
+        for (let i = 0; i < 6; i++) {
+            await jest.advanceTimersByTimeAsync(10_000)
+            if (i % 2 === 0) socket(0).reply({ type: 'pong' })
+            else socket(0).reply({ type: 'agent-updated' })
+        }
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('leaves no timers after closeAll on an open socket', async () => {
+        const promise = call('agent.status')
+        socket(0).open()
+        socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
+        await promise
+        client.closeAll()
+        expect(jest.getTimerCount()).toBe(0)
+    })
+})
+
+describe('ApiClient checkConnection', () => {
+    // A network switch the platform says nothing about (no `online`): the
+    // socket stays OPEN and silent. Something else noticed (ICE went
+    // disconnected) and asks the client to check its socket now.
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        TestSocket.closeHangs = true
+        TestSocket.answersPings = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => jest.useRealTimers())
+
+    const pings = (i: number) => socket(i).sent.filter(m => m.type === 'ping').length
+
+    it('pings at once; a socket silent for the deadline is dropped, the next dialled at once, and onNetworkChange fires when it opens', async () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
+
+        client.checkConnection()
+        expect(pings(0)).toBe(1)
+        await jest.advanceTimersByTimeAsync(1_999)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+
+        await jest.advanceTimersByTimeAsync(1)
+        // No backoff: the next socket is dialled now.
+        expect(socket(0).readyState).toBe(2)
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(changed).not.toHaveBeenCalled()
+
+        socket(1).open()
+        expect(changed).toHaveBeenCalledTimes(1)
+        const sent = socket(1).sent.map(m => m.type)
+        expect(sent[0]).toBe('events.watch')
+        expect(sent).toContain('perspective.all')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+    })
+
+    it('keeps a socket that answers the ping', async () => {
+        TestSocket.answersPings = true
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        client.checkConnection()
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+        expect(changed).not.toHaveBeenCalled()
+    })
+
+    it('keeps a socket that sends anything else within the deadline', async () => {
+        open()
+        socket(0).open()
+        client.checkConnection(3_000)
+        await jest.advanceTimersByTimeAsync(2_500)
+        socket(0).reply({ type: 'agent-updated' })
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('sends one probe for several calls while one is pending', async () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        client.checkConnection()
+        await jest.advanceTimersByTimeAsync(500)
+        client.checkConnection()
+        client.checkConnection()
+        expect(pings(0)).toBe(1)
+        await jest.advanceTimersByTimeAsync(1_500)
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        expect(changed).toHaveBeenCalledTimes(1)
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(TestSocket.instances).toHaveLength(2)
+    })
+
+    it('a probe answered after the periodic ping fell due is not dropped by that ping', async () => {
+        open()
+        socket(0).open()
+        // The periodic ping is due at 10 s; the probe starts just before it.
+        await jest.advanceTimersByTimeAsync(9_500)
+        client.checkConnection()
+        await jest.advanceTimersByTimeAsync(1_000)
+        socket(0).reply({ type: 'pong' })
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+        // The periodic deadline still runs after the probe.
+        socket(0).reply({ type: 'pong' })
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('does nothing without an open socket', async () => {
+        client.checkConnection()
+        expect(TestSocket.instances).toHaveLength(0)
+        open()
+        client.checkConnection()
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).sent).toEqual([])
+    })
+
+    it('leaves no timers after closeAll during a probe', async () => {
+        const promise = call('agent.status')
+        socket(0).open()
+        socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
+        await promise
+        client.checkConnection()
+        expect(pings(0)).toBe(1)
+        client.closeAll()
+        expect(jest.getTimerCount()).toBe(0)
+    })
+})
+
+describe('ApiClient on a network change', () => {
+    // A browser says the network changed with `online` on the window and
+    // `change` on `navigator.connection` (Chromium). Node has neither, so the
+    // tests install both, then take them away again.
+    let window: EventTarget
+    let connection: EventTarget
+    const navigatorBefore = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+    const g = globalThis as unknown as Record<string, unknown>
+
+    beforeEach(() => {
+        window = new EventTarget()
+        connection = new EventTarget()
+        g.addEventListener = window.addEventListener.bind(window)
+        g.removeEventListener = window.removeEventListener.bind(window)
+        Object.defineProperty(globalThis, 'navigator', { value: { connection }, configurable: true })
+        // The old socket's close event never comes, as on a dead network.
+        TestSocket.autoOpen = false
+        TestSocket.closeHangs = true
+        TestSocket.answersPings = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => {
+        jest.useRealTimers()
+        delete g.addEventListener
+        delete g.removeEventListener
+        if (navigatorBefore) Object.defineProperty(globalThis, 'navigator', navigatorBefore)
+    })
+
+    const online = () => window.dispatchEvent(new Event('online'))
+
+    it('redials at once on "online": a sent write fails, a sent read is resent, and onNetworkChange fires once the new socket opens', async () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u' }, { timeoutMs: 120_000 }))
+        const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
+
+        online()
+        // No ping deadline and no backoff: the next socket is dialled now.
+        expect(socket(0).readyState).toBe(2)
+        expect(TestSocket.instances).toHaveLength(2)
+        await jest.advanceTimersByTimeAsync(0)
+        expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+        expect(changed).not.toHaveBeenCalled()
+
+        socket(1).open()
+        expect(changed).toHaveBeenCalledTimes(1)
+        const sent = socket(1).sent.map(m => m.type)
+        expect(sent[0]).toBe('events.watch')
+        expect(sent).toContain('perspective.all')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+    })
+
+    it('checks the socket on a change of navigator.connection: one that answers stays, as on a bandwidth estimate update', () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+
+        connection.dispatchEvent(new Event('change'))
+        expect(socket(0).sent.at(-1)?.type).toBe('ping')
+        socket(0).reply({ type: 'pong' })
+        jest.advanceTimersByTime(5_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(changed).not.toHaveBeenCalled()
+    })
+
+    it('redials on a change of navigator.connection when the socket stays silent', () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+
+        connection.dispatchEvent(new Event('change'))
+        connection.dispatchEvent(new Event('change'))
+        expect(TestSocket.instances).toHaveLength(1)
+        jest.advanceTimersByTime(2_000)
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        expect(changed).toHaveBeenCalledTimes(1)
+    })
+
+    it('dials once for a burst of change events while the new socket connects', () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+
+        online()
+        connection.dispatchEvent(new Event('change'))
+        online()
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        expect(changed).toHaveBeenCalledTimes(1)
+    })
+
+    it('skips the reconnect backoff when the change comes while waiting to redial', async () => {
+        open()
+        socket(0).open()
+        socket(0).drop()
+        jest.advanceTimersByTime(500)
+        socket(1).drop()
+        // Backing off for 1 s now; the network change cuts it short.
+        expect(TestSocket.instances).toHaveLength(2)
+        online()
+        expect(TestSocket.instances).toHaveLength(3)
+    })
+
+    it('fires onNetworkChange at once when no socket is wanted', () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        online()
+        expect(TestSocket.instances).toHaveLength(0)
+        expect(changed).toHaveBeenCalledTimes(1)
+    })
+
+    it('stops listening once unsubscribed, and after closeAll', () => {
+        const changed = jest.fn()
+        const unsubscribe = client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        unsubscribe()
+        online()
+        socket(1).open()
+        expect(changed).not.toHaveBeenCalled()
+
+        client.closeAll()
+        online()
+        connection.dispatchEvent(new Event('change'))
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(2)
+    })
+
+    it('works without a global event target or navigator.connection, as in Node', () => {
+        delete g.addEventListener
+        delete g.removeEventListener
+        Object.defineProperty(globalThis, 'navigator', { value: {}, configurable: true })
+        open()
+        socket(0).open()
+        expect(socket(0).sent.map(m => m.type)).toEqual(['events.watch'])
+        client.closeAll()
     })
 })
 
@@ -775,7 +1227,8 @@ describe('PerspectiveProxy.on', () => {
         proxy.dispose()
         await flush()
 
-        socket(0).reply(linkAdded('p1'))
+        // off() left no handler, so the client closed its socket; the new registration opened another.
+        TestSocket.instances.at(-1)!.reply(linkAdded('p1'))
         expect(handler).toHaveBeenCalledTimes(1)
     })
 })

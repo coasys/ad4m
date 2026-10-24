@@ -359,6 +359,8 @@ interface MeshOptions extends ChannelOptions {
     now?: () => number
     /** What `join` is handed. An empty stream unless a test says otherwise. */
     localStream?: MediaStream
+    onNetworkChange?: (callback: () => void) => () => void
+    checkConnection?: () => void
 }
 
 /** Every mesh a test made, so each is left afterwards and no timer or listener outlives its test. */
@@ -382,6 +384,8 @@ async function makeMesh(bus: InMemoryBus, selfId: string, callId: string, option
         selfId,
         iceServers: options.iceServers,
         now: options.now,
+        onNetworkChange: options.onNetworkChange,
+        checkConnection: options.checkConnection,
         // No timer: every test drives `tick()` itself, so a sweep never fires
         // between an act and its assertion. The interval has its own test.
         sweepMs: 0,
@@ -1482,6 +1486,89 @@ describe("recovering a pair that did not connect", () => {
         alice.mesh.tick()
         await settle()
         expect(alice.recoveries).toEqual([])
+    })
+
+    it("restarts ICE on every pair at once when the network changes, connected or not", async () => {
+        // A Wi-Fi switch: every path is gone, though ICE has noticed on none yet.
+        const networkListeners = new Set<() => void>()
+        const onNetworkChange = (cb: () => void) => {
+            networkListeners.add(cb)
+            return () => { networkListeners.delete(cb) }
+        }
+        const roster = ["did:alice", "did:bob", "did:carol"]
+        const alice = await makeMesh(bus, "did:alice", CALL_ID, { onNetworkChange })
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        const carol = await makeMesh(bus, "did:carol", CALL_ID)
+        for (const m of [alice, bob, carol]) m.mesh.setRoster(roster)
+        await settleAll()
+        expect(alice.connections).toHaveLength(2)
+        alice.connections[0].setConnectionState("connected")
+        alice.connections[1].setConnectionState("disconnected")
+
+        for (const cb of networkListeners) cb()
+        await settle()
+
+        expect(alice.connections.map((pc) => pc.restartIceCalls)).toEqual([1, 1])
+        expect(alice.recoveries.map((r) => [r.peerId, r.rung]).sort()).toEqual([
+            ["did:bob", "ice-restart"],
+            ["did:carol", "ice-restart"],
+        ])
+        expect(alice.connections).toHaveLength(2)
+
+        await alice.mesh.leave()
+        expect(networkListeners.size).toBe(0)
+    })
+
+    it("does not charge network-change restarts to a pair's repair budget", async () => {
+        // A network change judges no pair lost. Several in a row (Wi-Fi flapping)
+        // must not leave a pair that then fails without any repair.
+        const clock = makeClock()
+        const networkListeners = new Set<() => void>()
+        const onNetworkChange = (cb: () => void) => {
+            networkListeners.add(cb)
+            return () => { networkListeners.delete(cb) }
+        }
+        // The restart offers go out on a path that is gone: none is answered.
+        let pathGone = false
+        const alice = await makeMesh(bus, "did:alice", CALL_ID, {
+            now: clock.now,
+            onNetworkChange,
+            drop: (payload) => pathGone && (payload as { kind?: string }).kind === "description",
+        })
+        const bob = await makeMesh(bus, "did:bob", CALL_ID, { now: clock.now })
+        for (const m of [alice, bob]) m.mesh.setRoster(["did:alice", "did:bob"])
+        await settleAll()
+        alice.live().setConnectionState("connected")
+        pathGone = true
+
+        for (let n = 0; n < MAX_RECOVERY_ATTEMPTS + 1; n += 1) {
+            for (const cb of networkListeners) cb()
+            await settle()
+        }
+        const restarts = alice.recoveries.length
+        alice.live().setConnectionState("failed")
+        await settle()
+        clock.advance(RECOVERY_INTERVAL_MS + 1)
+        alice.mesh.tick()
+        await settle()
+
+        expect(alice.recoveries.length).toBe(restarts + 1)
+        expect(alice.recoveries.at(-1)).toMatchObject({ rung: "ice-restart", attempts: 1 })
+    })
+
+    it("checks the executor socket when a pair goes disconnected", async () => {
+        // The signals of every rung go over that socket; a dead one is found in
+        // seconds, and its reconnect restarts every pair through onNetworkChange.
+        const checkConnection = jest.fn()
+        const alice = await makeMesh(bus, "did:alice", CALL_ID, { checkConnection })
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        for (const m of [alice, bob]) m.mesh.setRoster(["did:alice", "did:bob"])
+        await settleAll()
+        alice.live().setConnectionState("connected")
+        expect(checkConnection).not.toHaveBeenCalled()
+
+        alice.live().setConnectionState("disconnected")
+        expect(checkConnection).toHaveBeenCalledTimes(1)
     })
 
     it("rebuilds the pair, and says so, once the cheaper rungs have not worked", async () => {

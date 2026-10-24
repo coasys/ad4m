@@ -66,6 +66,31 @@ pub struct SfuPeer {
     /// When ICE last reported `Disconnected` without coming back, or `None`.
     /// See [`ICE_DISCONNECT_GRACE`].
     pub disconnected_since: Option<Instant>,
+    /// An ICE restart the client asked for (`sfu.callRestartIce`), from the
+    /// request until its answer lands or its offer goes stale.
+    pub ice_restart: Option<IceRestart>,
+}
+
+/// A client's ICE restart in flight. The SFU stays the only offerer: the
+/// restart travels as a server renegotiation offer, so it cannot cross an
+/// offer of the SFU's own.
+#[derive(Debug)]
+pub struct IceRestart {
+    /// When the client asked. The disconnect grace runs at least until
+    /// `since + ICE_RESTART_GRACE`.
+    pub since: Instant,
+    /// The offer that carries the restart, once made, with its track
+    /// mapping. `None` until the post-poll sweep makes it, after any other
+    /// pending offer is answered.
+    pub offer: Option<(String, Vec<crate::sfu::TrackMapEntry>)>,
+    /// The client asked again while the offer waited: it moved again, or
+    /// lost the answer. The offer is republished, and a fresh restart
+    /// follows its answer, so the newest network gets new credentials.
+    pub again: bool,
+    /// Candidates trickled while the offer waits for its answer. The
+    /// restart clears the remote candidates when the answer lands, so they
+    /// are added after it.
+    pub candidates: Vec<Candidate>,
 }
 
 /// How long a peer may stay ICE-disconnected before it is dropped.
@@ -73,6 +98,12 @@ pub struct SfuPeer {
 /// busy host or a brief network blip — and usually returns to
 /// `Connected` within seconds; dropping at once tore down live calls.
 pub const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(10);
+
+/// How long a peer whose client asked for an ICE restart is kept, from the
+/// request, however long it was disconnected before. The restart's answer
+/// ends it and restarts the disconnect clock: ICE checks again, but its state
+/// arrives only on the next poll.
+pub const ICE_RESTART_GRACE: Duration = Duration::from_secs(10);
 
 impl SfuPeer {
     pub fn new(
@@ -96,6 +127,149 @@ impl SfuPeer {
             is_pipe,
             channels: HashMap::new(),
             disconnected_since: None,
+            ice_restart: None,
+        }
+    }
+
+    /// Track an ICE state change: `Disconnected` starts the disconnect
+    /// clock, any other state stops it.
+    pub fn on_ice_state(&mut self, state: IceConnectionState, now: Instant) {
+        self.disconnected_since = match state {
+            IceConnectionState::Disconnected => self.disconnected_since.or(Some(now)),
+            _ => None,
+        };
+    }
+
+    /// Whether the peer stayed disconnected past its grace and is to be
+    /// dropped. See [`ICE_DISCONNECT_GRACE`] and [`ICE_RESTART_GRACE`].
+    pub fn stayed_disconnected(&self, now: Instant) -> bool {
+        let Some(since) = self.disconnected_since else {
+            return false;
+        };
+        if now < since + ICE_DISCONNECT_GRACE {
+            return false;
+        }
+        match &self.ice_restart {
+            Some(restart) => now >= restart.since + ICE_RESTART_GRACE,
+            None => true,
+        }
+    }
+
+    /// The client asked for an ICE restart: new ICE credentials, offered
+    /// with the SFU's candidates. The offer is made in the post-poll sweep,
+    /// once str0m has processed any answer accepted in this tick, so this
+    /// only records the request. Asked again while its offer waits, it
+    /// returns that offer to republish and restarts again after its answer.
+    pub fn restart_ice(
+        &mut self,
+        now: Instant,
+    ) -> Option<(String, Vec<crate::sfu::TrackMapEntry>)> {
+        match &mut self.ice_restart {
+            Some(IceRestart {
+                offer: Some(offer),
+                again,
+                ..
+            }) => {
+                *again = true;
+                Some(offer.clone())
+            }
+            Some(_) => None,
+            None => {
+                self.ice_restart = Some(IceRestart {
+                    since: now,
+                    offer: None,
+                    again: false,
+                    candidates: Vec::new(),
+                });
+                None
+            }
+        }
+    }
+
+    /// Whether a change waits for the next offer: deferred tracks, or an
+    /// ICE restart not yet offered.
+    fn has_deferred_changes(&self) -> bool {
+        !self.deferred_tracks.is_empty()
+            || self
+                .ice_restart
+                .as_ref()
+                .is_some_and(|restart| restart.offer.is_none())
+    }
+
+    /// A trickled remote candidate. Held while an ICE restart's offer waits
+    /// for its answer: the restart would discard it.
+    pub fn add_remote_candidate(&mut self, candidate: Candidate) {
+        match &mut self.ice_restart {
+            Some(restart) if restart.offer.is_some() => restart.candidates.push(candidate),
+            _ => self.rtc.add_remote_candidate(candidate),
+        }
+    }
+
+    /// Apply the client's answer to the SFU's pending offer. An answer to
+    /// an ICE restart's offer ends the restart and adds the candidates
+    /// trickled meanwhile, then starts the next restart if one was asked for.
+    pub fn accept_server_answer(&mut self, sdp_answer_json: &str) -> Result<(), String> {
+        let Some(pending) = self.pending_offer.take() else {
+            return Err("no pending offer".to_string());
+        };
+        let answer: str0m::change::SdpAnswer = match serde_json::from_str(sdp_answer_json) {
+            Ok(a) => a,
+            Err(e) => {
+                // Restore the pending offer so deferred tracks don't get
+                // orphaned. Keep pending_offer_sent so the stale-offer
+                // sweep can eventually clear and retry.
+                self.pending_offer = Some(pending);
+                return Err(format!("answer parse failed: {}", e));
+            }
+        };
+        // SDP parsed successfully — clear the stale-offer timestamp so the
+        // sweep no longer considers this peer.
+        self.pending_offer_sent = None;
+        let accepted = self
+            .rtc
+            .sdp_api()
+            .accept_answer(pending, answer)
+            .map_err(|e| format!("accept_answer failed: {:?}", e));
+        if self
+            .ice_restart
+            .as_ref()
+            .is_some_and(|restart| restart.offer.is_some())
+        {
+            if let Some(restart) = self.ice_restart.take() {
+                // ICE checks again from here, but its state arrives only on
+                // the next poll, after the disconnect sweep: restart the clock.
+                if accepted.is_ok() {
+                    if let Some(since) = self.disconnected_since.as_mut() {
+                        *since = Instant::now();
+                    }
+                }
+                for candidate in restart.candidates {
+                    self.rtc.add_remote_candidate(candidate);
+                }
+                if restart.again {
+                    self.ice_restart = Some(IceRestart {
+                        since: Instant::now(),
+                        offer: None,
+                        again: false,
+                        candidates: Vec::new(),
+                    });
+                }
+            }
+        }
+        accepted
+    }
+
+    /// The SFU's pending offer got no answer in time: forget it, and the
+    /// ICE restart it carried.
+    fn drop_stale_offer(&mut self) {
+        self.pending_offer = None;
+        self.pending_offer_sent = None;
+        if self
+            .ice_restart
+            .as_ref()
+            .is_some_and(|restart| restart.offer.is_some())
+        {
+            self.ice_restart = None;
         }
     }
 }
@@ -114,6 +288,7 @@ impl std::fmt::Debug for SfuPeer {
             .field("pending_offer_sent", &self.pending_offer_sent)
             .field("is_pipe", &self.is_pipe)
             .field("channels", &self.channels.len())
+            .field("ice_restart", &self.ice_restart.as_ref().map(|r| r.since))
             .finish()
     }
 }
@@ -172,6 +347,10 @@ pub enum SfuCommand {
         data: Vec<u8>,
         binary: bool,
     },
+    /// The client asked for an ICE restart of its own peer, e.g. after a
+    /// network change. The SFU offers new ICE credentials through the
+    /// server-offer path; the client answers with `ApplyServerAnswer`.
+    RestartIce { participant_id: ParticipantId },
     /// Query the quality preferences map.  Returns a snapshot via
     /// oneshot so callers outside the event loop can read it.
     GetQualityPreferences {
@@ -535,40 +714,21 @@ impl SfuServer {
                             );
                             continue;
                         };
-                        let Some(pending) = peer.pending_offer.take() else {
+                        // A second answer to a republished restart offer finds none pending.
+                        if peer.pending_offer.is_none() {
                             debug!(
                                 "SFU: ApplyServerAnswer for {} with no pending offer",
                                 participant_id
                             );
                             continue;
-                        };
-                        let answer: str0m::change::SdpAnswer =
-                            match serde_json::from_str(&sdp_answer_json) {
-                                Ok(a) => a,
-                                Err(e) => {
-                                    warn!(
-                                        "SFU: ApplyServerAnswer parse failed for {}: {}",
-                                        participant_id, e
-                                    );
-                                    // Restore the pending offer so deferred
-                                    // tracks don't get orphaned.  Keep
-                                    // pending_offer_sent so the stale-offer
-                                    // sweep can eventually clear and retry.
-                                    peer.pending_offer = Some(pending);
-                                    continue;
-                                }
-                            };
-                        // SDP parsed successfully — clear the stale-offer
-                        // timestamp so the sweep no longer considers this peer.
-                        peer.pending_offer_sent = None;
-                        if let Err(e) = peer.rtc.sdp_api().accept_answer(pending, answer) {
-                            warn!("SFU: accept_answer for {} failed: {:?}", participant_id, e);
-                        } else {
-                            info!(
+                        }
+                        match peer.accept_server_answer(&sdp_answer_json) {
+                            Ok(()) => info!(
                                 "SFU: server-offer answer accepted for {} ({} outbound tracks live)",
                                 participant_id,
                                 peer.tracks_out.len()
-                            );
+                            ),
+                            Err(e) => warn!("SFU: ApplyServerAnswer for {}: {}", participant_id, e),
                         }
                         // Deferred tracks drain AFTER poll_output — see
                         // the post-poll sweep below.  Draining here would
@@ -653,7 +813,7 @@ impl SfuServer {
                         };
                         match Candidate::from_sdp_string(&candidate_sdp) {
                             Ok(candidate) => {
-                                peer.rtc.add_remote_candidate(candidate);
+                                peer.add_remote_candidate(candidate);
                                 debug!("SFU: trickle ICE candidate added for {}", participant_id);
                             }
                             Err(e) => {
@@ -724,6 +884,28 @@ impl SfuServer {
                             );
                         }
                     }
+                    Ok(SfuCommand::RestartIce { participant_id }) => {
+                        let Some(peer) = peers.get_mut(&participant_id) else {
+                            debug!("SFU: RestartIce for unknown participant {}", participant_id);
+                            continue;
+                        };
+                        // A pipe renegotiates with its remote node, not a client.
+                        if peer.is_pipe {
+                            warn!("SFU: RestartIce for pipe {} ignored", participant_id);
+                            continue;
+                        }
+                        info!("SFU: peer {} asked for an ICE restart", participant_id);
+                        if let Some((sdp_offer_json, track_mapping)) =
+                            peer.restart_ice(Instant::now())
+                        {
+                            publish_renegotiation_offer(
+                                peer,
+                                &participant_id,
+                                sdp_offer_json,
+                                track_mapping,
+                            );
+                        }
+                    }
                     Ok(SfuCommand::GetQualityPreferences { reply }) => {
                         let _ = reply.send(quality_preferences.clone());
                     }
@@ -745,11 +927,9 @@ impl SfuServer {
             // after a remote node crash).
             {
                 let mut dead_peers: Vec<DeadPeer> = Vec::new();
+                let now = Instant::now();
                 for (pid, peer) in peers.iter_mut() {
-                    if peer
-                        .disconnected_since
-                        .is_some_and(|since| since.elapsed() >= ICE_DISCONNECT_GRACE)
-                    {
+                    if peer.stayed_disconnected(now) {
                         info!("SFU: peer {} stayed disconnected, dropping it", pid);
                         peer.rtc.disconnect();
                     }
@@ -788,8 +968,7 @@ impl SfuServer {
                     if let Some(sent_at) = peer.pending_offer_sent {
                         if sent_at.elapsed() > stale_threshold {
                             warn!("SFU: peer {} pending offer stale (>10s), clearing", pid);
-                            peer.pending_offer = None;
-                            peer.pending_offer_sent = None;
+                            peer.drop_stale_offer();
                             // Deferred tracks drain in the post-poll
                             // sweep — same reasoning as ApplyServerAnswer.
                         }
@@ -827,12 +1006,7 @@ impl SfuServer {
                         Ok(Output::Event(event)) => match event {
                             Event::IceConnectionStateChange(state) => {
                                 info!("SFU: peer {} ICE state: {:?}", pid, state);
-                                peer.disconnected_since = match state {
-                                    IceConnectionState::Disconnected => {
-                                        peer.disconnected_since.or(Some(Instant::now()))
-                                    }
-                                    _ => None,
-                                };
+                                peer.on_ice_state(state, Instant::now());
                             }
                             Event::MediaAdded(e) => {
                                 info!("SFU: peer {} added {:?} track mid={}", pid, e.kind, e.mid);
@@ -901,7 +1075,7 @@ impl SfuServer {
 
             // Relay media data to other peers in the same room
             let now = Instant::now();
-            let mut layer_keyframes: Vec<(ParticipantId, Mid, Rid)> = Vec::new();
+            let mut layer_keyframes: Vec<(ParticipantId, Mid, Option<Rid>)> = Vec::new();
             for (origin_pid, data) in &media_to_relay {
                 let origin_room = match peers.get(origin_pid) {
                     Some(p) => p.room_id.clone(),
@@ -916,6 +1090,14 @@ impl SfuServer {
                 let track = (origin_pid.clone(), data.mid);
                 layers.observe(now, &track, data.rid.as_ref());
                 let keyframe = is_keyframe(&data.codec_extra);
+                // A gap in the origin's sequence (e.g. after an outage or an
+                // ICE restart): receivers may need a keyframe to decode again.
+                if !data.contiguous
+                    && data.params.spec().codec.is_video()
+                    && layers.gap(now, &track, data.rid.as_ref())
+                {
+                    layer_keyframes.push((origin_pid.clone(), data.mid, data.rid));
+                }
 
                 // Forward to all other peers in the same room
                 for (target_pid, target_peer) in peers.iter_mut() {
@@ -940,18 +1122,23 @@ impl SfuServer {
                             quality_preferences.get(target_pid).map(|s| s.as_str()),
                         );
                         if let Some(rid) = route.request_keyframe {
-                            layer_keyframes.push((origin_pid.clone(), data.mid, rid));
+                            layer_keyframes.push((origin_pid.clone(), data.mid, Some(rid)));
                         }
                         if !route.forward {
                             continue;
                         }
+                        // One RTP clock per receiver across layer switches.
+                        let time = layers.rtp_time(
+                            data.network_time,
+                            target_pid,
+                            &track,
+                            data.rid.as_ref(),
+                            data.time,
+                        );
                         if let Some(writer) = target_peer.rtc.writer(out_mid) {
-                            if let Err(e) = writer.write(
-                                data.pt,
-                                data.network_time,
-                                data.time,
-                                data.data.clone(),
-                            ) {
+                            if let Err(e) =
+                                writer.write(data.pt, data.network_time, time, data.data.clone())
+                            {
                                 warn!(
                                     "SFU: failed to write media to peer {} mid {}: {:?}",
                                     target_pid, out_mid, e
@@ -964,7 +1151,7 @@ impl SfuServer {
             for (origin_pid, mid, rid) in layer_keyframes {
                 if let Some(mut writer) = peers.get_mut(&origin_pid).and_then(|p| p.rtc.writer(mid))
                 {
-                    let _ = writer.request_keyframe(Some(rid), KeyframeRequestKind::Pli);
+                    let _ = writer.request_keyframe(rid, KeyframeRequestKind::Pli);
                 }
             }
 
@@ -975,7 +1162,7 @@ impl SfuServer {
             // processing phase (ApplyServerAnswer) and stale-offer sweep
             // only clear pending_offer; the actual drain happens here.
             for (pid, peer) in peers.iter_mut() {
-                if peer.pending_offer.is_none() && !peer.deferred_tracks.is_empty() {
+                if peer.pending_offer.is_none() && peer.has_deferred_changes() {
                     if let Some((sdp_offer_json, track_mapping)) = apply_deferred_tracks(peer) {
                         publish_renegotiation_offer(peer, pid, sdp_offer_json, track_mapping);
                     }
@@ -1111,7 +1298,8 @@ impl SfuServer {
                     })
                     .collect();
                 let kinds: Vec<MediaKind> = to_add.iter().map(|(kind, _, _)| *kind).collect();
-                let Some((offer, pending, mids)) = offer_send_only(&mut target_peer.rtc, &kinds)
+                let Some((offer, pending, mids)) =
+                    offer_send_only(&mut target_peer.rtc, &kinds, false)
                 else {
                     continue;
                 };
@@ -1293,9 +1481,9 @@ fn clean_stale_track_refs(
     }
 }
 
-/// One SDP change adding a send-only m-line per entry of `kinds`: its offer,
-/// the pending offer, and the new mids in the order of `kinds`. `None` when
-/// `kinds` is empty.
+/// One SDP change adding a send-only m-line per entry of `kinds`, and an ICE
+/// restart when `restart`: its offer, the pending offer, and the new mids in
+/// the order of `kinds`. `None` when the change holds nothing.
 ///
 /// str0m draws each mid at random (three characters) and checks it only
 /// against the m-lines the session already has, not against the others
@@ -1307,9 +1495,14 @@ fn clean_stale_track_refs(
 fn offer_send_only(
     rtc: &mut Rtc,
     kinds: &[MediaKind],
+    restart: bool,
 ) -> Option<(SdpOffer, str0m::change::SdpPendingOffer, Vec<Mid>)> {
     loop {
         let mut api = rtc.sdp_api();
+        if restart {
+            // The SFU keeps its candidates: its socket did not move.
+            api.ice_restart(true);
+        }
         let mids: Vec<Mid> = kinds
             .iter()
             .map(|kind| api.add_media(*kind, str0m::media::Direction::SendOnly, None, None, None))
@@ -1321,11 +1514,15 @@ fn offer_send_only(
     }
 }
 
-/// Drain deferred tracks from a peer and produce a renegotiation
-/// offer.  Returns `(sdp_offer_json, track_mapping)` or `None` when
-/// no actionable tracks remain.
+/// Drain deferred changes from a peer — tracks, and an ICE restart not yet
+/// offered — into one renegotiation offer. Returns `(sdp_offer_json,
+/// track_mapping)` or `None` when nothing actionable remains.
 fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::TrackMapEntry>)> {
-    if peer.deferred_tracks.is_empty() {
+    let restart = peer
+        .ice_restart
+        .as_ref()
+        .is_some_and(|restart| restart.offer.is_none());
+    if peer.deferred_tracks.is_empty() && !restart {
         return None;
     }
     let deferred: Vec<_> = peer.deferred_tracks.drain(..).collect();
@@ -1342,12 +1539,12 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
         })
         .collect();
 
-    if to_add.is_empty() {
+    if to_add.is_empty() && !restart {
         return None;
     }
 
     let kinds: Vec<MediaKind> = to_add.iter().map(|(_, _, kind, _)| *kind).collect();
-    let (offer, pending, mids) = offer_send_only(&mut peer.rtc, &kinds)?;
+    let (offer, pending, mids) = offer_send_only(&mut peer.rtc, &kinds, restart)?;
     let new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = mids
         .into_iter()
         .zip(to_add)
@@ -1382,6 +1579,9 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
     peer.pending_offer_sent = Some(Instant::now());
 
     let sdp_offer_json = serde_json::to_string(&offer).ok()?;
+    if let Some(restart) = peer.ice_restart.as_mut().filter(|_| restart) {
+        restart.offer = Some((sdp_offer_json.clone(), track_mapping.clone()));
+    }
     Some((sdp_offer_json, track_mapping))
 }
 
@@ -1422,7 +1622,7 @@ fn publish_renegotiation_offer(
         }
     }
     info!(
-        "SFU: deferred-track renegotiation offer published for peer {}",
+        "SFU: deferred renegotiation offer published for peer {}",
         pid
     );
 }
@@ -1474,7 +1674,7 @@ mod tests {
         for _ in 0..20 {
             let mut rtc = Rtc::new(Instant::now());
             let (offer, _pending, mids) =
-                offer_send_only(&mut rtc, &kinds).expect("an offer for a non-empty batch");
+                offer_send_only(&mut rtc, &kinds, false).expect("an offer for a non-empty batch");
             assert_eq!(mids.len(), kinds.len());
             let distinct: HashSet<&Mid> = mids.iter().collect();
             assert_eq!(distinct.len(), mids.len(), "a mid repeats within the batch");
@@ -1500,7 +1700,7 @@ mod tests {
                 assert!(section.starts_with(if kind.is_audio() { "audio" } else { "video" }));
             }
         }
-        assert!(offer_send_only(&mut Rtc::new(Instant::now()), &[]).is_none());
+        assert!(offer_send_only(&mut Rtc::new(Instant::now()), &[], false).is_none());
     }
 
     /// A track queued twice while an offer was pending (a peer that opens
@@ -1737,6 +1937,377 @@ mod tests {
             caller_seen.data.last().is_some_and(|t| *t >= recent),
             "the caller stopped receiving at {:?}",
             caller_seen.data.last()
+        );
+    }
+
+    /// When the caller asks for an ICE restart after its network changed.
+    #[derive(Clone, Copy)]
+    enum Restart {
+        Never,
+        /// This long after the move, as a client that hears of the change does.
+        AfterMove(Duration),
+        /// This long after the SFU saw the caller disconnected: a client
+        /// that noticed late, with slow signalling.
+        AfterSfuDisconnected(Duration),
+    }
+
+    /// What happened to the SFU's peer, on the simulated clock.
+    struct NetworkChange {
+        dropped_at: Option<Duration>,
+        restarted_at: Option<Duration>,
+        sfu_seen: Seen,
+        caller_seen: Seen,
+    }
+
+    /// A caller on 203.0.113.20 moves to 203.0.113.30 at `MOVE` (a Wi-Fi
+    /// switch): from then on everything to or from the old address is lost.
+    /// The SFU's peer is driven as the event loop drives it: ICE states
+    /// through `on_ice_state`, the drop through `stayed_disconnected`. A
+    /// restart goes through `restart_ice` and the post-poll sweep
+    /// (`apply_deferred_tracks`); the caller applies the offer
+    /// with its new address as a candidate, as a browser gathers one after
+    /// a restart, and the SFU applies the answer, each `signalling` later.
+    fn network_change(restart: Restart, signalling: Duration) -> NetworkChange {
+        const MOVE: Duration = Duration::from_secs(5);
+        let bind: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let old_addr: SocketAddr = "203.0.113.20:50000".parse().unwrap();
+        let new_addr: SocketAddr = "203.0.113.30:50000".parse().unwrap();
+
+        let mut caller = Rtc::builder().build(Instant::now());
+        caller.add_local_candidate(Candidate::host(old_addr, "udp").unwrap());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            str0m::media::MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        let cid = change.add_channel("sfu-data".into());
+        let (offer, pending) = change.apply().unwrap();
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind, None).unwrap();
+        let answer: str0m::change::SdpAnswer = serde_json::from_str(&answer).unwrap();
+        caller.sdp_api().accept_answer(pending, answer).unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:caller".to_string(),
+            rtc,
+            false,
+        );
+
+        let start = Instant::now();
+        let mut now = start;
+        let (mut caller_seen, mut sfu_seen) = (Seen::default(), Seen::default());
+        let mut next_write = Duration::ZERO;
+        let mut restarted_at = None;
+        let mut dropped_at = None;
+        // Signalling in flight: the offer on its way to the caller, the
+        // answer on its way back.
+        let mut offer_due: Option<(Duration, SdpOffer)> = None;
+        let mut answer_due: Option<(Duration, String)> = None;
+        let end = Duration::from_secs(60);
+        while now - start < end {
+            let t = now - start;
+            let caller_addr = if t < MOVE { old_addr } else { new_addr };
+
+            let due = match restart {
+                Restart::Never => false,
+                Restart::AfterMove(d) => t >= MOVE + d,
+                Restart::AfterSfuDisconnected(d) => {
+                    peer.disconnected_since.is_some_and(|s| now >= s + d)
+                }
+            };
+            if due && restarted_at.is_none() {
+                restarted_at = Some(t);
+                assert!(peer.restart_ice(now).is_none(), "offered after the poll");
+                let (json, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
+                offer_due = Some((t + signalling, serde_json::from_str(&json).unwrap()));
+            }
+            if offer_due.as_ref().is_some_and(|(at, _)| t >= *at) {
+                let (_, offer) = offer_due.take().unwrap();
+                caller.add_local_candidate(Candidate::host(new_addr, "udp").unwrap());
+                let answer = caller.sdp_api().accept_offer(offer).unwrap();
+                answer_due = Some((t + signalling, serde_json::to_string(&answer).unwrap()));
+            }
+            if answer_due.as_ref().is_some_and(|(at, _)| t >= *at) {
+                let (_, answer) = answer_due.take().unwrap();
+                peer.accept_server_answer(&answer).unwrap();
+            }
+
+            let mut sent = Vec::new();
+            let caller_next = drive(&mut caller, now, start, &mut caller_seen, &mut sent);
+            for (source, destination, data) in sent.drain(..) {
+                // Only the address the caller has now still routes.
+                if source == caller_addr && destination == bind {
+                    receive(&mut peer.rtc, now, source, bind, &data);
+                }
+            }
+            let states = sfu_seen.ice.len();
+            let sfu_next = drive(&mut peer.rtc, now, start, &mut sfu_seen, &mut sent);
+            for (_, state) in sfu_seen.ice[states..].to_vec() {
+                peer.on_ice_state(state, now);
+            }
+            if peer.stayed_disconnected(now) {
+                peer.rtc.disconnect();
+                dropped_at = Some(t);
+                break;
+            }
+            for (_, destination, data) in sent.drain(..) {
+                if destination == caller_addr {
+                    receive(&mut caller, now, bind, destination, &data);
+                }
+            }
+
+            if t >= next_write {
+                if let Some(mut ch) = caller.channel(cid) {
+                    ch.write(true, b"caller").unwrap();
+                }
+                if let Some(mut ch) = sfu_seen.channel.and_then(|id| peer.rtc.channel(id)) {
+                    ch.write(true, b"sfu").unwrap();
+                }
+                next_write += Duration::from_millis(500);
+            }
+
+            let next = caller_next.min(sfu_next).min(start + next_write);
+            now = next.clamp(
+                now + Duration::from_millis(1),
+                now + Duration::from_millis(50),
+            );
+        }
+        NetworkChange {
+            dropped_at,
+            restarted_at,
+            sfu_seen,
+            caller_seen,
+        }
+    }
+
+    /// The first data each side received at or after `from`.
+    fn resumed(seen: &Seen, from: Duration) -> Option<Duration> {
+        seen.data.iter().copied().find(|t| *t >= from)
+    }
+
+    /// Without a restart, a caller that moved is lost: the SFU drops it once
+    /// it stayed disconnected for the grace.
+    #[test]
+    fn a_caller_that_moved_without_an_ice_restart_is_dropped() {
+        let run = network_change(Restart::Never, Duration::from_millis(100));
+        let dropped = run
+            .dropped_at
+            .unwrap_or_else(|| panic!("never dropped: {:?}", run.sfu_seen.ice));
+        assert!(
+            dropped > Duration::from_secs(5) + ICE_DISCONNECT_GRACE,
+            "{dropped:?}"
+        );
+    }
+
+    /// An ICE restart right after the move brings the caller back on its new
+    /// address within a second or two, on the same connection: the data
+    /// channel carries on both ways and the SFU never drops the peer.
+    #[test]
+    fn an_ice_restart_after_a_move_resumes_within_two_seconds() {
+        let run = network_change(
+            Restart::AfterMove(Duration::from_millis(200)),
+            Duration::from_millis(100),
+        );
+        assert_eq!(run.dropped_at, None, "{:?}", run.sfu_seen.ice);
+        let restarted = run.restarted_at.unwrap();
+        for (side, seen) in [("SFU", &run.sfu_seen), ("caller", &run.caller_seen)] {
+            let back = resumed(seen, restarted)
+                .unwrap_or_else(|| panic!("the {side} never heard again: {:?}", run.sfu_seen.ice));
+            assert!(
+                back - restarted < Duration::from_secs(2),
+                "the {side} heard again {:?} after the restart",
+                back - restarted
+            );
+            assert!(
+                seen.data.last().unwrap() >= &Duration::from_secs(55),
+                "the {side} stopped receiving at {:?}",
+                seen.data.last()
+            );
+        }
+    }
+
+    /// A restart asked for late, when the SFU has seen the caller
+    /// disconnected for almost the whole grace, and answered slowly: the
+    /// peer is kept past the grace until the restart can work, and ICE
+    /// connects again on the new address. (The data channel does not come
+    /// back here: after half a minute without an answer SCTP has given up
+    /// on the association. Media, which has no such retry limit, would.)
+    #[test]
+    fn a_late_ice_restart_extends_the_disconnect_grace() {
+        let run = network_change(
+            Restart::AfterSfuDisconnected(Duration::from_millis(9_500)),
+            Duration::from_millis(500),
+        );
+        assert!(run.restarted_at.is_some(), "{:?}", run.sfu_seen.ice);
+        assert_eq!(run.dropped_at, None, "{:?}", run.sfu_seen.ice);
+        let restarted = run.restarted_at.unwrap();
+        let back = run
+            .sfu_seen
+            .ice
+            .iter()
+            .find(|(t, s)| *t > restarted && *s == IceConnectionState::Connected)
+            .map(|(t, _)| *t)
+            .unwrap_or_else(|| panic!("never connected again: {:?}", run.sfu_seen.ice));
+        assert!(
+            back - restarted < Duration::from_secs(3),
+            "{:?}",
+            run.sfu_seen.ice
+        );
+    }
+
+    /// The restart waits behind an offer already pending, and a second
+    /// request while its offer waits gets that same offer.
+    #[test]
+    fn an_ice_restart_waits_for_a_pending_offer_and_is_offered_once() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:caller".to_string(),
+            rtc,
+            false,
+        );
+        let mut change = peer.rtc.sdp_api();
+        change.add_media(
+            MediaKind::Audio,
+            str0m::media::Direction::SendOnly,
+            None,
+            None,
+            None,
+        );
+        let (_, pending) = change.apply().unwrap();
+        peer.pending_offer = Some(pending);
+
+        let now = Instant::now();
+        assert!(peer.restart_ice(now).is_none(), "an offer is pending");
+        assert!(peer.has_deferred_changes());
+
+        // The pending offer goes stale; the restart is offered next.
+        peer.drop_stale_offer();
+        let (offer, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
+        assert!(offer.contains("ice-ufrag"), "{offer}");
+        assert!(!peer.has_deferred_changes());
+        assert_eq!(peer.restart_ice(now).map(|(o, _)| o), Some(offer));
+    }
+
+    /// A second request while the restart's offer waits gets that offer
+    /// again (its answer may have been lost), and once the answer lands a
+    /// fresh restart follows, with new ICE credentials for the newest
+    /// network.
+    #[test]
+    fn a_second_request_during_a_restart_restarts_again_after_its_answer() {
+        let bind: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let mut caller = Rtc::builder().build(Instant::now());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        let (offer, pending) = change.apply().unwrap();
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind, None).unwrap();
+        caller
+            .sdp_api()
+            .accept_answer(pending, serde_json::from_str(&answer).unwrap())
+            .unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:caller".to_string(),
+            rtc,
+            false,
+        );
+        let ufrag = |offer: &str| {
+            let offer: SdpOffer = serde_json::from_str(offer).unwrap();
+            offer
+                .to_sdp_string()
+                .lines()
+                .find_map(|l| l.strip_prefix("a=ice-ufrag:").map(str::to_string))
+                .unwrap()
+        };
+
+        let now = Instant::now();
+        assert!(peer.restart_ice(now).is_none(), "offered after the poll");
+        let (first, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
+        assert_eq!(peer.restart_ice(now).map(|(o, _)| o), Some(first.clone()));
+        assert!(!peer.has_deferred_changes());
+
+        let answer = caller
+            .sdp_api()
+            .accept_offer(serde_json::from_str(&first).unwrap())
+            .unwrap();
+        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+            .unwrap();
+        assert!(peer.has_deferred_changes(), "the second request is pending");
+        let (second, _) = apply_deferred_tracks(&mut peer).expect("a fresh restart");
+        assert_ne!(ufrag(&second), ufrag(&first));
+
+        let answer = caller
+            .sdp_api()
+            .accept_offer(serde_json::from_str(&second).unwrap())
+            .unwrap();
+        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+            .unwrap();
+        assert!(peer.ice_restart.is_none());
+        assert!(!peer.has_deferred_changes());
+    }
+
+    /// The event loop applies commands, then drops peers that stayed
+    /// disconnected, and only then polls str0m for the ICE state the answer
+    /// starts. A restart answered after the disconnect grace ran out must
+    /// not be dropped in between: its answer restarts the clock.
+    #[test]
+    fn a_restart_answered_late_keeps_the_peer_until_ice_reports() {
+        let bind: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let mut caller = Rtc::builder().build(Instant::now());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        let (offer, pending) = change.apply().unwrap();
+        let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, bind, None).unwrap();
+        caller
+            .sdp_api()
+            .accept_answer(pending, serde_json::from_str(&answer).unwrap())
+            .unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:caller".to_string(),
+            rtc,
+            false,
+        );
+        let now = Instant::now();
+        let lost_at = now
+            .checked_sub(ICE_DISCONNECT_GRACE + Duration::from_secs(5))
+            .unwrap();
+        peer.on_ice_state(IceConnectionState::Disconnected, lost_at);
+        assert!(peer.restart_ice(lost_at + ICE_DISCONNECT_GRACE).is_none());
+        let (offer, _) = apply_deferred_tracks(&mut peer).expect("the restart is offered");
+        assert!(
+            !peer.stayed_disconnected(now),
+            "the restart extends the grace"
+        );
+
+        let answer = caller
+            .sdp_api()
+            .accept_offer(serde_json::from_str(&offer).unwrap())
+            .unwrap();
+        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+            .unwrap();
+        assert!(
+            !peer.stayed_disconnected(Instant::now()),
+            "dropped between the answer and its ICE state"
         );
     }
 

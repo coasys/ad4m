@@ -52,6 +52,11 @@ export class Participant {
     return this.user.did;
   }
 
+  /** The participant process's pid: whose sockets an impairment of this participant alone cuts. */
+  get pid(): number {
+    return this.proc.pid!;
+  }
+
   /** The process died of a signal nobody sent: the libwebrtc binding crashed. */
   get crashed(): boolean {
     return !this.killed && this.exit?.signal != null;
@@ -83,6 +88,8 @@ export class Participant {
   quality(preference: SfuQualityPreference): Promise<void> { return this.send({ kind: "quality", preference }); }
   sendData(label: string, data: string, binary = false): Promise<void> { return this.send({ kind: "send", label, data, binary }); }
   snapshot(): Promise<Snapshot> { return this.send<Snapshot>({ kind: "snapshot" }); }
+  /** Tell the process its network changed, as a browser's `online` event does. */
+  networkChanged(): Promise<void> { return this.send({ kind: "networkChanged" }); }
 
   /** End the process at once, as a closed tab or a lost device does: no leave, no goodbye. */
   kill(): void {

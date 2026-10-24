@@ -306,6 +306,25 @@ async fn call_answer_server_offer(
     Ok(Value::Bool(ok))
 }
 
+// ── ICE restart ───────────────────────────────────────────────────────────────
+//
+// After a network change the client asks the SFU to restart ICE on the
+// caller's own connection. The offer comes back as an
+// `sfu-call-renegotiation-offer` event and is answered with
+// `sfu.callAnswerServerOffer`: the SFU stays the only offerer.
+
+async fn call_restart_ice(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+    let p: SfuRoomParams = parse(params)?;
+    let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
+    let ok = service()?
+        .call_restart_ice(&p.neighbourhood_url, &p.room_name, &agent_did)
+        .await
+        .map_err(map_room_err)?;
+    Ok(Value::Bool(ok))
+}
+
 // ── Trickle ICE ───────────────────────────────────────────────────────────────
 //
 // Companion to `callJoin`: when the client gathers ICE candidates
@@ -512,6 +531,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "sfu.callAnswerServerOffer",
         call_answer_server_offer,
     );
+    map.method::<SfuRoomParams, bool>("sfu.callRestartIce", call_restart_ice);
     map.method::<SfuNeighbourhoodParams, SfuConfig>("sfu.getConfig", get_config)
         .read();
     map.method::<SfuSetConfigParams, bool>("sfu.setConfig", set_config);
