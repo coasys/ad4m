@@ -1,0 +1,41 @@
+{
+  "description": "BIP-39 words (empty passphrase), SLIP-0010 Ed25519 masters at m/7133'/0'/n', HKDF salts and commitments, the recovery key.",
+  "entropy": "7f3a910c5e22d48619ab40ee6308c75d",
+  "masters": [
+    {
+      "commitment": "QmbT17VxyTGnwi13UNh5x46xHtzNoFTQzP5uEW6V3MwzvW",
+      "key": "z6MkiMkmsajkgYBADCpSz5mE9MavAQ6gR6BYKS958GsaBtAG",
+      "n": 0,
+      "path": "m/7133'/0'/0'",
+      "salt": "BNdh3TFT9ajX2rEwegBibH",
+      "saltHex": "54009df530e13b4169241cc1191262a8"
+    },
+    {
+      "commitment": "QmUjqxStXgm8CbRPa5W9UwPaDmEceFDEAuJAbPRewdwYVj",
+      "key": "z6Mkqn8fFCuY94k7dX2Wh6mihMBv51VE9cbc7aNDbvQJJpFq",
+      "n": 1,
+      "path": "m/7133'/0'/1'",
+      "salt": "6ig1ppqXNoGeKUrwH9KXhT",
+      "saltHex": "2e4f3b323b33910a22a6366ea591bbb2"
+    },
+    {
+      "commitment": "QmaSfDSESEvcyWJhXgGJQTp6Y3MMdsR4PHJVcTvEwr7RbM",
+      "key": "z6Mkm1sgFqXKUdQfsXoQE6BEzkkUm278vVpoQaLgn8knoAjW",
+      "n": 2,
+      "path": "m/7133'/0'/2'",
+      "salt": "Y34J29gpzKArGScWXdkL4p",
+      "saltHex": "fb54d0ceec7d780e669034c6177fee01"
+    },
+    {
+      "commitment": "QmPfvQBmV1ManNwJGWm7GeRrNBzFp7SxhZtjHhADcA6pzT",
+      "key": "z6MkuRsUGEsj2TE1bCKzDLZjXmiVPwVc1hkEqGwN6MRzaQwT",
+      "n": 3,
+      "path": "m/7133'/0'/3'",
+      "salt": "379GYiGrsjHRx8mW2uS1rW",
+      "saltHex": "110dd5d690bdd9b811dca6638bff963f"
+    }
+  ],
+  "recoveryPublic": "z6LSjVztUpgdSXhoZuVojnxsgeoFLwcgDiYLAVWDvEYAAZ4f",
+  "seed": "8034ac041cb6d4fccc0afd946adca22f19c8525d54c4d0cd99cf8b2e946683fbd5d4ad6d57048cc4308e4b3dc38d28f87bc5a77860a414bef3dac808ca59110c",
+  "words": "left stand drink rough coil drink grit gym unveil blue crack river"
+}
