@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "ad4m-hash-chain",
+    "ad4m-identity-core",
     "cli",
     "rust-client",
     "rust-executor",

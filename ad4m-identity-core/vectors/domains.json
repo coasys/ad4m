@@ -1,0 +1,318 @@
+{
+  "cases": [
+    {
+      "domain": "coasys:link",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "65a00335a7501f94cde134ea97bc34e757e0a238e110eba0361a23872cb1a43982171eda5e290a2d0f9e109b40af5f40f4ed9d5c744c38085fbe6678ace4f805",
+      "signingBytes": "{\"domain\":\"coasys:link\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:link\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:link"
+      }
+    },
+    {
+      "domain": "coasys:store-request",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "92c110bbf7507abead2f19ab96ff8e8feae2dc02de767bda31bbfed3270a2c1522753c59aadf6342fa019cc509c8f6b22d2f688c34c7fa39bab4d5d8814a0005",
+      "signingBytes": "{\"domain\":\"coasys:store-request\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:store-request\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:store-request"
+      }
+    },
+    {
+      "domain": "coasys:head",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "ae6444bb75efdc1191c60ce0f97222fe79bedd56feed3d6637a58372cadb2e7abc281fb9bfbb02c67f9227fb09c9cfc259be92868aa64dbd468b920176bc1a09",
+      "signingBytes": "{\"domain\":\"coasys:head\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:head\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:head"
+      }
+    },
+    {
+      "domain": "coasys:vouch",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "9766c641f4480eb0d32fac95479ebacd6e834f689d64d3512b61a6bf5bc4c99605f2c16a868c6a44c0af3b0a24fec8ad5ecd4c3b7d4d79613cd25b84d8f97f00",
+      "signingBytes": "{\"domain\":\"coasys:vouch\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:vouch\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:vouch"
+      }
+    },
+    {
+      "domain": "coasys:offer",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "49b81f6df5f9058f5fdeb8a7a2c3a1ed269052c93b7190c47b3b778b61e3e779fa7f04b8eff94de360e871ff05095d366664968f918a7f917222c38caf53700a",
+      "signingBytes": "{\"domain\":\"coasys:offer\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:offer\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:offer"
+      }
+    },
+    {
+      "domain": "coasys:claim",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "9789f21ef1bff3b7641a02493b89b10f217990bb90b0e2aa42841d7db59b4556417d80accd4a27e8ff2280694d847be4e36b8ca0d41642d84e6a33a9339f3104",
+      "signingBytes": "{\"domain\":\"coasys:claim\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:claim\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:claim"
+      }
+    },
+    {
+      "domain": "coasys:pause",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "59a2baaff4a914de253330460c07b34041ed7e7df08c768139bfef0f4747cad34d91a26039afd598859d7e07febcf8da3e3c2ecf6cf241a4c1c0f532166bc101",
+      "signingBytes": "{\"domain\":\"coasys:pause\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:pause\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:pause"
+      }
+    },
+    {
+      "domain": "coasys:inbox",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "f8aec40b1d80b0b626462f1140b369f0e5b4ff2b6f3dcc1c691459417eb91fc803ce749cba702ee48668f8cf6344d574c418bdc634127cc14846a63b0c0c5f0d",
+      "signingBytes": "{\"domain\":\"coasys:inbox\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:inbox\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:inbox"
+      }
+    },
+    {
+      "domain": "coasys:session",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "a36cce78dcadc5590745741c2f9a15a3cfc14ffc7d4231a57cdeb56c42184e01ec528c822ec9dbb410553e8644912c7fe6034b9d0f08ebb24211bbfa8e365600",
+      "signingBytes": "{\"domain\":\"coasys:session\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:session\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:session"
+      }
+    },
+    {
+      "domain": "coasys:account",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "63f627d4b612609f580b7a19c8e5e6a00fe7885e954a2373e63c46ab1ec85a3ddea02c21b3b846237ebb4aa6e3af8ebe3132dbc2ccab6a7e3736e9dc0dbede07",
+      "signingBytes": "{\"domain\":\"coasys:account\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:account\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:account"
+      }
+    },
+    {
+      "domain": "coasys:room-key",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "6804aa3ed69ed5b51ebae421588f3c3dc8b713de0bd4991e020ece4f3f64593d8af3a318faa65e89a1f481ac88de1656d9c342b89bbc5ec85ee17d2937c3db0b",
+      "signingBytes": "{\"domain\":\"coasys:room-key\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:room-key\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:room-key"
+      }
+    },
+    {
+      "domain": "coasys:bot-grant",
+      "key": "z6MkwUYaRhFCBV8fPNmdZbyPne9p8oX9eD5toHpWSHqnUdTZ",
+      "signature": "3db7403df6b1cd5abd589a7e8b65ee1b4482f8155fe122e8bf83190fd868ade97502282c32ae8e425e845f18e49380e0a952d34b277716522e10f3630f7cce0a",
+      "signingBytes": "{\"domain\":\"coasys:bot-grant\",\"nested\":{\"a\":\"ü\",\"b\":[1,2]},\"seq\":3,\"subject\":\"coasys:bot-grant\"}",
+      "value": {
+        "nested": {
+          "a": "ü",
+          "b": [
+            1,
+            2
+          ]
+        },
+        "seq": 3,
+        "subject": "coasys:bot-grant"
+      }
+    }
+  ],
+  "description": "The domain-field scheme: Ed25519 over JCS(value + {\"domain\": d}). A signature verifies only under its own domain; labels and coasys:kel are refused.",
+  "domains": [
+    {
+      "name": "coasys:kel",
+      "owner": "identity",
+      "scheme": "data-integrity"
+    },
+    {
+      "name": "coasys:link",
+      "owner": "identity",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:store-request",
+      "owner": "identity",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:head",
+      "owner": "identity",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:vouch",
+      "owner": "identity",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:offer",
+      "owner": "device linking",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:claim",
+      "owner": "device linking",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:pause",
+      "owner": "device linking",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:inbox",
+      "owner": "device linking",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:session",
+      "owner": "executor hosting",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:account",
+      "owner": "wrapped-key store",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:room-key",
+      "owner": "server link language",
+      "scheme": "domain-field"
+    },
+    {
+      "name": "coasys:bot-grant",
+      "owner": "executor hosting",
+      "scheme": "domain-field"
+    }
+  ],
+  "labels": [
+    "coasys:pow",
+    "coasys:pair-id:1",
+    "coasys:pair-key:1",
+    "coasys:match",
+    "coasys:wrap:1",
+    "coasys:auth:1"
+  ],
+  "refused": [
+    {
+      "domain": "coasys:pow",
+      "error": "Label"
+    },
+    {
+      "domain": "coasys:pair-id:1",
+      "error": "Label"
+    },
+    {
+      "domain": "coasys:pair-key:1",
+      "error": "Label"
+    },
+    {
+      "domain": "coasys:match",
+      "error": "Label"
+    },
+    {
+      "domain": "coasys:wrap:1",
+      "error": "Label"
+    },
+    {
+      "domain": "coasys:auth:1",
+      "error": "Label"
+    },
+    {
+      "domain": "coasys:kel",
+      "error": "Scheme"
+    },
+    {
+      "domain": "coasys:lang-key",
+      "error": "Unknown"
+    }
+  ]
+}
