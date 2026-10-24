@@ -195,10 +195,13 @@ commands:
           no_output_timeout: 30m
       - run:
           # The identity suite's tools: the integration runners compile no Rust.
+          # One invocation with `ad4m`: the holder reaches the executor through rust-client,
+          # whose TLS needs OpenSSL, and only `ad4m`'s graph vendors it (no system OpenSSL here).
           name: Build identity-store and the identity test holder
           command: |
-            cargo build --release -p identity-store
-            cargo build --release -p ad4m-identity-client --example holder --features ws,test-vault
+            cargo build --release -p ad4m -p identity-store -p ad4m-identity-client \
+              --bin identity-store --example holder \
+              --features ad4m-identity-client/ws,ad4m-identity-client/test-vault
           no_output_timeout: 30m
 
   build_integration_inputs:

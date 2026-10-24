@@ -28,8 +28,13 @@ const holderBinary = () => path.join(targetDir(), "release", "examples", "holder
 export function buildIdentityTools() {
     if (existsSync(storeBinary()) && existsSync(holderBinary())) return;
     const opts = { cwd: REPO_ROOT, stdio: "inherit" as const };
-    execSync("cargo build --release -p identity-store", opts);
-    execSync("cargo build --release -p ad4m-identity-client --example holder --features ws,test-vault", opts);
+    // One invocation with `ad4m`, as CI builds them: only `ad4m`'s graph vendors OpenSSL.
+    execSync(
+        "cargo build --release -p ad4m -p identity-store -p ad4m-identity-client " +
+            "--bin identity-store --example holder " +
+            "--features ad4m-identity-client/ws,ad4m-identity-client/test-vault",
+        opts,
+    );
 }
 
 /** A running identity-store. `restart` keeps its port, key and database file. */
