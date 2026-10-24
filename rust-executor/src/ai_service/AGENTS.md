@@ -16,9 +16,9 @@ Split plan: spec item 9 (`mod.rs`), item 7 (`harness/` → `agentic/`).
 | rest | tests |
 
 Persistence of models/tasks is in `db.rs` (`models`, `tasks`, `model_status`,
-`default_models` tables). Tasks have an owner (`tasks.user_email`, `NULL` for operator
-tasks; see `src/db/AGENTS.md`): `add_task` takes it, and the WS guards enforce it.
-Billing goes through `crate::billing` with the caller's `AgentContext`/email.
+`default_models` tables). Tasks have an owner (`tasks.agent_did`, the managed agent's DID;
+`NULL` for a task of the main agent; see `src/db/AGENTS.md`): `add_task` takes it, and the
+WS guards enforce it. Billing goes through `crate::billing` with the caller's agent DID.
 
 ## `harness/`
 
