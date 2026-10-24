@@ -1,3 +1,4 @@
+use crate::secret::Secret;
 use crate::utils;
 use crate::wallet::{KEY_NAME_MAIN, KEY_NAME_PLATFORM};
 use deno_core::error::AnyError;
@@ -22,7 +23,7 @@ pub fn set_global_config(config: Ad4mConfig) {
 }
 
 /// The admin credential the executor runs with, if a global config exists. Never panics.
-pub fn configured_admin_credential() -> Option<String> {
+pub fn configured_admin_credential() -> Option<Secret> {
     GLOBAL_AD4M_CONFIG
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -108,7 +109,9 @@ pub struct Ad4mConfig {
     /// Grants every capability to whoever presents it. Required: `run`
     /// refuses to start without one (an empty string counts as none) unless
     /// `insecure_no_admin_credential` is set. See [`Ad4mConfig::check_admin_credential`].
-    pub admin_credential: Option<String>,
+    /// Serialises as `"<redacted>"`: no serialised config carries it.
+    #[serde(serialize_with = "crate::secret::serialize_redacted")]
+    pub admin_credential: Option<Secret>,
     /// Tests and local development only: start without an admin credential.
     /// The empty token is then the operator (every capability), so anyone who
     /// can reach the listener controls the executor.
@@ -191,7 +194,9 @@ pub struct Ad4mConfig {
     /// Bearer token for internal API authentication (outbound: executor → platform Worker).
     /// MUST differ from `admin_credential` (inbound: client → executor) to maintain
     /// trust boundary separation. See the assertion in lib.rs::run().
-    pub internal_api_token: Option<String>,
+    /// Serialises as `"<redacted>"`, like `admin_credential`.
+    #[serde(serialize_with = "crate::secret::serialize_redacted")]
+    pub internal_api_token: Option<Secret>,
 }
 
 impl Ad4mConfig {
@@ -208,10 +213,12 @@ impl Ad4mConfig {
     }
 
     pub fn prepare(&mut self) {
-        // An empty credential is no credential. Normalised here, once, so
-        // every reader after prepare() (the startup check, REST/WS
-        // capabilities, the MCP bind host and auth) agrees on it.
-        self.admin_credential = non_empty_credential(self.admin_credential.take());
+        // An empty credential is no credential: an empty environment variable
+        // (a compose `${VAR}` with `VAR` unset) must not become a credential
+        // the empty token matches. Normalised here, once, so every reader
+        // after prepare() (the startup check, REST/WS capabilities, the MCP
+        // bind host and auth) agrees on it.
+        self.admin_credential = self.admin_credential.take().filter(|c| !c.is_empty());
 
         // Read shared-backend config from environment variables when not set
         // programmatically. This allows Docker containers to configure the
@@ -237,7 +244,7 @@ impl Ad4mConfig {
                 .and_then(|v| v.parse().ok());
         }
         if self.internal_api_token.is_none() {
-            self.internal_api_token = std::env::var("INTERNAL_API_TOKEN").ok();
+            self.internal_api_token = Secret::non_empty(std::env::var("INTERNAL_API_TOKEN").ok());
         }
 
         // Validate shared-backend URLs use HTTPS (or approved local addresses)
@@ -367,13 +374,6 @@ impl std::fmt::Debug for SmtpConfig {
             .field("from_address", &self.from_address)
             .finish()
     }
-}
-
-/// `Some("")` is no credential: an empty environment variable (a compose
-/// `${VAR}` with `VAR` unset) must not become a credential the empty token
-/// matches.
-pub fn non_empty_credential(credential: Option<String>) -> Option<String> {
-    credential.filter(|credential| !credential.is_empty())
 }
 
 /// Why `run` refused to start; names both ways out.
@@ -521,7 +521,7 @@ mod tests {
         insecure_no_admin_credential: Option<bool>,
     ) -> Ad4mConfig {
         Ad4mConfig {
-            admin_credential: admin_credential.map(str::to_string),
+            admin_credential: admin_credential.map(Secret::from),
             insecure_no_admin_credential,
             ..Default::default()
         }
@@ -556,23 +556,14 @@ mod tests {
         for flag in [None, Some(false), Some(true)] {
             let mut config = with_credential(Some(""), flag);
             config.prepare();
-            assert_eq!(config.admin_credential, None, "flag {flag:?}");
+            assert!(config.admin_credential.is_none(), "flag {flag:?}");
         }
         let mut config = with_credential(Some("secret"), Some(true));
         config.prepare();
-        assert_eq!(config.admin_credential.as_deref(), Some("secret"));
-    }
-
-    /// The interpretation pass reads AD4M_ADMIN_CREDENTIAL itself, through
-    /// this helper, so an empty variable is no credential there too.
-    #[test]
-    fn non_empty_credential_drops_only_the_empty_string() {
-        assert_eq!(non_empty_credential(Some(String::new())), None);
-        assert_eq!(non_empty_credential(None), None);
-        assert_eq!(
-            non_empty_credential(Some(" ".to_string())).as_deref(),
-            Some(" ")
-        );
+        assert!(config
+            .admin_credential
+            .unwrap()
+            .expose_for_compare("secret"));
     }
 
     #[test]
@@ -624,6 +615,28 @@ mod tests {
         assert_eq!(json["adminCredential"], "<redacted>");
         assert_eq!(json["smtpConfig"]["password"], "<redacted>");
         assert!(Ad4mConfig::default().redacted_json()["adminCredential"].is_null());
+    }
+
+    /// Plain serialisation (`get_json`) never writes the admin credential
+    /// either: the field serialises as the redaction marker. Reading a config
+    /// that carries the credential still works.
+    #[test]
+    fn the_admin_credential_serialises_redacted_and_deserialises() {
+        let config = with_credential(Some("admin-secret"), None);
+        let json = config.get_json();
+        assert!(!json.contains("admin-secret"), "{json}");
+        assert!(json.contains(r#""adminCredential":"<redacted>""#), "{json}");
+
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["adminCredential"] = "from-json".into();
+        let read: Ad4mConfig = serde_json::from_value(value).unwrap();
+        assert!(read
+            .admin_credential
+            .unwrap()
+            .expose_for_compare("from-json"));
+        assert!(Ad4mConfig::default()
+            .get_json()
+            .contains(r#""adminCredential":null"#));
     }
 
     #[test]

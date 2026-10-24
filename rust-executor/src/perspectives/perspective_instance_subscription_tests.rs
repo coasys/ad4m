@@ -7,31 +7,52 @@
 //!
 //! The background `subscribed_queries_loop` is not running in these tests, so
 //! `check_subscribed_queries` is driven directly after the matching link is
-//! written. Updates are observed on the global pubsub topic the WS layer
-//! forwards to clients.
+//! written. Updates are observed as the typed `query-subscription-update` events
+//! the WS layer forwards to clients.
 
 use super::*;
 use crate::perspectives::interpretation_test_support::{setup_perspective_no_llm, TASK_SDNA};
-use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+use crate::pubsub::get_global_pubsub;
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-/// Wait for an update for `subscription_id` on `rx`, ignoring updates for
-/// other perspectives (the topic is global).
+/// The payload of the next update for `subscription_id` on `rx` (see
+/// [`next_update_event_for`]).
 async fn next_update_for(
-    rx: &mut broadcast::Receiver<String>,
+    rx: &mut broadcast::Receiver<Arc<Event>>,
     perspective_uuid: &str,
     subscription_id: &str,
 ) -> Value {
+    next_update_event_for(rx, perspective_uuid, subscription_id)
+        .await
+        .payload
+        .clone()
+}
+
+/// Wait for an update for `subscription_id` on `rx`, ignoring other events and
+/// updates for other perspectives (the channel is global).
+async fn next_update_event_for(
+    rx: &mut broadcast::Receiver<Arc<Event>>,
+    perspective_uuid: &str,
+    subscription_id: &str,
+) -> Arc<Event> {
     let deadline = Duration::from_secs(10);
     let wait = async {
         loop {
-            let msg = rx.recv().await.expect("pubsub receiver closed");
-            let update: Value = serde_json::from_str(&msg).expect("subscription update JSON");
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                // Other tests' events share the channel; a lag skips some of theirs too.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("pubsub receiver closed: {e}"),
+            };
+            if event.topic != Topic::PerspectiveQuerySubscription {
+                continue;
+            }
+            let update = &event.payload;
             if update["perspectiveUuid"] == perspective_uuid
                 && update["subscriptionId"] == subscription_id
             {
-                return update;
+                return event;
             }
         }
     };
@@ -55,19 +76,16 @@ async fn a_model_subscriber_keeps_its_updates_when_another_disposes() {
     let query_json = r#"{"where":{"owner":"alice"}}"#;
 
     let (id1, _, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), "c".into())
+        .model_subscribe_and_query("Task".into(), query_json.into(), "c".into(), None)
         .await
         .expect("first model subscribe");
     let (id2, _, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), "c".into())
+        .model_subscribe_and_query("Task".into(), query_json.into(), "c".into(), None)
         .await
         .expect("second model subscribe");
     assert_ne!(id1, id2, "each subscriber gets its own subscription");
 
-    let mut rx = get_global_pubsub()
-        .await
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
+    let mut rx = get_global_pubsub().await.subscribe_events();
 
     assert!(perspective.dispose_query_subscription(&id1, "c").await);
     assert!(!is_registered(&perspective, &id1).await);
@@ -114,19 +132,16 @@ async fn a_query_subscriber_keeps_its_updates_when_another_connection_disposes()
     let query = "SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".to_string();
 
     let (id1, _, _) = perspective
-        .subscribe_and_query(query.clone(), "a".into())
+        .subscribe_and_query(query.clone(), "a".into(), None)
         .await
         .expect("first subscribe");
     let (id2, _, _) = perspective
-        .subscribe_and_query(query.clone(), "b".into())
+        .subscribe_and_query(query.clone(), "b".into(), None)
         .await
         .expect("second subscribe");
     assert_ne!(id1, id2, "each subscriber gets its own subscription");
 
-    let mut rx = get_global_pubsub()
-        .await
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
+    let mut rx = get_global_pubsub().await.subscribe_events();
 
     // A connection can end only its own subscriptions.
     assert!(!perspective.dispose_query_subscription(&id2, "a").await);
@@ -152,14 +167,96 @@ async fn a_query_subscriber_keeps_its_updates_when_another_connection_disposes()
         ))
         .await;
 
-    let update = next_update_for(&mut rx, &perspective.uuid, &id2).await;
+    let event = next_update_event_for(&mut rx, &perspective.uuid, &id2).await;
+    let update = &event.payload;
     assert!(
         update.to_string().contains("ns://thing/1"),
         "the update must carry the new link, got: {update}"
     );
     assert_eq!(
-        update["connectionId"], "b",
+        event.connection.as_deref(),
+        Some("b"),
         "addressed to its own connection"
+    );
+}
+
+/// A re-run's update goes to its subscriber only. Two managed agents owning one perspective
+/// subscribe the same query: each gets its own subscription id, and the re-run after a
+/// matching link sends each id to its own subscriber (`Audience::Dids([subscriber])`), not
+/// to the main agent (who does not own the perspective) or the other owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_update_reaches_only_its_subscriber() {
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let u = "did:key:subscriber-u".to_string();
+    let v = "did:key:subscriber-v".to_string();
+    perspective.persisted.lock().await.owners = Some(vec![u.clone(), v.clone()]);
+    let query = "SELECT ?s ?o WHERE { ?s <ns://audience-title> ?o . }".to_string();
+
+    let (id_u, _, _) = perspective
+        .subscribe_and_query(query.clone(), "u-connection".into(), Some(u.clone()))
+        .await
+        .expect("U subscribes");
+    let (id_v, _, _) = perspective
+        .subscribe_and_query(query.clone(), "v-connection".into(), Some(v.clone()))
+        .await
+        .expect("V subscribes");
+    assert_ne!(id_u, id_v, "two agents' subscriptions are not shared");
+
+    let mut rx = get_global_pubsub().await.subscribe_events();
+    perspective
+        .add_link(
+            Link {
+                source: "ns://thing/audience".into(),
+                predicate: Some("ns://audience-title".into()),
+                target: "literal://string:hello".into(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("add_link");
+    perspective
+        .check_subscribed_queries(ChangedPredicates::Specific(
+            HashSet::from(["ns://audience-title".to_string()]).into(),
+        ))
+        .await;
+
+    let mut got = std::collections::BTreeMap::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while got.len() < 2 {
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("pubsub receiver closed: {e}"),
+            };
+            if event.topic != Topic::PerspectiveQuerySubscription {
+                continue;
+            }
+            let update: crate::types::QuerySubscriptionUpdate =
+                serde_json::from_value(event.payload.clone()).expect("subscription update JSON");
+            if update.uuid == perspective.uuid {
+                assert_eq!(update.revision, 1);
+                let added = serde_json::to_string(&update.added).unwrap();
+                assert!(added.contains("ns://thing/audience"), "{added}");
+                let route = (event.audience.clone(), event.connection.clone());
+                got.insert(update.subscription_id, route);
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("both updates expected, got {got:?}"));
+    let route =
+        |did: String, connection: &str| (Audience::Dids(vec![did]), Some(connection.into()));
+    assert_eq!(
+        got.get(&id_u),
+        Some(&route(u, "u-connection")),
+        "U's update"
+    );
+    assert_eq!(
+        got.get(&id_v),
+        Some(&route(v, "v-connection")),
+        "V's update"
     );
 }
 
@@ -188,15 +285,13 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
             classes,
             r#"{"includeUnverified":true,"count":true}"#.into(),
             "c".into(),
+            None,
         )
         .await
         .expect("union model subscribe");
     assert!(initial.contains("\"totalCount\":0"), "{initial}");
 
-    let mut rx = get_global_pubsub()
-        .await
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
+    let mut rx = get_global_pubsub().await.subscribe_events();
 
     for (class, base, props, changed, expected) in [
         (
@@ -256,14 +351,16 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
     let classes =
         crate::perspectives::model_query::QueryClasses::union(vec!["Task".into(), "Note".into()]);
     let (id, _, _) = perspective
-        .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), "c".into())
+        .model_subscribe_and_query(
+            classes,
+            r#"{"includeUnverified":true}"#.into(),
+            "c".into(),
+            None,
+        )
         .await
         .expect("union model subscribe");
 
-    let mut rx = get_global_pubsub()
-        .await
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
+    let mut rx = get_global_pubsub().await.subscribe_events();
 
     perspective
         .create_subject(
@@ -315,6 +412,7 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
             QueryClasses::union(vec!["Task".into(), "Note".into()]),
             query_json.into(),
             "c".into(),
+            None,
         )
         .await
         .expect("first union subscribe");
@@ -323,6 +421,7 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
             QueryClasses::union(vec!["Note".into(), "Task".into(), "Note".into()]),
             query_json.into(),
             "c".into(),
+            None,
         )
         .await
         .expect("second union subscribe");
