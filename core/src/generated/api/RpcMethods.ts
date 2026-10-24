@@ -175,6 +175,7 @@ import type { UsersEmailTestParams } from "./UsersEmailTestParams";
 import type { UsersEmailTestResult } from "./UsersEmailTestResult";
 import type { UsersLoginParams } from "./UsersLoginParams";
 import type { UsersRequestVerificationParams } from "./UsersRequestVerificationParams";
+import type { UsersRevokeAllSessionsParams } from "./UsersRevokeAllSessionsParams";
 import type { UsersSetCreditsParams } from "./UsersSetCreditsParams";
 import type { UsersVerifyEmailParams } from "./UsersVerifyEmailParams";
 import type { ValidOutput } from "./ValidOutput";
@@ -371,8 +372,10 @@ export interface RpcMethods {
   "user.freeAccess": { params: SetUserFreeAccessRequest; result: boolean };
   "user.list": { params: Record<string, never>; result: Array<UserStatistics> };
   "user.login": { params: UsersLoginParams; result: string };
+  "user.logout": { params: Record<string, never>; result: boolean };
   "user.multiUserEnabled": { params: Record<string, never>; result: boolean };
   "user.requestVerification": { params: UsersRequestVerificationParams; result: VerificationRequestResult };
+  "user.revokeAllSessions": { params: UsersRevokeAllSessionsParams; result: boolean };
   "user.setMultiUserEnabled": { params: SetMultiUserRequest; result: boolean };
   "user.verifyEmail": { params: UsersVerifyEmailParams; result: string };
   "user.wallet": { params: UsersEmailParams; result: string };

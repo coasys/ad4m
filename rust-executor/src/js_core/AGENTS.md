@@ -27,3 +27,8 @@ as well. Split plan: spec item 9 (languages), item 1 (delete dead `main.js`).
   and the snapshot builder uses the same list. Language code comes from third parties:
   no wallet extension, and no op that unlocks, locks or reloads the keystore or writes
   the node's profile. Languages sign through `signature_service` / `agent_service`.
+- Language code publishes no executor event directly (#1371): `PUBSUB.publish` always
+  fails (`pubsub_extension.rs`). The events a language raises go through the dedicated ops
+  in `languages_extension.rs` (perspective diff, sync state, telepresence signal), and the
+  Rust side names each one's topic and audience. A new language event gets its own op the
+  same way, never a topic string from JS.

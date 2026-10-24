@@ -202,7 +202,7 @@ impl SfuService {
             });
         }
 
-        // Pump pipe-renegotiation pubsub topics → gossip.  Phase F
+        // Pump the pipe-renegotiation bus → gossip.  Phase F
         // routes media negotiation across the cluster: when the SFU
         // event loop wants to add an outbound track to a pipe-bound
         // peer it publishes the offer to a dedicated topic and waits
@@ -257,26 +257,16 @@ impl SfuService {
         Ok(service)
     }
 
-    /// Subscribe to `SFU_PIPE_RENEGOTIATION_OFFER_TOPIC` and translate
+    /// Subscribe to the pipe bus's offers and translate
     /// each publish into a `CascadeSignal::PipeOffer` directed at the
     /// remote SFU.  Runs for the lifetime of the executor.
     async fn run_pipe_renegotiation_offer_bridge(self: Arc<Self>) {
-        let pubsub = crate::pubsub::get_global_pubsub().await;
-        let mut rx = pubsub
-            .subscribe(&crate::pubsub::SFU_PIPE_RENEGOTIATION_OFFER_TOPIC)
-            .await;
+        let mut rx = super::pipe_bus::subscribe_offers();
         loop {
-            let msg = match rx.recv().await {
+            let payload = match rx.recv().await {
                 Ok(m) => m,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            };
-            let payload: crate::sfu::SfuPipeRenegotiationOffer = match serde_json::from_str(&msg) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!("SFU pipe-reneg offer bridge: parse error: {}", e);
-                    continue;
-                }
             };
             let signal = CascadeSignal::PipeOffer {
                 from_did: self.gossip.local_did().to_string(),
@@ -294,26 +284,16 @@ impl SfuService {
         }
     }
 
-    /// Subscribe to `SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC` and translate
+    /// Subscribe to the pipe bus's answers and translate
     /// each publish into a `CascadeSignal::PipeAnswer` directed at the
     /// remote SFU.  Runs for the lifetime of the executor.
     async fn run_pipe_renegotiation_answer_bridge(self: Arc<Self>) {
-        let pubsub = crate::pubsub::get_global_pubsub().await;
-        let mut rx = pubsub
-            .subscribe(&crate::pubsub::SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC)
-            .await;
+        let mut rx = super::pipe_bus::subscribe_answers();
         loop {
-            let msg = match rx.recv().await {
+            let payload = match rx.recv().await {
                 Ok(m) => m,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            };
-            let payload: crate::sfu::SfuPipeRenegotiationAnswer = match serde_json::from_str(&msg) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!("SFU pipe-reneg answer bridge: parse error: {}", e);
-                    continue;
-                }
             };
             let signal = CascadeSignal::PipeAnswer {
                 from_did: self.gossip.local_did().to_string(),
@@ -358,7 +338,7 @@ impl SfuService {
             // resends a PipeOffer for an existing pipe (e.g. it added
             // outbound tracks for a freshly-joined peer), the event
             // loop applies the offer and publishes the answer back
-            // through the SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC bridge.
+            // through the pipe bus's answer bridge.
             // Tuple: (local pipe participant_id, sdp_offer_json,
             //         remote_did, room_id_str).
             let mut pipe_renegotiation_offers: Vec<(ParticipantId, String, String, String)> =
@@ -751,14 +731,7 @@ impl SfuService {
                                 evt.room_name,
                                 evt.migrate_to_did
                             );
-                            if let Ok(json) = serde_json::to_string(&evt) {
-                                pubsub
-                                    .publish(
-                                        &crate::pubsub::SFU_MIGRATE_TOPIC,
-                                        &json,
-                                    )
-                                    .await;
-                            }
+                            pubsub.publish_event(crate::events::Event::sfu_migrate(&evt));
                         }
                     }
                 }
@@ -826,12 +799,9 @@ impl SfuService {
             room_name: room_id.room_name.clone(),
             participants,
         };
-        if let Ok(json) = serde_json::to_string(&roster) {
-            crate::pubsub::get_global_pubsub()
-                .await
-                .publish(&crate::pubsub::SFU_ROOM_ROSTER_TOPIC, &json)
-                .await;
-        }
+        crate::pubsub::get_global_pubsub()
+            .await
+            .publish_event(crate::events::Event::sfu_room_roster(&roster));
     }
 
     /// Get the local address of the SFU server.
