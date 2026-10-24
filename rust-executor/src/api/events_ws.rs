@@ -48,7 +48,7 @@
 
 use axum::{
     extract::{
-        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
+        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
     response::Response,
@@ -901,6 +901,11 @@ async fn handle_events_ws(
 ) {
     log::info!("Events WebSocket connected");
 
+    // Completes when the grant ends or the token expires: the socket closes at once, not at
+    // the next event.
+    let over = session.over();
+    tokio::pin!(over);
+
     let interest: super::event_interest::SharedInterest = Default::default();
     // No RPC connection, so no live query updates.
     let event_stream =
@@ -912,6 +917,10 @@ async fn handle_events_ws(
 
     loop {
         tokio::select! {
+            _ = &mut over => {
+                super::ws_rpc::close_token_ended(&mut socket).await;
+                break;
+            }
             // Forward events from PubSub to WebSocket
             event = event_stream.next() => {
                 match event {
@@ -922,11 +931,7 @@ async fn handle_events_ws(
                     }
                     // The stream ends when the token stops working.
                     None => {
-                        let close = CloseFrame {
-                            code: super::ws_rpc::CLOSE_TOKEN_ENDED,
-                            reason: "token expired or revoked".into(),
-                        };
-                        let _ = socket.send(Message::Close(Some(close))).await;
+                        super::ws_rpc::close_token_ended(&mut socket).await;
                         break;
                     }
                 }
