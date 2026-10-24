@@ -85,13 +85,6 @@ fn connection_context(
     Ok(Arc::new(ctx))
 }
 
-/// Whether a connection receives the event stream: the operator or a grant. An anonymous
-/// socket (no token, for example on an executor that has an admin credential) gets none.
-/// The stream's own filters then decide which events reach the session.
-pub(crate) fn may_receive_events(ctx: &RequestContext) -> bool {
-    ctx.session.is_authenticated()
-}
-
 /// Close code for a connection whose token opens no session or stopped working (RFC 6455
 /// "policy violation"). Clients read it as "log in again".
 pub(crate) const CLOSE_TOKEN_ENDED: u16 = 1008;
@@ -160,23 +153,20 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
     let (mut ws_sink, ws_stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    // A socket without a token gets no events: a stream that never yields.
-    let events: EventStream = if may_receive_events(&ctx) {
-        // Capability requests, app changes and notification install requests go
-        // only to sessions that can approve apps.
-        let can_approve_apps = ctx.session.may(&AGENT_PERMIT_CAPABILITY);
+    let conn = Connection::new(handler_map, ctx.clone(), tx);
+    // An anonymous socket (no token, for example on an executor that has an admin credential)
+    // gets no events: a stream that never yields. The stream carries the updates of the live
+    // queries this connection opens, watched or not.
+    let events: EventStream = if ctx.session.is_authenticated() {
         super::events_ws::build_event_stream(
             ctx.session.clone(),
-            ctx.is_operator(),
-            can_approve_apps,
-            super::events_ws::sfu_events_allowed(&ctx),
+            conn.interest(),
             ctx.connection_id.clone(),
         )
         .await
     } else {
         Box::pin(futures::stream::pending())
     };
-    let conn = Connection::new(handler_map, ctx, tx);
 
     // ── Writer task ─────────────────────────────────────────────────────
     let writer_session_over = conn.session_over.clone();
@@ -274,6 +264,11 @@ impl Connection {
             interest: Default::default(),
             calls: Default::default(),
         }
+    }
+
+    /// The events this connection asked for with `events.watch`: its event stream reads it.
+    pub(crate) fn interest(&self) -> event_interest::SharedInterest {
+        self.interest.clone()
     }
 
     /// Handle one text message from the client.
@@ -451,21 +446,20 @@ impl Connection {
 }
 
 /// Serve one connection until `incoming` ends or the token stops working:
-/// answer each client message and forward `events` that match the
-/// connection's interest. When the client is gone the event task stops, the
-/// connection's subscriptions end, and calls still in flight finish and reply
-/// to `tx`. `events` ends when the token stops working (see
-/// `build_event_stream`), and that ends the session too.
-pub(crate) async fn serve<S>(conn: Connection, incoming: S, events: EventStream)
+/// answer each client message and forward `events`, a stream built with the
+/// connection's [`Connection::interest`] and its `connection_id`. When the
+/// client is gone the event task stops, the connection's subscriptions end,
+/// and calls still in flight finish and reply to `tx`. `events` ends when the
+/// token stops working (see `build_event_stream`), and that ends the session
+/// too.
+pub(crate) async fn serve<S>(conn: Connection, incoming: S, mut events: EventStream)
 where
     S: futures::Stream<Item = String>,
 {
     let tx_events = conn.tx.clone();
     let event_session_over = conn.session_over.clone();
-    let event_stream = event_interest::filter_stream(events, conn.interest.clone());
     let event_task = tokio::spawn(async move {
-        tokio::pin!(event_stream);
-        while let Some(msg) = event_stream.next().await {
+        while let Some(msg) = events.next().await {
             if tx_events.send(msg).is_err() {
                 return;
             }
@@ -615,30 +609,47 @@ mod event_gate_tests {
     use super::*;
     use crate::agent::session::{Principal, Session};
 
-    // On an executor with an admin credential, a socket with no token gets only these
+    const ADMIN: &str = "the-admin-credential";
+
+    /// Whether a socket that presents `token` on a listener with `reach` gets an event stream.
+    fn gets_events(token: &str, admin: Option<&str>, reach: ListenerReach) -> bool {
+        let admin = admin.map(str::to_string);
+        Session::open(token, &admin, reach)
+            .unwrap()
+            .is_authenticated()
+    }
+
+    // On a node with an admin credential, a socket with no token gets only the anonymous
     // capabilities. It used to receive the main agent's event stream all the same.
     #[test]
     fn an_unauthenticated_socket_receives_no_events() {
-        let unauthenticated =
-            RequestContext::for_session(Session::for_test(Principal::Anonymous).with_caps(vec![
-                AGENT_AUTH_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
-            ]));
-        assert!(!may_receive_events(&unauthenticated));
+        assert!(!gets_events("", Some(ADMIN), ListenerReach::Loopback));
+        assert!(!gets_events("", Some(ADMIN), ListenerReach::Network));
+        let anonymous =
+            Session::for_test(Principal::Anonymous).with_caps(vec![AGENT_AUTH_CAPABILITY.clone()]);
+        assert!(!anonymous.is_authenticated());
     }
 
-    // Apps with narrow capabilities still need their query-subscription and link events.
+    // Apps with narrow capabilities still get an event stream: their capabilities choose the
+    // topics and perspectives it delivers (`Session::may_receive`).
     #[test]
-    fn authenticated_sessions_receive_events_whatever_their_capabilities() {
+    fn authenticated_sessions_get_events_whatever_their_capabilities() {
+        use crate::events::{Audience, Event, Topic};
         let narrow_app = RequestContext::app_for_test(vec![perspective_query_capability(vec![
             "some-uuid".to_string(),
         ])]);
-        assert!(may_receive_events(&narrow_app));
-        assert!(may_receive_events(&RequestContext::user_for_test(
-            "did:key:events-gate",
-            get_user_default_capabilities()
-        )));
-        assert!(may_receive_events(&RequestContext::operator_for_test()));
+        assert!(narrow_app.session.is_authenticated());
+        let link = |uuid: &str| {
+            Event::new(Topic::LinkAdded, Audience::Everyone, serde_json::json!({}))
+                .for_perspective(uuid)
+        };
+        assert!(narrow_app.session.may_receive(&link("some-uuid")));
+        assert!(!narrow_app.session.may_receive(&link("other-uuid")));
+        let user = RequestContext::user_for_test("did:key:u", vec![]);
+        assert!(user.session.is_authenticated());
+        assert!(gets_events(ADMIN, Some(ADMIN), ListenerReach::Network));
+        // No token on a loopback listener of a node without an admin credential (#1059).
+        assert!(gets_events("", None, ListenerReach::Loopback));
     }
 }
 
@@ -646,7 +657,8 @@ mod event_gate_tests {
 mod socket_tests {
     use super::*;
     use crate::db::Ad4mDb;
-    use crate::pubsub::{get_global_pubsub, AI_MODEL_LOADING_STATUS};
+    use crate::events::{Audience, Event, Topic};
+    use crate::pubsub::get_global_pubsub;
     use crate::test_utils::{setup_agent, setup_wallet};
     use futures::SinkExt;
     use std::time::Duration;
@@ -756,10 +768,7 @@ mod socket_tests {
         let before = call(&mut rpc, "1", "agent.status").await;
         assert_ne!(before["error"]["code"], 401, "{before}");
         let mut sockets = vec![("rpc", rpc)];
-        for (name, path) in [
-            ("events", "/api/v1/ws/events"),
-            ("realtime", "/v1/realtime"),
-        ] {
+        for (name, path) in [("second rpc", "/api/v1/ws"), ("realtime", "/v1/realtime")] {
             let url = format!("ws://{addr}{path}?token={token}");
             sockets.push((name, tokio_tungstenite::connect_async(url).await.unwrap().0));
         }
@@ -815,12 +824,18 @@ mod socket_tests {
         let mut sockets = vec![];
         for (name, path) in [
             ("rpc", "/api/v1/ws"),
-            ("events", "/api/v1/ws/events"),
+            ("rpc watching events", "/api/v1/ws"),
             ("realtime", "/v1/realtime"),
         ] {
             let url = format!("ws://{addr}{path}?token={token}");
             sockets.push((name, tokio_tungstenite::connect_async(url).await.unwrap().0));
         }
+        // Events reach a socket over its RPC connection once it watches them; the event
+        // stream must end at expiry too, not keep the socket open.
+        let watching = &mut sockets[1].1;
+        let watch = json!({ "model-loading-status": null, "perspective-added": null });
+        let reply = call_with(watching, "watch", "events.watch", watch).await;
+        assert_eq!(reply["result"], true, "{reply}");
 
         for (name, ws) in &mut sockets {
             let close = close_within(ws, Duration::from_secs(8)).await;
@@ -828,11 +843,6 @@ mod socket_tests {
             assert_eq!(code, CLOSE_TOKEN_ENDED, "{name}");
             assert_eq!(reason, token_ended_frame().reason.as_str(), "{name}");
         }
-    }
-
-    async fn events_socket(addr: std::net::SocketAddr, token: &str) -> Client {
-        let url = format!("ws://{addr}/api/v1/ws/events?token={token}");
-        tokio_tungstenite::connect_async(url).await.unwrap().0
     }
 
     // #1370: a user could not end their own session.
@@ -844,12 +854,12 @@ mod socket_tests {
         let other = crate::user_management::generate_user_jwt(&email, "test").unwrap();
 
         let mut ws = connect(addr, &token).await;
-        let mut events = events_socket(addr, &token).await;
+        let mut second = connect(addr, &token).await;
         let mut other_ws = connect(addr, &other).await;
 
         let reply = call(&mut ws, "1", "user.logout").await;
         assert_eq!(reply["result"], true, "the caller gets the reply: {reply}");
-        for (name, socket) in [("rpc", &mut ws), ("events", &mut events)] {
+        for (name, socket) in [("rpc", &mut ws), ("second rpc", &mut second)] {
             let close = close_within(socket, Duration::from_secs(3)).await;
             assert_eq!(close.map(|c| c.0), Some(CLOSE_TOKEN_ENDED), "{name}");
         }
@@ -873,7 +883,7 @@ mod socket_tests {
 
         let mut sockets = vec![
             ("laptop rpc", connect(addr, &laptop).await),
-            ("laptop events", events_socket(addr, &laptop).await),
+            ("laptop second rpc", connect(addr, &laptop).await),
             ("phone rpc", connect(addr, &phone).await),
         ];
         let mut bystander_ws = connect(addr, &theirs).await;
@@ -1012,13 +1022,12 @@ mod socket_tests {
         }
     }
 
-    // The events socket used to answer a dead token with a refused upgrade (the HTTP
-    // extractor's error), and the realtime socket opened and then refused each request. A
-    // browser reads neither as "log in again".
+    // The realtime socket opened and then refused each request. A browser does not read that
+    // as "log in again".
     #[tokio::test]
-    async fn the_events_and_realtime_sockets_close_a_dead_token_with_1008() {
+    async fn the_realtime_socket_closes_a_dead_token_with_1008() {
         let addr = start_server().await;
-        for path in ["/api/v1/ws/events", "/v1/realtime"] {
+        for path in ["/v1/realtime"] {
             let url = format!("ws://{addr}{path}?token=not-a-jwt");
             let mut ws = tokio_tungstenite::connect_async(url)
                 .await
@@ -1052,13 +1061,18 @@ mod socket_tests {
         }
 
         // Publish until the admin socket sees an event, so both streams had time to subscribe.
-        let event = r#"{"model":"socket-test","status":"loading"}"#.to_string();
+        // The event needs a capability the tokenless session holds (AGENT_AUTH), so
+        // `may_receive` would let it through: only the gate in `handle_ws` keeps it out.
+        let event = json!({ "model": "socket-test", "status": "loading" });
+        assert!(
+            crate::agent::capabilities::anonymous_capabilities().contains(&AGENT_AUTH_CAPABILITY)
+        );
         let seen = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                get_global_pubsub()
-                    .await
-                    .publish(&AI_MODEL_LOADING_STATUS, &event)
-                    .await;
+                get_global_pubsub().await.publish_event(Event {
+                    capability: AGENT_AUTH_CAPABILITY.clone(),
+                    ..Event::new(Topic::AiModelLoadingStatus, Audience::Everyone, &event)
+                });
                 if let Ok(Some(Ok(WsMessage::Text(text)))) =
                     tokio::time::timeout(Duration::from_millis(200), admin.next()).await
                 {

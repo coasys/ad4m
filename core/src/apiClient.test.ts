@@ -521,7 +521,6 @@ function linkAdded(perspectiveUuid: string, target = 'literal://x') {
     return {
         type: 'link-added',
         perspectiveUuid,
-        owner: 'did:test:owner',
         link: {
             author: 'did:test:alice',
             timestamp: '2026-01-01T00:00:00Z',

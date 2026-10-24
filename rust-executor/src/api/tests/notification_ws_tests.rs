@@ -21,18 +21,17 @@ use crate::agent::capabilities::{
     get_user_default_capabilities, perspective_query_capability, Capability,
     AGENT_UPDATE_CAPABILITY, ALL_CAPABILITY,
 };
-use crate::agent::AgentService;
+use crate::agent::session::{Principal, Session};
+use crate::agent::{AgentContext, AgentService};
 use crate::api::events_ws::build_event_stream;
 use crate::api::ws_handler::{build_handler_map, WsRpcError};
 use crate::db::Ad4mDb;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::{register_perspective, unregister_perspective};
-use crate::pubsub::{get_global_pubsub, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC};
 use crate::test_utils::setup_wallet;
 use crate::types::{
     ExpressionProof, Link, LinkExpression, LinkStatus, Notification, NotificationInput,
-    NotificationTriggeredEvent, PerspectiveHandle, PerspectiveState, RequestContext,
-    TriggeredNotification,
+    PerspectiveHandle, PerspectiveState, RequestContext,
 };
 
 const TRIGGER: &str = "SELECT ?source ?target WHERE { ?source <test://notify> ?target }";
@@ -686,33 +685,47 @@ async fn only_the_admin_credential_imports_data() {
     assert_eq!(imported.owner_did, bob_did);
 }
 
-/// Serialises the event that delivery publishes for a notification of `owner`.
-fn triggered(owner: &str) -> String {
-    serde_json::to_string(&NotificationTriggeredEvent {
-        perspective_uuid: "perspective".to_string(),
-        notification: TriggeredNotification {
-            notification: Notification {
-                id: Uuid::new_v4().to_string(),
-                granted: true,
-                description: String::new(),
-                app_name: String::new(),
-                app_url: String::new(),
-                app_icon_path: String::new(),
-                trigger: TRIGGER.to_string(),
-                perspective_ids: vec![],
-                webhook_url: "https://webhook.test".to_string(),
-                webhook_auth: "secret".to_string(),
-                owner_did: owner.to_string(),
-            },
-            perspective_id: "perspective".to_string(),
-            trigger_match: "[]".to_string(),
-        },
-    })
-    .unwrap()
+/// Fires a notification of `owner` through the delivery's publisher. The webhook URL does
+/// not parse, so nothing is posted.
+async fn fire(owner: &str) {
+    let notification = Notification {
+        id: Uuid::new_v4().to_string(),
+        granted: true,
+        description: String::new(),
+        app_name: String::new(),
+        app_url: String::new(),
+        app_icon_path: String::new(),
+        trigger: TRIGGER.to_string(),
+        perspective_ids: vec!["perspective".to_string()],
+        webhook_url: "not a url".to_string(),
+        webhook_auth: "secret".to_string(),
+        owner_did: owner.to_string(),
+    };
+    let matches = std::collections::BTreeMap::from([(notification, vec![json!({ "m": 1 })])]);
+    PerspectiveInstance::publish_notification_matches("perspective".to_string(), matches).await;
 }
 
+/// A session of the managed agent `did`.
+fn user_session(did: &str) -> Arc<Session> {
+    let user = Principal::Agent(AgentContext::managed(did.to_string()));
+    Arc::new(
+        Session::for_test(user)
+            .with_caps(get_user_default_capabilities())
+            .with_did(did),
+    )
+}
+
+/// The next `notification-triggered` message on `stream`, if one arrives in time.
 async fn next<S: futures::Stream<Item = String> + Unpin>(stream: &mut S) -> Option<String> {
-    tokio::time::timeout(std::time::Duration::from_millis(1500), stream.next())
+    let notification = async {
+        while let Some(msg) = stream.next().await {
+            if msg.contains("notification-triggered") {
+                return Some(msg);
+            }
+        }
+        None
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(1500), notification)
         .await
         .ok()
         .flatten()
@@ -720,24 +733,21 @@ async fn next<S: futures::Stream<Item = String> + Unpin>(stream: &mut S) -> Opti
 
 // The owner filter in `build_event_stream` was pinned only as a pure function. Replacing the
 // stream's guard with `true` sent every triggered notification, webhook secret included, to
-// every session, and no test failed.
+// every session, and no test failed. The publisher now names the owner as the audience
+// (`matches_notification_owner` before); this goes through the publisher and real streams.
 #[tokio::test]
 async fn triggered_event_reaches_only_the_owners_stream() {
     setup();
     let alice_did = user(ALICE);
-    user(BOB);
-    // Only the stream's owner filter decides here: no session has a token that ends.
-    let mut alice = build_event_stream(user_ctx(ALICE).session, false, false, false, None).await;
-    let mut bob = build_event_stream(user_ctx(BOB).session, false, false, false, None).await;
-    let mut main = build_event_stream(admin_ctx().session, true, true, true, None).await;
-    let pubsub = get_global_pubsub().await;
+    let bob_did = user(BOB);
+    let all = crate::api::event_interest::watching_all;
+    let operator = Arc::new(Session::for_test(Principal::Operator));
+    let alice_session = user_session(&alice_did);
+    let mut alice = build_event_stream(alice_session, all(), None).await;
+    let mut bob = build_event_stream(user_session(&bob_did), all(), None).await;
+    let mut main = build_event_stream(operator, all(), None).await;
 
-    pubsub
-        .publish(
-            &RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
-            &triggered(&alice_did),
-        )
-        .await;
+    fire(&alice_did).await;
     let a = next(&mut alice).await;
     assert!(
         a.as_deref()
@@ -747,12 +757,7 @@ async fn triggered_event_reaches_only_the_owners_stream() {
     assert_eq!(next(&mut bob).await, None, "Bob's stream got Alice's event");
     assert_eq!(next(&mut main).await, None, "main stream got Alice's event");
 
-    pubsub
-        .publish(
-            &RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
-            &triggered(&main_agent_did()),
-        )
-        .await;
+    fire(&main_agent_did()).await;
     let m = next(&mut main).await;
     assert!(
         m.as_deref()

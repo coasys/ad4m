@@ -31,3 +31,8 @@ as well. Split plan: spec item 9 (languages), item 1 (delete dead `main.js`).
   sealed to the runtime's agent context (`agent::sealed_box`) with the agent's secret
   inside the executor; no op hands a secret key to a language. Sealing needs only the
   recipient's DID, so languages seal themselves.
+- Language code publishes no executor event directly (#1371): `PUBSUB.publish` always
+  fails (`pubsub_extension.rs`). The events a language raises go through the dedicated ops
+  in `languages_extension.rs` (perspective diff, sync state, telepresence signal), and the
+  Rust side names each one's topic and audience. A new language event gets its own op the
+  same way, never a topic string from JS.

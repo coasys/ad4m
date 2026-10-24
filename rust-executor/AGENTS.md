@@ -44,7 +44,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `agent/` | Agent keys/DID, signing, multi-user (managed agents by DID; a user's email is only the login name), `capabilities/` (auth tokens, capability defs) | — |
 | `db.rs` | All SQLite access (`rusqlite`), single `impl Ad4mDb`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | — |
 | `db_backend.rs` | `SharedDb` HTTP backend for stateless/hosted mode; only used when `config.db_backend == "shared"` | — |
-| `pubsub.rs` | Global broadcast bus + topic constants; feeds `api/events_ws.rs` | — |
+| `pubsub.rs` | Global broadcast bus: one channel of typed events (`events.rs`: `Topic`, `Audience`, `Event`) for every event (live query updates too, as `Event::for_connection`); feeds `api/events_ws.rs` | `src/api/AGENTS.md` |
 | `types/` | `core.rs` = domain types (Link, Expression, Perspective…), `domain.rs` = wire/input types; some duplicates, see spec item 5 | — |
 | `runtime_service/`, `entanglement_service/`, `neighbourhoods.rs`, `billing.rs`, `email_service.rs`, `user_management.rs`, `unyt_service.rs`, `wallet.rs`, `perspective_snapshot.rs`, `logging.rs` | Smaller services; `unyt_service.rs` = Unyt/mHOT currency DNA + payments | — |
 
@@ -109,7 +109,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   and its owner may read the perspective. The owner is a DID (`owner_did`: a managed user's, or the
   main agent's), never an email; operator sessions act as the main agent. `runtime_ws.rs` refuses
   perspectives the owner cannot read; `events_ws.rs` sends `notification-triggered` only to sessions
-  with the owner's DID. `Ad4mDb::migrate_notification_owners` (run at startup once the agent loads)
+  with the owner's DID that may query the notification's perspective. `Ad4mDb::migrate_notification_owners` (run at startup once the agent loads)
   moves rows of older executors from `user_email` to `owner_did`.
 - **Keystore**: the `keystore` field of `agent.json` holds every local key, the main agent's and
   each managed user's (`wallet.rs`: Argon2id + XChaCha20-Poly1305, fresh salt and nonce per write).
