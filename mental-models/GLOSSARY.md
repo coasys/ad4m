@@ -36,9 +36,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **App data path** (`Ad4mConfig.app_data_path`, default `~/.ad4m`): The directory that holds all state of one executor. [Executor data](agents/executor/data.md)
 
-**App grant** (`generate_capability_token`): A JWT that the executor issues to an app after the operator approves the app's capability request. [App grants](agents/access/app-grants.md) — not: cap token
-
-**Apps registry** (`apps_map.rs`, file `apps_data.json`): The file that records every issued app grant with its app info and revoked flag, for listing and revocation. [App grants](agents/access/app-grants.md)
+**App grant** (`generate_capability_token`, `grants::mint`): The grant, and its JWT, that an app gets after the owner of an agent approves the app's capability request. [App grants](agents/access/app-grants.md) — not: cap token
 
 **Audience** (`Audience` in `events.rs`): Who may receive one event: some DIDs, everyone, or the operator; the publisher names it. [Events](agents/interfaces/events.md)
 
@@ -64,7 +62,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Capability** (`Capability { with: Resource, can }` in `agent/capabilities/types.rs`): A domain, a list of pointers and a list of verbs that together name a kind of action a caller may take. [Capabilities](agents/access/capabilities.md). For languages, see Language capability.
 
-**Capability request** (`agent.requestCapability`, `agent.permitCapability`, `agent.generateJwt`): An app's request for a set of capabilities, approved by the operator and redeemed with a six-digit code. [App grants](agents/access/app-grants.md)
+**Capability request** (`agent.requestCapability`, `agent.permitCapability`, `agent.generateJwt`): An app's request for a set of capabilities on one agent, approved by the operator or by a session of that agent with `agent/PERMIT`, and redeemed with a six-digit code. [App grants](agents/access/app-grants.md)
 
 **Cascade** (`rust-executor/src/sfu/cascade.rs`, `sfu/gossip/`): Several executors' SFUs that share load and pipe media between them. [SFU](agents/executor/services/sfu.md)
 
@@ -122,7 +120,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Free hosting** (`get_free_hosting_enabled`): The executor setting, on by default, under which nothing is billed. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
 
-**Grant** (`Claims.capabilities`, `Session.caps`): The list of capabilities that a session's token carries. [Capabilities](agents/access/capabilities.md)
+**Grant** (`LiveGrant` in `agent/grants.rs`, table `grants`): The executor's record of one issued token: the agent it acts as, its capabilities and the app that holds it. A token works only while its grant is active and unexpired. [App grants](agents/access/app-grants.md)
 
 **Guard** (`requires` on `FlowState`): A model query on a flow state that must match before a transition into that state may be proposed. [Flow spawn and guards](perspectives/social-dna/flows/spawn-and-guards.md)
 
@@ -324,6 +322,6 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **User account** (`users` table, `user_management.rs`): The login of a managed agent: email, DID and password hash. [Managed agents](agents/executor/managed-agents.md) — not: user (for the agent itself)
 
-**User token** (`generate_user_jwt`): A JWT issued at login whose `sub` is a managed agent's DID and that carries the default user capabilities. [Managed agents](agents/executor/managed-agents.md) — not: user JWT, login JWT
+**User token** (`generate_user_jwt`): A JWT issued at login whose `sub` is a managed agent's DID; its grant holds the default user capabilities. [Managed agents](agents/executor/managed-agents.md) — not: user JWT, login JWT
 
 **Wallet** (`WalletBackend`, `LocalWallet`, `SharedWallet`): The store of every Ed25519 key of the executor, by name, locked under the operator's passphrase. [Wallet and keys](agents/identity/wallet-and-keys.md). For the encrypted file form, see Keystore.

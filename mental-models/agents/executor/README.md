@@ -32,7 +32,7 @@ ad4m-executor run ──┐                    ┌── launcher (ui/src-tauri)
 
 `AgentService` holds the main agent. Managed agents are rows of the `users` table, reached through static functions in `agent/mod.rs` ([Identity](../identity/README.md)).
 
-Every service is a global singleton (`lazy_static` or `OnceLock`): `Ad4mDb`, `AgentService`, `LanguageController`, `AIService`, the pub/sub bus, the apps registry, the perspective registry. One process therefore runs one executor, and unit tests run serially.
+Every service is a global singleton (`lazy_static` or `OnceLock`): `Ad4mDb`, `AgentService`, `LanguageController`, `AIService`, the pub/sub bus, the grants, the perspective registry. One process therefore runs one executor, and unit tests run serially.
 
 </details>
 

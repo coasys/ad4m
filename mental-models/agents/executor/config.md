@@ -24,7 +24,7 @@ Settings that decide who the operator is and who can connect:
 | `localhost` | `true` | RPC listener on `127.0.0.1`; `false` binds `0.0.0.0` |
 | `tls` (file: `multi_user_config.tls_config`) | none | HTTPS/WSS on `0.0.0.0:tls_port`; the cleartext listener moves to loopback |
 | `enable_multi_user` (file: `multi_user_config.enabled`) | `false` | managed agents: sign-up and login; see below |
-| `auto_permit_cap_requests` | `true` for `ad4m-executor run` without a config file, else `false` | approve every app capability request without the operator |
+| `auto_permit_cap_requests` | `true` for `ad4m-executor run` without a config file, else `false` | approve every app capability request for the main agent without the operator |
 | `enable_mcp` (file: `mcp_enabled`), `mcp_port` | `false`, `3001` | MCP server |
 | `port` | `12000` | RPC port |
 | `wallet_backend`, `db_backend` (environment `WALLET_BACKEND`, `DB_BACKEND`) | local | `shared` for hosted mode |
