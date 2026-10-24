@@ -895,8 +895,13 @@ export class MeshManager {
                  * the call runs is then the answer, and the answering path
                  * makes an offer in its place. If the peer's offer got here
                  * first the browser refuses, and asks again once stable.
+                 *
+                 * Created explicitly, as `SfuManager` does. `{ type: "offer" }`
+                 * with no `sdp` reads as implicit in `@roamhq/wrtc`; Chromium
+                 * parses it as an empty description and refuses it ("Expect
+                 * line: v="), so no mesh call connected in a browser.
                  */
-                await pc.setLocalDescription({ type: "offer" })
+                await pc.setLocalDescription(await pc.createOffer())
                 slot.offeredAt = this.now()
                 slot.renegotiating = pc.connectionState === "connected"
                 this.sendDescription(peerId, slot)
@@ -1182,7 +1187,8 @@ export class MeshManager {
                 await this.flushCandidates(peerId, slot)
 
                 if (description.type === "offer") {
-                    await slot.pc.setLocalDescription({ type: "answer" })
+                    // Created explicitly, for the reason `negotiate` gives.
+                    await slot.pc.setLocalDescription(await slot.pc.createAnswer())
                     this.sendDescription(peerId, slot)
                 }
                 return
