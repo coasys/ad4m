@@ -1,0 +1,110 @@
+{
+  "cases": [
+    {
+      "entry": {
+        "body": "entry 1",
+        "chain": "vector-chain",
+        "prev": "QmZTsaomU2DxxgdF5mXaL93yvQj5RSNBndLxBueL77HQR7",
+        "proof": [
+          {
+            "cryptosuite": "eddsa-jcs-2022",
+            "domain": "test:chain",
+            "proofPurpose": "assertionMethod",
+            "proofValue": "z2FVqh72RWVeJLtCDqLtspCGg2oHU1P8w38EjGh3cLKBp7KkbXHhPfxxaHFkgDLpTrq2qeMocMATenG8k5rzMR1AZ",
+            "type": "DataIntegrityProof",
+            "verificationMethod": "test:vector-chain#z6Mko9hTggMwjSTEaJaPUfE6tqcy2xvU6BnNq3e3o8qVBiyH"
+          }
+        ],
+        "seq": 1
+      },
+      "name": "entry 1 of a test chain",
+      "proof": {
+        "cryptosuite": "eddsa-jcs-2022",
+        "domain": "test:chain",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "test:vector-chain#k"
+      },
+      "signingInput": "ec06a7fee337975a93db45840fc00e3397fb975846940b502590ce015e44199c8879e866770252d9d3a2a0d3a39c6c58f14901e9054cccab6534f0a0cda66b53"
+    },
+    {
+      "entry": {
+        "body": "genesis",
+        "chain": "vector-chain",
+        "key": "z6Mko9hTggMwjSTEaJaPUfE6tqcy2xvU6BnNq3e3o8qVBiyH",
+        "prev": null,
+        "proof": [
+          {
+            "cryptosuite": "eddsa-jcs-2022",
+            "domain": "test:chain",
+            "proofPurpose": "assertionMethod",
+            "proofValue": "zu2rPsDdDfWeYxa2485pVvfiHMsphDtNGZNWLNeToRj9Z1kpJpe7UnN7XG4LGQwQvfwnHqUY7UjyPF5afphhCg3e",
+            "type": "DataIntegrityProof",
+            "verificationMethod": "test:vector-chain#z6Mko9hTggMwjSTEaJaPUfE6tqcy2xvU6BnNq3e3o8qVBiyH"
+          }
+        ],
+        "seq": 0
+      },
+      "name": "entry 0 of a test chain",
+      "proof": {
+        "cryptosuite": "eddsa-jcs-2022",
+        "domain": "test:chain",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "test:vector-chain#k"
+      },
+      "signingInput": "ec06a7fee337975a93db45840fc00e3397fb975846940b502590ce015e44199ca54a2dbf1ab54cec87119048449ec5333646716294dabdc8faf196a3e452ad92"
+    },
+    {
+      "entry": {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2"
+        ],
+        "body": "x",
+        "prev": null,
+        "seq": 0
+      },
+      "name": "an entry with @context: the proof config gets it",
+      "proof": {
+        "cryptosuite": "eddsa-jcs-2022",
+        "domain": "test:chain",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "test:vector-chain#k"
+      },
+      "signingInput": "fabb9cef7d027401e830d8d9f3bc9f45de8c3f7efd230a24b255d5d6eaa4b8b6c85af2333bce9988c76d49238d96ac91e95f26539bd218e5ebaae3a52ff4ea03"
+    },
+    {
+      "entry": {
+        "body": "entry 1",
+        "chain": "vector-chain",
+        "prev": "QmZTsaomU2DxxgdF5mXaL93yvQj5RSNBndLxBueL77HQR7",
+        "proof": [
+          {
+            "cryptosuite": "eddsa-jcs-2022",
+            "domain": "test:chain",
+            "proofPurpose": "assertionMethod",
+            "proofValue": "z2FVqh72RWVeJLtCDqLtspCGg2oHU1P8w38EjGh3cLKBp7KkbXHhPfxxaHFkgDLpTrq2qeMocMATenG8k5rzMR1AZ",
+            "type": "DataIntegrityProof",
+            "verificationMethod": "test:vector-chain#z6Mko9hTggMwjSTEaJaPUfE6tqcy2xvU6BnNq3e3o8qVBiyH"
+          }
+        ],
+        "seq": 1
+      },
+      "name": "another domain changes the proof-config half",
+      "proof": {
+        "cryptosuite": "eddsa-jcs-2022",
+        "domain": "other:domain",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "test:vector-chain#k"
+      },
+      "signingInput": "0408a263cb58dc60767f52d278cdad05f14aefc3ff576dae9443dbf38c6c44c18879e866770252d9d3a2a0d3a39c6c58f14901e9054cccab6534f0a0cda66b53"
+    }
+  ],
+  "description": "eddsa-jcs-2022 signing input = sha256(JCS(proof without proofValue, plus the entry's @context if any)) ‖ sha256(JCS(entry without \"proof\")), hex. proofValue of the given proof is ignored."
+}
