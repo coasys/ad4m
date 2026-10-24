@@ -2205,6 +2205,30 @@ impl LanguageController {
         Ok(Language::new(address))
     }
 
+    /// The language to call `cap` on, for a caller that names `address`.
+    /// Identity and token capabilities resolve only to the language at
+    /// `system_addresses.agent_language`; for any other
+    /// address they answer `NotAgentLanguage`. Other capabilities resolve to
+    /// `address` itself.
+    pub async fn language_for_capability(
+        &self,
+        address: &str,
+        cap: capability::Capability,
+    ) -> Result<Language, LanguageError> {
+        let agent_language = self.system_addresses.lock().await.agent_language.clone();
+        capability::check_capability_target(cap, address, agent_language.as_deref())?;
+        Ok(Language::new(address.to_string()))
+    }
+
+    /// The agent language, for an identity or token capability.
+    pub async fn agent_language_for(
+        &self,
+        cap: capability::Capability,
+    ) -> Result<Language, LanguageError> {
+        let agent = self.get_agent_language().await?;
+        self.language_for_capability(agent.address(), cap).await
+    }
+
     /// Get the language language
     pub async fn get_language_language(&self) -> Result<Language, LanguageError> {
         let sys = self.system_addresses.lock().await;
@@ -3101,5 +3125,73 @@ mod template_tests {
             lines[3], r#"const UID = "unique-id-123""#,
             "UID gets replaced"
         );
+    }
+}
+
+#[cfg(test)]
+mod capability_routing_tests {
+    use super::capability::Capability;
+    use super::*;
+
+    async fn controller_with_agent_language(agent: Option<&str>) -> LanguageController {
+        let controller = LanguageController::new();
+        controller.system_addresses.lock().await.agent_language = agent.map(str::to_string);
+        controller
+    }
+
+    #[tokio::test]
+    async fn identity_and_token_calls_resolve_only_to_the_agent_language() {
+        let controller = controller_with_agent_language(Some("QmAgent")).await;
+        for cap in [
+            Capability::IdentityLog,
+            Capability::IdentityClaimOffer,
+            Capability::TokenSend,
+        ] {
+            let language = controller
+                .language_for_capability("QmAgent", cap)
+                .await
+                .unwrap();
+            assert_eq!(language.address(), "QmAgent");
+            assert_eq!(
+                controller.agent_language_for(cap).await.unwrap().address(),
+                "QmAgent"
+            );
+            match controller
+                .language_for_capability("QmLinkLanguage", cap)
+                .await
+            {
+                Err(LanguageError::NotAgentLanguage {
+                    address,
+                    capability,
+                }) => {
+                    assert_eq!(address, "QmLinkLanguage");
+                    assert_eq!(capability, cap.wire_name());
+                }
+                Err(other) => panic!("unexpected error {other}"),
+                Ok(_) => panic!("{} resolved to a link language", cap.wire_name()),
+            }
+        }
+        let link = controller
+            .language_for_capability("QmLinkLanguage", Capability::PerspectiveCommit)
+            .await
+            .unwrap();
+        assert_eq!(link.address(), "QmLinkLanguage");
+    }
+
+    #[tokio::test]
+    async fn identity_calls_fail_before_the_agent_language_is_known() {
+        let controller = controller_with_agent_language(None).await;
+        assert!(matches!(
+            controller
+                .agent_language_for(Capability::IdentityHead)
+                .await,
+            Err(LanguageError::NotFound { .. })
+        ));
+        assert!(matches!(
+            controller
+                .language_for_capability("QmAgent", Capability::IdentityHead)
+                .await,
+            Err(LanguageError::NotAgentLanguage { .. })
+        ));
     }
 }

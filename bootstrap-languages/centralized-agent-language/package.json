@@ -1,10 +1,10 @@
 {
   "name": "@coasys/centralized-agent-language",
   "version": "0.7.1",
-  "description": "AD4M Language implementation for Holochain profile DNA",
+  "description": "The closed beta's AD4M agent language: agent profiles and the identity interface on the shared identity store",
   "main": "index.js",
   "scripts": {
-    "test-disabled": "echo \"No agent language integration tests\"",
+    "test": "bash rust-impl/test.sh",
     "rollup-icons": "rollup -c rollup.config.icons.js",
     "rollup-expression-ui": "rollup -c rollup.config.expression-ui.js",
     "build": "run-script-os",

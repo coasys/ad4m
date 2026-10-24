@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+// The identity and token wire types live in their own
+// modules and are part of the language data shapes.
+pub use crate::identity::*;
+pub use crate::token::*;
+
 pub type Did = String;
 pub type Address = String;
 

@@ -398,6 +398,77 @@ For Languages that store other languages (the Language Language).
 |---|---|---|
 | `interactions(address)` | `string` | `Interaction[]` |
 
+### 5.8 Identity (agent language only)
+
+The agent language's identity interface: the calls the executor makes
+to read, append and resolve `did:scid:coasys:1` key logs and to pass offers and claims. The
+closed beta's `centralized-agent-language` maps each call to one route of the shared identity
+store (`identity-store`); a later Holochain or Holograph agent language serves the same calls.
+
+Each call is its own capability (`identity-log`, `identity-head`, …), detected from its flat
+export. **The executor calls them only on the language at `system_addresses.agent_language`**
+(`LanguageController::language_for_capability` refuses any other language with
+`NotAgentLanguage`), so a third-party language that exports them is never asked.
+
+| Export | Parameters | Returns | Store route |
+|---|---|---|---|
+| `identityLog(did, from)` | `string`, `number` | `Promise<LogPage \| null>` | `GET /v1/logs/{scid}?from=` |
+| `identityHead(did)` | `string` | `Promise<SignedHead \| null>` | `GET /v1/heads/{scid}` |
+| `identityAppend(did, req)` | `string`, `AppendRequest` | `Promise<SignedHead>` | `POST /v1/logs/{scid}/events` |
+| `identityKeyOwner(multikey, waitSec?)` | `string`, `number` (0–8) | `Promise<KeyIndexEntry \| null>` | `GET /v1/keys/{multikey}?wait=` |
+| `identityPowParams()` | — | `Promise<PowParams>` | `GET /v1/pow` |
+| `identityAttachNote(did, token, req)` | `string`, `string`, `SignedRequest` | `Promise<VouchNote>` | `POST /v1/notes/{scid}` |
+| `identityPutAgent(record, req?)` | `AgentRecord`, `SignedRequest?` | `Promise<void>` | `PUT /v1/agents/{did}` |
+| `identityOpenOffer(offer)` | `SignedOffer` | `Promise<OfferOpened>` | `POST /v1/offers/{scid}` |
+| `identityListOffers(did, req, waitSec?)` | `string`, `SignedRequest`, `number` | `Promise<OfferListing[]>` | `GET /v1/offers/{scid}?wait=` |
+| `identityCancelOffer(did, offerId, req)` | `string`, `string`, `SignedRequest` | `Promise<void>` | `DELETE /v1/offers/{scid}/{offerId}` |
+| `identityClaimOffer(did, offerId, claim)` | `string`, `string`, `Claim` | `Promise<ClaimReceipt>` | `POST /v1/offers/{scid}/{offerId}/claim` |
+| `identityOfferState(did, offerId, key, waitSec?)` | `string`, `string`, `string`, `number` | `Promise<OfferProgress>` | `GET /v1/offers/{scid}/{offerId}/state` |
+
+`did` is the full `did:scid:coasys:1:<scid>`. The wire types live in `ad4m-ldk`
+(`js/src/types.ts`, `rust/src/identity.rs`); JSON field names are camelCase.
+
+Rules for an implementation:
+
+- **It signs nothing and holds no key.** Events, offers, claims and signed requests pass
+  through unchanged; a `SignedRequest` travels in the `X-Coasys-Request` header. Events are
+  opaque JSON objects, so a new event format needs no new language: the language never reads
+  one; the executor and the store check each with the identity core.
+- **Refusals map one to one** onto `IdentityErrorCode` (`conflict` with the store's head,
+  `key-taken`, `forbidden` with a reason, `invalid`, `rate-limited`, `gone` with the offer's
+  state, `not-found`, `unavailable`). A refusal crosses the runtime as a language error whose
+  message is the refusal as JSON (`IdentityError` in JS, `IdentityErrorCode::from_language_error`
+  in Rust). A network failure or the 10-second host timeout is `unavailable`.
+- **The store's base URL comes from the language settings** (`{"storeUrl": "https://…"}`),
+  which the executor fills from its config key `identity.storeUrl` before the language loads.
+  The executor accepts a head from the language only when one of the keys in its config key
+  `identity.storeKeys` signed it (`coasys:head`).
+- `expressionGet` / `expressionCreate` keep working for agent profiles, on the store's
+  `/v1/agents/{did}` routes.
+
+The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the
+calls it makes today are `log`, `append`, `openOffer`, `listOffers`, `claimOffer` and
+`offerState`; the language serves the others for apps and for later executor features.
+
+### 5.9 Token (agent language only, interfaces only)
+
+The token interface: accounts are DIDs, amounts are decimal
+strings (`Amount { value, decimals }`, no floats), and the interface carries no signature (the
+language signs through its context, as for expressions). Same routing rule as identity: the
+executor calls these only on the agent language.
+
+| Export | Parameters | Returns |
+|---|---|---|
+| `tokenAssets()` | — | `Promise<string[]>` |
+| `tokenBalance(account, asset)` | `string`, `string` | `Promise<TokenBalance>` |
+| `tokenSend(to, asset, amount, memo?)` | `string`, `string`, `Amount`, `string?` | `Promise<TokenTransfer>` |
+| `tokenReceived(cursor, limit)` | `string \| null`, `number` | `Promise<{ items: TokenTransfer[]; cursor: string \| null }>` |
+
+Transfers reach the executor as a language signal with the tag `token-transfer`. Refusals are
+`TokenErrorCode` (`disabled`, `unknown-asset`, `unknown-account`, `insufficient`, `refused`,
+`unavailable`), carried like identity refusals (`TokenError`). In the closed beta no language
+implements the interface and every call answers `{ code: "disabled" }`.
+
 ---
 
 ## 6. Event handler exports (RUNTIME → LANGUAGE for asynchronous events)

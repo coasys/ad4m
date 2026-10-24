@@ -1,8 +1,8 @@
 [package]
 name = "centralized-agent-language"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Centralized Agent Expression Store — bootstrap language authored against the Rust ALDK"
+description = "The closed beta's agent language: agent profiles and the identity interface on the shared identity store (Rust ALDK)"
 
 # Standalone — not part of the main rust-executor workspace.
 [workspace]
@@ -12,6 +12,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 ad4m-ldk = { path = "../../../ad4m-ldk/rust" }
+# Canonical JSON, multikeys and proof values; the key log's replay for did:scid agent records.
+ad4m-hash-chain = { path = "../../../ad4m-hash-chain" }
+ad4m-identity-core = { path = "../../../ad4m-identity-core" }
 wasm-bindgen = "=0.2.118"
 wasm-bindgen-futures = "0.4"
 serde = { version = "1.0", features = ["derive"] }
@@ -19,6 +22,14 @@ serde_json = "1.0"
 serde-wasm-bindgen = "0.6"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["console"] }
+
+# The language suite (tests/language.rs) runs natively against a real identity-store.
+[dev-dependencies]
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
+ed25519-dalek = "2.2.0"
+tempfile = "3.27.0"
+# Writes a hostile store's row into the test store's file (same line as ad4m-hash-chain).
+rusqlite = "0.40.0"
 
 [profile.release]
 opt-level = "s"

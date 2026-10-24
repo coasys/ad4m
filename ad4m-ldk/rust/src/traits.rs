@@ -71,6 +71,126 @@ pub trait ExpressionCapability: Language {
     ) -> impl std::future::Future<Output = LanguageResult<Option<Expression>>>;
 }
 
+/// `identity` capability — the agent language's identity interface
+/// (section 5.8 of `docs-src/language-interface-spec.md`), with the offer
+/// and claim calls of device linking. Each call maps to
+/// one store route. The language signs nothing and holds no key: signed
+/// events and requests pass through unchanged. A refusal is an
+/// [`IdentityErrorCode`] converted into the `LanguageError`
+/// (`Err(IdentityErrorCode::NotFound.into())`).
+///
+/// The executor calls these only on the language at
+/// `system_addresses.agent_language`.
+pub trait IdentityCapability: Language {
+    /// `GET /v1/logs/{scid}?from=`
+    fn identity_log(
+        &mut self,
+        did: String,
+        from: u64,
+    ) -> impl std::future::Future<Output = LanguageResult<Option<LogPage>>>;
+    /// `GET /v1/heads/{scid}`
+    fn identity_head(
+        &mut self,
+        did: String,
+    ) -> impl std::future::Future<Output = LanguageResult<Option<SignedHead>>>;
+    /// `POST /v1/logs/{scid}/events`
+    fn identity_append(
+        &mut self,
+        did: String,
+        req: AppendRequest,
+    ) -> impl std::future::Future<Output = LanguageResult<SignedHead>>;
+    /// `GET /v1/keys/{multikey}?wait=` (0–8 seconds)
+    fn identity_key_owner(
+        &mut self,
+        multikey: String,
+        wait_s: u8,
+    ) -> impl std::future::Future<Output = LanguageResult<Option<KeyIndexEntry>>>;
+    /// `GET /v1/pow`
+    fn identity_pow_params(
+        &mut self,
+    ) -> impl std::future::Future<Output = LanguageResult<PowParams>>;
+    /// `POST /v1/notes/{scid}`
+    fn identity_attach_note(
+        &mut self,
+        did: String,
+        token: String,
+        req: SignedRequest,
+    ) -> impl std::future::Future<Output = LanguageResult<VouchNote>>;
+    /// `PUT /v1/agents/{did}`; no signed request for a did:key record.
+    fn identity_put_agent(
+        &mut self,
+        record: AgentRecord,
+        req: Option<SignedRequest>,
+    ) -> impl std::future::Future<Output = LanguageResult<()>>;
+    /// `POST /v1/offers/{scid}`
+    fn identity_open_offer(
+        &mut self,
+        offer: SignedOffer,
+    ) -> impl std::future::Future<Output = LanguageResult<OfferOpened>>;
+    /// `GET /v1/offers/{scid}?wait=`, signed by the current master key.
+    fn identity_list_offers(
+        &mut self,
+        did: String,
+        req: SignedRequest,
+        wait_s: u8,
+    ) -> impl std::future::Future<Output = LanguageResult<Vec<OfferListing>>>;
+    /// `DELETE /v1/offers/{scid}/{offerId}`, signed by the current master key.
+    fn identity_cancel_offer(
+        &mut self,
+        did: String,
+        offer_id: String,
+        req: SignedRequest,
+    ) -> impl std::future::Future<Output = LanguageResult<()>>;
+    /// `POST /v1/offers/{scid}/{offerId}/claim`
+    fn identity_claim_offer(
+        &mut self,
+        did: String,
+        offer_id: String,
+        claim: Claim,
+    ) -> impl std::future::Future<Output = LanguageResult<ClaimReceipt>>;
+    /// `GET /v1/offers/{scid}/{offerId}/state?key=&wait=`
+    fn identity_offer_state(
+        &mut self,
+        did: String,
+        offer_id: String,
+        key: String,
+        wait_s: u8,
+    ) -> impl std::future::Future<Output = LanguageResult<OfferProgress>>;
+}
+
+/// `token` capability — the agent language's token interface
+/// (section 5.9 of `docs-src/language-interface-spec.md`, interfaces only).
+/// Accounts are DIDs and amounts decimal strings; the language signs
+/// through its context. A refusal is a
+/// [`TokenErrorCode`] converted into the `LanguageError`. Transfers reach
+/// the executor as the `token-transfer` language signal
+/// (`runtime::emit_token_transfer`).
+///
+/// The executor calls these only on the language at
+/// `system_addresses.agent_language`.
+pub trait TokenCapability: Language {
+    fn token_assets(&mut self) -> impl std::future::Future<Output = LanguageResult<Vec<String>>>;
+    fn token_balance(
+        &mut self,
+        account: String,
+        asset: String,
+    ) -> impl std::future::Future<Output = LanguageResult<TokenBalance>>;
+    /// Sends from the agent that the language runs for.
+    fn token_send(
+        &mut self,
+        to: String,
+        asset: String,
+        amount: Amount,
+        memo: Option<String>,
+    ) -> impl std::future::Future<Output = LanguageResult<TokenTransfer>>;
+    /// Transfers to the agent, newest last, after `cursor`.
+    fn token_received(
+        &mut self,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> impl std::future::Future<Output = LanguageResult<TransferPage>>;
+}
+
 /// `perspective-commit` capability — writing diffs.
 pub trait PerspectiveCommitCapability: Language {
     fn perspective_commit(&mut self, diff: PerspectiveDiff) -> LanguageResult<()>;
