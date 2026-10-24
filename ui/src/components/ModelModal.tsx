@@ -279,24 +279,29 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         name: newModelName,
         modelType: newModelType,
       } as ModelInput;
+      // An edit that leaves the key field empty on the same endpoint keeps the saved
+      // key: the executor keeps it when the update carries no apiKey.
+      const keepSavedKey =
+        !!oldModel?.api?.hasApiKey && apiKey === "" && apiUrl === oldModel.api.baseUrl;
+      const sentApiKey = keepSavedKey ? undefined : apiKey;
       if (isExternalApi) {
         model.api = {
           baseUrl: apiUrl,
-          apiKey,
+          apiKey: sentApiKey,
           apiType: "OPEN_AI",
           model: apiModel,
         };
       } else if (isAnthropic) {
         model.api = {
           baseUrl: apiUrl,
-          apiKey,
+          apiKey: sentApiKey,
           apiType: "ANTHROPIC",
           model: apiModel,
         };
       } else if (isOllama) {
         model.api = {
           baseUrl: apiUrl,
-          apiKey,
+          apiKey: sentApiKey,
           apiType: "OLLAMA",
           model: apiModel,
         };
@@ -351,9 +356,12 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
           else setNewModel("🌐 External API");
           setApiUrl(oldModel.api.baseUrl);
           apiUrlRef.current = oldModel.api.baseUrl;
-          setApiKey(oldModel.api.apiKey);
-          apiKeyRef.current = oldModel.api.apiKey;
           setApiModel(oldModel.api.model);
+          // The saved endpoint passed its check when it was saved. The executor never
+          // returns the key, so it cannot be checked again here: the unchanged settings
+          // save as they are, and any edit to the URL or key asks for a new check.
+          setApiValid(true);
+          setApiModelValid(true);
           if (oldModel.api.maxNumCtx) setMaxNumCtx(String(oldModel.api.maxNumCtx));
         } else if (oldModel.local?.huggingfaceRepo) {
           setNewModel("🤗 Custom Hugging Face Model");
@@ -382,8 +390,6 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
       if (oldModel.api) {
         setApiUrl(oldModel.api.baseUrl);
         apiUrlRef.current = oldModel.api.baseUrl;
-        setApiKey(oldModel.api.apiKey);
-        apiKeyRef.current = oldModel.api.apiKey;
       }
     }
   }, []);
@@ -547,6 +553,11 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                       size="md"
                       type="text"
                       value={apiKey}
+                      placeholder={
+                        oldModel?.api?.hasApiKey && apiUrl === oldModel.api.baseUrl
+                          ? "Saved key kept unless you enter a new one"
+                          : undefined
+                      }
                       error={!!apiKeyError}
                       errortext={apiKeyError}
                       onInput={(e: any) => {

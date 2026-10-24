@@ -62,7 +62,6 @@ use serde_json::json;
 
 // HTTP request parts injected by rmcp's streamable-HTTP transport into each request's extensions.
 // Used to extract the Authorization header for admin-credential bypass.
-use crate::utils::constant_time_eq;
 use axum::http::request::Parts as HttpRequestParts;
 
 /// The credential carried by this request's `Authorization` header, if any.
@@ -231,18 +230,18 @@ impl Ad4mMcpHandler {
             .clone()
             .unwrap_or_default();
 
-        let admin_cred = self.context.admin_credential.as_deref();
+        let admin_cred = &self.context.admin_credential;
 
         // 1. Session token matches admin credential → pass
         if let Some(cred) = admin_cred {
-            if !session_token.is_empty() && constant_time_eq(&session_token, cred) {
+            if !session_token.is_empty() && cred.expose_for_compare(&session_token) {
                 return true;
             }
         }
 
         // 2. Session token is a valid JWT → pass
         if !session_token.is_empty() {
-            let caps = capabilities_from_token(session_token.clone(), admin_cred.map(String::from));
+            let caps = capabilities_from_token(session_token.clone(), admin_cred);
             if caps.is_ok() {
                 return true;
             }
@@ -286,20 +285,21 @@ impl Ad4mMcpHandler {
         let Some(header_token) = header_token else {
             return false;
         };
-        let admin_cred = self.context.admin_credential.as_deref();
+        let admin_cred = &self.context.admin_credential;
 
-        // Header matches admin credential → store & pass
+        // Header matches admin credential → store & pass. The header's value is the
+        // credential, so the secret itself is never read out.
         if let Some(cred) = admin_cred {
-            if constant_time_eq(&header_token, cred) {
+            if cred.expose_for_compare(&header_token) {
                 let mut guard = self.context.auth_token.write().await;
-                *guard = Some(cred.to_string());
+                *guard = Some(header_token);
                 return true;
             }
         }
 
         // Header is a valid JWT → store & pass
         if !header_token.is_empty()
-            && capabilities_from_token(header_token.clone(), admin_cred.map(String::from)).is_ok()
+            && capabilities_from_token(header_token.clone(), admin_cred).is_ok()
         {
             let mut guard = self.context.auth_token.write().await;
             *guard = Some(header_token);
@@ -517,30 +517,44 @@ impl Ad4mMcpHandler {
     /// Get capabilities from the stored auth token (reuses same logic as REST RequestContext)
     pub(crate) async fn get_capabilities(&self) -> Result<Vec<Capability>, String> {
         let token = self.get_auth_token().await;
-        let admin_cred = self.context.admin_credential.clone();
-        capabilities_from_token(token.unwrap_or_default(), admin_cred)
+        capabilities_from_token(token.unwrap_or_default(), &self.context.admin_credential)
     }
 
-    /// Whether the current caller may auto-permit a capability request.
+    /// Whether the current caller may auto-permit a capability request for `target`: the
+    /// rule of `agent.permitCapability` ([`crate::agent::capabilities::may_approve`], D12).
     ///
-    /// Authentication alone is not enough: a multi-user user token authenticates
-    /// (it decodes to a valid session), but it holds no PERMIT capability, so it may
-    /// only *create* a request for the admin to approve out of band. Auto-permit hands
-    /// back the inline code, which `generate_jwt` turns into an ALL_CAPABILITY token; a
-    /// caller without PERMIT must never receive it (issue #851, sub-problem 3). The
-    /// admin credential decodes to ALL_CAPABILITY, which contains PERMIT, so the admin
-    /// still auto-permits. `request_capability_with_header` adopts a valid header
-    /// credential into the session before this runs, so reading the session token covers
-    /// header-only clients too.
+    /// Authentication alone is not enough. The operator (the admin credential) may; any other
+    /// token only if it holds PERMIT and acts as `target`: a user token permits requests for
+    /// that user's own agent and creates any other for its owner to approve out of band.
+    /// Auto-permit hands back the inline code, which `generate_jwt` turns into a token on
+    /// `target`; a caller that may not approve must never receive it (issue #851,
+    /// sub-problem 3). `request_capability_with_header` adopts a valid header credential into
+    /// the session before this runs, so reading the session token covers header-only clients
+    /// too.
     ///
     /// The check holds only on an executor with an admin credential. Without one, the empty
-    /// token holds ALL_CAPABILITY, so every caller passes, on a multi-user executor also a user
+    /// token is the operator, so every caller passes, on a multi-user executor also a user
     /// who drops their token (#1059).
-    pub(crate) async fn caller_can_permit(&self) -> bool {
-        match self.get_capabilities().await {
+    pub(crate) async fn caller_can_permit(
+        &self,
+        target: &crate::agent::capabilities::RequestTarget,
+    ) -> bool {
+        let token = self.get_auth_token().await.unwrap_or_default();
+        if crate::agent::capabilities::is_admin_credential_token(
+            &token,
+            &self.context.admin_credential,
+        ) {
+            return true;
+        }
+        let holds_permit = match self.get_capabilities().await {
             Ok(caps) => check_capability(&Ok(caps), &AGENT_PERMIT_CAPABILITY).is_ok(),
             Err(_) => false,
-        }
+        };
+        holds_permit
+            && !token.is_empty()
+            && self
+                .agent_context_for(&token)
+                .is_ok_and(|agent| target.agent() == Some(&agent))
     }
 
     /// Store an auth token in the session and return a success JSON response
@@ -834,7 +848,7 @@ mod agent_context_tests {
 
     fn handler(session_token: &str) -> Ad4mMcpHandler {
         Ad4mMcpHandler::new(McpContext {
-            admin_credential: Some("test-admin".to_string()),
+            admin_credential: Some("test-admin".into()),
             auth_token: std::sync::Arc::new(tokio::sync::RwLock::new(Some(
                 session_token.to_string(),
             ))),

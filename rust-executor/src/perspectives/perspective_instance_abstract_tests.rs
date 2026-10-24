@@ -7,7 +7,7 @@
 use super::*;
 use crate::perspectives::interpretation_test_support::{setup_perspective_no_llm, TASK_SDNA};
 use crate::perspectives::model_query::QueryClasses;
-use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+use crate::pubsub::get_global_pubsub;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
@@ -487,19 +487,16 @@ fn link(source: &str, predicate: &str, target: &str) -> Link {
 /// A subscription over TextContent, its passes driven by hand.
 struct Sub {
     id: String,
-    rx: broadcast::Receiver<String>,
+    rx: broadcast::Receiver<Arc<Event>>,
 }
 
 impl Sub {
     async fn open(p: &PerspectiveInstance) -> (Sub, String) {
         let (id, _, initial) = p
-            .model_subscribe_and_query(one("TextContent"), ALL.into(), "c".into())
+            .model_subscribe_and_query(one("TextContent"), ALL.into(), "c".into(), None)
             .await
             .expect("subscribe");
-        let pubsub = get_global_pubsub().await;
-        let rx = pubsub
-            .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-            .await;
+        let rx = get_global_pubsub().await.subscribe_events();
         (Sub { id, rx }, initial)
     }
 
@@ -518,8 +515,16 @@ impl Sub {
             .await;
         let wait = async {
             loop {
-                let msg = self.rx.recv().await.expect("pubsub receiver closed");
-                let update: Value = serde_json::from_str(&msg).unwrap();
+                let event = match self.rx.recv().await {
+                    Ok(event) => event,
+                    // Other tests' events share the channel.
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(e) => panic!("pubsub receiver closed: {e}"),
+                };
+                if event.topic != Topic::PerspectiveQuerySubscription {
+                    continue;
+                }
+                let update = &event.payload;
                 if update["perspectiveUuid"] == p.uuid && update["subscriptionId"] == self.id {
                     return update.to_string();
                 }

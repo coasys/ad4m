@@ -377,18 +377,19 @@ async fn the_root_holds_class_less_channels() {
 /// A subscription, its passes driven by hand as in the abstract-class tests.
 pub(super) struct Sub {
     pub(super) id: String,
-    rx: tokio::sync::broadcast::Receiver<String>,
+    rx: tokio::sync::broadcast::Receiver<std::sync::Arc<crate::events::Event>>,
 }
 
 impl Sub {
     pub(super) async fn open(p: &PerspectiveInstance, class: &str, q: Value) -> (Sub, String) {
-        use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
-        let pubsub = get_global_pubsub().await;
-        let rx = pubsub
-            .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-            .await;
+        let rx = crate::pubsub::get_global_pubsub().await.subscribe_events();
         let (id, _, initial) = p
-            .model_subscribe_and_query(QueryClasses::One(class.into()), q.to_string(), "c".into())
+            .model_subscribe_and_query(
+                QueryClasses::One(class.into()),
+                q.to_string(),
+                "c".into(),
+                None,
+            )
             .await
             .expect("subscribe");
         (Sub { id, rx }, initial)
@@ -409,8 +410,16 @@ impl Sub {
             .await;
         let wait = async {
             loop {
-                let msg = self.rx.recv().await.expect("pubsub receiver closed");
-                let update: Value = serde_json::from_str(&msg).unwrap();
+                let event = match self.rx.recv().await {
+                    Ok(event) => event,
+                    // Other tests' events share the channel.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(e) => panic!("pubsub receiver closed: {e}"),
+                };
+                if event.topic != crate::events::Topic::PerspectiveQuerySubscription {
+                    continue;
+                }
+                let update = &event.payload;
                 if update["perspectiveUuid"] == p.uuid && update["subscriptionId"] == self.id {
                     return update.to_string();
                 }

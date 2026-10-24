@@ -102,7 +102,7 @@ impl DbBackend for LocalDb {
                 let notifs = db.get_notifications()?;
                 Ok(notifs
                     .into_iter()
-                    .filter_map(|n| serde_json::to_value(n).ok())
+                    .filter_map(|n| serde_json::to_value(n.view()).ok())
                     .collect())
             }
             _ => Err(anyhow!("LocalDb: unknown table '{}'", table)),

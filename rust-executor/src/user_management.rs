@@ -3,10 +3,9 @@
 //! Extracted to avoid code duplication between MCP tools and REST handlers.
 
 use crate::agent::capabilities::{
-    get_user_default_capabilities, token::generate_jwt as generate_jwt_token, AuthInfo,
-    DEFAULT_TOKEN_VALID_PERIOD,
+    get_user_default_capabilities, AuthInfo, DEFAULT_TOKEN_VALID_PERIOD,
 };
-use crate::agent::AgentService;
+use crate::agent::{AgentContext, AgentService};
 use crate::db::Ad4mDb;
 use crate::wallet::wallet_backend;
 
@@ -167,7 +166,9 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
     Ok(did)
 }
 
-/// Generate a JWT token for a user with default capabilities.
+/// A token for the user `email` with the default user capabilities, for the app `app_name`,
+/// and its grant: a login is an auto-approved grant on the user's managed agent, which the
+/// user lists and revokes like any other (`agent.getApps`, `agent.revokeToken`).
 pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> {
     let auth_info = AuthInfo {
         app_name: app_name.to_string(),
@@ -179,11 +180,16 @@ pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> 
         user_email: Some(email.to_string()),
     };
 
-    generate_jwt_token(
-        auth_info.app_name.clone(),
-        DEFAULT_TOKEN_VALID_PERIOD,
+    // The login names the user by email; the grant and the token's `sub` name the agent's DID.
+    let did = crate::agent::AgentService::did_for_email(email)
+        .map_err(|e| format!("Failed to generate token: {}", e))?;
+    crate::agent::grants::mint(
+        AgentContext::managed(did),
         auth_info,
+        None,
+        DEFAULT_TOKEN_VALID_PERIOD,
     )
+    .map(|(token, _)| token)
     .map_err(|e| format!("Failed to generate token: {}", e))
 }
 
@@ -247,6 +253,29 @@ fn shared_user_record(email: &str) -> Result<Option<serde_json::Value>, String> 
     crate::db_backend::db_backend()
         .get("shared:platform", "users", email)
         .map_err(|e| format!("Shared DB lookup failed: {}", e))
+}
+
+/// The DID of the user `email` in the shared database, read without adopting the user: for
+/// lookups on behalf of callers who may not write, such as an anonymous capability request.
+/// `None` without a shared database or a record there. The user is adopted later, on login
+/// ([`import_user_from_shared_db`]).
+pub fn shared_did_for_email(email: &str) -> Option<String> {
+    let record = shared_user_record(email).unwrap_or_else(|e| {
+        log::warn!("{e}");
+        None
+    });
+    shared_record_did(email, record.as_ref())
+}
+
+/// The DID that the shared `record` of `email` names, if adopting it would act as that DID:
+/// `None` without a record or a DID, or when a local user of another email owns the DID
+/// ([`adopt_shared_user`] refuses such a record). Reads only.
+fn shared_record_did(email: &str, record: Option<&serde_json::Value>) -> Option<String> {
+    let did = record?.get("did")?.as_str().filter(|did| !did.is_empty())?;
+    match AgentService::email_for_did(did) {
+        Ok(owner) if owner != email => None,
+        _ => Some(did.to_string()),
+    }
 }
 
 /// Copies the user `email` from the shared database into the local `users` table, on an
@@ -444,6 +473,52 @@ mod tests {
             adopt_shared_user("new@example.org", "did:key:z6MkSharedNew", "hash").unwrap(),
             "did:key:z6MkSharedNew"
         );
+    }
+
+    /// D15: a capability request may come from anyone, so resolving the email it names reads
+    /// the shared record without adopting it: the local `users` table gets no row.
+    #[test]
+    fn reading_a_shared_record_adds_no_local_user() {
+        setup();
+        let victim = "did:key:z6MkPeekVictim";
+        Ad4mDb::with_global_instance(|db| db.add_user("peek-victim@example.org", victim, "pw"))
+            .unwrap();
+        let users = || {
+            Ad4mDb::with_global_instance(|db| db.list_users())
+                .unwrap()
+                .len()
+        };
+        let before = users();
+
+        let record = serde_json::json!({ "did": "did:key:z6MkPeekNew", "password_hash": "h" });
+        assert_eq!(
+            shared_record_did("peek-new@example.org", Some(&record)).as_deref(),
+            Some("did:key:z6MkPeekNew")
+        );
+        assert!(Ad4mDb::with_global_instance(|db| db.get_user("peek-new@example.org")).is_err());
+        assert_eq!(users(), before, "reading a shared record wrote a user");
+
+        // A record naming a local user's DID under another email names no agent.
+        let stolen = serde_json::json!({ "did": victim });
+        assert_eq!(
+            shared_record_did("peek-other@example.org", Some(&stolen)),
+            None
+        );
+        assert_eq!(
+            shared_record_did("peek-victim@example.org", Some(&stolen)).as_deref(),
+            Some(victim)
+        );
+        assert_eq!(shared_record_did("peek-new@example.org", None), None);
+        assert_eq!(
+            shared_record_did(
+                "peek-new@example.org",
+                Some(&serde_json::json!({ "did": "" }))
+            ),
+            None
+        );
+        // Without a shared database there is no record to read.
+        assert_eq!(shared_did_for_email("peek-new@example.org"), None);
+        assert_eq!(users(), before);
     }
 
     /// Invariant: create_user on a locked executor must return Err before writing any DB row.

@@ -215,8 +215,18 @@ export class AgentClient {
     this.#cacheAgent(Agent.fromWire(event.agent));
   };
 
-  async requestCapability(authInfo: AuthInfoInput): Promise<string> {
-    return this.#apiClient.call('agent.requestCapability', { authInfo });
+  /**
+   * Asks the executor for a capability token. `agent` names the agent the token will act
+   * as: a managed user's email or an agent's DID; absent, the executor's main agent. That
+   * agent's owner approves the request (the operator for the main agent, the user for
+   * theirs). Returns the request id that {@link generateJwt} redeems with the approver's
+   * six-digit code.
+   */
+  async requestCapability(authInfo: AuthInfoInput, agent?: string): Promise<string> {
+    return this.#apiClient.call(
+      'agent.requestCapability',
+      agent === undefined ? { authInfo } : { authInfo, agent },
+    );
   }
 
   async permitCapability(auth: string): Promise<string> {
@@ -262,6 +272,20 @@ export class AgentClient {
 
   async verifyEmailCode(email: string, code: string, verificationType: string): Promise<string> {
     return this.#apiClient.call('user.verifyEmail', { email, code, verificationType });
+  }
+
+  /** Revokes this client's user token. The executor then closes the client's sockets. */
+  async logout(): Promise<boolean> {
+    return this.#apiClient.call('user.logout', {});
+  }
+
+  /**
+   * Revokes every token of a user issued up to now, this client's own included, and closes
+   * their sockets. A user leaves out `email` (or names themselves); the operator names the
+   * user. Tokens from a later login work.
+   */
+  async revokeAllSessions(email?: string): Promise<boolean> {
+    return this.#apiClient.call('user.revokeAllSessions', email === undefined ? {} : { email });
   }
 
   // Hosting methods

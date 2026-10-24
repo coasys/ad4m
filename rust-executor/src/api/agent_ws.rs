@@ -8,15 +8,17 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
+use crate::agent::grants::{GrantError, Grants, LiveGrant};
 use crate::agent::{
     did_document_for_context, AgentContext, AgentService, AgentSignature as InternalAgentSignature,
 };
 use crate::entanglement_service::{
     add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key,
 };
+use crate::events::Event;
 use crate::holochain_service::conductor_startup::spawn_conductor_startup;
 use crate::languages::LanguageController;
-use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC};
+use crate::pubsub::get_global_pubsub;
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
@@ -107,12 +109,34 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     Ok(serde_json::to_value(agent)?)
 }
 
-/// agent.apps — list registered apps
+/// agent.apps — the grants of the agent the caller acts as: a user lists the apps (and
+/// logins) on their own agent, the operator and main-agent apps those on the main agent.
 async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     ctx.require(&AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    Ok(serde_json::to_value(apps_map::client_view())?)
+    apps_of(&ctx)
+}
+
+/// The app list of the agent the caller acts as, as clients see it: no tokens.
+fn apps_of(ctx: &RequestContext) -> Result<Value, WsRpcError> {
+    let apps: Vec<crate::types::Apps> = Grants::global()
+        .list(&ctx.acts_as())
+        .iter()
+        .map(|grant| grant.as_app())
+        .collect();
+    Ok(serde_json::to_value(apps)?)
+}
+
+/// The grants that `token_or_request_id` names and the caller may manage: those on the agent
+/// it acts as, or any for the operator (D14). Another agent's grant reads as missing.
+fn manageable_grants(ctx: &RequestContext, token_or_request_id: &str) -> Vec<Arc<LiveGrant>> {
+    let own = ctx.acts_as();
+    Grants::global()
+        .find(token_or_request_id)
+        .into_iter()
+        .filter(|grant| ctx.is_operator() || grant.agent == own)
+        .collect()
 }
 
 /// agent.byDid — get agent by DID
@@ -359,19 +383,11 @@ async fn update_user_profile(did: String, body: UpdateProfileRequest) -> Result<
     Ok(agent)
 }
 
-/// Announces a changed profile on `agent-updated`. The event stream filters the event by
-/// the DID in the payload.
+/// Announces a changed profile on `agent-updated`, to the agent whose profile it is.
 async fn publish_agent_updated(agent: &Agent) {
     get_global_pubsub()
         .await
-        .publish(
-            &AGENT_UPDATED_TOPIC,
-            &serde_json::to_string(agent).unwrap_or_else(|e| {
-                log::error!("Failed to serialize agent for pubsub: {e}");
-                String::new()
-            }),
-        )
-        .await;
+        .publish_event(Event::agent_updated(agent));
 }
 
 /// Publishes the main agent to the agent language without holding up the caller.
@@ -446,14 +462,7 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     get_global_pubsub()
         .await
-        .publish(
-            &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| {
-                log::error!("Failed to serialize agent for pubsub: {e}");
-                String::new()
-            }),
-        )
-        .await;
+        .publish_event(Event::agent_status(&agent));
 
     log::info!("AD4M init complete");
     Ok(serde_json::to_value(agent)?)
@@ -475,14 +484,7 @@ async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 
     get_global_pubsub()
         .await
-        .publish(
-            &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| {
-                log::error!("Failed to serialize agent for pubsub: {e}");
-                String::new()
-            }),
-        )
-        .await;
+        .publish_event(Event::agent_status(&agent));
 
     Ok(serde_json::to_value(agent)?)
 }
@@ -578,14 +580,7 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
 
     get_global_pubsub()
         .await
-        .publish(
-            &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| {
-                log::error!("Failed to serialize agent for pubsub: {e}");
-                String::new()
-            }),
-        )
-        .await;
+        .publish_event(Event::agent_status(&agent));
 
     Ok(agent)
 }
@@ -606,31 +601,30 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(out)?)
 }
 
-/// agent.removeApp — remove app
+/// agent.removeApp — deletes an app's grant: its token stops working at once (a missing grant
+/// refuses as a revoked one does, #396) and leaves the app list.
 async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_app_management_by_users(&ctx)?;
 
     let request_id = params.require_str("id")?;
-    apps_map::remove_app(&request_id).map_err(|e| WsRpcError::internal(e))?;
-    Ok(serde_json::to_value(apps_map::client_view())?)
-}
-
-/// Approved apps belong to the executor's operator. The default user capabilities include
-/// AGENT_UPDATE, so without this a user session could remove or revoke the operator's apps.
-fn refuse_app_management_by_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
-    if ctx.user_did().is_some() {
-        return Err(WsRpcError::forbidden(
-            "Apps belong to the node's operator; a user session may not remove or revoke them",
-        ));
+    match Grants::global().remove(&manageable_grants(&ctx, &request_id)) {
+        Ok(()) => {}
+        Err(GrantError::NotFound) => {
+            return Err(WsRpcError::internal(format!(
+                "App with request_key '{}' not found.",
+                request_id
+            )))
+        }
+        Err(e @ GrantError::Store(_)) => return Err(WsRpcError::internal(e.to_string())),
     }
-    Ok(())
+    apps_of(&ctx)
 }
 
 // ── Auth ──
 
-/// agent.requestCapability — request capability
+/// agent.requestCapability — an app asks to act as an agent: the main agent, or the managed
+/// agent that `agent` names (#1399). Returns the request id that `agent.generateJwt` redeems.
 async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     ctx.require(&AGENT_AUTH_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
@@ -638,13 +632,22 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let body: RequestCapabilityRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
+    let target = requested_agent(body.agent.as_deref()).map_err(WsRpcError::bad_request)?;
     let auth_info: AuthInfo = body
         .auth_info
         .try_into()
         .map_err(|e: String| WsRpcError::bad_request(e))?;
-    let request_id = crate::agent::capabilities::request_capability(auth_info.clone()).await;
+    // Dev-mode auto-permit speaks for the operator, who owns only the main agent: a request
+    // on a managed agent always waits for that agent's owner (#1399).
+    let operator_owns_target = target.is_main_agent();
+    let request_id = crate::agent::capabilities::request_capability(auth_info.clone(), target)
+        .await
+        .map_err(|e| match e {
+            RequestCapabilityError::Invalid(e) => WsRpcError::bad_request(e),
+            RequestCapabilityError::Busy(e) => WsRpcError::too_many_requests(e),
+        })?;
 
-    if crate::config::auto_permit_cap_requests() {
+    if operator_owns_target && crate::config::auto_permit_cap_requests() {
         log::debug!(
             "🔐 auto-permitting capability request (request_id={}, app_name={:?})",
             request_id,
@@ -683,7 +686,11 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
     Ok(Value::String(request_id))
 }
 
-/// agent.permitCapability — permit capability
+/// agent.permitCapability — the owner of the agent a request names approves it, with the
+/// capabilities in `auth` (which may be fewer than the app asked for), and gets the code
+/// the app redeems. The owner is the operator, or a session acting as that agent with
+/// AGENT_PERMIT ([`may_approve`], D12); a request for another agent reads as missing.
+// PR 5 moves the owner check into the method's guard.
 async fn permit_capability_handler(
     params: Value,
     ctx: Arc<RequestContext>,
@@ -696,8 +703,27 @@ async fn permit_capability_handler(
 
     let auth: AuthInfoExtended = serde_json::from_str(&body.auth)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid auth info: {}", e)))?;
+    let missing = || {
+        WsRpcError::not_found(
+            "No pending request has this id; it may have expired. The app must request access \
+             again",
+        )
+    };
+    let target = request_target(&auth.request_id).ok_or_else(missing)?;
+    if !may_approve(&ctx.session, &target) {
+        return Err(missing());
+    }
+    // An approver grants no more than it holds itself.
+    let held = ctx.session.capabilities();
+    if let Some(approved) = &auth.auth.capabilities {
+        if crate::agent::capabilities::caps_within(&held, approved).is_empty() {
+            return Err(WsRpcError::forbidden(
+                "None of the approved capabilities is within this session's own",
+            ));
+        }
+    }
     let random_number_challenge =
-        crate::agent::capabilities::permit_capability(auth).map_err(|e| WsRpcError::internal(e))?;
+        crate::agent::capabilities::permit_capability_within(auth, &held).map_err(|_| missing())?;
     Ok(Value::String(random_number_challenge))
 }
 
@@ -712,23 +738,25 @@ async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let cap_token = generate_capability_token(body.request_id, body.rand)
         .await
         .map_err(|e| WsRpcError::internal(e))?;
-    Ok(Value::String(cap_token))
+    Ok(Value::String(cap_token.expose_once()))
 }
 
-/// agent.revokeToken — revoke token
+/// agent.revokeToken — revokes a grant: its token stops working and its sockets close.
 async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_app_management_by_users(&ctx)?;
 
     // The SDK sends the app's request id here; the field name promises the JWT. Both work,
-    // and a value that names no app answers 404 instead of a silent success (#1060).
+    // for an app's grant and a login's. A value that names no grant the caller may manage
+    // answers 404 instead of a silent success (#1060).
     let token = params.require_str("token")?;
-    apps_map::revoke_app(&token).map_err(|e| match e {
-        apps_map::RevokeError::NotFound => WsRpcError::not_found(e.to_string()),
-        apps_map::RevokeError::Store(_) => WsRpcError::internal(e.to_string()),
-    })?;
-    Ok(serde_json::to_value(apps_map::client_view())?)
+    Grants::global()
+        .revoke(&manageable_grants(&ctx, &token))
+        .map_err(|e| match e {
+            GrantError::NotFound => WsRpcError::not_found(e.to_string()),
+            GrantError::Store(_) => WsRpcError::internal(e.to_string()),
+        })?;
+    apps_of(&ctx)
 }
 
 // ── Status ──
@@ -1165,35 +1193,6 @@ mod tests {
 }
 
 #[cfg(test)]
-mod app_management_tests {
-    use crate::agent::capabilities::get_user_default_capabilities;
-    use crate::api::ws_handler::build_handler_map;
-    use crate::types::RequestContext;
-    use serde_json::json;
-    use std::sync::Arc;
-
-    // The default user capabilities include AGENT_UPDATE, which these calls check, so a user
-    // session could remove or revoke the operator's apps.
-    #[tokio::test]
-    async fn user_sessions_cannot_remove_or_revoke_apps() {
-        let user = Arc::new(RequestContext::user_for_test(
-            "did:key:apps-user",
-            get_user_default_capabilities(),
-        ));
-        for (op, params) in [
-            ("agent.removeApp", json!({ "id": "some-request-id" })),
-            ("agent.revokeToken", json!({ "token": "some-request-id" })),
-        ] {
-            let err = build_handler_map()
-                .dispatch(op, params, user.clone())
-                .await
-                .expect_err(op);
-            assert_eq!(err.code, 403, "{op}: {}", err.message);
-        }
-    }
-}
-
-#[cfg(test)]
 mod agents_by_dids_tests {
     use super::{lookup_agents_by_dids, AGENTS_BY_DIDS_CONCURRENCY};
     use crate::api::ws_handler::WsRpcError;
@@ -1281,6 +1280,8 @@ mod agents_by_dids_tests {
 #[cfg(test)]
 mod revoke_token_tests {
     use crate::agent::capabilities::*;
+    use crate::agent::grants::Grants;
+    use crate::agent::session::TokenId;
     use crate::api::ws_handler::build_handler_map;
     use crate::types::RequestContext;
     use serde_json::json;
@@ -1292,48 +1293,111 @@ mod revoke_token_tests {
 
     /// An approved app, as `agent.generateJwt` leaves it: its request id and its token.
     fn approved_app() -> (String, String) {
-        crate::test_utils::use_test_apps_file();
-        let request_id = format!("revoke-test-{}", uuid::Uuid::new_v4());
-        let token = format!("app-token-{}", uuid::Uuid::new_v4());
-        let app = AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth: AuthInfo::default(),
-        };
-        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let token = crate::test_utils::granted_token(AuthInfo {
+            app_name: "revoke test".to_string(),
+            ..AuthInfo::default()
+        });
+        let request_id = Grants::global().find(&token)[0].request_id.clone();
         (request_id, token)
     }
 
-    async fn revoke(value: &str) -> Result<serde_json::Value, (u16, String)> {
+    async fn call_as(
+        op: &str,
+        params: serde_json::Value,
+        ctx: Arc<RequestContext>,
+    ) -> Result<serde_json::Value, (u16, String)> {
         build_handler_map()
-            .dispatch("agent.revokeToken", json!({ "token": value }), operator())
+            .dispatch(op, params, ctx)
             .await
             .map_err(|e| (e.code, e.message))
+    }
+
+    async fn revoke(value: &str) -> Result<serde_json::Value, (u16, String)> {
+        call_as("agent.revokeToken", json!({ "token": value }), operator()).await
+    }
+
+    fn id_of(token: &str) -> TokenId {
+        TokenId(read_stored_claims(token).unwrap().nonce().to_string())
+    }
+
+    fn is_refused(token: &str) -> bool {
+        Grants::global().get(&id_of(token)).is_none()
+    }
+
+    fn request_ids(reply: &serde_json::Value) -> Vec<String> {
+        reply
+            .as_array()
+            .expect("the reply lists the apps")
+            .iter()
+            .map(|app| app["requestId"].as_str().unwrap().to_string())
+            .collect()
     }
 
     // #1060: revoking by the JWT, as the field name says, reported success and revoked
     // nothing.
     #[tokio::test]
     async fn revoking_by_the_jwt_revokes_the_app() {
-        let (request_id, token) = approved_app();
+        let (_, token) = approved_app();
+        assert!(!is_refused(&token));
         revoke(&token).await.expect("the JWT names the app");
-        assert!(check_token_revoked(&token).is_err());
-        apps_map::remove_app(&request_id).unwrap();
+        assert!(is_refused(&token));
     }
 
     #[tokio::test]
     async fn revoking_by_the_request_id_still_works() {
         let (request_id, token) = approved_app();
-        revoke(&request_id)
+        let reply = revoke(&request_id)
             .await
             .expect("the SDK sends the request id");
-        assert!(check_token_revoked(&token).is_err());
-        apps_map::remove_app(&request_id).unwrap();
+        assert!(is_refused(&token));
+        let app = reply
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|app| app["requestId"] == request_id.as_str())
+            .expect("a revoked app stays listed")
+            .clone();
+        assert_eq!(app["revoked"], true);
+    }
+
+    // #396: `removeApp` deleted the record that held the revocation. A removed app has no
+    // grant, and a token without one is refused, revoked first or not.
+    #[tokio::test]
+    async fn a_removed_apps_token_stays_refused() {
+        for revoke_first in [true, false] {
+            let (request_id, token) = approved_app();
+            if revoke_first {
+                revoke(&request_id).await.unwrap();
+            }
+            let reply = call_as("agent.removeApp", json!({ "id": request_id }), operator())
+                .await
+                .unwrap();
+            assert!(!request_ids(&reply).contains(&request_id));
+            assert!(is_refused(&token));
+            assert!(crate::agent::session::Session::open(
+                &token,
+                &Some("admin".into()),
+                ListenerReach::Network
+            )
+            .is_err());
+        }
     }
 
     #[tokio::test]
     async fn a_value_that_names_no_app_is_an_error() {
         let err = revoke("names-no-app").await.unwrap_err();
         assert_eq!(err.0, 404, "{}", err.1);
+        let err = call_as(
+            "agent.removeApp",
+            json!({ "id": "names-no-app" }),
+            operator(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, 500, "{}", err.1);
+        assert!(err.1.contains("not found"), "{}", err.1);
     }
 
     // A failed write must not read as "no such app": the operator would stop looking, and a
@@ -1341,17 +1405,14 @@ mod revoke_token_tests {
     #[tokio::test]
     async fn a_revoke_that_cannot_be_saved_is_a_server_error() {
         let (request_id, token) = approved_app();
-        apps_map::set_data_file_path("/nonexistent-dir-for-revoke-test/apps.json".to_string());
+        let db = crate::db::Ad4mDb::global_instance();
+        let taken = db.lock().unwrap().take();
         let result = revoke(&request_id).await;
-        crate::test_utils::use_test_apps_file();
+        *db.lock().unwrap() = taken;
 
         let err = result.unwrap_err();
         assert_eq!(err.0, 500, "{}", err.1);
-        assert!(
-            check_token_revoked(&token).is_err(),
-            "the app stays revoked in memory"
-        );
-        apps_map::remove_app(&request_id).unwrap();
+        assert!(is_refused(&token), "the app stays revoked in memory");
     }
 
     // The reply lists every app; with tokens in it, the caller could act as any of them.
@@ -1370,6 +1431,719 @@ mod revoke_token_tests {
                 .all(|app| app["token"].as_str().unwrap_or_default().is_empty()),
             "{reply}"
         );
-        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    /// A user with one login, and that user's session.
+    fn user_with_login(name: &str) -> (String, String, Arc<RequestContext>) {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let email = crate::test_utils::managed_user(name);
+        let token = crate::user_management::generate_user_jwt(&email, name).unwrap();
+        let ctx = Arc::new(
+            RequestContext::open(&token, &Some("admin".into()), ListenerReach::Network).unwrap(),
+        );
+        (email, token, ctx)
+    }
+
+    // D14, and closes a leak: any user listed the operator's apps. Each caller lists the
+    // grants of the agent it acts as.
+    #[tokio::test]
+    async fn get_apps_lists_the_grants_of_the_callers_agent() {
+        let (app_request, _) = approved_app();
+        let (_, alice_token, alice) = user_with_login("apps-alice");
+        let (_, bob_token, bob) = user_with_login("apps-bob");
+        let alice_login = id_of(&alice_token).0;
+        let bob_login = id_of(&bob_token).0;
+
+        let listed = request_ids(&call_as("agent.getApps", json!({}), alice).await.unwrap());
+        assert_eq!(
+            listed,
+            [alice_login.clone()],
+            "alice sees her own login only"
+        );
+
+        let listed = request_ids(&call_as("agent.getApps", json!({}), bob).await.unwrap());
+        assert_eq!(listed, [bob_login.clone()]);
+
+        let listed = request_ids(
+            &call_as("agent.getApps", json!({}), operator())
+                .await
+                .unwrap(),
+        );
+        assert!(
+            listed.contains(&app_request),
+            "the operator sees the main agent's apps"
+        );
+        assert!(!listed.contains(&alice_login) && !listed.contains(&bob_login));
+    }
+
+    // D14: a user revokes and removes their own grants, never another user's or the main
+    // agent's; the operator revokes any.
+    #[tokio::test]
+    async fn a_user_revokes_only_their_own_grants() {
+        let (app_request, app_token) = approved_app();
+        let (alice_email, alice_token, alice) = user_with_login("own-alice");
+        let (_, bob_token, _) = user_with_login("own-bob");
+        let second = crate::user_management::generate_user_jwt(&alice_email, "phone").unwrap();
+
+        for value in [app_request.clone(), app_token.clone(), bob_token.clone()] {
+            let err = call_as(
+                "agent.revokeToken",
+                json!({ "token": value }),
+                alice.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.0, 404, "{}", err.1);
+        }
+        let err = call_as(
+            "agent.removeApp",
+            json!({ "id": app_request }),
+            alice.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.1.contains("not found"), "{}", err.1);
+        assert!(!is_refused(&app_token) && !is_refused(&bob_token));
+
+        // Her phone's login, by its request id (the id the app list shows).
+        let reply = call_as(
+            "agent.revokeToken",
+            json!({ "token": id_of(&second).0 }),
+            alice.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(is_refused(&second));
+        assert!(!is_refused(&alice_token), "her other login works");
+        assert_eq!(
+            request_ids(&reply).len(),
+            2,
+            "the reply lists her grants only"
+        );
+
+        // The operator revokes another user's grant.
+        revoke(&bob_token).await.unwrap();
+        assert!(is_refused(&bob_token));
+    }
+
+    // D14: an app on the main agent acts as the main agent, not as the operator. With every
+    // capability it still neither revokes nor removes a user's login.
+    #[tokio::test]
+    async fn a_main_agent_app_revokes_no_users_grant() {
+        let (_, alice_token, _) = user_with_login("main-app-alice");
+        let app = Arc::new(
+            RequestContext::open(
+                &crate::test_utils::granted_token(AuthInfo {
+                    app_name: "main-agent app with every capability".to_string(),
+                    capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                    ..AuthInfo::default()
+                }),
+                &Some("admin".into()),
+                ListenerReach::Network,
+            )
+            .unwrap(),
+        );
+        assert!(!app.is_operator());
+        let login = id_of(&alice_token).0;
+
+        let err = call_as("agent.revokeToken", json!({ "token": login }), app.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, 404, "{}", err.1);
+        let err = call_as("agent.removeApp", json!({ "id": login }), app.clone())
+            .await
+            .unwrap_err();
+        assert!(err.1.contains("not found"), "{}", err.1);
+        assert!(!is_refused(&alice_token), "alice's login still works");
+        let listed = request_ids(&call_as("agent.getApps", json!({}), app).await.unwrap());
+        assert!(!listed.contains(&login), "the app does not see her login");
+    }
+}
+
+/// #1399, executor side: an app asks to act as a managed agent, that agent's owner approves
+/// it (D11, D12), and the grant stays within what was approved and what the agent holds (D13).
+#[cfg(test)]
+mod capability_request_tests {
+    use crate::agent::capabilities::pending::PendingRequests;
+    use crate::agent::capabilities::*;
+    use crate::api::ws_handler::build_handler_map;
+    use crate::events::{Event, Topic};
+    use crate::pubsub::get_global_pubsub;
+    use crate::types::RequestContext;
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn setup() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::ensure_test_db();
+    }
+
+    fn open(token: &str) -> Arc<RequestContext> {
+        Arc::new(
+            RequestContext::open(token, &Some("admin".into()), ListenerReach::Network)
+                .unwrap_or_else(|e| panic!("the token opens a session: {e}")),
+        )
+    }
+
+    /// A managed user's email and a session of that user's login.
+    fn user(name: &str) -> (String, Arc<RequestContext>) {
+        let email = crate::test_utils::managed_user(name);
+        let token = crate::user_management::generate_user_jwt(&email, name).unwrap();
+        (email, open(&token))
+    }
+
+    /// A session of an app on the main agent with `caps`.
+    fn main_agent_app(caps: Vec<Capability>) -> Arc<RequestContext> {
+        open(&crate::test_utils::granted_token(AuthInfo {
+            app_name: "main-agent app".into(),
+            capabilities: Some(caps),
+            ..AuthInfo::default()
+        }))
+    }
+
+    fn operator() -> Arc<RequestContext> {
+        Arc::new(RequestContext::operator_for_test())
+    }
+
+    fn anonymous() -> Arc<RequestContext> {
+        open("")
+    }
+
+    async fn call(
+        op: &str,
+        params: serde_json::Value,
+        ctx: Arc<RequestContext>,
+    ) -> Result<serde_json::Value, (u16, String)> {
+        build_handler_map()
+            .dispatch(op, params, ctx)
+            .await
+            .map_err(|e| (e.code, e.message))
+    }
+
+    fn auth_info(caps: &[Capability]) -> serde_json::Value {
+        json!({
+            "appName": "Consent test app",
+            "appDesc": "asks for a user's agent",
+            "appDomain": "consent.example",
+            "capabilities": caps,
+        })
+    }
+
+    /// An anonymous app asks for `caps` on `agent` (`None`: the main agent).
+    async fn request(agent: Option<&str>, caps: &[Capability]) -> String {
+        let mut params = json!({ "authInfo": auth_info(caps) });
+        if let Some(agent) = agent {
+            params["agent"] = json!(agent);
+        }
+        call("agent.requestCapability", params, anonymous())
+            .await
+            .expect("anyone may request")
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// `approver` approves `request_id` with `caps`; returns the code.
+    async fn permit(
+        approver: Arc<RequestContext>,
+        request_id: &str,
+        caps: &[Capability],
+    ) -> Result<String, (u16, String)> {
+        let auth = AuthInfoExtended {
+            request_id: request_id.to_string(),
+            auth: AuthInfo {
+                app_name: "Consent test app".into(),
+                capabilities: Some(caps.to_vec()),
+                ..AuthInfo::default()
+            },
+        };
+        let params = json!({ "auth": serde_json::to_string(&auth).unwrap() });
+        call("agent.permitCapability", params, approver)
+            .await
+            .map(|code| code.as_str().unwrap().to_string())
+    }
+
+    /// The app redeems its code, unauthenticated as it is.
+    async fn redeem(request_id: &str, code: &str) -> Result<String, (u16, String)> {
+        let params = json!({ "requestId": request_id, "rand": code });
+        call("agent.generateJwt", params, anonymous())
+            .await
+            .map(|token| token.as_str().unwrap().to_string())
+    }
+
+    /// The first event on `events` of `topic` that mentions `request_id`.
+    async fn event_about(
+        events: &mut tokio::sync::broadcast::Receiver<Arc<Event>>,
+        topic: Topic,
+        request_id: &str,
+    ) -> Arc<Event> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event.topic == topic && event.payload.to_string().contains(request_id) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no {topic:?} event for {request_id}"))
+    }
+
+    fn caps_text(caps: &[Capability]) -> Vec<String> {
+        let mut text: Vec<String> = caps.iter().map(|c| format!("{c:?}")).collect();
+        text.sort();
+        text
+    }
+
+    // The end-to-end flow of #1399 on the executor: the user (a session acting as the managed
+    // agent) receives the request, approves part of it, and the app's token acts as that
+    // user with only that part.
+    #[tokio::test]
+    async fn a_user_approves_a_subset_and_the_apps_token_acts_as_them_with_only_that() {
+        setup();
+        let (alice_email, alice) = user("consent-alice");
+        let (_, bob) = user("consent-bob");
+        let mut events = get_global_pubsub().await.subscribe_events();
+
+        let asked = [
+            AGENT_READ_CAPABILITY.clone(),
+            PERSPECTIVE_CREATE_CAPABILITY.clone(),
+        ];
+        let request_id = request(Some(&alice_email), &asked).await;
+
+        let approval = event_about(&mut events, Topic::ExceptionOccurred, &request_id).await;
+        assert!(alice.session.may_receive(&approval), "alice is asked");
+        assert!(!bob.session.may_receive(&approval), "bob is not");
+        assert!(!operator().session.may_receive(&approval));
+        assert!(!main_agent_app(vec![ALL_CAPABILITY.clone()])
+            .session
+            .may_receive(&approval));
+
+        let subset = [AGENT_READ_CAPABILITY.clone()];
+        let code = permit(alice.clone(), &request_id, &subset)
+            .await
+            .expect("alice approves a request for her own agent");
+        let token = redeem(&request_id, &code).await.unwrap();
+
+        let app = open(&token);
+        assert_eq!(
+            app.acts_as(),
+            crate::agent::AgentService::managed_agent_for_email(&alice_email).unwrap()
+        );
+        assert_eq!(app.user_did(), alice.user_did());
+        assert_eq!(caps_text(&app.session.capabilities()), caps_text(&subset));
+        assert!(!app.session.may(&PERSPECTIVE_CREATE_CAPABILITY));
+
+        let changed = event_about(&mut events, Topic::AppsChanged, &request_id).await;
+        assert!(alice.session.may_receive(&changed));
+        assert!(!bob.session.may_receive(&changed));
+        let listed = call("agent.getApps", json!({}), alice.clone())
+            .await
+            .unwrap();
+        assert!(listed.to_string().contains(&request_id), "{listed}");
+        let listed = call("agent.getApps", json!({}), operator()).await.unwrap();
+        assert!(!listed.to_string().contains(&request_id), "{listed}");
+
+        // A code redeems once.
+        assert!(redeem(&request_id, &code).await.is_err());
+    }
+
+    // D12: only the owner of the agent a request names approves it, or the operator. Another
+    // user and a main-agent app (even with every capability) read the request as missing;
+    // an anonymous caller lacks AGENT_PERMIT.
+    #[tokio::test]
+    async fn only_the_owner_of_the_requested_agent_or_the_operator_approves() {
+        setup();
+        let (alice_email, alice) = user("owner-alice");
+        let (_, bob) = user("owner-bob");
+        let caps = [AGENT_READ_CAPABILITY.clone()];
+
+        let for_alice = request(Some(&alice_email), &caps).await;
+        let refused = permit(bob.clone(), &for_alice, &caps).await.unwrap_err();
+        assert_eq!(refused.0, 404, "{}", refused.1);
+        let refused = permit(
+            main_agent_app(vec![ALL_CAPABILITY.clone()]),
+            &for_alice,
+            &caps,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.0, 404, "{}", refused.1);
+        let refused = permit(anonymous(), &for_alice, &caps).await.unwrap_err();
+        assert_eq!(refused.0, 403, "{}", refused.1);
+        assert!(!PendingRequests::global().is_approved(&for_alice));
+
+        // The operator approves any agent's request.
+        let code = permit(operator(), &for_alice, &caps).await.unwrap();
+        let token = redeem(&for_alice, &code).await.unwrap();
+        assert_eq!(
+            open(&token).acts_as(),
+            crate::agent::AgentService::managed_agent_for_email(&alice_email).unwrap()
+        );
+
+        // A request for the main agent: no user approves it; the operator and a main-agent
+        // app that holds AGENT_PERMIT do (within what the app holds itself).
+        let for_main = request(None, &caps).await;
+        let refused = permit(alice.clone(), &for_main, &caps).await.unwrap_err();
+        assert_eq!(refused.0, 404, "{}", refused.1);
+        assert!(!PendingRequests::global().is_approved(&for_main));
+        let refused = permit(
+            main_agent_app(vec![AGENT_PERMIT_CAPABILITY.clone()]),
+            &for_main,
+            &caps,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.0, 403, "it does not hold AGENT_READ: {}", refused.1);
+        assert!(permit(
+            main_agent_app(vec![
+                AGENT_PERMIT_CAPABILITY.clone(),
+                AGENT_READ_CAPABILITY.clone()
+            ]),
+            &for_main,
+            &caps
+        )
+        .await
+        .is_ok());
+        assert!(permit(operator(), &for_main, &caps).await.is_ok());
+    }
+
+    // D13: an approval wider than the user's own capabilities (here, every capability) yields
+    // a grant with the user's capabilities and no more.
+    #[tokio::test]
+    async fn a_grant_on_a_users_agent_never_exceeds_the_users_capabilities() {
+        setup();
+        let (alice_email, alice) = user("cap-owner-alice");
+        let request_id = request(Some(&alice_email), &[ALL_CAPABILITY.clone()]).await;
+        let code = permit(alice, &request_id, &[ALL_CAPABILITY.clone()])
+            .await
+            .unwrap();
+        let app = open(&redeem(&request_id, &code).await.unwrap());
+        assert_eq!(
+            caps_text(&app.session.capabilities()),
+            caps_text(&get_user_default_capabilities())
+        );
+        assert!(!app.session.may(&AGENT_LOCK_CAPABILITY));
+        assert!(!app.session.may(&ALL_CAPABILITY));
+    }
+
+    // An approver grants no more than it holds itself. An app that a user approved with
+    // AGENT_PERMIT may approve requests on the user's agent, but only within its own grant:
+    // it cannot mint itself (or another app) a grant with all of the user's capabilities.
+    // The same holds on the main agent for an app that holds AGENT_PERMIT without `*`.
+    #[tokio::test]
+    async fn an_approver_grants_no_more_than_it_holds() {
+        setup();
+        let (alice_email, alice) = user("attenuate-alice");
+        let narrow = [
+            AGENT_READ_CAPABILITY.clone(),
+            AGENT_PERMIT_CAPABILITY.clone(),
+        ];
+        let first = request(Some(&alice_email), &narrow).await;
+        let code = permit(alice, &first, &narrow).await.unwrap();
+        let app = open(&redeem(&first, &code).await.unwrap());
+
+        let second = request(Some(&alice_email), &[ALL_CAPABILITY.clone()]).await;
+        let code = permit(app, &second, &[ALL_CAPABILITY.clone()])
+            .await
+            .expect("an app with AGENT_PERMIT on alice's agent approves her requests");
+        let child = open(&redeem(&second, &code).await.unwrap());
+        assert!(
+            !child.session.may(&PERSPECTIVE_CREATE_CAPABILITY),
+            "an app holding READ and PERMIT minted a grant with every user capability"
+        );
+        assert!(child.session.may(&AGENT_READ_CAPABILITY));
+
+        let for_main = request(None, &[ALL_CAPABILITY.clone()]).await;
+        let code = permit(
+            main_agent_app(vec![AGENT_PERMIT_CAPABILITY.clone()]),
+            &for_main,
+            &[ALL_CAPABILITY.clone()],
+        )
+        .await
+        .unwrap();
+        let child = open(&redeem(&for_main, &code).await.unwrap());
+        assert!(
+            !child.session.may(&AGENT_LOCK_CAPABILITY),
+            "an app holding only PERMIT minted a `*` grant on the main agent"
+        );
+    }
+
+    // `user.revokeAllSessions` ends every login and app of the user. An app the user
+    // approved acts as the user's agent, but with only what it was granted: one without
+    // AGENT_UPDATE (which `agent.revokeToken` and `agent.removeApp` need) cannot end them.
+    #[tokio::test]
+    async fn a_read_only_app_cannot_end_its_users_sessions() {
+        setup();
+        let (alice_email, alice) = user("ras-alice");
+        let read = [AGENT_READ_CAPABILITY.clone()];
+        let id = request(Some(&alice_email), &read).await;
+        let code = permit(alice.clone(), &id, &read).await.unwrap();
+        let app = open(&redeem(&id, &code).await.unwrap());
+        let refused = call("user.revokeAllSessions", json!({}), app.clone()).await;
+        assert!(matches!(refused, Err((403, _))), "{refused:?}");
+        assert!(
+            alice.session.check().is_ok(),
+            "a read-only app revoked alice's login"
+        );
+        assert!(app.session.check().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_request_for_an_unknown_did_is_refused() {
+        setup();
+        let params = json!({
+            "authInfo": auth_info(&[AGENT_READ_CAPABILITY.clone()]),
+            "agent": "did:key:z6MkNoSuchAgentOnThisExecutor",
+        });
+        let err = call("agent.requestCapability", params, anonymous())
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, 400, "{}", err.1);
+    }
+
+    // The app's name, description, domain and URL are the caller's to choose, anonymous
+    // callers included, and go into memory and approval prompts: each is bounded.
+    #[tokio::test]
+    async fn a_request_with_an_overlong_app_field_is_refused() {
+        setup();
+        let long = "x".repeat(crate::agent::capabilities::MAX_AUTH_INFO_FIELD_BYTES + 1);
+        for field in ["appName", "appDesc", "appDomain", "appUrl", "appIconPath"] {
+            let mut auth = auth_info(&[AGENT_READ_CAPABILITY.clone()]);
+            auth[field] = json!(long);
+            let err = call(
+                "agent.requestCapability",
+                json!({ "authInfo": auth }),
+                anonymous(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.0, 400, "{field}: {}", err.1);
+            assert!(err.1.contains(field), "{field}: {}", err.1);
+        }
+        let mut auth = auth_info(&[AGENT_READ_CAPABILITY.clone()]);
+        auth["appName"] = json!(&long[1..]);
+        call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth }),
+            anonymous(),
+        )
+        .await
+        .expect("a field of the limit's length is taken");
+    }
+
+    // `capabilities` is caller-chosen like the app fields and is kept in memory and shown in
+    // the approval prompt, so it is bounded too: by its size as JSON.
+    #[tokio::test]
+    async fn a_request_with_an_oversized_capability_list_is_refused() {
+        setup();
+        let many: Vec<_> = (0..10_000)
+            .map(|i| {
+                crate::agent::capabilities::perspective_query_capability(vec![format!("p{i}")])
+            })
+            .collect();
+        let err = call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&many) }),
+            anonymous(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, 400, "{}", err.1);
+        assert!(err.1.contains("capabilities"), "{}", err.1);
+
+        let one_pointer_too_long = [crate::agent::capabilities::perspective_query_capability(
+            vec!["x".repeat(70_000)],
+        )];
+        let err = call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&one_pointer_too_long) }),
+            anonymous(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, 400, "{}", err.1);
+
+        // What apps ask for today stays well inside it.
+        let defaults = crate::agent::capabilities::get_user_default_capabilities();
+        call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&defaults) }),
+            anonymous(),
+        )
+        .await
+        .expect("the user default capabilities are taken");
+    }
+
+    // A store with no request that may go refuses a new one: the app may try again later, so
+    // the answer is 429, not a 500 that reads as the executor's fault.
+    #[tokio::test]
+    async fn a_request_to_a_full_store_is_429() {
+        setup();
+        let refused = {
+            let _full =
+                crate::agent::capabilities::pending::PendingRequests::global().fill_for_test();
+            call(
+                "agent.requestCapability",
+                json!({ "authInfo": auth_info(&[AGENT_READ_CAPABILITY.clone()]) }),
+                anonymous(),
+            )
+            .await
+        };
+        let err = refused.unwrap_err();
+        assert_eq!(err.0, 429, "{}", err.1);
+        assert!(err.1.contains("Too many capability requests"), "{}", err.1);
+    }
+
+    // D16: an email resolves to its user's DID at the edge. An email no user has is taken
+    // all the same, so the answer does not tell an anonymous caller which emails have
+    // accounts; the request reaches nobody and no user may approve it.
+    #[tokio::test]
+    async fn a_request_for_an_email_without_a_user_is_taken_and_reaches_nobody() {
+        setup();
+        let (alice_email, alice) = user("nobody-alice");
+        let caps = [AGENT_READ_CAPABILITY.clone()];
+        // Every event published from here on, whatever its audience: the operator's and the
+        // main agent's streams included.
+        let mut events = get_global_pubsub().await.subscribe_events();
+        let params = json!({
+            "authInfo": auth_info(&caps),
+            "agent": "no-such-user@example.org",
+        });
+        let request_id = call("agent.requestCapability", params, anonymous())
+            .await
+            .expect("an unknown email is answered like a known one");
+        let request_id = request_id.as_str().unwrap();
+        assert_eq!(
+            crate::agent::capabilities::request_target(request_id),
+            Some(crate::agent::capabilities::RequestTarget::NoAgent)
+        );
+        let refused = permit(alice, request_id, &caps).await.unwrap_err();
+        assert_eq!(refused.0, 404, "{}", refused.1);
+        assert!(!PendingRequests::global().is_approved(request_id));
+
+        // No approval request goes out: not to the operator, the main agent or anyone else.
+        // A request for a known user, made after it, does arrive, so the fence is not empty.
+        let known = request(Some(&alice_email), &caps).await;
+        let silent = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                let payload = event.payload.to_string();
+                if payload.contains(request_id) {
+                    return Err(event);
+                }
+                if event.topic == Topic::ExceptionOccurred && payload.contains(&known) {
+                    return Ok(());
+                }
+            }
+        })
+        .await
+        .expect("the approval request of the known user's request arrives");
+        if let Err(event) = silent {
+            panic!("a request for no agent published {:?}", event.topic);
+        }
+    }
+
+    // An anonymous caller declares any app name and domain it likes, so those prove nothing.
+    // Whatever app it claims to be, it gets no token for the main agent or a user's agent
+    // without the owner's approval: `agent.generateJwt` with the empty code (or a guess) is
+    // refused, and the request stays unapproved.
+    #[tokio::test]
+    async fn an_anonymous_caller_claiming_any_app_gets_no_token_without_the_owners_approval() {
+        setup();
+        let (alice_email, _alice) = user("claims-alice");
+        let alice_did = crate::agent::did_for_context(
+            &crate::agent::AgentService::managed_agent_for_email(&alice_email).unwrap(),
+        )
+        .unwrap();
+        let caps = [ALL_CAPABILITY.clone()];
+        for agent in [None, Some(alice_email.as_str()), Some(alice_did.as_str())] {
+            for (name, domain) in [
+                ("ADAM Launcher", "localhost"),
+                ("Flux", "app.flux.social"),
+                ("", ""),
+            ] {
+                let mut params = json!({
+                    "authInfo": {
+                        "appName": name,
+                        "appDesc": "claims to be a known app",
+                        "appDomain": domain,
+                        "capabilities": caps,
+                    },
+                });
+                if let Some(agent) = agent {
+                    params["agent"] = json!(agent);
+                }
+                let request_id = call("agent.requestCapability", params, anonymous())
+                    .await
+                    .expect("anyone may request")
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                assert!(
+                    !PendingRequests::global().is_approved(&request_id),
+                    "{name} for {agent:?}: no request is approved at the request"
+                );
+                for code in ["", "000000", "12345"] {
+                    assert!(
+                        redeem(&request_id, code).await.is_err(),
+                        "{name} for {agent:?}: {code:?} yields no token"
+                    );
+                }
+                assert!(
+                    PendingRequests::global().contains(&request_id),
+                    "{name} for {agent:?}: the request still waits for its owner"
+                );
+            }
+        }
+    }
+
+    // Dev-mode auto-permit speaks for the operator, so it approves requests on the main agent
+    // only. A request on a managed agent still waits for that agent's owner.
+    #[tokio::test]
+    async fn auto_permit_approves_only_requests_on_the_main_agent() {
+        setup();
+        let (alice_email, _alice) = user("auto-permit-alice");
+        let mut config = crate::config::get_global_config();
+        config.auto_permit_cap_requests = Some(true);
+        crate::config::set_global_config(config.clone());
+
+        let request = |agent: Option<&str>| {
+            let mut params = json!({
+                "authInfo": {
+                    "appName": "auto-permit",
+                    "appDesc": "dev mode",
+                    "appDomain": "localhost",
+                    "capabilities": [AGENT_READ_CAPABILITY.clone()],
+                },
+            });
+            if let Some(agent) = agent {
+                params["agent"] = json!(agent);
+            }
+            params
+        };
+        let main = call("agent.requestCapability", request(None), anonymous()).await;
+        let managed = call(
+            "agent.requestCapability",
+            request(Some(alice_email.as_str())),
+            anonymous(),
+        )
+        .await;
+        config.auto_permit_cap_requests = None;
+        crate::config::set_global_config(config);
+
+        let main = main.unwrap().as_str().unwrap().to_string();
+        let managed = managed.unwrap().as_str().unwrap().to_string();
+        assert!(
+            PendingRequests::global().is_approved(&main),
+            "auto-permit approves a request on the main agent"
+        );
+        assert!(
+            !PendingRequests::global().is_approved(&managed),
+            "auto-permit never approves a request on a managed agent"
+        );
     }
 }

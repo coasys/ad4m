@@ -17,6 +17,7 @@ pub mod perspective_snapshot;
 pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
+pub mod secret;
 pub mod sfu;
 pub mod unyt_service;
 pub mod user_management;
@@ -29,6 +30,7 @@ pub mod billing;
 mod dapp_server;
 pub mod db;
 pub mod db_backend;
+mod events;
 pub mod init;
 pub mod languages;
 pub mod logging;
@@ -51,6 +53,7 @@ use crate::{
     languages::LanguageController, runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
+pub use secret::Secret;
 
 #[cfg(unix)]
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
@@ -378,7 +381,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     .as_ref()
                     .expect("INTERNAL_API_TOKEN required for shared backends");
                 info!("Initialising shared wallet backend at {}", url);
-                Arc::new(crate::wallet::SharedWallet::new(url.clone(), token.clone()))
+                // The Worker's bearer token: the shared wallet sends it on every call.
+                Arc::new(crate::wallet::SharedWallet::new(
+                    url.clone(),
+                    token.expose().to_string(),
+                ))
             }
             _ => {
                 info!("Initialising local wallet backend");
@@ -404,7 +411,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     .as_ref()
                     .expect("INTERNAL_API_TOKEN required for shared backends");
                 info!("Initialising shared database backend at {}", url);
-                Arc::new(crate::db_backend::SharedDb::new(url.clone(), token.clone()))
+                // The Worker's bearer token: the shared database sends it on every call.
+                Arc::new(crate::db_backend::SharedDb::new(
+                    url.clone(),
+                    token.expose().to_string(),
+                ))
             }
             _ => {
                 info!("Initialising local database backend");
@@ -433,7 +444,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         if let (Some(internal), Some(admin)) =
             (&config.internal_api_token, &config.admin_credential)
         {
-            if internal == admin {
+            if admin.expose_for_compare(internal.expose()) {
                 panic!(
                     "INTERNAL_API_TOKEN must differ from ADMIN_CREDENTIAL in shared mode. \
                      Using the same value collapses two trust boundaries."
@@ -545,18 +556,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .into_owned(),
     );
 
-    agent::capabilities::apps_map::set_data_file_path(
-        config
-            .app_data_path
-            .as_ref()
-            .map(|path| {
-                std::path::Path::new(path)
-                    .join("apps_data.json")
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .expect("App data path not set in Ad4mConfig"),
-    );
+    // Grants are the allowlist of tokens: load them before the API serves.
+    if let Err(e) = agent::grants::load_at_start() {
+        // Without its grants the API would refuse every token: it does not start.
+        return failed_start(format!("Could not load the grants: {e}"));
+    }
 
     if config.admin_credential.is_none() {
         // Only reachable with insecure_no_admin_credential (checked above).
@@ -709,9 +713,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // and publishes updated HostingUserInfo only for affected users.
     tokio::spawn(async {
         use crate::db::Ad4mDb;
-        use crate::pubsub::{
-            get_global_pubsub, DIRTY_CREDIT_USERS, HOSTING_USER_INFO_CHANGED_TOPIC,
-        };
+        use crate::events::Event;
+        use crate::pubsub::{get_global_pubsub, DIRTY_CREDIT_USERS};
 
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -786,10 +789,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     free_access,
                 };
 
-                if let Ok(json) = serde_json::to_string(&info) {
-                    pubsub
-                        .publish(&HOSTING_USER_INFO_CHANGED_TOPIC, &json)
-                        .await;
+                for event in Event::hosting_user_info(&info) {
+                    pubsub.publish_event(event);
                 }
             }
         }
@@ -842,6 +843,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
         result
     })
+}
+
+/// The handle [`run`] returns when the executor cannot start: it ends at once with `reason`, as
+/// a failed API does, so the launcher shows it and executor binaries exit through
+/// [`exit_when_api_fails`].
+fn failed_start(reason: String) -> JoinHandle<Result<(), AnyError>> {
+    error!("{reason}");
+    std::thread::spawn(move || Err(deno_core::anyhow::anyhow!(reason)))
 }
 
 /// Build the cascade-gossip transport based on the SFU-related fields
@@ -919,4 +928,18 @@ pub fn exit_when_api_fails(api_thread: JoinHandle<Result<(), AnyError>>) {
         error!("REST API server failed, exiting: {}", reason);
         std::process::exit(1);
     });
+}
+
+#[cfg(test)]
+mod start_tests {
+    // Grants that did not load used to panic inside `run`, which the launcher runs in its own
+    // process. The failure now comes back through the handle `run` returns.
+    #[test]
+    fn a_failed_start_reports_its_reason_through_the_handle() {
+        let reason = super::failed_start("Could not load the grants: no database".to_string())
+            .join()
+            .expect("the handle does not panic")
+            .unwrap_err();
+        assert_eq!(reason.to_string(), "Could not load the grants: no database");
+    }
 }

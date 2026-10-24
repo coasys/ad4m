@@ -54,9 +54,11 @@ fn presign_url(config: &Ad4mConfig) -> Result<String, AnyError> {
 }
 
 fn internal_token(config: &Ad4mConfig) -> Result<String, AnyError> {
+    // The Worker's bearer token, sent with the snapshot requests.
     config
         .internal_api_token
-        .clone()
+        .as_ref()
+        .map(|token| token.expose().to_string())
         .ok_or_else(|| anyhow!("INTERNAL_API_TOKEN required for snapshots"))
 }
 
