@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "ad4m-hash-chain",
     "ad4m-identity-core",
+    "identity-store",
     "cli",
     "rust-client",
     "rust-executor",
@@ -16,6 +17,10 @@ members = [
 # script explicitly asks for it (never as part of the normal workspace build).
 exclude = [
     ".hc-toolchain",
+    # ad4m-ldk's Rust crate is its own workspace (languages build it for wasm32 on their own
+    # lockfiles). identity-store uses it as a path dependency for the shared identity wire
+    # types; excluding it lets cargo load it as a dependency rather than a second root.
+    "ad4m-ldk/rust",
 ]
 
 [patch.crates-io]
