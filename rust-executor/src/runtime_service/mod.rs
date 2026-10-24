@@ -24,7 +24,8 @@ pub struct BootstrapSeed {
 
 use serde::{Deserialize, Serialize};
 
-use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
+use crate::events::Event;
+use crate::pubsub::get_global_pubsub;
 use crate::types::{ExceptionInfo, ExceptionType, NotificationInput};
 use crate::{agent::did, db::Ad4mDb, types::SentMessage};
 
@@ -202,13 +203,11 @@ impl RuntimeService {
                 addon: Some(serde_json::to_string(&notification).unwrap()),
             };
 
+            // The main agent's sessions that may approve apps answer it.
+            let target = crate::agent::AgentContext::main_agent();
             get_global_pubsub()
                 .await
-                .publish(
-                    &EXCEPTION_OCCURRED_TOPIC,
-                    &serde_json::to_string(&exception_info).unwrap(),
-                )
-                .await;
+                .publish_event(Event::approval_request(&exception_info, &target));
         }
 
         Ok(notification_id)

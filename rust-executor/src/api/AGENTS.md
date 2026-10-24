@@ -7,8 +7,7 @@ REST/WS shim. Split plan: spec item 6.
 
 | Route | Handler | Notes |
 |---|---|---|
-| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates |
-| `GET /api/v1/ws/events` | `events_ws.rs` | Standalone event stream (same events, no live query updates; candidate for removal, spec D3) |
+| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
 | `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio, realtime WS |
 
@@ -61,8 +60,75 @@ from the global config where `agent.requestCapability` uses it.
   discovery and no compatibility modes.
 - Events: a socket gets no events until it sends `events.watch { "<type>": null | [perspective
   uuids] }` (replaces the last watch; `events.unwatch` clears it). `event_interest.rs`, handled
-  inline on both sockets (per-connection state, like `request.cancel`).
-- Every socket (RPC, `/events`, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
+  inline on the RPC socket (per-connection state, like `request.cancel`). A list matches events
+  whose `Event::perspective` (the payload's `perspectiveUuid`) it names; unscoped payloads carry
+  none. There is no separate events socket (`/api/v1/ws/events` was removed).
+- Live query updates (`query-subscription-update`) pass `events.watch` untouched. A live query
+  belongs to the RPC connection that opened it (`RequestContext::connection_id`, #1207): its
+  update is an `Event` with `Event::connection` set (`Event::for_connection`), and a socket's
+  stream drops an event whose connection is not its own before `may_receive` runs, so the update
+  needs both its connection and its audience. The key is not on the wire. When a socket's stream
+  lags it sends `{ "type": "query-subscription-update", "lagged": true }` and `LiveQuery` resyncs.
+  Closing the socket disposes its subscriptions (`ws_rpc::serve`).
+- One event path. A publisher calls `pubsub.publish_event(Event::new(Topic, Audience, payload))`
+  (`src/events.rs`); there is no default audience. Wire names live in `Topic::as_str` only;
+  `events_ws::event_specs()` is keyed by `Topic`. A socket's stream
+  (`events_ws::build_event_stream`) delivers an event when `Session::may_receive` and
+  `event_interest::wants` (the watch, keyed by `Topic`) hold, as `events_ws::wire_message`.
+- `Audience = Everyone | Dids(Vec<String>) | Operator`. `may_receive` needs both: the session is
+  in the audience (everyone, `Session::acts_as_did` is one of the DIDs, or for `Operator` the
+  operator principal only; a grant acts as its agent, the operator as the main agent it owns),
+  and it holds `Event::capability`. `Event::new` fills
+  the capability from `Topic::capability(perspective)`, the capability of the RPC method that
+  reads the same data (#1284): per-perspective topics name the event's perspective
+  (`perspective.queryLinks`' `perspective_query_capability([uuid])`; a signal: neighbourhood READ
+  on it); an event without a perspective needs the grant on `*`. Approval requests carry
+  AGENT_PERMIT instead (`Event::approval_request`). An app acts as the main agent, so without the
+  capability an app approved for AI or one perspective got every perspective's events. A user
+  token holds every topic's capability but `apps-changed`'s (AGENT_PERMIT) and the operator may
+  do anything, so only narrower tokens lose events. A new topic picks its capability in the same
+  exhaustive `match`. No check takes a lock or parses the payload. The stream builder takes the
+  socket's interest (`Connection::interest()`). Only authenticated sessions
+  (`Session::is_authenticated`: not anonymous) get a stream. The stream ends at the first event
+  the session may receive after `Session::check()` fails. `audience_matrix_tests` in
+  `events_ws.rs` pins who receives each audience; a new topic or audience adds its cases there.
+- The operator has no view of other agents' events: it receives what the main agent receives,
+  plus `Operator` events (what only the operator may read).
+- Audiences. Every per-perspective topic reads its recipients from one helper,
+  `perspectives::event_recipients`: the owners, or the main agent for an unowned perspective
+  (or one whose owner list is empty), read when the event is published. No per-perspective event
+  goes to `Everyone`. Each goes out once, to all recipients (`perspectives::publish_to_owners`),
+  and no payload names an `owner`: `perspective-added/-updated/-removed`, `sync-state-change`,
+  `link-added/-removed/-updated`. `query-subscription-update`
+  (`PerspectiveInstance::send_delta_update`, which reads the recipients when it publishes)
+  goes only to the subscriber (`SubscribedQuery::subscriber`, the main agent for `None`) when it
+  is one of them: the query ran as the subscriber, so a co-owner must not get its results.
+  `signal` goes to its `recipient` (`perspectives::signal_event`); one without a recipient goes
+  once to each of `event_recipients`, each copy naming that DID as `recipient`
+  (`perspectives::publish_telepresence_signal`, used by both link-language paths and by
+  `send_signal` / `send_broadcast` for the executor's own agents: a neighbourhood's owners are
+  only this executor's agents). `notification-triggered` goes to the notification's `ownerDid`,
+  never to co-owners, and needs the query capability on its perspective (its `triggerMatch` is
+  query results), not `runtime.notifications`' AGENT_UPDATE. `auto-processor-event` goes to the pass owner when it is one of
+  `event_recipients`, else nobody (`auto_processor::events::pass_audience`);
+  `auto-processor-neighbourhood-state` to `event_recipients` (empty for an unknown
+  perspective). `flow-state-changed` goes to the agent whose bookkeeping moved when it is one of
+  `event_recipients`; the main agent's state on a perspective it does not read (the operator
+  voted there) to `Operator` only, as `perspective.flowStates` lets only the operator read it;
+  any other agent's to nobody (`replica_state::state_changed_audience`). `auto_processor::events::emit` reads the handle when it publishes, so no emitter
+  may hold the perspective's handle lock while it emits. `hosting-user-info-changed` goes out twice
+  (`Event::hosting_user_info`): to the user's DID (looked up by email in the local users table
+  at publish, never imported) with RUNTIME_HOSTING_READ, and to the main agent's with
+  RUNTIME_USER_MANAGEMENT_READ (the operator and apps that may list users see every user's). `model-loading-status` goes to everyone; `transcription-text` to the stream
+  owner's DID. `agent-status-changed` and `agent-updated` go to the DID the payload names
+  (`Audience::agent`; a status without a DID, before `agent.generate()`, to everyone).
+  `apps-changed` (`Event::apps_changed`) and the approval exceptions (`CapabilityRequested`,
+  `InstallNotificationRequest`, `Event::approval_request`) go to the DID of the agent the
+  approval is for (the main agent today; #1399 passes a managed agent) with capability
+  AGENT_PERMIT: the operator and main-agent apps whose token holds it, whether or not they
+  subscribe to exceptions. Other exceptions go to everyone (`Event::exception`) with the
+  exception subscription's capability.
+- Every socket (RPC, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
   `Session::check()` again on each request and each delivered event, so revocation and expiry end
   an open connection. Tests build sessions with `Session::for_test(principal)` plus
   `.with_caps(..)`, `.with_did(..)`, `.with_grant(..)`, `.expiring_at(..)`, and contexts with
@@ -76,7 +142,8 @@ from the global config where `agent.requestCapability` uses it.
   close frame. The RPC socket first delivers in-flight replies for up to `REPLY_GRACE`, so
   `user.logout` gets its answer; each call's `cancel_token` is a child of the socket's token, so
   the calls still running are cancelled (401). Expiry closes an idle socket the same way:
-  every socket (and the SSE chat stream) also waits on `session.over()`, which completes when
+  every socket (and the SSE chat stream, and the RPC socket's event stream,
+  `build_event_stream`) also waits on `session.over()`, which completes when
   the grant ends or the token expires (leeway included). A new socket type must watch
   `session.over()` too.
 - Revocation is on grants (`agent::grants::Grants`): `agent.revokeToken` (by request id or by

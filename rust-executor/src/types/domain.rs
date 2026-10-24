@@ -1,12 +1,12 @@
 use super::core::{
     AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
-    ExpressionProof, Link, ModelType, Notification, TriggeredNotification,
+    ExpressionProof, Link, ModelType,
 };
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify_or_false;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// Who is calling, for one request: the caller's session and the request's cancel token.
@@ -895,23 +895,21 @@ pub struct NeighbourhoodSignalFilter {
     pub recipient: Option<String>, // DID of the recipient agent for this signal
 }
 
-// Wrapper for link events with owner filtering (for multi-user isolation)
+/// `link-added` / `link-removed`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveLinkWithOwner {
+pub struct PerspectiveLinkEvent {
     pub perspective_uuid: String,
     pub link: DecoratedLinkExpression,
-    pub owner: String, // DID of the owner
 }
 
-// Wrapper for link updated events with owner filtering (for multi-user isolation)
+/// `link-updated`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveLinkUpdatedWithOwner {
+pub struct PerspectiveLinkUpdatedEvent {
     pub perspective_uuid: String,
     pub new_link: DecoratedLinkExpression,
     pub old_link: DecoratedLinkExpression,
-    pub owner: String, // DID of the owner
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -1065,288 +1063,20 @@ where
     }
 }
 
-// Define the trait with a generic associated type `Value`
-pub trait GetValue {
-    type Value: Clone + DeserializeOwned + Send + 'static + std::fmt::Debug;
-    fn get_value(&self) -> Self::Value;
-}
-
-pub trait GetFilter {
-    fn get_filter(&self) -> Option<String>;
-}
-
-// Implement the trait for the `TranscriptionTextFilter` struct
-impl GetValue for TranscriptionTextFilter {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.text.clone()
-    }
-}
-
-// Implement the trait for the `TranscriptionTextFilter` struct
-impl GetFilter for TranscriptionTextFilter {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.stream_id.clone())
-    }
-}
-
-impl GetValue for Option<Apps> {
-    type Value = Option<Apps>;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-impl GetFilter for Option<Apps> {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-// Implement the trait for the `NeighbourhoodSignalFilter` struct
-impl GetValue for NeighbourhoodSignalFilter {
-    type Value = PerspectiveExpression;
-
-    fn get_value(&self) -> Self::Value {
-        self.signal.clone()
-    }
-}
-
-// Implement the trait for the `NeighbourhoodSignalFilter` struct
-impl GetFilter for NeighbourhoodSignalFilter {
-    fn get_filter(&self) -> Option<String> {
-        // Create a composite filter: perspective_uuid|recipient_did
-        // If recipient is None, just use perspective_uuid for backwards compatibility
-        match &self.recipient {
-            Some(recipient_did) => Some(format!("{}|{}", self.perspective.uuid, recipient_did)),
-            None => Some(self.perspective.uuid.clone()),
-        }
-    }
-}
-
-// Implement GetValue and GetFilter for PerspectiveLinkWithOwner
-impl GetValue for PerspectiveLinkWithOwner {
-    type Value = DecoratedLinkExpression;
-
-    fn get_value(&self) -> Self::Value {
-        self.link.clone()
-    }
-}
-
-impl GetFilter for PerspectiveLinkWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-// Implement GetValue and GetFilter for PerspectiveLinkUpdatedWithOwner
-impl GetValue for PerspectiveLinkUpdatedWithOwner {
-    type Value = LinkUpdated;
-
-    fn get_value(&self) -> Self::Value {
-        LinkUpdated {
-            new_link: self.new_link.clone(),
-            old_link: self.old_link.clone(),
-        }
-    }
-}
-
-impl GetFilter for PerspectiveLinkUpdatedWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-// Implement the trait for the `PerspectiveStateFilter` struct
-impl GetValue for PerspectiveStateFilter {
-    type Value = PerspectiveState;
-
-    fn get_value(&self) -> Self::Value {
-        self.state.clone()
-    }
-}
-
-// Implement the trait for the `PerspectiveStateFilter` struct
-impl GetFilter for PerspectiveStateFilter {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.perspective.uuid.clone())
-    }
-}
-
-// Implement the trait for the `AgentStatus` struct
-impl GetValue for AgentStatus {
-    type Value = AgentStatus;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-// Implement the trait for the `AgentStatus` struct
-impl GetFilter for AgentStatus {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-// Implement the trait for `Agent` struct
-impl GetValue for Agent {
-    type Value = Agent;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-// Implement the trait for `Agent` struct
-impl GetFilter for Agent {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `ExceptionInfo` struct
-impl GetValue for ExceptionInfo {
-    type Value = ExceptionInfo;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `ExceptionInfo` struct
-impl GetFilter for ExceptionInfo {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `PerspectiveHandle` struct
-impl GetValue for PerspectiveHandle {
-    type Value = PerspectiveHandle;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `PerspectiveHandle` struct
-impl GetFilter for PerspectiveHandle {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-// Wrapper type for perspective subscriptions that includes owner for filtering
+/// `perspective-added` / `perspective-updated`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveWithOwner {
+pub struct PerspectiveEvent {
     pub perspective_uuid: String,
     pub perspective: PerspectiveHandle,
-    pub owner: String,
 }
 
-impl GetValue for PerspectiveWithOwner {
-    type Value = PerspectiveHandle;
-
-    fn get_value(&self) -> Self::Value {
-        self.perspective.clone()
-    }
-}
-
-impl GetFilter for PerspectiveWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-// Wrapper type for perspective removed subscriptions that includes owner for filtering
+/// `perspective-removed`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveRemovedWithOwner {
+pub struct PerspectiveRemovedEvent {
     pub perspective_uuid: String,
     pub uuid: String,
-    pub owner: String,
-}
-
-impl GetValue for PerspectiveRemovedWithOwner {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.uuid.clone()
-    }
-}
-
-impl GetFilter for PerspectiveRemovedWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-//Implement the trait for `String`
-impl GetValue for String {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `String`
-impl GetFilter for String {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `PerspectiveExpression`
-impl GetValue for PerspectiveExpression {
-    type Value = PerspectiveExpression;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `PerspectiveExpression`
-impl GetFilter for PerspectiveExpression {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetValue for Notification {
-    type Value = Notification;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetFilter for Notification {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetValue for TriggeredNotification {
-    type Value = TriggeredNotification;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetFilter for TriggeredNotification {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
@@ -1357,50 +1087,6 @@ pub struct AIModelLoadingStatus {
     pub status: String,
     pub downloaded: bool,
     pub loaded: bool,
-}
-
-//Implement the trait for `AIModelLoadingStatus` struct
-impl GetValue for AIModelLoadingStatus {
-    type Value = AIModelLoadingStatus;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `AIModelLoadingStatus` struct
-impl GetFilter for AIModelLoadingStatus {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-impl GetValue for HostingUserInfo {
-    type Value = HostingUserInfo;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-impl GetFilter for HostingUserInfo {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.email.clone())
-    }
-}
-
-impl GetValue for ComputeLogEntry {
-    type Value = ComputeLogEntry;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-impl GetFilter for ComputeLogEntry {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.user_email.clone())
-    }
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]

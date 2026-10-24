@@ -9,7 +9,9 @@ pub use token::*;
 #[allow(ambiguous_glob_reexports)]
 pub use types::*;
 
-use crate::pubsub::{get_global_pubsub, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC};
+use crate::agent::AgentContext;
+use crate::events::Event;
+use crate::pubsub::get_global_pubsub;
 use crate::types::*;
 use crate::utils::constant_time_eq;
 
@@ -357,13 +359,12 @@ pub async fn request_capability(auth_info: AuthInfo) -> String {
         addon: Some(serde_json::to_string(&auth_extended).unwrap()),
     };
 
+    // The request is for the main agent until a request names its agent (#1399): the
+    // sessions that may approve apps for it get it.
+    let target = AgentContext::main_agent();
     get_global_pubsub()
         .await
-        .publish(
-            &EXCEPTION_OCCURRED_TOPIC,
-            &serde_json::to_string(&exception_info).unwrap(),
-        )
-        .await;
+        .publish_event(Event::approval_request(&exception_info, &target));
 
     request_id
 }
@@ -421,15 +422,13 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
 
     remove_request(&auth_key)?;
 
-    // The event reaches every session that can approve apps; the token goes only to the caller.
+    // The event reaches the sessions that may approve apps for the agent the app acts as (the
+    // main agent until a request names its agent, #1399); the token goes only to the caller.
     let apps_changed = grant.as_app();
+    let target = AgentContext::main_agent();
     get_global_pubsub()
         .await
-        .publish(
-            &APPS_CHANGED,
-            &serde_json::to_string(&Some(apps_changed)).unwrap_or_else(|_| "null".to_string()),
-        )
-        .await;
+        .publish_event(Event::apps_changed(&apps_changed, &target));
 
     Ok(cap_token)
 }
@@ -677,6 +676,7 @@ mod tests {
 #[cfg(test)]
 mod app_token_tests {
     use super::*;
+    use crate::events::{Audience, Topic};
     use std::time::Duration;
 
     fn test_auth_info() -> AuthInfo {
@@ -789,7 +789,7 @@ mod app_token_tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
-        let mut events = get_global_pubsub().await.subscribe(&APPS_CHANGED).await;
+        let mut events = get_global_pubsub().await.subscribe_events();
 
         let (request_id, code) = permitted_request().await;
         let token = generate_capability_token(request_id.clone(), code)
@@ -798,11 +798,17 @@ mod app_token_tests {
         assert!(!token.is_empty());
 
         let event = loop {
-            let msg = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
                 .await
                 .expect("an apps-changed event arrives")
                 .unwrap();
-            if let Ok(Some(app)) = serde_json::from_str::<Option<Apps>>(&msg) {
+            if event.topic != Topic::AppsChanged {
+                continue;
+            }
+            let main = crate::agent::did();
+            assert_eq!(event.audience, Audience::Dids(vec![main]));
+            assert_eq!(event.capability, *AGENT_PERMIT_CAPABILITY);
+            if let Ok(Some(app)) = serde_json::from_value::<Option<Apps>>(event.payload.clone()) {
                 if app.request_id == request_id {
                     break app;
                 }
