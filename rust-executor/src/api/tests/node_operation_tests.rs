@@ -468,14 +468,14 @@ async fn a_user_reads_only_their_own_compute_log() {
 }
 
 #[tokio::test]
-async fn the_default_model_hides_its_key_from_users_only() {
+async fn the_default_model_never_shows_its_key() {
     Ad4mDb::init_global_instance(":memory:").unwrap();
     let id = Ad4mDb::with_global_instance(|db| {
         let id = db.add_model(&ModelInput {
             name: "Remote".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.example.org/v1".to_string(),
-                api_key: "sk-provider-secret".to_string(),
+                api_key: Some("sk-provider-secret".into()),
                 model: "gpt".to_string(),
                 api_type: "OpenAi".to_string(),
                 max_num_ctx: None,
@@ -496,18 +496,19 @@ async fn the_default_model_hides_its_key_from_users_only() {
     )
     .await
     .expect("a user may read the default model");
-    assert_eq!(as_user["id"], json!(id));
-    assert_eq!(as_user["api"]["model"], json!("gpt"));
-    assert_eq!(
-        as_user["api"]["apiKey"],
-        json!(""),
-        "a user session must not see the operator's provider key"
-    );
-
     let as_operator = call("ai.getDefaultModel", params, operator_session())
         .await
         .expect("the operator reads the default model");
-    assert_eq!(as_operator["api"]["apiKey"], json!("sk-provider-secret"));
+
+    for model in [as_user, as_operator] {
+        assert_eq!(model["id"], json!(id));
+        assert_eq!(model["api"]["model"], json!("gpt"));
+        assert_eq!(model["api"]["hasApiKey"], json!(true));
+        assert!(
+            !model.to_string().contains("sk-provider-secret"),
+            "no session reads the provider key back: {model}"
+        );
+    }
 }
 
 /// The template the test languages are cloned from.

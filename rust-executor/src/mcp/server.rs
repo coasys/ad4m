@@ -20,6 +20,7 @@
 
 use super::tools::Ad4mMcpHandler;
 use crate::config::TlsConfig;
+use crate::secret::Secret;
 use anyhow::Result;
 use log::{info, warn};
 use rmcp::transport::streamable_http_server::{
@@ -32,7 +33,7 @@ use tokio::sync::RwLock;
 /// MCP Server context, similar to REST's RequestContext
 #[derive(Clone)]
 pub struct McpContext {
-    pub admin_credential: Option<String>,
+    pub admin_credential: Option<Secret>,
     pub auth_token: Arc<RwLock<Option<String>>>,
     /// Whether the dynamic per-class SHACL tools are exposed over this MCP
     /// transport (listed by `tools/list`, callable by `tools/call`). Off by
@@ -134,22 +135,25 @@ fn resolve_tls_port(plain_port: u16, rpc_tls_port: u16) -> TlsPort {
 /// authenticated, or a loopback-only bind on a node that does gate access and
 /// wanted to be reachable. Change one, change the other.
 ///
-/// A multi-user node is **not** gated by having user accounts. A login JWT
+/// A multi-user executor is **not** gated by having user accounts. A login JWT
 /// authenticates a user to the API; it is not an admin credential, and step 4
 /// does not consult the user table. `--enable-multi-user` without
-/// `--admin-credential` is an ungated node and binds loopback here.
+/// `--admin-credential` is an ungated executor and binds loopback here.
 ///
 /// `MCP_HOST` is the operator saying it outright and is honoured either way.
-/// Saying it on an ungated node hands every tool to whoever can route to the
-/// address, so that combination warns rather than passing quietly.
+/// Saying it on an ungated executor hands every tool to whoever can route to the
+/// address: a tokenless caller is the operator, so it may mint a token for the
+/// main agent with every capability and one that acts as any user of the
+/// executor. That combination warns rather than passing quietly.
 fn resolve_host(requested: Option<&str>, has_credential: bool) -> String {
     match requested {
         Some(host) => {
             if !has_credential && !is_loopback(host) {
                 warn!(
                     "MCP: MCP_HOST={host} binds beyond loopback with no --admin-credential set. \
-                     Every caller that can reach this address is authenticated and may mint \
-                     ALL_CAPABILITY. Set an admin credential, or bind 127.0.0.1."
+                     Every caller that can reach this address is the operator: it may mint \
+                     ALL_CAPABILITY tokens for the main agent and tokens that act as any user \
+                     of this executor. Set an admin credential, or bind 127.0.0.1."
                 );
             }
             host.to_string()
@@ -228,7 +232,7 @@ fn is_loopback(host: &str) -> bool {
 /// This runs an HTTP server that accepts MCP protocol requests.
 /// AI agents can connect via HTTP to interact with AD4M.
 pub async fn start_mcp_server(
-    admin_credential: Option<String>,
+    admin_credential: Option<Secret>,
     auth_token: Option<String>,
     config: McpServerConfig,
 ) -> Result<()> {
@@ -534,7 +538,7 @@ mod tests {
         let rpc_tls_port = held_port.wrapping_add(1);
 
         let context = McpContext {
-            admin_credential: Some("cred".to_string()),
+            admin_credential: Some("cred".into()),
             auth_token: Arc::new(RwLock::new(None)),
             dynamic_class_tools: false,
         };
@@ -657,7 +661,7 @@ mod tests {
             }),
         };
         tokio::spawn(start_mcp_server(
-            Some("test-admin-cred".to_string()),
+            Some("test-admin-cred".into()),
             None,
             config,
         ));
@@ -789,7 +793,7 @@ mod tests {
             }),
         };
         tokio::spawn(start_mcp_server(
-            Some("test-admin-cred".to_string()),
+            Some("test-admin-cred".into()),
             None,
             config,
         ));

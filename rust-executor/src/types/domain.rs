@@ -4,6 +4,7 @@ use super::core::{
 };
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify_or_false;
+use crate::secret::Secret;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
@@ -44,7 +45,7 @@ impl RequestContext {
     /// caller).
     pub fn open(
         token: &str,
-        admin_credential: &Option<String>,
+        admin_credential: &Option<crate::secret::Secret>,
         reach: crate::agent::capabilities::ListenerReach,
     ) -> Result<Self, crate::agent::session::AuthError> {
         let session = crate::agent::session::Session::open(token, admin_credential, reach)?;
@@ -162,6 +163,8 @@ pub struct Apps {
     pub auth: AuthInfo,
     pub request_id: String,
     pub revoked: Option<bool>,
+    /// Always empty: the executor does not keep app tokens, and an app receives its token
+    /// once, from `agent.generateJwt`. The field stays for clients that require it.
     pub token: String,
 }
 
@@ -736,8 +739,9 @@ pub struct PerspectiveUnsignedInput {
     pub links: Vec<LinkInput>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[serde(rename_all = "camelCase")]
+/// A notification to store. Built from the RPC's `NotificationInput`; never serialised,
+/// because it holds the webhook credential.
+#[derive(Debug, Clone)]
 pub struct NotificationInput {
     pub description: String,
     pub app_name: String,
@@ -746,7 +750,7 @@ pub struct NotificationInput {
     pub trigger: String,
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
-    pub webhook_auth: String,
+    pub webhook_auth: Secret,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -932,7 +936,13 @@ pub struct PerspectiveStateFilter {
 #[ts(optional_fields)]
 pub struct ModelApiInput {
     pub base_url: String,
-    pub api_key: String,
+    /// The provider key. An empty key stores no key, and so does `ai.addModel` without
+    /// one. `ai.updateModel` without one keeps the stored key; it refuses the update if
+    /// `baseUrl` changes too, because a key goes only to the endpoint it was set for.
+    /// Never serialised back out.
+    #[serde(default, skip_serializing)]
+    #[ts(as = "Option<String>")]
+    pub api_key: Option<Secret>,
     pub model: String,
     pub api_type: String,
     /// Optional ceiling for the provider's context window, in tokens.

@@ -23,6 +23,8 @@ pub mod protocol_tests;
 #[cfg(test)]
 pub mod runtime_ws_tests;
 #[cfg(test)]
+pub mod secret_leak_tests;
+#[cfg(test)]
 pub mod shacl_ws_tests;
 #[cfg(test)]
 pub mod start_server_tests;
