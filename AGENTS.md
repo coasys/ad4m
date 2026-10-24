@@ -12,6 +12,7 @@ file. Edit this file; do not put unique rules in `CLAUDE.md`.
 | `cli/` | `ad4m` CLI binary; wraps `rust-executor` (`ad4m-executor` subcommand) and `rust-client` | Rust |
 | `rust-client/` | Rust client for the executor's WS RPC | Rust |
 | `ad4m-hash-chain/` | Generic linear hash chain of signed JSON entries (entry hash, `eddsa-jcs-2022` proofs, fold/import, fork detection, `ChainStore` with memory/SQLite adapters; native + WASM). Under the key log. See `ad4m-hash-chain/AGENTS.md` | Rust |
+| `ad4m-identity-core/` | The `did:scid:coasys:1` identity core: the key log as a chain type on `ad4m-hash-chain` (`Event`, `KelPolicy`, `fold`, `KeyState`), signing domains, proof of work, event builders (`build`), the 12 words (`words`), WASM exports (`wasm`). Spec `docs-src/identity/did-scid-coasys-1.md`. See `ad4m-identity-core/AGENTS.md` | Rust |
 | `core/` | TypeScript SDK (`@coasys/ad4m`): `Ad4mClient`, types, model/SHACL decorators, generated RPC contracts (`src/generated/api/RpcMethods.ts`) | TS |
 | `connect/` | Browser/Node connection helper (`@coasys/ad4m-connect`) | TS |
 | `bootstrap-languages/` | The system Languages (agent, perspective-diff-sync, etc.) bundled into the executor | TS/Rust |

@@ -1,0 +1,990 @@
+{
+  "description": "A valid log with every op and every key life; masters and salts from the test labels `master n` and `salt n`.",
+  "did": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+  "events": [
+    {
+      "add": [
+        {
+          "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+          "id": "d1",
+          "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+        },
+        {
+          "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+          "expires": 1800000000,
+          "id": "d2",
+          "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+        }
+      ],
+      "format": "coasys/1",
+      "kind": "human",
+      "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+      "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+      "op": "incept",
+      "prev": null,
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "zafgTEJoxfmdF9U5v4ASv7oDGvSuY557qbf3Y9TPsxUsKH1VWvhhP9wPPURb5ToPNydqGTSjp6BTbbr6ARV8DVpb",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m0"
+        },
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z2MZC9w469PTv7ubmVSJy6Zb1CAkj9M5thJiYJqVRMagfKrChqcf3RJQvusUMB7sscvzow82uQqpzQ4QKn69MMhFP",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#d1"
+        },
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z5KXQjR38NYjWKUDgoQwWexfuNWcYrYDqZPYmtd8YQN5Jh55j9HBioediHxzDyiPMQeuGNtruyr8J7oAtRUDv5MzZ",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#d2"
+        }
+      ],
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 0
+    },
+    {
+      "add": [
+        {
+          "can": [
+            "read",
+            "write"
+          ],
+          "enc": "z6LSckrdiKrtfit19uPRwAK3WA7DLCaaUBrZGDLdTXkBSprp",
+          "expires": 1750000000,
+          "id": "d3",
+          "kind": "bot",
+          "sign": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr"
+        }
+      ],
+      "coSig": "z3coSig",
+      "format": "coasys/1",
+      "offer": "offer-1",
+      "op": "add",
+      "prev": "QmbwpNQJmPN8vmqmR5yyZiuQAA5gAeJuLpuqgk6fhNKzvn",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z2GqaZw26s8s7JAcywzCzf2co6uvLsKuiwarLTecZpHSsJ8m6AgrzVW2v6isUWDUUir5o64iFbSkWCHs2N1EoXLvh",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m0"
+        }
+      ],
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 1
+    },
+    {
+      "can": [
+        "read"
+      ],
+      "expires": 1900000000,
+      "format": "coasys/1",
+      "key": "d3",
+      "op": "scope",
+      "prev": "QmdBJpfiQUeKhfPkvUpzLWJdf29xfDgS2wYGbx6aAYXXF9",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "zpCfmi1dnq3oFCGUR1TkJySv4gH7r2mnDgfFGikjHA7onbNeHktyZPDy1sD6tzzb5SMbgTE9MYqjGvAepffVKGWC",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m0"
+        }
+      ],
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 2
+    },
+    {
+      "format": "coasys/1",
+      "op": "revoke",
+      "prev": "QmchSrUjVTmNajsWf1xuoDpZvZg6TjQ8sjhaDdzwiWt2Gp",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "ztcf8C4m7MdLxeRxS8fxfuVRAN48ptaEtFuTX7qHXK3Hr99sL94WauZ95n7JVScuqv9hZ2xryRXXsvKG24kehumG",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m0"
+        }
+      ],
+      "revoke": [
+        "d2"
+      ],
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 3
+    },
+    {
+      "format": "coasys/1",
+      "master": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
+      "next": "QmVvFnLYvMzZ2XJuoBvyZsqt9qn6hZo4MUTMC8Fj9aHJXd",
+      "op": "rotate",
+      "prev": "Qmdeq7grvbYPnHJgPhUz1qDWQSoJwRkqpJS23VSH1EeZqN",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z5haEn5tcnbvjEJoPiSxxehcbEmkWMP7Pbh5C9dnj7TeKCAUYW4GDw1sJzdrwbnN3ajr5tUmAW9QCswh7KHA7AkMD",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m1"
+        }
+      ],
+      "revoke": [
+        "d1"
+      ],
+      "salt": "7DqbanfBGH8JLz4xeScbj2",
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 4
+    },
+    {
+      "add": [
+        {
+          "enc": "z6LSg48mscT2aR7KbSouwbP26ne6LKsPegK9fdUbEJKatcCD",
+          "id": "d4",
+          "sign": "z6MkqSRMEYA6z9ToJjGrH8vYKtjjnRseu48jLPdYDXN8brSa"
+        }
+      ],
+      "coSig": "z3coSig",
+      "format": "coasys/1",
+      "offer": "offer-1",
+      "op": "add",
+      "prev": "QmRr2FTzSXfCSs1sDFwX5DdCDMLj3gBkE6YoSbtmZe8fyT",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z65CJgFVk8iUxYjBuqWsMCptmMoNtLdh4Bq29b58kop8i2ZG2GhekdRvXW3Sm5J4tiT1VpJCHoEnWDBXK3wYxZKmq",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m1"
+        }
+      ],
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 5
+    },
+    {
+      "format": "coasys/1",
+      "master": "z6MkiHTZ9xT973Yj5KJCXbHKw8j7XyzYYEW5BZTmzppkKEoP",
+      "next": null,
+      "op": "rotate",
+      "prev": "QmWJW1hHecAxjYCLba9JcZupnEtyDPTGGnHebiRJKvSeAa",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z2SQhCnbDQXpHdG4gztEwwCq7Lw7yzF1sHDg1W4AJD7WXbkD4TpDSjZWNSxHnRtHYhtkNU3TCNzboQuHokweaYxdZ",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m2"
+        }
+      ],
+      "salt": "RAGdryeF4Mik4njDvU79Wb",
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 6
+    }
+  ],
+  "hashes": [
+    "QmbwpNQJmPN8vmqmR5yyZiuQAA5gAeJuLpuqgk6fhNKzvn",
+    "QmdBJpfiQUeKhfPkvUpzLWJdf29xfDgS2wYGbx6aAYXXF9",
+    "QmchSrUjVTmNajsWf1xuoDpZvZg6TjQ8sjhaDdzwiWt2Gp",
+    "Qmdeq7grvbYPnHJgPhUz1qDWQSoJwRkqpJS23VSH1EeZqN",
+    "QmRr2FTzSXfCSs1sDFwX5DdCDMLj3gBkE6YoSbtmZe8fyT",
+    "QmWJW1hHecAxjYCLba9JcZupnEtyDPTGGnHebiRJKvSeAa",
+    "QmYPFSU7vBAuQjw7KFiqip9MoCoceSguK1XnH8r7CKsEC4"
+  ],
+  "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+  "state": {
+    "did": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+    "ended": true,
+    "keys": {
+      "d1": {
+        "added": 0,
+        "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+        "expires": null,
+        "id": "d1",
+        "revoked": 4,
+        "scopes": [],
+        "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+      },
+      "d2": {
+        "added": 0,
+        "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+        "expires": 1800000000,
+        "id": "d2",
+        "revoked": 3,
+        "scopes": [],
+        "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+      },
+      "d3": {
+        "added": 1,
+        "enc": "z6LSckrdiKrtfit19uPRwAK3WA7DLCaaUBrZGDLdTXkBSprp",
+        "expires": null,
+        "id": "d3",
+        "revoked": 6,
+        "scopes": [
+          [
+            1,
+            {
+              "can": [
+                "read",
+                "write"
+              ],
+              "expires": 1750000000
+            }
+          ],
+          [
+            2,
+            {
+              "can": [
+                "read"
+              ],
+              "expires": 1900000000
+            }
+          ]
+        ],
+        "sign": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr"
+      },
+      "d4": {
+        "added": 5,
+        "enc": "z6LSg48mscT2aR7KbSouwbP26ne6LKsPegK9fdUbEJKatcCD",
+        "expires": null,
+        "id": "d4",
+        "revoked": 6,
+        "scopes": [],
+        "sign": "z6MkqSRMEYA6z9ToJjGrH8vYKtjjnRseu48jLPdYDXN8brSa"
+      }
+    },
+    "kind": "human",
+    "masters": [
+      {
+        "added": 0,
+        "enc": null,
+        "expires": null,
+        "id": "m0",
+        "revoked": 4,
+        "scopes": [],
+        "sign": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq"
+      },
+      {
+        "added": 4,
+        "enc": null,
+        "expires": null,
+        "id": "m1",
+        "revoked": 6,
+        "scopes": [],
+        "sign": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK"
+      },
+      {
+        "added": 6,
+        "enc": null,
+        "expires": null,
+        "id": "m2",
+        "revoked": 6,
+        "scopes": [],
+        "sign": "z6MkiHTZ9xT973Yj5KJCXbHKw8j7XyzYYEW5BZTmzppkKEoP"
+      }
+    ],
+    "next": null,
+    "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt"
+  },
+  "validity": [
+    {
+      "key": "m0",
+      "now": 1700000000,
+      "seq": 0,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m0",
+      "now": 1850000000,
+      "seq": 0,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m0",
+      "now": 1700000000,
+      "seq": 1,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m0",
+      "now": 1850000000,
+      "seq": 1,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m0",
+      "now": 1700000000,
+      "seq": 2,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m0",
+      "now": 1850000000,
+      "seq": 2,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m0",
+      "now": 1700000000,
+      "seq": 3,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m0",
+      "now": 1850000000,
+      "seq": 3,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m0",
+      "now": 1700000000,
+      "seq": 4,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m0",
+      "now": 1850000000,
+      "seq": 4,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m0",
+      "now": 1700000000,
+      "seq": 5,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m0",
+      "now": 1850000000,
+      "seq": 5,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m0",
+      "now": 1700000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m0",
+      "now": 1850000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1700000000,
+      "seq": 0,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1850000000,
+      "seq": 0,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1700000000,
+      "seq": 1,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1850000000,
+      "seq": 1,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1700000000,
+      "seq": 2,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1850000000,
+      "seq": 2,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1700000000,
+      "seq": 3,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1850000000,
+      "seq": 3,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1700000000,
+      "seq": 4,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m1",
+      "now": 1850000000,
+      "seq": 4,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m1",
+      "now": 1700000000,
+      "seq": 5,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m1",
+      "now": 1850000000,
+      "seq": 5,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m1",
+      "now": 1700000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1850000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1700000000,
+      "seq": 0,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1850000000,
+      "seq": 0,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1700000000,
+      "seq": 1,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1850000000,
+      "seq": 1,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1700000000,
+      "seq": 2,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1850000000,
+      "seq": 2,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1700000000,
+      "seq": 3,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1850000000,
+      "seq": 3,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1700000000,
+      "seq": 4,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1850000000,
+      "seq": 4,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1700000000,
+      "seq": 5,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1850000000,
+      "seq": 5,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1700000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1850000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d1",
+      "now": 1700000000,
+      "seq": 0,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d1",
+      "now": 1850000000,
+      "seq": 0,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d1",
+      "now": 1700000000,
+      "seq": 1,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d1",
+      "now": 1850000000,
+      "seq": 1,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d1",
+      "now": 1700000000,
+      "seq": 2,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d1",
+      "now": 1850000000,
+      "seq": 2,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d1",
+      "now": 1700000000,
+      "seq": 3,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d1",
+      "now": 1850000000,
+      "seq": 3,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d1",
+      "now": 1700000000,
+      "seq": 4,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d1",
+      "now": 1850000000,
+      "seq": 4,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d1",
+      "now": 1700000000,
+      "seq": 5,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d1",
+      "now": 1850000000,
+      "seq": 5,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d1",
+      "now": 1700000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d1",
+      "now": 1850000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1700000000,
+      "seq": 0,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d2",
+      "now": 1850000000,
+      "seq": 0,
+      "validAt": true,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1700000000,
+      "seq": 1,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d2",
+      "now": 1850000000,
+      "seq": 1,
+      "validAt": true,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1700000000,
+      "seq": 2,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d2",
+      "now": 1850000000,
+      "seq": 2,
+      "validAt": true,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1700000000,
+      "seq": 3,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1850000000,
+      "seq": 3,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1700000000,
+      "seq": 4,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1850000000,
+      "seq": 4,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1700000000,
+      "seq": 5,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1850000000,
+      "seq": 5,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1700000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1850000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d3",
+      "now": 1700000000,
+      "seq": 0,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d3",
+      "now": 1850000000,
+      "seq": 0,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d3",
+      "now": 1700000000,
+      "seq": 1,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d3",
+      "now": 1850000000,
+      "seq": 1,
+      "validAt": true,
+      "validAtTime": false
+    },
+    {
+      "key": "d3",
+      "now": 1700000000,
+      "seq": 2,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d3",
+      "now": 1850000000,
+      "seq": 2,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d3",
+      "now": 1700000000,
+      "seq": 3,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d3",
+      "now": 1850000000,
+      "seq": 3,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d3",
+      "now": 1700000000,
+      "seq": 4,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d3",
+      "now": 1850000000,
+      "seq": 4,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d3",
+      "now": 1700000000,
+      "seq": 5,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d3",
+      "now": 1850000000,
+      "seq": 5,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d3",
+      "now": 1700000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d3",
+      "now": 1850000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1700000000,
+      "seq": 0,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1850000000,
+      "seq": 0,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1700000000,
+      "seq": 1,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1850000000,
+      "seq": 1,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1700000000,
+      "seq": 2,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1850000000,
+      "seq": 2,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1700000000,
+      "seq": 3,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1850000000,
+      "seq": 3,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1700000000,
+      "seq": 4,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1850000000,
+      "seq": 4,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1700000000,
+      "seq": 5,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d4",
+      "now": 1850000000,
+      "seq": 5,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d4",
+      "now": 1700000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1850000000,
+      "seq": 6,
+      "validAt": false,
+      "validAtTime": false
+    }
+  ]
+}

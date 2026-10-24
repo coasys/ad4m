@@ -1,0 +1,2057 @@
+{
+  "cases": [
+    {
+      "error": {
+        "code": "policy",
+        "format": "UnknownOp",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "z3coSig",
+          "format": "coasys/1",
+          "offer": "offer-1",
+          "op": "merge",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4EQCbmjaDWf9j3JFS9C81h6xPmus7LujeVCMrKS29ix52UtiDcTL7FxVBStoZSJMPoyKtcuaxPnyCLwvrB6z4maq",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "unknown op",
+      "rule": "10"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "UnknownField",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "name": "Alice's laptop",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        }
+      ],
+      "name": "unknown field",
+      "rule": "10"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "UnknownField",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "model": "phone",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "z3coSig",
+          "format": "coasys/1",
+          "offer": "offer-1",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4EQCbmjaDWf9j3JFS9C81h6xPmus7LujeVCMrKS29ix52UtiDcTL7FxVBStoZSJMPoyKtcuaxPnyCLwvrB6z4maq",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "unknown device-key field",
+      "rule": "10"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "Float",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "expires": 1.5,
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        }
+      ],
+      "name": "float",
+      "rule": "10"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "BigInteger",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "expires": 9007199254740992,
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        }
+      ],
+      "name": "big integer",
+      "rule": "10"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "UnsupportedKind",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "group",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        }
+      ],
+      "name": "group",
+      "rule": "10"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "Version",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/2",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        }
+      ],
+      "name": "other format",
+      "rule": "10"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "NotCanonical",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        }
+      ],
+      "name": "empty proof array",
+      "rule": "10"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "CanWithoutBotMark"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "can": [
+                "read"
+              ],
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "z3coSig",
+          "format": "coasys/1",
+          "offer": "offer-1",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4EQCbmjaDWf9j3JFS9C81h6xPmus7LujeVCMrKS29ix52UtiDcTL7FxVBStoZSJMPoyKtcuaxPnyCLwvrB6z4maq",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "can without bot mark",
+      "rule": "8"
+    },
+    {
+      "error": {
+        "code": "prev"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "z3coSig",
+          "format": "coasys/1",
+          "offer": "offer-1",
+          "op": "add",
+          "prev": "Qmf4sR9MRSWEWt8K75zvUTb4cChYQWrxScDHdcHCu4fBna",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4EQCbmjaDWf9j3JFS9C81h6xPmus7LujeVCMrKS29ix52UtiDcTL7FxVBStoZSJMPoyKtcuaxPnyCLwvrB6z4maq",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "wrong prev",
+      "rule": "1"
+    },
+    {
+      "error": {
+        "code": "seq"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "z3coSig",
+          "format": "coasys/1",
+          "offer": "offer-1",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4EQCbmjaDWf9j3JFS9C81h6xPmus7LujeVCMrKS29ix52UtiDcTL7FxVBStoZSJMPoyKtcuaxPnyCLwvrB6z4maq",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 2
+        }
+      ],
+      "name": "wrong seq",
+      "rule": "1"
+    },
+    {
+      "error": {
+        "code": "wrong-chain"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "z3coSig",
+          "format": "coasys/1",
+          "offer": "offer-1",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z248ZBXXLy45VATkh9gqzcKNdxKoqThMJVBE5njERPB8fE8dEGTPb8oyEM28aua3Ve9c5cDMzKmBQMNMzaif66Zkp",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmP4L9i2K2DqdCfk7ubuuejH5QuxvzCjg4ocGwbNSvknwz#m0"
+            }
+          ],
+          "scid": "QmP4L9i2K2DqdCfk7ubuuejH5QuxvzCjg4ocGwbNSvknwz",
+          "seq": 1
+        }
+      ],
+      "name": "other scid",
+      "rule": "2"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "Scid",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z5ACq3WLV4Buni718mETj5Q7kxjpNytrvGXXv3vTYSXv9et1ymLaaVCqGEoDU6vg6DWUMY1ZFpXSKnBVDpQc9zW7D",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmdBBiXFK41qoLKuE9SkZ9ZWqYY3fGorYxx6GgsKkJUgAu#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2nH5yfswHnNbp1oFKC3MUXNA2qV7ibK4Z5NjZaa58Fn7UQbGKS3EF8GGV76ZSVtCryqP6dnrgWX5UC9toPcDvJdE",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmdBBiXFK41qoLKuE9SkZ9ZWqYY3fGorYxx6GgsKkJUgAu#d1"
+            }
+          ],
+          "scid": "QmdBBiXFK41qoLKuE9SkZ9ZWqYY3fGorYxx6GgsKkJUgAu",
+          "seq": 0
+        }
+      ],
+      "name": "scid not derived",
+      "rule": "2"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "NotIncept",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "z3coSig",
+          "format": "coasys/1",
+          "offer": "offer-1",
+          "op": "add",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4EQCbmjaDWf9j3JFS9C81h6xPmus7LujeVCMrKS29ix52UtiDcTL7FxVBStoZSJMPoyKtcuaxPnyCLwvrB6z4maq",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        }
+      ],
+      "name": "first event not an incept",
+      "rule": "2"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "KeyIdOrder"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4MG1hK7AMnhcDGb7hLQRwcizJ7Xmy9JmJpDn1ppQghsufUZUXKzCqJuX6pFbay7Pzh4qLX5bWazqAqbydw9yjQYz",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmQX4j5qXnTDaVMTi8S1mdmSXSeDGdgV8VWktLc1K6rwbC#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zX9kBg8zQEMvzpCtVSkVQ7SZid79ts7KyL69XctBA6wMvmqNLz7utyPn3caw38pLpMATep6wDM13kGBQkhcuBw6V",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmQX4j5qXnTDaVMTi8S1mdmSXSeDGdgV8VWktLc1K6rwbC#d2"
+            }
+          ],
+          "scid": "QmQX4j5qXnTDaVMTi8S1mdmSXSeDGdgV8VWktLc1K6rwbC",
+          "seq": 0
+        }
+      ],
+      "name": "out-of-order key id",
+      "rule": "6"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "DuplicateKey"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSiFE8CXLwLVRpT7fF5Bmb1vyPZy2vLvtmmtvPge77MEx7",
+              "id": "d1",
+              "sign": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3WzjhFAkeHm59hXgPwSEmjQh1SoJG5JMyUHq9qZjByeKv3yCj5mCyatFj884fxR6vLNeA5VB8f3GkKp5m9bYfqU5",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmZ1x9V3G7Y3Tn7yFUnTfqnArC4shxi2FuT2Gd5H4EBbXP#m0"
+            }
+          ],
+          "scid": "QmZ1x9V3G7Y3Tn7yFUnTfqnArC4shxi2FuT2Gd5H4EBbXP",
+          "seq": 0
+        }
+      ],
+      "name": "duplicate key",
+      "rule": "7"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "BotInIncept"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "can": [
+                "read"
+              ],
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "expires": 10,
+              "id": "d1",
+              "kind": "bot",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zcTXvuQKf3UGZv1jGCR84bTpsWXFPVQ5rC59touFChWuSjzjLfaVtPZTVU78bFEGcAbBwNAnivdf56xzmJo3LHtX",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmUDbc6hg5TRBS68HEFTEPmPu2oDg6oeJmzx2bmvJLEjEY#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z5ymUC8FrEGaL3NggjFFS2zQ7EX5TaNajqpiLAHsbw3Y3cgP1EiBQLgMTARDNq7Qhr7Vfu27oGgyo8zJ12quqpEpq",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmUDbc6hg5TRBS68HEFTEPmPu2oDg6oeJmzx2bmvJLEjEY#d1"
+            }
+          ],
+          "scid": "QmUDbc6hg5TRBS68HEFTEPmPu2oDg6oeJmzx2bmvJLEjEY",
+          "seq": 0
+        }
+      ],
+      "name": "bot in incept",
+      "rule": "8"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "AddNotOne"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            },
+            {
+              "enc": "z6LSckrdiKrtfit19uPRwAK3WA7DLCaaUBrZGDLdTXkBSprp",
+              "id": "d3",
+              "sign": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr"
+            }
+          ],
+          "coSig": "c",
+          "format": "coasys/1",
+          "offer": "o",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z1fnhtz9hZtr83uh7CKkraaS4iWLJvBfWr7tU62A7mdBAeoMgF22y8qSKEEWhbSL3kV4fJKqQrLowXaY3MBBXx8k",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "add with two keys",
+      "rule": "4"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "EmptyScope"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "can": [],
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "expires": 10,
+              "id": "d2",
+              "kind": "bot",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "c",
+          "format": "coasys/1",
+          "offer": "o",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2BqZxUbQK8dpnymtpR7JYdJtLvbJSH1YPVL1ELwi9TdEzWTe964m6rGdJG6UfLMuvrppEeyYYZVrCUXVyWdjW6iZ",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "bot with no action",
+      "rule": "8"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "UnknownAction",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "can": [
+                "admin"
+              ],
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "expires": 10,
+              "id": "d2",
+              "kind": "bot",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "c",
+          "format": "coasys/1",
+          "offer": "o",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2pFDckkN1d2JYYuB14VHCXrsnFN86J11zwNR7BhKiS97C4atkk7hbqRGzD46XBUJTqBW2x6Mn7XgYsizyP3DxhL2",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "bot with an unknown action",
+      "rule": "8"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "UnsupportedKeyType"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6LSixYycqAJJYxUrYWjYazT2LXmuN4Tekinjxuh1Yz13FzA"
+            }
+          ],
+          "coSig": "c",
+          "format": "coasys/1",
+          "offer": "o",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3NY2hVBy8yieWmyYaGBakkzJAsbRjzGohNvrkYsSjSn59gycycXdxe3Kb7zirmUQeRwJAXVb3Enf9xpNvXw3goWB",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "X25519 key as a signing key",
+      "rule": "10"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "UnsupportedKeyType"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "zDnaeQZodvDFtWAcT3WPWCU7odWZp37qBbv2y2mYQQRXeuMC5"
+            }
+          ],
+          "coSig": "c",
+          "format": "coasys/1",
+          "offer": "o",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z59BD7dLMcA5d9VUa1gWq27BhtKxDWiYMaPxiTtW9hrtvggD2QJJhFcSJXZtpVgjj2ZQKsG7n6r6aYpX63Y6nihro",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "P-256 passkey key",
+      "rule": "10"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "MissingProof"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        }
+      ],
+      "name": "incept without the device's proof",
+      "rule": "4"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "MissingProof"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "c",
+          "format": "coasys/1",
+          "offer": "o",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zbaegWEpPfYnvxgjeKzse8uMMqjdeHRuLVf1r6qUhRUTQsUCm7bUBT4mUwRDXQwuQ54GfRSrCdnVtp2g3uT56n2p",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "add signed by a device key",
+      "rule": "4"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "BadProof"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "c",
+          "format": "coasys/1",
+          "offer": "o",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2AunKuHrXe55CrFraLcRguS8QVekXnZoSeHXWAd9ZHm7b9udKHMfFAUDjquGpxtThmaCbd4fDZbWPiNteVJQg2nG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "add with a forged master proof",
+      "rule": "3"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "BadProof"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "c",
+          "format": "coasys/1",
+          "offer": "o",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:link",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zkw8UotHvwZtKx7vWPCALY6TpeCmNN66QRyRT3rXadmorein1zHiUVsfiWf4Z6eKP5QgCoR6AU4E9eCX7eR3gnAm",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "proof in another domain",
+      "rule": "3"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "BadProof"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+              "id": "d2",
+              "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+            }
+          ],
+          "coSig": "z3coSig",
+          "format": "coasys/1",
+          "offer": "offer-1",
+          "op": "add",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4EQCbmjaDWf9j3JFS9C81h6xPmus7LujeVCMrKS29ix52UtiDcTL7FxVBStoZSJMPoyKtcuaxPnyCLwvrB6z4maq",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2XT72E6Ri8BJf7Lt8MnLyHhrJbXipGW7Tgpb51kjR8UBhUnu4Pr3tSGydF1XoF1m8E92xjSeacci6mAz5uKDZ2XW",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "an extra proof by a device key",
+      "rule": "4"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "UnknownKey"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "format": "coasys/1",
+          "op": "revoke",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2CB9fsSAHqc7sRySBbeiaPyqKgKM6FHwNTsAQPmAcGrrR1kRHtRfW7zFiiMqHY3EWrJcecQ3krRGZ6MG8MvH27sN",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "revoke": [
+            "d9"
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "revoke of an unknown key",
+      "rule": "4"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "RevokedKey"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "format": "coasys/1",
+          "op": "revoke",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4TF59rZv4pqugg2485xdGKRQ7qz1aAtbEfZxQqTBtxhTKq7L8SGPFkLQejK9srbsK4bruRucm2sE8b5SSHw7LSkt",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "revoke": [
+            "d1"
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        },
+        {
+          "format": "coasys/1",
+          "op": "revoke",
+          "prev": "QmbXoSaRvQkui7D7Ao2dweTYqGKtFsUipfK9s8pVBg9X6k",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3n7c2Bb5TLGHKPHBeWKhX2cdsfiNwdbSoTLqQAYsHGgoLrHP1fDpkLvTHtWkLX4hvq2G8AbwA8fH4NWPyRgf7wpX",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "revoke": [
+            "d1"
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 2
+        }
+      ],
+      "name": "revoke twice",
+      "rule": "4"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "NotABot"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "can": [
+            "read"
+          ],
+          "expires": 10,
+          "format": "coasys/1",
+          "key": "d1",
+          "op": "scope",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4y1shbBSQAJveWv8VTAnWxmCqMCcwvDSYLbmFzRPRqQuGg5GvFGChUPwtyUL8sW6sjhVo5XGBvzjF3xzKWGFjNgm",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "scope on a key without the bot mark",
+      "rule": "8"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "NextMismatch"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "format": "coasys/1",
+          "master": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
+          "next": "QmVvFnLYvMzZ2XJuoBvyZsqt9qn6hZo4MUTMC8Fj9aHJXd",
+          "op": "rotate",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3DSBtC518BXSutSCHoPJpQSTRjGFtLJAaoFM5aKx3zrfVB8ntAyoqUx7mvqcsw5ZqHJaVFTZkCmmHp8GCQE7MZat",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m1"
+            }
+          ],
+          "salt": "RAGdryeF4Mik4njDvU79Wb",
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "rotate with a wrong salt",
+      "rule": "5"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "Ended"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "format": "coasys/1",
+          "master": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
+          "next": null,
+          "op": "rotate",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4j5kj4DTrn1pvwFgSJ52KeRK5D26aTXMa6rUW9Gewq4XHFL8CzFbG98ps9C4M69Nsrd9RBfcUJKk7QFAXwok7fXB",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m1"
+            }
+          ],
+          "salt": "7DqbanfBGH8JLz4xeScbj2",
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        },
+        {
+          "format": "coasys/1",
+          "op": "revoke",
+          "prev": "QmT8nmbGgm8ciGbHGvuEu5NQY8NPuwUHFY8PCQHEjXQ5vj",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2P3utrueWMQX48KjPxLUKmxabX8APkahSDGNthsAUtAoofy8EcHKtW3eFefoNh3KtHnj8GYDVZuXferTzz912bsB",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m1"
+            }
+          ],
+          "revoke": [
+            "d1"
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 2
+        }
+      ],
+      "name": "event after the end",
+      "rule": "9"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "InceptAfterGenesis",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "incept after #0",
+      "rule": "2"
+    }
+  ],
+  "description": "One invalid log per rule; `error` is the pinned part of the ChainErrorCode."
+}
