@@ -1,0 +1,138 @@
+# ADAM
+
+ADAM is an agent-centric layer for the web. An **executor** process hosts one or more **agents**; each agent keeps its data in **perspectives**, graphs of links; and **languages**, code loaded into the executor, store, share and sync that data with other agents.
+
+**Why:** Data belongs to the agent, not to an app or a server. Apps and other agents reach the data only through the agent's executor, and only with the agent's permission. Languages keep the transport replaceable: the same perspective can sync over Holochain, a link server, or another network.
+
+This folder holds the mental models of this repository: a high-level expression of the code beside it, in a tree of short pages. The pages are kept 1-1 with the code. A pull request that changes a mental model changes its page in the same pull request. How the pages are written: [Conventions](CONVENTIONS.md).
+
+## Parts
+- [Agents](agents/README.md): who acts and through what — identity, the executor that hosts agents, what each caller may do, and the interfaces callers use.
+- [Languages](languages/README.md): how data leaves the executor — code that stores, shares and syncs expressions.
+- [Perspectives](perspectives/README.md): where meaning lives — an agent's graph of links, its shape and its behaviour.
+
+Terms: [Glossary](GLOSSARY.md).
+
+<details><summary>How it works</summary>
+
+```
+ app / bot / CLI / AI agent  ◄──────────── events, live-query updates ────────────┐
+   │ token: admin credential │ app grant │ user token                              │
+   ▼                                                                               │
+ executor API: RPC /api/v1/ws, MCP          [Agents: Executor interfaces, Access]  │
+   │ Session → principal + grant; each handler checks capability and owner         │
+   ▼                                                                               │
+ agent: AgentContext (main │ managed) ─ wallet key signs   [Agents: Identity]      │
+   │                                                                               │
+   ▼                                                                               │
+ perspective: PerspectiveInstance + Oxigraph store          [Perspectives] ────────┘
+   │ shared write: commit(diff)                 ▲ inbound: diff_from_link_language
+   ▼                                            │
+ link language (Deno isolate)                   │           [Languages]
+   │ Holochain DHT │ link server │ local        │
+   ▼                                            │
+ network ───────► other executors ──────────────┘
+```
+
+1. A caller opens one connection with a token. The executor turns it into a [session](agents/access/sessions.md) that acts as one agent within a grant.
+2. A write signs a [link](perspectives/links/link-expressions.md) as that agent and stores it in the perspective ([Link write path](perspectives/links/write-path.md)).
+3. In a [neighbourhood](perspectives/neighbourhoods/README.md), shared links go to the [link language](languages/link-languages/README.md), which carries them to the other members' executors. Their diffs come back the same way.
+4. Every change emits events and updates live queries on the caller's socket ([Events](agents/interfaces/events.md), [Live queries](perspectives/querying/live-queries.md)).
+
+Beside agents, languages and perspectives, the executor holds AI, SFU, Holochain and billing as process-wide services ([Executor services](agents/executor/services/README.md)). Every perspective runs background loops: some wake on events, the others poll on fixed intervals ([Neighbourhood sync](perspectives/neighbourhoods/sync.md)). In the default network, languages, neighbourhoods and agent profiles are published to central HTTP services; link sync can also run peer-to-peer over Holochain ([Bootstrap languages](languages/runtime/bootstrap-languages.md)).
+
+</details>
+
+<details><summary>Where in the code</summary>
+
+- [rust-executor/](../rust-executor/): the executor: agents, sessions, the language runtime, perspectives, executor services, the RPC and MCP servers. Start with its [AGENTS.md](../rust-executor/AGENTS.md).
+- [core/](../core/): the TypeScript SDK `@coasys/ad4m`: `Ad4mClient`, `PerspectiveProxy`, model classes, generated RPC contracts; [ad4m-hooks/](../ad4m-hooks/) holds its React and Vue hooks.
+- [connect/](../connect/): `@coasys/ad4m-connect`, which finds an executor and gets an app its token.
+- [cli/](../cli/): the `ad4m` client and the `ad4m-executor` binary; [rust-client/](../rust-client/) is the Rust client they use.
+- [bootstrap-languages/](../bootstrap-languages/): the languages that ship with ADAM (language, agent, neighbourhood, link and file languages); [ad4m-ldk/](../ad4m-ldk/) is the kit to write new ones.
+- [link-server/](../link-server/): the self-hosted server behind the server link language.
+- [docs-src/](../docs-src/): the user documentation and the language interface specs.
+- [tests/](../tests/): integration tests against a running executor (`tests/js/`, `*.bats`).
+- [ui/](../ui/): the launcher, which embeds the executor.
+
+</details>
+
+## Index
+
+- [ADAM](README.md)
+  - [Agents](agents/README.md)
+    - [Identity](agents/identity/README.md)
+      - [Wallet and keys](agents/identity/wallet-and-keys.md)
+      - [Signing and verification](agents/identity/signing-and-verification.md)
+      - [Agent profiles](agents/identity/profiles.md)
+    - [Executor](agents/executor/README.md)
+      - [Executor startup](agents/executor/startup.md)
+      - [Executor config](agents/executor/config.md)
+      - [Executor data](agents/executor/data.md)
+      - [Managed agents](agents/executor/managed-agents.md)
+      - [Executor services](agents/executor/services/README.md)
+        - [AI service](agents/executor/services/ai.md)
+        - [SFU](agents/executor/services/sfu.md)
+        - [Holochain service](agents/executor/services/holochain.md)
+        - [Billing and hosting](agents/executor/services/billing-and-hosting.md)
+    - [Access](agents/access/README.md)
+      - [Sessions](agents/access/sessions.md)
+      - [Operator and main agent](agents/access/operator-and-main-agent.md)
+      - [Capabilities](agents/access/capabilities.md)
+      - [App grants](agents/access/app-grants.md)
+      - [Access checks](agents/access/checks.md)
+    - [Executor interfaces](agents/interfaces/README.md)
+      - [RPC API](agents/interfaces/rpc-api.md)
+      - [Events](agents/interfaces/events.md)
+      - [MCP server](agents/interfaces/mcp-server.md)
+      - [TypeScript SDK](agents/interfaces/typescript-sdk/README.md)
+        - [ad4m-connect](agents/interfaces/typescript-sdk/ad4m-connect.md)
+        - [Model classes](agents/interfaces/typescript-sdk/model-classes.md)
+      - [Rust client and CLI](agents/interfaces/rust-client-and-cli.md)
+  - [Languages](languages/README.md)
+    - [Expressions and addresses](languages/expressions/README.md)
+      - [Language addresses](languages/expressions/addresses.md)
+      - [Literal expressions](languages/expressions/literals.md)
+    - [Language runtime](languages/runtime/README.md)
+      - [Language controller](languages/runtime/controller.md)
+      - [Language isolates](languages/runtime/isolates.md)
+      - [Language interface](languages/runtime/interface.md)
+      - [Installing languages](languages/runtime/installing/README.md)
+        - [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
+        - [Language language](languages/runtime/installing/language-language.md)
+      - [Bootstrap languages](languages/runtime/bootstrap-languages.md)
+    - [Link languages](languages/link-languages/README.md)
+      - [Perspective diff sync](languages/link-languages/perspective-diff-sync.md)
+      - [Server link language](languages/link-languages/server-link-language.md)
+      - [Link server](languages/link-languages/link-server.md)
+      - [Local link language](languages/link-languages/local-link-language.md)
+    - [Other language kinds](languages/other-kinds/README.md)
+      - [Agent languages](languages/other-kinds/agent-languages.md)
+      - [Neighbourhood and perspective languages](languages/other-kinds/neighbourhood-and-perspective-languages.md)
+      - [File storage languages](languages/other-kinds/file-storage-languages.md)
+  - [Perspectives](perspectives/README.md)
+    - [Links and store](perspectives/links/README.md)
+      - [Links](perspectives/links/link-expressions.md)
+      - [Local and shared links](perspectives/links/local-and-shared.md)
+      - [Oxigraph store](perspectives/links/oxigraph-store.md)
+      - [Link write path](perspectives/links/write-path.md)
+    - [Querying](perspectives/querying/README.md)
+      - [SPARQL queries](perspectives/querying/sparql.md)
+      - [Model queries](perspectives/querying/model-queries.md)
+      - [Live queries](perspectives/querying/live-queries.md)
+    - [Social DNA](perspectives/social-dna/README.md)
+      - [Subject classes](perspectives/social-dna/subject-classes.md)
+      - [Flows](perspectives/social-dna/flows/README.md)
+        - [Flow consensus](perspectives/social-dna/flows/consensus.md)
+        - [Flow spawn and guards](perspectives/social-dna/flows/spawn-and-guards.md)
+        - [Flow receipts](perspectives/social-dna/flows/receipts.md)
+      - [Interpretation](perspectives/social-dna/interpretation/README.md)
+        - [Interpretation overlay](perspectives/social-dna/interpretation/overlay.md)
+        - [Auto-processor](perspectives/social-dna/interpretation/auto-processor.md)
+    - [Neighbourhoods](perspectives/neighbourhoods/README.md)
+      - [Publishing and joining](perspectives/neighbourhoods/publishing-and-joining.md)
+      - [Neighbourhood sync](perspectives/neighbourhoods/sync.md)
+      - [Presence and signals](perspectives/neighbourhoods/presence-and-signals.md)
+      - [Neighbourhood calls](perspectives/neighbourhoods/calls.md)
+- [Glossary](GLOSSARY.md)
+- [Conventions](CONVENTIONS.md)
