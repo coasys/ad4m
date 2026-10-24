@@ -43,7 +43,12 @@ async fn tasks_produced_by(f: &Fixture, query: serde_json::Value) -> (Vec<String
 }
 
 /// The ids `model_query` returns for `class`, plus the reported total.
-async fn ids_of_class(f: &Fixture, class: &str, query: serde_json::Value) -> (Vec<String>, usize) {
+async fn ids_of_class(
+    f: &Fixture,
+    class: &str,
+    mut query: serde_json::Value,
+) -> (Vec<String>, usize) {
+    query["count"] = serde_json::json!(true);
     let json = f
         .perspective
         .model_query(class, &query.to_string())

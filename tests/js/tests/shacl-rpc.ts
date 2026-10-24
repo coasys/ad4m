@@ -331,6 +331,15 @@ export default function shaclRpcTests(testContext: TestContext) {
                     expect(byName.Todo.properties.length).to.equal(3);
                 });
 
+                it("getAllShacl({ names }) returns only the named shapes, equal to the unfiltered read's", async () => {
+                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
+                    const all = await perspective!.getAllShacl();
+                    const some = await perspective!.getAllShacl({ names: ["Todo", "DoesNotExist"] });
+                    expect(some.map((e) => e.name)).to.deep.equal(["Todo"]);
+                    expect(JSON.stringify(some[0].shape)).to.equal(JSON.stringify(all.find((e) => e.name === "Todo")!.shape));
+                    expect(await perspective!.getAllShacl({ names: [] })).to.deep.equal([]);
+                });
+
                 it("getShacl(name).properties matches the single-shape RPC result inside getAllShacl()", async () => {
                     const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
                     // Consistency check: bulk and single fetch must agree on

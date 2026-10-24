@@ -2189,17 +2189,17 @@ async fn flow_states_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 async fn flow_fired_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    let instance = params.require_str("instance")?;
-    ctx.require(&perspective_query_capability(vec![uuid.clone()]))
+    let body: PerspectiveFlowFiredParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    ctx.require(&perspective_query_capability(vec![body.uuid.clone()]))
         .map_err(|e| WsRpcError::forbidden(e))?;
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
     let agent_did = flow_bookkeeping_agent(&ctx)?;
     let fired =
-        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instance(
+        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instances(
             &perspective.uuid,
             &agent_did,
-            &instance,
+            &body.instances,
         )
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(fired)?)
@@ -2585,8 +2585,10 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     use crate::perspectives::flow_instance::{
-        pass::FireOutcome, produced::ValidOutput, propose::ProposeOutcome,
-        replica_state::FlowStateEntry,
+        pass::FireOutcome,
+        produced::ValidOutput,
+        propose::ProposeOutcome,
+        replica_state::{FlowFiredEntry, FlowStateEntry},
     };
     use crate::perspectives::interpretation::overlay::OverlayView;
 
@@ -2765,7 +2767,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         flow_states_handler,
     )
     .read();
-    map.method::<PerspectiveFlowFiredParams, Vec<String>>(
+    map.method::<PerspectiveFlowFiredParams, Vec<FlowFiredEntry>>(
         "perspective.flowFired",
         flow_fired_handler,
     )
@@ -3235,13 +3237,13 @@ pub struct PerspectiveFlowStatesParams {
     pub instances: Option<Vec<String>>,
 }
 
-/// `perspective.flowFired`: the proposals of `instance` the calling agent's
-/// pass has recorded as fired, sorted.
+/// `perspective.flowFired`: for each of `instances`, in order, the proposals
+/// the calling agent's pass has recorded as fired, sorted.
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct PerspectiveFlowFiredParams {
     pub uuid: String,
-    pub instance: String,
+    pub instances: Vec<String>,
 }
 
 #[derive(Deserialize, TS)]

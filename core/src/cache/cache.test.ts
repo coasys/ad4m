@@ -17,18 +17,34 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'events.watch': true,
     'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true },
-    'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
-    'expression.get': (p: Record<string, unknown>) => ({
-        author: 'did:test:123', timestamp: '2024-01-01', data: `{"url":"${p.url}"}`,
-        language: { address: 'lang://test' }, proof: { valid: true },
-    }),
-    'expression.getMany': (p: Record<string, unknown>) => {
-        const urls = (p.urls || []) as string[];
-        return urls.map((url: string) => ({
+    // Like the executor: `did:test:missing` is unknown (null), `did:test:broken`
+    // fails, and one failing DID fails the whole `agent.byDIDs` call (#1213).
+    'agent.byDid': (p: Record<string, unknown>) => {
+        if (p.did === 'did:test:missing') return null;
+        if (p.did === 'did:test:broken') throw { code: 500, message: `Failed to get agent ${p.did}: language failed` };
+        return { did: p.did, perspective: new Perspective() };
+    },
+    'agent.byDIDs': (p: Record<string, unknown>) =>
+        (p.dids as string[]).map(did => (MOCK_RESPONSES['agent.byDid'] as (p: Record<string, unknown>) => unknown)({ did })),
+    // Like the executor: `.../missing` is unknown (null), `.../broken` fails, and
+    // `getMany` answers per URL what `get` does (a failure as `{ code, message }`).
+    'expression.get': (p: Record<string, unknown>) => {
+        const url = p.url as string;
+        if (url.endsWith('/missing')) return null;
+        if (url.endsWith('/broken')) throw { code: 500, message: `Failed to get expression ${url}: language failed` };
+        return {
             author: 'did:test:123', timestamp: '2024-01-01', data: `{"url":"${url}"}`,
             language: { address: 'lang://test' }, proof: { valid: true },
-        }));
+        };
     },
+    'expression.getMany': (p: Record<string, unknown>) =>
+        ((p.urls || []) as string[]).map(url => {
+            try {
+                return (MOCK_RESPONSES['expression.get'] as (p: Record<string, unknown>) => unknown)({ url });
+            } catch (failure) {
+                return failure;
+            }
+        }),
     'expression.interact': () => 'ok',
     'expression.create': (p: Record<string, unknown>) => `lang://test/Qm-created-${Date.now()}`,
 };
@@ -83,12 +99,17 @@ class MockWebSocket {
                 return;
             }
 
-            const result = typeof handler === 'function'
-                ? (handler as (p: Record<string, unknown>) => unknown)(params)
-                : handler;
+            let reply: Record<string, unknown>;
+            try {
+                reply = { id, result: typeof handler === 'function'
+                    ? (handler as (p: Record<string, unknown>) => unknown)(params)
+                    : handler };
+            } catch (error) {
+                reply = { id, error }; // a handler throws `{ code, message }` to fail the call
+            }
 
             setTimeout(() => {
-                this.onmessage?.({ data: JSON.stringify({ id, result }) });
+                this.onmessage?.({ data: JSON.stringify(reply) });
             }, 0);
         } catch { /* malformed JSON */ }
     }
@@ -179,7 +200,7 @@ describe('AgentClient Cache', () => {
         expect(a3.did).toBe('did:test:dedup');
 
         // Only 1 RPC was actually made
-        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
+        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
         expect(byDidCalls).toHaveLength(1);
     });
 
@@ -191,7 +212,7 @@ describe('AgentClient Cache', () => {
         expect(a2.did).toBe('did:test:cached');
 
         // Only 1 RPC
-        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
+        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
         expect(byDidCalls).toHaveLength(1);
     });
 
@@ -199,10 +220,10 @@ describe('AgentClient Cache', () => {
         await ad4m.agent.byDID('did:test:one');
         await ad4m.agent.byDID('did:test:two');
 
-        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
+        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
         expect(byDidCalls).toHaveLength(2);
-        expect(byDidCalls[0].params.did).toBe('did:test:one');
-        expect(byDidCalls[1].params.did).toBe('did:test:two');
+        expect(byDidCalls[0].params.dids).toEqual(['did:test:one']);
+        expect(byDidCalls[1].params.dids).toEqual(['did:test:two']);
     });
 
     test('agent-updated event updates L1 cache', async () => {
@@ -227,7 +248,7 @@ describe('AgentClient Cache', () => {
         expect(a2.directMessageLanguage).toBe('lang://updated');
 
         // Should still be just 1 RPC (the second call was served from event-updated cache)
-        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
+        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
         expect(byDidCalls).toHaveLength(1);
     });
 
@@ -245,7 +266,7 @@ describe('AgentClient Cache', () => {
             await ad4m.agent.byDID('did:test:ttl');
 
             // Should have made 2 RPCs (first + re-fetch after TTL)
-            const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
+            const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
             expect(byDidCalls).toHaveLength(2);
         } finally {
             AgentClient.REMOTE_AGENT_TTL_MS = originalTTL;
@@ -266,11 +287,41 @@ describe('AgentClient Cache', () => {
             await ad4m.agent.byDID('did:test:self');
 
             // Should still be 1 RPC — self-DID is event-invalidated, not TTL-invalidated
-            const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
+            const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
             expect(byDidCalls).toHaveLength(1);
         } finally {
             AgentClient.REMOTE_AGENT_TTL_MS = originalTTL;
         }
+    });
+
+    test('byDID() — one failing DID rejects only its own callers', async () => {
+        // What a lone byDID gives for each DID.
+        const lone = {
+            ok: await ad4m.agent.byDID('did:test:lone-ok'),
+            missing: await ad4m.agent.byDID('did:test:missing'),
+            broken: await ad4m.agent.byDID('did:test:broken').then(() => null, (e) => e),
+        };
+        expect(lone.ok.did).toBe('did:test:lone-ok');
+        expect(lone.missing).toBeNull();
+        expect(lone.broken).toMatchObject({ status: 500 });
+        rpcCallLog = [];
+
+        const [ok, missing, broken] = await Promise.allSettled([
+            ad4m.agent.byDID('did:test:batch-ok'),
+            ad4m.agent.byDID('did:test:missing'),
+            ad4m.agent.byDID('did:test:broken'),
+        ]);
+        expect(ok).toMatchObject({ status: 'fulfilled', value: { did: 'did:test:batch-ok' } });
+        expect(missing).toEqual({ status: 'fulfilled', value: null });
+        expect(broken).toMatchObject({ status: 'rejected', reason: { status: lone.broken.status, message: lone.broken.message } });
+
+        // One batch, then each DID of the failed batch alone.
+        expect(rpcCallLog.filter(c => c.type.startsWith('agent.by')).map(c => [c.type, c.params.dids ?? c.params.did])).toEqual([
+            ['agent.byDIDs', ['did:test:batch-ok', 'did:test:missing', 'did:test:broken']],
+            ['agent.byDid', 'did:test:batch-ok'],
+            ['agent.byDid', 'did:test:missing'],
+            ['agent.byDid', 'did:test:broken'],
+        ]);
     });
 
     test('invalidateByDid() clears cache and forces re-fetch', async () => {
@@ -282,21 +333,21 @@ describe('AgentClient Cache', () => {
         // Next call should make a new RPC
         await ad4m.agent.byDID('did:test:invalidate');
 
-        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
+        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
         expect(byDidCalls).toHaveLength(2);
     });
 
     test('clearByDidCache() clears all L1 entries', async () => {
         await ad4m.agent.byDID('did:test:clear1');
         await ad4m.agent.byDID('did:test:clear2');
-        expect(rpcCallLog.filter(c => c.type === 'agent.byDid')).toHaveLength(2);
+        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(2);
 
         ad4m.agent.clearByDidCache();
 
         // Both should re-fetch
         await ad4m.agent.byDID('did:test:clear1');
         await ad4m.agent.byDID('did:test:clear2');
-        expect(rpcCallLog.filter(c => c.type === 'agent.byDid')).toHaveLength(4);
+        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(4);
     });
 
     test('byDID() RPC failure cleans up cache entry for retry', async () => {
@@ -325,7 +376,7 @@ describe('AgentClient Cache', () => {
             const agent = await ad4m.agent.byDID('did:test:fail');
             expect(agent.did).toBe('did:test:fail');
 
-            const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
+            const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
             expect(byDidCalls).toHaveLength(2);
         } finally {
             MOCK_RESPONSES['agent.byDid'] = origHandler;
@@ -333,7 +384,120 @@ describe('AgentClient Cache', () => {
     });
 });
 
+// ===================== BATCHED LOOKUPS =====================
+
+describe('Profile and expression lookups batch concurrent misses', () => {
+    const calls = (type: string) => rpcCallLog.filter(c => c.type === type);
+
+    test('20 concurrent byDID() calls for 5 DIDs make 1 RPC, with the results a single lookup gives', async () => {
+        const dids = ['did:test:b1', 'did:test:b2', 'did:test:b3', 'did:test:b4', 'did:test:b5'];
+        const requested = Array.from({ length: 20 }, (_, i) => dids[i % 5]);
+
+        const agents = await Promise.all(requested.map(did => ad4m.agent.byDID(did)));
+
+        expect(calls('agent.byDIDs')).toHaveLength(1);
+        expect(calls('agent.byDid')).toHaveLength(0);
+        expect([...(calls('agent.byDIDs')[0].params.dids as string[])].sort()).toEqual(dids);
+        // Golden: each result equals what one `agent.byDid` lookup of that DID returns.
+        const single = new Ad4mClient('http://127.0.0.1:12001', 'test-token');
+        for (let i = 0; i < requested.length; i++) {
+            const alone = await single.agent.byDID(requested[i]);
+            expect(JSON.stringify(agents[i])).toEqual(JSON.stringify(alone));
+        }
+    });
+
+    test('an unknown DID resolves to null for its caller only', async () => {
+        const orig = MOCK_RESPONSES['agent.byDid'];
+        MOCK_RESPONSES['agent.byDid'] = (p: Record<string, unknown>) =>
+            p.did === 'did:test:nobody' ? null : { did: p.did, perspective: new Perspective() };
+        try {
+            const [known, unknown] = await Promise.all([
+                ad4m.agent.byDID('did:test:somebody'),
+                ad4m.agent.byDID('did:test:nobody'),
+            ]);
+            expect(known.did).toBe('did:test:somebody');
+            expect(unknown).toBeNull();
+            expect(calls('agent.byDIDs')).toHaveLength(1);
+        } finally {
+            MOCK_RESPONSES['agent.byDid'] = orig;
+        }
+    });
+
+    test('more than 200 concurrent DIDs go out in calls of at most 200', async () => {
+        const dids = Array.from({ length: 250 }, (_, i) => `did:test:many-${i}`);
+        const agents = await Promise.all(dids.map(did => ad4m.agent.byDID(did)));
+        expect(agents.map(a => a.did)).toEqual(dids);
+        expect(calls('agent.byDIDs').map(c => (c.params.dids as string[]).length)).toEqual([200, 50]);
+    });
+
+    test('a failed batch rejects every waiting caller, and the next call retries', async () => {
+        const orig = MOCK_RESPONSES['agent.byDIDs'];
+        delete MOCK_RESPONSES['agent.byDIDs']; // the mock answers an unknown method with an error
+        let results: PromiseSettledResult<unknown>[];
+        try {
+            results = await Promise.allSettled([ad4m.agent.byDID('did:test:f1'), ad4m.agent.byDID('did:test:f2')]);
+        } finally {
+            MOCK_RESPONSES['agent.byDIDs'] = orig;
+        }
+        expect(results.map(r => r.status)).toEqual(['rejected', 'rejected']);
+        expect((await ad4m.agent.byDID('did:test:f1')).did).toBe('did:test:f1');
+        expect(calls('agent.byDIDs')).toHaveLength(2);
+    });
+
+    test('concurrent getMany() calls share one expression.getMany, each URL fetched once', async () => {
+        const [first, second] = await Promise.all([
+            ad4m.expression.getMany(['lang://test/Qm-s1', 'lang://test/Qm-s2']),
+            ad4m.expression.getMany(['lang://test/Qm-s2', 'lang://test/Qm-s3']),
+        ]);
+        expect(calls('expression.getMany')).toHaveLength(1);
+        expect(calls('expression.getMany')[0].params.urls).toEqual(['lang://test/Qm-s1', 'lang://test/Qm-s2', 'lang://test/Qm-s3']);
+        expect(first.map(e => JSON.parse(e.data).url)).toEqual(['lang://test/Qm-s1', 'lang://test/Qm-s2']);
+        expect(second.map(e => JSON.parse(e.data).url)).toEqual(['lang://test/Qm-s2', 'lang://test/Qm-s3']);
+    });
+
+    test('a get() in flight serves a concurrent getMany() of the same URL', async () => {
+        const [one, many] = await Promise.all([
+            ad4m.expression.get('lang://test/Qm-shared'),
+            ad4m.expression.getMany(['lang://test/Qm-shared', 'lang://test/Qm-own']),
+        ]);
+        expect(calls('expression.get')).toHaveLength(0);
+        expect(calls('expression.getMany').map(c => c.params.urls)).toEqual([['lang://test/Qm-shared', 'lang://test/Qm-own']]);
+        expect(JSON.stringify(many[0])).toEqual(JSON.stringify(one));
+    });
+
+    test('concurrent get() calls make one expression.getMany, each settling as a lone get() does', async () => {
+        const urls = ['lang://test/Qm-g1', 'lang://test/Qm-g2', 'lang://test/missing', 'lang://test/broken', 'lang://test/Qm-g1'];
+        const batched = await Promise.allSettled(urls.map(url => ad4m.expression.get(url)));
+        expect(calls('expression.getMany')).toHaveLength(1);
+        expect(calls('expression.get')).toHaveLength(0);
+
+        // Golden: each outcome equals what one `expression.get` call gives.
+        const alone = await Promise.allSettled(urls.map(url => new Ad4mClient('http://127.0.0.1:12002', 'test-token').expression.get(url, true)));
+        expect(calls('expression.get')).toHaveLength(urls.length);
+        const outcome = (r: PromiseSettledResult<unknown>) => r.status === 'fulfilled'
+            ? { value: JSON.stringify(r.value) }
+            : { error: (r.reason as Error).constructor.name, message: (r.reason as Error).message, status: (r.reason as { status?: number }).status };
+        expect(batched.map(outcome)).toEqual(alone.map(outcome));
+        expect(batched[2]).toEqual({ status: 'fulfilled', value: null });
+        expect(batched[3]).toMatchObject({ status: 'rejected', reason: { name: 'RpcError', status: 500 } });
+    });
+
+    test('a failed URL rejects only its own get(), and is read again next time', async () => {
+        const [good, bad] = await Promise.allSettled([
+            ad4m.expression.get('lang://test/Qm-ok'),
+            ad4m.expression.get('lang://test/broken'),
+        ]);
+        expect(good.status).toBe('fulfilled');
+        expect(bad.status).toBe('rejected');
+        await expect(ad4m.expression.getMany(['lang://test/Qm-ok', 'lang://test/broken'])).rejects.toMatchObject({ status: 500 });
+        expect(calls('expression.getMany').map(c => c.params.urls)).toEqual([['lang://test/Qm-ok', 'lang://test/broken'], ['lang://test/broken']]);
+    });
+});
+
 // ===================== EXPRESSION CACHE TESTS =====================
+
+/** RPCs that read expressions: `expression.get` (alwaysGet) or a batch of `get`/`getMany` misses. */
+const expressionReads = () => rpcCallLog.filter(c => c.type === 'expression.get' || c.type === 'expression.getMany');
 
 describe('ExpressionClient Cache', () => {
     test('get() deduplication — 3 concurrent calls = 1 RPC', async () => {
@@ -347,7 +511,7 @@ describe('ExpressionClient Cache', () => {
         expect(e2.author).toBe('did:test:123');
         expect(e3.author).toBe('did:test:123');
 
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(1);
     });
 
@@ -355,7 +519,7 @@ describe('ExpressionClient Cache', () => {
         await ad4m.expression.get('lang://test/Qm-l1hit');
         await ad4m.expression.get('lang://test/Qm-l1hit');
 
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(1);
     });
 
@@ -363,7 +527,7 @@ describe('ExpressionClient Cache', () => {
         await ad4m.expression.get('lang://test/Qm-always');
         await ad4m.expression.get('lang://test/Qm-always', true);
 
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(2);
     });
 
@@ -371,7 +535,7 @@ describe('ExpressionClient Cache', () => {
         await ad4m.expression.get('lang://test/Qm-a');
         await ad4m.expression.get('lang://test/Qm-b');
 
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(2);
     });
 
@@ -384,19 +548,19 @@ describe('ExpressionClient Cache', () => {
             await ad4m.expression.get('lang://test/Qm-lru-1');
             await ad4m.expression.get('lang://test/Qm-lru-2');
             await ad4m.expression.get('lang://test/Qm-lru-3');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(3);
+            expect(expressionReads()).toHaveLength(3);
 
             // Add 4th — should evict Qm-lru-1
             await ad4m.expression.get('lang://test/Qm-lru-4');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(4);
+            expect(expressionReads()).toHaveLength(4);
 
             // Qm-lru-2 should still be cached (no new RPC)
             await ad4m.expression.get('lang://test/Qm-lru-2');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(4);
+            expect(expressionReads()).toHaveLength(4);
 
             // Qm-lru-1 was evicted — should need a new RPC
             await ad4m.expression.get('lang://test/Qm-lru-1');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(5);
+            expect(expressionReads()).toHaveLength(5);
         } finally {
             ExpressionClient.MAX_MEM_ENTRIES = originalMax;
         }
@@ -405,7 +569,7 @@ describe('ExpressionClient Cache', () => {
     test('getMany() partial cache hits — only fetches uncached URLs', async () => {
         // Pre-populate Qm-1 in cache
         await ad4m.expression.get('lang://test/Qm-1');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(1);
+        expect(expressionReads()).toHaveLength(1);
 
         // getMany with Qm-1 (cached) + Qm-2 (not cached)
         const results = await ad4m.expression.getMany([
@@ -419,8 +583,8 @@ describe('ExpressionClient Cache', () => {
 
         // getMany should only have fetched Qm-2 (the uncached one)
         const getManyCalls = rpcCallLog.filter(c => c.type === 'expression.getMany');
-        expect(getManyCalls).toHaveLength(1);
-        expect(getManyCalls[0].params.urls).toEqual(['lang://test/Qm-2']);
+        expect(getManyCalls).toHaveLength(2);
+        expect(getManyCalls[1].params.urls).toEqual(['lang://test/Qm-2']);
     });
 
     test('getMany() all cached — no RPC', async () => {
@@ -440,25 +604,25 @@ describe('ExpressionClient Cache', () => {
 
     test('clearCache() forces re-fetch', async () => {
         await ad4m.expression.get('lang://test/Qm-clear');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(1);
+        expect(expressionReads()).toHaveLength(1);
 
         ad4m.expression.clearCache();
 
         await ad4m.expression.get('lang://test/Qm-clear');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2);
+        expect(expressionReads()).toHaveLength(2);
     });
 
     test('interact() invalidates cache for that URL', async () => {
         const url = 'lang://test/Qm-interact';
         await ad4m.expression.get(url);
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(1);
+        expect(expressionReads()).toHaveLength(1);
 
         // interact should invalidate cache
         await ad4m.expression.interact(url, { interactionName: 'modify', parameters: {} } as any);
 
         // Next get should hit network again (cache invalidated)
         await ad4m.expression.get(url);
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2);
+        expect(expressionReads()).toHaveLength(2);
     });
 });
 
@@ -468,17 +632,17 @@ describe('ExpressionClient Cache — mutation & edge cases', () => {
     test('interact() only invalidates the targeted URL, not others', async () => {
         await ad4m.expression.get('lang://test/Qm-keep');
         await ad4m.expression.get('lang://test/Qm-invalidate');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2);
+        expect(expressionReads()).toHaveLength(2);
 
         await ad4m.expression.interact('lang://test/Qm-invalidate', { interactionName: 'modify', parameters: {} } as any);
 
         // Qm-keep should still be cached
         await ad4m.expression.get('lang://test/Qm-keep');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2); // no new RPC
+        expect(expressionReads()).toHaveLength(2); // no new RPC
 
         // Qm-invalidate was invalidated — needs re-fetch
         await ad4m.expression.get('lang://test/Qm-invalidate');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(3);
+        expect(expressionReads()).toHaveLength(3);
     });
 
     test('create() does not pollute cache — fresh get() fetches from network', async () => {
@@ -486,7 +650,7 @@ describe('ExpressionClient Cache — mutation & edge cases', () => {
         // create returns an address string, not an ExpressionRendered
         // Cache should not have this address yet
         await ad4m.expression.get(addr);
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(1); // went to network
     });
 
@@ -554,12 +718,12 @@ describe('ExpressionClient Cache — mutation & edge cases', () => {
         await ad4m.expression.get('lang://test/Qm-cross1');
         await ad4m.expression.get('lang://test/Qm-cross2');
 
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(0); // no individual RPCs
+        expect(expressionReads()).toHaveLength(1); // no RPC after the getMany
     });
 
     test('get() populates cache for subsequent getMany()', async () => {
         await ad4m.expression.get('lang://test/Qm-pre');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(1);
+        expect(expressionReads()).toHaveLength(1);
 
         rpcCallLog = [];
 
@@ -585,15 +749,15 @@ describe('ExpressionClient Cache — mutation & edge cases', () => {
         try {
             await ad4m.expression.get('lang://test/Qm-bytes-1');
             await ad4m.expression.get('lang://test/Qm-bytes-2');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2);
+            expect(expressionReads()).toHaveLength(2);
 
             // Adding 3rd should evict 1st (oldest)
             await ad4m.expression.get('lang://test/Qm-bytes-3');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(3);
+            expect(expressionReads()).toHaveLength(3);
 
             // Qm-bytes-1 was evicted — needs re-fetch
             await ad4m.expression.get('lang://test/Qm-bytes-1');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(4);
+            expect(expressionReads()).toHaveLength(4);
         } finally {
             ExpressionClient.MAX_MEM_ENTRIES = origMaxEntries;
             ExpressionClient.MAX_MEM_BYTES = origMaxBytes;
@@ -624,7 +788,7 @@ describe('AgentClient Cache — additional edge cases', () => {
         expect(agent.did).toBe('did:test:preload');
         expect(agent.directMessageLanguage).toBe('lang://pre');
 
-        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid' && c.params.did === 'did:test:preload');
+        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs' && (c.params.dids as string[]).includes('did:test:preload'));
         expect(byDidCalls).toHaveLength(0);
     });
 
@@ -635,15 +799,15 @@ describe('AgentClient Cache — additional edge cases', () => {
     test('setSelfDid() then invalidateByDid() allows re-fetch of self', async () => {
         ad4m.agent.setSelfDid('did:test:self-inv');
         await ad4m.agent.byDID('did:test:self-inv');
-        expect(rpcCallLog.filter(c => c.type === 'agent.byDid')).toHaveLength(1);
+        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(1);
 
         ad4m.agent.invalidateByDid('did:test:self-inv');
 
         await ad4m.agent.byDID('did:test:self-inv');
-        expect(rpcCallLog.filter(c => c.type === 'agent.byDid')).toHaveLength(2);
+        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(2);
     });
 
-    test('concurrent byDID() for different DIDs makes parallel RPCs', async () => {
+    test('concurrent byDID() for different DIDs makes one RPC', async () => {
         const [a1, a2, a3] = await Promise.all([
             ad4m.agent.byDID('did:test:par-1'),
             ad4m.agent.byDID('did:test:par-2'),
@@ -654,19 +818,20 @@ describe('AgentClient Cache — additional edge cases', () => {
         expect(a2.did).toBe('did:test:par-2');
         expect(a3.did).toBe('did:test:par-3');
 
-        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
-        expect(byDidCalls).toHaveLength(3); // all different DIDs
+        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
+        expect(byDidCalls).toHaveLength(1);
+        expect(byDidCalls[0].params.dids).toEqual(['did:test:par-1', 'did:test:par-2', 'did:test:par-3']);
     });
 
     test('updatePublicPerspective() does not interact with byDID cache', async () => {
         // updatePublicPerspective uses agent.updateProfile RPC, not agent.byDid
         // Verify cache is unaffected
         await ad4m.agent.byDID('did:test:update-profile');
-        expect(rpcCallLog.filter(c => c.type === 'agent.byDid')).toHaveLength(1);
+        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(1);
 
         // byDID should still be cached
         await ad4m.agent.byDID('did:test:update-profile');
-        expect(rpcCallLog.filter(c => c.type === 'agent.byDid')).toHaveLength(1);
+        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(1);
     });
 });
 
@@ -684,9 +849,9 @@ describe('Cache isolation between clients', () => {
         await client2.expression.get('lang://test/Qm-isolated');
 
         // 2 RPCs for each — both clients went to network independently
-        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
+        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
         expect(byDidCalls).toHaveLength(2);
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(2);
     });
 });
@@ -696,7 +861,7 @@ describe('Cache isolation between clients', () => {
 describe('Ad4mClient cache integration', () => {
     test('close() clears agent L1 cache', async () => {
         await ad4m.agent.byDID('did:test:close');
-        expect(rpcCallLog.filter(c => c.type === 'agent.byDid')).toHaveLength(1);
+        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(1);
 
         ad4m.close();
 
@@ -707,6 +872,6 @@ describe('Ad4mClient cache integration', () => {
         const fresh = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         await fresh.agent.byDID('did:test:close');
         // New client should make its own RPC (separate cache)
-        expect(rpcCallLog.filter(c => c.type === 'agent.byDid')).toHaveLength(2);
+        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(2);
     });
 });

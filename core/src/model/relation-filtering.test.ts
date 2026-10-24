@@ -1031,18 +1031,16 @@ class SavesReadOnly extends Ad4mModel {
 describe("readOnly relations when saving", () => {
   it("are skipped by save() and create(), even without a getter", async () => {
     const proto = SavesReadOnly.prototype as any;
-    const set = jest.spyOn(proto, "setRelationValues").mockResolvedValue(undefined);
-    const add = jest.spyOn(proto, "addRelationValue").mockResolvedValue(undefined);
+    const plan = jest.spyOn(proto, "planRelation").mockReturnValue([]);
     try {
       const instance = new SavesReadOnly({ uuid: "p" } as any, "test://instance");
       await (instance as any).innerUpdate(true);
 
-      const touched = [...set.mock.calls, ...add.mock.calls].map((call) => call[0]);
+      const touched = plan.mock.calls.map((call) => call[0]);
       expect(touched).toContain("writableLinks");
       expect(touched).not.toContain("readOnlyLinks");
     } finally {
-      set.mockRestore();
-      add.mockRestore();
+      plan.mockRestore();
     }
   });
 
