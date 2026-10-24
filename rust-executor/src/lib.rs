@@ -545,18 +545,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .into_owned(),
     );
 
-    agent::capabilities::apps_map::set_data_file_path(
-        config
-            .app_data_path
-            .as_ref()
-            .map(|path| {
-                std::path::Path::new(path)
-                    .join("apps_data.json")
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .expect("App data path not set in Ad4mConfig"),
-    );
+    // Grants are the allowlist of tokens: load them before the API serves.
+    if let Err(e) = agent::grants::load_at_start() {
+        // Without its grants the API would refuse every token: it does not start.
+        return failed_start(format!("Could not load the grants: {e}"));
+    }
 
     if config.admin_credential.is_none() {
         // Only reachable with insecure_no_admin_credential (checked above).
@@ -844,6 +837,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     })
 }
 
+/// The handle [`run`] returns when the executor cannot start: it ends at once with `reason`, as
+/// a failed API does, so the launcher shows it and executor binaries exit through
+/// [`exit_when_api_fails`].
+fn failed_start(reason: String) -> JoinHandle<Result<(), AnyError>> {
+    error!("{reason}");
+    std::thread::spawn(move || Err(deno_core::anyhow::anyhow!(reason)))
+}
+
 /// Build the cascade-gossip transport based on the SFU-related fields
 /// of [`Ad4mConfig`].  Returns a [`NoopGossip`] when cascade is
 /// unconfigured, a [`TcpGossip`] when `sfu_cascade_listen` is set, or
@@ -919,4 +920,18 @@ pub fn exit_when_api_fails(api_thread: JoinHandle<Result<(), AnyError>>) {
         error!("REST API server failed, exiting: {}", reason);
         std::process::exit(1);
     });
+}
+
+#[cfg(test)]
+mod start_tests {
+    // Grants that did not load used to panic inside `run`, which the launcher runs in its own
+    // process. The failure now comes back through the handle `run` returns.
+    #[test]
+    fn a_failed_start_reports_its_reason_through_the_handle() {
+        let reason = super::failed_start("Could not load the grants: no database".to_string())
+            .join()
+            .expect("the handle does not panic")
+            .unwrap_err();
+        assert_eq!(reason.to_string(), "Could not load the grants: no database");
+    }
 }

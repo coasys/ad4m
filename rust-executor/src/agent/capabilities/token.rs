@@ -9,11 +9,15 @@ pub fn signing_key_name() -> String {
     get_global_config().signing_key_name()
 }
 
-pub fn generate_jwt(
+/// Signs a token for `audience` that expires `expiration_time` seconds from now and names the
+/// managed agent `sub` by its DID (`None`: the main agent). The token carries no capabilities: a token
+/// works only while its grant does, and the grant holds them. Only `agent::grants::mint`
+/// calls this, so every token has a grant.
+pub(crate) fn sign_token(
     audience: String,
     expiration_time: u64,
-    capabilities: AuthInfo,
-) -> Result<String, AnyError> {
+    sub: Option<String>,
+) -> Result<(String, Claims), AnyError> {
     let backend = wallet_backend();
     let name = signing_key_name();
 
@@ -34,33 +38,22 @@ pub fn generate_jwt(
         name
     ))?;
 
-    // A token for a user acts as the user's managed agent, which `sub` names by its DID.
-    let sub = match &capabilities.user_email {
-        Some(email) => Some(crate::agent::AgentService::did_for_email(email)?),
-        None => None,
-    };
-    let payload = Claims::new(
-        did_document.id,
-        audience,
-        expiration_time,
-        sub,
-        capabilities,
-    );
+    let claims = Claims::new(did_document.id, audience, expiration_time, sub);
 
     let token = encode(
         &Header::default(),
-        &payload,
+        &claims,
         &EncodingKey::from_secret(secret_key.as_slice()),
     )?;
 
-    Ok(token)
+    Ok((token, claims))
 }
 
 pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
     let backend = wallet_backend();
     let name = signing_key_name();
 
-    // Same guard as generate_jwt: every authenticated request verifies its JWT
+    // Same guard as sign_token: every authenticated request verifies its JWT
     // here, so a locked wallet must surface as "locked", not as the internal
     // "key not found" — the caller (e.g. a remote multi-user agent) can do
     // nothing about the key, but can ask the operator to unlock.
@@ -84,6 +77,22 @@ pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
     Ok(result.claims)
 }
 
+/// The claims of a token, read without the wallet and without the signature check.
+///
+/// Never use it to decide who a caller is. It serves revocation: a token names its grant by
+/// id, and the operator may revoke it while the wallet is locked. Revoking needs the grant,
+/// which only a token this executor issued has.
+/// `None` when the token does not parse.
+pub fn read_stored_claims(token: &str) -> Option<Claims> {
+    let mut validation = jsonwebtoken::Validation::new(Algorithm::HS256);
+    validation.insecure_disable_signature_validation();
+    validation.validate_exp = false;
+    validation.required_spec_claims.clear();
+    jsonwebtoken::decode::<Claims>(token, &DecodingKey::from_secret(&[]), &validation)
+        .ok()
+        .map(|data| data.claims)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,13 +100,36 @@ mod tests {
     use crate::wallet::{try_init_wallet_backend, LocalWallet, WalletBackend};
     use std::sync::Arc;
 
+    // Revocation reads a token's id without the wallet, so the operator can revoke while it
+    // is locked.
+    #[test]
+    fn a_tokens_id_reads_without_the_wallet() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let (token, signed) = sign_token("id test".to_string(), 3600, None).unwrap();
+        let claims = decode_jwt(token.clone()).unwrap();
+        assert_eq!(claims.nonce(), signed.nonce());
+
+        let backend = wallet_backend();
+        backend.lock("stored-token-id-test");
+        let read = read_stored_claims(&token);
+        backend
+            .unlock("stored-token-id-test")
+            .expect("restore the shared wallet");
+
+        let read = read.expect("the token parses");
+        assert_eq!(read.nonce(), claims.nonce());
+        assert_eq!(read.expires_at(), claims.expires_at());
+        assert!(read_stored_claims("not-a-jwt").is_none());
+    }
+
     /// decode_jwt is the verification step of every authenticated request, so a
     /// locked wallet must surface as the operator-facing "Executor is locked"
-    /// message generate_jwt already uses — not as the internal "key not found".
+    /// message sign_token already uses — not as the internal "key not found".
     /// A remote multi-user agent hit exactly this in the 2026-09-15 wake test:
-    /// after a node restart, the waker's subscribe 403'd with
+    /// after an executor restart, the waker's subscribe 403'd with
     /// "main key not found. call createMainKey() first", which reads like a
-    /// broken installation instead of "ask the node's operator to unlock".
+    /// broken installation instead of "ask the executor's operator to unlock".
     #[test]
     fn decode_jwt_on_locked_wallet_names_the_locked_state() {
         set_global_config(Ad4mConfig::default());

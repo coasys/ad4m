@@ -65,9 +65,25 @@ from the global config where `agent.requestCapability` uses it.
 - Every socket (RPC, `/events`, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
   `Session::check()` again on each request and each delivered event, so revocation and expiry end
   an open connection. Tests build sessions with `Session::for_test(principal)` plus
-  `.with_caps(..)`, `.with_did(..)`, `.expiring_at(..)`, and contexts with
+  `.with_caps(..)`, `.with_did(..)`, `.with_grant(..)`, `.expiring_at(..)`, and contexts with
   `RequestContext::{operator,app,user}_for_test` / `for_session` (`.on_connection(id)` for a
   context on an RPC connection).
+- Each socket's "session over" token is `ctx.session.ended()`: a child of the grant's `ended`
+  token (a token that never fires for the operator and anonymous callers). Revoking or removing
+  the grant cancels it, and the socket closes at once with `ws_rpc::token_ended_frame()` (1008),
+  the same frame a failed check sends. A grant revoked before the socket starts serving gives an
+  already-cancelled child, so there is no race to check. Only the socket's own task writes the
+  close frame. The RPC socket first delivers in-flight replies for up to `REPLY_GRACE`, so
+  `user.logout` gets its answer; each call's `cancel_token` is a child of the socket's token, so
+  the calls still running are cancelled (401). Expiry closes an idle socket the same way:
+  every socket (and the SSE chat stream) also waits on `session.over()`, which completes when
+  the grant ends or the token expires (leeway included). A new socket type must watch
+  `session.over()` too.
+- Revocation is on grants (`agent::grants::Grants`): `agent.revokeToken` (by request id or by
+  the token) and `agent.removeApp` act on grants of the caller's own agent, or any for the
+  operator; another agent's grant answers as missing. `user.logout` revokes the caller's grant;
+  `user.revokeAllSessions` revokes every grant on that user's agent. `agent.getApps` lists the
+  grants of `acts_as()`.
 - Live queries: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision }`
   (revision 0, or later if a write landed while the first result was computed: the subscription is
   registered first);

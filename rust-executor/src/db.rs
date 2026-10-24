@@ -24,6 +24,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
+mod grants;
+pub use grants::GrantRow;
+
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
     perspective: String,
@@ -142,7 +145,7 @@ impl Ad4mDb {
         AD4M_DB_INSTANCE.clone()
     }
 
-    fn new(db_path: &str) -> Ad4mDbResult<Self> {
+    pub(crate) fn new(db_path: &str) -> Ad4mDbResult<Self> {
         let conn = Connection::open(db_path)?;
         Self::refuse_data_from_before_did_keys(&conn)?;
 
@@ -347,6 +350,9 @@ impl Ad4mDb {
              )",
             [],
         )?;
+
+        // The tokens the executor issued: see agent::grants.
+        Self::create_grants_table(&conn)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS email_verifications (
