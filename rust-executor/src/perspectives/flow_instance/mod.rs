@@ -20,9 +20,9 @@
 //! links in perspective
 //!   │
 //!   ▼ load_proposal_links  (atom.rs)
-//!      ├─ Half 1: model_query(FlowTransitionProposal, where flowInstance=uri)
-//!      │          → proposal URIs scoped to this instance
-//!      └─ Half 2: get_links(source=uri) per proposal (raw; signature verdicts intact)
+//!      model_query(FlowTransitionProposal, where flowInstance=uri, links=[…])
+//!        → each proposal's URI and its `__links` rows: one link per row, with
+//!          its own author, signature verdict and status (verified only)
 //!   │
 //!   ▼ TransitionAtom::from_links  (atom.rs)
 //!      Answers: "is this a proposal, and whose words are in it?"
