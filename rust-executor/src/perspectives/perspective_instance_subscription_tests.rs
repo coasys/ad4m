@@ -441,7 +441,7 @@ async fn a_model_subscription_refuses_a_cursor() {
         r#"{"after":""}"#,
     ] {
         let err = perspective
-            .model_subscribe_and_query("Task".into(), query_json.into(), "c".into())
+            .model_subscribe_and_query("Task".into(), query_json.into(), "c".into(), None)
             .await
             .expect_err(query_json);
         assert_eq!(err.to_string(), MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED);
@@ -455,6 +455,7 @@ async fn a_model_subscription_refuses_a_cursor() {
             "Task".into(),
             r#"{"limit":5,"after":null}"#.into(),
             "c".into(),
+            None,
         )
         .await
         .expect("a null cursor is no cursor");
