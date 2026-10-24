@@ -266,6 +266,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ad4m-ldk"
+version = "0.13.0-test-1"
+dependencies = [
+ "futures",
+ "js-sys",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10049,6 +10062,29 @@ name = "identity-hash"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfdd7caa900436d8f13b2346fe10257e0c05c1f1f9e351f4f5d57c03bd5f45da"
+
+[[package]]
+name = "identity-store"
+version = "0.1.0"
+dependencies = [
+ "ad4m-hash-chain",
+ "ad4m-identity-core",
+ "ad4m-ldk",
+ "axum",
+ "base64 0.22.1",
+ "bs58 0.5.1",
+ "ed25519-dalek 2.2.0",
+ "http-body-util",
+ "rand 0.8.5",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tower",
+ "tower-http",
+]
 
 [[package]]
 name = "idna"

@@ -13,6 +13,7 @@ file. Edit this file; do not put unique rules in `CLAUDE.md`.
 | `rust-client/` | Rust client for the executor's WS RPC | Rust |
 | `ad4m-hash-chain/` | Generic linear hash chain of signed JSON entries (entry hash, `eddsa-jcs-2022` proofs, fold/import, fork detection, `ChainStore` with memory/SQLite adapters; native + WASM). Under the key log. See `ad4m-hash-chain/AGENTS.md` | Rust |
 | `ad4m-identity-core/` | The `did:scid:coasys:1` identity core: the key log as a chain type on `ad4m-hash-chain` (`Event`, `KelPolicy`, `fold`, `KeyState`), signing domains, proof of work, event builders (`build`), the 12 words (`words`), WASM exports (`wasm`). Spec `docs-src/identity/did-scid-coasys-1.md`. See `ad4m-identity-core/AGENTS.md` | Rust |
+| `identity-store/` | The shared store of key logs: `identity-store` binary (axum, SQLite on `ad4m-hash-chain`'s `SqliteChainStore`), signed heads, the key index, signed requests, agent records, offers and claims (an `add` spends a claim: the claim check). Reached by executors only through the agent language. See `identity-store/AGENTS.md` | Rust |
 | `core/` | TypeScript SDK (`@coasys/ad4m`): `Ad4mClient`, types, model/SHACL decorators, generated RPC contracts (`src/generated/api/RpcMethods.ts`) | TS |
 | `connect/` | Browser/Node connection helper (`@coasys/ad4m-connect`) | TS |
 | `bootstrap-languages/` | The system Languages (agent, perspective-diff-sync, etc.) bundled into the executor | TS/Rust |

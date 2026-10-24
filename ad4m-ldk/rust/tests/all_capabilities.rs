@@ -1,7 +1,8 @@
 //! Expands `ad4m_language!` with every capability arm, so `cargo test`
 //! type-checks every shim the macro can emit. The shims marshal through
 //! `JsValue` and only run inside WASM; the slot logic they share has unit
-//! tests in `src/state.rs`.
+//! tests in `src/state.rs`. The `identity` and `token` arms expand in
+//! `tests/identity_token.rs`, with a language that implements them.
 
 use ad4m_ldk::prelude::*;
 use ad4m_ldk::traits::LanguageSourceCapability;

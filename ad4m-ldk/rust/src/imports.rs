@@ -159,6 +159,13 @@ pub fn emit_signal_typed<T: Serialize + ?Sized>(data: &T) {
     }
 }
 
+/// Report a token transfer (new, or a change of state) to the executor as
+/// the `token-transfer` language signal (section 5.9 of
+/// `docs-src/language-interface-spec.md`).
+pub fn emit_token_transfer(transfer: &crate::token::TokenTransfer) {
+    emit_signal_typed(&crate::token::TokenTransferSignal::new(transfer.clone()));
+}
+
 // ---------------------------------------------------------------------------
 // Typed wrappers for the remaining JsValue-shaped imports.
 //
