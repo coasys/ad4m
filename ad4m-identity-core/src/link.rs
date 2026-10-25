@@ -53,6 +53,23 @@ pub const OFFER_ID_LEN: usize = 16;
 pub const DEVICE_R_LEN: usize = 16;
 /// Characters of a claim's or device string's hint.
 pub const HINT_MAX_CHARS: usize = 64;
+/// Bytes of the JSON an offer string or a device string holds, at most. The largest legitimate
+/// one is a device string: two multikeys (48 characters each), `r` (22), `exp` (16 digits), a
+/// 64-character hint (at most 384 bytes as JSON, every character escaped as `\u00XX`) and the
+/// field names come to under 600 bytes, which leaves over 1400 bytes for the store's URL.
+pub const ENVELOPE_JSON_MAX: usize = 2048;
+
+// Base58 decoding costs time quadratic in the text length, so every decoder refuses text longer
+// than the longest encoding of its byte length before decoding. n bytes take at most
+// ceil(n * log58(256)) = ceil(n * 1.3657) base58 characters.
+/// The longest base58 text of the 32-byte secret `s`: ceil(43.70) = 44.
+const SECRET_TEXT_MAX: usize = 44;
+/// The longest base58 text of a 16-byte offer id or device string `r`: ceil(21.85) = 22.
+const ID_TEXT_MAX: usize = 22;
+/// The longest base58 body of an offer or device string (after its prefix), from
+/// [`ENVELOPE_JSON_MAX`] bytes: ceil(2048 * 1.3657) = 2797. JSON starts with `{` (0x7b), so
+/// 2049 bytes of it take at least 2798 characters: the text bound is the byte bound.
+const ENVELOPE_TEXT_MAX: usize = 2797;
 
 /// What the offer adds: a device (an app), a node (an executor) or a bot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,7 +254,10 @@ fn malformed(what: impl Into<String>) -> LinkError {
     LinkError::Malformed(what.into())
 }
 
-fn b58_exact(text: &str, len: usize) -> Option<Vec<u8>> {
+fn b58_exact(text: &str, len: usize, text_max: usize) -> Option<Vec<u8>> {
+    if text.len() > text_max {
+        return None;
+    }
     bs58::decode(text)
         .into_vec()
         .ok()
@@ -246,7 +266,7 @@ fn b58_exact(text: &str, len: usize) -> Option<Vec<u8>> {
 
 /// The secret `s` from its base58btc text, if it is 32 bytes.
 pub fn decode_secret(s: &str) -> Option<[u8; SECRET_LEN]> {
-    b58_exact(s, SECRET_LEN).and_then(|b| b.try_into().ok())
+    b58_exact(s, SECRET_LEN, SECRET_TEXT_MAX).and_then(|b| b.try_into().ok())
 }
 
 /// The offer commit: `multihash_b58(sha256("coasys:offer" ‖ s))`.
@@ -299,7 +319,7 @@ fn check_bot_scope(scope: &BotScope) -> Result<(), LinkError> {
 
 /// The shape of an offer: ids and keys well formed, `bot` set exactly for a bot offer.
 pub fn check_offer_shape(offer: &Offer) -> Result<(), LinkError> {
-    if b58_exact(&offer.offer_id, OFFER_ID_LEN).is_none() {
+    if b58_exact(&offer.offer_id, OFFER_ID_LEN, ID_TEXT_MAX).is_none() {
         return Err(malformed("offerId is 16 bytes of base58btc"));
     }
     if decode_hash(&offer.commit).is_err() {
@@ -399,7 +419,7 @@ pub fn verify_claim(scid: &str, c: &Claim) -> Result<(), LinkError> {
     if decode_secret(&c.s).is_none() {
         return Err(malformed("s is 32 bytes of base58btc"));
     }
-    if b58_exact(&c.offer_id, OFFER_ID_LEN).is_none() {
+    if b58_exact(&c.offer_id, OFFER_ID_LEN, ID_TEXT_MAX).is_none() {
         return Err(malformed("offerId is 16 bytes of base58btc"));
     }
     if !is_ed25519_multikey(&c.device_key) {
@@ -526,6 +546,11 @@ fn decode_string(prefix: &str, text: &str) -> Result<Value, LinkError> {
     let body = text
         .strip_prefix(prefix)
         .ok_or_else(|| malformed(format!("the string does not start with {prefix}")))?;
+    if body.len() > ENVELOPE_TEXT_MAX {
+        return Err(malformed(format!(
+            "the string holds more than {ENVELOPE_JSON_MAX} bytes"
+        )));
+    }
     let bytes = bs58::decode(body)
         .into_vec()
         .map_err(|_| malformed("the string is not base58btc"))?;
@@ -574,7 +599,7 @@ impl OfferString {
         if decode_secret(&parsed.s).is_none() {
             return Err(malformed("s is 32 bytes of base58btc"));
         }
-        if b58_exact(&parsed.offer_id, OFFER_ID_LEN).is_none() {
+        if b58_exact(&parsed.offer_id, OFFER_ID_LEN, ID_TEXT_MAX).is_none() {
             return Err(malformed("offerId is 16 bytes of base58btc"));
         }
         if decode_hash(&parsed.scid).is_err() {
@@ -642,7 +667,7 @@ impl DeviceString {
         if !is_x25519_multikey(&parsed.enc) {
             return Err(malformed("enc is an X25519 multikey"));
         }
-        if b58_exact(&parsed.r, DEVICE_R_LEN).is_none() {
+        if b58_exact(&parsed.r, DEVICE_R_LEN, ID_TEXT_MAX).is_none() {
             return Err(malformed("r is 16 bytes of base58btc"));
         }
         if parsed
@@ -682,5 +707,47 @@ mod tests {
             .filter(|c| *c != ' ')
             .all(|c| BASE32.contains(&(c as u8))));
         assert_ne!(code, match_code("QmScid", "offer", "z6MkOther"));
+    }
+
+    #[test]
+    fn length_limits_fit_the_longest_encodings() {
+        assert_eq!(
+            bs58::encode([0xff; SECRET_LEN]).into_string().len(),
+            SECRET_TEXT_MAX
+        );
+        assert_eq!(
+            bs58::encode([0xff; OFFER_ID_LEN]).into_string().len(),
+            ID_TEXT_MAX
+        );
+        assert_eq!(
+            bs58::encode([0xff; DEVICE_R_LEN]).into_string().len(),
+            ID_TEXT_MAX
+        );
+        assert_eq!(
+            bs58::encode([0xff; ENVELOPE_JSON_MAX]).into_string().len(),
+            ENVELOPE_TEXT_MAX
+        );
+        // The smallest JSON one byte over the limit already takes a longer text.
+        let mut over = vec![0u8; ENVELOPE_JSON_MAX + 1];
+        over[0] = b'{';
+        assert!(bs58::encode(over).into_string().len() > ENVELOPE_TEXT_MAX);
+    }
+
+    #[test]
+    fn overlong_text_is_refused_before_decoding() {
+        // A megabyte of base58 would take minutes to decode; refused, it takes no time.
+        let huge = "2".repeat(1 << 20);
+        let started = std::time::Instant::now();
+        assert_eq!(decode_secret(&huge), None);
+        assert_eq!(b58_exact(&huge, OFFER_ID_LEN, ID_TEXT_MAX), None);
+        assert!(
+            decode_string(OFFER_STRING_PREFIX, &format!("{OFFER_STRING_PREFIX}{huge}")).is_err()
+        );
+        assert!(decode_string(
+            DEVICE_STRING_PREFIX,
+            &format!("{DEVICE_STRING_PREFIX}{huge}")
+        )
+        .is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 }

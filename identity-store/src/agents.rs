@@ -7,6 +7,10 @@
 //! write it only while its scope is in force (the bot-scope check). A `did:scid` record comes
 //! with a signed request of that identity, names an anchor in its log, and is signed by a
 //! non-bot key of that log valid at the head.
+//!
+//! The store does not read `profile`: the record signature covers it whatever it holds. The
+//! agent language puts a `did:key` agent's Agent there as that agent's signed AD4M expression,
+//! which the executor verifies on every read.
 
 use ad4m_hash_chain::{decode_ed25519_multikey, decode_proof_value, MAX_SAFE_INTEGER};
 use ad4m_identity_core::{scid_of, verify_signed, LINK_DOMAIN};

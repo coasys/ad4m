@@ -21,7 +21,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `src/log.rs` | `POST …/events` with the admission checks (below), log pages, heads, the key index; `admit_new_log` (the brake's place) |
 | `src/offers.rs` | the offer routes, the claim route, the device's state poll, the store's side of the claim check (`check_spend`, `spend`, `supersede`) |
 | `src/request.rs` | signed requests (`X-Coasys-Request`): checks, nonce replay guard, `percent_decode` |
-| `src/agents.rs` | agent records under a `did:key` or a `did:scid` |
+| `src/agents.rs` | agent records under a `did:key` or a `did:scid`; the store checks the record signature and never reads `profile` (the agent language writes a `did:key` agent's signed AD4M expression there) |
 | `src/head.rs` | `StoreKey` (key file, `keygen`), `sign_head` (the core's `HeadStatement`; executors verify it with the same type) |
 | `src/routes.rs` | the axum router, body limit, CORS, waits, the feed (token compared in constant time) |
 | `src/error.rs` | `ApiError`: every refusal as a status and a JSON body with an `error` name |

@@ -374,6 +374,140 @@ fn the_device_string_round_trips_and_refuses_extra_fields() {
     .is_err());
 }
 
+/// Bytes of the JSON a string encodes.
+fn json_len<T: serde::Serialize>(value: &T) -> usize {
+    ad4m_hash_chain::canonical_json(&serde_json::to_value(value).unwrap())
+        .unwrap()
+        .len()
+}
+
+/// `store` grown with `a`s until the JSON of `value` is `bytes` long.
+fn pad_store<T: serde::Serialize>(
+    value: &mut T,
+    store: impl Fn(&mut T) -> &mut String,
+    bytes: usize,
+) {
+    let missing = bytes - json_len(value);
+    store(value).push_str(&"a".repeat(missing));
+    assert_eq!(json_len(value), bytes);
+}
+
+#[test]
+fn the_longest_claim_fields_verify_and_overlong_ones_are_refused_before_decoding() {
+    let log = Log::new();
+    let scid = log.chain.state().scid.clone();
+    // The co-signature does not cover `s`: the longest 32-byte text still verifies.
+    let mut longest = link_claim(&log, 2, false);
+    longest.s = bs58::encode([0xff; 32]).into_string();
+    assert_eq!(longest.s.len(), 44);
+    assert_eq!(verify_claim(&scid, &longest), Ok(()));
+    let longest_id = bs58::encode([0xff; 16]).into_string();
+    assert_eq!(longest_id.len(), 22);
+    let claim = make_claim(
+        &scid,
+        &longest_id,
+        [0xff; 32],
+        &dev(2),
+        enc("d2"),
+        false,
+        None,
+    )
+    .unwrap();
+    assert_eq!(verify_claim(&scid, &claim), Ok(()));
+
+    let mut huge_s = claim.clone();
+    huge_s.s = huge_base58();
+    assert!(matches!(
+        quickly(|| verify_claim(&scid, &huge_s)),
+        Err(LinkError::Malformed(_))
+    ));
+    assert!(!quickly(|| check_secret(
+        &link_offer(&log, OfferKind::Device, None),
+        &huge_s
+    )));
+    let mut huge_id = claim.clone();
+    huge_id.offer_id = huge_base58();
+    assert!(matches!(
+        quickly(|| verify_claim(&scid, &huge_id)),
+        Err(LinkError::Malformed(_))
+    ));
+    let mut huge_enc = claim;
+    huge_enc.enc_key = format!("z{}", huge_base58());
+    assert!(matches!(
+        quickly(|| verify_claim(&scid, &huge_enc)),
+        Err(LinkError::Malformed(_))
+    ));
+}
+
+#[test]
+fn an_offer_with_the_longest_id_is_well_formed_and_an_overlong_id_is_refused() {
+    let log = Log::new();
+    let mut offer = link_offer(&log, OfferKind::Device, None);
+    offer.offer_id = bs58::encode([0xff; 16]).into_string();
+    assert_eq!(check_offer_shape(&offer), Ok(()));
+    offer.offer_id = huge_base58();
+    assert!(matches!(
+        quickly(|| check_offer_shape(&offer)),
+        Err(LinkError::Malformed(_))
+    ));
+}
+
+#[test]
+fn an_offer_string_up_to_the_envelope_limit_parses_and_a_longer_one_is_refused() {
+    let mut longest = offer_string();
+    pad_store(&mut longest, |s| &mut s.store, ENVELOPE_JSON_MAX);
+    assert_eq!(OfferString::parse(&longest.encode()).unwrap(), longest);
+    assert_eq!(OfferString::parse_link(&longest.link()).unwrap(), longest);
+
+    let mut over = longest;
+    over.store.push('a');
+    assert!(matches!(
+        OfferString::parse(&over.encode()),
+        Err(LinkError::Malformed(_))
+    ));
+
+    let huge = format!("{OFFER_STRING_PREFIX}{}", huge_base58());
+    assert!(matches!(
+        quickly(|| OfferString::parse(&huge)),
+        Err(LinkError::Malformed(_))
+    ));
+    assert!(matches!(
+        quickly(|| OfferString::parse_link(&format!("{OFFER_LINK_PAGE}#{huge}"))),
+        Err(LinkError::Malformed(_))
+    ));
+}
+
+#[test]
+fn a_device_string_up_to_the_envelope_limit_parses_and_a_longer_one_is_refused() {
+    // The largest device string with an empty store: the room left for the store's URL.
+    let worst = DeviceString {
+        sign: ad4m_hash_chain::encode_ed25519_multikey(&[0xff; 32]),
+        enc: ad4m_identity_core::encode_x25519_multikey(&[0xff; 32]),
+        r: bs58::encode([0xff; 16]).into_string(),
+        exp: ad4m_hash_chain::MAX_SAFE_INTEGER,
+        hint: Some("\u{1}".repeat(HINT_MAX_CHARS)),
+        store: String::new(),
+    };
+    assert!(json_len(&worst) < 600, "{}", json_len(&worst));
+
+    let mut longest = worst;
+    pad_store(&mut longest, |d| &mut d.store, ENVELOPE_JSON_MAX);
+    assert_eq!(DeviceString::parse(&longest.encode()).unwrap(), longest);
+
+    let mut over = longest;
+    over.store.push('a');
+    assert!(matches!(
+        DeviceString::parse(&over.encode()),
+        Err(LinkError::Malformed(_))
+    ));
+
+    let huge = format!("{DEVICE_STRING_PREFIX}{}", huge_base58());
+    assert!(matches!(
+        quickly(|| DeviceString::parse(&huge)),
+        Err(LinkError::Malformed(_))
+    ));
+}
+
 #[test]
 fn offer_states_name_themselves_on_the_wire() {
     let view = claimed(&Log::new(), 2);
