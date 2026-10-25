@@ -139,6 +139,16 @@ impl Ad4mDb {
         operator_record_in(&self.conn)
     }
 
+    /// Tests on the shared database: sets the operator record (`Some`) or clears it (`None`).
+    #[cfg(test)]
+    pub(crate) fn set_operator_record_for_test(&self, scid: Option<&str>) -> Ad4mDbResult<()> {
+        self.conn.execute("DELETE FROM operator_record", [])?;
+        if let Some(scid) = scid {
+            set_operator_record_if_empty_in(&self.conn, scid, 1, OperatorSetBy::Cli)?;
+        }
+        Ok(())
+    }
+
     /// The SCID the local agent `agent_did` (its `did:key`) speaks for, if any.
     pub fn agent_identity(&self, agent_did: &str) -> Ad4mDbResult<Option<String>> {
         Ok(self

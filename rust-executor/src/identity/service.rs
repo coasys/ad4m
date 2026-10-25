@@ -13,7 +13,7 @@ use serde_json::Value;
 use super::backend::{IdentityBackend, IdentityError};
 use super::cache::{CacheError, KelCache};
 use super::device::{device_key, enc_key_of, WalletSigner};
-use super::operator::FirstLinkRefusal;
+use super::operator::{main_incept_check, FirstLinkRefusal};
 use super::types::{
     convert, BotView, DeviceView, ForkRecord, IdentityLog, IdentityStatus, OfferListing,
     OfferOpened, PublishParams, SignedHead, SignedOffer, SignedRequest,
@@ -225,6 +225,8 @@ impl IdentityService {
 
     /// `identity.cosignIncept`: adds `agent`'s device-key proof to an `incept` that lists that
     /// key with its `enc` key, while the agent has no identity yet; the event must fold with it.
+    /// On an executor with an operator record the main agent co-signs no incept (`first-link`):
+    /// its key may speak only for the operator's identity.
     pub async fn cosign_incept(
         &self,
         agent: &AgentContext,
@@ -248,6 +250,10 @@ impl IdentityService {
                 event.op.name()
             )));
         };
+        if agent.is_main_agent() {
+            let record = db(|db| db.operator_record())?;
+            main_incept_check(record.as_ref(), &did_of(&event.scid)).map_err(first_link_error)?;
+        }
         let listed = add.iter().find(|d| d.sign == key).ok_or_else(|| {
             WsRpcError::bad_request("not-listed: the incept does not list this agent's device key")
         })?;
@@ -526,5 +532,89 @@ mod tests {
             (e.code, e.message.starts_with("identity-fork")),
             (409, true)
         );
+    }
+
+    /// Sets the operator record of the shared test database; clears it when dropped, even if
+    /// the test panics.
+    struct OperatorRecord;
+
+    impl OperatorRecord {
+        fn set(did: &str) -> Self {
+            Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(Some(did))).unwrap();
+            OperatorRecord
+        }
+    }
+
+    impl Drop for OperatorRecord {
+        fn drop(&mut self) {
+            let _ = Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None));
+        }
+    }
+
+    /// A new person's incept listing `agent`'s device key as `d1`, signed by the master only.
+    fn incept_listing(agent: &AgentContext, seed: u8) -> Value {
+        use ad4m_identity_core::build::{incept_human, Signer};
+        let (_, key) = device_key(agent).unwrap();
+        let master = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let next = ad4m_identity_core::commitment(&Signer::key(&master), "salt");
+        let incept = incept_human(
+            &master,
+            next,
+            vec![ad4m_identity_core::DeviceKey {
+                id: "d1".into(),
+                enc: enc_key_of(&key).unwrap(),
+                sign: key,
+                life: ad4m_identity_core::KeyLife::Standing,
+            }],
+        )
+        .unwrap();
+        serde_json::to_value(&incept).unwrap()
+    }
+
+    fn test_service() -> IdentityService {
+        use crate::identity::cache::tests::{in_memory, FakeStore};
+        IdentityService {
+            backend: Arc::new(FakeStore::new(vec![])),
+            cache: Arc::new(in_memory(vec![])),
+            store_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn with_an_operator_record_the_main_agent_co_signs_no_incept() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let service = test_service();
+        let main = AgentContext::main_agent();
+        let incept = incept_listing(&main, 51);
+        let operator = did_of(&TestLog::new(4).scid());
+        let proofs = |v: &Value| v["proof"].as_array().map(Vec::len);
+
+        // No operator record (a desktop executor's first run): the main key starts an identity.
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        let cosigned = service.cosign_incept(&main, &incept).await.unwrap();
+        assert_eq!(proofs(&cosigned), Some(2));
+
+        // With a record the main key may speak only for the operator: no new identity.
+        let _record = OperatorRecord::set(&operator);
+        let refused = service.cosign_incept(&main, &incept).await.unwrap_err();
+        assert_eq!(refused.code, 403, "{refused:?}");
+        assert!(
+            refused.message.starts_with("first-link") && refused.message.contains(&operator),
+            "{}",
+            refused.message
+        );
+
+        // A managed user is not bound by the operator record.
+        let user = crate::test_utils::create_test_user(&format!(
+            "incept-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let managed = AgentContext::managed(user);
+        let cosigned = service
+            .cosign_incept(&managed, &incept_listing(&managed, 52))
+            .await
+            .unwrap();
+        assert_eq!(proofs(&cosigned), Some(2));
     }
 }

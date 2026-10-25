@@ -7,6 +7,11 @@
 //! [`first_link_check`] (in `ClaimService::claim_for_main`): only an offer of the recorded
 //! identity passes. While the key is valid in a log, `claim_for_main` refuses every offer
 //! (`already-linked`).
+//!
+//! The same rule holds for a new identity: with an operator record the main key may speak only
+//! for the operator's identity, so `identity.cosignIncept` for the main agent runs
+//! [`main_incept_check`] and refuses an incept of any other identity. Managed users are not
+//! bound by the operator record.
 
 use std::path::Path;
 
@@ -21,6 +26,10 @@ pub enum FirstLinkRefusal {
     /// The main key is in no log and the offer is not of the recorded operator's identity.
     #[error("first-link: this executor's first link must come from its operator {operator}, not from {offer}")]
     FirstLink { operator: String, offer: String },
+    /// An executor with an operator record: the main key joins the operator's identity
+    /// through a claim and co-signs no incept of a new one.
+    #[error("first-link: this executor's main key may speak only for its operator {operator}; it co-signs no incept of {incept}")]
+    OperatorIncept { operator: String, incept: String },
 }
 
 /// `OperatorRecord::admits_first_link`: true only when the record is set and
@@ -45,6 +54,24 @@ pub fn first_link_check(
         operator: record.scid.clone(),
         offer: offer_did.to_string(),
     })
+}
+
+/// The check `identity.cosignIncept` runs for the main agent: without an operator record the
+/// main key may start an identity (a desktop executor's first run); with one, only an incept of
+/// the recorded identity passes, which a new incept never is (its SCID derives from it).
+pub fn main_incept_check(
+    record: Option<&OperatorRecordRow>,
+    incept_did: &str,
+) -> Result<(), FirstLinkRefusal> {
+    match record {
+        Some(record) if !admits_first_link(Some(record), incept_did) => {
+            Err(FirstLinkRefusal::OperatorIncept {
+                operator: record.scid.clone(),
+                incept: incept_did.to_string(),
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Why `init --operator` did not record the operator.
@@ -114,6 +141,15 @@ mod tests {
         let refusal = first_link_check(Some(&record(A)), B).unwrap_err();
         assert!(matches!(refusal, FirstLinkRefusal::FirstLink { .. }));
         assert!(refusal.to_string().starts_with("first-link"));
+    }
+
+    #[test]
+    fn the_main_key_co_signs_an_incept_only_without_an_operator() {
+        assert_eq!(main_incept_check(None, B), Ok(()));
+        let refusal = main_incept_check(Some(&record(A)), B).unwrap_err();
+        assert!(matches!(refusal, FirstLinkRefusal::OperatorIncept { .. }));
+        assert!(refusal.to_string().starts_with("first-link"), "{refusal}");
+        assert_eq!(main_incept_check(Some(&record(A)), A), Ok(()));
     }
 
     #[test]

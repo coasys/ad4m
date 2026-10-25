@@ -6,15 +6,20 @@
 //! 3. Master #0 and the commitment to master #1 from the seed; an `incept` listing the
 //!    executor's device key as `d1` with its `enc` key (`identity.status`); the executor adds
 //!    its proof (`identity.cosignIncept`); the client folds the event; `identity.publish`.
-//! 4. The vault keeps master #0 (after the publish, so a cancelled unlock leaves
-//!    nothing in the store).
+//! 4. The vault keeps master #0 and the co-signed incept *before* the publish: a vault that
+//!    refuses (a cancelled prompt, no screen lock) leaves nothing in the store, and a
+//!    published identity always has its master key on this surface.
+//! 5. `identity.publish`; once it answers, the vault forgets the incept. When the publish
+//!    fails or its answer is lost, [`resume`] (or `finish` with the same words) publishes the
+//!    kept incept again: the executor answers a repeat of the events its store holds with the
+//!    store's head, so the identity is made once, with the master key the vault holds.
 
 use ad4m_identity_core::build::{incept_human, Signer};
 use ad4m_identity_core::words::{self, Seed, Words};
-use ad4m_identity_core::{DeviceKey, Event, KeyLife};
+use ad4m_identity_core::{DeviceKey, Event, KeyLife, Op};
 use ad4m_ldk::identity::SignedHead;
 
-use crate::executor::{ExecutorRpc, ViaExecutor};
+use crate::executor::{ExecutorRpc, IdentityStatus, ViaExecutor};
 use crate::secret::Secret;
 use crate::vault::Vault;
 use crate::{fold, ClientError, Random};
@@ -127,16 +132,15 @@ impl CreateFlow {
     }
 }
 
-/// Step 3 and 4 of `create` from the seed of confirmed words.
+/// Steps 3 to 5 of `create` from the seed of confirmed words. When the vault keeps an incept of
+/// these words for this executor (an earlier `create` that did not see its publish answered),
+/// publishes that one again instead of making another.
 pub async fn create_from_seed<R: ExecutorRpc>(
     seed: &Seed,
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
 ) -> Result<Created, ClientError> {
     let status = executor.status().await?;
-    if let Some(did) = status.did {
-        return Err(ClientError::HasIdentity(did));
-    }
     let master = words::master_key(seed, 0)?;
     let (next, _) = words::next_commitment(seed, 1)?;
     let device = DeviceKey {
@@ -146,6 +150,17 @@ pub async fn create_from_seed<R: ExecutorRpc>(
         life: KeyLife::Standing,
     };
     let incept = incept_human(&master, next, vec![device])?;
+    if let Some(pending) = pending_for(vault, &status.device_key)? {
+        if pending.scid != incept.scid {
+            return Err(ClientError::CreatePending(ad4m_identity_core::did_of(
+                &pending.scid,
+            )));
+        }
+        return publish_kept(executor, vault, &status, pending).await;
+    }
+    if let Some(did) = status.did {
+        return Err(ClientError::HasIdentity(did));
+    }
     let cosigned: Event = executor.cosign_incept(&incept).await?;
     if cosigned.op != incept.op || cosigned.scid != incept.scid {
         return Err(ClientError::Protocol(
@@ -158,13 +173,69 @@ pub async fn create_from_seed<R: ExecutorRpc>(
             "the incept names another master".into(),
         ));
     }
-    let head = executor.publish(std::slice::from_ref(&cosigned)).await?;
-    let scid = cosigned.scid.clone();
-    vault.store_master(&scid, 0, Secret::new(master.to_bytes()))?;
+    // Custody first: nothing is public until the vault holds the master key and the incept.
+    vault.store_master(&cosigned.scid, 0, Secret::new(master.to_bytes()))?;
+    vault.store_pending_incept(&cosigned)?;
+    publish_kept(executor, vault, &status, cosigned).await
+}
+
+/// Finishes a `create` whose publish failed or went unanswered: publishes the incept the vault
+/// keeps for this executor again (the executor answers a repeat of a held log with its head).
+/// `None` when the vault keeps no such incept.
+pub async fn resume<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+) -> Result<Option<Created>, ClientError> {
+    let status = executor.status().await?;
+    let Some(pending) = pending_for(vault, &status.device_key)? else {
+        return Ok(None);
+    };
+    publish_kept(executor, vault, &status, pending)
+        .await
+        .map(Some)
+}
+
+/// The kept incept that lists `device_key`.
+fn pending_for(vault: &dyn Vault, device_key: &str) -> Result<Option<Event>, ClientError> {
+    Ok(vault
+        .pending_incepts()?
+        .into_iter()
+        .find(|e| listed_id(e, device_key).is_some()))
+}
+
+fn listed_id(incept: &Event, device_key: &str) -> Option<String> {
+    let Op::Incept { add, .. } = &incept.op else {
+        return None;
+    };
+    add.iter()
+        .find(|d| d.sign == device_key)
+        .map(|d| d.id.clone())
+}
+
+/// Publishes `incept`, which the vault keeps with its master #0, and forgets it once the
+/// executor answers. An executor that speaks for another identity is refused before the publish.
+async fn publish_kept<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    status: &IdentityStatus,
+    incept: Event,
+) -> Result<Created, ClientError> {
+    let did = ad4m_identity_core::did_of(&incept.scid);
+    if let Some(held) = &status.did {
+        if *held != did {
+            return Err(ClientError::HasIdentity(held.clone()));
+        }
+    }
+    fold(std::slice::from_ref(&incept))?;
+    let device_key_id = listed_id(&incept, &status.device_key).ok_or_else(|| {
+        ClientError::Protocol("the kept incept does not list this executor's key".into())
+    })?;
+    let head = executor.publish(std::slice::from_ref(&incept)).await?;
+    vault.incept_published(&incept.scid)?;
     Ok(Created {
-        did: ad4m_identity_core::did_of(&scid),
-        scid,
-        device_key_id: "d1".into(),
+        did,
+        scid: incept.scid,
+        device_key_id,
         head,
     })
 }

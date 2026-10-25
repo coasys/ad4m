@@ -7,7 +7,7 @@
 //! written yet), and [`MemoryVault`] for tests (feature `test-vault`, never in a release build).
 
 use ad4m_identity_core::build::Signer;
-use ad4m_identity_core::Multikey;
+use ad4m_identity_core::{Event, Multikey};
 
 use crate::secret::Secret;
 
@@ -69,6 +69,11 @@ impl Unlocked {
 }
 
 /// The custody of master keys on one surface.
+///
+/// `create` keeps master #0 and the co-signed incept here *before* it publishes the incept
+/// ([`Vault::store_pending_incept`]), and forgets the incept once the publish is confirmed
+/// ([`Vault::incept_published`]): a publish whose answer is lost is finished later from the
+/// vault (`flows::create::resume`), with the same master key and the same identity.
 pub trait Vault: Send + Sync {
     /// Stores master `index` for `scid`, replacing an older index.
     fn store_master(
@@ -80,6 +85,14 @@ pub trait Vault: Send + Sync {
     /// One unlock (one prompt where the OS needs it) for a flow that uses the master key `why`.
     /// `now` starts the unlock's [`UNLOCK_TTL_S`].
     fn unlock(&self, scid: &str, why: MasterUse, now: u64) -> Result<Unlocked, VaultError>;
+    /// Keeps the co-signed incept of a new identity (`incept.scid`), whose master #0 the vault
+    /// holds, until [`Vault::incept_published`]; replaces a kept incept of the same identity.
+    /// The incept holds public keys and proofs only, no secret.
+    fn store_pending_incept(&self, incept: &Event) -> Result<(), VaultError>;
+    /// The incepts kept and not yet confirmed published.
+    fn pending_incepts(&self) -> Result<Vec<Event>, VaultError>;
+    /// The store holds `scid`'s incept: the vault forgets it (no error when it holds none).
+    fn incept_published(&self, scid: &str) -> Result<(), VaultError>;
 }
 
 /// A master key in memory: an Ed25519 key that zeroes on drop.
@@ -129,6 +142,7 @@ mod memory {
     #[derive(Default)]
     pub struct MemoryVault {
         keys: Mutex<Keys>,
+        pending: Mutex<Vec<Event>>,
         unlocks: Mutex<Vec<MasterUse>>,
     }
 
@@ -167,6 +181,25 @@ mod memory {
                 Box::new(KeySigner::new(secret.expose(), *index)),
                 now,
             ))
+        }
+
+        fn store_pending_incept(&self, incept: &Event) -> Result<(), VaultError> {
+            let mut pending = self.pending.lock().map_err(poisoned)?;
+            pending.retain(|e| e.scid != incept.scid);
+            pending.push(incept.clone());
+            Ok(())
+        }
+
+        fn pending_incepts(&self) -> Result<Vec<Event>, VaultError> {
+            Ok(self.pending.lock().map_err(poisoned)?.clone())
+        }
+
+        fn incept_published(&self, scid: &str) -> Result<(), VaultError> {
+            self.pending
+                .lock()
+                .map_err(poisoned)?
+                .retain(|e| e.scid != scid);
+            Ok(())
         }
     }
 

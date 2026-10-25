@@ -10,9 +10,9 @@ master key for the person.
 |---|---|
 | `src/lib.rs` | `Clock`, `Random` (the surface passes both: no clock or randomness of its own), `SystemClock` (not wasm32), `OsRandom`, `ClientError` |
 | `src/secret.rs` | `Secret<T>`: zeroed on drop, `Debug` prints `<redacted>`, no `Serialize`, no `Clone` |
-| `src/vault.rs` | `Vault`, `Unlocked` (one unlock per flow, 300 s), `MasterSigner` (`Signer` + `index`), `KeySigner`, `MasterUse` (`Link`, `Revoke`), `VaultError`; the trait has `store_master` and `unlock` only; `MemoryVault` (tests and feature `test-vault`, never in a release build) |
+| `src/vault.rs` | `Vault`, `Unlocked` (one unlock per flow, 300 s), `MasterSigner` (`Signer` + `index`), `KeySigner`, `MasterUse` (`Link`, `Revoke`), `VaultError`; the trait has `store_master`, `unlock` and the pending incept of a `create` (`store_pending_incept`, `pending_incepts`, `incept_published`); `MemoryVault` (tests and feature `test-vault`, never in a release build) |
 | `src/executor.rs` | `ExecutorRpc` (one RPC call), `ViaExecutor` (the typed `identity.*` calls the flows make: status, log, cosignIncept, publish, openOffer, offers; claiming is the joining executor's call, `ad4m-executor claim`); feature `ws`: `ExecutorRpc` for `ad4m-client`'s `WsRpcClient` |
-| `src/flows/create.rs` | `CreateFlow` (words shown → two typed back → `finish`): master #0, `incept` listing the executor's key as `d1`, `identity.cosignIncept`, fold, `identity.publish`, then the vault keeps master #0 |
+| `src/flows/create.rs` | `CreateFlow` (words shown → two typed back → `finish`): master #0, `incept` listing the executor's key as `d1`, `identity.cosignIncept`, fold, the vault keeps master #0 and the co-signed incept, then `identity.publish`; `resume` publishes a kept incept again after a failed or unanswered publish |
 | `src/flows/link.rs` | `LinkFlow`: `open` (offer signed by the current master at the head, offer link), `wait_for_claim` (master-signed list requests; the match code), `confirm` (the `add` that spends the claim) |
 | `src/flows/revoke.rs` | `revoke` (a `revoke` signed by the current master), `key_id_of` |
 | `examples/holder.rs` | the flows over JSON lines against a real executor (features `ws,test-vault`), for `tests/js/tests/identity.test.ts` |
@@ -28,6 +28,11 @@ master key for the person.
 - The client re-checks what it reads: every log goes through `fold` here too.
 - The core (no features) builds for `wasm32-unknown-unknown`; keep `tokio`, sockets and the
   system clock out of it (they sit behind `ws`, in examples and tests).
+- **Custody before publish.** `create` stores master #0 and the co-signed incept in the vault
+  before `identity.publish`, and forgets the incept only when the publish answers. A vault that
+  refuses leaves nothing public; a lost answer is finished by `resume` (or `finish` with the
+  same words), which publishes the identical incept again (the executor answers a repeat of a
+  held log with the store's head).
 - `create` publishes no proof of work: the store has no brake yet and admits a `#0` without
   one; the `pow` step comes with the brake.
 

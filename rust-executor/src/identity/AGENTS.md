@@ -11,7 +11,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh`, `ingest`, `accept`, forks |
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner` |
-| `operator.rs` | `admits_first_link`, `first_link_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
+| `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
 | `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key, never `canKeepMaster`), `join_status` (the main agent's claims only) |
 | `service.rs` | `IdentityService`: status, log, cosignIncept, publish, openOffer, offers, devices; error mapping |
 | `types.rs` | the RPC contracts (ts-rs) mirroring `ad4m_ldk::identity`'s JSON, `IdentityForkEvent`, `AgentWithIdentity` |
@@ -31,6 +31,13 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
   first-link rule itself: `already-linked` while the main key is valid in a log, `no-operator`
   without a record, `first-link` for another identity.
+- With an operator record the main key may speak only for the operator's identity:
+  `cosignIncept` for the main agent runs `main_incept_check` and refuses (`first-link`) an
+  incept of any other identity. Managed users are not bound by the record.
+- `identity.storeUrl` reaches the agent language only through `write_agent_language_settings`
+  (atomic: temp file + rename). When it fails, `LanguageController::install_agent_language`
+  does not load the agent language, so no profile or identity call goes to an older or the
+  default store; identity calls answer `unavailable`.
 - An agent keeps the first identity it joined (`identity_agents`); `agent.status` and
   `agent.get` carry it as `identity`, `did` stays the device `did:key`.
 

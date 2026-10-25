@@ -701,6 +701,30 @@ impl LanguageController {
         Ok(())
     }
 
+    /// Writes `identity.storeUrl` into the agent language's settings, then installs and loads
+    /// it. The language sends agent profiles and every identity call to its `storeUrl`; when
+    /// that setting cannot be written, the language is not loaded at all, so profile and
+    /// identity calls fail (the identity calls as `unavailable`) instead of reaching an older
+    /// store or the language's default one.
+    pub(crate) async fn install_agent_language(
+        &self,
+        languages_dir: &std::path::Path,
+        agent_language: &str,
+        settings: &crate::identity::IdentitySettings,
+    ) -> Result<(), LanguageError> {
+        crate::identity::write_agent_language_settings(languages_dir, agent_language, settings)
+            .map_err(|e| LanguageError::LoadError {
+                address: agent_language.to_string(),
+                message: format!(
+                    "identity.storeUrl could not be written to the agent language's settings \
+                     ({e}); the agent language is not loaded, so no profile or identity call \
+                     reaches a store other than the configured one"
+                ),
+            })?;
+        self.install_language_from_address(agent_language, true)
+            .await
+    }
+
     /// Load the language language and, unless `language_language_only`, the agent,
     /// neighbourhood and perspective languages. With the default seed none of these touch
     /// Holochain, so this returns without waiting for the conductor; a seed whose system
@@ -734,17 +758,8 @@ impl LanguageController {
         if !language_language_only {
             // Step 2: Load other system languages
             let agent_language = RuntimeService::with_global_instance(|rs| rs.get_agent_language());
-            // The agent language reads its store URL from its settings at load.
-            if let Err(e) = crate::identity::write_agent_language_settings(
-                &languages_directory(),
-                &agent_language,
-                &crate::identity::settings_from_config(),
-            ) {
-                error!(
-                    "Could not write the agent language's storeUrl setting: {}",
-                    e
-                );
-            }
+            let identity_settings = crate::identity::settings_from_config();
+            let languages_dir = languages_directory();
             let neighbourhood_language =
                 RuntimeService::with_global_instance(|rs| rs.get_neighbourhood_language());
             let perspective_language =
@@ -756,7 +771,7 @@ impl LanguageController {
                 agent_language, neighbourhood_language, perspective_language
             );
             let (agent_result, neighbourhood_result, perspective_result) = tokio::join!(
-                self.install_language_from_address(&agent_language, true),
+                self.install_agent_language(&languages_dir, &agent_language, &identity_settings),
                 self.install_language_from_address(&neighbourhood_language, true),
                 self.install_language_from_address(&perspective_language, true),
             );

@@ -97,6 +97,11 @@ fn publish_fork(did: &str, fork: &ad4m_identity_core::ForkEvidence) {
 
 /// Fills the agent language's `storeUrl` setting from `identity.storeUrl` before the language
 /// loads (it reads `languages/<address>/settings.json` at load). Other settings stay.
+///
+/// The file is replaced atomically (a temporary file in the same directory, then a rename), so
+/// a failure leaves the old file as it was. An error means the setting may not be in force: the
+/// caller must not load the agent language then (see
+/// `LanguageController::install_agent_language`).
 pub fn write_agent_language_settings(
     languages_dir: &Path,
     agent_language: &str,
@@ -113,10 +118,38 @@ pub fn write_agent_language_settings(
             .ok()
             .filter(|v| v.is_object())
             .unwrap_or_else(|| serde_json::json!({})),
-        Err(_) => serde_json::json!({}),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(e),
     };
     value["storeUrl"] = serde_json::Value::String(url.clone());
-    std::fs::write(&path, serde_json::to_string(&value)?)
+    replace_file(&path, serde_json::to_string(&value)?.as_bytes())
+}
+
+/// Writes `bytes` to a new file beside `path`, syncs it and renames it over `path`; on any
+/// failure the new file is removed and `path` is untouched.
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("the settings file has no directory"))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp = dir.join(format!(".settings.json.{}.{nanos}.tmp", std::process::id()));
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
 }
 
 /// The identity settings from the executor's global config.
@@ -158,5 +191,75 @@ mod tests {
         // No storeUrl configured: the language keeps its own.
         write_agent_language_settings(dir.path(), "QmAgent", &IdentitySettings::default()).unwrap();
         assert_eq!(read()["storeUrl"], "http://127.0.0.1:9");
+    }
+
+    fn store_url(url: &str) -> IdentitySettings {
+        IdentitySettings {
+            store_url: Some(url.into()),
+            store_keys: vec![],
+        }
+    }
+
+    fn temp_files_in(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_read_is_reported_not_replaced() {
+        // `settings.json` is a directory: an error, not a silent fallback.
+        let dir = tempfile::tempdir().unwrap();
+        let lang = dir.path().join("QmAgent");
+        std::fs::create_dir_all(lang.join("settings.json")).unwrap();
+        assert!(
+            write_agent_language_settings(dir.path(), "QmAgent", &store_url("http://x")).is_err()
+        );
+        assert!(lang.join("settings.json").is_dir());
+        assert!(temp_files_in(&lang).is_empty());
+    }
+
+    #[test]
+    fn a_failed_replace_leaves_the_old_file_whole_and_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // The rename cannot replace a non-empty directory.
+        let target = dir.path().join("settings.json");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+        assert!(replace_file(&target, b"{}").is_err());
+        assert!(target.join("inner").is_dir());
+        assert!(temp_files_in(dir.path()).is_empty());
+
+        // A good replace swaps the whole file.
+        let file = dir.path().join("other.json");
+        std::fs::write(&file, "old").unwrap();
+        replace_file(&file, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
+        assert!(temp_files_in(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_settings_directory_keeps_the_old_store_url_and_reports_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let lang = dir.path().join("QmAgent");
+        std::fs::create_dir_all(&lang).unwrap();
+        let path = lang.join("settings.json");
+        let old = r#"{"storeUrl":"http://old.store","storagePath":"/x"}"#;
+        std::fs::write(&path, old).unwrap();
+        std::fs::set_permissions(&lang, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root ignores the mode: the check holds only where the mode does.
+        let enforced = std::fs::File::create(lang.join("probe")).is_err();
+        let written =
+            write_agent_language_settings(dir.path(), "QmAgent", &store_url("http://127.0.0.1:9"));
+        std::fs::set_permissions(&lang, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if enforced {
+            assert!(written.is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+            assert!(temp_files_in(&lang).is_empty());
+        }
     }
 }

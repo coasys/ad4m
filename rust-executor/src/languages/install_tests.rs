@@ -152,3 +152,71 @@ async fn a_source_request_that_hangs_ends_at_the_timeout() {
     assert_eq!(start.elapsed(), LANGUAGE_FETCH_TIMEOUT);
     assert_eq!(counts.source.load(Ordering::SeqCst), 1);
 }
+
+/// The agent language sends profiles and identity calls to its `storeUrl` setting. When
+/// `identity.storeUrl` cannot be written there, the language is never fetched or loaded, so no
+/// identity call reaches the store an older or unparsable settings file names (or the
+/// language's default store): the identity backend answers `unavailable`.
+#[tokio::test(start_paused = true)]
+async fn the_agent_language_is_not_loaded_when_its_store_url_cannot_be_written() {
+    use crate::identity::backend::{AgentLanguageBackend, IdentityBackend, IdentityError};
+    let controller = LanguageController::global_instance();
+    let (ll, previous, counts) = install_fake_language_language(&controller, true).await;
+    let languages = crate::test_utils::test_languages_directory();
+    let settings = crate::identity::IdentitySettings {
+        store_url: Some("http://127.0.0.1:9".into()),
+        store_keys: vec![],
+    };
+
+    // `settings.json` is a directory: the setting cannot be written.
+    let agent = format!("QmAgentUnwritable{}", Uuid::new_v4().simple());
+    std::fs::create_dir_all(languages.join(&agent).join("settings.json")).unwrap();
+    let refused = tokio::time::timeout(
+        Duration::from_millis(500),
+        controller.install_agent_language(&languages, &agent, &settings),
+    )
+    .await
+    .expect("no fetch to wait for");
+    let fetched = counts.meta.load(Ordering::SeqCst) + counts.source.load(Ordering::SeqCst);
+    let loaded = controller.is_language_loaded(&agent).await;
+    let previous_agent = controller
+        .system_addresses
+        .lock()
+        .await
+        .agent_language
+        .replace(agent.clone());
+    let identity_call = AgentLanguageBackend.log("did:scid:coasys:1:Qm", 0).await;
+    controller.system_addresses.lock().await.agent_language = previous_agent;
+
+    // Control: with a writable settings file the same call goes on to fetch the language.
+    let writable = format!("QmAgentWritable{}", Uuid::new_v4().simple());
+    let installed = tokio::time::timeout(
+        Duration::from_millis(500),
+        controller.install_agent_language(&languages, &writable, &settings),
+    )
+    .await
+    .expect("the fake language language answers at once");
+    let fetched_writable = counts.meta.load(Ordering::SeqCst);
+
+    controller.system_addresses.lock().await.language_language = previous;
+    controller.set_runtime_for_test(&ll, None).await;
+
+    let error = refused.expect_err("an unwritten storeUrl stops the install");
+    assert!(error.to_string().contains("identity.storeUrl"), "{error}");
+    assert_eq!(fetched, 0, "the agent language was fetched");
+    assert!(!loaded, "the agent language was loaded");
+    assert!(
+        matches!(identity_call, Err(IdentityError::Unavailable(_))),
+        "{identity_call:?}"
+    );
+    assert!(
+        installed.is_err(),
+        "the fake language language has no source"
+    );
+    assert_eq!(fetched_writable, 1);
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(languages.join(&writable).join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(written["storeUrl"], "http://127.0.0.1:9");
+}

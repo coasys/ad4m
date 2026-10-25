@@ -75,6 +75,10 @@ pub enum ClientError {
     /// The executor's device key speaks for an identity already.
     #[error("the executor speaks for {0} already")]
     HasIdentity(String),
+    /// The vault keeps another identity's incept for this executor whose publish is not
+    /// confirmed: `flows::create::resume` finishes that one first.
+    #[error("{0} was created on this surface and its publish is not confirmed")]
+    CreatePending(String),
     /// The words typed back are not the words shown.
     #[error("the words do not match")]
     WrongWords,

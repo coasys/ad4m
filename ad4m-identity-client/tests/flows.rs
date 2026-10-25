@@ -5,11 +5,11 @@
 //! (`identity.test.ts`).
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use ad4m_hash_chain::canonical_json;
-use ad4m_identity_client::flows::create::{CreateFlow, CreateScreen};
+use ad4m_identity_client::flows::create::{resume, CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::LinkFlow;
 use ad4m_identity_client::flows::revoke::{key_id_of, revoke};
 use ad4m_identity_client::{
@@ -95,6 +95,12 @@ struct TestExecutor {
     device: SigningKey,
     identity: RefCell<Option<String>>,
     joins: RefCell<Vec<(String, String)>>,
+    /// `identity.publish` calls that reached the store.
+    publishes: Cell<usize>,
+    /// The next `identity.publish` commits, then its answer is lost (a transport failure).
+    lose_publish_answer: Cell<bool>,
+    /// The next `identity.publish` fails before it reaches the store.
+    refuse_publish: Cell<bool>,
 }
 
 impl TestExecutor {
@@ -104,6 +110,9 @@ impl TestExecutor {
             device: SigningKey::from_bytes(&[seed; 32]),
             identity: RefCell::new(None),
             joins: RefCell::new(Vec::new()),
+            publishes: Cell::new(0),
+            lose_publish_answer: Cell::new(false),
+            refuse_publish: Cell::new(false),
         }
     }
 
@@ -219,6 +228,13 @@ impl ExecutorRpc for TestExecutor {
                     .map(|e| Event::from_json(e).unwrap())
                     .collect();
                 let scid = events[0].scid.clone();
+                if self.refuse_publish.replace(false) {
+                    return Err(RpcError {
+                        code: 503,
+                        message: "unavailable: the store did not answer".into(),
+                    });
+                }
+                self.publishes.set(self.publishes.get() + 1);
                 let (code, body) = self
                     .store
                     .send(
@@ -228,11 +244,40 @@ impl ExecutorRpc for TestExecutor {
                         None,
                     )
                     .await;
-                if code != 200 {
-                    return Err(Self::refused(code, &body));
-                }
+                let head = match code {
+                    200 => body["head"].clone(),
+                    // As the executor does: a 409 whose log holds these very events (the
+                    // append happened before) answers the store's head.
+                    409 => {
+                        let page = self.log(&scid).await?;
+                        let held: Vec<Event> = page["events"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|e| Event::from_json(e).unwrap())
+                            .collect();
+                        let same = events.iter().all(|ours| {
+                            held.iter().any(|t| {
+                                t.seq == ours.seq
+                                    && ad4m_identity_core::event_hash(t).unwrap()
+                                        == ad4m_identity_core::event_hash(ours).unwrap()
+                            })
+                        });
+                        if !same {
+                            return Err(Self::refused(code, &body));
+                        }
+                        page["head"].clone()
+                    }
+                    _ => return Err(Self::refused(code, &body)),
+                };
                 self.record_if_listed(&scid).await?;
-                Ok(body["head"].clone())
+                if self.lose_publish_answer.replace(false) {
+                    return Err(RpcError {
+                        code: 503,
+                        message: "the connection closed".into(),
+                    });
+                }
+                Ok(head)
             }
             "identity.log" => {
                 let did = p["did"].as_str().unwrap();
@@ -398,8 +443,8 @@ async fn join(b: &ViaExecutor<TestExecutor>, offer_id: &Value) -> Value {
         .unwrap()
 }
 
-/// `create` on `executor` with fixed words; answers the identity.
-async fn create(executor: &ViaExecutor<TestExecutor>, vault: &MemoryVault, entropy: u8) -> String {
+/// A `create` flow over fixed words, at the confirmed step.
+fn confirmed(entropy: u8) -> CreateFlow {
     let (mut flow, screen) = CreateFlow::from_words(words::from_entropy(&[entropy; 16]));
     let list = shown(screen);
     let CreateScreen::ConfirmWords { positions } = flow.words_written(&OsRandom).unwrap() else {
@@ -407,7 +452,16 @@ async fn create(executor: &ViaExecutor<TestExecutor>, vault: &MemoryVault, entro
     };
     flow.confirm([&list[positions[0] - 1], &list[positions[1] - 1]])
         .unwrap();
-    flow.finish(executor, vault).await.unwrap().did
+    flow
+}
+
+/// `create` on `executor` with fixed words; answers the identity.
+async fn create(executor: &ViaExecutor<TestExecutor>, vault: &MemoryVault, entropy: u8) -> String {
+    confirmed(entropy)
+        .finish(executor, vault)
+        .await
+        .unwrap()
+        .did
 }
 
 #[tokio::test]
@@ -442,6 +496,8 @@ async fn create_makes_an_identity_that_lists_the_executor_as_d1() {
 
     assert_eq!(created.device_key_id, "d1");
     assert_eq!(created.head.seq, 0);
+    assert!(vault.pending_incepts().unwrap().is_empty());
+    assert_eq!(a.rpc().publishes.get(), 1);
     let status = a.status().await.unwrap();
     assert_eq!(status.did.as_deref(), Some(created.did.as_str()));
     assert_eq!(status.key_id.as_deref(), Some("d1"));
@@ -479,6 +535,171 @@ async fn create_makes_an_identity_that_lists_the_executor_as_d1() {
         again.finish(&a, &vault).await,
         Err(ClientError::HasIdentity(did)) if did == created.did
     ));
+}
+
+/// A vault that refuses to keep a master key (the person cancelled, no screen lock, …).
+struct RefusingVault(MemoryVault);
+
+impl Vault for RefusingVault {
+    fn store_master(
+        &self,
+        _scid: &str,
+        _index: u32,
+        _secret: ad4m_identity_client::Secret<[u8; 32]>,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        Err(ad4m_identity_client::VaultError::Cancelled)
+    }
+
+    fn unlock(
+        &self,
+        scid: &str,
+        why: MasterUse,
+        now: u64,
+    ) -> Result<ad4m_identity_client::Unlocked, ad4m_identity_client::VaultError> {
+        self.0.unlock(scid, why, now)
+    }
+
+    fn store_pending_incept(&self, incept: &Event) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.store_pending_incept(incept)
+    }
+
+    fn pending_incepts(&self) -> Result<Vec<Event>, ad4m_identity_client::VaultError> {
+        self.0.pending_incepts()
+    }
+
+    fn incept_published(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.0.incept_published(scid)
+    }
+}
+
+#[tokio::test]
+async fn create_publishes_nothing_when_the_vault_cannot_keep_the_master_key() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+
+    let refused = confirmed(6)
+        .finish(&a, &RefusingVault(MemoryVault::new()))
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(ClientError::Vault(
+                ad4m_identity_client::VaultError::Cancelled
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(a.rpc().publishes.get(), 0, "nothing reached the store");
+    assert_eq!(a.status().await.unwrap().did, None);
+    let refusing = RefusingVault(MemoryVault::new());
+    let _ = confirmed(6).finish(&a, &refusing).await;
+    assert!(refusing.pending_incepts().unwrap().is_empty());
+
+    // Nothing public happened, so the same words make the identity once the vault works.
+    let vault = MemoryVault::new();
+    let created = confirmed(6).finish(&a, &vault).await.unwrap();
+    assert_eq!(a.status().await.unwrap().did, Some(created.did.clone()));
+    assert!(vault.unlock(&created.scid, MasterUse::Link, 0).is_ok());
+}
+
+#[tokio::test]
+async fn create_finishes_with_the_same_words_after_a_lost_publish_answer() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+
+    // The store takes the incept and the executor records it, but the answer never arrives.
+    a.rpc().lose_publish_answer.set(true);
+    let lost = confirmed(8).finish(&a, &vault).await;
+    assert!(
+        matches!(&lost, Err(ClientError::Rpc(e)) if e.code == 503),
+        "{lost:?}"
+    );
+    let did = a
+        .status()
+        .await
+        .unwrap()
+        .did
+        .expect("the publish committed");
+    assert_eq!(vault.pending_incepts().unwrap().len(), 1);
+
+    // The same words finish the same identity: no second incept, the same master key.
+    let created = confirmed(8).finish(&a, &vault).await.unwrap();
+    assert_eq!(created.did, did);
+    assert_eq!(created.head.seq, 0);
+    assert_eq!(a.events(&did).await.unwrap().len(), 1);
+    assert!(vault.pending_incepts().unwrap().is_empty());
+    let seed = words::seed(&words::from_entropy(&[8; 16]));
+    let kept = vault.unlock(&created.scid, MasterUse::Link, 0).unwrap();
+    assert_eq!(
+        Signer::key(kept.signer(0).unwrap()),
+        Signer::key(&words::master_key(&seed, 0).unwrap())
+    );
+}
+
+#[tokio::test]
+async fn resume_finishes_a_create_from_the_vault_alone() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+    assert!(resume(&a, &vault).await.unwrap().is_none());
+
+    // The publish answer is lost and the flow (with the words) is gone.
+    a.rpc().lose_publish_answer.set(true);
+    assert!(confirmed(10).finish(&a, &vault).await.is_err());
+    let did = a
+        .status()
+        .await
+        .unwrap()
+        .did
+        .expect("the publish committed");
+
+    // Other words are refused while the kept incept is not finished: no second identity.
+    let other = confirmed(11).finish(&a, &vault).await;
+    assert!(
+        matches!(&other, Err(ClientError::CreatePending(d)) if *d == did),
+        "{other:?}"
+    );
+
+    let created = resume(&a, &vault).await.unwrap().expect("a kept incept");
+    assert_eq!(
+        (created.did.as_str(), created.device_key_id.as_str()),
+        (did.as_str(), "d1")
+    );
+    assert_eq!(created.head.seq, 0);
+    assert_eq!(a.events(&did).await.unwrap().len(), 1);
+    assert_eq!(a.rpc().publishes.get(), 2);
+    assert!(vault.unlock(&created.scid, MasterUse::Link, 0).is_ok());
+    // Done: nothing left to resume, and another create is refused as before.
+    assert!(resume(&a, &vault).await.unwrap().is_none());
+    assert!(matches!(
+        confirmed(11).finish(&a, &vault).await,
+        Err(ClientError::HasIdentity(d)) if d == did
+    ));
+}
+
+#[tokio::test]
+async fn resume_publishes_an_incept_whose_publish_never_reached_the_store() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+
+    a.rpc().refuse_publish.set(true);
+    let failed = confirmed(12).finish(&a, &vault).await;
+    assert!(
+        matches!(&failed, Err(ClientError::Rpc(e)) if e.code == 503),
+        "{failed:?}"
+    );
+    assert_eq!(a.status().await.unwrap().did, None);
+    let kept = vault.pending_incepts().unwrap();
+    assert_eq!(kept.len(), 1);
+    // The master key is kept already, under the identity the incept makes.
+    assert!(vault.unlock(&kept[0].scid, MasterUse::Link, 0).is_ok());
+
+    let created = resume(&a, &vault).await.unwrap().expect("a kept incept");
+    assert_eq!(created.scid, kept[0].scid);
+    assert_eq!(a.status().await.unwrap().did, Some(created.did));
+    assert!(vault.pending_incepts().unwrap().is_empty());
 }
 
 #[tokio::test]
