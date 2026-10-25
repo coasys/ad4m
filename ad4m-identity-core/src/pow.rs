@@ -11,6 +11,10 @@ use sha2::{Digest, Sha256};
 pub const POW_LABEL: &str = "coasys:pow";
 /// The nonce length in bytes.
 pub const NONCE_LEN: usize = 16;
+/// The longest base58 text of a 16-byte nonce: ceil(16 * log58(256)) = ceil(21.85) = 22.
+/// Base58 decoding costs time quadratic in the text length, so longer text is refused before
+/// decoding.
+const NONCE_TEXT_MAX: usize = 22;
 
 /// A proof of work, as `AppendRequest.pow` carries it. `nonce` is base58btc (no multibase
 /// prefix) of 16 bytes; `bits` is the cost the solver aimed at. The checker states its own
@@ -90,6 +94,9 @@ pub fn solve(scid: &str, bits: u8) -> Pow {
 /// True when `pow.nonce` is 16 bytes of base58btc and `sha256("coasys:pow" ‖ scid ‖ nonce)`
 /// has at least `bits` leading zero bits. `pow.bits` is not read.
 pub fn check(scid: &str, pow: &Pow, bits: u8) -> bool {
+    if pow.nonce.len() > NONCE_TEXT_MAX {
+        return false;
+    }
     let Ok(bytes) = bs58::decode(&pow.nonce).into_vec() else {
         return false;
     };

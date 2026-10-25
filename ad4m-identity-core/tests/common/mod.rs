@@ -1186,3 +1186,23 @@ fn check_link(file: &Value) {
     );
     assert_eq!(DeviceString::parse(&device.encode()).unwrap(), device);
 }
+
+// ----- Time -----
+
+/// A megabyte of valid base58 characters: decoding it would take minutes.
+pub fn huge_base58() -> String {
+    "2".repeat(1 << 20)
+}
+
+/// Runs `f` and asserts it returns in under a second. wasm32 has no clock: there it only runs `f`.
+pub fn quickly<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let started = std::time::Instant::now();
+        let out = f();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        out
+    }
+    #[cfg(target_arch = "wasm32")]
+    f()
+}
