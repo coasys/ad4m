@@ -842,8 +842,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "runtime.setFreeHostingEnabled",
         set_free_hosting_enabled,
     )
-    // A billing decision for the whole executor: the admin credential only, like
-    // `user.setMultiUserEnabled` (#1328).
+    // A billing decision for the whole executor: the operator, or a grant on the main agent
+    // that holds every capability (#1328). An app with a narrower grant gets 403.
     .guard(Guard::Executor(ALL_CAPABILITY.clone()));
     // The executor's rates and Unyt version, which users read too.
     map.method::<NoParams, Vec<HostRate>>("runtime.hostRates", get_host_rates)
