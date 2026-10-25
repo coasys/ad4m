@@ -4,7 +4,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Abstract class** (`model_query/abstract_classes.rs`, built-in `ad4m://TextContent`): A subject class that reads the instances of several concrete classes, sends each write to the record's own classes, and cannot be created. [Subject classes](perspectives/social-dna/subject-classes.md)
 
-**Access check** (`Guard` in `api/guards.rs`, `get_perspective_with_access`, `Session::may_receive`): The code in a method guard, event delivery or language op that applies a session's grant to one call, as a capability check plus an ownership check. [Access checks](agents/access/checks.md) — not: guard alone (a guard is a flow term; say method guard)
+**Access check** (`Guard` in `api/guards.rs`, `get_perspective_with_access`): The code in the method guard of an RPC method or MCP tool that applies a session's grant to one call: a capability check, an ownership check, or both. [Access checks](agents/access/checks.md); event delivery: [Events](agents/interfaces/events.md); language ops: [Signing and verification](agents/identity/signing-and-verification.md) — not: guard alone (a guard is a flow term; say method guard)
 
 **ACL** (`acl` table in `link-server/src/db.ts`): The list of DIDs admitted to one link-server room, checked on every request. [Link server](languages/link-languages/link-server.md)
 

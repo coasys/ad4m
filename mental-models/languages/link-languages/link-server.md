@@ -10,7 +10,7 @@ The **link server** is a self-hosted Node.js process, separate from the executor
 
 | Route | Does |
 |---|---|
-| `POST /rooms/:id/auth` | step 1: challenge; step 2: verify the Ed25519 signature over `sha256(challenge)`, store the X25519 key, issue a JWT |
+| `POST /rooms/:id/auth` | step 1: challenge; step 2: verify the Ed25519 signature over `sha256(challenge)`, store the X25519 key if the client sends a well-formed one (a bad signature over it answers 400), issue a JWT |
 | `POST /rooms/:id/commit` | apply additions and removals in one transaction; push to WebSocket peers |
 | `GET /rooms/:id/sync`, `/render`, `/revision` | catch-up since a sequence number; full state; current revision |
 | `GET /rooms/:id/peers` | online agents |

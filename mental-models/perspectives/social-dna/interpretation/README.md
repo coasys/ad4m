@@ -21,7 +21,7 @@
 5. Drop no-op updates; apply all writes in one batch with overlays (`apply_with_overlay`).
 6. Run flow spawn and the flow evaluator ([Flow spawn and guards](../flows/spawn-and-guards.md)).
 
-The RPC answers after all six steps: `run_interpretation` awaits `apply_ops_and_run_flow_passes` and returns its flow proposals with the result.
+The RPC answers after all six steps: its handler awaits `run_interpretation_observed`, which runs `apply_ops_and_run_flow_passes`, and returns only the written base URIs.
 
 `perspective.runInterpretationWithHarness` replaces step 3 with a tool-calling loop (`ai_service::harness`) in which the LLM reads the graph through the MCP tools. Both paths share steps 4–6.
 

@@ -8,7 +8,7 @@ An **access check** applies a session's grant to one call: a capability check pl
 
 <details><summary>How it works</summary>
 
-`HandlerMap::dispatch`: method (404) → params fit the contract (400) → the guard's capability (403) → the guard's rule → the handler.
+`HandlerMap::dispatch`: method (404) → params fit the contract (400) → the guard's capability, for `Cap`, `Executor` and `Owns` (403) → the guard's rule → the handler.
 
 | Guard | Rule after the capability |
 |---|---|

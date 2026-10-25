@@ -15,7 +15,7 @@ The **SFU** (selective forwarding unit) is a WebRTC media server inside the exec
    |---|---|
    | `mesh` (default) | directly between participants; the executor forwards no media |
    | `designated` | this executor's SFU |
-   | `gateway` | this executor's SFU, as for `designated`: the SDK takes every non-`mesh` mode as "sfu" and joins its own executor's SFU ([Session.ts](../../../../core/src/neighbourhood/Session.ts)). `sfu.sfuPeer[s]ForNeighbourhood` return the string `"gateway"` (`sfu_peer_for_neighbourhood` in [service.rs](../../../../rust-executor/src/sfu/service.rs)) |
+   | `gateway` | this executor's SFU, as for `designated`: the SDK takes every non-`mesh` mode as "sfu" and joins its own executor's SFU ([Session.ts](../../../../core/src/neighbourhood/Session.ts)). `sfu.sfuPeerForNeighbourhood` returns the string `"gateway"` and `sfu.sfuPeersForNeighbourhood` returns `["gateway"]` (`sfu_peer_for_neighbourhood`, `sfu_peers_for_neighbourhood` in [service.rs](../../../../rust-executor/src/sfu/service.rs)) |
    | `cascaded` | this SFU and its configured cascade peers |
 
 3. A member calls `sfu.callJoin(neighbourhoodUrl, roomName, sdpOffer)`. The handler checks that the caller is a neighbourhood member (`member_did`) and returns an SDP answer. With `acceptRedirect`, the SFU may send the caller to the least-loaded SFU in the cascade.

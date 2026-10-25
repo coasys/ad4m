@@ -1,6 +1,6 @@
 # Access
 
-Access decides what each caller may do on the executor. Each connection opens one **session** from its token: a **principal** (operator, one agent, or anonymous) plus its capabilities. A token works only while its **grant** does, and the grant holds its capabilities. Before each handler, the method's **method guard** makes two **access checks**: a capability covers the call, and the session's agent owns the data.
+Access decides what each caller may do on the executor. Each connection opens one **session** from its token: a **principal** (operator, one agent, or anonymous) plus its capabilities. An agent's token works only while its **grant** does, and the grant holds its capabilities; the operator holds every capability without a grant, and an anonymous session has no token. Before each handler, the method's **method guard** makes its **access checks**: a capability covers the call (`Cap`, `Executor`, `Owns`), and the session's agent owns the data (`Owns`). `Open` makes neither; `Operator` admits the operator only.
 
 **Why:** Each call raises four questions: who is this, what kind of action, whose data, and who may hear about it. `Session` answers the first in one place. The method guard that each RPC method registers answers the next two; each event names who may hear it.
 

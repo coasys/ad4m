@@ -1,6 +1,6 @@
 # Executor config
 
-`Ad4mConfig` is the one struct that `run()` reads. `ad4m-executor run` builds it from a JSON config file (`--config` / `AD4M_CONFIG`), then applies `AD4M_*` environment variables and flags on top. Secrets never sit in the file. `ExecutorSecrets` (admin credential, SMTP password, unlock passphrase) come from `AD4M_*_FILE` paths or environment variables. The launcher maps its own state through the same file type.
+`Ad4mConfig` is the one struct that `run()` reads. `ad4m-executor run` builds it from a JSON config file (`--config` / `AD4M_CONFIG`), then applies `AD4M_*` environment variables and flags on top. Secrets never sit in the file. `ExecutorSecrets` (admin credential, SMTP password, unlock passphrase) come from `AD4M_*_FILE` paths or environment variables; the SMTP password also from the file's `multi_user_config.smtp_config.password_file` path, and a `--admin-credential` flag beats both. The launcher maps its own state through the same file type.
 
 **Why:** A headless executor and the launcher must give every key the same meaning, so one mapping (`ExecutorConfigFile::to_ad4m_config`) serves both. Unknown keys and inline secrets fail the parse. A typo or a pasted secret therefore stops the start; it is not ignored.
 
@@ -12,14 +12,16 @@
 config file (JSON) ─┐
 AD4M_* env, flags ──┼─ cli/src/run_config.rs merges ─► ExecutorConfigFile ─┐
 launcher state ─────┘                                                       ├─ to_ad4m_config ─► Ad4mConfig ─► config.prepare() ─► run()
-AD4M_*_FILE, AD4M_SMTP_PASSWORD ─► ExecutorSecrets ─────────────────────────┘
+AD4M_*_FILE, AD4M_SMTP_PASSWORD ─┬► ExecutorSecrets ────────────────────────┘
+smtp_config.password_file ───────┤
+--admin-credential ──────────────┘
 ```
 
 Settings that decide who the operator is and who can connect:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `admin_credential` (`AD4M_ADMIN_CREDENTIAL[_FILE]`) | none: `run` refuses to start | the operator's token |
+| `admin_credential` (`--admin-credential`, else `AD4M_ADMIN_CREDENTIAL[_FILE]`) | none: `run` refuses to start | the operator's token |
 | `insecure_no_admin_credential` | `false` | tests only: no token on a loopback listener is the operator |
 | `localhost` | `true` | RPC listener on `127.0.0.1`; `false` binds `0.0.0.0` |
 | `tls` (file: `multi_user_config.tls_config`) | none | HTTPS/WSS on `0.0.0.0:tls_port`; the cleartext listener moves to loopback |
