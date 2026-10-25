@@ -26,7 +26,7 @@ as well. Split plan: spec item 9 (languages), item 1 (delete dead `main.js`).
 - Every language runtime gets the extensions in `options.rs::ad4m_language_extensions()`,
   and the snapshot builder uses the same list. Language code comes from third parties:
   no wallet extension, and no op that unlocks, locks or reloads the keystore or writes
-  the node's profile. Languages sign through `signature_service` / `agent_service`.
+  the main agent's profile. Languages sign through `signature_service` / `agent_service`.
 - `agent_open_sealed` (`agentOpenSealed` in `host.js`, `AGENT.openSealed`) opens boxes
   sealed to the runtime's agent context (`agent::sealed_box`) with the agent's secret
   inside the executor; no op hands a secret key to a language. Sealing needs only the

@@ -3,11 +3,15 @@
 #[cfg(test)]
 pub mod agent_did_document_tests;
 #[cfg(test)]
+pub mod ai_task_access_tests;
+#[cfg(test)]
 pub mod anonymous_access_tests;
 #[cfg(test)]
 pub mod connection_tests;
 #[cfg(test)]
 pub mod error_tests;
+#[cfg(test)]
+pub mod executor_operation_tests;
 #[cfg(test)]
 pub mod flow_ws_tests;
 #[cfg(test)]
@@ -15,11 +19,17 @@ pub mod handler_table_tests;
 #[cfg(test)]
 pub mod live_query_tests;
 #[cfg(test)]
-pub mod node_operation_tests;
+pub mod method_matrix_tests;
+#[cfg(test)]
+pub(crate) mod multi_user;
+#[cfg(test)]
+pub mod neighbourhood_access_tests;
 #[cfg(test)]
 pub mod notification_ws_tests;
 #[cfg(test)]
 pub mod protocol_tests;
+#[cfg(test)]
+pub mod runtime_access_tests;
 #[cfg(test)]
 pub mod runtime_ws_tests;
 #[cfg(test)]
