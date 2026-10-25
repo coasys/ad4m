@@ -1,12 +1,14 @@
 //! Agent profile tools
 //!
-//! Tools for managing agent identity, profile fields, and profile pictures.
-//! Uses native Rust agent service calls (no JS runtime required).
+//! Tools for managing agent identity, profile fields, and profile pictures. They read and
+//! write the caller's agent through the RPC methods `agent.get`, `agent.byDid`,
+//! `agent.updateProfile` and `expression.create`, called through the handler map, so those
+//! methods' guards apply.
 
-use super::Ad4mMcpHandler;
-use crate::agent::{create_signed_expression, AgentContext, AgentService};
+use super::{labelled_json, method_error, Ad4mMcpHandler};
+use crate::agent::{create_signed_expression, AgentContext};
+use crate::api::ws_handler::WsRpcError;
 use crate::languages::LanguageController;
-use crate::types::domain::Perspective;
 use crate::types::Agent;
 use crate::types::{DecoratedLinkExpression, Link, VerifiedExpression};
 use rmcp::{handler::server::wrapper::Parameters, tool};
@@ -62,79 +64,21 @@ pub struct SetAgentPublicPerspectiveParams {
     pub links_json: String,
 }
 
+/// The file-storage language that holds profile pictures.
+const FILE_STORAGE_LANGUAGE: &str = "QmzSYwddqhm49PrRMzSrJf3AvmmreXMKtr1u56nbTjBFVmCzS8N";
+
+/// The profile text fields: `(predicate, field name)`.
+const PROFILE_FIELDS: [(&str, &str); 5] = [
+    ("sioc://has_username", "username"),
+    ("sioc://has_given_name", "given_name"),
+    ("sioc://has_family_name", "family_name"),
+    ("sioc://has_email", "email"),
+    ("sioc://has_bio", "bio"),
+];
+
 // ============================================================================
-// Helper: get agent via native Rust calls
+// Helpers
 // ============================================================================
-
-/// Get the current agent, handling both multi-user and single-user modes.
-fn get_current_agent(context: &AgentContext) -> Result<Agent, String> {
-    match AgentService::get_agent_for_context(context) {
-        Ok(agent) => Ok(agent),
-        Err(_) if context.managed_did().is_some() => {
-            // Multi-user fallback: user exists in wallet but has no profile yet
-            let did = context.managed_did().unwrap_or_default().to_string();
-            AgentService::wallet_key_for_did(&did)
-                .map_err(|e| format!("User agent not available: {}", e))?;
-            Ok(Agent {
-                did,
-                direct_message_language: None,
-                perspective: Some(Perspective { links: vec![] }),
-            })
-        }
-        Err(e) => Err(format!("Agent not available: {}", e)),
-    }
-}
-
-/// Update the current agent's public perspective, handling both multi-user and single-user modes.
-async fn update_agent_perspective(
-    context: &AgentContext,
-    links: Vec<DecoratedLinkExpression>,
-) -> Result<Agent, String> {
-    if let Some(did) = context.managed_did().map(str::to_string) {
-        // Multi-user mode
-        AgentService::wallet_key_for_did(&did)
-            .map_err(|e| format!("User agent not available: {}", e))?;
-
-        // Keep the user's DM language: this call updates only the perspective.
-        let direct_message_language = AgentService::load_managed_agent_profile(&did)
-            .map_err(|e| format!("Failed to load user profile: {}", e))?
-            .and_then(|profile| profile.direct_message_language);
-        let agent = Agent {
-            did: did.clone(),
-            direct_message_language,
-            perspective: Some(Perspective { links }),
-        };
-
-        AgentService::store_managed_agent_profile(&did, &agent)
-            .map_err(|e| format!("Failed to store user profile: {}", e))?;
-
-        if let Err(e) = AgentService::publish_agent_to_language(context).await {
-            log::warn!("Failed to publish user profile to agent language: {}", e);
-        }
-
-        Ok(agent)
-    } else {
-        // Single-user / admin mode
-        let agent = AgentService::with_mutable_global_instance(|agent_service| {
-            if let Some(ref mut agent) = agent_service.agent {
-                agent.perspective = Some(Perspective { links });
-                let updated = agent.clone();
-                if let Some(ref passphrase) = agent_service.passphrase {
-                    agent_service.save(passphrase.clone());
-                }
-                Ok(updated)
-            } else {
-                Err("Agent not initialized".to_string())
-            }
-        })?;
-
-        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-            log::warn!("Failed to publish agent expression: {}", e);
-        }
-
-        Ok(agent)
-    }
-}
 
 /// Build a properly signed DecoratedLinkExpression for a profile link.
 fn make_profile_link(
@@ -159,6 +103,35 @@ fn make_profile_link(
     })
 }
 
+impl Ad4mMcpHandler {
+    /// The caller's own agent (`agent.get`): a user's, or the main agent. A failure that is
+    /// not a refusal answers `{"error": "{failed}: .."}`.
+    async fn current_agent(&self, failed: &'static str) -> Result<Agent, String> {
+        self.call("agent.get", json!({}), labelled_json(failed))
+            .await
+    }
+
+    /// Replace the caller's public perspective with `links` (`agent.updateProfile`). The
+    /// method verifies every link's signature again. A failure that is not a refusal answers
+    /// `{"error": "{failed}: .."}`.
+    async fn set_public_links(
+        &self,
+        links: &[DecoratedLinkExpression],
+        failed: &'static str,
+    ) -> Result<Agent, String> {
+        let params = json!({ "publicPerspective": { "links": links } });
+        self.call("agent.updateProfile", params, labelled_json(failed))
+            .await
+    }
+
+    /// The caller's agent, to sign profile links as.
+    async fn signer(&self) -> Result<AgentContext, String> {
+        self.get_agent_context()
+            .await
+            .map_err(|e| method_error(WsRpcError::unauthorized(e)))
+    }
+}
+
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -169,21 +142,10 @@ impl Ad4mMcpHandler {
         description = "Get the DID (Decentralized Identifier) of the current agent. Use this to identify your own messages when filtering — compare the 'author' field in message data against your DID."
     )]
     pub async fn get_my_did(&self, _params: Parameters<GetAgentProfileParams>) -> String {
-        let token = match self.get_auth_token().await {
-            Some(t) => t,
-            None => return json!({"error": "Failed to get auth token"}).to_string(),
-        };
-        let context = match self.agent_context_for(&token) {
-            Ok(context) => context,
-            Err(e) => return json!({"error": e}).to_string(),
-        };
-
-        let agent = match get_current_agent(&context) {
-            Ok(a) => a,
-            Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
-        };
-
-        agent.did
+        match self.current_agent("Failed to get agent").await {
+            Ok(agent) => agent.did,
+            Err(e) => e,
+        }
     }
 
     /// Get the current agent's public profile
@@ -191,38 +153,26 @@ impl Ad4mMcpHandler {
         description = "Get the current agent's public profile (username, name, bio, profile picture URLs). This is the identity that other agents and human users see in neighbourhoods."
     )]
     pub async fn get_agent_profile(&self, _params: Parameters<GetAgentProfileParams>) -> String {
-        let token = self.get_auth_token().await.unwrap_or_default();
-        let context = match self.agent_context_for(&token) {
-            Ok(context) => context,
-            Err(e) => return json!({"error": e}).to_string(),
-        };
-
-        let agent = match get_current_agent(&context) {
+        let agent = match self.current_agent("Failed to get agent").await {
             Ok(a) => a,
-            Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
+            Err(e) => return e,
         };
 
         let mut profile = json!({"did": agent.did});
 
-        let predicates = vec![
-            ("sioc://has_username", "username"),
-            ("sioc://has_given_name", "given_name"),
-            ("sioc://has_family_name", "family_name"),
-            ("sioc://has_email", "email"),
-            ("sioc://has_bio", "bio"),
+        let predicates = PROFILE_FIELDS.iter().chain(&[
             ("sioc://has_profile_image", "profile_image"),
             ("sioc://has_profile_thumbnail_image", "profile_thumbnail"),
-        ];
+        ]);
 
         if let Some(ref perspective) = agent.perspective {
-            for link in &perspective.links {
-                if link.data.source == "flux://profile" {
-                    let predicate = link.data.predicate.as_deref().unwrap_or("");
-                    for (pred_uri, field_name) in &predicates {
-                        if predicate == *pred_uri {
-                            let value = Self::resolve_literal_value(&link.data.target);
-                            profile[field_name] = json!(value);
-                        }
+            for (pred_uri, field_name) in predicates {
+                for link in &perspective.links {
+                    if link.data.source == "flux://profile"
+                        && link.data.predicate.as_deref() == Some(*pred_uri)
+                    {
+                        profile[*field_name] =
+                            json!(Self::resolve_literal_value(&link.data.target));
                     }
                 }
             }
@@ -236,20 +186,13 @@ impl Ad4mMcpHandler {
         description = "Set the current agent's public profile (username, name, bio, email). These fields are visible to other agents and to the human users of whichever app renders the neighbourhood. Only provided fields are updated; omitted fields keep their current values."
     )]
     pub async fn set_agent_profile(&self, params: Parameters<SetAgentProfileParams>) -> String {
-        let _capabilities = match self.get_capabilities().await {
-            Ok(c) => c,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let token = self.get_auth_token().await.unwrap_or_default();
-        let context = match self.agent_context_for(&token) {
-            Ok(context) => context,
-            Err(e) => return json!({"error": e}).to_string(),
-        };
-
-        let agent = match get_current_agent(&context) {
+        let agent = match self.current_agent("Failed to get agent").await {
             Ok(a) => a,
-            Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
+            Err(e) => return e,
+        };
+        let context = match self.signer().await {
+            Ok(context) => context,
+            Err(e) => return e,
         };
 
         let current_links = agent
@@ -258,20 +201,13 @@ impl Ad4mMcpHandler {
             .map(|p| &p.links[..])
             .unwrap_or(&[]);
 
-        let profile_text_predicates = [
-            "sioc://has_username",
-            "sioc://has_given_name",
-            "sioc://has_family_name",
-            "sioc://has_email",
-            "sioc://has_bio",
-        ];
-
         let mut current_values = std::collections::HashMap::new();
         let mut preserved_links: Vec<DecoratedLinkExpression> = Vec::new();
 
         for link in current_links {
             let predicate = link.data.predicate.as_deref().unwrap_or("");
-            if link.data.source == "flux://profile" && profile_text_predicates.contains(&predicate)
+            if link.data.source == "flux://profile"
+                && PROFILE_FIELDS.iter().any(|(p, _)| *p == predicate)
             {
                 current_values.insert(predicate.to_string(), link.data.target.clone());
                 continue;
@@ -307,27 +243,26 @@ impl Ad4mMcpHandler {
             }
         }
 
-        match update_agent_perspective(&context, all_links).await {
+        match self
+            .set_public_links(&all_links, "Failed to update profile")
+            .await
+        {
             Ok(_) => {
                 let mut updated = json!({"success": true});
-                if let Some(u) = p.username.as_ref() {
-                    updated["username"] = json!(u);
-                }
-                if let Some(g) = p.given_name.as_ref() {
-                    updated["given_name"] = json!(g);
-                }
-                if let Some(f) = p.family_name.as_ref() {
-                    updated["family_name"] = json!(f);
-                }
-                if let Some(e) = p.email.as_ref() {
-                    updated["email"] = json!(e);
-                }
-                if let Some(b) = p.bio.as_ref() {
-                    updated["bio"] = json!(b);
+                for ((_, field), value) in PROFILE_FIELDS.iter().zip([
+                    &p.username,
+                    &p.given_name,
+                    &p.family_name,
+                    &p.email,
+                    &p.bio,
+                ]) {
+                    if let Some(value) = value {
+                        updated[*field] = json!(value);
+                    }
                 }
                 updated.to_string()
             }
-            Err(e) => json!({"error": format!("Failed to update profile: {}", e)}).to_string(),
+            Err(e) => e,
         }
     }
 
@@ -339,64 +274,52 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<SetAgentProfilePictureParams>,
     ) -> String {
-        let _capabilities = match self.get_capabilities().await {
-            Ok(c) => c,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let token = self.get_auth_token().await.unwrap_or_default();
-        let context = match self.agent_context_for(&token) {
-            Ok(context) => context,
-            Err(e) => return json!({"error": e}).to_string(),
-        };
         let mime = params.0.mime_type.as_deref().unwrap_or("image/png");
-
-        // Find the file-storage language via the LanguageController
-        let controller = LanguageController::global_instance();
-        //let all_languages = controller.get_installed_languages(None).await;
-        //let file_storage_lang = all_languages
-        //    .iter()
-        //    .find(|l| l.name.to_lowercase().contains("file-storage"))
-        //     .map(|l| l.address.clone());
-
-        //let file_storage_addr = match file_storage_lang {
-        //    Some(addr) => addr,
-        //    None => {
-        //        return json!({"error": "File storage language not found in runtime"}).to_string()
-        //    }
-        //};
-
-        let file_storage_addr = "QmzSYwddqhm49PrRMzSrJf3AvmmreXMKtr1u56nbTjBFVmCzS8N".to_string();
-
-        // Ensure the file-storage language is loaded before trying to create an expression.
-        // language_by_ref() downloads and installs the language if it isn't already running.
-        if !controller.is_language_loaded(&file_storage_addr).await {
-            if let Err(e) = controller.language_by_ref(&file_storage_addr).await {
-                return json!({"error": format!("Failed to load file-storage language: {}", e)})
-                    .to_string();
-            }
-        }
-
-        // Create expression via the language controller
         let content = json!({
             "data_base64": params.0.image_base64,
             "name": "profile-image",
             "file_type": mime,
         });
-        let profile_img = match controller
-            .expression_create(&file_storage_addr, content, &context)
+        let create = json!({
+            "languageAddress": FILE_STORAGE_LANGUAGE,
+            "content": content.to_string(),
+        });
+
+        // `expression.create` decides who may store the image. Its guard runs before the
+        // file-storage language loads, so a refused caller installs nothing.
+        if let Err(e) = self.admit_method("expression.create", &create).await {
+            return method_error(e);
+        }
+
+        // language_by_ref() downloads and installs the language if it isn't already running.
+        let controller = LanguageController::global_instance();
+        if !controller.is_language_loaded(FILE_STORAGE_LANGUAGE).await {
+            if let Err(e) = controller.language_by_ref(FILE_STORAGE_LANGUAGE).await {
+                return json!({"error": format!("Failed to load file-storage language: {}", e)})
+                    .to_string();
+            }
+        }
+
+        let profile_img: String = match self
+            .call(
+                "expression.create",
+                create,
+                labelled_json("Failed to upload image"),
+            )
             .await
         {
-            Ok(addr) => addr,
-            Err(e) => {
-                return json!({"error": format!("Failed to upload image: {}", e)}).to_string()
-            }
+            Ok(address) => address,
+            Err(e) => return e,
         };
 
         // Get current agent and rebuild links with the new profile image
-        let agent = match get_current_agent(&context) {
+        let agent = match self.current_agent("Failed to get agent").await {
             Ok(a) => a,
-            Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
+            Err(e) => return e,
+        };
+        let context = match self.signer().await {
+            Ok(context) => context,
+            Err(e) => return e,
         };
 
         let current_links = agent
@@ -416,39 +339,30 @@ impl Ad4mMcpHandler {
             all_links.push(link.clone());
         }
 
-        let image_link = match make_profile_link(
-            "flux://profile",
+        for predicate in [
             "sioc://has_profile_image",
-            &profile_img,
-            &context,
-        ) {
-            Ok(l) => l,
-            Err(e) => {
-                return json!({"error": format!("Failed to sign profile link: {}", e)}).to_string()
-            }
-        };
-        let thumb_link = match make_profile_link(
-            "flux://profile",
             "sioc://has_profile_thumbnail_image",
-            &profile_img,
-            &context,
-        ) {
-            Ok(l) => l,
-            Err(e) => {
-                return json!({"error": format!("Failed to sign profile link: {}", e)}).to_string()
+        ] {
+            match make_profile_link("flux://profile", predicate, &profile_img, &context) {
+                Ok(link) => all_links.push(link),
+                Err(e) => {
+                    return json!({"error": format!("Failed to sign profile link: {}", e)})
+                        .to_string()
+                }
             }
-        };
-        all_links.push(image_link);
-        all_links.push(thumb_link);
+        }
 
-        match update_agent_perspective(&context, all_links).await {
+        match self
+            .set_public_links(&all_links, "Failed to update profile")
+            .await
+        {
             Ok(_) => json!({
                 "success": true,
                 "profile_image": profile_img,
                 "message": "Profile picture updated. Use a square image for best results — apps usually crop it to a circle."
             })
             .to_string(),
-            Err(e) => json!({"error": format!("Failed to update profile: {}", e)}).to_string(),
+            Err(e) => e,
         }
     }
 
@@ -460,50 +374,26 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<GetAgentPublicPerspectiveParams>,
     ) -> String {
-        let token = self.get_auth_token().await.unwrap_or_default();
-
-        if let Some(did) = &params.0.did {
-            // Look up another agent by DID via the agent language
-            let controller = LanguageController::global_instance();
-            let agent_lang = match controller.get_agent_language().await {
-                Ok(lang) => lang,
-                Err(e) => {
-                    return json!({"error": format!("Agent language not available: {}", e)})
-                        .to_string()
-                }
-            };
-            let lang_address = agent_lang.address().to_string();
-            match controller.get_expression(&lang_address, did).await {
-                Ok(Some(expr_json)) => {
-                    let agent: Option<Agent> = serde_json::from_value(
-                        expr_json
-                            .get("data")
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Null),
-                    )
-                    .ok();
-                    match agent {
-                        Some(a) => serde_json::to_string(&a).unwrap_or_else(|_| "null".into()),
-                        None => json!({"error": "Agent not found"}).to_string(),
-                    }
-                }
-                Ok(None) => json!({"error": "Agent not found"}).to_string(),
-                Err(e) => {
-                    json!({"error": format!("Failed to get agent perspective: {}", e)}).to_string()
-                }
+        let agent = match &params.0.did {
+            // Another agent, through the agent language (the main agent's own DID answers
+            // locally).
+            Some(did) => {
+                self.call::<Option<Agent>>(
+                    "agent.byDid",
+                    json!({ "did": did }),
+                    labelled_json("Failed to get agent perspective"),
+                )
+                .await
             }
-        } else {
-            // Get own agent
-            let context = match self.agent_context_for(&token) {
-                Ok(context) => context,
-                Err(e) => return json!({"error": e}).to_string(),
-            };
-            match get_current_agent(&context) {
-                Ok(agent) => serde_json::to_string(&agent).unwrap_or_else(|_| "null".into()),
-                Err(e) => {
-                    json!({"error": format!("Failed to get agent perspective: {}", e)}).to_string()
-                }
-            }
+            None => self
+                .current_agent("Failed to get agent perspective")
+                .await
+                .map(Some),
+        };
+        match agent {
+            Ok(Some(agent)) => serde_json::to_string(&agent).unwrap_or_else(|_| "null".into()),
+            Ok(None) => json!({"error": "Agent not found"}).to_string(),
+            Err(e) => e,
         }
     }
 
@@ -515,21 +405,57 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<SetAgentPublicPerspectiveParams>,
     ) -> String {
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
         let links: Vec<DecoratedLinkExpression> = match serde_json::from_str(&params.0.links_json) {
             Ok(l) => l,
             Err(e) => return json!({"error": format!("Invalid links JSON: {}", e)}).to_string(),
         };
 
-        match update_agent_perspective(&agent_context, links).await {
+        match self
+            .set_public_links(&links, "Failed to update agent perspective")
+            .await
+        {
             Ok(agent) => serde_json::to_string(&agent).unwrap_or_else(|_| "null".into()),
-            Err(e) => {
-                json!({"error": format!("Failed to update agent perspective: {}", e)}).to_string()
-            }
+            Err(e) => e,
         }
+    }
+}
+
+/// What a profile write leaves behind, read back as the operator: the method matrix through
+/// MCP compares only who may call the profile tools (#851).
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use crate::agent::capabilities::{AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY};
+    use crate::mcp::tools::test_support::{app, handler_as, operator, setup};
+
+    #[tokio::test]
+    async fn an_app_sets_the_main_agents_profile_and_the_operator_reads_it() {
+        setup();
+        let updated = handler_as(app(vec![
+            AGENT_READ_CAPABILITY.clone(),
+            AGENT_UPDATE_CAPABILITY.clone(),
+        ]))
+        .set_agent_profile(Parameters(SetAgentProfileParams {
+            username: Some("mcp-name".into()),
+            given_name: None,
+            family_name: None,
+            email: None,
+            bio: None,
+        }))
+        .await;
+        let updated: serde_json::Value = serde_json::from_str(&updated).expect(&updated);
+        assert_eq!(updated["success"], true, "{updated}");
+        assert_eq!(updated["username"], "mcp-name");
+        let operator = handler_as(operator());
+        let profile = operator
+            .get_agent_profile(Parameters(GetAgentProfileParams {}))
+            .await;
+        assert!(profile.contains("mcp-name"), "{profile}");
+        assert_eq!(
+            operator
+                .get_my_did(Parameters(GetAgentProfileParams {}))
+                .await,
+            crate::agent::did()
+        );
     }
 }
