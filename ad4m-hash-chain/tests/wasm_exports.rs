@@ -46,3 +46,37 @@ fn compare_export_matches_the_vectors() {
     assert!(compare_js(vec![], vec![], 1.5, "c".into()).is_err());
     assert!(compare_js(vec![], vec![], -1.0, "c".into()).is_err());
 }
+
+#[wasm_bindgen_test]
+fn compare_export_refuses_seqs_past_max_safe_integer() {
+    let max = ad4m_hash_chain::MAX_SAFE_INTEGER;
+    let (a, b, c) = ("Qma".to_string(), "Qmb".to_string(), "Qmc".to_string());
+    // The last hash sits at seq max: the answer names seq max exactly.
+    let got = compare_js(
+        vec![a.clone()],
+        vec![a.clone(), b.clone()],
+        (max - 1) as f64,
+        "c".into(),
+    );
+    assert_eq!(
+        rust(&got.unwrap()),
+        serde_json::json!({"kind": "they-extend", "from": max})
+    );
+    let got = compare_js(
+        vec![a.clone(), b.clone()],
+        vec![a.clone(), c.clone()],
+        (max - 1) as f64,
+        "c".into(),
+    );
+    assert_eq!(rust(&got.unwrap())["fork"]["seq"], serde_json::json!(max));
+    // A hash at seq max + 1: that seq is not a safe integer in JavaScript.
+    let err = compare_js(
+        vec![a.clone()],
+        vec![a.clone(), b.clone()],
+        max as f64,
+        "c".into(),
+    );
+    assert_eq!(rust(&err.unwrap_err())["code"], "malformed");
+    let err = compare_js(vec![a.clone(), b], vec![a, c], max as f64, "c".into());
+    assert_eq!(rust(&err.unwrap_err())["code"], "malformed");
+}

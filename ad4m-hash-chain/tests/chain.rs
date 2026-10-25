@@ -361,7 +361,7 @@ fn two_valid_entries_at_one_seq_give_fork_evidence_and_nothing_appends() {
     };
     assert_eq!(
         compare(ours.hashes(), branch.hashes(), 0, &"c".to_string()),
-        Compare::Fork(evidence.clone())
+        Some(Compare::Fork(evidence.clone()))
     );
 
     let mut chain = fold(&TestPolicy, &entries[..3]).unwrap();
@@ -383,11 +383,11 @@ fn a_shorter_peer_chain_is_we_extend_and_never_truncates() {
     let peer = fold(&TestPolicy, &entries[..3]).unwrap();
     assert_eq!(
         compare(chain.hashes(), peer.hashes(), 0, &"c".to_string()),
-        Compare::WeExtend { from: 3 }
+        Some(Compare::WeExtend { from: 3 })
     );
     assert_eq!(
         compare(peer.hashes(), chain.hashes(), 0, &"c".to_string()),
-        Compare::TheyExtend { from: 3 }
+        Some(Compare::TheyExtend { from: 3 })
     );
     assert_eq!(
         compare(
@@ -396,7 +396,7 @@ fn a_shorter_peer_chain_is_we_extend_and_never_truncates() {
             2,
             &"c".to_string()
         ),
-        Compare::WeExtend { from: 3 }
+        Some(Compare::WeExtend { from: 3 })
     );
     let before = snapshot(&chain);
     assert_eq!(
@@ -414,9 +414,9 @@ fn compare_same_and_fork_offsets() {
         .map(|e| entry_hash(e).unwrap())
         .collect();
     let c = "c".to_string();
-    assert_eq!(compare(&h, &h, 0, &c), Compare::Same);
-    assert_eq!(compare(&[], &[], 7, &c), Compare::Same);
-    match compare(&h[1..], &[h[1].clone(), h[0].clone()], 1, &c) {
+    assert_eq!(compare(&h, &h, 0, &c), Some(Compare::Same));
+    assert_eq!(compare(&[], &[], 7, &c), Some(Compare::Same));
+    match compare(&h[1..], &[h[1].clone(), h[0].clone()], 1, &c).unwrap() {
         Compare::Fork(f) => {
             assert_eq!(f.seq, 2);
             assert_eq!(f.ours, h[2]);
@@ -424,6 +424,41 @@ fn compare_same_and_fork_offsets() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn compare_refuses_seqs_past_u64_and_answers_up_to_it() {
+    let h: Vec<String> = make_chain("c", 1, 3)
+        .iter()
+        .map(|e| entry_hash(e).unwrap())
+        .collect();
+    let c = "c".to_string();
+    // The answer would name seq u64::MAX + 1.
+    assert_eq!(compare(&h[..1], &h[..2], u64::MAX, &c), None);
+    assert_eq!(compare(&h[..2], &h[..1], u64::MAX, &c), None);
+    assert_eq!(
+        compare(&h[..2], &[h[0].clone(), h[2].clone()], u64::MAX, &c),
+        None
+    );
+    // Answers whose seq fits are still given.
+    assert_eq!(compare(&h[..1], &h[..1], u64::MAX, &c), Some(Compare::Same));
+    assert_eq!(
+        compare(&h[..1], &h[..2], u64::MAX - 1, &c),
+        Some(Compare::TheyExtend { from: u64::MAX })
+    );
+    assert_eq!(
+        compare(&h[..2], &[h[0].clone(), h[2].clone()], u64::MAX - 1, &c),
+        Some(Compare::Fork(ForkEvidence {
+            chain: c.clone(),
+            seq: u64::MAX,
+            ours: h[1].clone(),
+            theirs: h[2].clone(),
+        }))
+    );
+    assert_eq!(
+        compare(&[], &h, u64::MAX, &c),
+        Some(Compare::TheyExtend { from: u64::MAX })
+    );
 }
 
 // --------------------------------------------------------------- out of order

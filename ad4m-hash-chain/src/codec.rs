@@ -14,6 +14,16 @@ pub const SHA2_256: u8 = 0x12;
 /// The multicodec prefix of an Ed25519 public key (varint of 0xed).
 pub const ED25519_PUB: [u8; 2] = [0xed, 0x01];
 
+// Base58 decoding costs time quadratic in the text length, so every decoder refuses text
+// longer than the longest encoding of its byte length before decoding. n bytes take at
+// most ceil(n * log58(256)) = ceil(n * 1.3657) base58 characters.
+/// The longest base58 text of a 34-byte multihash (0x12 0x20 + 32-byte digest): 47.
+const HASH_TEXT_MAX: usize = 47;
+/// The longest multikey: `z` + base58 of 34 bytes (0xed 0x01 + 32-byte key): 1 + 47.
+const MULTIKEY_TEXT_MAX: usize = 48;
+/// The longest proof value: `z` + base58 of a 64-byte Ed25519 signature: 1 + 88.
+const PROOF_VALUE_TEXT_MAX: usize = 89;
+
 /// Why a hash string is not a SHA-256 multihash.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HashError {
@@ -46,6 +56,9 @@ pub fn hash_bytes(data: &[u8]) -> Hash {
 
 /// The digest inside a multihash text. Only sha2-256 (code 0x12) is accepted.
 pub fn decode_hash(hash: &str) -> Result<[u8; 32], HashError> {
+    if hash.len() > HASH_TEXT_MAX {
+        return Err(HashError::Length);
+    }
     let bytes = bs58::decode(hash)
         .into_vec()
         .map_err(|_| HashError::Base58)?;
@@ -72,6 +85,9 @@ pub fn encode_ed25519_multikey(public_key: &[u8; 32]) -> Multikey {
 
 /// The Ed25519 public key inside a multikey. Any other key type is refused.
 pub fn decode_ed25519_multikey(multikey: &str) -> Option<[u8; 32]> {
+    if multikey.len() > MULTIKEY_TEXT_MAX {
+        return None;
+    }
     let body = multikey.strip_prefix('z')?;
     let bytes = bs58::decode(body).into_vec().ok()?;
     if bytes.len() != 34 || bytes[..2] != ED25519_PUB {
@@ -89,6 +105,9 @@ pub fn encode_proof_value(signature: &[u8; 64]) -> String {
 
 /// The signature inside a proof value.
 pub fn decode_proof_value(value: &str) -> Option<[u8; 64]> {
+    if value.len() > PROOF_VALUE_TEXT_MAX {
+        return None;
+    }
     let body = value.strip_prefix('z')?;
     let bytes = bs58::decode(body).into_vec().ok()?;
     bytes.try_into().ok()
@@ -140,5 +159,46 @@ mod tests {
         assert_eq!(decode_proof_value(&v), Some(sig));
         assert_eq!(decode_proof_value(&v[1..]), None);
         assert_eq!(decode_proof_value("z2"), None);
+    }
+
+    #[test]
+    fn length_limits_fit_the_longest_encodings() {
+        let hash = bs58::encode([0xff; 34]).into_string();
+        assert_eq!(hash.len(), HASH_TEXT_MAX);
+        let mut longest_hash = vec![SHA2_256, 32];
+        longest_hash.extend_from_slice(&[0xff; 32]);
+        let longest_hash = bs58::encode(longest_hash).into_string();
+        assert_eq!(decode_hash(&longest_hash), Ok([0xff; 32]));
+
+        let key = [0xff; 32];
+        let mk = encode_ed25519_multikey(&key);
+        assert_eq!(
+            1 + bs58::encode([0xff; 34]).into_string().len(),
+            MULTIKEY_TEXT_MAX
+        );
+        assert_eq!(decode_ed25519_multikey(&mk), Some(key));
+
+        let sig = [0xff; 64];
+        let v = encode_proof_value(&sig);
+        assert_eq!(v.len(), PROOF_VALUE_TEXT_MAX);
+        assert_eq!(decode_proof_value(&v), Some(sig));
+    }
+
+    #[test]
+    fn overlong_text_is_refused_before_decoding() {
+        // Leading '1's decode to leading zero bytes: decoded, this hash would show code 0.
+        let padded = format!("1{}", hash_bytes(b"abc"));
+        assert_eq!(padded.len(), HASH_TEXT_MAX);
+        assert_eq!(decode_hash(&padded), Err(HashError::Code(0)));
+        let padded = format!("11{}", hash_bytes(b"abc"));
+        assert_eq!(decode_hash(&padded), Err(HashError::Length));
+
+        // A megabyte of base58 would take minutes to decode; refused, it takes no time.
+        let huge = "2".repeat(1 << 20);
+        let started = std::time::Instant::now();
+        assert_eq!(decode_hash(&huge), Err(HashError::Length));
+        assert_eq!(decode_ed25519_multikey(&format!("z{huge}")), None);
+        assert_eq!(decode_proof_value(&format!("z{huge}")), None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 }
