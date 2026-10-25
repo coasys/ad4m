@@ -280,30 +280,35 @@ async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
     let late_id = Arc::new(std::sync::Mutex::new(None::<String>));
     let mut handlers = build_handler_map();
     let b = block.clone();
-    handlers.method::<Value, bool>("test.block", move |_, _| {
-        let b = b.clone();
-        async move {
-            b.notified().await;
-            Ok(json!(true))
-        }
-    });
-    let (l, slot, uuid) = (late.clone(), late_id.clone(), p.0.clone());
-    handlers.method::<Value, bool>(
-        "test.subscribeLate",
-        move |_, ctx: Arc<crate::types::RequestContext>| {
-            let (l, slot, uuid) = (l.clone(), slot.clone(), uuid.clone());
+    // Every method needs a guard, or the dispatcher refuses it before the handler runs.
+    handlers
+        .method::<Value, bool>("test.block", move |_, _| {
+            let b = b.clone();
             async move {
-                l.notified().await;
-                let (id, _, _) = crate::perspectives::get_perspective(&uuid)
-                    .unwrap()
-                    .subscribe_and_query(QUERY.into(), ctx.connection_id.clone().unwrap(), None)
-                    .await
-                    .unwrap();
-                *slot.lock().unwrap() = Some(id);
+                b.notified().await;
                 Ok(json!(true))
             }
-        },
-    );
+        })
+        .guard(crate::api::guards::Guard::Open);
+    let (l, slot, uuid) = (late.clone(), late_id.clone(), p.0.clone());
+    handlers
+        .method::<Value, bool>(
+            "test.subscribeLate",
+            move |_, ctx: Arc<crate::types::RequestContext>| {
+                let (l, slot, uuid) = (l.clone(), slot.clone(), uuid.clone());
+                async move {
+                    l.notified().await;
+                    let (id, _, _) = crate::perspectives::get_perspective(&uuid)
+                        .unwrap()
+                        .subscribe_and_query(QUERY.into(), ctx.connection_id.clone().unwrap(), None)
+                        .await
+                        .unwrap();
+                    *slot.lock().unwrap() = Some(id);
+                    Ok(json!(true))
+                }
+            },
+        )
+        .guard(crate::api::guards::Guard::Open);
 
     let mut socket = Socket::open_with_handlers(handlers).await;
     let early = socket.subscribe(&p.0).await;
@@ -316,12 +321,17 @@ async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
         "a live query outlived its socket while a call was in flight"
     );
     late.notify_one();
-    let late_sub = loop {
-        if let Some(id) = late_id.lock().unwrap().clone() {
-            break id;
+    // Bounded, so a late call that never runs fails the test instead of hanging it.
+    let late_sub = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(id) = late_id.lock().unwrap().clone() {
+                break id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
+    })
+    .await
+    .expect("test.subscribeLate never subscribed");
     assert!(
         ended(&p.0, &late_sub, &socket.connection_id).await,
         "a subscribe that completed after the close kept its live query"
@@ -504,16 +514,19 @@ async fn an_event_stream_that_ends_ends_the_session() {
 // follow the session's end.
 #[tokio::test]
 async fn a_revocation_cancels_the_calls_in_flight() {
+    use crate::api::guards::Guard;
     use crate::api::ws_handler::{HandlerMap, NoParams, WsRpcError};
     let (started, mut cancel_tokens) = mpsc::unbounded_channel();
     let mut map = HandlerMap::new();
+    // Every method needs a guard, or the dispatcher refuses it before the handler runs.
     map.method::<NoParams, bool>("test.wait", move |_, ctx: Arc<RequestContext>| {
         let started = started.clone();
         async move {
             started.send(ctx.cancel_token.clone().unwrap()).unwrap();
             std::future::pending::<Result<Value, WsRpcError>>().await
         }
-    });
+    })
+    .guard(Guard::Open);
     let session = Session::for_test(Principal::Agent(AgentContext::main_agent()))
         .with_caps(vec![ALL_CAPABILITY.clone()]);
     let grant = session.grant().unwrap().clone();

@@ -49,7 +49,7 @@ Using Holochain for its core backbone, each instance doesn't just store data-it 
 
 
 
-Practically, this means every developer's user runs their own AD4M node. Install it, configure it (e.g., via a RuntimeConfig JSON), and it spins up a process holding their private keys, syncing their Perspectives, and running Language code-like a lightweight, personal cloud. A UI might then query:
+Practically, this means every developer's user runs their own AD4M executor. Install it, configure it (e.g., via a RuntimeConfig JSON), and it spins up a process holding their private keys, syncing their Perspectives, and running Language code-like a lightweight, personal cloud. A UI might then query:
 ```javascript
 // Initialize the client
 const ad4mClient = new Ad4mClient("http://localhost:12000");
@@ -77,7 +77,7 @@ This spanning layer doesn't replace the internet-it augments it, giving agents c
 ### Protocols with a Global Addressing Scheme
 At the heart of AD4M are Languages, which are more than just data formats-they're protocol-like abstractions that define how agents express,
 store, and share data across ecosystems. Conceptually akin to protocols like HTTP or IPFS, each Language encapsulates the capacity of (AD4M-) agents
-(read: nodes/users) to spawn *Expressions*-that is: data-objects with cryptographic provenance- messages, posts, you name it.
+(read: executors/users) to spawn *Expressions*-that is: data-objects with cryptographic provenance- messages, posts, you name it.
 How the Language implementation actually stores and shares these Expressions is up to the Language implementor.
 
 The key point here is to introduce a global addressing scheme, extending the familiar URI model.
@@ -159,7 +159,7 @@ By rooting adaptability in the language-language, AD4M ensures its spanning laye
 
 
 ## Perspectives and Neighbourhoods
-The local AD4M node stores, manages and provides access to an arbitrary number of Perspectives-subjective knowledge graphs of RDF triples.
+The local AD4M executor stores, manages and provides access to an arbitrary number of Perspectives-subjective knowledge graphs of RDF triples.
 Each Perspective is similar to a Solid Pod, in that it's a (private) collection of semantic associations.
 The main difference to semantic-web-style graphs is that each triple (called a `Link` in AD4M) is an Expression and thus has a cryptographic provenance.
 These triples, like `<subject> <predicate> <object>`, store data such as `<agent123> <posted> <QmXyz123://post456>`.

@@ -16,21 +16,26 @@ use serde_json::json;
 use std::sync::Arc;
 
 impl Ad4mMcpHandler {
-    /// Generate dynamic MCP tools from SHACL subject classes across all perspectives
+    /// Generate dynamic MCP tools from the SHACL subject classes of every perspective the
+    /// caller may read, or of the context's `perspective_scope` only when it is set.
     pub(crate) async fn generate_dynamic_tools(&self) -> Vec<Tool> {
-        let perspectives = all_perspectives();
+        let uuids = match &self.context.perspective_scope {
+            Some(uuid) => vec![uuid.clone()],
+            None => {
+                let mut uuids = Vec::new();
+                for p in all_perspectives() {
+                    uuids.push(p.persisted.lock().await.uuid.clone());
+                }
+                uuids
+            }
+        };
         let mut tools = Vec::new();
         let mut seen_classes = std::collections::HashSet::new();
 
-        for p in perspectives.iter() {
-            let handle = p.persisted.lock().await.clone();
-
-            // Multi-user isolation: skip perspectives the user can't access
-            if !self.can_access_perspective(&handle).await {
+        for uuid in uuids {
+            if !self.may_read_perspective(&uuid).await {
                 continue;
             }
-
-            let uuid = handle.uuid.clone();
 
             let perspective = match get_perspective(&uuid) {
                 Some(p) => p,
@@ -44,35 +49,57 @@ impl Ad4mMcpHandler {
                     continue;
                 }
 
-                // An abstract class (#1435): only its reads (see
-                // `handle_dynamic_tool`). If the index does not load, the
-                // writes are listed and refused when called.
+                // If the abstract-class index does not load, the writes are listed and
+                // refused when called.
                 let writable = !perspective.is_abstract_class(&class.name).unwrap_or(false);
-                if writable {
-                    tools.push(Self::make_create_tool(&class.name, &class.properties));
-                }
-                tools.push(Self::make_query_tool(&class.name));
-                tools.push(Self::make_list_tool(&class.name));
-                tools.push(Self::make_get_tool(&class.name));
-                if writable {
-                    tools.push(Self::make_delete_tool(&class.name));
-                }
-                // Per-property set tools and collection tools
-                for prop in &class.properties {
-                    if prop.is_collection {
-                        tools.push(Self::make_collection_get_tool(&class.name, &prop.name));
-                        if writable {
-                            tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
-                            tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
-                        }
-                    } else if writable {
-                        tools.push(Self::make_set_property_tool(&class.name, &prop.name));
-                    }
-                }
+                tools.extend(Self::class_tools(class, writable));
             }
         }
 
         tools
+    }
+
+    /// The dynamic tools of `class`. An abstract class (#1435) is not `writable`: it gets
+    /// only its reads (see `handle_dynamic_tool`).
+    pub(crate) fn class_tools(class: &shacl::ShaclClass, writable: bool) -> Vec<Tool> {
+        let mut tools = Vec::new();
+        if writable {
+            tools.push(Self::make_create_tool(&class.name, &class.properties));
+        }
+        tools.push(Self::make_query_tool(&class.name));
+        tools.push(Self::make_list_tool(&class.name));
+        tools.push(Self::make_get_tool(&class.name));
+        if writable {
+            tools.push(Self::make_delete_tool(&class.name));
+        }
+        for prop in &class.properties {
+            if prop.is_collection {
+                tools.push(Self::make_collection_get_tool(&class.name, &prop.name));
+                if writable {
+                    tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
+                    tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
+                }
+            } else if writable {
+                tools.push(Self::make_set_property_tool(&class.name, &prop.name));
+            }
+        }
+        tools
+    }
+
+    /// The names of the dynamic tools of `classes` that are theirs alone: a generated name
+    /// that a static tool also has (a class named `Instance` generates `instance_query`)
+    /// dispatches to the static tool, so it is left out.
+    pub(crate) fn class_tool_names(
+        classes: &[shacl::ShaclClass],
+    ) -> std::collections::HashSet<String> {
+        let statics: std::collections::HashSet<String> =
+            Self::static_tool_names().into_iter().collect();
+        classes
+            .iter()
+            .flat_map(|class| Self::class_tools(class, true))
+            .map(|t| t.name.to_string())
+            .filter(|name| !statics.contains(name))
+            .collect()
     }
 
     /// Extract property information from a SHACL shape
@@ -340,16 +367,20 @@ impl Ad4mMcpHandler {
             }
         };
 
-        // Find actual class name (preserving original case)
+        // Find actual class name (preserving original case). A write checks the write guard
+        // here already, so a caller who may not write is refused as the write would refuse it.
         let class_name = {
-            let perspective = match self.get_readable_perspective(&perspective_id).await {
+            let writes = !matches!(operation, "query" | "list" | "get");
+            let perspective = if writes {
+                self.get_writable_perspective(&perspective_id)
+                    .await
+                    .map(|(p, _)| p)
+            } else {
+                self.get_readable_perspective(&perspective_id).await
+            };
+            let perspective = match perspective {
                 Ok(p) => p,
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Perspective not found: {}",
-                        perspective_id
-                    ))]));
-                }
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
             };
             let name = match shacl::find_class_name(&perspective, class_name_lower).await {
                 Some(name) => name,
@@ -977,12 +1008,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let (mut perspective, _agent_ctx) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(perspective_id).await {
                 Ok(p) => p,
                 Err(e) => return e,
@@ -1085,11 +1111,6 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let _agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
         let (mut perspective, _agent_ctx) =
             match self.get_writable_perspective(perspective_id).await {
                 Ok(p) => p,
@@ -1150,7 +1171,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let (mut perspective, _agent_ctx) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(perspective_id).await {
                 Ok(p) => p,
                 Err(e) => return e,
@@ -1163,11 +1184,6 @@ impl Ad4mMcpHandler {
         {
             Ok(pred) => pred,
             Err(e) => return format!("Error resolving property '{}': {}", property_name, e),
-        };
-
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
         };
 
         let target = Self::create_property_expression(
@@ -1255,7 +1271,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let (perspective, _agent_ctx) = match self.get_writable_perspective(perspective_id).await {
+        let perspective = match self.get_readable_perspective(perspective_id).await {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -1307,7 +1323,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let (mut perspective, _agent_ctx) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(perspective_id).await {
                 Ok(p) => p,
                 Err(e) => return e,
@@ -1320,11 +1336,6 @@ impl Ad4mMcpHandler {
         {
             Ok(pred) => pred,
             Err(e) => return format!("Error resolving collection '{}': {}", collection_name, e),
-        };
-
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
         };
 
         let target = Self::create_property_expression(
@@ -1435,78 +1446,9 @@ impl Ad4mMcpHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
 
-    // Test-only struct that mirrors McpContext for test isolation
-    struct TestAuthContext {
-        admin_credential: Option<String>,
-        auth_token: Arc<RwLock<Option<String>>>,
-    }
-
-    impl TestAuthContext {
-        fn new(admin_credential: Option<String>) -> Self {
-            Self {
-                admin_credential,
-                auth_token: Arc::new(RwLock::new(None)),
-            }
-        }
-
-        async fn get_auth_token(&self) -> Option<String> {
-            self.auth_token.read().await.clone()
-        }
-    }
-
-    // `test_auth_status_unauthenticated` used to live here. It re-implemented the
-    // match inside the test body and asserted against its own copy, so no change to
-    // the real tool could ever fail it. The real answer function is now tested
-    // directly in `mcp::tools::auth::auth_status_tests`.
-
-    #[tokio::test]
-    async fn test_auth_token_stores_value() {
-        let ctx = TestAuthContext::new(None);
-
-        // Simulate token storage logic
-        {
-            let mut token_guard = ctx.auth_token.write().await;
-            *token_guard = Some("test-token".to_string());
-        }
-
-        let token = ctx.get_auth_token().await;
-        assert_eq!(token, Some("test-token".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_admin_credential_check() {
-        let ctx = TestAuthContext::new(Some("my-admin-secret".to_string()));
-
-        // Set admin credential as token
-        {
-            let mut token_guard = ctx.auth_token.write().await;
-            *token_guard = Some("my-admin-secret".to_string());
-        }
-
-        let token = ctx.get_auth_token().await;
-        let is_admin = token.as_ref() == ctx.admin_credential.as_ref();
-
-        assert!(is_admin);
-    }
-
-    #[tokio::test]
-    async fn test_invalid_admin_credential() {
-        let ctx = TestAuthContext::new(Some("my-admin-secret".to_string()));
-
-        // Set wrong credential
-        {
-            let mut token_guard = ctx.auth_token.write().await;
-            *token_guard = Some("wrong-secret".to_string());
-        }
-
-        let token = ctx.get_auth_token().await;
-        let is_admin = token.as_ref() == ctx.admin_credential.as_ref();
-
-        assert!(!is_admin);
-    }
+    // The MCP session's caller is tested in `mcp::caller` and `mcp::tools`
+    // (`agent_context_tests`), and `auth_status` in `mcp::tools::auth`.
 
     #[test]
     fn test_escape_prolog_string() {
