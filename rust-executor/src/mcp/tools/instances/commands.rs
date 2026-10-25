@@ -6,6 +6,9 @@
 //! `this` / `value` substitution. Kept on the static surface because it is
 //! the only way over MCP to run an action the class declares but no
 //! `instance_*` tool models (custom actions, local-only links, …).
+//!
+//! It calls the RPC method `perspective.executeCommands` through the handler map, so the
+//! method's guard applies.
 
 use super::{error_json, pretty, Ad4mMcpHandler};
 use crate::perspectives::perspective_instance::{Command, Parameter};
@@ -35,39 +38,33 @@ impl Ad4mMcpHandler {
     pub async fn execute_commands(&self, params: Parameters<ExecuteCommandsParams>) -> String {
         let p = &params.0;
 
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((mut perspective, agent_context)) => {
-                let commands: Vec<Command> = match serde_json::from_str(&p.commands) {
-                    Ok(cmds) => cmds,
-                    Err(e) => return error_json(format!("Error parsing commands JSON: {e}")),
-                };
-
-                let parameters: Vec<Parameter> = match &p.parameters {
-                    Some(params_str) => match serde_json::from_str(params_str) {
-                        Ok(parsed) => parsed,
-                        Err(e) => return error_json(format!("Error parsing parameters JSON: {e}")),
-                    },
-                    None => Vec::new(),
-                };
-
-                match perspective
-                    .execute_commands(
-                        commands,
-                        p.expression_address.clone(),
-                        parameters,
-                        None,
-                        &agent_context,
-                    )
-                    .await
-                {
-                    Ok(_) => pretty(&json!({
-                        "executed": true,
-                        "perspective_id": p.perspective_id,
-                        "expression_address": p.expression_address
-                    })),
-                    Err(e) => error_json(format!("Error executing commands: {e}")),
-                }
+        // The method parses both again; parsing here keeps the tool's own messages.
+        if let Err(e) = serde_json::from_str::<Vec<Command>>(&p.commands) {
+            return error_json(format!("Error parsing commands JSON: {e}"));
+        }
+        if let Some(parameters) = &p.parameters {
+            if let Err(e) = serde_json::from_str::<Vec<Parameter>>(parameters) {
+                return error_json(format!("Error parsing parameters JSON: {e}"));
             }
+        }
+
+        let params = json!({
+            "uuid": p.perspective_id,
+            "commands": p.commands,
+            "expression": p.expression_address,
+            "parameters": p.parameters,
+        });
+        let executed = self
+            .call::<serde_json::Value>("perspective.executeCommands", params, |e| {
+                error_json(format!("Error executing commands: {}", e.message))
+            })
+            .await;
+        match executed {
+            Ok(_) => pretty(&json!({
+                "executed": true,
+                "perspective_id": p.perspective_id,
+                "expression_address": p.expression_address
+            })),
             Err(e) => e,
         }
     }
