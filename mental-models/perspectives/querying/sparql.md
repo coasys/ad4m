@@ -8,7 +8,7 @@ A **SPARQL query** (`perspective.querySparql`) runs a caller's read-only SPARQL 
 
 <details><summary>How it works</summary>
 
-1. The handler checks the capability and owner access, then reads `engine` (default `"sparql"`; any other value is refused).
+1. The method's guard checks the capability and owner access; the handler then reads `engine` (default `"sparql"`; any other value is refused).
 2. `validate_readonly_query` parses the text as a SPARQL query. `INSERT`, `DELETE` and other updates fail to parse and are refused. `SELECT`, `ASK`, `CONSTRUCT` and `DESCRIBE` pass.
 3. The query runs on a blocking thread. The handler stops waiting after `SPARQL_QUERY_TIMEOUT_SECS` (30 s, answer 408). The client can cancel with `request.cancel` (answer 499).
 4. `query_arbitrary` returns the executor's own JSON shape, not the W3C SPARQL JSON results format: `SELECT` rows as an array of JSON objects keyed by variable name, `ASK` as a boolean, and graph results as subject/predicate/object rows. Unlike the internal `query`, it does not re-encode `?target` / `?t` bindings as `literal:` strings.

@@ -4,7 +4,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Abstract class** (`model_query/abstract_classes.rs`, built-in `ad4m://TextContent`): A subject class that reads the instances of several concrete classes, sends each write to the record's own classes, and cannot be created. [Subject classes](perspectives/social-dna/subject-classes.md)
 
-**Access check** (`ctx.require`, `get_perspective_with_access`, `refuse_user_session`): The code in a handler, MCP tool, event delivery or language op that applies a session's grant to one call, as a capability check plus an ownership check. [Access checks](agents/access/checks.md) — not: guard (a guard is a flow term)
+**Access check** (`Guard` in `api/guards.rs`, `get_perspective_with_access`, `Session::may_receive`): The code in a method guard, event delivery or language op that applies a session's grant to one call, as a capability check plus an ownership check. [Access checks](agents/access/checks.md) — not: guard alone (a guard is a flow term; say method guard)
 
 **ACL** (`acl` table in `link-server/src/db.ts`): The list of DIDs admitted to one link-server room, checked on every request. [Link server](languages/link-languages/link-server.md)
 
@@ -26,7 +26,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **AI service** (`AIService`, `rust-executor/src/ai_service/`): The executor service that runs local and remote LLMs, embedding models, transcription and AI tasks. [AI service](agents/executor/services/ai.md)
 
-**AI task** (`tasks` table, `AIService::add_task`): A stored system prompt with examples, bound to one model. [AI service](agents/executor/services/ai.md)
+**AI task** (`tasks` table, `AIService::add_task`): A stored system prompt with examples, bound to one model and owned by the agent that created it. [AI service](agents/executor/services/ai.md)
 
 **ALDK** (`ad4m-ldk/`): The AD4M Language Development Kit, for writing languages in TypeScript (`defineLanguage`) or in Rust compiled to WASM (`ad4m_language!`). [Language interface](languages/runtime/interface.md)
 
@@ -122,7 +122,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Grant** (`LiveGrant` in `agent/grants.rs`, table `grants`): The executor's record of one issued token: the agent it acts as, its capabilities and the app that holds it. A token works only while its grant is active and unexpired. [App grants](agents/access/app-grants.md)
 
-**Guard** (`requires` on `FlowState`): A model query on a flow state that must match before a transition into that state may be proposed. [Flow spawn and guards](perspectives/social-dna/flows/spawn-and-guards.md)
+**Guard** (`requires` on `FlowState`): A model query on a flow state that must match before a transition into that state may be proposed. [Flow spawn and guards](perspectives/social-dna/flows/spawn-and-guards.md) — not: method guard
 
 **Hard-wired class** (`hardwired_class.rs`, `hardwired_sdna/`): A subject class that the executor registers itself from bundled JSON, such as `FlowInstance`, `InterpretationRun` or `AutoProcessor`. [Social DNA](perspectives/social-dna/README.md) — not: built-in class (except for the abstract `ad4m://TextContent`)
 
@@ -208,6 +208,8 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Mesh** (`SfuConfig.mode == "mesh"`, `MeshManager`): A call in which every participant sends media to every other directly; the executor forwards none. [Neighbourhood calls](perspectives/neighbourhoods/calls.md)
 
+**Method guard** (`Guard` in `api/guards.rs`: `Open`, `Operator`, `Cap`, `Executor`, `Owns`): The rule that each RPC method registers for who may call it; dispatch checks its capability, then its rule, before the handler. [Access checks](agents/access/checks.md) — not: guard (a flow term)
+
 **Model class** (SDK `Ad4mModel`, `@Model` in `core/src/model/decorators.ts`): A TypeScript class whose decorators generate a subject class and whose methods run model queries. [Model classes](agents/interfaces/typescript-sdk/model-classes.md)
 
 **Model query** (`execute_model_query`, `ModelQueryInput`): A query for instances of subject classes, built from their SHACL shapes and run in the executor. [Model queries](perspectives/querying/model-queries.md)
@@ -286,7 +288,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Server link language** (`bootstrap-languages/server-link-language/`): The link language that syncs through a link server, with end-to-end encryption. [Server link language](languages/link-languages/server-link-language.md)
 
-**Session** (`Session` in `agent/session.rs`): A connection's identity: a principal, its capabilities and its token's expiry, checked again on each request and event. [Sessions](agents/access/sessions.md) — not: call (an SDK call object is also named `Session`), MCP session (MCP keeps its own per-session token)
+**Session** (`Session` in `agent/session.rs`): A connection's identity: a principal, its capabilities and its grant, checked again on each request and event. [Sessions](agents/access/sessions.md) — not: call (an SDK call object is also named `Session`), MCP session (an MCP session holds one `Session`)
 
 **SFU** (`SfuService`, `rust-executor/src/sfu/`): The WebRTC selective forwarding unit inside the executor that relays call media. [SFU](agents/executor/services/sfu.md)
 

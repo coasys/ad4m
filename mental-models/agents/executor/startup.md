@@ -10,7 +10,7 @@ Startup has two phases. First, `rust_executor::run(config)` starts the services 
 
 **Phase 1: `run(config)`**, in the order of the statements in `lib.rs`. This page owns the boot order.
 
-1. Shutdown channel and SIGINT/SIGTERM handler, logging, `config.prepare()` (defaults), `check_admin_credential()`. The check panics without a credential unless `insecure_no_admin_credential` is set.
+1. Shutdown channel and SIGINT/SIGTERM handler, logging, the soft open-file limit raised towards 65 536, at most the hard limit (`fd_limit::raise_fd_limit_at_startup`), `config.prepare()` (defaults), `check_admin_credential()`. The check panics without a credential unless `insecure_no_admin_credential` is set.
 2. Wallet backend and DB backend: local or shared ([Executor data](data.md)). Hosted mode restores perspective snapshots, then refuses an `internal_api_token` equal to the admin credential.
 3. Data directories under `<app_data>/ad4m/`; `Ad4mDb` (`ad4m_db.sqlite`); the multi-user flag, turned on if `enable_multi_user` is set.
 4. `AIService`, then `AgentService` (loads `agent.json` if it exists), notification owner migration, `RuntimeService`, then the grants (`grants::load_at_start`; the executor does not start without them).

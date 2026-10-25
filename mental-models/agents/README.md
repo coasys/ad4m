@@ -22,7 +22,7 @@ An **agent** is a DID with an Ed25519 key pair; the executor signs and stores da
    │
    ▼
  Access: Session::open ──► Principal = Operator │ Agent(AgentContext) │ Anonymous
-   │        capability check + ownership check in each handler
+   │        method guard: capability check + ownership check, before each handler
    ▼
  Identity: AgentContext::Main │ Managed { did } ──► wallet key ──► sign / DID
    │

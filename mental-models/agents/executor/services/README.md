@@ -27,7 +27,7 @@ Email and the **runtime service** (bootstrap seed, trust and friend lists, notif
 
 Direct messages are not implemented: `runtime.sendFriendMessage` answers 501, and `runtime.inbox` answers an empty list ([runtime_ws.rs](../../../../rust-executor/src/api/runtime_ws.rs)).
 
-Each service checks access in its own handlers. Some refuse user sessions (`refuse_user_session`, for example `ai.addModel`), some check for the operator (`runtime.*`), and the `sfu.*` handlers check a capability ([Access checks](../../access/checks.md)).
+Each RPC method of a service registers a guard. Some refuse user sessions (`Guard::Executor`, for example `ai.addModel`), some admit the operator only (`Guard::Operator`, for example `runtime.setHostRates`), and most `sfu.*` methods check a capability (`Guard::Cap`) ([Access checks](../../access/checks.md)).
 
 The order in which `run()` starts the services is on [Executor startup](../startup.md). The Holochain conductor starts later, on agent generate or unlock.
 

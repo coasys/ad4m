@@ -34,7 +34,7 @@ Hosted mode (`wallet_backend = "shared"`, `db_backend = "shared"`):
 <details><summary>Where in the code</summary>
 
 - [rust-executor/src/lib.rs](../../../rust-executor/src/lib.rs): data directories, backend choice, `Ad4mDb::init_global_instance`.
-- [rust-executor/src/db.rs](../../../rust-executor/src/db.rs): every SQLite table and query (`Ad4mDb`).
+- [rust-executor/src/db.rs](../../../rust-executor/src/db.rs) and [db/](../../../rust-executor/src/db): every SQLite table and query (`Ad4mDb`); [db/tasks.rs](../../../rust-executor/src/db/tasks.rs): the owner of each AI task.
 - [rust-executor/src/db_backend.rs](../../../rust-executor/src/db_backend.rs): `DbBackend`, `LocalDb`, `SharedDb`.
 - [rust-executor/src/wallet.rs](../../../rust-executor/src/wallet.rs): `LocalWallet`, `SharedWallet`.
 - [rust-executor/src/perspective_snapshot.rs](../../../rust-executor/src/perspective_snapshot.rs): restore and periodic backup.

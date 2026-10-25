@@ -27,9 +27,9 @@ app (anonymous)                executor                                approver 
  │ ◄──────────────────────────  JWT (180 days)         apps-changed (no token) ──► the agent's approvers
 ```
 
-1. `may_approve`: the operator approves any request. Another session approves only a request for the agent it acts as, and only with `agent/PERMIT`. Any other caller gets 403 without `agent/PERMIT`, else 404, as for a missing request.
+1. `agent.permitCapability`'s guard (`Owns { Request }`): the operator approves any request. Another session approves only a request for the agent it acts as, and only with `agent/PERMIT`. Any other caller gets 403 without `agent/PERMIT`, else 404, as for a missing request.
 2. The approver grants no more than it holds (`caps_within`). At redemption, a grant on a managed agent is capped again at that user's capabilities (`grant_caps_for`).
-3. A request waits 10 minutes for the main agent and 24 hours for a managed agent, counted again from the approval. A restart forgets it. An email that no user has is taken all the same: its approval request reaches nobody, and its code mints nothing.
+3. A request waits 10 minutes for the main agent and 24 hours for a managed agent, counted again from the approval. A restart forgets it. The executor holds at most 1024 requests, and 64 per agent; past that a new request evicts an older unapproved one. An email that no user has is taken all the same: its approval request reaches nobody, and its code mints nothing.
 4. A mint that fails (locked wallet, database) leaves the request approved, and the same code redeems later.
 
 JWT claims (`Claims`), signed HS256 with the wallet's JWT signing key (`signing_key_name()`): `iss` (the signing key's DID), `aud` (app name), `iat`, `exp`, `nonce` (a UUID: the token id, which names the grant) and `sub` (a managed agent's DID; none for the main agent). The token carries no capabilities: the grant holds them.
@@ -44,8 +44,9 @@ With `auto_permit_cap_requests`, `agent.requestCapability` permits a request for
 
 - [rust-executor/src/agent/grants.rs](../../../rust-executor/src/agent/grants.rs): `LiveGrant`, `Grants` (`get`, `find`, `revoke`, `revoke_agent`, `remove`, `list`), `mint`, `load_at_start`.
 - [rust-executor/src/db/grants.rs](../../../rust-executor/src/db/grants.rs): the `grants` table.
-- [rust-executor/src/agent/capabilities/mod.rs](../../../rust-executor/src/agent/capabilities/mod.rs): `request_capability`, `requested_agent`, `may_approve`, `permit_capability_within`, `caps_within`, `grant_caps_for`, `generate_capability_token`, `DEFAULT_TOKEN_VALID_PERIOD`.
-- [rust-executor/src/agent/capabilities/pending.rs](../../../rust-executor/src/agent/capabilities/pending.rs): `PendingRequests` (memory only), `RequestTarget`, `MAX_CODE_ATTEMPTS`, the request lifetimes.
+- [rust-executor/src/agent/capabilities/mod.rs](../../../rust-executor/src/agent/capabilities/mod.rs): `request_capability`, `requested_agent`, `request_target`, `permit_capability_within`, `caps_within`, `grant_caps_for`, `generate_capability_token`, `DEFAULT_TOKEN_VALID_PERIOD`.
+- [rust-executor/src/agent/capabilities/pending.rs](../../../rust-executor/src/agent/capabilities/pending.rs): `PendingRequests` (memory only), `RequestTarget`, `MAX_CODE_ATTEMPTS`, the request lifetimes, `MAX_PENDING_REQUESTS`, `MAX_PENDING_REQUESTS_PER_TARGET`.
+- [rust-executor/src/api/guards.rs](../../../rust-executor/src/api/guards.rs): `Owner::Request`, `Owner::Grant` (who may approve, revoke and remove).
 - [rust-executor/src/agent/capabilities/token.rs](../../../rust-executor/src/agent/capabilities/token.rs): `sign_token`, `decode_jwt`.
 - [rust-executor/src/api/agent_ws.rs](../../../rust-executor/src/api/agent_ws.rs): `agent.requestCapability`, `agent.permitCapability`, `agent.generateJwt`, `agent.getApps`, `agent.revokeToken`, `agent.removeApp`.
 - [rust-executor/src/api/users_ws.rs](../../../rust-executor/src/api/users_ws.rs): `user.logout`, `user.revokeAllSessions`.

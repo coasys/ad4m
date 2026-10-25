@@ -9,7 +9,7 @@ Callers reach the executor through two servers. The **RPC API** is one WebSocket
 ## Parts
 - [RPC API](rpc-api.md): the message format, dispatch and checks, and the HTTP routes.
 - [Events](events.md): what the executor pushes on a socket, and who receives each event.
-- [MCP server](mcp-server.md): the tools for AI agents, their own auth flow, the listeners.
+- [MCP server](mcp-server.md): the tools for AI agents, their login tools, the listeners.
 - [TypeScript SDK](typescript-sdk/README.md): `@coasys/ad4m`, with ad4m-connect and model classes below it.
 - [Rust client and CLI](rust-client-and-cli.md): `ad4m-client`, the `ad4m` CLI and the `ad4m-executor` binary.
 
@@ -24,7 +24,7 @@ Callers reach the executor through two servers. The **RPC API** is one WebSocket
 | OpenAI-compatible client | any | `/v1/*`, `/api/v1/openai/v1/*` | `Authorization: Bearer` |
 | Hosting service | — | `/health` (open), `/internal/shutdown` | `INTERNAL_API_TOKEN` for the shutdown |
 
-The two servers authenticate with separate code: the RPC API opens a `Session`, and the MCP server decodes tokens itself and checks its own capabilities ([Access checks](../access/checks.md)).
+Both servers open a `Session` with `Session::open`: the RPC API one per socket, the MCP server one per MCP session. MCP tools that wrap an RPC method run its guard ([Access checks](../access/checks.md)).
 
 </details>
 

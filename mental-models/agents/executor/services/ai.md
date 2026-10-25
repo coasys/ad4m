@@ -8,7 +8,7 @@ The **AI service** (`AIService`) runs models for the executor: LLMs (large langu
 
 <details><summary>How it works</summary>
 
-1. Models and tasks live in SQLite (`models`, `tasks`, `default_models`, `model_status`). The operator adds models (`ai.addModel`). `ai.setDefaultModel` picks one model per `ModelType` (`LLM`, `EMBEDDING`, `TRANSCRIPTION`).
+1. Models and tasks live in SQLite (`models`, `tasks`, `default_models`, `model_status`). The operator adds models (`ai.addModel`). A task belongs to the agent whose session created it (`tasks.agent_did`; none: the main agent), and only that agent and the operator reach it. `ai.setDefaultModel` picks one model per `ModelType` (`LLM`, `EMBEDDING`, `TRANSCRIPTION`).
 2. `spawn_llm_model` starts one worker thread per model with a request channel. `LlmModel` is `Local(Llama)` or `Remote(Box<dyn RemoteChat>, model)`.
 3. Three kinds of caller reach the models:
 

@@ -20,12 +20,12 @@ Who may make which calls:
 
 | Calls | Allowed for |
 |---|---|
-| calls that change the executor itself (lock, unlock, trusted agents, languages) | the operator, or an app grant on the main agent |
-| multi-user mode, free access, host rates, notification grants, data import, Holochain restart, opening links, the Unyt membrane proof, `sfu.ensureMembership` | the operator alone |
+| calls that change the executor itself (lock, unlock, trusted agents, languages): `Guard::Executor` | the operator, or an app grant on the main agent |
+| multi-user mode, free access, host rates, notification grants, data import, Holochain restart, opening links, the Unyt membrane proof, `sfu.ensureMembership`: `Guard::Operator` | the operator alone |
 
 1. The launcher generates an admin credential and passes it to the embedded executor (`ExecutorSecrets.admin_credential`). The launcher's UI is the operator.
 2. A headless operator sets `AD4M_ADMIN_CREDENTIAL_FILE` (or the variable). It talks to the executor with the CLI (`ad4m --admin-credential`) or the SDK.
-3. Operator-only checks in handlers use `ctx.is_operator()` (`user.setMultiUserEnabled`, `user.freeAccess`, `runtime.setHostRates`, `runtime.grantNotification`, `runtime.importData`, `runtime.restartHolochain`, `runtime.openLink`, `runtime.setUnytMembraneProof`, `sfu.ensureMembership`). Main-agent checks use `refuse_user_session`, which lets the operator and main-agent grants through.
+3. Operator-only methods register `Guard::Operator`, which checks `ctx.is_operator()` (`user.setMultiUserEnabled`, `user.freeAccess`, `runtime.setHostRates`, `runtime.grantNotification`, `runtime.importData`, `runtime.restartHolochain`, `runtime.openLink`, `runtime.setUnytMembraneProof`, `sfu.ensureMembership`); every other caller gets 403 "Admin credential required". Main-agent methods register `Guard::Executor`, which lets the operator and main-agent grants through ([Access checks](checks.md)).
 4. `api::listener_router` marks each listener with its `ListenerReach`. `listener_reach()` reads a request with a forwarding header as `Network`.
 
 </details>
@@ -36,7 +36,7 @@ Who may make which calls:
 - [rust-executor/src/agent/capabilities/mod.rs](../../../rust-executor/src/agent/capabilities/mod.rs): `ListenerReach`, `is_admin_credential_token_on`.
 - [rust-executor/src/api/auth.rs](../../../rust-executor/src/api/auth.rs): `listener_reach`, `FORWARDING_HEADERS`.
 - [rust-executor/src/api/mod.rs](../../../rust-executor/src/api/mod.rs): `listener_router`, `bind_api_listeners`.
-- [rust-executor/src/api/guards.rs](../../../rust-executor/src/api/guards.rs): `refuse_user_session`.
+- [rust-executor/src/api/guards.rs](../../../rust-executor/src/api/guards.rs): `Guard::Operator`, `Guard::Executor`, `OPERATOR_ONLY`.
 - [rust-executor/src/agent/mod.rs](../../../rust-executor/src/agent/mod.rs): `AgentContext::Main`, `AgentService` (the main agent's state).
 - [docs-src/pages/auth.mdx](../../../docs-src/pages/auth.mdx): "Admin Credential Override".
 

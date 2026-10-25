@@ -1,6 +1,6 @@
 # Capabilities
 
-A **capability** (`Capability { with: Resource { domain, pointers }, can }`) names one kind of action. It has a domain (`agent`, `perspective`, `language`, `runtime.friends`, `artificial intelligence`, …), the objects in that domain (`pointers`, such as perspective UUIDs, or `*`), and the verbs (`READ`, `CREATE`, `UPDATE`, `DELETE`, `SUBSCRIBE`, …). A session's capabilities come from its token's **grant** ([App grants](app-grants.md)). A handler calls `ctx.require(&X_CAPABILITY)`, and the call passes if one of the session's capabilities covers it.
+A **capability** (`Capability { with: Resource { domain, pointers }, can }`) names one kind of action. It has a domain (`agent`, `perspective`, `language`, `runtime.friends`, `artificial intelligence`, …), the objects in that domain (`pointers`, such as perspective UUIDs, or `*`), and the verbs (`READ`, `CREATE`, `UPDATE`, `DELETE`, `SUBSCRIBE`, …). A session's capabilities come from its token's **grant** ([App grants](app-grants.md)). A method's guard names one capability, and the call passes if one of the session's capabilities covers it ([Access checks](checks.md)).
 
 **Why:** Capabilities let the owner of an agent give an app less than full access, for example one perspective only. The grant, not the JWT, holds them, so a revoked grant takes them away at once.
 
@@ -26,7 +26,7 @@ Built-in sets:
 
 Perspective capabilities take the UUID as pointer: `perspective_query_capability(vec![uuid])`, `perspective_update_capability(vec![uuid])`.
 
-A capability names a kind of action, not whose data. A user's default set holds `perspective` query, update and delete on `*`; the ownership check in each handler keeps users apart ([Access checks](checks.md)).
+A capability names a kind of action, not whose data. A user's default set holds `perspective` query, update and delete on `*`; the ownership rule of each method's guard keeps users apart ([Access checks](checks.md)).
 
 </details>
 
@@ -34,7 +34,7 @@ A capability names a kind of action, not whose data. A user's default set holds 
 
 - [rust-executor/src/agent/capabilities/types.rs](../../../rust-executor/src/agent/capabilities/types.rs): `Capability`, `Resource`, `AuthInfo`.
 - [rust-executor/src/agent/capabilities/defs.rs](../../../rust-executor/src/agent/capabilities/defs.rs): every `*_CAPABILITY`, the domain and verb constants, `get_user_default_capabilities`.
-- [rust-executor/src/agent/capabilities/mod.rs](../../../rust-executor/src/agent/capabilities/mod.rs): `capability_matches`, `require_capability`, `check_capability`, `anonymous_capabilities`, `capabilities_on`.
+- [rust-executor/src/agent/capabilities/mod.rs](../../../rust-executor/src/agent/capabilities/mod.rs): `capability_matches`, `require_capability`, `check_capability`, `anonymous_capabilities`.
 - [core/src/agent/](../../../core/src/agent) and [core/src/generated/api/](../../../core/src/generated/api): SDK types (`Capability`, `AuthInfo`).
 
 </details>

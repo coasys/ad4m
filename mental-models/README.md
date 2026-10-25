@@ -20,7 +20,7 @@ Terms: [Glossary](GLOSSARY.md).
    │ token: admin credential │ app grant │ user token                              │
    ▼                                                                               │
  executor API: RPC /api/v1/ws, MCP          [Agents: Executor interfaces, Access]  │
-   │ Session → principal + grant; each handler checks capability and owner         │
+   │ Session → principal + grant; a method guard checks capability and owner       │
    ▼                                                                               │
  agent: AgentContext (main │ managed) ─ wallet key signs   [Agents: Identity]      │
    │                                                                               │
