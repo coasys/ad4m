@@ -30,7 +30,9 @@ mod grants;
 mod identity;
 mod tasks;
 pub use grants::GrantRow;
-pub(crate) use identity::{operator_record_in, set_operator_record_if_empty_in};
+#[cfg(test)]
+pub(crate) use identity::operator_record_in;
+pub(crate) use identity::set_operator_record_if_empty_in;
 pub use identity::{JoinRow, OperatorRecordRow, OperatorSetBy};
 
 #[derive(Serialize, Deserialize)]
