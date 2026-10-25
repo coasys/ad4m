@@ -142,7 +142,6 @@ mod session_tests {
 
         assert_eq!(ctx.session.managed_did(), Some(did.as_str()));
         assert!(!ctx.is_operator());
-        assert_eq!(ctx.auth_token, token);
         assert_eq!(ctx.user_did(), Some(did.as_str()));
         assert_eq!(
             ctx.acts_as(),

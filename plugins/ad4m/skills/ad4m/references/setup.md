@@ -1,8 +1,8 @@
 # AD4M Plugin Setup & Authentication for AI Agents
 
-> **Scope.** This file covers what has to happen *before* the MCP tools work: installing the plugin, connecting to an executor, and authenticating. Once you are connected, the executor documents itself — `ad4m_get_documentation(topic="overview")` (tool surface, workflow, authentication over MCP, data rules) and `topic="architecture"` (data model, SHACL format) need no authentication and are compiled into the binary, so they always describe the node in front of you. Setup is deliberately *not* served there: an agent that can call the tool is already past it, which is why this file lives in the skill.
+> **Scope.** This file covers what has to happen *before* the MCP tools work: installing the plugin, connecting to an executor, and authenticating. Once you are connected, the executor documents itself — `ad4m_get_documentation(topic="overview")` (tool surface, workflow, authentication over MCP, data rules) and `topic="architecture"` (data model, SHACL format) need no authentication and are compiled into the binary, so they always describe the executor in front of you. Setup is deliberately *not* served there: an agent that can call the tool is already past it, which is why this file lives in the skill.
 
-Standing up an executor — downloading, initializing, running, unlocking — is node-operator work, and in the plugin's default `managed` mode it is already done for you. Do not start an executor yourself; it conflicts with the one the plugin manages (Scenario 1 explains how). The raw invocations live in the operator appendix at the end of this file, for humans and explicit troubleshooting only.
+Standing up an executor — downloading, initializing, running, unlocking — is the executor operator's work, and in the plugin's default `managed` mode it is already done for you. Do not start an executor yourself; it conflicts with the one the plugin manages (Scenario 1 explains how). The raw invocations live in the operator appendix at the end of this file, for humans and explicit troubleshooting only.
 
 ## Installing the plugin itself
 
@@ -64,7 +64,7 @@ gateway, done. MCP ends up at `http://localhost:3001/mcp`, the API at
 `http://localhost:12000`.
 
 Running `ad4m-executor` yourself alongside a managed plugin does not give you a second,
-independent node — it gives you two processes fighting over the same ports and, if you
+independent executor — it gives you two processes fighting over the same ports and, if you
 point them at the same app-data path, the same lair keystore. The symptoms (`Port
 already in use`, `Failed to spawn Lair keystore`) are in the Troubleshooting table, and
 the cause is almost always this. If you think the managed executor is broken, restart
@@ -74,7 +74,7 @@ the gateway rather than launching a replacement by hand.
 
 The operator sets up the network path (SSH tunnel, Caddy reverse proxy, or Cloudflare Tunnel) — that is their side of the setup. What matters on the agent side is the TLS guard below.
 
-**Do not start an executor of your own here either.** In `external` mode there is no plugin-managed process to collide with, so Scenario 1's reason does not apply — but Scenario 3's does: the remote node is where the accounts, perspectives and neighbourhood state live. An executor you launch yourself is an empty node nobody else is on, and nothing you write there reaches the space you were meant to join. If the remote executor is down or unreachable, that is the operator's to fix — report it, don't substitute for it.
+**Do not start an executor of your own here either.** In `external` mode there is no plugin-managed process to collide with, so Scenario 1's reason does not apply — but Scenario 3's does: the remote executor is where the accounts, perspectives and neighbourhood state live. An executor you launch yourself is an empty one nobody else is on, and nothing you write there reaches the space you were meant to join. If the remote executor is down or unreachable, that is the operator's to fix — report it, don't substitute for it.
 
 **Two endpoints, two config keys.** `mcpEndpoint` covers the MCP tools only. The waker (wake-on-mention/children) connects separately to the executor's **API port** via `executorUrl` (default `http://localhost:12000` — wrong on a remote box). Set both, substituting the operator's real host and API port, e.g. `executorUrl: "http://marvin.fritz.box:12200"`; otherwise the MCP tools work while every `subscribe_*` call fails against an executor that was never at localhost.
 
@@ -100,7 +100,7 @@ operator appendix at the end of this file). Your side is to connect the plugin t
 waker will silently look for the executor on localhost (see Scenario 2's "Two
 endpoints, two config keys") — then the provisioning flow below. Starting your own multi-user executor
 instead of connecting to the operator's defeats the point of the scenario — everyone has
-to be on the *same* node to share accounts and neighbourhood state — and in `managed`
+to be on the *same* executor to share accounts and neighbourhood state — and in `managed`
 mode it collides with the plugin's own executor exactly as described in Scenario 1.
 
 **⚠️ A browser app (WE, Flux) REQUIRES TLS for non-localhost.** Browsers block mixed content and WebSocket connections to insecure origins. The operator MUST use one of:
@@ -118,9 +118,9 @@ If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser
 
 **Agent provisioning + auth flow (manual, MCP tool calls — only if you're not using the OpenClaw plugin or `ad4m-setup` can't run):**
 
-1. `signup(email, password)` → creates the account, returns a DID, and emails a **`signup`**-typed verification code. Some nodes' `signup` response mentions that email even when the node doesn't actually enforce verification (seen on a test executor with SMTP disabled) — try `login_email` next rather than assuming.
-2. `login_email(email, password)` → JWT token. Done, if the node doesn't enforce verification.
-3. **If `login_email` returns no token, the node does enforce verification and this step is interactive** — a human has to read the code out of the inbox:
+1. `signup(email, password)` → creates the account, returns a DID, and emails a **`signup`**-typed verification code. Some executors' `signup` response mentions that email even when the executor doesn't actually enforce verification (seen on a test executor with SMTP disabled) — try `login_email` next rather than assuming.
+2. `login_email(email, password)` → JWT token. Done, if the executor doesn't enforce verification.
+3. **If `login_email` returns no token, the executor does enforce verification and this step is interactive** — a human has to read the code out of the inbox:
    - Straight after signup, verify the code signup already sent:
      `verify_email_code(email, code, verification_type="signup")` → JWT.
    - For an existing, already-verified account, ask for a fresh login code first:
@@ -129,14 +129,14 @@ If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser
    - The parameter is `verification_type` (`"signup"` or `"login"`), not `type`, and it has to match the code the executor issued — `verify_and_login` looks the code up by (email, type). `openclaw ad4m-setup` does exactly this, prompting for the code.
 4. Include the JWT on subsequent requests (for the OpenClaw plugin: `plugins.entries.ad4m.config.token`).
 
-**Legacy capability flow (single shared node identity, not a distinct per-agent account):**
+**Legacy capability flow (the executor's main agent, or the agent named in `agent`, not a distinct per-agent account):**
 
 1. `request_capability` → get `request_id` + `code`
 2. Admin approves (or auto-approve with admin credential)
 3. `generate_jwt` with `request_id` + `code` → get JWT token
 4. All subsequent requests include the JWT
 
-**Both auth paths require the node's operator to have unlocked the wallet** — a freshly-restarted multi-user node with no admin credential configured is fully deadlocked until someone runs `agent.unlock` (the node operator must do this; if you are a third party, this is not something you can retry around), since both `login_email` and the capability bootstrap fail with a locked wallet.
+**Both auth paths require the executor's operator to have unlocked the wallet** — a freshly-restarted multi-user executor with no admin credential configured is fully deadlocked until someone runs `agent.unlock` (the executor's operator must do this; if you are a third party, this is not something you can retry around), since both `login_email` and the capability bootstrap fail with a locked wallet.
 
 **Human auth flow (browser app):**
 
@@ -253,13 +253,13 @@ the WebSocket URL:
 ws://localhost:12000/api/v1/ws?token=<admin-credential-or-jwt>
 ```
 
-Remember: an executor only starts without an admin credential when it is run with `--insecure-no-admin-credential` (tests and local development only). An empty token then resolves to full access on a loopback-bound API only. On a network-bound API (`--localhost false`, or TLS) a caller with no token can only request a capability, check whether multi-user mode is on, and sign up and log in when it is, so set an admin credential on any node you administer over the network. A reverse proxy or tunnel on the same host connects from loopback: a request carrying a `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header is treated as a network caller, but a proxy that sets none of them (a raw TCP forward, `ssh -R`) makes every client behind it the operator. Set an admin credential on any node behind a proxy or tunnel.
+Remember: an executor only starts without an admin credential when it is run with `--insecure-no-admin-credential` (tests and local development only). An empty token then resolves to full access on a loopback-bound API only. On a network-bound API (`--localhost false`, or TLS) a caller with no token can only request a capability, check whether multi-user mode is on, and sign up and log in when it is, so set an admin credential on any executor you administer over the network. A reverse proxy or tunnel on the same host connects from loopback: a request carrying a `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header is treated as a network caller, but a proxy that sets none of them (a raw TCP forward, `ssh -R`) makes every client behind it the operator. Set an admin credential on any executor behind a proxy or tunnel.
 **Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`; remote/external mode: your `executorUrl` host and port, not localhost)
 
-## Appendix: running an executor by hand (node operators only)
+## Appendix: running an executor by hand (executor operators only)
 
-These invocations exist for a **human node operator** provisioning a standalone or
-multi-user node, or for debugging an executor entirely outside any OpenClaw gateway.
+These invocations exist for a **human executor operator** provisioning a standalone or
+multi-user executor, or for debugging an executor entirely outside any OpenClaw gateway.
 If you are an agent whose gateway runs the AD4M plugin in `managed` mode, these commands
 are not for you — the plugin already runs an executor, and starting another conflicts
 with it (see Scenario 1). Only reach for them when explicitly asked to test an executor
@@ -297,5 +297,5 @@ ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
 | Waker not firing | WS not accessible, bad query, or (remote path) `executorUrl` unset so the waker is pointed at localhost | Check `ws://<executorUrl host:port>/api/v1/ws` (events arrive on the RPC socket) and waker logs — the address to probe is the one in your `executorUrl`, which on a remote box is **not** `localhost:12000`. Confirm `executorUrl` is set in the plugin config (Scenario 2) |
 | Messages "uninitialized" | Property set after creation (race) | Pass all initial values at creation — `instance_create(..., properties={...})` (static tools) or `{class}_create` with every property up front (legacy dynamic tools). Never a create followed by a separate set call. |
 | Channel query returns empty | SHACL still syncing | Wait 3-5 min for Holochain gossip, then retry |
-| `User key not found on executor` (login) or `main key not found` (capability flow), right after a restart | **Expected, by design.** The node hasn't been unlocked by its operator yet; the error message is misleading (reads like a bad credential) but the lockout itself is intentional. | If you're the operator: unlock with the agent's passphrase — `ad4m agent unlock` on the CLI, or `agent.unlock` over WS-RPC (there is no REST route for it). If you're a third party: this needs the node's operator, not a client-side retry. |
-| `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or the subscription shows under a **Pending** section in `list_waker_subscriptions` instead of active | Normal during node startup; also correct if the node genuinely hasn't been unlocked yet (row above). The plugin retries the registration every 30s automatically rather than pretending to have succeeded. | Nothing to do if Pending clears within a minute or two. If it doesn't clear, the cause is almost always the node not being unlocked — an operator problem, not a client-side one. A subscribe error that says the handshake **timed out** means the executor accepted the waker's connection but never answered; the error names the `executorUrl` the waker used — check it is the real API host and port (Scenario 2). |
+| `User key not found on executor` (login) or `main key not found` (capability flow), right after a restart | **Expected, by design.** The executor hasn't been unlocked by its operator yet; the error message is misleading (reads like a bad credential) but the lockout itself is intentional. | If you're the operator: unlock with the agent's passphrase — `ad4m agent unlock` on the CLI, or `agent.unlock` over WS-RPC (there is no REST route for it). If you're a third party: this needs the executor's operator, not a client-side retry. |
+| `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or the subscription shows under a **Pending** section in `list_waker_subscriptions` instead of active | Normal during executor startup; also correct if the executor genuinely hasn't been unlocked yet (row above). The plugin retries the registration every 30s automatically rather than pretending to have succeeded. | Nothing to do if Pending clears within a minute or two. If it doesn't clear, the cause is almost always the executor not being unlocked — an operator problem, not a client-side one. A subscribe error that says the handshake **timed out** means the executor accepted the waker's connection but never answered; the error names the `executorUrl` the waker used — check it is the real API host and port (Scenario 2). |

@@ -47,9 +47,8 @@ parameter that names a user by email (`runtime.computeLog { userEmail }`, the op
 field that shows an address (`hosting.info`'s `email`, the compute log's `userEmail`) reads it
 back with `AgentService::email_for_did` or a join on `users.did`.
 
-`RequestContext` (`types/domain.rs`) is the caller for one request: `session: Arc<Session>`,
-the per-request `cancel_token`, and `auth_token` (read only by the interpretation pass; Plan 20
-PR 6 removes it). The RPC socket opens one per connection (`RequestContext::open`); REST and the
+`RequestContext` (`types/domain.rs`) is the caller for one request: `session: Arc<Session>`
+and the per-request `cancel_token`. It carries no token: a handler acts as the session. The RPC socket opens one per connection (`RequestContext::open`); REST and the
 OpenAI-compatible API take it as an axum extractor (`auth.rs`), which answers 401 for a token
 that opens no session and 503 while the wallet is locked. `auto_permit_cap_requests` is read
 from the global config where `agent.requestCapability` uses it.
@@ -353,6 +352,15 @@ an unowned (perspectives) and a missing resource of the guard's `Owner`. A new g
 covered without a new test; a method whose params need more than `uuid` adds an entry to
 `EXTRA_PARAMS`, with `TARGET` where it names the row's resource in another param.
 
+The MCP tools that wrap an RPC method dispatch through the same map
+(`ws_handler::shared_handler_map`, `mcp::tools::Ad4mMcpHandler::call`), so the guards hold on
+MCP too, 404 included: MCP remaps no refusal. `tests/method_matrix_mcp_tests.rs` runs each of
+them as every matrix caller on the rows' resources (`World::id`) and checks it against `admit`
+of its methods and the rows' `Expect` (see `mcp/AGENTS.md`). The MCP tools with no RPC method that
+take a perspective run `Guard::perspective(perspective_query_capability)` (read) or
+`Guard::perspective(perspective_update_capability)` (write) themselves; the same file checks
+them against those two guards.
+
 ## Protocol
 
 - Clients (core SDK, rust-client) ship with the executor from the same revision: no feature
@@ -484,9 +492,10 @@ covered without a new test; a method whose params need more than `uuid` adds an 
      capabilities). The request goes only when the grant exists; a failed mint (locked wallet,
      database) leaves it approved and redeemable. Five wrong codes delete it; a code redeems
      once. `apps-changed` then goes to the grant's agent.
-  `capabilities::request_capability`, `permit_capability` and `generate_capability_token` are the
-  same steps for MCP (`mcp/tools/auth.rs`, which auto-permits only when `caller_can_permit` says
-  the caller may approve for the target) and the dev-mode auto-permit.
+  MCP (`mcp/tools/auth.rs`) calls these methods: the request and the redeem without a token,
+  the auto-permit as its caller, so `agent.permitCapability`'s guard decides whether the caller
+  may approve and its handler caps the approval at the caller's own capabilities.
+  `capabilities::permit_capability` is the dev-mode auto-permit.
 - Live queries: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision }`
   (revision 0, or later if a write landed while the first result was computed: the subscription is
   registered first);
