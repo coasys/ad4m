@@ -60,6 +60,12 @@ impl AgentKey for HostAgent {
     fn now_ms(&self) -> u64 {
         js_sys::Date::now() as u64
     }
+
+    fn signed_expression(&self, data: &serde_json::Value) -> LanguageResult<Expression> {
+        let signed = rt::agent_create_signed_expression_typed(data)?;
+        serde_wasm_bindgen::from_value(signed)
+            .map_err(|e| LanguageError::internal(format!("the host's signed expression: {e}")))
+    }
 }
 
 pub struct CentralizedAgentLanguage {

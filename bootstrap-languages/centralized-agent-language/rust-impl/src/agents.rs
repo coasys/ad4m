@@ -1,14 +1,21 @@
 //! Agent profiles on the shared store's agent records, in place of
 //! the Node server at mock.ad4m.dev.
 //!
-//! - `create` publishes the running agent's profile under its `did:key`: an `AgentRecord`
-//!   whose `sig` is the agent key's signature (through the host's `agentSign`) of the
-//!   `coasys:link` bytes of `{profile, version, anchor: null}`, sent as
+//! - `create` publishes the running agent's profile under its `did:key`. The host signs the
+//!   Agent as an AD4M expression (`createSignedExpression`: hex Ed25519 signature of
+//!   `sha256(json(data) || timestamp)` by the agent's did:key), and that whole signed
+//!   expression is the record's `profile`. The record's `sig` is the agent key's signature
+//!   (through the host's `agentSign`) of the `coasys:link` bytes of
+//!   `{profile, version, anchor: null}`, so it covers the signed expression too. Sent as
 //!   `PUT /v1/agents/{did}` with no signed request.
 //! - `get` reads `GET /v1/agents/{did}` and keeps the record only when its signature holds:
 //!   for a `did:key`, by that key; for a `did:scid`, by a key that the log (read from the store
 //!   and replayed here with the identity core, every event's signatures checked) lists at the
 //!   anchor, valid and without the bot mark at the head. Any other record is ignored (`None`).
+//!   A `did:key` record answers its stored signed expression unchanged (the executor checks
+//!   that signature on every read), and only when the expression's author is the record's did
+//!   and its data is an Agent naming that did. A `did:scid` record's profile is a plain Agent,
+//!   answered as an expression built from the record.
 
 use ad4m_hash_chain::{decode_ed25519_multikey, decode_proof_value, encode_proof_value};
 use ad4m_identity_core::{fold_json, verify_signed, KelChain, LINK_DOMAIN};
@@ -25,6 +32,9 @@ pub trait AgentKey {
     fn sign(&self, bytes: &[u8]) -> LanguageResult<Vec<u8>>;
     /// Now, in unix milliseconds.
     fn now_ms(&self) -> u64;
+    /// `data` as an AD4M expression signed by the agent's key, as the host's
+    /// `createSignedExpression` makes it: the expression the executor's read path verifies.
+    fn signed_expression(&self, data: &Value) -> LanguageResult<Expression>;
 }
 
 fn signature_holds(record: &AgentRecord, key: &str) -> bool {
@@ -80,13 +90,15 @@ pub fn profile_of(mut content: Value, did: &str) -> LanguageResult<Value> {
     Ok(content)
 }
 
-/// A `did:key` record of `agent` at `version`.
+/// A `did:key` record of `agent` at `version`; its profile is `expression`, the agent's signed
+/// profile expression.
 pub fn did_key_record(
     agent: &impl AgentKey,
-    profile: Value,
+    expression: &Expression,
     version: u64,
 ) -> LanguageResult<AgentRecord> {
     let did = agent.did()?;
+    let profile = serde_json::to_value(expression).map_err(|_| invalid("profile"))?;
     let mut record = AgentRecord {
         did: did.clone(),
         profile,
@@ -118,9 +130,17 @@ pub async fn create<H: Http>(
         ));
     }
     let profile = profile_of(content, &did)?;
+    let mut expression = agent.signed_expression(&profile)?;
+    if expression.author != did {
+        return Err(LanguageError::internal(
+            "the host signed the profile as another agent",
+        ));
+    }
+    expression.proof.valid = None;
+    expression.proof.invalid = None;
     let mut version = agent.now_ms();
     for attempt in 0..2 {
-        let record = did_key_record(agent, profile.clone(), version)?;
+        let record = did_key_record(agent, &expression, version)?;
         let body = serde_json::to_value(&record).map_err(|_| invalid("malformed"))?;
         let reply = store
             .send(
@@ -163,6 +183,9 @@ pub async fn get<H: Http>(
     if !verified(store, &record, now_s).await? {
         return Ok(None);
     }
+    if record.did.starts_with("did:key:") {
+        return Ok(signed_profile_of(&record));
+    }
     Ok(Some(Expression {
         author: record.did.clone(),
         timestamp: iso_time_ms(record.version),
@@ -174,6 +197,25 @@ pub async fn get<H: Http>(
             invalid: None,
         },
     }))
+}
+
+/// The signed profile expression a `did:key` record carries, when it is this agent's: authored
+/// by the record's did, its data an Agent naming that did. The language does not judge the
+/// expression's own signature: the executor verifies it on every read.
+fn signed_profile_of(record: &AgentRecord) -> Option<Expression> {
+    let mut expression: Expression = serde_json::from_value(record.profile.clone()).ok()?;
+    let agent_did = expression.data.get("did").and_then(Value::as_str);
+    let has_links = expression
+        .data
+        .get("perspective")
+        .and_then(|p| p.get("links"))
+        .is_some_and(Value::is_array);
+    if expression.author != record.did || agent_did != Some(record.did.as_str()) || !has_links {
+        return None;
+    }
+    expression.proof.valid = None;
+    expression.proof.invalid = None;
+    Some(expression)
 }
 
 async fn verified<H: Http>(

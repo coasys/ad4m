@@ -12,12 +12,12 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ad4m_hash_chain::{encode_ed25519_multikey, sha256};
+use ad4m_hash_chain::{decode_ed25519_multikey, encode_ed25519_multikey, sha256};
 use ad4m_ldk::identity::{AgentRecord, AppendRequest, IdentityErrorCode, SignedRequest};
-use ad4m_ldk::prelude::{LanguageError, LanguageResult};
+use ad4m_ldk::prelude::{Expression, ExpressionProof, LanguageError, LanguageResult};
 use centralized_agent_language::agents::{self, AgentKey};
 use centralized_agent_language::store::{encode_request, Http, HttpReply, Store, REQUEST_HEADER};
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use futures::executor::block_on;
 use serde_json::{json, Value};
 
@@ -313,12 +313,20 @@ impl Host {
     }
 }
 
-/// The agent the host runs the language for: an Ed25519 key from a label.
-struct TestAgentKey(SigningKey);
+/// The agent the host runs the language for: an Ed25519 key from a label, and a clock (the
+/// system's, or a fixed instant in unix milliseconds).
+struct TestAgentKey(SigningKey, Option<u64>);
 
 impl TestAgentKey {
     fn new(label: &str) -> Self {
-        TestAgentKey(SigningKey::from_bytes(&sha256(label.as_bytes())))
+        TestAgentKey(SigningKey::from_bytes(&sha256(label.as_bytes())), None)
+    }
+
+    fn at(label: &str, now_ms: u64) -> Self {
+        TestAgentKey(
+            SigningKey::from_bytes(&sha256(label.as_bytes())),
+            Some(now_ms),
+        )
     }
 }
 
@@ -333,11 +341,100 @@ impl AgentKey for TestAgentKey {
         Ok(self.0.sign(bytes).to_bytes().to_vec())
     }
     fn now_ms(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
+        self.1.unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        })
     }
+    /// As the executor's `create_signed_expression` (`rust-executor/src/agent/mod.rs`) signs for
+    /// the host's `createSignedExpression`: data with sorted keys, a millisecond UTC timestamp,
+    /// the hex Ed25519 signature of `hash_data_and_timestamp`.
+    fn signed_expression(&self, data: &Value) -> LanguageResult<Expression> {
+        let data = sorted(data);
+        let timestamp = agents::iso_time_ms(self.now_ms());
+        let signature = self.0.sign(&hash_data_and_timestamp(&data, &timestamp));
+        let did = self.did()?;
+        Ok(Expression {
+            author: did.clone(),
+            timestamp,
+            data,
+            proof: ExpressionProof {
+                signature: hex(&signature.to_bytes()),
+                key: format!("{did}#{}", &did["did:key:".len()..]),
+                valid: None,
+                invalid: None,
+            },
+        })
+    }
+}
+
+/// `serde_json::Value` with every object's keys sorted, as the executor's `sort_json_value`.
+fn sorted(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|k| (k.clone(), sorted(&map[k])))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The executor's `hash_data_and_timestamp` (`rust-executor/src/agent/signatures.rs`):
+/// sha256 of `serde_json::to_vec(data)` followed by the RFC 3339 millisecond timestamp.
+fn hash_data_and_timestamp(data: &Value, timestamp: &str) -> [u8; 32] {
+    let mut bytes = serde_json::to_vec(data).unwrap();
+    bytes.extend_from_slice(timestamp.as_bytes());
+    sha256(&bytes)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// The check the executor runs on every expression a language answers
+/// (`LanguageController::verify_expression_proof`, then `agent::signatures::verify`): sort the
+/// data's keys, hex-decode `proof.signature`, and verify `hash_data_and_timestamp(data,
+/// timestamp)` under the key of the did:key `author`. The executor re-renders the timestamp it
+/// parses as RFC 3339 with milliseconds and `Z`; this check takes only a timestamp already in
+/// that form.
+fn executor_verifies(expression: &Expression) -> bool {
+    let canonical = expression.timestamp.len() == 24
+        && expression.timestamp.ends_with('Z')
+        && expression.timestamp.as_bytes()[19] == b'.';
+    let Some(key) = expression
+        .author
+        .strip_prefix("did:key:")
+        .and_then(decode_ed25519_multikey)
+        .and_then(|k| VerifyingKey::from_bytes(&k).ok())
+    else {
+        return false;
+    };
+    let Some(sig) = unhex(&expression.proof.signature)
+        .and_then(|s| <[u8; 64]>::try_from(s).ok())
+        .map(|s| ed25519_dalek::Signature::from_bytes(&s))
+    else {
+        return false;
+    };
+    let message = hash_data_and_timestamp(&sorted(&expression.data), &expression.timestamp);
+    canonical && key.verify(&message, &sig).is_ok()
 }
 
 fn refusal<T: std::fmt::Debug>(result: LanguageResult<T>) -> IdentityErrorCode {
@@ -791,6 +888,12 @@ fn expression_create_and_get_for_a_did_key_agent_use_the_stores_agent_route() {
         .get("valid")
         .is_none());
     assert_eq!(expression.data["directMessageLanguage"], "lang://dm");
+    // What the executor's read path checks: the agent's AD4M signature of this very expression.
+    assert!(executor_verifies(&expression), "{expression:?}");
+    assert!(expression.proof.valid.is_none() && expression.proof.invalid.is_none());
+    let mut tampered = expression.clone();
+    tampered.data["directMessageLanguage"] = json!("lang://other");
+    assert!(!executor_verifies(&tampered));
     assert_eq!(
         block_on(agents::create(&store, &agent, content.clone())).unwrap(),
         did
@@ -832,6 +935,83 @@ fn expression_create_and_get_for_a_did_key_agent_use_the_stores_agent_route() {
     assert!(calls
         .iter()
         .any(|c| c.method == "PUT" && c.url == format!("{}/v1/agents/{did}", server.url)));
+}
+
+/// What `expressionGet` answers for the profile of [`fixture_profile_expression_is_pinned`].
+/// `rust-executor/src/languages/mod.rs` (`agent_language_profile_tests`) holds the same text and
+/// runs it through the executor's own read-path check: change both together.
+const PROFILE_FIXTURE: &str = r#"{"author":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","timestamp":"2027-01-15T08:00:00.123Z","data":{"did":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","directMessageLanguage":"lang://dm","perspective":{"links":[{"author":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","data":{"predicate":"sioc://likes","source":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","target":"literal://string:hi"},"proof":{"key":"k","signature":"ab"},"timestamp":"2027-01-15T08:00:00.000Z"}]}},"proof":{"signature":"01458e67b883f12668acf6a8bd17f12f1229f7526c48ff60ce3cda50719ec4fa559cca32a959eca1d0e9e15808ad92df1ab2115dded42138c4339f7f2645340d","key":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA#z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA"}}"#;
+
+#[test]
+fn fixture_profile_expression_is_pinned() {
+    let server = StoreProcess::start();
+    let (_host, store) = Host::on(&server.url);
+    let agent = TestAgentKey::at("agent fixture", 1_800_000_000_123);
+    let did = agent.did().unwrap();
+    let content = json!({
+        "perspective": { "links": [{ "author": did, "timestamp": "2027-01-15T08:00:00.000Z",
+            "proof": { "valid": true, "signature": "ab", "key": "k" },
+            "data": { "target": "literal://string:hi", "source": did, "predicate": "sioc://likes" } }] },
+        "did": did,
+        "directMessageLanguage": "lang://dm",
+    });
+    block_on(agents::create(&store, &agent, content)).unwrap();
+    let expression = block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .unwrap();
+    assert!(executor_verifies(&expression));
+    assert_eq!(serde_json::to_string(&expression).unwrap(), PROFILE_FIXTURE);
+}
+
+#[test]
+fn a_did_key_record_carrying_another_agents_expression_is_ignored() {
+    let server = StoreProcess::start();
+    let (_host, store) = Host::on(&server.url);
+    let jo = TestAgentKey::new("agent jo");
+    let kim = TestAgentKey::new("agent kim");
+    let jo_did = jo.did().unwrap();
+    let kim_did = kim.did().unwrap();
+    let agent = |did: &str| json!({ "did": did, "perspective": { "links": [] }, "directMessageLanguage": null });
+
+    // Kim's own signed profile, put under jo's record (jo's record signature holds).
+    let kims = kim.signed_expression(&agent(&kim_did)).unwrap();
+    assert!(executor_verifies(&kims));
+    let record = agents::did_key_record(&jo, &kims, 1).unwrap();
+    block_on(store.put_agent(&record, None)).unwrap();
+    assert!(block_on(agents::get(&store, &jo_did, now_s()))
+        .unwrap()
+        .is_none());
+
+    // Jo's signature of an Agent naming kim: authored by jo, but not jo's profile.
+    let naming_kim = jo.signed_expression(&agent(&kim_did)).unwrap();
+    let record = agents::did_key_record(&jo, &naming_kim, 2).unwrap();
+    block_on(store.put_agent(&record, None)).unwrap();
+    assert!(block_on(agents::get(&store, &jo_did, now_s()))
+        .unwrap()
+        .is_none());
+
+    // A plain profile with no signed expression: nothing the executor could verify.
+    let mut plain = agents::did_key_record(&jo, &naming_kim, 3).unwrap();
+    plain.profile = agent(&jo_did);
+    let bytes =
+        ad4m_identity_core::signing_bytes(ad4m_identity_core::LINK_DOMAIN, &plain.signed_value())
+            .unwrap();
+    plain.sig = ad4m_hash_chain::encode_proof_value(&jo.0.sign(&bytes).to_bytes());
+    block_on(store.put_agent(&plain, None)).unwrap();
+    assert!(block_on(agents::get(&store, &jo_did, now_s()))
+        .unwrap()
+        .is_none());
+
+    // Jo's own signed profile: answered.
+    let jos = jo.signed_expression(&agent(&jo_did)).unwrap();
+    let record = agents::did_key_record(&jo, &jos, 4).unwrap();
+    block_on(store.put_agent(&record, None)).unwrap();
+    let expression = block_on(agents::get(&store, &jo_did, now_s()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(expression.author, jo_did);
+    assert_eq!(expression.data, agent(&jo_did));
+    assert!(executor_verifies(&expression));
 }
 
 #[test]

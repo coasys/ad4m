@@ -3195,3 +3195,53 @@ mod capability_routing_tests {
         ));
     }
 }
+
+/// The agent language's profile expressions on the executor's read path: every expression a
+/// language answers goes through `verify_expression_proof`, so the profile `expressionGet`
+/// answers has to carry the agent's own AD4M signature of that expression.
+#[cfg(test)]
+mod agent_language_profile_tests {
+    use super::*;
+
+    /// What the centralized agent language's `expressionGet` answers for a did:key agent's
+    /// profile; `bootstrap-languages/centralized-agent-language/rust-impl/tests/language.rs`
+    /// (`PROFILE_FIXTURE`) pins the same text as the language's output: change both together.
+    const PROFILE_FIXTURE: &str = r#"{"author":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","timestamp":"2027-01-15T08:00:00.123Z","data":{"did":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","directMessageLanguage":"lang://dm","perspective":{"links":[{"author":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","data":{"predicate":"sioc://likes","source":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","target":"literal://string:hi"},"proof":{"key":"k","signature":"ab"},"timestamp":"2027-01-15T08:00:00.000Z"}]}},"proof":{"signature":"01458e67b883f12668acf6a8bd17f12f1229f7526c48ff60ce3cda50719ec4fa559cca32a959eca1d0e9e15808ad92df1ab2115dded42138c4339f7f2645340d","key":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA#z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA"}}"#;
+
+    fn verdict(mut expression: JsonValue) -> (JsonValue, JsonValue) {
+        LanguageController::verify_expression_proof(&mut expression);
+        (
+            expression["proof"]["valid"].clone(),
+            expression["proof"]["invalid"].clone(),
+        )
+    }
+
+    #[test]
+    fn the_agent_languages_profile_expression_verifies() {
+        let expression: JsonValue = serde_json::from_str(PROFILE_FIXTURE).unwrap();
+        assert_eq!(
+            verdict(expression),
+            (JsonValue::Bool(true), JsonValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn a_changed_profile_or_a_record_signature_in_its_place_does_not_verify() {
+        let expression: JsonValue = serde_json::from_str(PROFILE_FIXTURE).unwrap();
+
+        let mut changed = expression.clone();
+        changed["data"]["directMessageLanguage"] = JsonValue::from("lang://other");
+        assert_eq!(
+            verdict(changed),
+            (JsonValue::Bool(false), JsonValue::Bool(true))
+        );
+
+        // A store record's multibase `coasys:link` signature is not an AD4M expression proof.
+        let mut record_sig = expression;
+        record_sig["proof"]["signature"] = JsonValue::from("z3Jx6Yb4rD9aQnL2");
+        assert_eq!(
+            verdict(record_sig),
+            (JsonValue::Bool(false), JsonValue::Bool(true))
+        );
+    }
+}

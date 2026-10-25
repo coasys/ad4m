@@ -444,7 +444,9 @@ Rules for an implementation:
   The executor accepts a head from the language only when one of the keys in its config key
   `identity.storeKeys` signed it (`coasys:head`).
 - `expressionGet` / `expressionCreate` keep working for agent profiles, on the store's
-  `/v1/agents/{did}` routes.
+  `/v1/agents/{did}` routes. A `did:key` record's `profile` is the Agent as the agent's signed
+  AD4M expression (the host's `createSignedExpression`), and `expressionGet` answers that
+  expression unchanged, so the executor's check of `proof.signature` holds as before.
 
 The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the
 calls it makes today are `log`, `append`, `openOffer`, `listOffers`, `claimOffer` and

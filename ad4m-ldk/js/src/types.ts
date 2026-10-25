@@ -201,7 +201,11 @@ export interface Anchor {
 export interface AgentRecord {
     /** did:scid, or did:key for a bot or a device-only identity. */
     did: string;
-    /** Today's Agent: perspective, directMessageLanguage. */
+    /**
+     * Today's Agent: perspective, directMessageLanguage. The agent language writes a did:key
+     * agent's Agent as that agent's signed AD4M expression ({author, timestamp, data, proof});
+     * the store does not read it.
+     */
     profile: JsonObject;
     version: number;
     /** The device did:key that signed. */
