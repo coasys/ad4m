@@ -568,14 +568,24 @@ async fn only_the_admin_credential_grants_notifications() {
     let app = app_ctx(vec![ALL_CAPABILITY.clone()]);
     let id = create(app.clone(), &[&main.uuid]).await.unwrap();
 
-    let err = call(
-        "runtime.grantNotification",
-        json!({ "id": id, "granted": true }),
-        app,
-    )
-    .await
-    .expect_err("an app must not grant its own notification");
-    assert_eq!(err.code, 403);
+    user(ALICE);
+    for (who, ctx) in [
+        ("an app granting its own notification", app),
+        ("a managed user", user_ctx(ALICE)),
+    ] {
+        let err = call(
+            "runtime.grantNotification",
+            json!({ "id": id, "granted": true }),
+            ctx,
+        )
+        .await
+        .expect_err(who);
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (403, crate::api::guards::OPERATOR_ONLY),
+            "{who}"
+        );
+    }
     assert!(!stored(&id).unwrap().granted);
 
     call(
@@ -662,21 +672,27 @@ async fn only_the_admin_credential_imports_data() {
     .unwrap();
     let params = json!({ "type": "db", "filePath": file.to_str().unwrap() });
 
-    // Both callers hold AGENT_UPDATE, so neither is refused by the capability check: a managed
-    // user by the user-session guard (#1167), an app token by the admin-credential check.
-    for (who, ctx, refusal) in [
-        ("a managed user", user_ctx(ALICE), "user session"),
+    // Both callers hold AGENT_UPDATE, and an app every capability: only the admin credential
+    // imports.
+    for (who, ctx) in [
+        ("a managed user", user_ctx(ALICE)),
         (
             "an app token with AGENT_UPDATE",
             app_ctx(vec![AGENT_UPDATE_CAPABILITY.clone()]),
-            "admin credential",
+        ),
+        (
+            "an app token with every capability",
+            app_ctx(vec![ALL_CAPABILITY.clone()]),
         ),
     ] {
         let err = call("runtime.importData", params.clone(), ctx)
             .await
             .expect_err(who);
-        assert_eq!(err.code, 403, "{who}");
-        assert!(err.message.contains(refusal), "{who}: {err:?}");
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (403, crate::api::guards::OPERATOR_ONLY),
+            "{who}"
+        );
         assert_eq!(stored(&id), None, "{who} imported a notification");
     }
 

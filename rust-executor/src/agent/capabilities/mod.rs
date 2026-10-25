@@ -12,7 +12,6 @@ pub use token::*;
 pub use types::*;
 
 use crate::agent::grants::now;
-use crate::agent::session::Session;
 use crate::agent::AgentContext;
 use crate::events::Event;
 use crate::pubsub::get_global_pubsub;
@@ -295,8 +294,13 @@ pub fn capabilities_from_token(
 /// so anonymous callers cannot list them.
 pub fn anonymous_capabilities() -> Vec<Capability> {
     use crate::db::Ad4mDb;
-    let multi_user_enabled =
-        Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+    anonymous_capabilities_when(Ad4mDb::with_global_instance(|db| {
+        db.get_multi_user_enabled().unwrap_or(false)
+    }))
+}
+
+/// [`anonymous_capabilities`] with multi-user mode on or off.
+pub fn anonymous_capabilities_when(multi_user_enabled: bool) -> Vec<Capability> {
     if multi_user_enabled {
         vec![
             AGENT_AUTH_CAPABILITY.clone(),
@@ -486,32 +490,20 @@ pub fn request_target(request_id: &str) -> Option<RequestTarget> {
     PendingRequests::global().target(request_id, now())
 }
 
-/// Whether `session` may approve a capability request for `target` (D12): the operator, or a
-/// session that acts as `target` (the same DID) and holds AGENT_PERMIT (a user on their own
-/// agent; on the main agent, an app the operator gave AGENT_PERMIT). Nobody approves for
-/// another agent; only the operator approves a request for [`RequestTarget::NoAgent`], and
-/// its code redeems nothing. An anonymous caller approves nothing, whatever it holds: it acts
-/// as the main agent only in name.
-pub fn may_approve(session: &Session, target: &RequestTarget) -> bool {
-    session.is_operator()
-        || session.is_authenticated()
-            && target.agent().is_some_and(|agent| {
-                session.acts_as() == *agent && session.may(&AGENT_PERMIT_CAPABILITY)
-            })
-}
-
 /// Approves a pending request with `auth_info_extended.auth` as the operator, which holds
 /// every capability: [`permit_capability_within`] with no limit beyond the request's agent.
 /// For the operator and dev-mode auto-permit; a session approves with its own capabilities.
 pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String, String> {
-    permit_capability_within(auth_info_extended, &[ALL_CAPABILITY.clone()])
+    permit_capability_within(auth_info_extended, std::slice::from_ref(&*ALL_CAPABILITY))
 }
 
 /// Approves a pending request with `auth_info_extended.auth`, which may grant less than the
 /// app asked for, and returns the code the app redeems: for the approver only. The request's
-/// agent stays the one it named. The caller has checked [`may_approve`]. An approver grants
-/// no more than it holds itself (`approver`, its session's capabilities): an app with
-/// AGENT_PERMIT approves only within its own grant, so it cannot mint a wider one.
+/// agent stays the one it named. The caller has checked that the approver owns that agent
+/// (`agent.permitCapability`'s guard, `api::guards::Owner::Request`; MCP's
+/// `caller_can_permit`). An approver grants no more than it holds itself (`approver`, its
+/// session's capabilities): an app with AGENT_PERMIT approves only within its own grant, so
+/// it cannot mint a wider one.
 pub fn permit_capability_within(
     auth_info_extended: AuthInfoExtended,
     approver: &[Capability],
@@ -1331,44 +1323,6 @@ mod app_token_tests {
         assert!(caps_within(&reader, &[AGENT_READ_CAPABILITY.clone()]).is_empty());
         let caps = caps_within(&reader, &[ALL_CAPABILITY.clone()]);
         assert_eq!(caps_text(&caps), caps_text(&reader));
-    }
-
-    // D12: the operator approves anything; a session approves only for the agent it acts as,
-    // and only while it holds AGENT_PERMIT.
-    #[test]
-    fn only_the_operator_or_the_agent_with_permit_may_approve() {
-        use crate::agent::session::{Principal, Session};
-        let main = AgentContext::main_agent();
-        let alice = AgentContext::managed("did:key:z6MkAlice".into());
-        let bob = AgentContext::managed("did:key:z6MkBob".into());
-        let permit = vec![
-            AGENT_PERMIT_CAPABILITY.clone(),
-            AGENT_READ_CAPABILITY.clone(),
-        ];
-        let no_permit = vec![AGENT_READ_CAPABILITY.clone()];
-        let session = |agent: &AgentContext, caps: &Vec<Capability>| {
-            Session::for_test(Principal::Agent(agent.clone())).with_caps(caps.clone())
-        };
-        let targets: [RequestTarget; 4] = [
-            main.clone().into(),
-            alice.clone().into(),
-            bob.clone().into(),
-            RequestTarget::NoAgent,
-        ];
-
-        let operator = Session::for_test(Principal::Operator);
-        assert!(targets.iter().all(|t| may_approve(&operator, t)));
-
-        let anonymous = Session::for_test(Principal::Anonymous).with_caps(permit.clone());
-        assert!(targets.iter().all(|t| !may_approve(&anonymous, t)));
-
-        for (agent, own) in [(&main, &targets[0]), (&alice, &targets[1])] {
-            assert!(may_approve(&session(agent, &permit), own), "{agent:?}");
-            assert!(!may_approve(&session(agent, &no_permit), own), "{agent:?}");
-            for other in targets.iter().filter(|t| *t != own) {
-                assert!(!may_approve(&session(agent, &permit), other), "{agent:?}");
-            }
-        }
     }
 
     #[tokio::test]

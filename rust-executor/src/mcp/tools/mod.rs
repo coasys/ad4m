@@ -521,7 +521,7 @@ impl Ad4mMcpHandler {
     }
 
     /// Whether the current caller may auto-permit a capability request for `target`: the
-    /// rule of `agent.permitCapability` ([`crate::agent::capabilities::may_approve`], D12).
+    /// rule of `agent.permitCapability`'s guard ([`crate::api::guards::Owner::Request`], D12).
     ///
     /// Authentication alone is not enough. The operator (the admin credential) may; any other
     /// token only if it holds PERMIT and acts as `target`: a user token permits requests for

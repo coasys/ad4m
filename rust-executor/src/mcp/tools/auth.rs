@@ -126,7 +126,7 @@ impl Ad4mMcpHandler {
     /// `check_auth_with_header`: tests cannot build an rmcp `RequestContext`. Creating the
     /// request needs only that the tool stay reachable; auto-permitting it (the inline code
     /// that generate_jwt mints into a token) needs a session that may approve the request
-    /// (`may_approve`): the operator, or a session that acts as the requested agent and holds
+    /// (`caller_can_permit`): the operator, or a session that acts as the requested agent and holds
     /// PERMIT, as a user's own token does for that user's agent. A valid header credential
     /// joins the session first, as `call_tool` does for the other auth tools.
     pub(crate) async fn request_capability_with_header(
