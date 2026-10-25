@@ -11,11 +11,11 @@
 | Mode | Steps | Token kind |
 |---|---|---|
 | Local executor | `requestCapability()` → person approves in the launcher → `verifyLocalAd4mCode(code)`: the capability-request flow of [App grants](../../access/app-grants.md) | app grant on the main agent |
-| Remote, multi-user (`hosting: true`) | `isMultiUser()`; `loginWithPassword`, or `submitEmail` + `verifyEmailCode`, or `createAccount` | user token (managed agent) |
-| Guest | `connectAsGuest(hostUrl)`: random `guest-<uuid>@flux.demo` email and password in `localStorage`, `user.create` + `user.login` | user token |
+| Remote, multi-user | `isMultiUser()`; `loginWithPassword`, or `submitEmail` + `verifyEmailCode`, or `createAccount` | user token (managed agent) |
+| Guest | `connectAsGuest(hostUrl)`: random `guest-<uuid>@flux.demo` email and password in `localStorage`, `user.login`, and `user.create` + `user.login` when that fails | user token |
 | Embedded | wait for `AD4M_CONFIG` from `window.parent`; the origin is checked against `allowedOrigins` when the app sets it, and proxy mode requires it | the parent's token |
 
-1. `connect()` runs the health check and the first authenticated read together. The token goes only to the URL where it was last accepted.
+1. `connect()` runs the health check and the first authenticated read together. Before the health check passes, the token goes only to the URL where it was last accepted; a new URL gets it after its health check passes.
 2. When the executor later refuses the token (`onAuthFailed`), the library discards the token and the state becomes `unauthenticated`.
 3. A locked executor (`Executor is locked…`, close 1013) keeps the token.
 

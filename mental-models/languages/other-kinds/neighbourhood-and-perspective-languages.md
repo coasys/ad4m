@@ -14,7 +14,7 @@ The publish and join steps are on [Publishing and joining](../../perspectives/ne
 |---|---|---|
 | store | `create_neighbourhood_with_context` → `expression_create(<neighbourhood language>, Neighbourhood, ctx)`, signed as the caller | address = `hash(JSON.stringify(neighbourhood))`; the signed expression goes to the Cloudflare KV proxy; an existing key is refused |
 | address | the URL is `neighbourhood://<address>` | — |
-| read | `get_neighbourhood(address)` → `get_expression` → `DecoratedNeighbourhoodExpression` | `expressionGet(address)` reads the KV proxy |
+| read | `get_neighbourhood(address)` → `get_expression` → `DecoratedNeighbourhoodExpression` | `expressionGet(address)` answers from memory when this executor wrote or read the address before; otherwise it reads the KV proxy. A miss is not kept |
 
 The address hashes the unsigned content. Two agents who publish the same `Neighbourhood` JSON get the same address; the store refuses the existing key, so the second `expressionCreate` throws.
 

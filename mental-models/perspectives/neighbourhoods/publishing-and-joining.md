@@ -1,6 +1,6 @@
 # Publishing and joining
 
-**Publishing** turns an existing perspective into a neighbourhood. The executor installs the chosen link language, stores a neighbourhood expression through the neighbourhood language, and records the resulting `neighbourhood://` URL on the perspective. **Joining** goes the other way: fetch the neighbourhood expression by URL, install its link language, and create a new perspective bound to it. If another agent on the same executor already joined that neighbourhood, the joining agent instead becomes a **co-owner** of the existing perspective.
+**Publishing** turns an existing perspective into a neighbourhood. The executor installs the chosen link language, stores a neighbourhood expression through the neighbourhood language, and records the resulting `neighbourhood://` URL on the perspective. **Joining** goes the other way: fetch the neighbourhood expression by URL and create a new perspective bound to it. The perspective then installs the link language in the background. If another agent on the same executor already joined that neighbourhood, the joining agent instead becomes a **co-owner** of the existing perspective.
 
 **Why:** Publishing from an existing perspective lets an agent start alone and share later; the executor pushes shared links written before publishing to the link language. Co-owners on one executor share one perspective, so one store and one link-language isolate serve every local agent in the same space, not one of each per agent. Local links are a layer in that same store, on top of the shared links.
 
@@ -17,8 +17,8 @@ Publish (`neighbourhood.publish(perspectiveUuid, linkLanguage, meta)`):
 
 Join (`neighbourhood.join(url)`):
 
-1. If any perspective already has this `shared_url`: add the caller's DID to its `owners` (memory and SQLite), call `update_local_agents` on the link language, and return that handle.
-2. Otherwise fetch the `Neighbourhood`, install its link language, and create a new perspective with name and `shared_url` = the URL, `owners` = [caller], state `LinkLanguageInstalledButNotSynced` or `LinkLanguageFailedToInstall`.
+1. If any perspective already has this `shared_url`: add the caller's DID to its `owners` (memory and SQLite), and return that handle. A background task (`register_owners_in_background`) calls `update_local_agents`, which reads the owners when it sends.
+2. Otherwise fetch the `Neighbourhood` and create a new perspective with name and `shared_url` = the URL, `owners` = [caller], state `NeighbourhoodJoinInitiated`. The join returns here. `ensure_link_language` installs the link language in the background. The state then moves to `LinkLanguageInstalledButNotSynced` and `Synced`, or to `LinkLanguageFailedToInstall`.
 3. The background loops take over ([Neighbourhood sync](sync.md)).
 
 </details>

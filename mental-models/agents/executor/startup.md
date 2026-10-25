@@ -13,8 +13,8 @@ Startup has two phases. First, `rust_executor::run(config)` starts the services 
 1. Shutdown channel and SIGINT/SIGTERM handler, logging, `config.prepare()` (defaults), `check_admin_credential()`. The check panics without a credential unless `insecure_no_admin_credential` is set.
 2. Wallet backend and DB backend: local or shared ([Executor data](data.md)). Hosted mode restores perspective snapshots, then refuses an `internal_api_token` equal to the admin credential.
 3. Data directories under `<app_data>/ad4m/`; `Ad4mDb` (`ad4m_db.sqlite`); the multi-user flag, turned on if `enable_multi_user` is set.
-4. `AIService`, then `AgentService` (loads `agent.json` if it exists), notification owner migration, `RuntimeService`, apps registry path.
-5. SFU service, V8 platform, `LanguageController`, perspectives.
+4. `AIService`, then `AgentService` (loads `agent.json` if it exists), notification owner migration, `RuntimeService`, then the grants (`grants::load_at_start`; the executor does not start without them).
+5. Prolog service (`init_prolog_service`; the engine is disabled), SFU service, V8 platform, `LanguageController`, perspectives.
 6. Background tasks: dapp server (fixed port 8080), Holochain signal receiver and Unyt, credit flush, MCP server thread (if `enable_mcp`), RPC server thread.
 
 **Phase 2: the first `agent.generate { passphrase }`, or each `agent.unlock { passphrase }`.**

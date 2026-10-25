@@ -27,7 +27,7 @@ Top-up:
 2. That handler and the 30 s poll `check_pending_payments` read transactions where this executor is the payee, and `payment_requests` rows. They credit users.
 3. The transaction's counterparty is the payer's wallet address (its agent key). `get_user_by_hot_wallet_address` finds the `users` row with that address; a payment from an unknown address credits nobody.
 
-Operator settings: `runtime.setFreeHostingEnabled`, `runtime.setHostRates`; `hosting.info`, `hosting.wallet`, `hosting.setHotWallet`.
+Settings: `runtime.setHostRates` (operator only), `runtime.setFreeHostingEnabled` (needs `runtime/QUIT`), `hosting.wallet` (refuses user sessions). A user sets its own hot-wallet address with `hosting.setHotWallet` and reads its own hosting info with `hosting.info`.
 
 </details>
 

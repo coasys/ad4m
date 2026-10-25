@@ -13,8 +13,8 @@ The **language language** is the system language that stores and serves other la
 | `bootstrap-languages/language-language` | HTTP: a Cloudflare Workers KV (key-value) proxy (`PROXY_URL` constant) | the default `mainnet_seed.json` |
 | `bootstrap-languages/local/language-language.js` | `ad4m:host` KV, or files in `storagePath` | local seed, Docker, integration tests |
 
-1. Publish: `expressionCreate({bundle, meta})` hashes the bundle, signs `meta` with `agentCreateSignedExpression`, and stores `meta-<hash>` and then the bundle.
-2. Get meta: `expressionGet(address)` returns the signed meta expression.
+1. Publish: `expressionCreate({bundle, meta})` hashes the bundle and signs `meta` with `agentCreateSignedExpression`. The default variant stores the bundle and then `meta-<hash>`; an existing key counts as stored, and any other store failure throws. The local variant stores `meta-<hash>` and then `bundle-<hash>`, so a failed bundle write leaves the meta behind.
+2. Get meta: `expressionGet(address)` returns the signed meta expression. The default variant keeps each meta it reads in memory and answers later reads from there. A miss is not kept, so the next read asks again, and two reads of an uncached meta at the same time both go to the proxy. The local variant reads its storage on every call.
 3. Get bundle: `languageGetSource(address)`.
 
 On the default seed, every executor fetches every language from one Cloudflare Worker (`PROXY_URL`). The executor loads the language language itself from the seed's inline bundle text, not by address, so its address is the hash of the bundle that the seed carries.

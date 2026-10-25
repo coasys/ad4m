@@ -16,7 +16,7 @@
 Trust check in `language_by_ref(addr)`:
 
 1. Get the meta expression from the language language. Refuse it if `proof.valid` is false.
-2. If `author` is in `RuntimeService::get_trusted_agents()` (seed `trustedAgents` + main agent DID + DB `trusted_agents`), fetch the bundle, check hash = `meta.address`, install.
+2. If `author` is in `RuntimeService::get_trusted_agents()` (seed `trustedAgents` + main agent DID + DB table `trusted_agent`), fetch the bundle, check hash = `meta.address`, install.
 3. Otherwise read `templateAppliedParams` and `templateSourceLanguageAddress`. Refuse if either is missing, or if the source meta's author is not trusted (publishes `ExceptionType::AgentIsUntrusted`).
 4. Template the source again with the params. Refuse if the result's hash differs from the fetched bundle's hash.
 

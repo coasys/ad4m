@@ -4,7 +4,7 @@
 
 1. Get the bundle, from disk or from the language language by address.
 2. Check that the bundle hashes to the address.
-3. Save it as `<data>/languages/<address>/bundle.js`.
+3. Save it as `<data>/ad4m/languages/<address>/bundle.js`.
 4. Load it into an isolate.
 
 **Publishing** stores a bundle and its language meta (`LanguageMeta`) in the language language, so other executors can install it.
@@ -24,17 +24,17 @@ Four install paths exist:
 | Path | Used by | Checks |
 |---|---|---|
 | `language_by_ref(addr)` | RPC `language.get`, model queries, MCP profile tool | proof valid; author trusted, or a template of a trusted source; then `install_language` |
-| `LanguageController::install_language(addr)` | neighbourhood publish and join, the `ensure_link_language` retry loop | hash only; up to 10 attempts each for meta and bundle, sleeping 5 s × n after each miss |
+| `LanguageController::install_language(addr)` | neighbourhood publish, `ensure_link_language`, the background load after `applyTemplate` and the MCP clone, `language_by_ref` | hash only. One install per address at a time; a second caller waits, then finds the language loaded. A bundle on disk is only hash-checked. Otherwise one source request, then one meta request, each with a 30 s timeout (`LANGUAGE_FETCH_TIMEOUT`). A missing source fails the install; a missing meta does not |
 | `install_language_from_address(addr, true)` | system languages, known link languages at boot | hash only; one attempt |
 | `load_installed_languages` | boot | none: loads every `languages/<dir>/bundle.js` |
 
-When the link-language install fails on join, `install_neighbourhood_with_context` still creates the perspective, with state `LinkLanguageFailedToInstall`. `ensure_link_language` then retries the install after 0.5 s, doubling up to 30 s ([Neighbourhood sync](../../../perspectives/neighbourhoods/sync.md)).
+Join does not install the link language. `install_neighbourhood_with_context` creates the perspective with state `NeighbourhoodJoinInitiated` and returns. `ensure_link_language` then installs it. A failed install sets `LinkLanguageFailedToInstall` and is retried after 0.5 s, doubling up to 30 s ([Neighbourhood sync](../../../perspectives/neighbourhoods/sync.md)).
 
 Publishing:
 
 1. `language.publish` (refused to user sessions) reads `languagePath` from the executor's file system, hashes it, and calls `expressionCreate({bundle, meta})` on the language language as the main agent.
 2. `language.applyTemplate` builds a templated copy and publishes it as the caller (`ctx.acts_as()`), so managed agents can create neighbourhoods.
-3. Both then load the new bundle locally.
+3. `language.publish` then loads the new bundle before it returns. `language.applyTemplate` returns the address first and loads the bundle in the background through `install_language`. A neighbourhood publish with that address waits for this install.
 
 </details>
 
@@ -43,7 +43,8 @@ Publishing:
 - [rust-executor/src/languages/mod.rs](../../../../rust-executor/src/languages/mod.rs): `install_language_from_address`, `load_installed_languages`, `install_language`, `language_by_ref`, `save_language_bundle`, `language_remove`.
 - [rust-executor/src/languages/conductor_languages.rs](../../../../rust-executor/src/languages/conductor_languages.rs): `load_link_and_installed_languages`.
 - [rust-executor/src/api/languages_ws.rs](../../../../rust-executor/src/api/languages_ws.rs): `publish_language`, `apply_template`, `remove_language`, `write_settings`.
-- [rust-executor/src/neighbourhoods.rs](../../../../rust-executor/src/neighbourhoods.rs): install calls on publish and join (`install_neighbourhood_with_context`).
+- [rust-executor/src/neighbourhoods.rs](../../../../rust-executor/src/neighbourhoods.rs): the install call on publish (`neighbourhood_publish_from_perspective_with_context`).
+- [rust-executor/src/perspectives/perspective_instance.rs](../../../../rust-executor/src/perspectives/perspective_instance.rs): `ensure_link_language`, which installs the link language after a join.
 - [rust-executor/src/types/domain.rs](../../../../rust-executor/src/types/domain.rs): `LanguageMeta`, `LanguageLanguageInput`.
 - [cli/src/languages.rs](../../../../cli/src/languages.rs): CLI `languages` commands.
 

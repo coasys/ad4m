@@ -1,6 +1,6 @@
 # Local link language
 
-The **local link language** (`local-link-language`) is a link language with no network. It keeps the links of one neighbourhood in memory and in the `ad4m:host` key-value store, and reports itself synced. Links never leave the executor, so agents on two executors cannot share a neighbourhood through it. It is one of the **local bootstrap languages**: plain JavaScript system languages that run ADAM with no Holochain and no central services.
+The **local link language** (`local-link-language`) is a link language with no network. It keeps the links of one neighbourhood in memory and in the `ad4m:host` key-value store, and its `sync()` always succeeds, so the executor sets the perspective to `Synced`. Links never leave the executor, so agents on two executors cannot share a neighbourhood through it. It is one of the **local bootstrap languages**: plain JavaScript system languages that run ADAM with no Holochain and no central services.
 
 **Why:** Tests, Docker images and standalone executors need neighbourhoods that work without a Holochain DHT or a server. The SFU end-to-end tests and the local integration tests use it, so they do not depend on Holochain timing. Those tests check executor logic, not sync.
 

@@ -16,6 +16,7 @@ State (each field is an `Arc<tokio::Mutex<…>>`, so a clone of `LanguageControl
 | `system_addresses` | `SystemLanguageAddresses`: language language, agent, neighbourhood, perspective, and the set of system addresses |
 | `language_aliases` | `did`, `lang`, `neighbourhood`, `perspective` → address |
 | `language_names` | address → name, for log lines |
+| `installs` | address → lock; `install_language` holds it, so one install of a language runs at a time |
 
 Calls:
 

@@ -16,7 +16,7 @@
 
 1. Read existing instances per class (`existing_instance_context`), keyed by each class's identity property.
 2. Build one prompt from those, each class's `interpretationHint`, fields and relations, any active flow context, and the transcript (`build_interpretation_input`).
-3. Call the LLM through the AI service's interpretation task (`ensure_interpretation_task_for_model`; see [AI service](../../../agents/executor/services/ai.md)). Retry up to 5 times when the JSON does not parse (`retry_interpretation_parse`).
+3. Call the LLM through the AI service's interpretation task (`ensure_interpretation_task_for_model`; see [AI service](../../../agents/executor/services/ai.md)). Make up to 5 attempts when the JSON does not parse (`retry_interpretation_parse`).
 4. Drop proposals already present, then plan the writes: an `id` means update, no `id` means create; relation values resolve to existing ids or `new:<Class>:<n>` refs (`plan_interpretation_ops_with_context`).
 5. Drop no-op updates; apply all writes in one batch with overlays (`apply_with_overlay`).
 6. Run flow spawn and the flow evaluator ([Flow spawn and guards](../flows/spawn-and-guards.md)).

@@ -31,7 +31,7 @@ What the executor needs from each fixed-role language:
 
 | Alias | Executor call that uses it |
 |---|---|
-| `lang` | `install_language` and `language_by_ref` fetch meta and bundles; `language.publish` and `applyTemplate` store them |
+| `lang` | `install_language` and `language_by_ref` fetch bundles and meta; `runtime.linkLanguageTemplates` and the MCP template list read metas; `language.publish` and `applyTemplate` store them |
 | `did` | `publish_agent_to_language` stores profiles; `agent.byDid` and `expression.get("did:…")` read them |
 | `neighbourhood` | `create_neighbourhood_with_context` on publish; `get_neighbourhood` on join |
 | `perspective` | none: the executor loads it and registers the alias; the language stores nothing |

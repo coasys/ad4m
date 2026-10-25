@@ -1,6 +1,6 @@
 # Rust client and CLI
 
-`ad4m-client` (directory `rust-client/`) is the Rust client of the [RPC API](rpc-api.md). Its `Ad4mClient` has sub-clients (`agent`, `perspectives`, `neighbourhoods`, `languages`, `expressions`, `runtime`; no AI sub-client) over one `WsRpcClient`. The `cli/` crate builds two binaries on it: `ad4m`, the operator's command-line client, and `ad4m-executor`, which runs the executor itself (`init`, `run`, `config print`).
+`ad4m-client` (directory `rust-client/`) is the Rust client of the [RPC API](rpc-api.md). Its `Ad4mClient` has sub-clients (`agent`, `perspectives`, `neighbourhoods`, `languages`, `expressions`, `runtime`; no AI sub-client) over one `WsRpcClient`. The `cli/` crate builds two binaries on it: `ad4m`, the operator's command-line client, and `ad4m-executor`, which runs the executor itself (`init`, `run`, `config print`, `log`, `dev`).
 
 **Why:** Operators of headless executors need a shell tool. The executor itself reuses the client's types, for example `ad4m_client::literal::Literal` in MCP and the perspective code. The executor binary lives in the CLI crate, so one release ships both.
 
@@ -29,7 +29,7 @@
 
 - [rust-client/src/lib.rs](../../../rust-client/src/lib.rs): `Ad4mClient`.
 - [rust-client/src/ws_rpc.rs](../../../rust-client/src/ws_rpc.rs): `WsRpcClient` (tokio-tungstenite, `{ id, type, params }`).
-- [rust-client/src/agent.rs](../../../rust-client/src/agent.rs): `request_capability`, `generate_jwt` and the agent calls.
+- [rust-client/src/agent.rs](../../../rust-client/src/agent.rs): `request_capability`, `retrieve_capability` (RPC `agent.generateJwt`) and the agent calls.
 - [cli/src/ad4m.rs](../../../cli/src/ad4m.rs): the `ad4m` binary.
 - [cli/src/startup.rs](../../../cli/src/startup.rs): `get_cap_token`, `data_path`.
 - [cli/src/ad4m_executor.rs](../../../cli/src/ad4m_executor.rs), [cli/src/run_config.rs](../../../cli/src/run_config.rs): the `ad4m-executor` binary.

@@ -18,7 +18,7 @@ Publish (when and what: [Agent profiles](../../agents/identity/profiles.md)):
 
 1. The executor calls `expression_create(<agent language>, profile, ctx)` as the agent. All agents on the executor, main and managed, publish through the same agent-language isolate.
 2. In the language, `expressionCreate` checks `content.did == agentDid()`. `agentDid()` is the calling agent because `expression_create` passes its `AgentContext`.
-3. It signs with `agentCreateSignedExpression` and POSTs `{did, expression}`.
+3. It signs with `agentCreateSignedExpression` and POSTs `{data: {did, expression}}`.
 
 Resolve:
 

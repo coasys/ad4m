@@ -4,7 +4,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Abstract class** (`model_query/abstract_classes.rs`, built-in `ad4m://TextContent`): A subject class that reads the instances of several concrete classes, sends each write to the record's own classes, and cannot be created. [Subject classes](perspectives/social-dna/subject-classes.md)
 
-**Access check** (`ctx.require`, `get_perspective_with_access`, `refuse_user_session`): The code in a handler, MCP tool, event filter or language op that applies a session's grant to one call, as a capability check plus an ownership check. [Access checks](agents/access/checks.md) — not: guard (a guard is a flow term)
+**Access check** (`ctx.require`, `get_perspective_with_access`, `refuse_user_session`): The code in a handler, MCP tool, event delivery or language op that applies a session's grant to one call, as a capability check plus an ownership check. [Access checks](agents/access/checks.md) — not: guard (a guard is a flow term)
 
 **ACL** (`acl` table in `link-server/src/db.ts`): The list of DIDs admitted to one link-server room, checked on every request. [Link server](languages/link-languages/link-server.md)
 
@@ -36,9 +36,9 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **App data path** (`Ad4mConfig.app_data_path`, default `~/.ad4m`): The directory that holds all state of one executor. [Executor data](agents/executor/data.md)
 
-**App grant** (`generate_capability_token`): A JWT that the executor issues to an app after the operator approves the app's capability request. [App grants](agents/access/app-grants.md) — not: cap token
+**App grant** (`generate_capability_token`, `grants::mint`): The grant, and its JWT, that an app gets after the owner of an agent approves the app's capability request. [App grants](agents/access/app-grants.md) — not: cap token
 
-**Apps registry** (`apps_map.rs`, file `apps_data.json`): The file that records every issued app grant with its app info and revoked flag, for listing and revocation. [App grants](agents/access/app-grants.md)
+**Audience** (`Audience` in `events.rs`): Who may receive one event: some DIDs, everyone, or the operator; the publisher names it. [Events](agents/interfaces/events.md)
 
 **Auto-processor** (`AutoProcessorConfig`, `auto_processor_supervisor`): A declared instance in a perspective that makes the executor run interpretation by itself on new messages in a scope. [Auto-processor](perspectives/social-dna/interpretation/auto-processor.md)
 
@@ -62,7 +62,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Capability** (`Capability { with: Resource, can }` in `agent/capabilities/types.rs`): A domain, a list of pointers and a list of verbs that together name a kind of action a caller may take. [Capabilities](agents/access/capabilities.md). For languages, see Language capability.
 
-**Capability request** (`agent.requestCapability`, `agent.permitCapability`, `agent.generateJwt`): An app's request for a set of capabilities, approved by the operator and redeemed with a six-digit code. [App grants](agents/access/app-grants.md)
+**Capability request** (`agent.requestCapability`, `agent.permitCapability`, `agent.generateJwt`): An app's request for a set of capabilities on one agent, approved by the operator or by a session of that agent with `agent/PERMIT`, and redeemed with a six-digit code. [App grants](agents/access/app-grants.md)
 
 **Cascade** (`rust-executor/src/sfu/cascade.rs`, `sfu/gossip/`): Several executors' SFUs that share load and pipe media between them. [SFU](agents/executor/services/sfu.md)
 
@@ -86,7 +86,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Entanglement proof** (`EntanglementProof`, `entanglement_service`): Signatures in both directions that link the main agent's DID to another key, such as a device key or a Holochain agent key. [Signing and verification](agents/identity/signing-and-verification.md)
 
-**Event** (`events_ws::events`, `event_specs()`): A typed message that the executor pushes on a socket that asked for it with `events.watch`. [Events](agents/interfaces/events.md) — not: subscription (that is a live query), notification
+**Event** (`Event` and `Topic` in `events.rs`, `event_specs()`): A typed message that the executor pushes on a socket that asked for it with `events.watch`, to the sessions in its audience that hold its capability. [Events](agents/interfaces/events.md) — not: subscription (that is a live query), notification
 
 **Event interest** (`events.watch`, `events.unwatch`, `EventInterest` in `api/event_interest.rs`): The event types, each optionally narrowed to some perspectives, that one socket asked for; a socket with no interest gets no events. [Events](agents/interfaces/events.md)
 
@@ -120,7 +120,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Free hosting** (`get_free_hosting_enabled`): The executor setting, on by default, under which nothing is billed. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
 
-**Grant** (`Claims.capabilities`, `Session.caps`): The list of capabilities that a session's token carries. [Capabilities](agents/access/capabilities.md)
+**Grant** (`LiveGrant` in `agent/grants.rs`, table `grants`): The executor's record of one issued token: the agent it acts as, its capabilities and the app that holds it. A token works only while its grant is active and unexpired. [App grants](agents/access/app-grants.md)
 
 **Guard** (`requires` on `FlowState`): A model query on a flow state that must match before a transition into that state may be proposed. [Flow spawn and guards](perspectives/social-dna/flows/spawn-and-guards.md)
 
@@ -154,7 +154,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Keystore** (`AgentStore.keystore`, `KeystoreEnvelope`): The encrypted form of all wallet keys inside `agent.json`. [Wallet and keys](agents/identity/wallet-and-keys.md)
 
-**Known link languages** (`RuntimeService::get_know_link_languages`): The link language addresses from the bootstrap seed that the executor loads at start. [Bootstrap languages](languages/runtime/bootstrap-languages.md)
+**Known link languages** (`RuntimeService::get_know_link_languages`): The link language addresses from the bootstrap seed plus the database table `known_link_languages`; the executor loads them after the Holochain conductor starts. [Bootstrap languages](languages/runtime/bootstrap-languages.md)
 
 **Language** (`rust-executor/src/languages/`): A JavaScript bundle, loaded into its own isolate, that does some of these, one per language capability it exports: create and fetch expressions; commit, sync, render and query links; list peers; carry telepresence. [Languages](languages/README.md)
 
@@ -250,13 +250,13 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Perspective language** (`bootstrap-languages/perspective-language/`, alias `perspective`): The system language meant for perspective snapshots; a stub that stores nothing today. [Neighbourhood and perspective languages](languages/other-kinds/neighbourhood-and-perspective-languages.md)
 
-**Perspective state** (`PerspectiveState`): Where a perspective stands with its neighbourhood: `Private`, `NeighbourhoodCreationInitiated`, `LinkLanguageFailedToInstall`, `LinkLanguageInstalledButNotSynced` or `Synced`. [Neighbourhood sync](perspectives/neighbourhoods/sync.md) — not: sync state
+**Perspective state** (`PerspectiveState`): Where a perspective stands with its neighbourhood: `Private`, `NeighbourhoodCreationInitiated`, `NeighbourhoodJoinInitiated`, `LinkLanguageFailedToInstall`, `LinkLanguageInstalledButNotSynced` or `Synced`. [Neighbourhood sync](perspectives/neighbourhoods/sync.md) — not: sync state
 
 **Principal** (`Principal` in `agent/session.rs`): The kind of caller behind a session: operator, agent or anonymous. [Sessions](agents/access/sessions.md)
 
 **Processing claim** (`ProcessingClaim`, `try_claim`): A shared link that an executor writes before it runs an auto-processor batch, so that peers back off. [Auto-processor](perspectives/social-dna/interpretation/auto-processor.md)
 
-**Pub/sub topic** (`PubSub`, `*_TOPIC` in `rust-executor/src/pubsub.rs`): A named in-process broadcast channel on which executor code publishes a change once; every socket's event stream reads it. [Events](agents/interfaces/events.md)
+**Pub/sub topic** (`Topic` in `rust-executor/src/events.rs`, `PubSub`): The kind of an event, with its wire name. Executor code publishes each event once on the one in-process broadcast channel; every socket's event stream reads it. [Events](agents/interfaces/events.md)
 
 **Public perspective** (`Agent.perspective`): The signed links in an agent profile that describe the agent. [Agent profiles](agents/identity/profiles.md)
 
@@ -272,7 +272,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Request context** (`RequestContext` in `types/domain.rs`): The value that each RPC handler receives: one `Arc<Session>`, a cancel token and the RPC connection id. [Sessions](agents/access/sessions.md)
 
-**Revision** (`Language::current_revision`): A link language's name for its current state: in p-diff-sync a diff-entry hash, in the link server a hash of the active link hashes. [Link languages](languages/link-languages/README.md)
+**Revision** (`Language::current_revision`): A link language's name for its current state: in p-diff-sync a diff-entry hash, in the link server the XOR of the active link hashes. [Link languages](languages/link-languages/README.md)
 
 **Role gate** (`ConsensusRule.from_role`, `flow_instance/roles/`): A model query that a voter must match, as of the vote's time, for the vote to count. [Flow consensus](perspectives/social-dna/flows/consensus.md)
 
@@ -322,6 +322,6 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **User account** (`users` table, `user_management.rs`): The login of a managed agent: email, DID and password hash. [Managed agents](agents/executor/managed-agents.md) — not: user (for the agent itself)
 
-**User token** (`generate_user_jwt`): A JWT issued at login whose `sub` is a managed agent's DID and that carries the default user capabilities. [Managed agents](agents/executor/managed-agents.md) — not: user JWT, login JWT
+**User token** (`generate_user_jwt`): A JWT issued at login whose `sub` is a managed agent's DID; its grant holds the default user capabilities. [Managed agents](agents/executor/managed-agents.md) — not: user JWT, login JWT
 
 **Wallet** (`WalletBackend`, `LocalWallet`, `SharedWallet`): The store of every Ed25519 key of the executor, by name, locked under the operator's passphrase. [Wallet and keys](agents/identity/wallet-and-keys.md). For the encrypted file form, see Keystore.

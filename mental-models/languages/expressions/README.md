@@ -2,7 +2,7 @@
 
 An **expression** is data signed by an agent: `{author, timestamp, data, proof}`. An **expression URL** names it as `<language address or alias>://<expression address>`. To read it, the executor asks that language for the expression and checks the signature.
 
-**Why:** The URL carries the address of the code that can resolve it. An executor that does not have the language fetches it by address from the language language, checks the hash, and then resolves the expression. The signature lets any reader check the author without trusting the store.
+**Why:** The URL carries the address of the code that can resolve it. An executor that does not have the language can fetch it by address from the language language and check the hash; `expression.get` resolves only through a language that is already loaded. The signature lets any reader check the author without trusting the store.
 
 **Parent:** [Languages](../README.md)
 

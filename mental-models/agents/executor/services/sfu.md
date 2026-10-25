@@ -26,7 +26,7 @@ Two checks decide who controls calls:
 | What | Who | Code |
 |---|---|---|
 | the call policy | the **neighbourhood creator**, the author of the neighbourhood expression | `config_store.rs` |
-| SFU room and config writes on one executor (`require_owner`) | the first local **owner** of the neighbourhood's perspective on that executor | `sfu_ws.rs` |
+| SFU room start and stop on one executor (`require_owner`) | the first local **owner** of the neighbourhood's perspective on that executor | `sfu_ws.rs` |
 
 `sfu.ensureMembership` lets the operator register any DID as a neighbourhood member, for tests and bridges.
 
