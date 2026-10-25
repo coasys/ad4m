@@ -29,7 +29,9 @@ pub fn entry_hash_js(entry: JsValue) -> Result<String, JsValue> {
     entry_hash_json(&value).map_err(|e| malformed(&e.to_string()))
 }
 
-/// `compare` on hashes from seq `from` on. `from` must be a safe non-negative integer.
+/// `compare` on hashes from seq `from` on. `from` must be a safe non-negative integer, and
+/// so must the seq of every hash listed (`from + length - 1`): every seq the answer names is
+/// one of those or one past the shorter list, so it reaches JavaScript exactly.
 #[wasm_bindgen(js_name = compare)]
 pub fn compare_js(
     ours: Vec<String>,
@@ -40,6 +42,14 @@ pub fn compare_js(
     if !(from >= 0.0 && from.fract() == 0.0 && from <= crate::MAX_SAFE_INTEGER as f64) {
         return Err(malformed("from must be a safe non-negative integer"));
     }
-    let result: Compare = compare(&ours, &theirs, from as u64, &chain);
+    let from = from as u64;
+    let longest = u64::try_from(ours.len().max(theirs.len())).unwrap_or(u64::MAX);
+    if from.saturating_add(longest) > crate::MAX_SAFE_INTEGER + 1 {
+        return Err(malformed(
+            "the seq of every hash (from + index) must be a safe integer",
+        ));
+    }
+    let result: Compare = compare(&ours, &theirs, from, &chain)
+        .ok_or_else(|| malformed("a seq of the answer does not fit in a u64"))?;
     to_js(&result)
 }

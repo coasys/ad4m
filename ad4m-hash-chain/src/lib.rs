@@ -345,27 +345,29 @@ pub enum Compare {
 }
 
 /// Compares our hashes with a peer's hashes from position `from` on: `ours[i]` and
-/// `theirs[i]` are both the hash at seq `from + i`. Never truncates.
-pub fn compare(ours: &[Hash], theirs: &[Hash], from: u64, chain: &ChainId) -> Compare {
+/// `theirs[i]` are both the hash at seq `from + i`. Never truncates. `None` when the seq
+/// the answer names does not fit in a u64.
+pub fn compare(ours: &[Hash], theirs: &[Hash], from: u64, chain: &ChainId) -> Option<Compare> {
+    let seq_at = |i: usize| u64::try_from(i).ok().and_then(|i| from.checked_add(i));
     for (i, (a, b)) in ours.iter().zip(theirs).enumerate() {
         if a != b {
-            return Compare::Fork(ForkEvidence {
+            return Some(Compare::Fork(ForkEvidence {
                 chain: chain.clone(),
-                seq: from + i as u64,
+                seq: seq_at(i)?,
                 ours: a.clone(),
                 theirs: b.clone(),
-            });
+            }));
         }
     }
-    match ours.len().cmp(&theirs.len()) {
+    Some(match ours.len().cmp(&theirs.len()) {
         std::cmp::Ordering::Equal => Compare::Same,
         std::cmp::Ordering::Less => Compare::TheyExtend {
-            from: from + ours.len() as u64,
+            from: seq_at(ours.len())?,
         },
         std::cmp::Ordering::Greater => Compare::WeExtend {
-            from: from + theirs.len() as u64,
+            from: seq_at(theirs.len())?,
         },
-    }
+    })
 }
 
 /// What [`import`] did with a batch.
@@ -388,6 +390,10 @@ pub enum ImportOutcome {
 /// seq we hold has the hash we hold (else `Fork`); the new entries start at head + 1 (else
 /// `Gap`); then each new entry passes the order, link and policy checks of `append`. Two
 /// different entries at one new seq within the batch are `Malformed`.
+///
+/// `Fork` is hash-only evidence: the competing entry has a canonical form and names this
+/// chain, but its proofs are not verified and the policy is not applied to it. Verify it
+/// before treating the fork as authenticated or passing it to `ChainStore::record_fork`.
 pub fn import<P: ChainPolicy>(
     chain: &mut Chain<P>,
     policy: &P,

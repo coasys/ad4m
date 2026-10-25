@@ -589,7 +589,8 @@ fn compare_cases() -> Value {
     let cases: Vec<Value> = cases
         .into_iter()
         .map(|(name, ours, theirs, from)| {
-            let result = compare(&ours, &theirs, from, &"vector-chain".to_string());
+            let result = compare(&ours, &theirs, from, &"vector-chain".to_string())
+                .expect("vector seqs fit in u64");
             json!({"name": name, "ours": ours, "theirs": theirs, "from": from, "chain": "vector-chain", "result": result})
         })
         .collect();
@@ -662,7 +663,8 @@ pub fn check_vector_file(name: &str, file: &Value) {
                     &theirs,
                     case["from"].as_u64().unwrap(),
                     &case["chain"].as_str().unwrap().to_string(),
-                );
+                )
+                .expect("vector seqs fit in u64");
                 assert_eq!(to_json(&got), case["result"], "{label}");
             }
             other => panic!("unknown vector file {other}"),
