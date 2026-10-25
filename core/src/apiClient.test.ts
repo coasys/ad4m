@@ -441,7 +441,7 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(authFailed).not.toHaveBeenCalled()
     })
 
-    // A locked wallet is a state of the node: the token may be good. 1013 is not an auth failure.
+    // A locked wallet is a state of the executor: the token may be good. 1013 is not an auth failure.
     it('treats close code 1013 (executor locked) as an ordinary close that carries its reason', async () => {
         const LOCKED = 'Executor is locked: ask the operator to unlock it, then reconnect'
         open()

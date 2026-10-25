@@ -36,6 +36,9 @@ async function exchangeAgentInfosUntil(
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
+/** The admin credentials of the multi-user executors (node 1 and node 2). */
+const ADMIN_CREDENTIAL = "multi-user-simple-admin";
+const NODE2_ADMIN_CREDENTIAL = "multi-user-simple-node2-admin";
 
 describe("Multi-User Simple integration tests", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
@@ -73,10 +76,12 @@ describe("Multi-User Simple integration tests", () => {
         localServicesProcess = localServices.process;
 
         // Start executor with local services
+        // Multi-user mode needs an admin credential: without one a caller with no token is
+        // the operator, which a multi-user executor must not have.
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            apiPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
+            apiPort, hcAdminPort, hcAppPort, false, ADMIN_CREDENTIAL, proxyUrl!, bootstrapUrl!);
 
-        adminAd4mClient = new Ad4mClient(baseUrl(apiPort))
+        adminAd4mClient = new Ad4mClient(baseUrl(apiPort), ADMIN_CREDENTIAL)
 
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")
@@ -493,7 +498,9 @@ describe("Multi-User Simple integration tests", () => {
                 expect.fail("User 2 should not be able to add links to User 1's perspective");
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                expect(errorMessage).to.include("Access denied");
+                // Not yours answers as missing does (404), so a user cannot learn which
+                // perspectives exist.
+                expect(errorMessage).to.include(`Perspective ${perspective1.uuid} not found`);
                 console.log("✅ Cross-user perspective access properly denied");
             }
         });
@@ -2014,12 +2021,12 @@ describe("Multi-User Simple integration tests", () => {
                 node2HcAdminPort,
                 node2HcAppPort,
                 false,
-                undefined,
+                NODE2_ADMIN_CREDENTIAL,
                 proxyUrl!,
                 bootstrapUrl!
             );
 
-            node2AdminClient = new Ad4mClient(baseUrl(node2GqlPort));
+            node2AdminClient = new Ad4mClient(baseUrl(node2GqlPort), NODE2_ADMIN_CREDENTIAL);
             await node2AdminClient.agent.generate("passphrase");
             await node2AdminClient.runtime.setMultiUserEnabled(true);
 
@@ -3021,7 +3028,9 @@ describe("Multi-User Simple integration tests", () => {
                 await managedClient.runtime.grantNotification(notificationId);
                 expect.fail("Managed user should not be able to call grantNotification");
             } catch (error: any) {
-                expect(error.message).to.include("Permission denied");
+                // runtime.grantNotification is Guard::Operator: only the admin credential.
+                expect(error.message).to.include("403");
+                expect(error.message).to.include("Admin credential required");
                 console.log("✅ Managed user correctly blocked from calling grantNotification");
             }
         });

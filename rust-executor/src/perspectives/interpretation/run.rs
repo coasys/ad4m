@@ -17,7 +17,6 @@ use crate::ai_service::harness::provider::{
 use crate::ai_service::harness::{run_with_tools, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::secret::Secret;
 use crate::types::LinkStatus;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1041,7 +1040,7 @@ pub async fn run_interpretation_with_harness_and_model(
     scope: Option<&Scope>,
     cursor: Option<&InterpretationRunCursor>,
     max_tool_calls: u32,
-    auth_token: Option<String>,
+    caller: Option<Arc<crate::agent::session::Session>>,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     dedup_on_drain: bool,
     credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
@@ -1105,20 +1104,9 @@ pub async fn run_interpretation_with_harness_and_model(
         .map(class_propose_shape_from_shacl)
         .collect();
 
-    // The AD4M MCP handler is the read-tool surface. Constructed here with a
-    // pass-scoped McpContext — the admin credential of `harness_admin_credential`
-    // + a fresh per-pass auth-token slot. Every existing MCP tool (`query_*`,
-    // `get_*`, subject/perspective tools) becomes visible to the LLM through
-    // `Ad4mToolProvider`.
-    let mcp_context = crate::mcp::server::McpContext {
-        admin_credential: harness_admin_credential(&auth_token),
-        auth_token: Arc::new(tokio::sync::RwLock::new(auth_token.clone())),
-        // The harness reaches tools through `list_tool_schemas` /
-        // `call_tool_by_name`, which always include the dynamic per-class
-        // tools regardless of this flag (it only gates the MCP transport).
-        // Set explicitly so the intent is visible at the construction site.
-        dynamic_class_tools: true,
-    };
+    // The AD4M MCP handler is the read-tool surface (see `pass_mcp_context`).
+    let has_caller = caller.is_some();
+    let mcp_context = pass_mcp_context(perspective, context, caller).await;
     let mcp_handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::new(mcp_context));
     let ad4m_provider = Arc::new(crate::mcp::tools::provider_impl::Ad4mToolProvider::new(
         mcp_handler,
@@ -1151,17 +1139,15 @@ pub async fn run_interpretation_with_harness_and_model(
     // overlay) and never touched `extintention_propose_create`. Filtering
     // down to the ~2 classes × ~3 read verbs the pass actually needs
     // forces the LLM through the propose-write wrappers below.
-    let allowed_class_prefixes: Vec<String> = propose_shapes
+    let offered_classes: Vec<_> = all_shacl_classes
         .iter()
-        .map(|s| format!("{}_", s.class_name.to_lowercase()))
+        .filter(|c| requested_class_names.contains_key(&c.name))
+        .cloned()
         .collect();
-    let ad4m_filtered: Arc<dyn ToolProvider> =
-        Arc::new(FilteredProvider::new(ad4m_bound, move |t: &ToolSchema| {
-            if !is_read_only(t) {
-                return false;
-            }
-            allowed_class_prefixes.iter().any(|p| t.name.starts_with(p))
-        }));
+    let ad4m_filtered: Arc<dyn ToolProvider> = Arc::new(FilteredProvider::new(
+        ad4m_bound,
+        offered_class_tools(&offered_classes),
+    ));
 
     // Wrap in ProposeWritesProvider so the LLM also sees the two synthetic
     // per-class writers whose side-effect is "queue an InterpretationOp",
@@ -1189,9 +1175,12 @@ pub async fn run_interpretation_with_harness_and_model(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
-    // A pass with a caller bills the user it acts as; the caller's token named that user. An
-    // executor-owned pass (no caller token) bills no one.
-    let bill_to = auth_token.and(context.managed_did().map(str::to_string));
+    // A pass with a caller bills the agent it acts as (by DID); the caller's session named that
+    // agent. An executor-owned pass (no caller) bills no one.
+    let bill_to = context
+        .managed_did()
+        .map(str::to_string)
+        .filter(|_| has_caller);
     let bridge = Arc::new(
         crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
             Arc::new(service),
@@ -1283,44 +1272,504 @@ pub async fn run_interpretation_with_harness_and_model(
     })
 }
 
-/// The admin credential the harness's MCP handler compares a pass's token with. A pass
-/// with a caller token uses the executor's configured credential, so an admin caller acts
-/// as the main agent, as on the RPC socket. An executor-owned pass (the auto-processor's,
-/// with no caller token) keeps the unauthenticated local path it always had: with a
-/// credential set, the handler would ask it to authenticate and hide its read tools.
-fn harness_admin_credential(auth_token: &Option<String>) -> Option<Secret> {
-    auth_token.as_ref()?;
-    // An empty env credential is none, as in `Ad4mConfig::prepare`.
-    crate::config::configured_admin_credential()
-        .or_else(|| Secret::non_empty(std::env::var("AD4M_ADMIN_CREDENTIAL").ok()))
+/// Which AD4M tools a pass sees: the read tools generated for `offered` classes, by exact
+/// name. Not a name prefix: offered classes come from graph state neighbourhood peers write,
+/// and a class named `List` would otherwise admit the static `list_perspectives`.
+fn offered_class_tools(
+    offered: &[crate::mcp::shacl::ShaclClass],
+) -> impl Fn(&ToolSchema) -> bool + Send + Sync + 'static {
+    let names = crate::mcp::tools::Ad4mMcpHandler::class_tool_names(offered);
+    move |t: &ToolSchema| is_read_only(t) && names.contains(&t.name)
 }
 
-#[cfg(test)]
-mod harness_credential_tests {
-    use super::harness_admin_credential;
-    use crate::config::{set_global_config, Ad4mConfig};
+/// The MCP context of an interpretation pass on `perspective`. The pass runs in-process but
+/// has no request headers, so its reach is `Network`: a tokenless fallback inside it is
+/// anonymous. Its dynamic tool list names the classes of `perspective` only.
+///
+/// - A pass with a caller acts as the caller's session: the one its RPC request arrived on,
+///   so the pass's tools reach what the caller reaches, and stop once that session's grant
+///   ends.
+/// - A pass without one (the auto-processor's) acts as the perspective's owner, limited to
+///   querying `perspective` ([`pass_owner_session`]), never as the operator: the transcript it
+///   reads may come from
+///   neighbourhood peers and can steer the model, and the operator reaches every user's
+///   perspectives.
+pub(crate) async fn pass_mcp_context(
+    perspective: &PerspectiveInstance,
+    context: &AgentContext,
+    caller: Option<Arc<crate::agent::session::Session>>,
+) -> crate::mcp::server::McpContext {
+    let session = match caller {
+        Some(session) => session,
+        None => Arc::new(pass_owner_session(perspective, context).await),
+    };
+    crate::mcp::server::McpContext::new(
+        // The pass holds its session; no token arrives that a credential would decide.
+        None,
+        // A pass has no request headers, so nothing shows it local: any tokenless
+        // fallback inside a pass is anonymous, never the operator.
+        crate::agent::capabilities::ListenerReach::Network,
+        // The harness reaches tools through `list_tool_schemas` /
+        // `call_tool_by_name`, which always include the dynamic per-class
+        // tools regardless of this flag (it only gates the MCP transport).
+        // Set explicitly so the intent is visible at the construction site.
+        true,
+    )
+    .scoped_to(&perspective.uuid)
+    .with_session(session)
+}
 
-    #[test]
-    fn an_executor_owned_pass_keeps_the_unauthenticated_path() {
-        let config = Ad4mConfig {
-            admin_credential: Some("configured-admin".into()),
-            ..Ad4mConfig::default()
-        };
-        set_global_config(config);
-        assert!(harness_admin_credential(&None).is_none());
-        set_global_config(Ad4mConfig::default());
+/// The session a pass without a caller acts as, from the owners of `perspective`. Always an
+/// in-process session ([`Session::in_process`]): one of the executor's agents, never the
+/// operator.
+///
+/// - a managed user who owns it (the pass's own user, if it is one of them) acts as that
+///   user's agent;
+/// - otherwise (unowned, owned by the main agent, or by a DID that is no managed user) the
+///   main agent. The perspective guard lets the main agent reach its own and unowned
+///   perspectives only, so the pass reaches no user's perspective.
+///
+/// Either way the session may only query this perspective, so even a tool outside the pass's
+/// offered ones ([`offered_class_tools`]) would reach nothing else of the agent's. The pass
+/// writes through its proposal buffer.
+///
+/// [`Session::in_process`]: crate::agent::session::Session::in_process
+async fn pass_owner_session(
+    perspective: &PerspectiveInstance,
+    context: &AgentContext,
+) -> crate::agent::session::Session {
+    use crate::agent::session::Session;
+    let handle = perspective.persisted.lock().await.clone();
+    let main_did = crate::agent::AgentService::global_instance()
+        .lock()
+        .ok()
+        .and_then(|agent| agent.as_ref().and_then(|a| a.did.clone()));
+    let main_owns = handle.is_unowned()
+        || main_did
+            .as_deref()
+            .is_some_and(|did| handle.is_owned_by(did));
+    // Owners are agent DIDs (D16); the managed ones are those a user account holds.
+    let managed = crate::agent::AgentService::managed_agent_dids().unwrap_or_default();
+    let users: Vec<String> = handle
+        .get_owners()
+        .into_iter()
+        .filter(|did| managed.contains(did))
+        .collect();
+    let own_user = users
+        .iter()
+        .find(|did| context.managed_did() == Some(did.as_str()));
+    let owner = own_user.or_else(|| users.first().filter(|_| !main_owns));
+    let caps = vec![crate::agent::capabilities::perspective_query_capability(
+        vec![handle.uuid],
+    )];
+    match owner {
+        Some(did) => Session::in_process(AgentContext::managed(did.clone()), caps).with_did(did),
+        None => Session::in_process(AgentContext::main_agent(), caps),
+    }
+}
+
+/// Whom the tools of a pass without a caller token act as, and what they reach.
+#[cfg(test)]
+mod pass_session_tests {
+    use super::*;
+    use crate::agent::session::Principal;
+    use crate::mcp::tools::provider_impl::Ad4mToolProvider;
+    use crate::mcp::tools::Ad4mMcpHandler;
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::perspectives::{register_perspective, unregister_perspective};
+    use serde_json::{json, Value};
+
+    const NOTE_SDNA: &str = r#"{
+      "target_class": "pass://Note",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"pass://Note"}
+      ],
+      "properties": [
+        {"path":"pass://note_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"pass://note_title","target":"value"}]}
+      ]
+    }"#;
+
+    const DIARY_SDNA: &str = r#"{
+      "target_class": "pass://Diary",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"pass://Diary"}
+      ],
+      "properties": [
+        {"path":"pass://diary_entry","name":"entry","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"pass://diary_entry","target":"value"}]}
+      ]
+    }"#;
+
+    const LEDGER_SDNA: &str = r#"{
+      "target_class": "pass://Ledger",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"pass://Ledger"}
+      ],
+      "properties": [
+        {"path":"pass://ledger_sum","name":"sum","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"pass://ledger_sum","target":"value"}]}
+      ]
+    }"#;
+
+    /// What user B wrote in B's perspective: no tool of another pass may return it.
+    const B_SECRET: &str = "pass-test-b-secret-entry";
+
+    /// A registered perspective with one class, owned by `owner` (`None`: unowned).
+    /// Unregistered when dropped.
+    struct Fixture {
+        perspective: PerspectiveInstance,
+        uuid: String,
     }
 
-    #[test]
-    fn a_pass_with_a_caller_token_checks_it_against_the_configured_credential() {
-        let config = Ad4mConfig {
-            admin_credential: Some("configured-admin".into()),
-            ..Ad4mConfig::default()
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            unregister_perspective(&self.uuid);
+        }
+    }
+
+    async fn fixture(class: &str, sdna: &str, owner: Option<&str>) -> Fixture {
+        let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[(class, sdna)]).await;
+        let uuid = {
+            let mut handle = perspective.persisted.lock().await;
+            handle.owners = owner.map(|did| vec![did.to_string()]);
+            handle.uuid.clone()
         };
-        set_global_config(config);
-        let credential = harness_admin_credential(&Some("configured-admin".to_string()));
-        assert!(credential.is_some_and(|c| c.expose_for_compare("configured-admin")));
-        set_global_config(Ad4mConfig::default());
+        register_perspective(uuid.clone(), perspective.clone());
+        Fixture { perspective, uuid }
+    }
+
+    /// A managed user: a row in the users table, which makes the owner DID a managed agent.
+    fn managed_user(email: &str, did: &str) {
+        let known = crate::db::Ad4mDb::with_global_instance(|db| db.get_username_by_did(did))
+            .ok()
+            .flatten();
+        if known.is_none() {
+            crate::db::Ad4mDb::with_global_instance(|db| db.add_user(email, did, "pw"))
+                .expect("a managed user");
+        }
+    }
+
+    const A_EMAIL: &str = "pass.owner.a@example.org";
+    const A_DID: &str = "did:key:pass-owner-a";
+    const B_EMAIL: &str = "pass.owner.b@example.org";
+    const B_DID: &str = "did:key:pass-owner-b";
+
+    /// User B's perspective with a Diary entry in it, written as the operator.
+    async fn b_perspective() -> Fixture {
+        managed_user(B_EMAIL, B_DID);
+        let b = fixture("Diary", DIARY_SDNA, Some(B_DID)).await;
+        let operator = crate::mcp::tools::test_support::handler_as(
+            crate::mcp::tools::test_support::operator(),
+        );
+        let created = operator
+            .call_tool_by_name(
+                "instance_create",
+                json!({
+                    "perspective_id": b.uuid,
+                    "class_name": "Diary",
+                    "properties": { "entry": B_SECRET },
+                }),
+            )
+            .await
+            .expect("the operator writes B's diary");
+        assert!(!created.contains("error"), "{created}");
+        // The operator reads it: the secret is there for a tool to leak.
+        let read = operator
+            .call_tool_by_name(
+                "instance_query",
+                json!({ "perspective_id": b.uuid, "class_name": "Diary" }),
+            )
+            .await
+            .unwrap();
+        assert!(read.contains(B_SECRET), "{read}");
+        b
+    }
+
+    /// The handler of a pass without a caller token on `pass`, run by `context`.
+    async fn pass_handler(pass: &Fixture, context: &AgentContext) -> Arc<Ad4mMcpHandler> {
+        let mcp = pass_mcp_context(&pass.perspective, context, None).await;
+        Arc::new(Ad4mMcpHandler::new(mcp))
+    }
+
+    /// A value for a schema property the test does not care about, of the declared type,
+    /// that the tool parses before it reaches its guard.
+    fn filler(name: &str, schema: &Value) -> Value {
+        if name == "commands" {
+            return json!(
+                r#"[{"action":"addLink","source":"this","predicate":"pass://p","target":"pass://t"}]"#
+            );
+        }
+        match schema["type"].as_str() {
+            Some("integer") | Some("number") => json!(1),
+            Some("boolean") => json!(false),
+            Some("array") => json!([]),
+            Some("object") => json!({}),
+            _ => json!("Diary"),
+        }
+    }
+
+    /// Calls every tool of `handler` that names a perspective with `target` as that
+    /// perspective (the other required arguments filled in), and returns each answer.
+    async fn every_perspective_tool_on(
+        handler: &Ad4mMcpHandler,
+        target: &str,
+    ) -> Vec<(String, String)> {
+        let mut answers = Vec::new();
+        for tool in handler.list_tool_schemas().await {
+            let properties = tool.parameters["properties"].clone();
+            let Some(properties) = properties.as_object() else {
+                continue;
+            };
+            let key = ["perspective_id", "perspective_uuid", "uuid"]
+                .into_iter()
+                .find(|k| properties.contains_key(*k));
+            let Some(key) = key else { continue };
+            let mut args = serde_json::Map::new();
+            for required in tool.parameters["required"].as_array().into_iter().flatten() {
+                let name = required.as_str().unwrap_or_default();
+                args.insert(name.to_string(), filler(name, &properties[name]));
+            }
+            args.insert(key.to_string(), json!(target));
+            let answer = match handler
+                .call_tool_by_name(&tool.name, Value::Object(args))
+                .await
+            {
+                Ok(answer) => answer,
+                Err(e) => e.to_string(),
+            };
+            answers.push((tool.name, answer));
+        }
+        answers
+    }
+
+    /// No answer carries B's data, and every one refuses B: as missing, by status, or as a
+    /// tool the in-process bridge does not dispatch.
+    fn assert_b_unreachable(answers: &[(String, String)], b: &str) {
+        assert!(answers.len() > 10, "the tools that name a perspective ran");
+        let not_refused: Vec<_> = answers
+            .iter()
+            .filter(|(_, answer)| {
+                answer.contains(B_SECRET)
+                    || !((answer.contains(&format!("Perspective {b} not found"))
+                        && answer.contains("\"status\":404"))
+                        || answer.contains("\"status\":403")
+                        || answer.contains("\"status\":401")
+                        || answer.starts_with("Unknown tool:"))
+            })
+            .collect();
+        assert!(not_refused.is_empty(), "reached B: {not_refused:#?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tokenless_pass_acts_as_the_user_who_owns_the_perspective() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let session = pass_handler(&a, &AgentContext::managed(A_DID.into()))
+            .await
+            .session()
+            .await
+            .unwrap();
+        assert!(!session.is_operator());
+        assert_eq!(session.managed_did(), Some(A_DID));
+        // Run by the main agent's loop, it is still the owner.
+        let session = pass_handler(&a, &AgentContext::main_agent())
+            .await
+            .session()
+            .await
+            .unwrap();
+        assert_eq!(session.managed_did(), Some(A_DID));
+    }
+
+    /// A pass has no request headers, so its reach is `Network`: any tokenless fallback
+    /// inside a pass is anonymous, never the operator, even without an admin credential.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tokenless_fallback_inside_a_pass_is_anonymous() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let handler = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
+        let tokenless = handler.tokenless_session().unwrap();
+        assert!(!tokenless.is_operator());
+        assert!(!tokenless.is_authenticated());
+        // The pass's own session is unchanged: the owner's.
+        let session = handler.session().await.unwrap();
+        assert_eq!(session.managed_did(), Some(A_DID));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_on_user_as_perspective_cannot_read_user_bs() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let b = b_perspective().await;
+        let handler = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
+
+        // The pass reads its own perspective.
+        let described = handler
+            .call_tool_by_name("describe_perspective", json!({ "perspective_id": a.uuid }))
+            .await
+            .unwrap();
+        assert!(described.contains("Note"), "{described}");
+
+        // Every perspective tool, called with B's uuid, refuses.
+        assert_b_unreachable(&every_perspective_tool_on(&handler, &b.uuid).await, &b.uuid);
+
+        // Through the pass's provider, a model that sends B's uuid reads A's perspective.
+        let bound = BoundArgsProvider::new(
+            Arc::new(Ad4mToolProvider::new(handler)),
+            std::collections::BTreeMap::from([(
+                "perspective_id".to_string(),
+                Value::String(a.uuid.clone()),
+            )]),
+        );
+        for (tool, args) in [
+            (
+                "instance_query",
+                json!({ "perspective_id": b.uuid, "class_name": "Diary" }),
+            ),
+            ("describe_perspective", json!({ "perspective_id": b.uuid })),
+            ("query_links", json!({ "perspective_id": b.uuid })),
+        ] {
+            let answer = bound
+                .call(tool, args)
+                .await
+                .unwrap_or_else(|e| e.to_string());
+            assert!(!answer.contains(B_SECRET), "{tool} read B: {answer}");
+            assert!(!answer.contains(&b.uuid), "{tool} named B: {answer}");
+        }
+    }
+
+    /// A class with no properties, named `name`.
+    fn bare_class(name: &str) -> crate::mcp::shacl::ShaclClass {
+        crate::mcp::shacl::ShaclClass {
+            name: name.to_string(),
+            name_lower: name.to_lowercase(),
+            properties: vec![],
+            shape_uri: None,
+            all_predicates: vec![],
+        }
+    }
+
+    /// A read tool named `name`, as the filter sees it.
+    fn read_tool(name: &str) -> crate::ai_service::harness::provider::ToolSchema {
+        crate::ai_service::harness::provider::ToolSchema {
+            name: name.to_string(),
+            description: String::new(),
+            parameters: json!({}),
+            side_effect: crate::ai_service::harness::provider::SideEffect::Read,
+        }
+    }
+
+    // Offered classes come from SHACL in the perspective, shared graph state that
+    // neighbourhood peers write: a class named after a static tool's first word (`List`,
+    // `Query`, `Get`, `Instance`, ...) must not admit that static tool.
+    #[test]
+    fn an_offered_class_admits_its_own_tools_and_no_static_tool() {
+        let statics = Ad4mMcpHandler::static_tool_names();
+        assert!(statics.iter().any(|n| n == "list_perspectives"));
+        let mut words: Vec<&str> = statics.iter().filter_map(|n| n.split('_').next()).collect();
+        words.extend(["List", "Query", "Get"]);
+        for word in words {
+            let mut chars = word.chars();
+            let class_name: String = chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default();
+            let admits = offered_class_tools(&[bare_class(&class_name)]);
+            for name in &statics {
+                assert!(
+                    !admits(&read_tool(name)),
+                    "a class named `{class_name}` admits the static tool `{name}`"
+                );
+            }
+        }
+
+        let admits = offered_class_tools(&[bare_class("List")]);
+        for own in ["list_query", "list_list", "list_get"] {
+            assert!(admits(&read_tool(own)), "`{own}` is the class's own tool");
+        }
+        assert!(!admits(&read_tool("note_query")), "another class's tool");
+    }
+
+    // The pass reaches its own perspective, not the rest of its user's, even through a static
+    // tool: the perspective's config and SHACL are shared graph state that neighbourhood peers
+    // write.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tokenless_pass_lists_no_other_perspective_of_its_user() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let other = fixture("Diary", DIARY_SDNA, Some(A_DID)).await;
+        let handler = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
+        let listed = handler
+            .call_tool_by_name("list_perspectives", json!({}))
+            .await
+            .unwrap_or_else(|e| e.to_string());
+        assert!(!listed.contains(&other.uuid), "{listed}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_on_an_unowned_perspective_cannot_reach_a_users_perspective() {
+        let unowned = fixture("Note", NOTE_SDNA, None).await;
+        let b = b_perspective().await;
+        let handler = pass_handler(&unowned, &AgentContext::main_agent()).await;
+        let session = handler.session().await.unwrap();
+        assert!(!session.is_operator());
+        assert_eq!(
+            session.principal,
+            Principal::Agent(AgentContext::main_agent())
+        );
+        assert!(
+            session.grant().is_none(),
+            "an in-process session has no grant"
+        );
+
+        let described = handler
+            .call_tool_by_name(
+                "describe_perspective",
+                json!({ "perspective_id": unowned.uuid }),
+            )
+            .await
+            .unwrap();
+        assert!(described.contains("Note"), "{described}");
+
+        assert_b_unreachable(&every_perspective_tool_on(&handler, &b.uuid).await, &b.uuid);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_tool_list_of_a_pass_names_the_classes_of_its_perspective_only() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        // A's other perspective: A may read it, the pass on A still does not list it.
+        let a_other = fixture("Ledger", LEDGER_SDNA, Some(A_DID)).await;
+        let b = b_perspective().await;
+
+        let names = |tools: Vec<crate::ai_service::harness::provider::ToolSchema>| {
+            tools.into_iter().map(|t| t.name).collect::<Vec<_>>()
+        };
+        let tokenless = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
+        // A pass run by the operator reaches every perspective; its list is scoped too.
+        let operator = Arc::new(crate::agent::session::Session::for_test(
+            Principal::Operator,
+        ));
+        let operator_pass = Ad4mMcpHandler::new(
+            pass_mcp_context(&a.perspective, &AgentContext::main_agent(), Some(operator)).await,
+        );
+        assert!(operator_pass.session().await.unwrap().is_operator());
+
+        for listed in [
+            names(tokenless.list_tool_schemas().await),
+            names(operator_pass.list_tool_schemas().await),
+        ] {
+            assert!(listed.iter().any(|n| n.starts_with("note_")), "{listed:?}");
+            assert!(
+                !listed.iter().any(|n| n.starts_with("diary_")),
+                "{listed:?}"
+            );
+            assert!(
+                !listed.iter().any(|n| n.starts_with("ledger_")),
+                "{listed:?}"
+            );
+        }
+        drop((a_other, b));
     }
 }
 
