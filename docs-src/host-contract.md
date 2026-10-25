@@ -57,7 +57,7 @@ any language is loaded.
 | `openSealed(sealed)` | `(SealedBox) => string` | Opens a box sealed to the acting agent (the node, or the managed user the call runs for) and returns the plaintext as hex. Throws for a box sealed to any other DID, or an altered one. See "Sealed boxes" below. |
 | `createSignedExpression(data)` | `(any) => object` | Wraps `data` in an Expression envelope with `author`, `timestamp`, `data`, and `proof` fields. Returns the signed expression object. |
 | `getAllLocalUserDIDs()` | `() => string[]` | Returns DIDs of all local managed users. |
-| `createSignedExpressionForUser(email, data)` | `(string, any) => object` | Like `createSignedExpression` but signs with a managed user's key. Only the user that the current call runs for: any other email, and any call that runs for the node, throws. |
+| `createSignedExpressionForUser(email, data)` | `(string, any) => object` | Like `createSignedExpression` but signs with a managed user's key. Only the user that the current call runs for: any other email, and any call that runs for the main agent, throws. |
 | `didForUser(email)` | `(string) => string` | Returns the DID for a managed user identified by email. |
 
 #### Sealed boxes
