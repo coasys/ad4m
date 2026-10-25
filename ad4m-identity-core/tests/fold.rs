@@ -241,6 +241,17 @@ fn unsupported_key_types() {
 }
 
 #[test]
+fn an_unsigned_incept_with_an_overlong_enc_key_is_refused_before_decoding() {
+    let mut d1 = device(1, KeyLife::Standing);
+    d1.enc = format!("z{}", huge_base58());
+    let event =
+        ad4m_identity_core::build::incept_unsigned(&mk(&master(0)), next(1), vec![d1]).unwrap();
+    let events = [json(&event)];
+    let err = quickly(|| fold_json(&events).unwrap_err());
+    assert_eq!(policy_of(err), FoldError::UnsupportedKeyType);
+}
+
+#[test]
 fn incept_without_the_devices_proof() {
     assert_eq!(
         policy_of(refuse("incept without the device's proof")),

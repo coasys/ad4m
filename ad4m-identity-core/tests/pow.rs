@@ -73,6 +73,27 @@ fn malformed_nonces_fail() {
 }
 
 #[test]
+fn the_longest_nonce_checks_and_an_overlong_one_is_refused_before_decoding() {
+    let longest = Pow {
+        nonce: bs58::encode([0xff; 16]).into_string(),
+        bits: 0,
+    };
+    assert_eq!(longest.nonce.len(), 22);
+    assert!(pow::check(SCID, &longest, 0));
+
+    let huge = Pow {
+        nonce: "2".repeat(1 << 20),
+        bits: 0,
+    };
+    // wasm32 has no clock: there the call only has to return.
+    #[cfg(not(target_arch = "wasm32"))]
+    let started = std::time::Instant::now();
+    assert!(!pow::check(SCID, &huge, 0));
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
 fn the_hash_is_label_scid_nonce() {
     use sha2::{Digest, Sha256};
     let nonce = [7u8; 16];
