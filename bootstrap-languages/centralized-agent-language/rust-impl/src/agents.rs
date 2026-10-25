@@ -12,15 +12,16 @@
 //!   for a `did:key`, by that key; for a `did:scid`, by a key that the log (read from the store
 //!   and replayed here with the identity core, every event's signatures checked) lists at the
 //!   anchor, valid and without the bot mark at the head. Any other record is ignored (`None`).
-//!   A `did:key` record answers its stored signed expression unchanged (the executor checks
-//!   that signature on every read), and only when the expression's author is the record's did
-//!   and its data is an Agent naming that did. A `did:scid` record's profile is a plain Agent,
-//!   answered as an expression built from the record.
+//!   A record answers its stored signed expression unchanged (the executor checks that
+//!   signature on every read), and only when the expression's author is the record's did and
+//!   its data is an Agent naming that did. A `did:scid` person's profile is an AD4M expression
+//!   authored by the `did:scid` and signed by a device key (`proof.key`, a `did:key`), which
+//!   must be the record's `signed_by`; the executor checks that key against the author's log.
 
 use ad4m_hash_chain::{decode_ed25519_multikey, decode_proof_value, encode_proof_value};
 use ad4m_identity_core::{fold_json, verify_signed, KelChain, LINK_DOMAIN};
 use ad4m_ldk::identity::{AgentRecord, IdentityErrorCode, LogPage};
-use ad4m_ldk::prelude::{Expression, ExpressionProof, LanguageError, LanguageResult};
+use ad4m_ldk::prelude::{Expression, LanguageError, LanguageResult};
 use serde_json::Value;
 
 use crate::store::{segment, Http, Store};
@@ -183,25 +184,14 @@ pub async fn get<H: Http>(
     if !verified(store, &record, now_s).await? {
         return Ok(None);
     }
-    if record.did.starts_with("did:key:") {
-        return Ok(signed_profile_of(&record));
-    }
-    Ok(Some(Expression {
-        author: record.did.clone(),
-        timestamp: iso_time_ms(record.version),
-        data: record.profile.clone(),
-        proof: ExpressionProof {
-            signature: record.sig.clone(),
-            key: record.signed_by.clone(),
-            valid: None,
-            invalid: None,
-        },
-    }))
+    Ok(signed_profile_of(&record))
 }
 
-/// The signed profile expression a `did:key` record carries, when it is this agent's: authored
-/// by the record's did, its data an Agent naming that did. The language does not judge the
-/// expression's own signature: the executor verifies it on every read.
+/// The signed profile expression a record carries, when it is this agent's: authored by the
+/// record's did, its data an Agent naming that did. For a `did:scid` record the expression's
+/// `proof.key` must also be the record's `signed_by`, the key [`verified`] checked against the
+/// log. The language does not judge the expression's own signature: the executor verifies it
+/// on every read (for a `did:scid` author, under `proof.key` once the author's log lists it).
 fn signed_profile_of(record: &AgentRecord) -> Option<Expression> {
     let mut expression: Expression = serde_json::from_value(record.profile.clone()).ok()?;
     let agent_did = expression.data.get("did").and_then(Value::as_str);
@@ -211,6 +201,9 @@ fn signed_profile_of(record: &AgentRecord) -> Option<Expression> {
         .and_then(|p| p.get("links"))
         .is_some_and(Value::is_array);
     if expression.author != record.did || agent_did != Some(record.did.as_str()) || !has_links {
+        return None;
+    }
+    if !record.did.starts_with("did:key:") && expression.proof.key != record.signed_by {
         return None;
     }
     expression.proof.valid = None;
@@ -268,7 +261,8 @@ pub async fn read_log<H: Http>(store: &Store<H>, did: &str) -> LanguageResult<Op
     Ok(fold_json(&events).ok())
 }
 
-/// `version` (unix milliseconds) as an ISO 8601 timestamp, `YYYY-MM-DDTHH:MM:SS.mmmZ`.
+/// Unix milliseconds as an ISO 8601 timestamp, `YYYY-MM-DDTHH:MM:SS.mmmZ` (the form of an AD4M
+/// expression's timestamp).
 pub fn iso_time_ms(ms: u64) -> String {
     let secs = ms / 1000;
     let days = (secs / 86_400) as i64;

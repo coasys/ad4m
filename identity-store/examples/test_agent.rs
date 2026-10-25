@@ -21,7 +21,7 @@
 //! | `rotate` | `name` | the `rotate` event (not pushed) |
 //! | `push` | `name`, `event` | `{seq}`: the person's copy takes the event the store took |
 //! | `request` | `name`, `signer` (`master`, `d1` or a device label), `keyId?`, `method`, `path`, `body`, `expires` | the `SignedRequest` |
-//! | `record` | `name`, `signer`, `keyId`, `profile`, `version`, `did?`, `anchor?` | a `did:scid` `AgentRecord` (`did`/`anchor` replace the person's, re-signed: a hostile store's row) |
+//! | `record` | `name`, `signer`, `keyId`, `agent` or `profile`, `version`, `author?`, `expressionSigner?`, `did?`, `anchor?` | a `did:scid` `AgentRecord`. Its profile is `agent` as the person's AD4M expression signed by `signer` (or by `expressionSigner`, authored by `author` instead of the person), or `profile` stored as given. `did`/`anchor` replace the person's, re-signed: a hostile store's row |
 //! | `didKeyRecord` | `device`, `profile`, `version` | a `did:key` `AgentRecord` signed by that key |
 
 #[path = "../tests/common/agent.rs"]
@@ -32,7 +32,7 @@ use std::io::{BufRead, Write};
 
 use ad4m_identity_core::link::{Claim, ClaimView, OfferKind, SignedOffer};
 use ad4m_identity_core::{BotScope, Event};
-use agent::{did_key, did_key_record, enc_of, Device, Person};
+use agent::{did_key, did_key_record, enc_of, signed_profile, Device, Person, PROFILE_TIME};
 use ed25519_dalek::SigningKey;
 use serde_json::{json, Value};
 
@@ -82,13 +82,18 @@ impl Apps {
 
     fn signer(&mut self, req: &Value) -> Result<SigningKey, String> {
         let signer = text(req, "signer")?.to_string();
+        self.signer_named(req, &signer)
+    }
+
+    /// The key `signer` names: `master`, `d<n>` of the person, or a device label.
+    fn signer_named(&mut self, req: &Value, signer: &str) -> Result<SigningKey, String> {
         if signer == "master" {
             return Ok(self.person(req)?.current_master());
         }
         if let Some(n) = signer.strip_prefix('d').and_then(|n| n.parse::<u32>().ok()) {
             return Ok(self.person(req)?.device_key(n));
         }
-        Ok(self.device(&signer).key.clone())
+        Ok(self.device(signer).key.clone())
     }
 
     fn handle(&mut self, req: &Value) -> Result<Value, String> {
@@ -184,10 +189,23 @@ impl Apps {
             "record" => {
                 let signer = self.signer(req)?;
                 let key_id = text(req, "keyId")?.to_string();
-                let profile = field(req, "profile")?.clone();
                 let version = number(req, "version")?;
+                let profile = match req.get("agent") {
+                    Some(agent) => {
+                        let expression_signer = match req.get("expressionSigner") {
+                            Some(_) => self.signer_named(req, text(req, "expressionSigner")?)?,
+                            None => signer.clone(),
+                        };
+                        let author = match req.get("author") {
+                            Some(_) => text(req, "author")?.to_string(),
+                            None => self.person(req)?.did(),
+                        };
+                        signed_profile(&author, &expression_signer, agent, PROFILE_TIME)
+                    }
+                    None => field(req, "profile")?.clone(),
+                };
                 let person = self.person(req)?;
-                let mut record = person.agent_record(&key_id, &signer, profile, version);
+                let mut record = person.record_with_profile(&key_id, &signer, profile, version);
                 // A hostile store's row for the suites: another did or anchor, re-signed.
                 if let Some(did) = req.get("did").and_then(Value::as_str) {
                     record.did = did.to_string();

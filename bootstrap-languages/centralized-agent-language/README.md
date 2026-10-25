@@ -9,11 +9,13 @@ serves the identity interface, both on the shared identity store (`identity-stor
   expression (`createSignedExpression`), that signed expression is the record's `profile`, and
   the agent's key signs the record through the host; a read keeps a record only when its
   signature holds (for a `did:scid`, by an unrevoked, non-bot key of that log at an anchor the
-  log holds). A `did:key` read answers the stored signed expression unchanged, so the
-  executor's signature check on every expression passes, and only when its author is the
-  record's did and its data an Agent naming that did. A `did:scid` record's profile is a
-  plain Agent, answered as an expression built from the record; the executor cannot verify
-  that one yet (it resolves an expression's author as a `did:key`).
+  log holds). A read answers the stored signed expression unchanged, so the executor's
+  signature check on every expression passes, and only when its author is the record's did
+  and its data an Agent naming that did. A `did:scid` person's profile is an AD4M expression
+  authored by the `did:scid` and signed by a device key: its `proof.key` (a `did:key`) must
+  be the record's `signedBy`, and the executor verifies the signature under that key once
+  the author's log (in its key-log cache) lists it valid and without the bot mark. A record
+  whose profile is a plain Agent answers nothing.
 - `identityLog`, `identityHead`, `identityAppend`, `identityKeyOwner`, `identityPowParams`,
   `identityAttachNote`, `identityPutAgent`, `identityOpenOffer`, `identityListOffers`,
   `identityCancelOffer`, `identityClaimOffer`, `identityOfferState`: one store route each.

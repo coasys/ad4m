@@ -298,8 +298,22 @@ impl Person {
     }
 
     /// The agent record of the person, signed by device key `key_id` (secret `signer`) and
-    /// anchored at the head.
+    /// anchored at the head. Its profile is `agent` as the person's AD4M expression signed by
+    /// `signer` ([`signed_profile`]).
     pub fn agent_record(
+        &self,
+        key_id: &str,
+        signer: &SigningKey,
+        agent: Value,
+        version: u64,
+    ) -> AgentRecord {
+        let profile = signed_profile(&self.did(), signer, &agent, PROFILE_TIME);
+        self.record_with_profile(key_id, signer, profile, version)
+    }
+
+    /// The agent record of the person with `profile` stored as given, signed by device key
+    /// `key_id` (secret `signer`) and anchored at the head.
+    pub fn record_with_profile(
         &self,
         key_id: &str,
         signer: &SigningKey,
@@ -322,6 +336,46 @@ impl Person {
         };
         record.sig = sign_record(&record, signer);
         record
+    }
+}
+
+/// The timestamp of the profiles [`Person::agent_record`] signs.
+pub const PROFILE_TIME: &str = "2027-01-15T08:00:00.000Z";
+
+/// `agent` as an AD4M expression of `author` signed by the device key `signer`, as the
+/// executor's `create_signed_expression` signs: the hex Ed25519 signature of
+/// `sha256(json(data) || timestamp)`, `data` with every object's keys sorted, `timestamp` an
+/// RFC 3339 UTC time with milliseconds. `proof.key` is the signer's `did:key`.
+pub fn signed_profile(author: &str, signer: &SigningKey, agent: &Value, timestamp: &str) -> Value {
+    let data = sorted(agent);
+    let mut message = serde_json::to_vec(&data).unwrap();
+    message.extend_from_slice(timestamp.as_bytes());
+    let signature: String = Signer::sign(signer, &sha256(&message))
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    serde_json::json!({
+        "author": author,
+        "timestamp": timestamp,
+        "data": data,
+        "proof": { "key": did_key(signer), "signature": signature },
+    })
+}
+
+/// `value` with every object's keys sorted, as the executor's `sort_json_value`.
+fn sorted(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|k| (k.clone(), sorted(&map[k])))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+        other => other.clone(),
     }
 }
 

@@ -6,9 +6,9 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 
 | File | What |
 |---|---|
-| `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`), `write_agent_language_settings`, the `identity-fork` publisher |
+| `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`), `write_agent_language_settings`, the `identity-fork` publisher, `verify_expression` (an expression by a `did:scid` author, for `LanguageController::verify_expression_proof`) |
 | `backend.rs` | `IdentityBackend`, `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
-| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh`, `ingest`, `accept`, forks |
+| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh`, `ingest`, `accept`, forks, `key_speaks_for` |
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner` |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
@@ -38,6 +38,11 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   (atomic: temp file + rename). When it fails, `LanguageController::install_agent_language`
   does not load the agent language, so no profile or identity call goes to an older or the
   default store; identity calls answer `unavailable`.
+- An expression by a `did:scid` author verifies only under its `proof.key` (a bare `did:key`)
+  when the cached log lists that key valid at the cached head by the clock now, without the
+  bot mark; the expression's own timestamp does not count. When the cached log does not admit
+  the key (no log yet, or a device added since), the read refreshes that one log from the store
+  once and checks again; a store that cannot answer leaves it `valid: false`.
 - An agent keeps the first identity it joined (`identity_agents`); `agent.status` and
   `agent.get` carry it as `identity`, `did` stays the device `did:key`.
 

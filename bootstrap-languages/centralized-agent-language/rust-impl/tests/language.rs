@@ -416,11 +416,16 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
 /// parses as RFC 3339 with milliseconds and `Z`; this check takes only a timestamp already in
 /// that form.
 fn executor_verifies(expression: &Expression) -> bool {
+    signature_holds_under(expression, &expression.author)
+}
+
+/// The signature check of [`executor_verifies`] under the did:key `did`. For a `did:scid`
+/// author the executor runs it under `proof.key`, once the author's log lists that key.
+fn signature_holds_under(expression: &Expression, did: &str) -> bool {
     let canonical = expression.timestamp.len() == 24
         && expression.timestamp.ends_with('Z')
         && expression.timestamp.as_bytes()[19] == b'.';
-    let Some(key) = expression
-        .author
+    let Some(key) = did
         .strip_prefix("did:key:")
         .and_then(decode_ed25519_multikey)
         .and_then(|k| VerifyingKey::from_bytes(&k).ok())
@@ -796,10 +801,11 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
     let p = person(&mut apps, &store, name);
     let did = p["did"].as_str().unwrap().to_string();
     link(&mut apps, &store, name, &did, "gus phone");
-    let profile = json!({ "perspective": { "links": [] }, "directMessageLanguage": "lang://dm" });
+    let profile =
+        json!({ "did": did, "perspective": { "links": [] }, "directMessageLanguage": "lang://dm" });
     let record: AgentRecord = serde_json::from_value(apps.run(
         "record",
-        json!({ "name": name, "signer": "gus phone", "keyId": "d2", "profile": profile, "version": 1 }),
+        json!({ "name": name, "signer": "gus phone", "keyId": "d2", "agent": profile, "version": 1 }),
     ))
     .unwrap();
     let path = format!("/v1/agents/{did}");
@@ -815,15 +821,18 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
     let expression = block_on(agents::get(&store, &did, now_s()))
         .unwrap()
         .unwrap();
+    assert_eq!(serde_json::to_value(&expression).unwrap(), record.profile);
     assert_eq!(expression.data, profile);
     assert_eq!(expression.author, did);
+    assert_eq!(expression.proof.key, record.signed_by);
+    assert!(signature_holds_under(&expression, &record.signed_by));
 
     // A record of this did signed by a key of another log: a hostile store's row, ignored.
     let other = person(&mut apps, &store, "ivy records");
     let hostile = apps.run(
         "record",
-        json!({ "name": "ivy records", "signer": "d1", "keyId": "d1", "profile": profile, "version": 9,
-                "did": did, "anchor": record.anchor }),
+        json!({ "name": "ivy records", "signer": "d1", "keyId": "d1", "agent": profile, "version": 9,
+                "author": did, "did": did, "anchor": record.anchor }),
     );
     assert_eq!(
         hostile["signedBy"],
@@ -862,6 +871,54 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
     assert!(block_on(agents::get(&store, &did, now_s()))
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn a_did_scid_record_answers_only_the_persons_profile_signed_by_the_records_key() {
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (_host, store) = Host::on(&server.url);
+    let name = "hal records";
+    let p = person(&mut apps, &store, name);
+    let did = p["did"].as_str().unwrap().to_string();
+    let path = format!("/v1/agents/{did}");
+    let agent = |d: &str| json!({ "did": d, "perspective": { "links": [] }, "directMessageLanguage": null });
+    let mut put = |fields: Value| -> AgentRecord {
+        let mut fields = fields;
+        fields["name"] = json!(name);
+        fields["signer"] = json!("d1");
+        fields["keyId"] = json!("d1");
+        let record = apps.run("record", fields);
+        let req = apps.signed(name, "d1", Some("d1"), "PUT", &path, Some(&record));
+        let record: AgentRecord = serde_json::from_value(record).unwrap();
+        block_on(store.put_agent(&record, Some(&req))).unwrap();
+        record
+    };
+    let answered = |store: &Store<Host>| block_on(agents::get(store, &did, now_s())).unwrap();
+
+    // Signed by a key other than the record's (a device in no log).
+    put(json!({ "agent": agent(&did), "expressionSigner": "hal stranger", "version": 1 }));
+    assert!(answered(&store).is_none());
+
+    // Authored by another did.
+    let other = "did:scid:coasys:1:zOtherPerson";
+    put(json!({ "agent": agent(&did), "author": other, "version": 2 }));
+    assert!(answered(&store).is_none());
+
+    // An Agent naming another did.
+    put(json!({ "agent": agent(other), "version": 3 }));
+    assert!(answered(&store).is_none());
+
+    // A plain Agent with no signed expression.
+    put(json!({ "profile": agent(&did), "version": 4 }));
+    assert!(answered(&store).is_none());
+
+    // The person's profile signed by the record's key: answered unchanged.
+    let record = put(json!({ "agent": agent(&did), "version": 5 }));
+    let expression = answered(&store).unwrap();
+    assert_eq!(serde_json::to_value(&expression).unwrap(), record.profile);
+    assert_eq!(expression.proof.key, record.signed_by);
+    assert!(signature_holds_under(&expression, &record.signed_by));
 }
 
 #[test]

@@ -169,6 +169,25 @@ impl KelCache {
         Ok(Some(chain))
     }
 
+    /// Whether the signing multikey `key` speaks for `did` by the cached log alone: the log
+    /// lists it, valid at the cached head by `now` (unix seconds) and without the bot mark.
+    /// `false` when the cache holds no log of `did` or cannot read it.
+    pub async fn key_speaks_for(&self, did: &str, key: &str, now: u64) -> bool {
+        let chain = match self.chain(scid_from(did)).await {
+            Ok(Some(chain)) => chain,
+            Ok(None) => return false,
+            Err(e) => {
+                log::warn!("identity: the cached log of {did} is unreadable: {e}");
+                return false;
+            }
+        };
+        let state = chain.state();
+        let head = chain.head().seq;
+        state.key_id_of(&key.to_string()).is_some()
+            && state.bot_scope_at(key, head).is_none()
+            && state.key_valid_at_time(key, head, now)
+    }
+
     /// The cached events of `scid` from seq `from` on.
     pub async fn stored_events(&self, scid: &str, from: u64) -> Result<Vec<Event>, CacheError> {
         let entries = self

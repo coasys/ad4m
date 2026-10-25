@@ -67,6 +67,42 @@ pub fn service() -> Result<Arc<IdentityService>, WsRpcError> {
     })
 }
 
+/// Verifies `expr`, authored by a `did:scid`: its `proof.key` must be the bare `did:key` of a
+/// key that the author's log in `cache` lists, valid at the cached head by the clock now and
+/// without the bot mark (as a device key's signature counts everywhere in this module), and
+/// the expression's signature must hold under that key. The expression's own timestamp does
+/// not count: the signer states it. When the cached log does not admit the key (no log yet, or
+/// a device added since), the log is refreshed once through `backend` and checked again.
+pub async fn verify_expression<T: serde::Serialize>(
+    cache: &KelCache,
+    backend: Option<&dyn backend::IdentityBackend>,
+    expr: &crate::types::Expression<T>,
+) -> Result<bool, deno_core::error::AnyError> {
+    let Some(key) = expr
+        .proof
+        .key
+        .strip_prefix("did:key:")
+        .filter(|key| ad4m_hash_chain::decode_ed25519_multikey(key).is_some())
+    else {
+        return Ok(false);
+    };
+    let mut admitted = cache
+        .key_speaks_for(&expr.author, key, service::now())
+        .await;
+    if let (false, Some(backend)) = (admitted, backend) {
+        if let Err(e) = cache.refresh(backend, &expr.author).await {
+            log::info!("identity: refresh of {} failed ({e})", expr.author);
+        }
+        admitted = cache
+            .key_speaks_for(&expr.author, key, service::now())
+            .await;
+    }
+    if !admitted {
+        return Ok(false);
+    }
+    crate::agent::signatures::verify_by(expr, &expr.proof.key)
+}
+
 /// `identity-fork`, to the sessions of the identity's local agents, when the cache finds two
 /// logs for one identity.
 fn publish_fork(did: &str, fork: &ad4m_identity_core::ForkEvidence) {

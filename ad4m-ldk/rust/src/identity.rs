@@ -141,9 +141,10 @@ pub struct Anchor {
 pub struct AgentRecord {
     /// did:scid, or did:key for a bot or a device-only identity.
     pub did: String,
-    /// Today's Agent: perspective, directMessageLanguage. The agent language writes a `did:key`
-    /// agent's Agent as that agent's signed AD4M expression (`{author, timestamp, data, proof}`);
-    /// the store does not read it.
+    /// Today's Agent: perspective, directMessageLanguage, as the agent's signed AD4M expression
+    /// (`{author, timestamp, data, proof}`): for a `did:key` agent signed by that key, for a
+    /// `did:scid` person authored by the `did:scid` and signed by `signed_by` (`proof.key`).
+    /// The store does not read it.
     pub profile: serde_json::Value,
     pub version: u64,
     /// The device did:key that signed.
