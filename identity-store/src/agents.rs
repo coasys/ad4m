@@ -123,11 +123,7 @@ impl Store {
                 state.bot_scope_at(id, seq).is_none() && state.key_valid_at_time(id, seq, now)
             };
             // Device keys only, never a master: the master never signs for the person.
-            let device_id = state
-                .keys
-                .iter()
-                .find(|(_, r)| r.sign == key)
-                .map(|(id, _)| id);
+            let device_id = state.device_key_id_of(&key.to_string());
             let valid = device_id.is_some_and(|id| valid_at(id, anchor) && valid_at(id, head));
             if !valid {
                 return Err(ApiError::forbidden(

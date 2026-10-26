@@ -280,11 +280,7 @@ async fn verified<H: Http>(
     }
     let state = chain.state();
     // Device keys only, never a master: the master never signs for the person.
-    let device_id = state
-        .keys
-        .iter()
-        .find(|(_, r)| r.sign == key)
-        .map(|(id, _)| id);
+    let device_id = state.device_key_id_of(&key.to_string());
     Ok(device_id.is_some_and(|id| {
         state.bot_scope_at(id, anchor).is_none() && state.key_valid_at_time(id, anchor, now_s)
     }))
