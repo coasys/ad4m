@@ -7,6 +7,9 @@
 //! canonical JSON of the argument, so a signer hashes `JCS(body)` for `bodyHash`. HTTP
 //! statuses map one to one onto `IdentityErrorCode`; a network failure or the host's
 //! 10-second timeout is `unavailable`. The store URL is read on every call.
+//!
+//! `log` alone may read from another host: a did:scid `src` hint that is an HTTPS base
+//! ([`src_base`]). Every other call goes to the configured store.
 
 use std::future::Future;
 
@@ -14,7 +17,7 @@ use ad4m_hash_chain::canonical_json;
 use ad4m_ldk::identity::{
     AgentRecord, AppendRequest, Claim, ClaimReceipt, ForbiddenReason, IdentityErrorCode,
     KeyIndexEntry, LogPage, OfferListing, OfferOpened, OfferProgress, PowParams, RateLimitScope,
-    SignedHead, SignedOffer, SignedRequest, VouchNote,
+    SignedHead, SignedOffer, SignedRequest, VouchNote, LOG_PAGE_EVENTS, MAX_LOG_PAGE_BYTES,
 };
 use ad4m_ldk::prelude::LanguageResult;
 use serde::de::DeserializeOwned;
@@ -182,6 +185,101 @@ pub fn scid_of(did: &str) -> LanguageResult<&str> {
     ad4m_identity_core::scid_of(did).ok_or_else(|| invalid("did"))
 }
 
+/// The HTTPS base a did:scid `src` hint names: `store.example`, `https://store.example`,
+/// `store.example:8443/prefix`. A scheme-less `src` is HTTPS. The answer is
+/// `https://<host>[:port][/path]`, the host in lower case, without a trailing `/`.
+///
+/// Refused as `invalid` (`src`): another scheme (`http`, an AD4M language address, a DID
+/// method), userinfo, a query or a fragment, a host that is not a DNS name or an IP literal,
+/// a port outside 1-65535, and a path with anything but unreserved characters,
+/// percent-escapes and `/`, or with a `.` or `..` segment. Only the form is checked: whether
+/// the host resolves to a public address is for the executor, which resolves DNS.
+pub fn src_base(src: &str) -> LanguageResult<String> {
+    let bad = || invalid("src");
+    let rest = match src.find("://") {
+        Some(at) if src[..at].eq_ignore_ascii_case("https") => &src[at + 3..],
+        Some(_) => return Err(bad()),
+        None => src,
+    };
+    if rest.contains(['?', '#', '@', '\\']) {
+        return Err(bad());
+    }
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let (host, port) = if let Some(inner) = authority.strip_prefix('[') {
+        let (ip, after) = inner.split_once(']').ok_or_else(bad)?;
+        ip.parse::<std::net::Ipv6Addr>().map_err(|_| bad())?;
+        let port = match after {
+            "" => None,
+            p => Some(p.strip_prefix(':').ok_or_else(bad)?),
+        };
+        (format!("[{}]", ip.to_ascii_lowercase()), port)
+    } else {
+        let (host, port) = match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        };
+        if !is_dns_name(host) {
+            return Err(bad());
+        }
+        (host.to_ascii_lowercase(), port)
+    };
+    let port = match port {
+        None => String::new(),
+        Some(p) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => {
+            match p.parse::<u16>() {
+                Ok(n) if n > 0 => format!(":{n}"),
+                _ => return Err(bad()),
+            }
+        }
+        Some(_) => return Err(bad()),
+    };
+    let path = path.trim_end_matches('/');
+    if !path.is_empty() && !is_path_prefix(path) {
+        return Err(bad());
+    }
+    Ok(format!("https://{host}{port}{path}"))
+}
+
+/// A DNS name (an IPv4 literal is one too): labels of 1-63 letters, digits and `-`, not at
+/// either end of a label, at most 253 characters, no trailing dot.
+fn is_dns_name(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+/// A path prefix: `/`-led segments of unreserved characters and percent-escapes, none of
+/// them empty, `.` or `..`.
+fn is_path_prefix(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix('/') else {
+        return false;
+    };
+    rest.split('/').all(|seg| {
+        let bytes = seg.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'%' if bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                    && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit) =>
+                {
+                    i += 3
+                }
+                b if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') => i += 1,
+                _ => return false,
+            }
+        }
+        !seg.is_empty() && seg != "." && seg != ".."
+    })
+}
+
 /// The store client over a host's `httpFetch`.
 pub struct Store<H: Http> {
     http: H,
@@ -204,14 +302,25 @@ impl<H: Http> Store<H> {
         }
     }
 
-    /// Sends one request and answers the raw reply. Only a network failure fails here.
+    /// Sends one request to the configured store and answers the raw reply. Only a network
+    /// failure fails here.
     pub async fn send(
         &self,
         method: &str,
         path: &str,
         options: Send<'_>,
     ) -> LanguageResult<HttpReply> {
-        let base = (self.url)();
+        self.send_to(&(self.url)(), method, path, options).await
+    }
+
+    /// Sends one request to the host at `base` and answers the raw reply.
+    async fn send_to(
+        &self,
+        base: &str,
+        method: &str,
+        path: &str,
+        options: Send<'_>,
+    ) -> LanguageResult<HttpReply> {
         let base = base.trim_end_matches('/');
         let query: Vec<String> = options
             .query
@@ -287,9 +396,40 @@ impl<H: Http> Store<H> {
             .map_err(|_| unavailable())
     }
 
-    pub async fn log(&self, did: &str, from: u64) -> LanguageResult<Option<LogPage>> {
+    /// One page of `did`'s log from `from`: from the host `src` names when it is given (see
+    /// [`src_base`]), else from the configured store. A page from another host only reads; its
+    /// head is passed on as data. A reply larger than [`MAX_LOG_PAGE_BYTES`] or a page of more
+    /// than [`LOG_PAGE_EVENTS`] events is refused as `invalid` (`too-large`).
+    pub async fn log(
+        &self,
+        did: &str,
+        from: u64,
+        src: Option<&str>,
+    ) -> LanguageResult<Option<LogPage>> {
         let path = format!("/v1/logs/{}", segment(scid_of(did)?));
-        self.read(&path, vec![("from", from.to_string())]).await
+        let base = match src {
+            Some(src) => src_base(src)?,
+            None => (self.url)(),
+        };
+        let query = Send {
+            query: vec![("from", from.to_string())],
+            ..Send::default()
+        };
+        let reply = self.send_to(&base, "GET", &path, query).await?;
+        if reply.status == 404 {
+            return Ok(None);
+        }
+        if !(200..300).contains(&reply.status) {
+            return Err(refusal_of(reply.status, &reply.body).into());
+        }
+        if reply.body.len() > MAX_LOG_PAGE_BYTES {
+            return Err(invalid("too-large"));
+        }
+        let page: LogPage = serde_json::from_str(&reply.body).map_err(|_| unavailable())?;
+        if page.events.len() > LOG_PAGE_EVENTS as usize {
+            return Err(invalid("too-large"));
+        }
+        Ok(Some(page))
     }
 
     pub async fn head(&self, did: &str) -> LanguageResult<Option<SignedHead>> {
@@ -497,6 +637,51 @@ mod tests {
         assert_eq!(store_url_from(r#"{"storeUrl":"http://x"}"#), "http://x");
         assert_eq!(store_url_from(""), DEFAULT_STORE_URL);
         assert_eq!(store_url_from(r#"{"storeUrl":""}"#), DEFAULT_STORE_URL);
+    }
+
+    #[test]
+    fn a_src_is_normalised_to_an_https_base() {
+        for (src, base) in [
+            ("store.example", "https://store.example"),
+            ("Store.Example/", "https://store.example"),
+            ("https://store.example", "https://store.example"),
+            ("HTTPS://store.example/", "https://store.example"),
+            ("store.example:8443", "https://store.example:8443"),
+            (
+                "https://store.example/kel/v%2D1/",
+                "https://store.example/kel/v%2D1",
+            ),
+            ("203.0.113.7", "https://203.0.113.7"),
+            ("[2001:DB8::1]:443", "https://[2001:db8::1]:443"),
+            ("localhost", "https://localhost"),
+        ] {
+            assert_eq!(src_base(src).unwrap(), base, "{src}");
+        }
+        for src in [
+            "",
+            "http://store.example",
+            "wss://store.example",
+            "https://u@store.example",
+            "store.example?a",
+            "store.example#a",
+            "store.example:",
+            "store.example:99999",
+            "store..example",
+            "store.example/a//b",
+            "store.example/./b",
+            "store.example/%zz",
+            "[::1]x",
+            &"a".repeat(64),
+            "did:web:store.example",
+        ] {
+            assert_eq!(
+                IdentityErrorCode::from_language_error(&src_base(src).unwrap_err()),
+                Some(IdentityErrorCode::Invalid {
+                    reason: "src".into()
+                }),
+                "{src}"
+            );
+        }
     }
 
     #[test]

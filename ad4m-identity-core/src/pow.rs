@@ -1,5 +1,5 @@
-//! The brake's proof of work for a new log with no vouching note (section 9 of
-//! `docs-src/identity/did-scid-coasys-1.md`): a 16-byte
+//! The brake's proof of work for a new log with no vouching note (section 14 of
+//! `docs-src/identity/did-scid-coasys-1.md`, host policy: verifiers never check it): a 16-byte
 //! `nonce` such that `sha256("coasys:pow" ‖ scid ‖ nonce)` has at least `bits` leading zero
 //! bits. The proof binds to the SCID, which covers master #0, the next-key commitment and every
 //! listed device key, so one proof admits one log. The store keeps no state for a proof.

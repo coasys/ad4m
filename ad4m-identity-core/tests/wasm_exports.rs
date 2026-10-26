@@ -58,6 +58,25 @@ fn fold_export_refuses_every_fold_vector() {
 }
 
 #[wasm_bindgen_test]
+fn did_document_export_matches_the_document_vector() {
+    let file: Value = serde_json::from_str(include_str!("../vectors/document.json")).unwrap();
+    let handle = KelChainJs::fold(js(&file["events"])).unwrap();
+    let aka: Vec<String> = serde_json::from_value(file["alsoKnownAs"].clone()).unwrap();
+    for case in file["documents"].as_array().unwrap() {
+        let version = case["version"].as_u64().map(|v| v as f64);
+        let got = rust(&handle.did_document(version, Some(aka.clone())).unwrap());
+        assert_eq!(got["didDocument"], case["didDocument"], "{version:?}");
+        assert_eq!(got["didDocumentMetadata"], case["didDocumentMetadata"]);
+    }
+    let past = file["refused"][0]["version"].as_u64().unwrap() as f64;
+    let err = rust(&handle.did_document(Some(past), None).err().unwrap());
+    assert_eq!(err["code"], "document");
+    assert_eq!(err["reason"], file["refused"][0]["error"]);
+    let err = rust(&handle.did_document(Some(1.5), None).err().unwrap());
+    assert_eq!(err["code"], "malformed");
+}
+
+#[wasm_bindgen_test]
 fn import_export_appends_and_reports() {
     let file: Value = serde_json::from_str(include_str!("../vectors/log.json")).unwrap();
     let events = file["events"].as_array().unwrap();

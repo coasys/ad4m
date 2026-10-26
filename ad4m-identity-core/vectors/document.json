@@ -1,0 +1,622 @@
+{
+  "alsoKnownAs": [
+    "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt?src=store.example"
+  ],
+  "description": "The DID document of the log of log.json at the head (version null) and after every seq, with alsoKnownAs; a version past the head is refused.",
+  "did": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+  "documents": [
+    {
+      "didDocument": {
+        "@context": [
+          "https://www.w3.org/ns/did/v1",
+          "https://w3id.org/security/multikey/v1",
+          "https://coasys.org/ns/did-scid-coasys/v1"
+        ],
+        "alsoKnownAs": [
+          "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt?src=store.example"
+        ],
+        "assertionMethod": [],
+        "authentication": [],
+        "capabilityInvocation": [],
+        "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "id": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "keyAgreement": [],
+        "verificationMethod": []
+      },
+      "didDocumentMetadata": {
+        "deactivated": true,
+        "versionId": "6"
+      },
+      "version": null
+    },
+    {
+      "didDocument": {
+        "@context": [
+          "https://www.w3.org/ns/did/v1",
+          "https://w3id.org/security/multikey/v1",
+          "https://coasys.org/ns/did-scid-coasys/v1"
+        ],
+        "alsoKnownAs": [
+          "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt?src=store.example"
+        ],
+        "assertionMethod": [
+          "#d1",
+          "#d2"
+        ],
+        "authentication": [
+          "#d1",
+          "#d2"
+        ],
+        "capabilityInvocation": [],
+        "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "id": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "keyAgreement": [
+          "#d1-enc",
+          "#d2-enc"
+        ],
+        "verificationMethod": [
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d1",
+            "publicKeyMultibase": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ",
+            "type": "Multikey"
+          },
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d1-enc",
+            "publicKeyMultibase": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+            "type": "Multikey"
+          },
+          {
+            "coasys:expires": 1800000000,
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d2",
+            "publicKeyMultibase": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr",
+            "type": "Multikey"
+          },
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d2-enc",
+            "publicKeyMultibase": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+            "type": "Multikey"
+          }
+        ]
+      },
+      "didDocumentMetadata": {
+        "deactivated": true,
+        "nextVersionId": "1",
+        "versionId": "0"
+      },
+      "version": 0
+    },
+    {
+      "didDocument": {
+        "@context": [
+          "https://www.w3.org/ns/did/v1",
+          "https://w3id.org/security/multikey/v1",
+          "https://coasys.org/ns/did-scid-coasys/v1"
+        ],
+        "alsoKnownAs": [
+          "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt?src=store.example"
+        ],
+        "assertionMethod": [
+          "#d1",
+          "#d2"
+        ],
+        "authentication": [
+          "#d1",
+          "#d2"
+        ],
+        "capabilityInvocation": [
+          "#d3"
+        ],
+        "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "id": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "keyAgreement": [
+          "#d1-enc",
+          "#d2-enc"
+        ],
+        "verificationMethod": [
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d1",
+            "publicKeyMultibase": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ",
+            "type": "Multikey"
+          },
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d1-enc",
+            "publicKeyMultibase": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+            "type": "Multikey"
+          },
+          {
+            "coasys:expires": 1800000000,
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d2",
+            "publicKeyMultibase": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr",
+            "type": "Multikey"
+          },
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d2-enc",
+            "publicKeyMultibase": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+            "type": "Multikey"
+          },
+          {
+            "coasys:bot": {
+              "can": [
+                "read",
+                "write"
+              ],
+              "expires": 1750000000
+            },
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d3",
+            "publicKeyMultibase": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr",
+            "type": "Multikey"
+          }
+        ]
+      },
+      "didDocumentMetadata": {
+        "deactivated": true,
+        "nextVersionId": "2",
+        "versionId": "1"
+      },
+      "version": 1
+    },
+    {
+      "didDocument": {
+        "@context": [
+          "https://www.w3.org/ns/did/v1",
+          "https://w3id.org/security/multikey/v1",
+          "https://coasys.org/ns/did-scid-coasys/v1"
+        ],
+        "alsoKnownAs": [
+          "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt?src=store.example"
+        ],
+        "assertionMethod": [
+          "#d1",
+          "#d2"
+        ],
+        "authentication": [
+          "#d1",
+          "#d2"
+        ],
+        "capabilityInvocation": [
+          "#d3"
+        ],
+        "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "id": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "keyAgreement": [
+          "#d1-enc",
+          "#d2-enc"
+        ],
+        "verificationMethod": [
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d1",
+            "publicKeyMultibase": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ",
+            "type": "Multikey"
+          },
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d1-enc",
+            "publicKeyMultibase": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+            "type": "Multikey"
+          },
+          {
+            "coasys:expires": 1800000000,
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d2",
+            "publicKeyMultibase": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr",
+            "type": "Multikey"
+          },
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d2-enc",
+            "publicKeyMultibase": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+            "type": "Multikey"
+          },
+          {
+            "coasys:bot": {
+              "can": [
+                "read"
+              ],
+              "expires": 1900000000
+            },
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d3",
+            "publicKeyMultibase": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr",
+            "type": "Multikey"
+          }
+        ]
+      },
+      "didDocumentMetadata": {
+        "deactivated": true,
+        "nextVersionId": "3",
+        "versionId": "2"
+      },
+      "version": 2
+    },
+    {
+      "didDocument": {
+        "@context": [
+          "https://www.w3.org/ns/did/v1",
+          "https://w3id.org/security/multikey/v1",
+          "https://coasys.org/ns/did-scid-coasys/v1"
+        ],
+        "alsoKnownAs": [
+          "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt?src=store.example"
+        ],
+        "assertionMethod": [
+          "#d1"
+        ],
+        "authentication": [
+          "#d1"
+        ],
+        "capabilityInvocation": [
+          "#d3"
+        ],
+        "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "id": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "keyAgreement": [
+          "#d1-enc"
+        ],
+        "verificationMethod": [
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d1",
+            "publicKeyMultibase": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ",
+            "type": "Multikey"
+          },
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d1-enc",
+            "publicKeyMultibase": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+            "type": "Multikey"
+          },
+          {
+            "coasys:bot": {
+              "can": [
+                "read"
+              ],
+              "expires": 1900000000
+            },
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d3",
+            "publicKeyMultibase": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr",
+            "type": "Multikey"
+          }
+        ]
+      },
+      "didDocumentMetadata": {
+        "deactivated": true,
+        "nextVersionId": "4",
+        "versionId": "3"
+      },
+      "version": 3
+    },
+    {
+      "didDocument": {
+        "@context": [
+          "https://www.w3.org/ns/did/v1",
+          "https://w3id.org/security/multikey/v1",
+          "https://coasys.org/ns/did-scid-coasys/v1"
+        ],
+        "alsoKnownAs": [
+          "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt?src=store.example"
+        ],
+        "assertionMethod": [],
+        "authentication": [],
+        "capabilityInvocation": [
+          "#d3"
+        ],
+        "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "id": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "keyAgreement": [],
+        "verificationMethod": [
+          {
+            "coasys:bot": {
+              "can": [
+                "read"
+              ],
+              "expires": 1900000000
+            },
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d3",
+            "publicKeyMultibase": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr",
+            "type": "Multikey"
+          }
+        ]
+      },
+      "didDocumentMetadata": {
+        "deactivated": true,
+        "nextVersionId": "5",
+        "versionId": "4"
+      },
+      "version": 4
+    },
+    {
+      "didDocument": {
+        "@context": [
+          "https://www.w3.org/ns/did/v1",
+          "https://w3id.org/security/multikey/v1",
+          "https://coasys.org/ns/did-scid-coasys/v1"
+        ],
+        "alsoKnownAs": [
+          "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt?src=store.example"
+        ],
+        "assertionMethod": [
+          "#d4"
+        ],
+        "authentication": [
+          "#d4"
+        ],
+        "capabilityInvocation": [
+          "#d3"
+        ],
+        "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "id": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "keyAgreement": [
+          "#d4-enc"
+        ],
+        "verificationMethod": [
+          {
+            "coasys:bot": {
+              "can": [
+                "read"
+              ],
+              "expires": 1900000000
+            },
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d3",
+            "publicKeyMultibase": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr",
+            "type": "Multikey"
+          },
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d4",
+            "publicKeyMultibase": "z6MkqSRMEYA6z9ToJjGrH8vYKtjjnRseu48jLPdYDXN8brSa",
+            "type": "Multikey"
+          },
+          {
+            "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+            "id": "#d4-enc",
+            "publicKeyMultibase": "z6LSg48mscT2aR7KbSouwbP26ne6LKsPegK9fdUbEJKatcCD",
+            "type": "Multikey"
+          }
+        ]
+      },
+      "didDocumentMetadata": {
+        "deactivated": true,
+        "nextVersionId": "6",
+        "versionId": "5"
+      },
+      "version": 5
+    },
+    {
+      "didDocument": {
+        "@context": [
+          "https://www.w3.org/ns/did/v1",
+          "https://w3id.org/security/multikey/v1",
+          "https://coasys.org/ns/did-scid-coasys/v1"
+        ],
+        "alsoKnownAs": [
+          "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt?src=store.example"
+        ],
+        "assertionMethod": [],
+        "authentication": [],
+        "capabilityInvocation": [],
+        "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "id": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+        "keyAgreement": [],
+        "verificationMethod": []
+      },
+      "didDocumentMetadata": {
+        "deactivated": true,
+        "versionId": "6"
+      },
+      "version": 6
+    }
+  ],
+  "events": [
+    {
+      "add": [
+        {
+          "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+          "id": "d1",
+          "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+        },
+        {
+          "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
+          "expires": 1800000000,
+          "id": "d2",
+          "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+        }
+      ],
+      "format": "coasys/1",
+      "kind": "human",
+      "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+      "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+      "op": "incept",
+      "prev": null,
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "zafgTEJoxfmdF9U5v4ASv7oDGvSuY557qbf3Y9TPsxUsKH1VWvhhP9wPPURb5ToPNydqGTSjp6BTbbr6ARV8DVpb",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m0"
+        },
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z2MZC9w469PTv7ubmVSJy6Zb1CAkj9M5thJiYJqVRMagfKrChqcf3RJQvusUMB7sscvzow82uQqpzQ4QKn69MMhFP",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#d1"
+        },
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z5KXQjR38NYjWKUDgoQwWexfuNWcYrYDqZPYmtd8YQN5Jh55j9HBioediHxzDyiPMQeuGNtruyr8J7oAtRUDv5MzZ",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#d2"
+        }
+      ],
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 0
+    },
+    {
+      "add": [
+        {
+          "can": [
+            "read",
+            "write"
+          ],
+          "enc": "z6LSckrdiKrtfit19uPRwAK3WA7DLCaaUBrZGDLdTXkBSprp",
+          "expires": 1750000000,
+          "id": "d3",
+          "kind": "bot",
+          "sign": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr"
+        }
+      ],
+      "coSig": "z3coSig",
+      "format": "coasys/1",
+      "offer": "offer-1",
+      "op": "add",
+      "prev": "QmbwpNQJmPN8vmqmR5yyZiuQAA5gAeJuLpuqgk6fhNKzvn",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z2GqaZw26s8s7JAcywzCzf2co6uvLsKuiwarLTecZpHSsJ8m6AgrzVW2v6isUWDUUir5o64iFbSkWCHs2N1EoXLvh",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m0"
+        }
+      ],
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 1
+    },
+    {
+      "can": [
+        "read"
+      ],
+      "expires": 1900000000,
+      "format": "coasys/1",
+      "key": "d3",
+      "op": "scope",
+      "prev": "QmdBJpfiQUeKhfPkvUpzLWJdf29xfDgS2wYGbx6aAYXXF9",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "zpCfmi1dnq3oFCGUR1TkJySv4gH7r2mnDgfFGikjHA7onbNeHktyZPDy1sD6tzzb5SMbgTE9MYqjGvAepffVKGWC",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m0"
+        }
+      ],
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 2
+    },
+    {
+      "format": "coasys/1",
+      "op": "revoke",
+      "prev": "QmchSrUjVTmNajsWf1xuoDpZvZg6TjQ8sjhaDdzwiWt2Gp",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "ztcf8C4m7MdLxeRxS8fxfuVRAN48ptaEtFuTX7qHXK3Hr99sL94WauZ95n7JVScuqv9hZ2xryRXXsvKG24kehumG",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m0"
+        }
+      ],
+      "revoke": [
+        "d2"
+      ],
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 3
+    },
+    {
+      "format": "coasys/1",
+      "master": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
+      "next": "QmVvFnLYvMzZ2XJuoBvyZsqt9qn6hZo4MUTMC8Fj9aHJXd",
+      "op": "rotate",
+      "prev": "Qmdeq7grvbYPnHJgPhUz1qDWQSoJwRkqpJS23VSH1EeZqN",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z5haEn5tcnbvjEJoPiSxxehcbEmkWMP7Pbh5C9dnj7TeKCAUYW4GDw1sJzdrwbnN3ajr5tUmAW9QCswh7KHA7AkMD",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m1"
+        }
+      ],
+      "revoke": [
+        "d1"
+      ],
+      "salt": "7DqbanfBGH8JLz4xeScbj2",
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 4
+    },
+    {
+      "add": [
+        {
+          "enc": "z6LSg48mscT2aR7KbSouwbP26ne6LKsPegK9fdUbEJKatcCD",
+          "id": "d4",
+          "sign": "z6MkqSRMEYA6z9ToJjGrH8vYKtjjnRseu48jLPdYDXN8brSa"
+        }
+      ],
+      "coSig": "z3coSig",
+      "format": "coasys/1",
+      "offer": "offer-1",
+      "op": "add",
+      "prev": "QmRr2FTzSXfCSs1sDFwX5DdCDMLj3gBkE6YoSbtmZe8fyT",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z65CJgFVk8iUxYjBuqWsMCptmMoNtLdh4Bq29b58kop8i2ZG2GhekdRvXW3Sm5J4tiT1VpJCHoEnWDBXK3wYxZKmq",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m1"
+        }
+      ],
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 5
+    },
+    {
+      "format": "coasys/1",
+      "master": "z6MkiHTZ9xT973Yj5KJCXbHKw8j7XyzYYEW5BZTmzppkKEoP",
+      "next": null,
+      "op": "rotate",
+      "prev": "QmWJW1hHecAxjYCLba9JcZupnEtyDPTGGnHebiRJKvSeAa",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z2SQhCnbDQXpHdG4gztEwwCq7Lw7yzF1sHDg1W4AJD7WXbkD4TpDSjZWNSxHnRtHYhtkNU3TCNzboQuHokweaYxdZ",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt#m2"
+        }
+      ],
+      "salt": "RAGdryeF4Mik4njDvU79Wb",
+      "scid": "QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "seq": 6
+    }
+  ],
+  "refused": [
+    {
+      "error": "VersionPastHead",
+      "version": 7
+    }
+  ]
+}

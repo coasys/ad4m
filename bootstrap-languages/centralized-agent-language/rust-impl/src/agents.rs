@@ -248,7 +248,7 @@ async fn verified<H: Http>(
 pub async fn read_log<H: Http>(store: &Store<H>, did: &str) -> LanguageResult<Option<KelChain>> {
     let mut events: Vec<Value> = Vec::new();
     loop {
-        let Some(page): Option<LogPage> = store.log(did, events.len() as u64).await? else {
+        let Some(page): Option<LogPage> = store.log(did, events.len() as u64, None).await? else {
             return Ok(None);
         };
         let done = page.events.is_empty()

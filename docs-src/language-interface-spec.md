@@ -412,7 +412,7 @@ export. **The executor calls them only on the language at `system_addresses.agen
 
 | Export | Parameters | Returns | Store route |
 |---|---|---|---|
-| `identityLog(did, from)` | `string`, `number` | `Promise<LogPage \| null>` | `GET /v1/logs/{scid}?from=` |
+| `identityLog(did, from, src?)` | `string`, `number`, `string?` | `Promise<LogPage \| null>` | `GET /v1/logs/{scid}?from=`, at `src` when given |
 | `identityHead(did)` | `string` | `Promise<SignedHead \| null>` | `GET /v1/heads/{scid}` |
 | `identityAppend(did, req)` | `string`, `AppendRequest` | `Promise<SignedHead>` | `POST /v1/logs/{scid}/events` |
 | `identityKeyOwner(multikey, waitSec?)` | `string`, `number` (0–8) | `Promise<KeyIndexEntry \| null>` | `GET /v1/keys/{multikey}?wait=` |
@@ -424,6 +424,19 @@ export. **The executor calls them only on the language at `system_addresses.agen
 | `identityCancelOffer(did, offerId, req)` | `string`, `string`, `SignedRequest` | `Promise<void>` | `DELETE /v1/offers/{scid}/{offerId}` |
 | `identityClaimOffer(did, offerId, claim)` | `string`, `string`, `Claim` | `Promise<ClaimReceipt>` | `POST /v1/offers/{scid}/{offerId}/claim` |
 | `identityOfferState(did, offerId, key, waitSec?)` | `string`, `string`, `string`, `number` | `Promise<OfferProgress>` | `GET /v1/offers/{scid}/{offerId}/state` |
+
+`src` on `identityLog` is the did:scid `src` hint: where the DID's log may be fetched, in
+place of the language's own store. A language serves the forms it knows and refuses any other
+with `invalid`. The store language serves an HTTPS base (`store.example`,
+`https://store.example`, optionally with a path prefix; a scheme-less `src` is HTTPS) and
+refuses `http` and other schemes, userinfo, a query, a fragment and a host that is not a DNS
+name or an IP literal. A `src` only reads: the language never writes to it, and the head in a
+page from another host is data, and the executor decides whether it trusts it. The language
+checks only the form of `src`; refusing a host that resolves to a private, loopback or
+link-local address belongs to the executor, which resolves DNS and runs the fetch. A page
+over 256 events or over the size of 257 store bodies (64 KiB each) is refused as `invalid`
+(`too-large`). Signed, long-lived data (events, agent records, link anchors) carries the bare
+DID, never a `src`.
 
 `did` is the full `did:scid:coasys:1:<scid>`. The wire types live in `ad4m-ldk`
 (`js/src/types.ts`, `rust/src/identity.rs`); JSON field names are camelCase.

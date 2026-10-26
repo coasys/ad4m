@@ -1,5 +1,5 @@
-//! The registry of signing domains and of the labels that are not signing domains (section 7
-//! of `docs-src/identity/did-scid-coasys-1.md`).
+//! The registry of signing domains and of the labels that are not signing domains (sections 7
+//! and 16 of `docs-src/identity/did-scid-coasys-1.md`).
 //!
 //! Every signature names its domain, and a verifier states the domain it expects, so a
 //! signature made for one purpose never verifies for another. Log events use Data Integrity
@@ -31,7 +31,7 @@ pub struct Domain {
     pub scheme: Scheme,
 }
 
-/// The signature table (section 7 of `docs-src/identity/did-scid-coasys-1.md`). A part of the
+/// The signature table (section 16 of `docs-src/identity/did-scid-coasys-1.md`). A part of the
 /// system that needs a new domain adds a row there and here.
 pub const SIGNING_DOMAINS: &[Domain] = &[
     Domain {

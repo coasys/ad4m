@@ -1,4 +1,4 @@
-//! The format spec's vectors (section 11), recomputed from their inputs. Runs on
+//! The format spec's vectors (section 12), recomputed from their inputs. Runs on
 //! native and on wasm32-unknown-unknown (wasm-bindgen-test under Node). The words part of
 //! `commitment.json` needs the `words` feature.
 #![cfg(feature = "build")]
@@ -16,6 +16,7 @@ const FILES: &[(&str, &str)] = &[
     ("pow", include_str!("../vectors/pow.json")),
     ("domains", include_str!("../vectors/domains.json")),
     ("link", include_str!("../vectors/link.json")),
+    ("document", include_str!("../vectors/document.json")),
 ];
 
 #[test]

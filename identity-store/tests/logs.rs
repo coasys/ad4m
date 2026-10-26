@@ -6,7 +6,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use ad4m_identity_core::link::OfferKind;
-use ad4m_identity_core::{pow, BotScope};
+use ad4m_identity_core::{pow, BotScope, Event};
 use ad4m_ldk::identity::{KeyIndexEntry, LogPage, SignedHead};
 use axum::http::StatusCode;
 use identity_store::{Fault, Settings};
@@ -737,4 +737,163 @@ async fn the_store_survives_a_restart_on_its_file() {
         Settings::default(),
     );
     assert_eq!(again.head(&alice.scid()).unwrap().unwrap().seq, 0);
+}
+
+const ORIGIN: &str = "https://resolver.example";
+
+fn header<'a>(reply: &'a common::Reply, name: &str) -> Option<&'a str> {
+    reply.headers.get(name).map(|v| v.to_str().unwrap())
+}
+
+/// GET `path` from a browser at `ORIGIN`.
+async fn read_from_origin(t: &TestStore, path: &str) -> common::Reply {
+    t.send_with("GET", path, None, None, &[("origin", ORIGIN)])
+        .await
+}
+
+#[tokio::test]
+async fn a_page_below_the_head_is_cached_for_good_and_the_page_with_the_head_for_ten_seconds() {
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    // 257 rotations on #0: 258 events, so the first page ends below the head.
+    let mut rotations: Vec<Event> = Vec::new();
+    for _ in 0..257 {
+        let rotate = alice.rotate(&[]);
+        alice.push(rotate.clone());
+        rotations.push(rotate);
+    }
+    for batch in rotations.chunks(32) {
+        let batch: Vec<&Event> = batch.iter().collect();
+        let reply = t.append(&alice.scid(), &batch).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    }
+    assert_eq!(alice.head_seq(), 257);
+
+    let first = read_from_origin(&t, &format!("/v1/logs/{}?from=0", alice.scid())).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let page: LogPage = serde_json::from_value(first.body.clone()).unwrap();
+    assert_eq!(page.events.len(), 256);
+    assert_eq!(page.head.seq, 257);
+    assert_eq!(
+        header(&first, "cache-control"),
+        Some("public, max-age=31536000, immutable")
+    );
+    assert_eq!(header(&first, "access-control-allow-origin"), Some("*"));
+
+    // The page that ends one below the head is settled too.
+    let below = t.get(&format!("/v1/logs/{}?from=1", alice.scid())).await;
+    assert_eq!(
+        header(&below, "cache-control"),
+        Some("public, max-age=31536000, immutable")
+    );
+
+    for from in [256, 257, 300] {
+        let reply = read_from_origin(&t, &format!("/v1/logs/{}?from={from}", alice.scid())).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(
+            header(&reply, "cache-control"),
+            Some("public, max-age=10"),
+            "from={from}"
+        );
+        assert_eq!(header(&reply, "access-control-allow-origin"), Some("*"));
+    }
+    let last: LogPage = serde_json::from_value(
+        t.get(&format!("/v1/logs/{}?from=256", alice.scid()))
+            .await
+            .body,
+    )
+    .unwrap();
+    assert_eq!(last.events, vec![alice.json(256), alice.json(257)]);
+}
+
+#[tokio::test]
+async fn an_unknown_log_is_not_stored_by_caches() {
+    let t = TestStore::new();
+    let alice = Person::new("alice");
+    let reply = read_from_origin(&t, &format!("/v1/logs/{}", alice.scid())).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(header(&reply, "cache-control"), Some("no-store"));
+    assert_eq!(header(&reply, "access-control-allow-origin"), Some("*"));
+
+    // Once published, the log's one page holds the head.
+    t.publish(&alice).await;
+    let reply = t.get(&format!("/v1/logs/{}", alice.scid())).await;
+    assert_eq!(header(&reply, "cache-control"), Some("public, max-age=10"));
+}
+
+#[tokio::test]
+async fn logs_and_heads_are_readable_from_any_origin_and_writes_only_from_the_configured_ones() {
+    let t = TestStore::with_settings(Settings {
+        pow_bits: 8,
+        feed_token: None,
+        cors_origins: vec!["https://app.example".into()],
+    });
+    let alice = Person::new("alice");
+    let incept = serde_json::to_vec(&json!({ "events": [alice.json(0)] })).unwrap();
+
+    // A write from another origin carries no CORS grant; the store still answers it.
+    let write = t
+        .send_with(
+            "POST",
+            &format!("/v1/logs/{}/events", alice.scid()),
+            Some(incept),
+            None,
+            &[("origin", ORIGIN)],
+        )
+        .await;
+    assert_eq!(write.status, StatusCode::OK, "{}", write.body);
+    assert_eq!(header(&write, "access-control-allow-origin"), None);
+    assert_eq!(header(&write, "cache-control"), None);
+    let preflight = t
+        .send_with(
+            "OPTIONS",
+            &format!("/v1/logs/{}/events", alice.scid()),
+            None,
+            None,
+            &[
+                ("origin", ORIGIN),
+                ("access-control-request-method", "POST"),
+            ],
+        )
+        .await;
+    assert_eq!(header(&preflight, "access-control-allow-origin"), None);
+    let allowed = t
+        .send_with(
+            "OPTIONS",
+            &format!("/v1/logs/{}/events", alice.scid()),
+            None,
+            None,
+            &[
+                ("origin", "https://app.example"),
+                ("access-control-request-method", "POST"),
+            ],
+        )
+        .await;
+    assert_eq!(
+        header(&allowed, "access-control-allow-origin"),
+        Some("https://app.example")
+    );
+
+    // Reads: any origin, also on a preflight.
+    let head = read_from_origin(&t, &format!("/v1/heads/{}", alice.scid())).await;
+    assert_eq!(head.status, StatusCode::OK);
+    assert_eq!(header(&head, "access-control-allow-origin"), Some("*"));
+    let log = read_from_origin(&t, &format!("/v1/logs/{}", alice.scid())).await;
+    assert_eq!(header(&log, "access-control-allow-origin"), Some("*"));
+    let preflight = t
+        .send_with(
+            "OPTIONS",
+            &format!("/v1/logs/{}", alice.scid()),
+            None,
+            None,
+            &[("origin", ORIGIN), ("access-control-request-method", "GET")],
+        )
+        .await;
+    assert_eq!(header(&preflight, "access-control-allow-origin"), Some("*"));
+
+    // Other reads keep the configured origins.
+    let pow = read_from_origin(&t, "/v1/pow").await;
+    assert_eq!(pow.status, StatusCode::OK);
+    assert_eq!(header(&pow, "access-control-allow-origin"), None);
 }

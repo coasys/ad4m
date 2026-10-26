@@ -45,6 +45,14 @@ pub struct LogPage {
     pub pauses: Vec<PauseRecord>,
 }
 
+/// The most events a log page carries.
+pub const LOG_PAGE_EVENTS: u32 = 256;
+/// The largest request body a store takes, so the largest one event can be.
+pub const MAX_STORE_BODY: usize = 64 * 1024;
+/// The largest log page a client reads: a full page of the largest events, plus one body's
+/// room for the head, `appendedAt` and the JSON around them.
+pub const MAX_LOG_PAGE_BYTES: usize = (LOG_PAGE_EVENTS as usize + 1) * MAX_STORE_BODY;
+
 /// `POST /v1/logs/{scid}/events`. Carries a vouching token or a proof, never both.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,7 +64,7 @@ pub struct AppendRequest {
     pub pow: Option<Pow>,
 }
 
-/// A proof of work on a new log with no note (section 9 of
+/// A proof of work on a new log with no note (section 14, host admission policy, of
 /// `docs-src/identity/did-scid-coasys-1.md`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

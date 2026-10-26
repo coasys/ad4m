@@ -78,8 +78,8 @@ function testLanguage() {
     let transferSink: ((t: TokenTransfer) => void) | null = null;
     const identity: IdentitySpec & { calls: typeof calls } = {
         calls,
-        async log(did, from) {
-            this.calls.push(["log", [did, from]]);
+        async log(did, from, src) {
+            this.calls.push(["log", src === undefined ? [did, from] : [did, from, src]]);
             const page: LogPage = {
                 events,
                 appendedAt: [10, 11],
@@ -166,6 +166,9 @@ test("identity: events and requests pass through unchanged, as free functions", 
     assert.deepEqual(page!.events, events);
     assert.equal(page!.events, events, "the page carries the language's own event objects");
     assert.deepEqual(JSON.parse(JSON.stringify(page)).events, events);
+    assert.deepEqual(calls.at(-1), ["log", ["did:scid:zScid", 0]]);
+    await identityLog!("did:scid:zScid", 0, "store.example");
+    assert.deepEqual(calls.at(-1), ["log", ["did:scid:zScid", 0, "store.example"]]);
 
     const req: AppendRequest = { events, vouch: null, pow: { nonce: "zNonce16", bits: 22 } };
     assert.deepEqual(await identityAppend!("did:scid:zScid", req), head);

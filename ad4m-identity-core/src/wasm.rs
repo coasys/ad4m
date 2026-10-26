@@ -4,11 +4,15 @@
 //! class KelChain { static fold(events: object[]): KelHandle;                  // throws ChainErrorCode
 //!                  static import(handle: KelHandle, events: object[]): ImportOutcome; }
 //! class KelHandle { id(): string; head(): Head; hashes(): string[]; hashAt(seq: number): string | undefined;
-//!                   state(): KeyState; }
+//!                   state(): KeyState;
+//!                   didDocument(version?: number, alsoKnownAs?: string[]):
+//!                     { didDocument: DidDocument, didDocumentMetadata: DocumentMetadata }; }
 //! ```
 //!
 //! Errors are thrown as a `ChainErrorCode` object. A KEL refusal is
-//! `{ code: "policy", reason: <FoldError name>, detail: <message> }`.
+//! `{ code: "policy", reason: <FoldError name>, detail: <message> }`. `didDocument` throws
+//! `{ code: "document", reason: "VersionPastHead", detail }` for a version past the head and
+//! `{ code: "malformed", reason }` for a version that is not a seq.
 
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
@@ -43,6 +47,20 @@ fn json_of(value: &impl serde::Serialize) -> Result<JsValue, JsValue> {
     to_js(&value)
 }
 
+/// A JS number as a seq: a non-negative safe integer.
+fn seq_of(n: f64) -> Option<u64> {
+    (n >= 0.0 && n.fract() == 0.0 && n <= ad4m_hash_chain::MAX_SAFE_INTEGER as f64)
+        .then_some(n as u64)
+}
+
+/// What `didDocument` returns.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Resolved<'a> {
+    did_document: &'a crate::DidDocument,
+    did_document_metadata: &'a crate::DocumentMetadata,
+}
+
 /// One folded log, held in WASM memory.
 #[wasm_bindgen]
 pub struct KelHandle {
@@ -69,15 +87,39 @@ impl KelHandle {
     /// The hash at `seq`, if the log holds it.
     #[wasm_bindgen(js_name = hashAt)]
     pub fn hash_at(&self, seq: f64) -> Option<String> {
-        if !(seq >= 0.0 && seq.fract() == 0.0 && seq <= ad4m_hash_chain::MAX_SAFE_INTEGER as f64) {
-            return None;
-        }
-        self.chain.hash_at(seq as u64).cloned()
+        self.chain.hash_at(seq_of(seq)?).cloned()
     }
 
     /// The replayed `KeyState` as JSON.
     pub fn state(&self) -> Result<JsValue, JsValue> {
         json_of(self.chain.state())
+    }
+
+    /// The DID document at `version` (the head when absent) with its metadata:
+    /// `{ didDocument, didDocumentMetadata }`.
+    #[wasm_bindgen(js_name = didDocument)]
+    pub fn did_document(
+        &self,
+        version: Option<f64>,
+        also_known_as: Option<Vec<String>>,
+    ) -> Result<JsValue, JsValue> {
+        let version = match version {
+            None => None,
+            Some(v) => Some(seq_of(v).ok_or_else(|| malformed("version must be a seq"))?),
+        };
+        let (document, metadata) =
+            crate::did_document(&self.chain, version, &also_known_as.unwrap_or_default()).map_err(
+                |e| {
+                    thrown(json!({"code": "document", "reason": e.name(), "detail": e.to_string()}))
+                },
+            )?;
+        // Through text, not `Value`, so the object keeps the document's member order.
+        let text = serde_json::to_string(&Resolved {
+            did_document: &document,
+            did_document_metadata: &metadata,
+        })
+        .map_err(|e| malformed(&e.to_string()))?;
+        js_sys::JSON::parse(&text)
     }
 }
 
