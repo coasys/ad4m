@@ -41,6 +41,9 @@
 #   AD4M_STAGING_URL            executor URL [http://127.0.0.1:12400]
 #   AD4M_STAGING_BUILD_TIMEOUT  build time limit, timeout(1) syntax [3h]
 #   AD4M_STAGING_CUDA_ROOT      CUDA toolkit for the staging build [/usr/local/cuda]
+#   AD4M_LINK_SERVER_DEPLOY     link-server deploy script [~/bin/deploy-link-server.sh]
+#   AD4M_LINK_SERVER_INSTANCE   link-server instance to move with this branch [staging]
+#                                 also deploys link.ad4m.dev (prod) when that instance exists
 #   AD4M_STAGING_GATE_SECONDS   time the new build has to become healthy [180]
 #   AD4M_STAGING_RETRY=1        build the last failed SHA again
 #   AD4M_STAGING_KEEP_DATA=1    rollback: go back without a snapshot, on the current data
@@ -79,6 +82,46 @@ REQUIRED_SECRETS=(admin-credential unlock-passphrase)
 REF=refs/ad4m-staging/$BRANCH
 
 log() { echo "update: $*"; }
+
+# The link-server has no timer of its own. This is the one caller: when this
+# branch's executor is the deployed build, the link-server of the same
+# instance moves to that commit. A failure here does not roll the executor
+# back; the next check retries. A matching deploy is a no-op.
+sync_link_server() {
+  local sha=$1 script instance status current link
+  script=${AD4M_LINK_SERVER_DEPLOY:-$HOME/bin/deploy-link-server.sh}
+  # $2 overrides the env instance. link.ad4m.dev (prod) tracks staging.
+  instance=${2:-${AD4M_LINK_SERVER_INSTANCE:-staging}}
+  status=$HOME/link-server/$instance/status.json
+  link=$HOME/link-server/$instance/current
+  current=$(jq -r '.deployed_sha // empty' "$status" 2>/dev/null || true)
+  if [[ $current == "$sha" && $(readlink "$link" || true) == "releases/$sha" ]]; then
+    return 0
+  fi
+  if [[ ! -x $script ]]; then
+    log "link-server deploy script missing: $script"
+    return 1
+  fi
+  log "link-server $instance is ${current:-unset}; deploying $sha"
+  if "$script" "$instance" "$sha"; then
+    log "link-server $instance is at $sha"
+    return 0
+  fi
+  log "link-server deploy of $sha failed; the executor is left as it is; the next check retries"
+  return 1
+}
+
+# Staging executor deploys move every link-server that serves that branch.
+# prod is link.ad4m.dev (Nico 2026-10-26): the hardcoded SERVER_URL, used by
+# staging executors. A missing instance.env is not a failure.
+sync_link_servers() {
+  local sha=$1 rc=0
+  sync_link_server "$sha" "${AD4M_LINK_SERVER_INSTANCE:-staging}" || rc=1
+  if [[ -f $HOME/link-server/prod/instance.env ]]; then
+    sync_link_server "$sha" prod || rc=1
+  fi
+  return $rc
+}
 
 # A CI runner's checkout pins its branch when a worktree hangs off it.
 case $REPO in
@@ -353,6 +396,12 @@ subject=$(git -C "$SRC" log -1 --format=%s "$sha")
 if [[ $sha == "$(field deployed_sha)" ]]; then
   log "$BRANCH is $sha, already deployed"
   set_status staging_sha "$sha"
+  # Retry only a link-server deploy this script started and did not finish.
+  # A historical mismatch is not a reason to move link-staging on a quiet check.
+  if [[ $(field link_server_pending) == "$sha" ]]; then
+    sync_link_servers "$sha" || exit 1
+    set_status link_server_pending null
+  fi
   exit 0
 fi
 if [[ $sha == "$(field last_failed_sha)" && $RETRY != 1 ]]; then
@@ -460,7 +509,12 @@ if start_and_gate; then
     while read -r old; do
       [[ $old == "$sha" || $old == "$deployed" ]] || rm -rf "${STATE:?}/releases/$old"
     done
-  exit 0
+  set_status link_server_pending "$sha"
+  if sync_link_servers "$sha"; then
+    set_status link_server_pending null
+    exit 0
+  fi
+  exit 1
 fi
 
 # --- Roll back
