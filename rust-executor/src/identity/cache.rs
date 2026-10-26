@@ -522,7 +522,8 @@ pub(crate) mod tests {
     };
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::sync::Notify;
 
     /// A cache in memory, trusting heads signed by `store_keys`.
     pub(crate) fn in_memory(store_keys: Vec<String>) -> KelCache {
@@ -605,6 +606,10 @@ pub(crate) mod tests {
         pub log_calls: AtomicUsize,
         /// The key index's answer for every key, when set: a did:scid that need not list it.
         pub key_owner_override: StdMutex<Option<String>>,
+        /// When set, the first `log` call notifies `.0`, then waits for `.1`.
+        pub pause_store: StdMutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+        /// A `log` call fails as unavailable.
+        pub store_down: AtomicBool,
     }
 
     impl FakeStore {
@@ -614,6 +619,8 @@ pub(crate) mod tests {
                 events: StdMutex::new(events),
                 log_calls: AtomicUsize::new(0),
                 key_owner_override: StdMutex::new(None),
+                pause_store: StdMutex::new(None),
+                store_down: AtomicBool::new(false),
             }
         }
 
@@ -646,6 +653,14 @@ pub(crate) mod tests {
     impl IdentityBackend for FakeStore {
         async fn log(&self, _did: &str, from: u64) -> Result<Option<LogPage>, IdentityError> {
             self.log_calls.fetch_add(1, Ordering::SeqCst);
+            let pause = self.pause_store.lock().unwrap().take();
+            if let Some((entered, release)) = pause {
+                entered.notify_one();
+                release.notified().await;
+            }
+            if self.store_down.load(Ordering::SeqCst) {
+                return Err(IdentityError::Unavailable("down".into()));
+            }
             Ok(self.page(from))
         }
         /// The index of the one log it holds (every device key, revoked ones too), unless
