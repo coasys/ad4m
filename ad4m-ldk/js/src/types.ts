@@ -22,6 +22,25 @@ export interface ExpressionProof {
     key: string;
     valid?: boolean;
     invalid?: boolean;
+    /**
+     * The agent record a `did:scid` profile came in. The agent language's `expressionGet`
+     * answers a `did:scid` agent's profile as the record stores it, plus this field and
+     * nothing else, so a reader can check the record itself at its anchor: removing
+     * `proof.record` gives back the record's `profile` exactly, and `sig` is the record
+     * signature over `{profile, version, anchor}` (`coasys:link`) by `proof.key`, the
+     * record's `signedBy`. Absent on every other expression.
+     */
+    record?: AgentRecordProof;
+}
+
+/** `proof.record` on a `did:scid` profile expression: the binding of its agent record. */
+export interface AgentRecordProof {
+    /** The record's `version`. */
+    version: number;
+    /** The record's content anchor: the seq of the person's log the signer knew. */
+    anchor: number;
+    /** The record's `sig`, unchanged. */
+    sig: string;
 }
 
 export interface Link {
@@ -327,18 +346,11 @@ export interface OfferProgress {
  */
 export interface IdentitySpec {
     /**
-     * GET /v1/logs/{scid}?from=: one page of at most 256 events from `from`.
-     *
-     * `src` is the did:scid `src` hint: where the DID's log may be fetched, in place of the
-     * language's own store. A language serves the forms it knows (the store language: an
-     * HTTPS base such as `store.example`, `https://store.example` or
-     * `https://store.example/prefix`) and refuses any other with `{ code: "invalid" }`. A
-     * `src` only ever reads: the head in a page from another host is data, and the executor
-     * decides whether it trusts it. The language checks only the form of `src`: refusing a
-     * host that resolves to a private, loopback or link-local address belongs to the
-     * executor, which resolves DNS and runs the fetch.
+     * GET /v1/logs/{scid}?from=: one page of at most 256 events from `from`, read from the
+     * language's own store only. A did:scid `src` hint names another host; the executor
+     * fetches that host itself over the did:scid host profile, never through the language.
      */
-    log(did: string, from: number, src?: string): Promise<LogPage | null>;
+    log(did: string, from: number): Promise<LogPage | null>;
     /** GET /v1/heads/{scid} */
     head(did: string): Promise<SignedHead | null>;
     /** POST /v1/logs/{scid}/events */

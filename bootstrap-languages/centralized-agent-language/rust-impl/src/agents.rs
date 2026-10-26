@@ -15,15 +15,19 @@
 //!   it signed, at or below the head. A key revoked at seq N signs nothing valid anchored at or
 //!   after N; a record anchored before the revocation stays valid. Any other record is ignored
 //!   (`None`).
-//!   A `did:key` record answers its stored signed expression unchanged (the executor checks
-//!   that signature on every read), and only when the expression's author is the record's did
-//!   and its data is an Agent naming that did. A `did:scid` record's profile is a plain Agent,
-//!   answered as an expression built from the record.
+//!   A record's profile is the agent's signed profile expression, answered only when its
+//!   author is the record's did and its data is an Agent naming that did (the executor checks
+//!   the expression's signature on every read). A `did:key` record answers it as stored. A
+//!   `did:scid` record answers it exactly as stored plus `proof.record` (`{version, anchor,
+//!   sig}` of the record), so the executor can check the record itself at its anchor rather
+//!   than the expression's key at the log's head: removing `proof.record` gives back the
+//!   record's profile, which `sig` covers, and `proof.key` is the record's `signedBy`. A
+//!   `did:scid` profile that is not exactly an expression of that form is ignored.
 
 use ad4m_hash_chain::{decode_ed25519_multikey, decode_proof_value, encode_proof_value};
 use ad4m_identity_core::{fold_json, verify_signed, KelChain, LINK_DOMAIN};
-use ad4m_ldk::identity::{AgentRecord, IdentityErrorCode, LogPage};
-use ad4m_ldk::prelude::{Expression, ExpressionProof, LanguageError, LanguageResult};
+use ad4m_ldk::identity::{AgentRecord, AgentRecordProof, IdentityErrorCode, LogPage};
+use ad4m_ldk::prelude::{Expression, LanguageError, LanguageResult};
 use serde_json::Value;
 
 use crate::store::{segment, Http, Store};
@@ -189,24 +193,24 @@ pub async fn get<H: Http>(
     if record.did.starts_with("did:key:") {
         return Ok(signed_profile_of(&record));
     }
-    Ok(Some(Expression {
-        author: record.did.clone(),
-        timestamp: iso_time_ms(record.version),
-        data: record.profile.clone(),
-        proof: ExpressionProof {
-            signature: record.sig.clone(),
-            key: record.signed_by.clone(),
-            valid: None,
-            invalid: None,
-        },
-    }))
+    Ok(scid_profile_of(&record))
 }
 
-/// The signed profile expression a `did:key` record carries, when it is this agent's: authored
-/// by the record's did, its data an Agent naming that did. The language does not judge the
-/// expression's own signature: the executor verifies it on every read.
+/// The signed profile expression a `did:key` record carries, when it is this agent's (see
+/// [`own_profile`]). The language does not judge the expression's own signature: the executor
+/// verifies it on every read.
 fn signed_profile_of(record: &AgentRecord) -> Option<Expression> {
-    let mut expression: Expression = serde_json::from_value(record.profile.clone()).ok()?;
+    let mut expression = own_profile(record)?;
+    expression.proof.valid = None;
+    expression.proof.invalid = None;
+    expression.proof.record = None;
+    Some(expression)
+}
+
+/// The record's profile as an expression, when it is this agent's: authored by the record's
+/// did, its data an Agent naming that did.
+fn own_profile(record: &AgentRecord) -> Option<Expression> {
+    let expression: Expression = serde_json::from_value(record.profile.clone()).ok()?;
     let agent_did = expression.data.get("did").and_then(Value::as_str);
     let has_links = expression
         .data
@@ -216,8 +220,31 @@ fn signed_profile_of(record: &AgentRecord) -> Option<Expression> {
     if expression.author != record.did || agent_did != Some(record.did.as_str()) || !has_links {
         return None;
     }
-    expression.proof.valid = None;
-    expression.proof.invalid = None;
+    Some(expression)
+}
+
+/// The profile expression a `did:scid` record carries, with the record's binding added as
+/// `proof.record`. Kept only when the stored profile is exactly such an expression (no field
+/// the expression type would drop, no `proof.valid`, `proof.invalid` or `proof.record`) and its
+/// `proof.key` is the record's `signedBy`: then the answer minus `proof.record` is the record's
+/// profile, and the record signature can be checked over it.
+fn scid_profile_of(record: &AgentRecord) -> Option<Expression> {
+    let anchor = record.anchor?;
+    let mut expression = own_profile(record)?;
+    let proof = &expression.proof;
+    if proof.valid.is_some()
+        || proof.invalid.is_some()
+        || proof.record.is_some()
+        || proof.key != record.signed_by
+        || serde_json::to_value(&expression).ok()? != record.profile
+    {
+        return None;
+    }
+    expression.proof.record = Some(AgentRecordProof {
+        version: record.version,
+        anchor,
+        sig: record.sig.clone(),
+    });
     Some(expression)
 }
 
@@ -259,7 +286,7 @@ async fn verified<H: Http>(
 pub async fn read_log<H: Http>(store: &Store<H>, did: &str) -> LanguageResult<Option<KelChain>> {
     let mut events: Vec<Value> = Vec::new();
     loop {
-        let Some(page): Option<LogPage> = store.log(did, events.len() as u64, None).await? else {
+        let Some(page): Option<LogPage> = store.log(did, events.len() as u64).await? else {
             return Ok(None);
         };
         let done = page.events.is_empty()
