@@ -21,11 +21,13 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use ad4m_identity_core::{did_document, did_of, scid_of, Event, KelChain};
+use ad4m_identity_core::{
+    did_document, did_of, scid_of, Event, ForkEvidence, ImportOutcome, KelChain,
+};
 use serde_json::Value;
 
 use super::backend::{IdentityBackend, IdentityError};
-use super::cache::{scid_from, CacheError, Ingested, KelCache};
+use super::cache::{fold_log, scid_from, CacheError, Ingested, KelCache, MAX_PAGES};
 use super::src_fetch::{refuse_private_host, SrcFetch};
 use super::types::{
     convert, DidDocumentMetadata, DidResolutionMetadata, DidResolutionResult, ForkRecord,
@@ -37,10 +39,17 @@ pub const DID_LD_JSON: &str = "application/did+ld+json";
 /// How long a failed fetch from a foreign host keeps the resolver from asking it again for the
 /// same identity.
 pub const MISS_TTL: Duration = Duration::from_secs(300);
-/// The most pages the resolver reads from one source for one log.
-const MAX_PAGES: usize = 64;
+/// The most bytes one resolution reads from a foreign `src`, over all its pages. A person's key
+/// log is an incept and a few adds, revokes and rotations, about a kilobyte each (an event the
+/// store takes is at most 64 KiB), so 1 MiB holds hundreds of ordinary events. The page cap
+/// alone (`MAX_PAGES` × `MAX_LOG_PAGE_BYTES`, about 1 GiB) would let any `agent:READ` session
+/// make the executor hold a host's choice of bytes in memory for one answer.
+const MAX_SRC_LOG_BYTES: usize = 1 << 20;
 /// The most events a page holds (`identity-store`'s page size).
 const PAGE_EVENTS: usize = 256;
+/// How long (seconds) a log refreshed from the configured store may admit a key before the
+/// next admission refreshes it again ([`verify_expression`]).
+pub const ADMIT_FRESHNESS: u64 = 60;
 /// Bounds of the in-memory maps (failed fetches, confirmed keys).
 const MAP_BOUND: usize = 4096;
 
@@ -49,19 +58,33 @@ const MAP_BOUND: usize = 4096;
 // ---------------------------------------------------------------------------------------------
 
 /// Whether the signing multikey `key` speaks for `did` by the cached log alone, read up to its
-/// trusted seq ([`KelCache::trusted`]: the accepted, store-signed head): the log lists it,
-/// valid at that seq by `now` (unix seconds) and without the bot mark. A key added past the
-/// trusted seq does not count yet, nor does a revocation past it. `false` when the cache holds
-/// no log of `did`, no store-signed head of it, or cannot read it: a log only a foreign `src`
-/// served shows its keys but proves nothing about whose they are (spec section 11).
+/// trusted seq ([`KelCache::trusted`]: the accepted, store-signed head): the log lists it as a
+/// device key (a master signs the log, never for the person), valid at that seq by `now` (unix
+/// seconds) and without the bot mark. A key added past the trusted seq does not count yet, nor
+/// does a revocation past it. `false` when the cache holds no log of `did`, no store-signed head
+/// of it, or cannot read it: a log only a foreign `src` served shows its keys but proves nothing
+/// about whose they are (spec section 11).
 pub async fn key_speaks_for(cache: &KelCache, did: &str, key: &str, now: u64) -> bool {
     let Some((chain, trusted)) = trusted_log(cache, did).await else {
         return false;
     };
     let state = chain.state();
-    state.key_id_of(&key.to_string()).is_some()
-        && state.bot_scope_at(key, trusted).is_none()
-        && state.key_valid_at_time(key, trusted, now)
+    let Some(id) = device_key_id(state, key) else {
+        return false;
+    };
+    state.bot_scope_at(&id, trusted).is_none() && state.key_valid_at_time(&id, trusted, now)
+}
+
+/// The id (`d<n>`) of the device key whose signing multikey is `key`; `None` for a master key
+/// or a key the log does not list. A master signs the log's events, never for the person.
+// The core gains `KeyState::device_key_id_of` on the base branch; until it lands here, the
+// lookup is local.
+pub(super) fn device_key_id(state: &ad4m_identity_core::KeyState, key: &str) -> Option<String> {
+    state
+        .keys
+        .values()
+        .find(|record| record.sign == key)
+        .map(|record| record.id.clone())
 }
 
 /// The cached log of `did` and its trusted seq ([`KelCache::trusted`]); `None` without one or
@@ -91,15 +114,31 @@ async fn trusted_log(cache: &KelCache, did: &str) -> Option<(KelChain, u64)> {
 ///   states it.
 ///
 /// Either way the log counts only up to its trusted seq: an `add` carries only the master's
-/// signature, so a log a foreign `src` served may list anyone's key. When the cached log does
-/// not admit the key (no log or no store-signed head yet, a trusted seq below the anchor, or a
-/// device added since), the log is refreshed once from the configured store through `backend`
-/// (which advances the accepted head) and checked again.
+/// signature, so a log a foreign `src` served may list anyone's key. The log is refreshed once
+/// from the configured store through `backend` (which advances the accepted head) and checked
+/// again when the cached log does not admit the key (no log or no store-signed head yet, a
+/// trusted seq below the anchor, or a device added since), and when it does admit it but last
+/// refreshed more than [`ADMIT_FRESHNESS`] seconds ago in this run (a restart makes every log
+/// stale): a revocation at the store reaches a reader within the window. Offline: a refresh
+/// that fails (store unreachable) leaves the cached trusted head to answer.
 pub async fn verify_expression<T: serde::Serialize>(
     cache: &KelCache,
     backend: Option<&dyn IdentityBackend>,
     expr: &crate::types::Expression<T>,
     record: Option<&Value>,
+) -> Result<bool, deno_core::error::AnyError> {
+    let now = super::service::now();
+    verify_expression_at(cache, backend, expr, record, now).await
+}
+
+/// [`verify_expression`] by the clock `now` (unix seconds): the freshness window and key
+/// expiry are judged at `now`.
+pub(crate) async fn verify_expression_at<T: serde::Serialize>(
+    cache: &KelCache,
+    backend: Option<&dyn IdentityBackend>,
+    expr: &crate::types::Expression<T>,
+    record: Option<&Value>,
+    now: u64,
 ) -> Result<bool, deno_core::error::AnyError> {
     let Some(key) = expr
         .proof
@@ -124,18 +163,25 @@ pub async fn verify_expression<T: serde::Serialize>(
     }
     let anchor = anchored.as_ref().map(|r| r.anchor);
     let admits = || async {
-        let now = super::service::now();
         match anchor {
             Some(anchor) => key_valid_at_anchor(cache, &expr.author, key, anchor, now).await,
             None => key_speaks_for(cache, &expr.author, key, now).await,
         }
     };
     let mut admitted = admits().await;
-    if let (false, Some(backend)) = (admitted, backend) {
-        if let Err(e) = cache.refresh(backend, &expr.author).await {
-            log::info!("identity: refresh of {} failed ({e})", expr.author);
+    if let Some(backend) = backend {
+        let stale =
+            admitted && !cache.refreshed_within(scid_from(&expr.author), now, ADMIT_FRESHNESS);
+        if !admitted || stale {
+            // A failed refresh changes nothing in the cache: the cached trusted head answers.
+            // It counts as an attempt, so an unreachable store is tried once per window, not on
+            // every read.
+            if let Err(e) = cache.refresh(backend, &expr.author).await {
+                log::info!("identity: refresh of {} failed ({e})", expr.author);
+                cache.note_refreshed(scid_from(&expr.author), now);
+            }
+            admitted = admits().await;
         }
-        admitted = admits().await;
     }
     if !admitted {
         return Ok(false);
@@ -208,12 +254,7 @@ pub async fn key_valid_at_anchor(
         return false;
     }
     let state = chain.state();
-    let Some(id) = state
-        .keys
-        .values()
-        .find(|record| record.sign == key)
-        .map(|record| record.id.clone())
-    else {
+    let Some(id) = device_key_id(state, key) else {
         return false;
     };
     state.bot_scope_at(&id, anchor).is_none() && state.key_valid_at_time(&id, anchor, now)
@@ -528,10 +569,11 @@ pub fn parse_src(src: &str) -> Result<SrcKind, String> {
 }
 
 /// Whether `ip` is a public unicast address: not loopback, private (RFC 1918, fc00::/7),
-/// link-local, CGNAT (100.64/10), multicast, unspecified, "this network" (0/8), reserved
-/// (240/4, broadcast) or IETF protocol (192.0.0/24). An IPv6 address that carries an IPv4 one
-/// (mapped `::ffff:a.b.c.d`, compatible `::a.b.c.d`, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) is
-/// judged by that IPv4 address.
+/// link-local, CGNAT (100.64/10), benchmarking (198.18/15), multicast, unspecified, "this
+/// network" (0/8), reserved (240/4, broadcast) or IETF protocol (192.0.0/24). An IPv6 address
+/// that carries an IPv4 one (mapped `::ffff:a.b.c.d`, compatible `::a.b.c.d`, NAT64
+/// `64:ff9b::/96` and the local-use `64:ff9b:1::/48`, 6to4 `2002::/16`) is judged by that IPv4
+/// address (for NAT64, its last 32 bits).
 pub fn is_public(ip: IpAddr) -> bool {
     fn v4_public(ip: std::net::Ipv4Addr) -> bool {
         let o = ip.octets();
@@ -542,6 +584,7 @@ pub fn is_public(ip: IpAddr) -> bool {
             || (o[0] == 169 && o[1] == 254)
             || (o[0] == 172 && (o[1] & 0xf0) == 16)
             || (o[0] == 192 && o[1] == 168)
+            || (o[0] == 198 && (o[1] & 0xfe) == 18)
             || (o[0] == 192 && o[1] == 0 && o[2] == 0)
             || o[0] >= 224)
     }
@@ -557,7 +600,8 @@ pub fn is_public(ip: IpAddr) -> bool {
             if s[..5] == [0, 0, 0, 0, 0] && (s[5] == 0xffff || s[5] == 0) {
                 return v4_public(embedded(12));
             }
-            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+            // NAT64: the well-known prefix and the local-use one (64:ff9b:1::/48, RFC 8215).
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || s[..3] == [0x64, 0xff9b, 1] {
                 return v4_public(embedded(12));
             }
             if s[0] == 0x2002 {
@@ -592,6 +636,17 @@ struct Loaded {
     /// The host that answered; `None`: the cache.
     source: Option<String>,
     skipped: Vec<SkippedSource>,
+    /// A foreign `src` whose log conflicts with the one the cache holds: reported in the
+    /// answer like a fork, never recorded (the foreign log was never cached).
+    conflict: Option<ForkEvidence>,
+}
+
+/// Why a foreign `src` gave no log for the answer.
+enum ForeignMiss {
+    /// Its log and the cache's differ at a seq both hold.
+    Conflict(ForkEvidence),
+    /// The fetch failed, or what it served does not fold: why.
+    Failed(String),
 }
 
 /// DID resolution through the key-log cache and the agent language.
@@ -641,6 +696,17 @@ impl Resolver {
     pub(crate) fn with_src_fetch(mut self, src_fetch: SrcFetch) -> Self {
         self.src_fetch = src_fetch;
         self
+    }
+
+    /// Forgets what this resolver remembers of `scid`: its confirmed device keys and its failed
+    /// fetches (`identity.resetLog`).
+    pub fn forget(&self, scid: &str) {
+        if let Ok(mut keys) = self.keys.lock() {
+            keys.retain(|_, held| held != scid);
+        }
+        if let Ok(mut misses) = self.misses.lock() {
+            misses.retain(|(_, held), _| held != scid);
+        }
     }
 
     /// The configured store as a `src` (`host[:port][/path]`).
@@ -698,6 +764,7 @@ impl Resolver {
             Ok((chain, loaded)) => {
                 meta.source = Some(loaded.source.unwrap_or_else(|| "cache".into()));
                 meta.skipped = loaded.skipped;
+                meta.fork = loaded.conflict.as_ref().map(fork_record);
                 self.answer(&chain, url.version_id, url.fragment.as_deref(), meta)
                     .await
             }
@@ -751,12 +818,8 @@ impl Resolver {
 
         // The key's id and the seq that added it.
         let device_key = |chain: &KelChain| {
-            chain
-                .state()
-                .keys
-                .values()
-                .find(|r| r.sign == key)
-                .map(|r| (r.id.clone(), r.added))
+            let state = chain.state();
+            device_key_id(state, key).and_then(|id| state.keys.get(&id).map(|r| (id, r.added)))
         };
         // Listed up to the log's trusted seq: the store admitted the key for this person.
         let confirmed = |chain: &KelChain, trusted: Option<u64>| {
@@ -817,7 +880,7 @@ impl Resolver {
             }
             keys.insert(key.to_string(), scid.clone());
         }
-        meta.key_valid = Some(chain.state().key_valid_at(key, trusted));
+        meta.key_valid = Some(chain.state().key_valid_at(&key_id, trusted));
         meta.key_id = Some(key_id);
         self.answer(&chain, None, None, meta).await
     }
@@ -857,8 +920,11 @@ impl Resolver {
     }
 
     /// The log of `scid`: from the cache when it holds it (and `version`) and not `fresh`, else
-    /// from the sources in order (after a `src` that answered, the configured store too),
-    /// imported into the cache (which only extends), then from the cache.
+    /// from the sources in order. A foreign `src`'s log is folded in memory on what the cache
+    /// held and serves this answer only: none of it is cached. The configured store is read
+    /// after it in any case (into the cache, which only extends), so a `src` serving a prefix
+    /// cannot hide an event the store holds: the answer is the `src`'s log extended by the
+    /// cache's, or, when the two differ at a seq both hold, the cache's with the conflict.
     async fn load(
         &self,
         scid: &str,
@@ -873,17 +939,16 @@ impl Resolver {
             Err(e) => return Err((internal(e), loaded)),
         };
         let covers = |chain: &KelChain| version.is_none_or(|v| v <= chain.head().seq);
-        if let Some(chain) = cached.filter(|c| !fresh && covers(c)) {
-            return Ok((chain, loaded));
+        if let Some(chain) = cached.as_ref().filter(|c| !fresh && covers(c)) {
+            return Ok((chain.clone(), loaded));
         }
 
         let did = did_of(scid);
+        // The foreign host's label and the events it served past what the cache held.
+        let mut foreign: Option<(String, KelChain, Vec<Event>)> = None;
         for source in self.sources(src) {
-            let (label, fetched, foreign) = match source {
-                Source::Skip(skipped) => {
-                    loaded.skipped.push(skipped);
-                    continue;
-                }
+            match source {
+                Source::Skip(skipped) => loaded.skipped.push(skipped),
                 Source::Foreign(base) => {
                     if self.recent_miss(&base.label, scid) {
                         loaded.skipped.push(SkippedSource {
@@ -907,81 +972,167 @@ impl Resolver {
                             continue;
                         }
                     }
-                    let fetched = self.fetch_untrusted(scid, Some(&base)).await;
-                    if matches!(&fetched, Err(e) if !matches!(e, CacheError::Fork(_))) {
-                        self.note_miss(&base.label, scid);
+                    match self.fetch_foreign(scid, &base, cached.clone()).await {
+                        Ok((chain, events)) => foreign = Some((base.label, chain, events)),
+                        Err(ForeignMiss::Conflict(fork)) => loaded.conflict = Some(fork),
+                        Err(ForeignMiss::Failed(why)) => {
+                            self.note_miss(&base.label, scid);
+                            loaded.skipped.push(SkippedSource {
+                                src: base.label,
+                                reason: why,
+                            });
+                        }
                     }
-                    (base.label, fetched, true)
                 }
                 Source::Store => {
                     let fetched = match self.cache.refresh(self.backend.as_ref(), &did).await {
                         Ok(_) => Ok(()),
                         // A head no key of identity.storeKeys signed: the events still count,
                         // the head does not.
-                        Err(CacheError::BadHeadSignature) => self.fetch_untrusted(scid, None).await,
+                        Err(CacheError::BadHeadSignature) => self.fetch_store_unsigned(scid).await,
                         Err(e) => Err(e),
                     };
-                    (self.store_label(), fetched, false)
+                    match fetched {
+                        Ok(()) => loaded.source = Some(self.store_label()),
+                        // The cache keeps the log it held first; the fork is in the metadata.
+                        Err(CacheError::Fork(_)) => {}
+                        Err(e) => loaded.skipped.push(SkippedSource {
+                            src: self.store_label(),
+                            reason: e.to_string(),
+                        }),
+                    }
                 }
-            };
-            match fetched {
-                // A foreign host may serve a prefix that stops before a revocation, and the
-                // cache keeps what it imports: after it, read on from the configured store, so
-                // a src cannot hide an event the store holds.
-                Ok(()) if foreign => loaded.source = Some(label),
-                Ok(()) => {
-                    loaded.source.get_or_insert(label);
-                    break;
-                }
-                // The cache keeps the log it held first; the fork is in the metadata.
-                Err(CacheError::Fork(_)) => break,
-                Err(e) => loaded.skipped.push(SkippedSource {
-                    src: label,
-                    // A foreign host is no identity store: its failure reads as itself.
-                    reason: match e {
-                        CacheError::Unavailable(why) if foreign => why,
-                        e => e.to_string(),
-                    },
-                }),
             }
         }
 
-        match self.cache.chain(scid).await {
-            Ok(Some(chain)) => Ok((chain, loaded)),
-            Ok(None) => Err((
+        let held = match self.cache.chain(scid).await {
+            Ok(held) => held,
+            Err(e) => return Err((internal(e), loaded)),
+        };
+        match (foreign, held) {
+            (Some((label, chain, _)), None) => {
+                loaded.source = Some(label);
+                Ok((chain, loaded))
+            }
+            // The src's events onto the cache's log: what the store holds past the src's
+            // head stays (a revocation the src left out), and what the src holds past the
+            // store's shows, untrusted.
+            (Some((label, _, events)), Some(held)) => {
+                let mut merged = held.clone();
+                match ad4m_identity_core::import(&mut merged, &events) {
+                    Ok(ImportOutcome::Appended { .. }) | Ok(ImportOutcome::AlreadyHave) => {
+                        loaded.source = Some(label);
+                        Ok((merged, loaded))
+                    }
+                    Ok(ImportOutcome::Fork(fork)) => {
+                        loaded.conflict = Some(fork);
+                        Ok((held, loaded))
+                    }
+                    Ok(ImportOutcome::Gap { have, first }) => {
+                        loaded.skipped.push(SkippedSource {
+                            src: label,
+                            reason: format!(
+                                "its events start at seq {first}, the log ends at {have}"
+                            ),
+                        });
+                        Ok((held, loaded))
+                    }
+                    Err(e) => {
+                        loaded.skipped.push(SkippedSource {
+                            src: label,
+                            reason: format!(
+                                "its events do not continue the log: {}",
+                                ad4m_identity_core::error_code(&e)
+                            ),
+                        });
+                        Ok((held, loaded))
+                    }
+                }
+            }
+            (None, Some(held)) => Ok((held, loaded)),
+            (None, None) => Err((
                 ResolveError::NotFound(format!("no source holds a log of {did}")),
                 loaded,
             )),
-            Err(e) => Err((internal(e), loaded)),
         }
     }
 
-    /// Reads `scid`'s log page by page from the cached head and imports the events with no
-    /// head: a host's head is a hint of how far to page, never trusted. From the foreign host
-    /// `src` over the did:scid host profile ([`SrcFetch`]) when given, else from the configured
-    /// store through the agent language.
-    async fn fetch_untrusted(&self, scid: &str, src: Option<&HttpsBase>) -> Result<(), CacheError> {
+    /// Reads `scid`'s log from the foreign host `base` over the did:scid host profile
+    /// ([`SrcFetch`]) and folds it in memory on `held` (the cache's log, if any), never into the
+    /// cache. The host's head is a hint of how far to page, never trusted. At most `MAX_PAGES`
+    /// pages and [`MAX_SRC_LOG_BYTES`] in all. The log, and the events the host served (from
+    /// `held`'s head on).
+    async fn fetch_foreign(
+        &self,
+        scid: &str,
+        base: &HttpsBase,
+        held: Option<KelChain>,
+    ) -> Result<(KelChain, Vec<Event>), ForeignMiss> {
+        let failed = |e: CacheError| ForeignMiss::Failed(e.to_string());
+        let mut chain = held;
+        let mut served: Vec<Event> = Vec::new();
+        let mut budget = MAX_SRC_LOG_BYTES;
+        for _ in 0..MAX_PAGES {
+            let from = chain.as_ref().map_or(0, |c| c.head().seq);
+            let (page, bytes) = match self.src_fetch.page(base, scid, from, budget).await {
+                Ok(Some(found)) => found,
+                Ok(None) => return Err(failed(CacheError::NotFound)),
+                Err(why) => return Err(ForeignMiss::Failed(why)),
+            };
+            budget = budget.saturating_sub(bytes);
+            let events = page
+                .events
+                .iter()
+                .map(Event::from_json)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| failed(CacheError::Fold(ad4m_identity_core::ChainError::Policy(e))))?;
+            let count = events.len();
+            let head = match chain.as_mut() {
+                _ if events.is_empty() => break,
+                None => {
+                    let (started, _) = fold_log(scid, &events).map_err(failed)?;
+                    let head = started.head();
+                    chain = Some(started);
+                    head
+                }
+                Some(chain) => match ad4m_identity_core::import(chain, &events)
+                    .map_err(|e| failed(CacheError::Fold(e)))?
+                {
+                    ImportOutcome::AlreadyHave => break,
+                    ImportOutcome::Appended { head, .. } => head,
+                    ImportOutcome::Gap { have, first } => {
+                        return Err(failed(CacheError::Gap {
+                            have: Some(have),
+                            first,
+                        }))
+                    }
+                    ImportOutcome::Fork(fork) => return Err(ForeignMiss::Conflict(fork)),
+                },
+            };
+            served.extend(events);
+            if head.seq >= page.head.seq || count < PAGE_EVENTS {
+                break;
+            }
+        }
+        match chain {
+            Some(chain) => Ok((chain, served)),
+            None => Err(failed(CacheError::NotFound)),
+        }
+    }
+
+    /// Reads `scid`'s log from the configured store page by page from the cached head and
+    /// imports the events with no head: for a store whose head no key of `identity.storeKeys`
+    /// signed (the events count, the head does not).
+    async fn fetch_store_unsigned(&self, scid: &str) -> Result<(), CacheError> {
         let did = did_of(scid);
         for _ in 0..MAX_PAGES {
             let cached = self.cache.chain(scid).await?;
             let from = cached.as_ref().map_or(0, |c| c.head().seq);
-            let page = match src {
-                Some(base) => self
-                    .src_fetch
-                    .page(base, scid, from)
-                    .await
-                    .map_err(CacheError::Unavailable)?
-                    .map(|page| (page.events, page.head.seq)),
-                None => self
-                    .backend
-                    .log(&did, from)
-                    .await?
-                    .map(|page| (page.events, page.head.seq)),
-            };
-            let Some((events, head_seq)) = page else {
+            let Some(page) = self.backend.log(&did, from).await? else {
                 return Err(CacheError::NotFound);
             };
-            let events = events
+            let events = page
+                .events
                 .iter()
                 .map(Event::from_json)
                 .collect::<Result<Vec<_>, _>>()
@@ -995,7 +1146,7 @@ impl Resolver {
             match self.cache.ingest(scid, &events).await? {
                 Ingested::AlreadyHave => return Ok(()),
                 Ingested::Appended(head) => {
-                    if head.seq >= head_seq || events.len() < PAGE_EVENTS {
+                    if head.seq >= page.head.seq || events.len() < PAGE_EVENTS {
                         return Ok(());
                     }
                 }
@@ -1023,9 +1174,14 @@ impl Resolver {
         }
     }
 
-    /// Whether the cache's accepted (store-signed) head is the log's head.
-    fn head_trusted(&self, chain: &KelChain) -> bool {
+    /// Whether `chain`'s head is the log's trusted head: [`KelCache::trusted`] (the accepted
+    /// head, while it verifies under the current `identity.storeKeys` and the cache holds its
+    /// event) is at `chain`'s head, with its hash.
+    async fn head_trusted(&self, chain: &KelChain) -> bool {
         let head = chain.head();
+        if !matches!(self.cache.trusted(chain.id()).await, Ok(Some((_, seq))) if seq == head.seq) {
+            return false;
+        }
         matches!(
             self.cache.accepted_head(chain.id()),
             Ok(Some(accepted)) if accepted.seq == head.seq && accepted.hash == head.hash
@@ -1046,18 +1202,16 @@ impl Resolver {
             .map(|src| format!("{did}?src={src}"))
             .into_iter()
             .collect();
-        meta.head_trusted = Some(self.head_trusted(chain));
-        meta.fork = match self.cache.forks(chain.id()).await {
-            Ok(forks) => forks.first().map(|f| ForkRecord {
-                seq: f.seq,
-                ours: f.ours.clone(),
-                theirs: f.theirs.clone(),
-            }),
+        meta.head_trusted = Some(self.head_trusted(chain).await);
+        // The first recorded fork; else a conflict of this answer's `src` the caller set.
+        let recorded = match self.cache.forks(chain.id()).await {
+            Ok(forks) => forks.first().map(fork_record),
             Err(e) => {
                 log::warn!("identity: could not read the forks of {did}: {e}");
                 None
             }
         };
+        meta.fork = recorded.or(meta.fork.take());
         let (document, metadata) = match did_document(chain, version, &also_known_as) {
             Ok(found) => found,
             Err(e) => return failure(ResolveError::NotFound(e.to_string()), meta),
@@ -1110,6 +1264,14 @@ impl Resolver {
                 )
             }
         }
+    }
+}
+
+fn fork_record(fork: &ForkEvidence) -> ForkRecord {
+    ForkRecord {
+        seq: fork.seq,
+        ours: fork.ours.clone(),
+        theirs: fork.theirs.clone(),
     }
 }
 
@@ -1290,6 +1452,11 @@ mod tests {
             "::127.0.0.1",
             "64:ff9b::a00:1",
             "2002:c0a8:101::1",
+            "198.18.0.1",
+            "198.19.255.255",
+            "64:ff9b:1::a00:1",
+            "64:ff9b:1:ffff::7f00:1",
+            "::ffff:198.18.0.1",
         ] {
             assert!(!is_public(ip.parse().unwrap()), "{ip} must be refused");
         }
@@ -1301,6 +1468,10 @@ mod tests {
             "2001:db8::1",
             "2606:4700::1111",
             "::ffff:8.8.8.8",
+            "198.17.255.255",
+            "198.20.0.1",
+            "64:ff9b:1::808:808",
+            "64:ff9b::808:808",
         ] {
             assert!(is_public(ip.parse().unwrap()), "{ip} is public");
         }
@@ -1435,6 +1606,16 @@ mod tests {
         );
         assert_eq!(result.did_resolution_metadata.head_trusted, Some(false));
         assert_eq!(methods(&result), vec!["#d1", "#d1-enc"]);
+        assert!(
+            resolver.cache.chain(&log.scid()).await.unwrap().is_none(),
+            "the src's log answered this resolution only"
+        );
+        assert!(resolver
+            .cache
+            .stored_events(&log.scid(), 0)
+            .await
+            .unwrap()
+            .is_empty());
         assert!(
             result.did_document.unwrap().get("alsoKnownAs").is_none(),
             "no store configured: no alsoKnownAs"
@@ -2029,6 +2210,15 @@ mod tests {
             vec!["#d1", "#d1-enc", "#d2", "#d2-enc"],
             "resolution shows the foreign log's keys"
         );
+        assert!(
+            resolver
+                .cache
+                .chain(&attacker.scid())
+                .await
+                .unwrap()
+                .is_none(),
+            "a foreign log is never cached"
+        );
 
         let rewritten = signed_profile(&x, &victim.device);
         let expr: crate::types::Expression<Value> =
@@ -2102,11 +2292,11 @@ mod tests {
         let url = format!("{did}?src=log.example:{}", host.port);
         let (result, ()) = tokio::join!(resolver.resolve(&url, false), async {
             entered.notified().await;
-            // The src has answered and its prefix is in the shared cache (so this is the
-            // window); the store's answer is pending. Only the store-signed head makes a key
-            // speak, and the cache has none yet.
+            // The src has answered (this is the window) and the store's answer is pending.
+            // The prefix serves this resolution only: the shared cache holds none of it, and
+            // only a store-signed head makes a key speak.
             let held = resolver.cache.chain(&log.scid()).await.unwrap();
-            assert_eq!(held.map(|c| c.head().seq), Some(0), "the prefix is cached");
+            assert!(held.is_none(), "the src's prefix is not cached");
             assert!(
                 !key_speaks_for(&resolver.cache, &did, &d1, 1).await,
                 "the src's prefix speaks for the person before the store answered"
@@ -2140,11 +2330,195 @@ mod tests {
             "shown in resolution"
         );
         assert!(
-            resolver.cache.chain(&log.scid()).await.unwrap().is_some(),
-            "cached"
+            resolver.cache.chain(&log.scid()).await.unwrap().is_none(),
+            "a foreign log is never cached"
         );
+        assert!(resolver
+            .cache
+            .stored_events(&log.scid(), 0)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(resolver.cache.accepted_head(&log.scid()).unwrap().is_none());
         assert!(!key_speaks_for(&resolver.cache, &did, &log.device.key(), 1).await);
         assert!(!key_valid_at_anchor(&resolver.cache, &did, &log.device.key(), 0, 1).await);
+    }
+
+    /// A foreign log that differs from the cache's at a seq both hold: the answer is the
+    /// cache's log with the conflict as `coasys:fork`, and nothing is recorded (the foreign
+    /// log was never cached).
+    #[tokio::test]
+    async fn a_src_that_conflicts_with_the_cache_is_reported_not_recorded() {
+        let mut held = TestLog::new(80);
+        held.revoke_d1();
+        let mut other = TestLog::new(80);
+        add_key(
+            &mut other,
+            &ed25519_dalek::SigningKey::from_bytes(&[81; 32]),
+            81,
+        );
+        assert_eq!(held.scid(), other.scid());
+        let host = log_host(Arc::new(FakeStore::new(other.events.clone()))).await;
+        let resolver = local_resolver(trusting(), Arc::new(FakeStore::new(held.events.clone())));
+        let did = did_of(&held.scid());
+        resolver.resolve(&did, false).await;
+
+        let result = resolver
+            .resolve(&format!("{did}?src=log.example:{}", host.port), true)
+            .await;
+        assert_eq!(result.did_resolution_metadata.error, None, "{result:?}");
+        let fork = result
+            .did_resolution_metadata
+            .fork
+            .clone()
+            .expect("the conflict");
+        assert_eq!(fork.seq, 1);
+        assert_eq!(fork.ours, held.chain().head().hash);
+        assert_eq!(fork.theirs, other.chain().head().hash);
+        assert!(
+            methods(&result).is_empty(),
+            "the cache's log, with the revoke"
+        );
+        assert_eq!(result.did_resolution_metadata.head_trusted, Some(true));
+        assert!(
+            resolver.cache.forks(&held.scid()).await.unwrap().is_empty(),
+            "no fork recorded"
+        );
+        assert_eq!(
+            resolver
+                .cache
+                .chain(&held.scid())
+                .await
+                .unwrap()
+                .unwrap()
+                .head()
+                .hash,
+            held.chain().head().hash
+        );
+    }
+
+    /// One resolution reads at most `MAX_SRC_LOG_BYTES` from a foreign host, whatever the page
+    /// cap allows; past it the src is skipped and nothing of it is kept.
+    #[tokio::test]
+    async fn a_src_log_past_the_byte_cap_is_skipped() {
+        let log = TestLog::new(82);
+        let mut page =
+            serde_json::to_value(FakeStore::new(log.events.clone()).page(0).unwrap()).unwrap();
+        page["pad"] = Value::from("x".repeat(MAX_SRC_LOG_BYTES));
+        let body = serde_json::to_vec(&page).unwrap();
+        assert!(
+            body.len() < ad4m_ldk::identity::MAX_LOG_PAGE_BYTES,
+            "under the page cap"
+        );
+        let host = TestHost::start(move |_| response("200 OK", &[], &body)).await;
+        let resolver = local_resolver(trusting(), Arc::new(FakeStore::new(vec![])));
+        let did = did_of(&log.scid());
+        let src = format!("log.example:{}", host.port);
+        let result = resolver.resolve(&format!("{did}?src={src}"), false).await;
+        assert_eq!(
+            result.did_resolution_metadata.error.as_deref(),
+            Some("notFound"),
+            "{result:?}"
+        );
+        let skipped = &result.did_resolution_metadata.skipped;
+        assert!(
+            skipped
+                .iter()
+                .any(|s| s.src == src && s.reason.contains("bytes left to read")),
+            "{skipped:?}"
+        );
+        assert!(resolver.cache.chain(&log.scid()).await.unwrap().is_none());
+    }
+
+    /// The master key signs the log, never for its person: an expression it signed with the
+    /// person as author is invalid, with or without a record.
+    #[tokio::test]
+    async fn the_master_key_never_signs_for_its_person() {
+        let log = TestLog::new(83);
+        let did = did_of(&log.scid());
+        let cache = cache_holding(&log).await;
+        let now = super::super::service::now();
+        assert!(!key_speaks_for(&cache, &did, &log.master.key(), now).await);
+        let by_master = signed_profile(&did, &log.master);
+        assert!(!verifies(&cache, &by_master).await);
+        assert!(!verifies(&cache, &with_record(&by_master, &log.master, 1, 0)).await);
+        assert!(verifies(&cache, &signed_profile(&did, &log.device)).await);
+    }
+
+    /// A reader that admitted a key keeps the cached verdict only for `ADMIT_FRESHNESS`: past
+    /// it, an ordinary verification refreshes the log and sees the store's revocation. With the
+    /// store unreachable the cached trusted head answers.
+    #[tokio::test]
+    async fn a_revocation_at_the_store_reaches_a_reader_after_the_freshness_window() {
+        let mut log = TestLog::new(84);
+        let did = did_of(&log.scid());
+        let store = FakeStore::new(log.events.clone());
+        let cache = trusting();
+        let expr: crate::types::Expression<Value> =
+            serde_json::from_value(signed_profile(&did, &log.device)).unwrap();
+        let backend: &dyn IdentityBackend = &store;
+        let verify = |now: u64| verify_expression_at(&cache, Some(backend), &expr, None, now);
+        let now = super::super::service::now();
+        assert!(verify(now).await.unwrap(), "read from the store, d1 valid");
+
+        log.revoke_d1();
+        *store.events.lock().unwrap() = log.events.clone();
+        let reads = store.log_calls.load(Ordering::SeqCst);
+        assert!(
+            verify(now + ADMIT_FRESHNESS - 5).await.unwrap(),
+            "within the window the cached verdict stands"
+        );
+        assert_eq!(store.log_calls.load(Ordering::SeqCst), reads, "no read");
+
+        store.store_down.store(true, Ordering::SeqCst);
+        assert!(
+            verify(now + ADMIT_FRESHNESS + 5).await.unwrap(),
+            "offline: the cached trusted head answers"
+        );
+        assert_eq!(store.log_calls.load(Ordering::SeqCst), reads + 1);
+
+        store.store_down.store(false, Ordering::SeqCst);
+        assert!(
+            verify(now + ADMIT_FRESHNESS + 10).await.unwrap(),
+            "a failed attempt counts: no new read within the window after it"
+        );
+        assert_eq!(store.log_calls.load(Ordering::SeqCst), reads + 1);
+        assert!(
+            !verify(now + 2 * ADMIT_FRESHNESS + 10).await.unwrap(),
+            "past the next window the store's revocation counts"
+        );
+    }
+
+    /// `coasys:headTrusted` follows `KelCache::trusted`: once the key that signed the accepted
+    /// head leaves `identity.storeKeys`, the cached log answers with an untrusted head.
+    #[tokio::test]
+    async fn head_trusted_follows_the_configured_store_keys_across_a_reopen() {
+        use crate::identity::head::test_store_key::TestStoreKey;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        let log = TestLog::new(85);
+        let did = did_of(&log.scid());
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        {
+            let cache = KelCache::open(&path, vec![store.key.multikey()]).unwrap();
+            let (resolver, _) = resolver(cache, store.clone(), None);
+            let result = resolver.resolve(&did, false).await;
+            assert_eq!(result.did_resolution_metadata.head_trusted, Some(true));
+        }
+        let cache = KelCache::open(&path, vec![TestStoreKey::new(3).multikey()]).unwrap();
+        let (resolver, store) = resolver(cache, store, None);
+        let calls = store.log_calls.load(Ordering::SeqCst);
+        let result = resolver.resolve(&did, false).await;
+        assert_eq!(
+            store.log_calls.load(Ordering::SeqCst),
+            calls,
+            "the cache answered"
+        );
+        assert_eq!(
+            result.did_resolution_metadata.source.as_deref(),
+            Some("cache")
+        );
+        assert_eq!(result.did_resolution_metadata.head_trusted, Some(false));
     }
 
     #[tokio::test]

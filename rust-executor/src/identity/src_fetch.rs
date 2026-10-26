@@ -173,14 +173,17 @@ impl SrcFetch {
         }
     }
 
-    /// One page of `scid`'s log from seq `from` at `base`. `Ok(None)`: the host holds no log
-    /// (`404`). An error is why the fetch failed (`refused: …` for the address policy).
+    /// One page of `scid`'s log from seq `from` at `base`, with the bytes its body took: at
+    /// most `budget` and [`MAX_LOG_PAGE_BYTES`] (the caller's budget is what one resolution may
+    /// still read). `Ok(None)`: the host holds no log (`404`). An error is why the fetch failed
+    /// (`refused: …` for the address policy).
     pub async fn page(
         &self,
         base: &HttpsBase,
         scid: &str,
         from: u64,
-    ) -> Result<Option<HostPage>, String> {
+        budget: usize,
+    ) -> Result<Option<(HostPage, usize)>, String> {
         if !self.allow_private {
             refuse_private_host(&base.url).map_err(|why| format!("refused: {why}"))?;
         }
@@ -214,22 +217,26 @@ impl SrcFetch {
         if !status.is_success() {
             return Err(format!("the host answered {status}"));
         }
-        let too_large = || format!("the page is larger than {MAX_LOG_PAGE_BYTES} bytes");
-        if response
-            .content_length()
-            .is_some_and(|n| n > MAX_LOG_PAGE_BYTES as u64)
-        {
+        let limit = budget.min(MAX_LOG_PAGE_BYTES);
+        let too_large = || {
+            if limit < MAX_LOG_PAGE_BYTES {
+                format!("the log is larger than the {limit} bytes left to read of it")
+            } else {
+                format!("the page is larger than {MAX_LOG_PAGE_BYTES} bytes")
+            }
+        };
+        if response.content_length().is_some_and(|n| n > limit as u64) {
             return Err(too_large());
         }
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|e| describe(&e))? {
-            if body.len() + chunk.len() > MAX_LOG_PAGE_BYTES {
+            if body.len() + chunk.len() > limit {
                 return Err(too_large());
             }
             body.extend_from_slice(&chunk);
         }
         serde_json::from_slice(&body)
-            .map(Some)
+            .map(|page| Some((page, body.len())))
             .map_err(|e| format!("the host answered no log page: {e}"))
     }
 }
@@ -368,7 +375,12 @@ mod tests {
         let host = TestHost::start(|_| response("200 OK", &[], &page_json())).await;
         let fetch = SrcFetch::plain_http(false, answering(&["127.0.0.1"]));
         let result = fetch
-            .page(&base(&format!("log.example:{}", host.port)), "Qm", 0)
+            .page(
+                &base(&format!("log.example:{}", host.port)),
+                "Qm",
+                0,
+                MAX_LOG_PAGE_BYTES,
+            )
             .await;
         let why = result.expect_err("no public address");
         assert!(why.contains("not a public address"), "{why}");
@@ -378,11 +390,17 @@ mod tests {
         // The same host, allowed: the transport itself works.
         let fetch = SrcFetch::plain_http(true, answering(&["127.0.0.1"]));
         let page = fetch
-            .page(&base(&format!("log.example:{}", host.port)), "Qm", 0)
+            .page(
+                &base(&format!("log.example:{}", host.port)),
+                "Qm",
+                0,
+                MAX_LOG_PAGE_BYTES,
+            )
             .await
             .unwrap()
             .expect("a page");
-        assert_eq!(page.head.seq, 0);
+        assert_eq!(page.0.head.seq, 0);
+        assert_eq!(page.1, page_json().len(), "the bytes the body took");
         assert_eq!(host.connections(), 1);
     }
 
@@ -435,7 +453,12 @@ mod tests {
         .await;
         let fetch = SrcFetch::plain_http(true, answering(&["127.0.0.1"]));
         let why = fetch
-            .page(&base(&format!("127.0.0.1:{}", redirecting.port)), "Qm", 0)
+            .page(
+                &base(&format!("127.0.0.1:{}", redirecting.port)),
+                "Qm",
+                0,
+                MAX_LOG_PAGE_BYTES,
+            )
             .await
             .expect_err("a 3xx is a failed fetch");
         assert!(why.contains("302"), "{why}");
@@ -452,7 +475,10 @@ mod tests {
             format!("127.0.0.1:{}", host.port),
             format!("[::ffff:127.0.0.1]:{}", host.port),
         ] {
-            let why = fetch.page(&base(&src), "Qm", 0).await.unwrap_err();
+            let why = fetch
+                .page(&base(&src), "Qm", 0, MAX_LOG_PAGE_BYTES)
+                .await
+                .unwrap_err();
             assert!(why.starts_with("refused"), "{src}: {why}");
         }
         settle().await;
@@ -473,11 +499,29 @@ mod tests {
         let fetch = SrcFetch::plain_http(true, answering(&["127.0.0.1"]));
         for host in [&declared, &streamed] {
             let why = fetch
-                .page(&base(&format!("127.0.0.1:{}", host.port)), "Qm", 0)
+                .page(
+                    &base(&format!("127.0.0.1:{}", host.port)),
+                    "Qm",
+                    0,
+                    MAX_LOG_PAGE_BYTES,
+                )
                 .await
                 .unwrap_err();
             assert!(why.contains("larger than"), "{why}");
         }
+    }
+
+    /// The caller's budget (what one resolution may still read) caps a page below the page cap.
+    #[tokio::test]
+    async fn a_body_over_the_callers_budget_is_refused() {
+        let host = TestHost::start(|_| response("200 OK", &[], &page_json())).await;
+        let fetch = SrcFetch::plain_http(true, answering(&["127.0.0.1"]));
+        let src = base(&format!("127.0.0.1:{}", host.port));
+        let size = page_json().len();
+        let why = fetch.page(&src, "Qm", 0, size - 1).await.unwrap_err();
+        assert!(why.contains("bytes left to read"), "{why}");
+        let (_, bytes) = fetch.page(&src, "Qm", 0, size).await.unwrap().unwrap();
+        assert_eq!(bytes, size);
     }
 
     #[tokio::test]
@@ -491,7 +535,12 @@ mod tests {
         .await;
         let fetch = SrcFetch::plain_http(true, answering(&["127.0.0.1"]));
         let answer = fetch
-            .page(&base(&format!("127.0.0.1:{}/did/", host.port)), "QmAbc", 7)
+            .page(
+                &base(&format!("127.0.0.1:{}/did/", host.port)),
+                "QmAbc",
+                7,
+                MAX_LOG_PAGE_BYTES,
+            )
             .await
             .unwrap();
         assert!(answer.is_none(), "404: the host holds no log");

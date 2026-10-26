@@ -45,9 +45,11 @@ impl ClaimService<'_> {
         };
         self.identity.refreshed_or_cached(&scid).await?;
         let trusted = self.identity.cache.trusted(&scid).await;
-        Ok(trusted
-            .map_err(cache_error)?
-            .is_some_and(|(chain, seq)| chain.state().key_valid_at_time(&key, seq, now())))
+        Ok(trusted.map_err(cache_error)?.is_some_and(|(chain, seq)| {
+            let state = chain.state();
+            super::resolver::device_key_id(state, &key)
+                .is_some_and(|id| state.key_valid_at_time(&id, seq, now()))
+        }))
     }
 
     /// Claims `params.offer` with the main wallet key. Refuses `no-operator` with no operator

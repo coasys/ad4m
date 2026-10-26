@@ -82,6 +82,14 @@ pub struct LogParams {
     pub fresh: Option<bool>,
 }
 
+/// `identity.resetLog` params.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetLogParams {
+    /// The `did:scid:coasys:1:…` whose cached log, accepted head and forks this executor drops.
+    pub did: String,
+}
+
 /// `identity.log`: a log as the cache holds it. Every event passed `fold` here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

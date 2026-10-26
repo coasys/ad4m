@@ -1,6 +1,8 @@
 //! `revoke`: end device keys of the identity with a `revoke` signed by
 //! the current master key, published through the executor. The revoked keys stop speaking
-//! for the person from that event on; their earlier signatures keep their verdicts.
+//! for the person from that event on. Earlier signatures stay valid only where they name the
+//! seq they were made at: did:key links, and profiles whose `proof.record` anchors them. A
+//! did:scid expression without an anchor is judged at the trusted head, so it turns invalid.
 
 use ad4m_identity_core::build::revoke as revoke_event;
 use ad4m_identity_core::KeyId;

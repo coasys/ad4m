@@ -15,7 +15,8 @@ use crate::agent::capabilities::{
 use crate::identity::types::{
     ClaimOfferParams, ClaimOfferResult, CosignInceptParams, DeviceView, DidResolutionResult,
     IdentityLog, IdentityStatus, JoinStatus, JoinStatusParams, LogParams, OfferListing,
-    OfferOpened, OffersParams, OpenOfferParams, PublishParams, ResolveParams, SignedHead,
+    OfferOpened, OffersParams, OpenOfferParams, PublishParams, ResetLogParams, ResolveParams,
+    SignedHead,
 };
 use crate::types::RequestContext;
 
@@ -38,6 +39,11 @@ async fn log(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcErr
         .log(&p.did, p.from.unwrap_or(0), p.fresh.unwrap_or(false))
         .await?;
     answer(log)
+}
+
+async fn reset_log(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: ResetLogParams = parse(params)?;
+    answer(crate::identity::service()?.reset_log(&p.did).await?)
 }
 
 /// A DID resolution result in every case: a refusal is `didResolutionMetadata.error`, not an
@@ -125,12 +131,17 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<ResolveParams, DidResolutionResult>("identity.resolve", resolve)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
-    // Signs with the agent's own device key.
+    // Drops this executor's copy of a log (the way out of a fork): the operator only.
+    map.method::<ResetLogParams, bool>("identity.resetLog", reset_log)
+        .guard(Guard::Operator);
+    // Signs with the agent's own device key, and publishes what the custody service signed.
+    // Both can bind the agent to an identity for good, so for the main agent only the
+    // operator (the custody service holds the admin credential): every app holds these
+    // capabilities by default. A user acts for their own agent.
     map.method::<CosignInceptParams, Value>("identity.cosignIncept", cosign_incept)
-        .guard(Guard::Cap(AGENT_SIGN_CAPABILITY.clone()));
-    // Pass objects the custody service signed.
+        .guard(Guard::UserOrOperator(AGENT_SIGN_CAPABILITY.clone()));
     map.method::<PublishParams, SignedHead>("identity.publish", publish)
-        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<OpenOfferParams, OfferOpened>("identity.openOffer", open_offer)
         .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<OffersParams, Vec<OfferListing>>("identity.offers", offers)
@@ -153,9 +164,9 @@ mod tests {
     use super::*;
     use crate::agent::capabilities::Capability;
 
-    /// Each call carries its guard: reads the agent read capability, co-signing the agent sign
-    /// capability, writes the agent update capability, and a claim for the main agent the
-    /// operator.
+    /// Each call carries its guard: reads the agent read capability; co-signing and publishing
+    /// the agent sign and update capabilities, and for the main agent the operator; other writes
+    /// the agent update capability; a claim for the main agent and a log reset the operator.
     #[test]
     fn every_identity_call_has_its_guard() {
         let mut map = HandlerMap::new();
@@ -163,13 +174,23 @@ mod tests {
         let cap = |c: &Capability| format!("{:?}", Guard::Cap(c.clone()));
         let expected = [
             ("identity.claimOffer", format!("{:?}", Guard::Operator)),
-            ("identity.cosignIncept", cap(&AGENT_SIGN_CAPABILITY)),
+            (
+                "identity.cosignIncept",
+                format!("{:?}", Guard::UserOrOperator(AGENT_SIGN_CAPABILITY.clone())),
+            ),
             ("identity.devices", cap(&AGENT_READ_CAPABILITY)),
             ("identity.joinStatus", cap(&AGENT_READ_CAPABILITY)),
             ("identity.log", cap(&AGENT_READ_CAPABILITY)),
             ("identity.offers", cap(&AGENT_READ_CAPABILITY)),
             ("identity.openOffer", cap(&AGENT_UPDATE_CAPABILITY)),
-            ("identity.publish", cap(&AGENT_UPDATE_CAPABILITY)),
+            (
+                "identity.publish",
+                format!(
+                    "{:?}",
+                    Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone())
+                ),
+            ),
+            ("identity.resetLog", format!("{:?}", Guard::Operator)),
             ("identity.resolve", cap(&AGENT_READ_CAPABILITY)),
             ("identity.status", cap(&AGENT_READ_CAPABILITY)),
         ];

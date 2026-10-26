@@ -55,12 +55,27 @@ export class IdentityClient {
         });
     }
 
-    /** Adds this agent's device-key proof to an `incept` that lists its key. */
+    /**
+     * Drops this executor's cached copy of `did`'s log (its events, accepted head and recorded
+     * forks); the next read refreshes from the configured store and takes the store's branch.
+     * The way out of an `identity-fork`. The operator (admin credential) only.
+     */
+    async resetLog(did: string): Promise<boolean> {
+        return this.#apiClient.call("identity.resetLog", { did });
+    }
+
+    /**
+     * Adds this agent's device-key proof to an `incept` that lists its key. For the main
+     * agent the admin credential only; a user's session for its own agent.
+     */
     async cosignIncept(event: unknown): Promise<unknown> {
         return this.#apiClient.call("identity.cosignIncept", { event: event as any });
     }
 
-    /** Appends signed events through the agent language. */
+    /**
+     * Appends signed events through the agent language. For the main agent the admin
+     * credential only; a user's session for its own agent.
+     */
     async publish(events: unknown[]): Promise<SignedHead> {
         return this.#apiClient.call("identity.publish", { events: events as any[] });
     }

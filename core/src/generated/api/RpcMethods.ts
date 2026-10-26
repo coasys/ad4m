@@ -144,6 +144,7 @@ import type { PublishNeighbourhoodRequest } from "./PublishNeighbourhoodRequest"
 import type { PublishParams } from "./PublishParams";
 import type { RequestCapabilityRequest } from "./RequestCapabilityRequest";
 import type { RequestPaymentRequest } from "./RequestPaymentRequest";
+import type { ResetLogParams } from "./ResetLogParams";
 import type { ResolveParams } from "./ResolveParams";
 import type { RunInterpretationRequest } from "./RunInterpretationRequest";
 import type { RunInterpretationWithHarnessRequest } from "./RunInterpretationWithHarnessRequest";
@@ -263,6 +264,7 @@ export interface RpcMethods {
   "identity.offers": { params: OffersParams; result: Array<OfferListing> };
   "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
   "identity.publish": { params: PublishParams; result: SignedHead };
+  "identity.resetLog": { params: ResetLogParams; result: boolean };
   "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };

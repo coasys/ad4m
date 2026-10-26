@@ -87,6 +87,7 @@ export type { OffersParams } from "./OffersParams";
 export type { OpenOfferParams } from "./OpenOfferParams";
 export type { PublishParams } from "./PublishParams";
 export type { RequestBody } from "./RequestBody";
+export type { ResetLogParams } from "./ResetLogParams";
 export type { ResolveParams } from "./ResolveParams";
 export type { SignedBy } from "./SignedBy";
 export type { SignedHead } from "./SignedHead";

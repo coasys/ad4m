@@ -1782,7 +1782,7 @@ impl LanguageController {
         }
 
         // Verify the expression proof (sets proof.valid / proof.invalid)
-        Self::verify_expression_proof(&mut language_meta).await;
+        Self::verify_expression_proof(&mut language_meta, false).await;
 
         // Validate proof
         let proof_valid = language_meta
@@ -2505,9 +2505,11 @@ impl LanguageController {
         if lang_address == "literal" {
             let mut decoded = literal_decode(expression_address)?;
             // Verify signature on literal expressions too
-            Self::verify_expression_proof(&mut decoded).await;
+            Self::verify_expression_proof(&mut decoded, false).await;
             return Ok(Some(decoded));
         }
+
+        let record_admitted = self.honours_record(lang_address).await;
 
         // Check immutability for caching
         let immutable = self
@@ -2523,7 +2525,7 @@ impl LanguageController {
             if let Ok(Some(expr)) = cached {
                 let mut expr_json = serde_json::to_value(&expr).unwrap_or(JsonValue::Null);
                 // Verify and set proof.valid
-                Self::verify_expression_proof(&mut expr_json).await;
+                Self::verify_expression_proof(&mut expr_json, record_admitted).await;
                 return Ok(Some(expr_json));
             }
         }
@@ -2571,21 +2573,32 @@ impl LanguageController {
         }
 
         // Verify signature
-        Self::verify_expression_proof(&mut expr_json).await;
+        Self::verify_expression_proof(&mut expr_json, record_admitted).await;
 
         Ok(Some(expr_json))
     }
 
     /// Verify an expression's proof and set the `valid` field. A `did:scid` author's key is
-    /// checked against the identity module's key-log cache.
-    async fn verify_expression_proof(expr_json: &mut JsonValue) {
+    /// checked against the identity module's key-log cache. `record_admitted`: the expression
+    /// came from the agent language, whose store admitted its `proof.record` (see
+    /// [`Self::honours_record`]); otherwise a `proof.record` is ignored.
+    async fn verify_expression_proof(expr_json: &mut JsonValue, record_admitted: bool) {
         let service = crate::identity::service().ok();
         Self::verify_expression_proof_with(
             expr_json,
             service.as_deref().map(|s| s.cache.as_ref()),
             service.as_deref().map(|s| s.backend.as_ref()),
+            record_admitted,
         )
         .await
+    }
+
+    /// Whether a `proof.record` counts on an expression `lang_address` (a resolved address)
+    /// served: only the agent language's. The store refuses an agent record anchored before a
+    /// revocation of its key, so a record the agent language serves was admitted; anyone else
+    /// can wrap a fresh signature by a revoked key in a record naming an earlier anchor.
+    async fn honours_record(&self, lang_address: &str) -> bool {
+        self.system_addresses.lock().await.agent_language.as_deref() == Some(lang_address)
     }
 
     /// [`Self::verify_expression_proof`] with the key-log cache `cache` (`None`: no identity
@@ -2594,6 +2607,7 @@ impl LanguageController {
         expr_json: &mut JsonValue,
         cache: Option<&crate::identity::cache::KelCache>,
         backend: Option<&dyn crate::identity::backend::IdentityBackend>,
+        record_admitted: bool,
     ) {
         match serde_json::from_value::<crate::types::Expression<JsonValue>>(expr_json.clone()) {
             Ok(mut expr) => {
@@ -2604,11 +2618,12 @@ impl LanguageController {
                 expr.data = crate::js_core::utils::sort_json_value(&expr.data);
                 let verdict = if expr.author.starts_with(ad4m_identity_core::DID_PREFIX) {
                     // The agent record a did:scid profile came in (the agent language adds it
-                    // as `proof.record`); the typed expression does not carry it.
+                    // as `proof.record`); the typed expression does not carry it. From any
+                    // other source it is ignored: the head rule judges.
                     let record = expr_json
                         .get("proof")
                         .and_then(|proof| proof.get("record"))
-                        .filter(|record| !record.is_null())
+                        .filter(|record| record_admitted && !record.is_null())
                         .cloned();
                     match cache {
                         Some(cache) => {
@@ -3354,6 +3369,7 @@ mod agent_language_profile_tests {
             &mut expression,
             Some(&cache),
             Some(&store),
+            true,
         )
         .await;
         assert_eq!(
@@ -3415,7 +3431,8 @@ mod agent_language_profile_tests {
         );
         // An expression a verification already flagged reads the same.
         let mut flagged = answered.clone();
-        LanguageController::verify_expression_proof_with(&mut flagged, Some(&cache), None).await;
+        LanguageController::verify_expression_proof_with(&mut flagged, Some(&cache), None, true)
+            .await;
         assert_eq!(verdict_with(flagged, Some(&cache)).await, VALID);
 
         // The same profile without its record: the head rule, and d1 is revoked there.
@@ -3433,6 +3450,41 @@ mod agent_language_profile_tests {
         assert_eq!(verdict_with(null_record, Some(&cache)).await, INVALID);
     }
 
+    /// A `proof.record` counts only on what the agent language served (its store admitted the
+    /// record). The same anchored profile, signed before a revocation, served by another
+    /// language: its record is ignored and the head rule finds the key revoked.
+    #[tokio::test]
+    async fn a_record_counts_only_from_the_agent_language() {
+        use crate::identity::resolver::test_profiles::with_record;
+        let controller = LanguageController::new();
+        controller.system_addresses.lock().await.agent_language = Some("QmAgent".into());
+        let mut log = TestLog::new(38);
+        let cache = cache_of(&[&log]).await;
+        let profile = scid_profile(&did_of(&log), &log.device);
+        let answered = with_record(&profile, &log.device, 1, 0);
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+
+        let through = |address: &'static str| {
+            let controller = &controller;
+            let (answered, cache) = (answered.clone(), &cache);
+            async move {
+                let admitted = controller.honours_record(address).await;
+                served_verdict(answered, Some(cache), admitted).await
+            }
+        };
+        assert_eq!(
+            through("QmAgent").await,
+            VALID,
+            "the agent language's record"
+        );
+        assert_eq!(
+            through("QmOtherLanguage").await,
+            INVALID,
+            "another language's record is ignored: d1 is revoked at the head"
+        );
+    }
+
     /// What the centralized agent language's `expressionGet` answers for a did:key agent's
     /// profile; `bootstrap-languages/centralized-agent-language/rust-impl/tests/language.rs`
     /// (`PROFILE_FIXTURE`) pins the same text as the language's output: change both together.
@@ -3442,11 +3494,26 @@ mod agent_language_profile_tests {
         verdict_with(expression, None).await
     }
 
+    /// The verdict on `expression` as the agent language served it (its `proof.record` counts).
     async fn verdict_with(
-        mut expression: JsonValue,
+        expression: JsonValue,
         cache: Option<&KelCache>,
     ) -> (JsonValue, JsonValue) {
-        LanguageController::verify_expression_proof_with(&mut expression, cache, None).await;
+        served_verdict(expression, cache, true).await
+    }
+
+    async fn served_verdict(
+        mut expression: JsonValue,
+        cache: Option<&KelCache>,
+        record_admitted: bool,
+    ) -> (JsonValue, JsonValue) {
+        LanguageController::verify_expression_proof_with(
+            &mut expression,
+            cache,
+            None,
+            record_admitted,
+        )
+        .await;
         (
             expression["proof"]["valid"].clone(),
             expression["proof"]["invalid"].clone(),

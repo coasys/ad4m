@@ -225,6 +225,24 @@ impl IdentityService {
         })
     }
 
+    /// `identity.resetLog` (the operator): drops this executor's copy of `did`'s log (its
+    /// events, accepted head and recorded forks, and what the resolver remembers of it), so the
+    /// next read refreshes from the configured store and takes the store's branch. The way out
+    /// of a fork: the cache never leaves a branch it holds by itself.
+    pub async fn reset_log(&self, did: &str) -> Result<bool, WsRpcError> {
+        let scid = ad4m_identity_core::scid_of(did)
+            .ok_or_else(|| WsRpcError::bad_request(format!("{did} is not a did:scid:coasys:1")))?
+            .to_string();
+        self.cache.reset(&scid).await.map_err(cache_error)?;
+        self.resolver.forget(&scid);
+        log::warn!(
+            "identity: the operator reset this executor's copy of the log of {} (events, accepted \
+             head, forks); the next read takes the configured store's branch",
+            did_of(&scid)
+        );
+        Ok(true)
+    }
+
     /// `identity.cosignIncept`: adds `agent`'s device-key proof to an `incept` that lists that
     /// key with its `enc` key, while the agent has no identity yet; the event must fold with it.
     /// On an executor with an operator record the main agent co-signs no incept (`first-link`):
@@ -293,15 +311,15 @@ impl IdentityService {
         let Some((chain, trusted)) = self.cache.trusted(scid).await.map_err(cache_error)? else {
             return Ok(None);
         };
+        // As a device key: a log may name the agent's key as its master, which signs the log
+        // and never speaks for the person.
         let state = chain.state();
-        let Some(id) = state
-            .record(&key)
-            .filter(|record| record.added <= trusted)
-            .map(|record| record.id.clone())
+        let Some(id) = super::resolver::device_key_id(state, &key)
+            .filter(|id| state.keys.get(id).is_some_and(|r| r.added <= trusted))
         else {
             return Ok(None);
         };
-        if state.key_valid_at_time(&key, trusted, now()) {
+        if state.key_valid_at_time(&id, trusted, now()) {
             db(|db| db.set_agent_identity(&agent_did, scid, now()))
                 .map_err(|e| error(409, format!("identity-exists: {}", e.message)))?;
             // The main agent's status gains its identity (a managed agent's status event names
@@ -696,6 +714,85 @@ mod tests {
             Some("d2".to_string())
         );
         assert_eq!(db(|db| db.agent_identity(&agent_did)).unwrap(), Some(scid));
+    }
+
+    /// After a fork the cache keeps its branch; `resetLog` drops this executor's copy, and the
+    /// next read takes the store's branch: a key revoked on the store's branch speaks no more.
+    #[tokio::test]
+    async fn a_reset_log_takes_the_stores_branch_after_a_fork() {
+        use crate::identity::cache::tests::{trusting, FakeStore};
+        use crate::identity::resolver::{key_speaks_for, test_profiles::signed_profile};
+        use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
+        // Ours: seq 1 adds a second device key. The store's branch: seq 1 revokes d1.
+        let mut ours = TestLog::new(71);
+        let second = ed25519_dalek::SigningKey::from_bytes(&[72; 32]);
+        let chain = ours.chain();
+        let device = ad4m_identity_core::DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: second.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[72; 32]),
+            life: ad4m_identity_core::KeyLife::Standing,
+        };
+        let mut add = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut add, "m0", &ours.master).unwrap();
+        ours.events.push(add);
+        let mut theirs = TestLog::new(71);
+        theirs.revoke_d1();
+        assert_eq!(ours.scid(), theirs.scid());
+
+        let store = Arc::new(FakeStore::new(ours.events.clone()));
+        let backend: Arc<dyn IdentityBackend> = store.clone();
+        let cache = Arc::new(trusting());
+        let service = IdentityService {
+            resolver: Arc::new(crate::identity::resolver::Resolver::new(
+                cache.clone(),
+                backend.clone(),
+                None,
+                false,
+            )),
+            backend,
+            cache,
+            store_url: None,
+        };
+        let scid = ours.scid();
+        let did = did_of(&scid);
+        let d1 = ours.device.key();
+        service.log(&did, 0, true).await.unwrap();
+        assert!(key_speaks_for(&service.cache, &did, &d1, now()).await);
+
+        // The store now serves the other branch: the cache records the fork, keeps its own.
+        *store.events.lock().unwrap() = theirs.events.clone();
+        service.log(&did, 0, true).await.unwrap();
+        assert_eq!(service.cache.forks(&scid).await.unwrap().len(), 1);
+        assert!(
+            key_speaks_for(&service.cache, &did, &d1, now()).await,
+            "the cache keeps its branch"
+        );
+
+        assert!(service.reset_log(&did).await.unwrap());
+        assert!(service.cache.chain(&scid).await.unwrap().is_none());
+        assert!(service.cache.accepted_head(&scid).unwrap().is_none());
+        assert!(service.cache.forks(&scid).await.unwrap().is_empty());
+
+        // An ordinary verification reads the log again and takes the store's branch.
+        let expr: crate::types::Expression<Value> =
+            serde_json::from_value(signed_profile(&did, &ours.device)).unwrap();
+        let reader: &dyn IdentityBackend = store.as_ref();
+        assert!(
+            !crate::identity::verify_expression(&service.cache, Some(reader), &expr, None)
+                .await
+                .unwrap(),
+            "d1 is revoked on the store's branch"
+        );
+        let log = service.log(&did, 0, false).await.unwrap();
+        assert_eq!(log.head.unwrap().hash, theirs.chain().head().hash);
+        assert!(log.fork.is_none());
+
+        // Not a did:scid: a bad request.
+        assert_eq!(
+            service.reset_log("did:key:z6Mk").await.unwrap_err().code,
+            400
+        );
     }
 
     // ---- probe (second review pass): publish before the executor can accept the head ----

@@ -11,6 +11,8 @@
 //! keeps the cached history and calls the fork listener once per new fork (the executor
 //! publishes `identity-fork`). Signed heads: a head from the agent language counts only under a
 //! key of `identity.storeKeys`; events that arrive through [`KelCache::ingest`] need none.
+//! [`KelCache::reset`] (`identity.resetLog`) is the one way a held log leaves: the operator
+//! drops this executor's copy, and the next read takes the store's branch.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -33,6 +35,12 @@ pub const KEL_TYPE: ChainType = "coasys:kel";
 
 /// The most events one log page holds (`identity-store`'s page size).
 const PAGE: u64 = 256;
+/// The most pages one read of a log takes from one source (the store's refresh here, the
+/// resolver's reads too): 64 × 256 events, far past any person's log.
+pub(super) const MAX_PAGES: usize = 64;
+/// The most logs whose refresh time the cache remembers; past it the times start over (every
+/// log stale once).
+const REFRESHED_BOUND: usize = 4096;
 
 /// Why the cache refused or could not answer.
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +101,9 @@ pub struct KelCache {
     chains: Mutex<HashMap<String, KelChain>>,
     /// One fetch per identity at a time, so concurrent callers share one store round trip.
     fetching: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// When each log last refreshed from the configured store (unix seconds), in memory only:
+    /// after a restart every log counts as stale ([`KelCache::refreshed_within`]).
+    refreshed: StdMutex<HashMap<String, u64>>,
     store_keys: Vec<String>,
     on_fork: Option<ForkListener>,
 }
@@ -116,12 +127,41 @@ pub fn scid_from(did: &str) -> &str {
         .unwrap_or(did)
 }
 
+/// The log that `events` start (from seq 0, in any order, repeats dropped), checked to be
+/// `scid`'s; with the events in seq order.
+pub fn fold_log(scid: &str, events: &[Event]) -> Result<(KelChain, Vec<Event>), CacheError> {
+    let mut sorted: Vec<Event> = events.to_vec();
+    sorted.sort_by_key(|e| e.seq);
+    sorted.dedup_by(|a, b| a.seq == b.seq && a == b);
+    match sorted.first() {
+        None => return Err(CacheError::NotFound),
+        Some(first) if first.seq != 0 => {
+            return Err(CacheError::Gap {
+                have: None,
+                first: first.seq,
+            })
+        }
+        Some(_) => {}
+    }
+    let chain = ad4m_identity_core::fold(&sorted).map_err(CacheError::Fold)?;
+    if chain.id() != scid {
+        return Err(CacheError::Fold(ChainError::WrongChain {
+            want: scid.to_string(),
+            got: chain.id().clone(),
+        }));
+    }
+    Ok((chain, sorted))
+}
+
 impl KelCache {
     /// The cache in the database file at `path` (the executor's `ad4m_db.sqlite`), trusting
     /// heads signed by `store_keys` (multikeys).
     pub fn open(path: impl AsRef<Path>, store_keys: Vec<String>) -> Result<Self, CacheError> {
         let store = SqliteChainStore::open(path.as_ref()).map_err(storage)?;
         let meta = Connection::open(path.as_ref()).map_err(storage)?;
+        // The store's connection writes the same file; `reset` deletes through this one.
+        meta.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(storage)?;
         Self::with(store, meta, store_keys)
     }
 
@@ -136,6 +176,7 @@ impl KelCache {
             meta: StdMutex::new(meta),
             chains: Mutex::new(HashMap::new()),
             fetching: Mutex::new(HashMap::new()),
+            refreshed: StdMutex::new(HashMap::new()),
             store_keys,
             on_fork: None,
         })
@@ -254,6 +295,34 @@ impl KelCache {
             .map_err(storage)
     }
 
+    /// Drops this executor's copy of `scid`'s log: its events, its accepted head, its recorded
+    /// forks and the log in memory (`identity.resetLog`). The cache never leaves a branch it
+    /// holds by itself, so this is the way out of a fork: the next read refreshes from the
+    /// configured store and takes the store's branch. The rows sit in the hash-chain tables of
+    /// this executor's own database; the shared stores never drop a log.
+    pub async fn reset(&self, scid: &str) -> Result<(), CacheError> {
+        let mut chains = self.chains.lock().await;
+        {
+            let mut meta = self.meta.lock().map_err(storage)?;
+            let tx = meta.transaction().map_err(storage)?;
+            for table in ["chain_entries", "chain_heads", "chain_forks"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE type = ?1 AND chain = ?2"),
+                    params![KEL_TYPE, scid],
+                )
+                .map_err(storage)?;
+            }
+            tx.execute("DELETE FROM identity_heads WHERE scid = ?1", params![scid])
+                .map_err(storage)?;
+            tx.commit().map_err(storage)?;
+        }
+        chains.remove(scid);
+        if let Ok(mut refreshed) = self.refreshed.lock() {
+            refreshed.remove(scid);
+        }
+        Ok(())
+    }
+
     /// Records `fork` unless the same fork is recorded already; calls the listener for a new one.
     async fn record_fork(&self, fork: &ForkEvidence, theirs_json: &str) -> Result<(), CacheError> {
         let known = self.forks(&fork.chain).await?;
@@ -280,8 +349,10 @@ impl KelCache {
         Ok(())
     }
 
-    /// Events from any source (a store, a space, another executor, an app): the same checks,
-    /// no head signature. `events` are of one log and may come in any order.
+    /// Events with no head that counts: the same checks, no head signature. `events` are of one
+    /// log and may come in any order. The resolver takes the configured store's events this way
+    /// when its head is not signed under `identity.storeKeys`; a foreign `src`'s events never
+    /// reach the cache (the resolver folds them in memory for its one answer).
     pub async fn ingest(&self, scid: &str, events: &[Event]) -> Result<Ingested, CacheError> {
         let mut chains = self.chains.lock().await;
         self.ingest_locked(&mut chains, scid, events).await
@@ -339,22 +410,7 @@ impl KelCache {
         scid: &str,
         events: &[Event],
     ) -> Result<Ingested, CacheError> {
-        let mut sorted: Vec<Event> = events.to_vec();
-        sorted.sort_by_key(|e| e.seq);
-        sorted.dedup_by(|a, b| a.seq == b.seq && a == b);
-        if sorted[0].seq != 0 {
-            return Err(CacheError::Gap {
-                have: None,
-                first: sorted[0].seq,
-            });
-        }
-        let chain = ad4m_identity_core::fold(&sorted).map_err(CacheError::Fold)?;
-        if chain.id() != scid {
-            return Err(CacheError::Fold(ChainError::WrongChain {
-                want: scid.to_string(),
-                got: chain.id().clone(),
-            }));
-        }
+        let (chain, sorted) = fold_log(scid, events)?;
         let head = chain.head();
         let refs: Vec<&Event> = sorted.iter().collect();
         self.persist(scid, None, &refs).await?;
@@ -456,12 +512,35 @@ impl KelCache {
             let _one_fetch = gate.lock().await;
             self.fetch(backend, &scid).await
         };
+        if result.is_ok() {
+            self.note_refreshed(&scid, now());
+        }
         let mut fetching = self.fetching.lock().await;
         // The map's handle and ours: nobody else waits on this gate.
         if Arc::strong_count(&gate) <= 2 {
             fetching.remove(&scid);
         }
         result
+    }
+
+    /// Marks `scid`'s log as read from the store (or tried) at `at`.
+    pub(crate) fn note_refreshed(&self, scid: &str, at: u64) {
+        if let Ok(mut refreshed) = self.refreshed.lock() {
+            if refreshed.len() >= REFRESHED_BOUND && !refreshed.contains_key(scid) {
+                refreshed.clear();
+            }
+            refreshed.insert(scid.to_string(), at);
+        }
+    }
+
+    /// Whether `scid`'s log refreshed from the configured store within `window` seconds before
+    /// `now` (in this run of the executor).
+    pub fn refreshed_within(&self, scid: &str, now: u64, window: u64) -> bool {
+        self.refreshed
+            .lock()
+            .ok()
+            .and_then(|refreshed| refreshed.get(scid).copied())
+            .is_some_and(|at| now.saturating_sub(at) < window)
     }
 
     /// The pages of [`KelCache::refresh`], under the identity's gate.
@@ -471,7 +550,7 @@ impl KelCache {
         scid: &str,
     ) -> Result<KelChain, CacheError> {
         let did = ad4m_identity_core::did_of(scid);
-        loop {
+        for _ in 0..MAX_PAGES {
             let cached = self.chain(scid).await?;
             let from = cached.as_ref().map_or(0, |c| c.head().seq);
             let Some(page) = backend.log(&did, from).await? else {
@@ -513,6 +592,9 @@ impl KelCache {
                 }
             }
         }
+        Err(CacheError::Unavailable(format!(
+            "the store's log of {did} runs past {MAX_PAGES} pages"
+        )))
     }
 }
 
@@ -533,8 +615,18 @@ pub(crate) mod tests {
 
     /// A cache in memory, trusting heads signed by `store_keys`.
     pub(crate) fn in_memory(store_keys: Vec<String>) -> KelCache {
-        let store = SqliteChainStore::open_in_memory().unwrap();
-        let meta = Connection::open_in_memory().unwrap();
+        // One in-memory database for both connections, as `open` shares one file.
+        let name = format!(
+            "file:kel-cache-{}?mode=memory&cache=shared",
+            uuid::Uuid::new_v4().simple()
+        );
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+        let store =
+            SqliteChainStore::from_connection(Connection::open_with_flags(&name, flags).unwrap())
+                .unwrap();
+        let meta = Connection::open_with_flags(&name, flags).unwrap();
         KelCache::with(store, meta, store_keys).unwrap()
     }
 
