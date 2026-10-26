@@ -104,7 +104,7 @@ export default function autoProcessorNeighbourhoodTests(
         );
 
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
-        await testContext.makeAllNodesKnown();
+        await testContext.makeAllNodesKnown([alice, aliceHandle.uuid], [bob, bobHandle.uuid]);
         await sleep(2000); // K2 space initialization after join + agent info exchange
 
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;

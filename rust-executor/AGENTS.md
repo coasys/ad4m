@@ -20,6 +20,11 @@ cd .. && pnpm run test-main                        # JS integration suites again
 ```
 
 `--release` and `--test-threads=1` are required (see `.claude/skills/rust-executor-testing.md`).
+
+**Where a create or join spends its time:** `grep 'timing:'` in the executor log. Each line is
+`timing: <step> [address] <ms>ms` (`logging::span`), logged when the step ends. `applyTemplate`,
+`publish` and `join` are the totals of the three calls; `applyTemplate.*`, `publish.*`,
+`installLanguage.*`, `loadLanguage.*` and `holochain.*` are their steps.
 Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call real LLMs.
 
 ## Module map (what lives where)
@@ -38,9 +43,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `tool_bundles/` | Tool bundles: an app's JS for its agents' tools, one bare `JsRuntime` per bundle with two ops (random bytes, a log line); time limit on load and every call, memory cap on heap and ArrayBuffers. `builtin.rs` compiles in WE's template tools (`template_read` / `template_update` in `mcp/`), vendored by `scripts/vendor-template-tools.sh` | `src/tool_bundles/AGENTS.md` |
 | `holochain_service/` | Embedded Holochain conductor behind an actor channel; signal fan-in | `src/holochain_service/AGENTS.md` |
 | `agent/` | Agent keys/DID, signing, multi-user (managed agents by DID; a user's email is only the login name), `capabilities/` (auth tokens, capability defs) | — |
-| `db.rs` | All SQLite access (`rusqlite`), single `impl Ad4mDb`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | — |
+| `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
 | `db_backend.rs` | `SharedDb` HTTP backend for stateless/hosted mode; only used when `config.db_backend == "shared"` | — |
-| `pubsub.rs` | Global broadcast bus + topic constants; feeds `api/events_ws.rs` | — |
+| `pubsub.rs` | Global broadcast bus: one channel of typed events (`events.rs`: `Topic`, `Audience`, `Event`) for every event (live query updates too, as `Event::for_connection`); feeds `api/events_ws.rs` | `src/api/AGENTS.md` |
 | `types/` | `core.rs` = domain types (Link, Expression, Perspective…), `domain.rs` = wire/input types; some duplicates, see spec item 5 | — |
 | `runtime_service/`, `entanglement_service/`, `neighbourhoods.rs`, `billing.rs`, `email_service.rs`, `user_management.rs`, `unyt_service.rs`, `wallet.rs`, `perspective_snapshot.rs`, `logging.rs` | Smaller services; `unyt_service.rs` = Unyt/mHOT currency DNA + payments | — |
 
@@ -52,6 +57,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   Do not add new ones; spec item 11 introduces `AppContext`.
 - **Perspective links live in the per-perspective `SparqlStore`** (oxigraph), not SQLite.
   `PerspectiveInstance` is `Clone` and cheap: all state is behind `Arc`. `get_perspective()` returns a clone.
+- **Open files.** Each perspective's RocksDB store holds about 70 descriptors and at most 274
+  (see `perspectives/AGENTS.md`), so a 256 soft `RLIMIT_NOFILE` ran out at about a dozen
+  perspectives ("Too many open files"). The executor raises its soft limit at startup in
+  `fd_limit::raise_fd_limit_at_startup` (#1462); do not add another.
 - **Prolog is off.** `prolog_service::PROLOG_MODE` is `Disabled`; Prolog query paths return empty.
   Subject classes, flows and model queries run on SHACL + SPARQL (`perspectives/model_query`).
 - **Tokio vs std locks** are both used; check the import before assuming `.lock()` is async.
@@ -72,11 +81,21 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   else carries an email. `users.did` is unique (partial index, empty DIDs excluded).
   `agent/session.rs` opens one `Session` per connection: `Principal::Operator` (the admin
   credential: the executor's administrator role, not an agent), `Principal::Agent(AgentContext)`
-  (a grant: a token without `sub` acts as the main agent; a user token's `sub` is the agent's
-  DID), or
-  `Principal::Anonymous`. Capabilities, token id, expiry and the agent's DID are `Session` fields.
-  Read identity with `acts_as()` / `acts_as_did()` / `managed_did()` / `is_operator()`; never
-  decode the token again. Any signing/DID/billing path takes the `AgentContext` explicitly.
+  (a grant on the main agent or on a managed agent, by DID), or `Principal::Anonymous`.
+  Capabilities, the grant and the agent's DID are `Session` fields. Read identity with
+  `acts_as()` / `acts_as_did()` / `managed_did()` / `is_operator()`; never decode the token
+  again. Any signing/DID/billing path takes the `AgentContext` explicitly.
+- **Grants** (`agent/grants.rs`, table `grants` in `db/grants.rs`) are the one allowlist of
+  tokens: a token (id = its `nonce`) opens a session only while its grant exists, is active and
+  has not expired, and the session's capabilities are the grant's (tokens carry `iss, aud, iat,
+  exp, nonce, sub` only). A grant names its agent by `agent_did` (`NULL` = the main agent); a
+  token's `sub` must name the same agent: none for the main agent, the DID for a managed agent.
+  Both mint paths go through `grants::mint`: the app capability flow (a grant on the main agent)
+  and a user login (an auto-approved grant on that user's agent). The admin credential is no
+  token. Revoking or removing a grant cancels its `ended` token, which every socket of the
+  session watches through `Session::ended()`. Start-up drops expired rows. The app registry of
+  executors before grants (`apps_data.json`) is not read: no migration exists. Tests mint with
+  `test_utils::granted_token(auth)`; a token signed without a grant is refused.
 - **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
   `AgentService::create_managed_agent_key` creates one under its DID,
   `AgentService::wallet_key_for_did` finds it (cached). A shared wallet cannot name keys, so there
@@ -85,15 +104,42 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **Billing** is per agent: `billing::bill_compute(agent_did, ..)`, `compute_log.agent_did`,
   `payment_requests.agent_did`. Credits stay on the user's `users` row, reached by
   DID (`get_agent_credits`, `deduct_credits_and_log`).
-- **Capabilities**: every WS handler checks `ctx.require(&X_CAPABILITY)` itself
-  (`agent/capabilities/defs.rs`); `Session::may` answers the same question as a `bool`. MCP tools
-  check via `Ad4mMcpHandler::get_*_perspective`.
+- **Capabilities**: every WS method declares a guard where it registers (`api/guards.rs`); the
+  dispatcher checks its capability (`agent/capabilities/defs.rs`) and ownership rule before the
+  handler runs. A handler calls `ctx.require(&X_CAPABILITY)` only for a check its guard does not
+  make; `Session::may` answers the same question as a `bool`. MCP tools check via
+  `Ad4mMcpHandler::get_*_perspective`.
+- **Per-agent objects**: a session reaches only its agent's; the operator reaches all.
+  Perspectives are owned by DID (`owners`; none = the main agent), AI tasks by DID
+  (`tasks.agent_did`; `NULL` = the main agent), grants and capability requests by their agent's
+  DID. A WS method that names one declares `Guard::Owns` (`api/AGENTS.md`); missing and not
+  yours are both 404. The capability check alone does not
+  separate users: user tokens hold wildcard perspective, neighbourhood and AI capabilities.
+- **Capability requests** (#1399, executor side): `agent.requestCapability(authInfo, agent?)`
+  names a target agent (a managed agent's DID, or its user's email, resolved to the DID at once; absent = the main agent) and records a
+  `PendingRequest` in memory only (`agent/capabilities/pending.rs`: never on disk, anonymous
+  callers create them; 1024 at most, unapproved evicted first). The approval request event goes to
+  the target agent's DID with `AGENT_PERMIT`. `agent.permitCapability` (the operator, or a
+  session acting as the target managed agent) approves it, possibly with fewer capabilities, and
+  gets a six-digit code (a `Secret`). `agent.generateJwt` redeems the code once, in one locked
+  step: the grant is minted on the target agent with the approved capabilities capped at that
+  agent's own (`grant_caps_for`); a failed mint leaves the request approved and redeemable. Five
+  wrong codes delete a request; it lives 10 minutes (main agent) or 24 hours (managed agent),
+  restarted at approval. No request is approved at the request: the app name and domain are
+  whatever the (anonymous) caller declares, so they never grant anything. Only a six-digit code
+  approves or redeems (`pending::is_code`); the empty code is refused before any comparison.
+  The request flow is in `api/AGENTS.md`.
+- **Secrets** (`secret.rs`): credentials are `Secret`s (no `Serialize`): the admin credential,
+  AI provider keys (results carry `hasApiKey`), webhook credentials (`hasWebhookAuth`) and
+  capability codes. `api/tests/secret_leak_tests.rs` calls every read method as each principal
+  and fails if a seeded secret reaches a reply or an event; a new read method needing parameters
+  gets them in its `params` table.
 - **Notifications** post perspective data to any webhook URL. Their grant, update and delivery
   rules live in `runtime_service/notification_access.rs`: a notification fires only when granted
   and its owner may read the perspective. The owner is a DID (`owner_did`: a managed user's, or the
   main agent's), never an email; operator sessions act as the main agent. `runtime_ws.rs` refuses
   perspectives the owner cannot read; `events_ws.rs` sends `notification-triggered` only to sessions
-  with the owner's DID. `Ad4mDb::migrate_notification_owners` (run at startup once the agent loads)
+  with the owner's DID that may query the notification's perspective. `Ad4mDb::migrate_notification_owners` (run at startup once the agent loads)
   moves rows of older executors from `user_email` to `owner_did`.
 - **Keystore**: the `keystore` field of `agent.json` holds every local key, the main agent's and
   each managed user's (`wallet.rs`: Argon2id + XChaCha20-Poly1305, fresh salt and nonce per write).

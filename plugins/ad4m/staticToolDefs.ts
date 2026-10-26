@@ -25,7 +25,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "auth_status",
-    "description": "Check the current authentication status of the MCP session.",
+    "description": "Check the current authentication status of the MCP session: whether its token (the Authorization header, or the one a login tool set) works, who it acts as and which capabilities it holds.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "AuthStatusParams",
