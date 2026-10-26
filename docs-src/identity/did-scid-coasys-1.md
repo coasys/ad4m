@@ -5,6 +5,24 @@ Reference implementation: `ad4m-identity-core` on `ad4m-hash-chain`. Test vector
 `ad4m-identity-core/vectors/*.json`. Every build of the core (native, `wasm32`, with and
 without features) must give the answers the vectors hold.
 
+The spec has three parts, each binding a different party:
+
+- **Part A — Format** (sections 1–12) is normative for every verifier and resolver: the
+  identifier, the events, the hashes and proofs, the replay rules, key validity, resolution of
+  a DID URL and the DID document. A party that implements Part A can verify and resolve any
+  `did:scid:coasys:1` identity without trusting the host it read the log from.
+- **Part B — Host profile** (sections 13–14) is normative for hosts: the HTTPS route a host
+  serves logs on. Which logs a host admits is host policy; a verifier never checks it.
+- **Part C — Wallet profile** (sections 15–16) is informative: how a Coasys wallet derives
+  master keys from the 12 words, and the signing domains of the rest of the system. A
+  verifier of a log needs none of it; it lets wallets and apps interoperate.
+
+The DID method is did:scid (ToIP DID SCID Method Specification, Working Draft 03,
+27 April 2025) with the format code `coasys` and version `1`. Documents and metadata follow
+W3C DID Core v1.0.
+
+# Part A — Format (normative for every verifier)
+
 ## 1. Why a new format
 
 An identity here is one person with one master key that several apps may hold, and many device
@@ -163,7 +181,7 @@ rule. Each rule names the error that the reference implementation returns
   replaced. With `next: null` the log ends: every key stops at that seq.
 - `scope`: the bot key's scope is replaced from its seq.
 
-## 6. Resolution and key validity
+## 6. Key validity
 
 `fold` gives the state after the head: every master and device key with the seq that added it
 and the seq that ended it, the bot scopes per seq, `next`, and `ended`.
@@ -175,19 +193,269 @@ and the seq that ended it, the bot scopes per seq, `next`, and `ended`.
   caller's trusted time.
 - The current master is the last master, until the log ends.
 
-## 7. Signing domains
+## 7. The `coasys:kel` domain
 
 Every signature names its domain and every verifier states the domain it expects. Log events
-sign with the Data Integrity proof of section 4 under `coasys:kel`. Every other domain signs
-`JCS(value + {"domain": domain})` with Ed25519 (the value is an object without a `domain`
-member). The registry is `ad4m_identity_core::domain::SIGNING_DOMAINS`:
-`coasys:kel`, `coasys:link`, `coasys:store-request`, `coasys:head`, `coasys:vouch`,
-`coasys:offer`, `coasys:claim`, `coasys:pause`, `coasys:inbox`, `coasys:session`,
-`coasys:account`, `coasys:room-key`, `coasys:bot-grant`. These labels enter a hash or a key
-derivation and are never signing domains; every signing API refuses them: `coasys:pow`,
-`coasys:pair-id:1`, `coasys:pair-key:1`, `coasys:match`, `coasys:wrap:1`, `coasys:auth:1`.
+sign with the Data Integrity proof of section 4 under `coasys:kel`. A verifier of a log needs
+no other domain: a log proof under any other domain fails (K10), and a signature under
+`coasys:kel` never verifies in another domain. The other domains of the system are listed in
+Part C (section 16).
 
-## 8. The words and master keys
+## 8. Resolution
+
+A DID URL of this format is the DID followed by optional DID parameters and an optional
+fragment: `did:scid:coasys:1:<scid>[?<params>][#<keyId>]`. The resolver reads two
+parameters: `src` (where to look) and `versionId` (which version). The DID itself is the part
+before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL carried.
+
+1. **Sources.** The resolver takes the sources in this order: the `src` of the DID URL, then
+   each `src` the caller supplies, then the resolver's configured hosts. A parameter value is
+   percent-decoded first.
+   - A `src` without a scheme is an HTTPS base URL with its `https://` left out:
+     `store.example` is `https://store.example`, and `store.example:8443/logs` is
+     `https://store.example:8443/logs`. A `src` has a scheme when it starts with an RFC 3986
+     scheme and a `:` that is not followed by a port number (digits, then `/` or the end).
+   - `https:` is the HTTPS base URL as written.
+   - Any other scheme names an adapter (another DID method, a peer-to-peer transport). The
+     resolver uses only the adapters it has; a source with an unsupported scheme is skipped,
+     as if it held no log, and the resolver tries the next one.
+2. **Retrieval over HTTPS.** For an HTTPS base `B` (without a trailing `/`), the resolver
+   requests `GET B/v1/logs/<scid>?from=0`, then pages with `from` = the seq after the last
+   event it received, until a page holds no more events. The response body is a `LogPage`
+   (section 13). `404` means the source holds no log. Any other status, or a body that is not a
+   `LogPage`, means the source gave no valid log. A resolver bounds the pages and bytes it
+   reads from one source.
+3. **Verification.** The resolver folds the events with the rules of section 5, each event
+   parsed as JSON under P1–P6. Event #0 must give the SCID of the DID. Any failure means the
+   source gave no valid log: the resolver skips it and tries the next source. It may stop at
+   the first source that gives a valid log or read further sources for a longer one; either
+   way it keeps the longest valid log it holds. A shorter valid log never replaces a longer one
+   (it is a prefix, or a fork). Two valid logs that differ at one seq are a fork: the resolver
+   answers with the log it held first, and reports the fork in the DID resolution metadata
+   (`coasys:fork`: the seq and the two event hashes).
+4. **The DID document.** The resolver derives the DID document (section 9) from the state
+   after the head. With `versionId=<seq>`, it derives it from the state after that seq. A
+   `versionId` that is not a decimal integer is `invalidDidUrl`; a seq past the head of the
+   log the resolver holds is `notFound`. A fragment `#<keyId>` dereferences the verification
+   method with that id in the chosen document: `?versionId=4#d3` is `#d3` as of seq 4, which is
+   what a signature anchored at seq 4 needs.
+5. **Metadata.** DID document metadata holds `versionId`, the seq of the version used;
+   `nextVersionId`, the seq after it when the log holds one; and `deactivated`, true when the
+   log has ended (a `rotate` with `next: null`). `deactivated` describes the DID, not the
+   version: an earlier version of an ended log still lists its keys, with `deactivated: true`.
+   DID Core makes `versionId` and `nextVersionId` strings, so seq 4 is `"4"`. The log holds no
+   time, so the resolver does not support `versionTime` and refuses it with `invalidDidUrl`;
+   `created` and `updated` are absent for the same reason. A host's `appendedAt` is the host's
+   claim, not part of the verifiable history.
+6. **What a host can do.** A host can withhold events or serve an older head. It cannot forge
+   one: every event carries proofs by keys the state before it names, and event #0 hashes to
+   the SCID in the DID. The resolver must not trust a host for anything except the bytes it
+   returns, and checks every byte itself.
+
+## 9. DID document
+
+The DID document of a log at seq *s* is a pure function of the state after *s*. It reads no
+clock: an expiry is a property of a verification method, never a filter, and a verifier
+compares it with its own trusted time (`key_valid_at_time`, section 6). The reference is
+`ad4m_identity_core::did_document`.
+
+| Log item at *s* | DID document | Why |
+|---|---|---|
+| Standing device key `dN` valid at *s* (`key_valid_at`) | `verificationMethod` `#dN`: `Multikey`, `publicKeyMultibase` = its `sign`. Listed in `authentication` and `assertionMethod` | devices sign as the person: links, records, logins |
+| `Until` device key valid at *s* | as a standing key, plus `"coasys:expires": <expires>` on the method | DID Core has no expiry on a method. A verifier that ignores the property sees a key that the log refuses after `expires` |
+| Bot key valid at *s* | `verificationMethod` `#dN` with `"coasys:bot": {"can": […], "expires": …}`, the scope in force at *s*. Listed only in `capabilityInvocation`, never in `authentication` or `assertionMethod` | a bot acts within a scope, not as the person: a generic verifier must not take a bot's statement as the person's |
+| The `enc` key of each standing or `Until` key | `verificationMethod` `#dN-enc`: `Multikey`, `publicKeyMultibase` = its `enc`. Listed in `keyAgreement` | where messages to the person are sealed. A bot's `enc` key is absent: a bot has no inbox, and a message to the person must not reach one |
+| A key revoked, replaced or ended at or before *s* | absent | a document describes one state; a document of an earlier version lists it |
+| Masters `mN` | absent | masters control the log, not the subject's statements; the log never lets them sign for the person |
+| Next-key commitment | absent | a log parameter, not a key |
+| Ended log | no verification methods, every relationship empty; metadata `deactivated: true` | DID Core's deactivation |
+| `id`, `controller`, each method's `controller` | the DID | self-controlled |
+| `alsoKnownAs` | the DID URLs with `src` the caller gives (other hosts of this DID) | where else to look |
+
+Methods are listed in key order (`d1`, `d2`, …, by number), each key's signing method before
+its `-enc` method. Method ids are relative DID URLs (`#d1`), resolved against `id`. The
+JSON-LD form has `@context` first, then `id`, `controller`, `verificationMethod`,
+`authentication`, `assertionMethod`, `keyAgreement`, `capabilityInvocation` (each written even
+when empty) and `alsoKnownAs` (left out when empty). A method has `id`, `type`, `controller`,
+`publicKeyMultibase`, then `coasys:expires` and `coasys:bot` when they apply.
+
+Example: the log of `vectors/log.json` at `versionId=3` (`vectors/document.json`):
+
+```json
+{
+  "@context": [
+    "https://www.w3.org/ns/did/v1",
+    "https://w3id.org/security/multikey/v1",
+    "https://coasys.org/ns/did-scid-coasys/v1"
+  ],
+  "id": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+  "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+  "verificationMethod": [
+    {
+      "id": "#d1",
+      "type": "Multikey",
+      "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "publicKeyMultibase": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+    },
+    {
+      "id": "#d1-enc",
+      "type": "Multikey",
+      "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "publicKeyMultibase": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz"
+    },
+    {
+      "id": "#d3",
+      "type": "Multikey",
+      "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "publicKeyMultibase": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr",
+      "coasys:bot": { "can": ["read"], "expires": 1900000000 }
+    }
+  ],
+  "authentication": ["#d1"],
+  "assertionMethod": ["#d1"],
+  "keyAgreement": ["#d1-enc"],
+  "capabilityInvocation": ["#d3"],
+  "alsoKnownAs": [
+    "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt?src=store.example"
+  ]
+}
+```
+
+Its metadata: `{"versionId": "3", "nextVersionId": "4", "deactivated": true}` (the log of
+the vectors ends at seq 6).
+
+The context `https://coasys.org/ns/did-scid-coasys/v1` defines the two extension properties:
+
+```json
+{
+  "@context": {
+    "@version": 1.1,
+    "@protected": true,
+    "coasys": "https://coasys.org/ns/did-scid-coasys/v1#",
+    "coasys:expires": {
+      "@id": "coasys:expires",
+      "@type": "http://www.w3.org/2001/XMLSchema#integer"
+    },
+    "coasys:bot": {
+      "@id": "coasys:bot",
+      "@context": {
+        "@protected": true,
+        "can": { "@id": "coasys:can", "@container": "@set" },
+        "expires": {
+          "@id": "coasys:expires",
+          "@type": "http://www.w3.org/2001/XMLSchema#integer"
+        }
+      }
+    }
+  }
+}
+```
+
+`coasys:expires` is unix seconds: the `expires` of an `Until` key. `coasys:bot` is a bot key's
+scope: `can` (actions from `read`, `write`, `join`) and `expires` (unix seconds).
+
+## 10. Where `src` goes
+
+Signed or long-lived data carries the bare DID, never `src`: log events, proofs, link anchors,
+agent records, expressions. A `src` there would disclose one host choice in every copy of the
+data and freeze it in signed bytes, so a later move of the log would leave stale hints that
+nobody can correct. A DID URL with `src` is for telling a reader where to look: a shared link,
+a QR code, a profile card, the `alsoKnownAs` of the DID document. A resolver that gets a bare
+DID uses its caller's sources and its configured hosts.
+
+## 11. Security and privacy
+
+- A store can withhold events but cannot add one: every event carries proofs by keys the state
+  before it names. A verifier re-checks everything a store serves.
+- Forks (two valid events at one seq) are detected, never resolved, by the hash-chain module;
+  a shorter peer log never truncates a held one.
+- Only the words make master *n*+1, so whoever holds master *n* cannot rotate alone.
+- `fold` refuses unknown fields so that no personal data enters a log by accident. `offer` and
+  `coSig` are opaque to `fold`.
+- The core reads no clock. Expiries are compared with the caller's trusted time. The window a
+  host accepts for a new `expires` is host policy (section 14).
+- A generic DID Core verifier ignores `coasys:expires` and `coasys:bot`. Bot keys sit outside
+  `authentication` and `assertionMethod`, so such a verifier never takes a bot's signature as
+  the person's; it does not apply an `Until` expiry, which the log and a `coasys/1` resolver
+  still enforce.
+- A `src` fetched from untrusted data is a request to an address someone else chose. A
+  resolver on a server limits it (HTTPS only, public addresses only, no redirect to another
+  host).
+
+## 12. Test vectors
+
+| File | Holds |
+|---|---|
+| `log.json` | a valid log with every op and every key life: events, SCID, DID, hashes, the folded state, `key_valid_at` and `key_valid_at_time` for every key, seq and two times |
+| `fold.json` | one invalid log per rule with the pinned error `{code, reason, format}` |
+| `proofs.json` | every proof of `log.json` with its proof config, config hash, signing input and event hash; a tampered body, a wrong key, another domain |
+| `commitment.json` | entropy, words, seed, masters 0–3 with path, key, salt and commitment, and the recovery public key |
+| `pow.json` | proofs at 8, 12 and 16 bits for the SCID of `log.json`, with their hashes |
+| `domains.json` | the registry and the labels; one domain-field signature per domain, which verifies only under its own domain; the refused names |
+| `link.json` | device linking: the offer commit, the claim and offer signing bytes, the match code, the offer and device strings, and the `add` events that spend a claim |
+| `document.json` | the log of `log.json` with a fixed `alsoKnownAs`, the DID document and metadata at the head and after every seq, and a version past the head refused (`VersionPastHead`) |
+
+The vectors are regenerated by
+`AD4M_IDENTITY_WRITE_VECTORS=1 cargo test -p ad4m-identity-core --all-features --test vectors_fresh`;
+a changed hash in `log.json` or `proofs.json` is a format change.
+
+# Part B — Host profile (normative for hosts)
+
+A host stores logs and answers resolution requests. A host that serves logs over HTTPS follows
+section 13; everything else it offers (appending, signed heads, key lookups, feeds) is outside
+this profile.
+
+## 13. Retrieval over HTTPS
+
+```
+GET /v1/logs/<scid>?from=<n>
+  200 application/json   LogPage
+  404                    the host holds no log for <scid>
+  Access-Control-Allow-Origin: *
+  Cache-Control: public, max-age=31536000, immutable   a full page that ends below the head
+  Cache-Control: public, max-age=10                    the page that holds the head
+```
+
+- `LogPage` is a JSON object with at least these members:
+  - `events`: at most 256 events from seq `n`, in seq order, each exactly as appended. A `from`
+    past the head gives an empty `events`.
+  - `head`: the host's head `{scid, seq, hash, …}`. A host may sign it (the Coasys identity
+    store signs it under `coasys:head` with `time`, `store` and `sig`); a resolver that does
+    not trust the host's key reads it only as a hint of how far to page.
+  - `appendedAt`: one unix time per event, when the host stored it. It is the host's claim
+    and no part of the verifiable history.
+
+  A host may add members; a resolver ignores members it does not know.
+- The route allows cross-origin reads, so a browser resolves with no server of its own.
+- A full page (256 events) that ends below the head never changes, because a host never
+  replaces a stored event: it may be cached as immutable. The page that holds the head changes
+  with every append and is cached briefly.
+
+## 14. Admission (host policy)
+
+Which logs and events a host accepts is host policy. A verifier never checks it, and a host may
+choose otherwise without breaking verification. A host re-runs `fold` on every append. The
+Coasys identity store adds these checks:
+
+- **One key per identity.** A host may require that a signing key appears in at most one log
+  it holds (rule K8 already holds within one log).
+- **Expiry window.** The store refuses an `expires` in the past or more than 400 days ahead.
+- **Proof of work for a log with no vouching note**, below.
+
+### Proof of work for a log with no vouching note
+
+A 16-byte `nonce` such that `sha256("coasys:pow" ‖ scid ‖ nonce)` has at least `bits` leading
+zero bits, with `scid` as its UTF-8 text. On the wire: `{ "nonce": base58btc(16 bytes), "bits" }`;
+the store checks against its own `bits` (or `previousBits` for 10 minutes after a change),
+never the proof's. The proof binds to the SCID, which covers master #0, the commitment and every
+listed key, so one proof admits one log.
+
+# Part C — Wallet profile (informative)
+
+A verifier needs none of this part. It fixes how Coasys wallets make keys and what the rest
+of the system signs, so that wallets and apps interoperate.
+
+## 15. The words and master keys
 
 - 12 BIP-39 English words (128 bits of entropy); the BIP-39 seed with an empty passphrase.
 - Master key *n*: SLIP-0010 Ed25519 at the hardened path `m/7133'/0'/n'` (provisional until
@@ -202,37 +470,13 @@ derivation and are never signing domains; every signing API refuses them: `coasy
   record.
 - Device keys and their X25519 keys come from random bytes, never from the words.
 
-## 9. Proof of work for a log with no vouching note
+## 16. Other signing domains
 
-A 16-byte `nonce` such that `sha256("coasys:pow" ‖ scid ‖ nonce)` has at least `bits` leading
-zero bits, with `scid` as its UTF-8 text. On the wire: `{ "nonce": base58btc(16 bytes), "bits" }`;
-the store checks against its own `bits` (or `previousBits` for 10 minutes after a change),
-never the proof's. The proof binds to the SCID, which covers master #0, the commitment and every
-listed key, so one proof admits one log.
-
-## 10. Security and privacy
-
-- A store can withhold events but cannot add one: every event carries proofs by keys the state
-  before it names. A verifier re-checks everything a store serves.
-- Forks (two valid events at one seq) are detected, never resolved, by the hash-chain module;
-  a shorter peer log never truncates a held one.
-- Only the words make master *n*+1, so whoever holds master *n* cannot rotate alone.
-- `fold` refuses unknown fields so that no personal data enters a log by accident. `offer` and
-  `coSig` are opaque to `fold`.
-- The core reads no clock. Expiries are compared with the caller's trusted time; the store
-  refuses an `expires` in the past or more than 400 days ahead.
-
-## 11. Test vectors
-
-| File | Holds |
-|---|---|
-| `log.json` | a valid log with every op and every key life: events, SCID, DID, hashes, the folded state, `key_valid_at` and `key_valid_at_time` for every key, seq and two times |
-| `fold.json` | one invalid log per rule with the pinned error `{code, reason, format}` |
-| `proofs.json` | every proof of `log.json` with its proof config, config hash, signing input and event hash; a tampered body, a wrong key, another domain |
-| `commitment.json` | entropy, words, seed, masters 0–3 with path, key, salt and commitment, and the recovery public key |
-| `pow.json` | proofs at 8, 12 and 16 bits for the SCID of `log.json`, with their hashes |
-| `domains.json` | the registry and the labels; one domain-field signature per domain, which verifies only under its own domain; the refused names |
-
-The vectors are regenerated by
-`AD4M_IDENTITY_WRITE_VECTORS=1 cargo test -p ad4m-identity-core --all-features --test vectors_fresh`;
-a changed hash in `log.json` or `proofs.json` is a format change.
+Every domain other than `coasys:kel` (section 7) signs `JCS(value + {"domain": domain})` with
+Ed25519 (the value is an object without a `domain` member). The registry is
+`ad4m_identity_core::domain::SIGNING_DOMAINS`:
+`coasys:kel`, `coasys:link`, `coasys:store-request`, `coasys:head`, `coasys:vouch`,
+`coasys:offer`, `coasys:claim`, `coasys:pause`, `coasys:inbox`, `coasys:session`,
+`coasys:account`, `coasys:room-key`, `coasys:bot-grant`. These labels enter a hash or a key
+derivation and are never signing domains; every signing API refuses them: `coasys:pow`,
+`coasys:pair-id:1`, `coasys:pair-key:1`, `coasys:match`, `coasys:wrap:1`, `coasys:auth:1`.

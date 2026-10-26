@@ -1,4 +1,4 @@
-//! The 12 words and master-key derivation (feature `words`; section 8 of
+//! The 12 words and master-key derivation (feature `words`; section 15 of
 //! `docs-src/identity/did-scid-coasys-1.md`).
 //!
 //! - 12 BIP-39 English words, 128 bits of entropy; the BIP-39 seed with an empty passphrase.
