@@ -58,6 +58,7 @@ impl ClaimService<'_> {
         &self,
         params: &ClaimOfferParams,
     ) -> Result<ClaimOfferResult, WsRpcError> {
+        self.identity.refuse_without_store_keys()?;
         let offer = parse_offer(&params.offer)?;
         let offer_did = did_of(&offer.scid);
         let record = db(|db| db.operator_record())?;

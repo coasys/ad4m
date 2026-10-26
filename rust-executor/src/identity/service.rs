@@ -316,14 +316,31 @@ impl IdentityService {
         Ok(Some(id))
     }
 
+    /// Refuses the calls that make the store commit something irreversible (`publish`, a claim)
+    /// while `identity.storeKeys` is empty: the cache then accepts no head, so the executor
+    /// could never bind the agent to the log, but the store would already hold the events and
+    /// the agent's key would be taken for every identity.
+    pub(super) fn refuse_without_store_keys(&self) -> Result<(), WsRpcError> {
+        if self.cache.trusts_a_store() {
+            return Ok(());
+        }
+        Err(error(
+            503,
+            "no-store-keys: identity.storeKeys is not set, so this executor accepts no head from \
+             the identity store and cannot bind an agent to a log; set identity.storeKeys first",
+        ))
+    }
+
     /// `identity.publish`: appends through the agent language, then takes the events into the
     /// cache and records the identity for `agent` when the log lists its key. A `409` whose log
     /// already holds these events (the append happened elsewhere) answers the store's head.
+    /// Refused with `no-store-keys` while `identity.storeKeys` is empty, before the store commits.
     pub async fn publish(
         &self,
         agent: &AgentContext,
         params: &PublishParams,
     ) -> Result<SignedHead, WsRpcError> {
+        self.refuse_without_store_keys()?;
         let events = params
             .events
             .iter()
@@ -679,5 +696,157 @@ mod tests {
             Some("d2".to_string())
         );
         assert_eq!(db(|db| db.agent_identity(&agent_did)).unwrap(), Some(scid));
+    }
+
+    // ---- probe (second review pass): publish before the executor can accept the head ----
+
+    /// A store that records appends and answers them with a head signed by the test store
+    /// key, so the log it then serves is the one it was given.
+    struct RecordingStore {
+        inner: crate::identity::cache::tests::FakeStore,
+        appends: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl IdentityBackend for RecordingStore {
+        async fn log(
+            &self,
+            did: &str,
+            from: u64,
+        ) -> Result<Option<ad4m_ldk::identity::LogPage>, IdentityError> {
+            self.inner.log(did, from).await
+        }
+        async fn key_owner(
+            &self,
+            multikey: &str,
+            wait_s: u8,
+        ) -> Result<Option<ad4m_ldk::identity::KeyIndexEntry>, IdentityError> {
+            self.inner.key_owner(multikey, wait_s).await
+        }
+        async fn append(
+            &self,
+            _did: &str,
+            req: &ad4m_ldk::identity::AppendRequest,
+        ) -> Result<ad4m_ldk::identity::SignedHead, IdentityError> {
+            self.appends
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let events: Vec<Event> = req
+                .events
+                .iter()
+                .map(|e| Event::from_json(e).unwrap())
+                .collect();
+            let mut held = self.inner.events.lock().unwrap();
+            held.extend(events);
+            let chain = ad4m_identity_core::fold(&held).unwrap();
+            let head = chain.head();
+            Ok(self
+                .inner
+                .key
+                .sign_head(chain.id(), head.seq, &head.hash, 1))
+        }
+        async fn open_offer(
+            &self,
+            offer: &ad4m_ldk::identity::SignedOffer,
+        ) -> Result<ad4m_ldk::identity::OfferOpened, IdentityError> {
+            self.inner.open_offer(offer).await
+        }
+        async fn list_offers(
+            &self,
+            did: &str,
+            req: &ad4m_ldk::identity::SignedRequest,
+            wait_s: u8,
+        ) -> Result<Vec<ad4m_ldk::identity::OfferListing>, IdentityError> {
+            self.inner.list_offers(did, req, wait_s).await
+        }
+        async fn claim_offer(
+            &self,
+            did: &str,
+            offer_id: &str,
+            claim: &ad4m_ldk::identity::Claim,
+        ) -> Result<ad4m_ldk::identity::ClaimReceipt, IdentityError> {
+            self.inner.claim_offer(did, offer_id, claim).await
+        }
+        async fn offer_state(
+            &self,
+            did: &str,
+            offer_id: &str,
+            key: &str,
+            wait_s: u8,
+        ) -> Result<ad4m_ldk::identity::OfferProgress, IdentityError> {
+            self.inner.offer_state(did, offer_id, key, wait_s).await
+        }
+    }
+
+    /// With `identity.storeKeys` unset (the default), the executor can accept no store head, so
+    /// a publish can never bind the agent. It must refuse before the store commits the events:
+    /// once the store holds the incept, the device key is taken for every identity, forever.
+    #[tokio::test]
+    async fn without_store_keys_publish_refuses_before_the_store_commits() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let user = crate::test_utils::create_test_user(&format!(
+            "nokeys-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let agent = AgentContext::managed(user);
+        let (agent_did, _) = device_key(&agent).unwrap();
+        let backend = Arc::new(RecordingStore {
+            inner: crate::identity::cache::tests::FakeStore::new(vec![]),
+            appends: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let cache = Arc::new(crate::identity::cache::tests::in_memory(vec![]));
+        let service = IdentityService {
+            resolver: Arc::new(crate::identity::resolver::Resolver::new(
+                cache.clone(),
+                backend.clone(),
+                None,
+                false,
+            )),
+            backend: backend.clone(),
+            cache,
+            store_url: None,
+        };
+        let incept = incept_listing(&agent, 53);
+        let cosigned = service.cosign_incept(&agent, &incept).await.unwrap();
+        let result = service
+            .publish(
+                &agent,
+                &PublishParams {
+                    events: vec![cosigned],
+                },
+            )
+            .await;
+        let err = result.expect_err("a publish the executor cannot accept is refused");
+        assert_eq!(
+            backend.appends.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the store was asked to commit an incept the executor can never accept ({})",
+            err.message
+        );
+        assert_eq!(err.code, 503, "{err:?}");
+        assert!(err.message.starts_with("no-store-keys"), "{}", err.message);
+        assert_eq!(db(|db| db.agent_identity(&agent_did)).unwrap(), None);
+
+        // A claim is refused the same way, before every other check (here: before `no-operator`).
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        let offer = ad4m_identity_core::link::OfferString {
+            store: "https://store.example".into(),
+            scid: "QmScid".into(),
+            offer_id: "offer".into(),
+            s: "secret".into(),
+        };
+        let refused = service
+            .claims()
+            .claim_for_main(&crate::identity::types::ClaimOfferParams {
+                offer: offer.encode(),
+                hint: None,
+            })
+            .await
+            .expect_err("a claim the executor cannot finish is refused");
+        assert!(
+            refused.message.starts_with("no-store-keys"),
+            "{}",
+            refused.message
+        );
     }
 }
