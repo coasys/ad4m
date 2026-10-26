@@ -504,6 +504,8 @@ struct Loaded {
     /// The host that answered; `None`: the cache.
     source: Option<String>,
     skipped: Vec<SkippedSource>,
+    /// A `src`'s log that answers this call but is not in the cache: the store could not answer.
+    unpublished: Option<KelChain>,
 }
 
 /// DID resolution through the key-log cache and the agent language.
@@ -721,8 +723,10 @@ impl Resolver {
     }
 
     /// The log of `scid`: from the cache when it holds it (and `version`) and not `fresh`, else
-    /// from the sources in order (after a `src` that answered, the configured store's events
-    /// too), imported into the cache (which only extends), then from the cache.
+    /// from the sources in order, imported into the cache (which only extends), then from the
+    /// cache. A `src`'s log is staged and enters the cache only after the configured store's
+    /// events ([`Resolver::publish`]); when the store cannot answer, the staged log answers this
+    /// call alone.
     async fn load(
         &self,
         scid: &str,
@@ -769,23 +773,14 @@ impl Resolver {
                             continue;
                         }
                     }
-                    let fetched = self.fetch_untrusted(scid, Some(&base.base)).await;
-                    if matches!(&fetched, Err(e) if !matches!(e, CacheError::Fork(_))) {
-                        self.note_miss(&base.label, scid);
-                    }
-                    if fetched.is_ok() {
-                        // A foreign host may serve a prefix of the log, one that stops before a
-                        // revocation, and the cache keeps what it imports: read on from the
-                        // configured store, so a src cannot hide an event the store holds. A
-                        // store that holds no log of it changes nothing.
-                        match self.fetch_untrusted(scid, None).await {
-                            Ok(()) | Err(CacheError::NotFound) => {}
-                            Err(e) => loaded.skipped.push(SkippedSource {
-                                src: self.store_label(),
-                                reason: e.to_string(),
-                            }),
+                    let (staged, seen) = self.stage(scid, &base.base).await;
+                    let fetched = match staged {
+                        Err(e) if !matches!(e, CacheError::Fork(_)) => {
+                            self.note_miss(&base.label, scid);
+                            Err(e)
                         }
-                    }
+                        staged => self.publish(scid, staged, seen, &mut loaded).await,
+                    };
                     (base.label, fetched)
                 }
                 Source::Store => {
@@ -793,7 +788,10 @@ impl Resolver {
                         Ok(_) => Ok(()),
                         // A head no key of identity.storeKeys signed: the events still count,
                         // the head does not.
-                        Err(CacheError::BadHeadSignature) => self.fetch_untrusted(scid, None).await,
+                        Err(CacheError::BadHeadSignature) => {
+                            self.fetch_untrusted(&self.cache, scid, None, &mut Vec::new())
+                                .await
+                        }
                         Err(e) => Err(e),
                     };
                     (self.store_label(), fetched)
@@ -813,6 +811,9 @@ impl Resolver {
             }
         }
 
+        if let Some(chain) = loaded.unpublished.take() {
+            return Ok((chain, loaded));
+        }
         match self.cache.chain(scid).await {
             Ok(Some(chain)) => Ok((chain, loaded)),
             Ok(None) => Err((
@@ -823,13 +824,72 @@ impl Resolver {
         }
     }
 
+    /// Reads `scid`'s log from the foreign host `src` into a private copy of the cached log, so
+    /// that no reader of the cache sees it yet. Answers that copy (or why it failed) and every
+    /// event the host served.
+    async fn stage(&self, scid: &str, src: &str) -> (Result<KelChain, CacheError>, Vec<Event>) {
+        let mut seen = Vec::new();
+        let staged = async {
+            let staging = KelCache::open_in_memory(Vec::new())?;
+            staging
+                .ingest(scid, &self.cache.stored_events(scid, 0).await?)
+                .await?;
+            self.fetch_untrusted(&staging, scid, Some(src), &mut seen)
+                .await?;
+            staging.chain(scid).await?.ok_or(CacheError::NotFound)
+        }
+        .await;
+        (staged, seen)
+    }
+
+    /// Puts the events a foreign host served (`seen`, staged as `staged`) into the cache, after
+    /// the configured store's. A host may serve a prefix of the log, one that stops before a
+    /// revocation, and [`key_speaks_for`] reads the cache: were the prefix in it while the
+    /// store's answer is pending, a concurrent verifier would take the revoked key. So the
+    /// store's events go in first, and the host's then only extend them or show a fork. A store
+    /// that holds no log of it leaves the host's log as the only one. A store that cannot answer
+    /// leaves the cache as it was, and `staged` answers this resolution alone.
+    async fn publish(
+        &self,
+        scid: &str,
+        staged: Result<KelChain, CacheError>,
+        mut seen: Vec<Event>,
+        loaded: &mut Loaded,
+    ) -> Result<(), CacheError> {
+        match self
+            .fetch_untrusted(&self.cache, scid, None, &mut Vec::new())
+            .await
+        {
+            Ok(()) | Err(CacheError::NotFound) => {
+                // Pages overlap at the seq they start from.
+                seen.sort_by_key(|e| e.seq);
+                seen.dedup();
+                self.cache.ingest(scid, &seen).await.map(|_| ())
+            }
+            Err(e) => {
+                loaded.skipped.push(SkippedSource {
+                    src: self.store_label(),
+                    reason: format!("{e}; the src's log is not cached"),
+                });
+                loaded.unpublished = Some(staged?);
+                Ok(())
+            }
+        }
+    }
+
     /// Reads `scid`'s log from `src` (the configured store when `None`) page by page from the
-    /// cached head and imports the events with no head: a host's head is a hint of how far to
-    /// page, never trusted.
-    async fn fetch_untrusted(&self, scid: &str, src: Option<&str>) -> Result<(), CacheError> {
+    /// head `into` holds and imports the events into `into` with no head: a host's head is a
+    /// hint of how far to page, never trusted. Every event read is also pushed onto `seen`.
+    async fn fetch_untrusted(
+        &self,
+        into: &KelCache,
+        scid: &str,
+        src: Option<&str>,
+        seen: &mut Vec<Event>,
+    ) -> Result<(), CacheError> {
         let did = did_of(scid);
         for _ in 0..MAX_PAGES {
-            let cached = self.cache.chain(scid).await?;
+            let cached = into.chain(scid).await?;
             let from = cached.as_ref().map_or(0, |c| c.head().seq);
             let Some(page) = self.backend.log(&did, from, src).await? else {
                 return Err(CacheError::NotFound);
@@ -846,7 +906,8 @@ impl Resolver {
                     None => Err(CacheError::NotFound),
                 };
             }
-            match self.cache.ingest(scid, &events).await? {
+            seen.extend(events.iter().cloned());
+            match into.ingest(scid, &events).await? {
                 Ingested::AlreadyHave => return Ok(()),
                 Ingested::Appended(head) => {
                     if head.seq >= page.head.seq || events.len() < PAGE_EVENTS {
@@ -986,6 +1047,7 @@ mod tests {
     use crate::identity::types::DidDocument;
     use ad4m_identity_core::build::Signer;
     use std::sync::atomic::Ordering;
+    use tokio::sync::Notify;
 
     fn scid_url(input: &str) -> ScidUrl {
         match parse_did_url(input).unwrap() {
@@ -1299,6 +1361,85 @@ mod tests {
         );
         // Nor does the revoked key speak for the person on the expression read path.
         assert!(!key_speaks_for(&resolver.cache, &did, &log.device.key(), 1).await);
+    }
+
+    #[tokio::test]
+    async fn a_src_prefix_never_speaks_for_its_person_while_the_store_answer_is_pending() {
+        // d1 is revoked at seq 1; the foreign host serves only seq 0, and the store's answer is
+        // held back until a concurrent verifier has looked at the cache.
+        let mut log = TestLog::new(1);
+        let prefix = log.events.clone();
+        log.revoke_d1();
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        *store.foreign_events.lock().unwrap() = Some(prefix);
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let (resolver, store) = resolver(
+            in_memory(vec![store.key.multikey()]),
+            store,
+            Some("https://store.example"),
+        );
+        let did = did_of(&log.scid());
+        let d1 = log.device.key();
+        let url = format!("{did}?src=203.0.113.7");
+        let (result, ()) = tokio::join!(resolver.resolve(&url, false), async {
+            entered.notified().await;
+            // The src has answered; the store's answer is pending.
+            assert_eq!(foreign_srcs(&store), vec!["https://203.0.113.7"]);
+            assert!(
+                !key_speaks_for(&resolver.cache, &did, &d1, 1).await,
+                "the src's prefix speaks for the person before the store answered"
+            );
+            release.notify_one();
+        });
+        assert_eq!(result.did_resolution_metadata.error, None, "{result:?}");
+        assert!(
+            methods(&result).is_empty(),
+            "d1 is revoked at the store's head"
+        );
+        assert!(!key_speaks_for(&resolver.cache, &did, &d1, 1).await);
+    }
+
+    #[tokio::test]
+    async fn a_src_log_answers_but_is_not_cached_when_the_store_cannot_answer() {
+        let log = TestLog::new(1);
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        store.store_down.store(true, Ordering::SeqCst);
+        let (resolver, _) = resolver(
+            in_memory(vec![store.key.multikey()]),
+            store,
+            Some("https://store.example"),
+        );
+        let did = did_of(&log.scid());
+        let result = resolver
+            .resolve(&format!("{did}?src=203.0.113.7"), false)
+            .await;
+        let meta = &result.did_resolution_metadata;
+        assert_eq!(meta.error, None, "{result:?}");
+        assert_eq!(meta.source.as_deref(), Some("203.0.113.7"));
+        assert_eq!(meta.skipped[0].src, "store.example");
+        assert_eq!(methods(&result), vec!["#d1", "#d1-enc"]);
+        assert!(resolver.cache.chain(&log.scid()).await.unwrap().is_none());
+        assert!(!key_speaks_for(&resolver.cache, &did, &log.device.key(), 1).await);
+    }
+
+    #[tokio::test]
+    async fn a_src_log_the_store_does_not_hold_is_cached() {
+        let log = TestLog::new(1);
+        let store = Arc::new(FakeStore::new(vec![]));
+        *store.foreign_events.lock().unwrap() = Some(log.events.clone());
+        let (resolver, _) = resolver(
+            in_memory(vec![store.key.multikey()]),
+            store,
+            Some("https://store.example"),
+        );
+        let did = did_of(&log.scid());
+        let result = resolver
+            .resolve(&format!("{did}?src=203.0.113.7"), false)
+            .await;
+        assert_eq!(result.did_resolution_metadata.error, None, "{result:?}");
+        assert_eq!(methods(&result), vec!["#d1", "#d1-enc"]);
+        assert!(key_speaks_for(&resolver.cache, &did, &log.device.key(), 1).await);
     }
 
     #[tokio::test]

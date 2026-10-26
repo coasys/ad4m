@@ -141,6 +141,14 @@ impl KelCache {
         })
     }
 
+    /// A cache in a private in-memory database, trusting heads signed by `store_keys`: a staging
+    /// area whose logs no reader of the executor's cache sees.
+    pub fn open_in_memory(store_keys: Vec<String>) -> Result<Self, CacheError> {
+        let store = SqliteChainStore::open_in_memory().map_err(storage)?;
+        let meta = Connection::open_in_memory().map_err(storage)?;
+        Self::with(store, meta, store_keys)
+    }
+
     /// Calls `listener` for each fork recorded for the first time.
     pub fn set_fork_listener(&mut self, listener: ForkListener) {
         self.on_fork = Some(listener);
@@ -491,13 +499,12 @@ pub(crate) mod tests {
     };
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::sync::Notify;
 
     /// A cache in memory, trusting heads signed by `store_keys`.
     pub(crate) fn in_memory(store_keys: Vec<String>) -> KelCache {
-        let store = SqliteChainStore::open_in_memory().unwrap();
-        let meta = Connection::open_in_memory().unwrap();
-        KelCache::with(store, meta, store_keys).unwrap()
+        KelCache::open_in_memory(store_keys).unwrap()
     }
 
     /// A person's log built with the core's builders: master m0 and one device d1.
@@ -558,6 +565,10 @@ pub(crate) mod tests {
         pub key_owner_override: StdMutex<Option<String>>,
         /// What a `log` call with a `src` serves, when set; `events` otherwise.
         pub foreign_events: StdMutex<Option<Vec<Event>>>,
+        /// When set, the first `log` call without a `src` notifies `.0`, then waits for `.1`.
+        pub pause_store: StdMutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+        /// A `log` call without a `src` fails as unavailable.
+        pub store_down: AtomicBool,
     }
 
     impl FakeStore {
@@ -569,6 +580,8 @@ pub(crate) mod tests {
                 log_srcs: StdMutex::new(Vec::new()),
                 key_owner_override: StdMutex::new(None),
                 foreign_events: StdMutex::new(None),
+                pause_store: StdMutex::new(None),
+                store_down: AtomicBool::new(false),
             }
         }
     }
@@ -583,6 +596,16 @@ pub(crate) mod tests {
         ) -> Result<Option<LogPage>, IdentityError> {
             self.log_calls.fetch_add(1, Ordering::SeqCst);
             self.log_srcs.lock().unwrap().push(src.map(str::to_string));
+            if src.is_none() {
+                let pause = self.pause_store.lock().unwrap().take();
+                if let Some((entered, release)) = pause {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                if self.store_down.load(Ordering::SeqCst) {
+                    return Err(IdentityError::Unavailable("down".into()));
+                }
+            }
             let foreign = src.and(self.foreign_events.lock().unwrap().clone());
             let events = foreign.unwrap_or_else(|| self.events.lock().unwrap().clone());
             if events.is_empty() {
