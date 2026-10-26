@@ -138,10 +138,12 @@ pub struct RequestBody {
 pub struct AgentRecord {
     /// did:scid, or did:key for a bot or a device-only identity.
     pub did: String,
-    /// Today's Agent: perspective, directMessageLanguage, as the agent's signed AD4M expression
-    /// (`{author, timestamp, data, proof}`): for a `did:key` agent signed by that key, for a
-    /// `did:scid` person authored by the `did:scid` and signed by `signed_by` (`proof.key`).
-    /// The store does not read it.
+    /// The agent's profile as a signed AD4M expression (`{author, timestamp, data, proof}`, the
+    /// data today's Agent: did, perspective, directMessageLanguage); the store does not read it.
+    /// A `did:key` agent's expression is signed by that key (the agent language writes it). A
+    /// `did:scid` agent's is authored by the did:scid and signed by the record's `signedBy`
+    /// (`proof.key`), with no `proof.valid`, `proof.invalid` or `proof.record`: the agent
+    /// language answers it with [`AgentRecordProof`] added as `proof.record`.
     pub profile: serde_json::Value,
     pub version: u64,
     /// The device did:key that signed.
@@ -155,6 +157,22 @@ pub struct AgentRecord {
     #[serde(default)]
     pub anchor: Option<u64>,
     /// `coasys:link` scheme over {profile, version, anchor}.
+    pub sig: String,
+}
+
+/// `proof.record` on a `did:scid` profile expression from the agent language: the binding of
+/// the agent record it came in. With `proof.key` as the record's `signedBy` and the expression
+/// minus `proof.record` as the record's `profile`, a reader rebuilds the [`AgentRecord`] and
+/// checks `sig` over [`AgentRecord::signed_value`] under `coasys:link`, then the key at
+/// `anchor` in the person's log: a record signed before a revocation stays valid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRecordProof {
+    /// The record's `version`.
+    pub version: u64,
+    /// The record's content anchor (always present on a `did:scid` record).
+    pub anchor: u64,
+    /// The record's `sig`, unchanged.
     pub sig: String,
 }
 

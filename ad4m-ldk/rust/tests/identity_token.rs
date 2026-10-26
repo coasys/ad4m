@@ -96,16 +96,8 @@ impl Language for Agent {
 }
 
 impl IdentityCapability for Agent {
-    async fn identity_log(
-        &mut self,
-        did: String,
-        from: u64,
-        src: Option<String>,
-    ) -> LanguageResult<Option<LogPage>> {
-        match src {
-            Some(src) => self.calls.push(format!("log {did} {from} {src}")),
-            None => self.calls.push(format!("log {did} {from}")),
-        }
+    async fn identity_log(&mut self, did: String, from: u64) -> LanguageResult<Option<LogPage>> {
+        self.calls.push(format!("log {did} {from}"));
         if self.appended.is_empty() {
             return Ok(None);
         }
@@ -291,7 +283,7 @@ fn shims_expand() {
 fn identity_calls_pass_events_through_unchanged() {
     let mut lang = block_on(Agent::init()).unwrap();
     assert_eq!(
-        block_on(lang.identity_log("did:scid:zScid".into(), 0, None)).unwrap(),
+        block_on(lang.identity_log("did:scid:zScid".into(), 0)).unwrap(),
         None
     );
 
@@ -312,10 +304,9 @@ fn identity_calls_pass_events_through_unchanged() {
         block_on(lang.identity_append("did:scid:zScid".into(), req)).unwrap(),
         head()
     );
-    let page =
-        block_on(lang.identity_log("did:scid:zScid".into(), 0, Some("store.example".into())))
-            .unwrap()
-            .unwrap();
+    let page = block_on(lang.identity_log("did:scid:zScid".into(), 0))
+        .unwrap()
+        .unwrap();
     assert_eq!(page.events, events);
     let page_json = serde_json::to_value(&page).unwrap();
     assert_eq!(page_json["events"], Value::Array(events.clone()));
@@ -345,7 +336,7 @@ fn identity_calls_pass_events_through_unchanged() {
         vec![
             "log did:scid:zScid 0",
             "append did:scid:zScid",
-            "log did:scid:zScid 0 store.example",
+            "log did:scid:zScid 0",
             "head did:scid:zScid",
             "keyOwner z6MkKey 8"
         ]
@@ -548,6 +539,37 @@ fn an_agent_record_anchor_is_one_seq_and_signs_as_that_number() {
                      "anchor": {"kelDid": "did:scid:zScid", "keyId": "d1", "kelSeq": 1, "kelHash": "zHash1"},
                      "sig": "zRec"});
     assert!(serde_json::from_value::<AgentRecord>(old).is_err());
+}
+
+#[test]
+fn a_profile_proof_carries_its_record_as_proof_record() {
+    let mut proof = ExpressionProof {
+        signature: "ab".into(),
+        key: "did:key:zDev".into(),
+        ..ExpressionProof::default()
+    };
+    // Absent on every other expression: no `record` key at all.
+    assert_eq!(
+        serde_json::to_value(&proof).unwrap(),
+        json!({"signature": "ab", "key": "did:key:zDev"})
+    );
+    let parsed: ExpressionProof =
+        serde_json::from_value(json!({"signature": "ab", "key": "did:key:zDev"})).unwrap();
+    assert_eq!(parsed.record, None);
+
+    proof.record = Some(ad4m_ldk::identity::AgentRecordProof {
+        version: 1_800_000_000_123,
+        anchor: 7,
+        sig: "zRec".into(),
+    });
+    let value = serde_json::to_value(&proof).unwrap();
+    assert_eq!(
+        value,
+        json!({"signature": "ab", "key": "did:key:zDev",
+               "record": {"version": 1_800_000_000_123u64, "anchor": 7, "sig": "zRec"}})
+    );
+    let back: ExpressionProof = serde_json::from_value(value).unwrap();
+    assert_eq!(back.record, proof.record);
 }
 
 #[test]

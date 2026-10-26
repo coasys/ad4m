@@ -12,13 +12,15 @@ serves the identity interface, both on the shared identity store (`identity-stor
   the signer knew when it signed; the read keeps the record only when the anchor is at or below
   the log's head and the log lists `signedBy`, without the bot mark and valid at the anchor (a
   key revoked at seq N signs nothing valid anchored at or after N; a record signed before the
-  revocation stays valid). A read answers the stored signed expression unchanged, so the
-  executor's signature check on every expression passes, and only when its author is the
-  record's did and its data an Agent naming that did. A `did:scid` person's profile is an AD4M
-  expression authored by the `did:scid` and signed by a device key: its `proof.key` (a
-  `did:key`) must be the record's `signedBy`, and the executor verifies the signature under
-  that key once the author's log (in its key-log cache) lists it valid and without the bot
-  mark. A record whose profile is a plain Agent answers nothing.
+  revocation stays valid). A record's profile is the agent's signed AD4M expression, answered
+  only when its author is the record's did and its data an Agent naming that did. A `did:key`
+  read answers it unchanged, so the executor's signature check on every expression passes. A
+  `did:scid` read answers it exactly as stored plus `proof.record` = `{version, anchor, sig}`
+  of the record, so the executor checks the record itself at its anchor: removing
+  `proof.record` gives back the stored profile, which `sig` covers, by `proof.key` (the
+  record's `signedBy`). A `did:scid` profile with `proof.valid`, `proof.invalid` or
+  `proof.record`, another `proof.key`, or a field the expression type does not carry is
+  ignored.
 - `identityLog`, `identityHead`, `identityAppend`, `identityKeyOwner`, `identityPowParams`,
   `identityAttachNote`, `identityPutAgent`, `identityOpenOffer`, `identityListOffers`,
   `identityCancelOffer`, `identityClaimOffer`, `identityOfferState`: one store route each.
@@ -30,15 +32,9 @@ serves the identity interface, both on the shared identity store (`identity-stor
 The store's base URL is the `storeUrl` language setting (`{"storeUrl": "https://…"}`), read on
 every call; without it, `https://store.coasys.org`.
 
-`identityLog(did, from, src?)` alone may read elsewhere: given a did:scid `src` hint that is an
-HTTPS base (`store.example`, `https://store.example`, `https://store.example/prefix`; a
-scheme-less one is HTTPS), it fetches `GET {src}/v1/logs/{scid}?from=` from that host. Any
-other `src` (`http`, userinfo, a query or fragment, a host that is not a DNS name or IP
-literal, an AD4M language address, a DID method) is refused as `invalid` (`src`) before any
-fetch. The language only reads from a `src` and passes its head on as data; the executor
-decides whether to trust it. Refusing hosts on private or loopback addresses is the
-executor's job (it resolves DNS and runs the fetch); the language checks only the form. A
-page over 256 events or 257 × 64 KiB is `invalid` (`too-large`), from a `src` or the store.
+Every call goes to that store. A did:scid `src` hint names another host of a log; the executor
+fetches it itself, never through the language. A log page over 256 events or 257 × 64 KiB is
+`invalid` (`too-large`).
 
 The language is `rust-impl/` (the Rust ALDK port), which `pnpm build` bundles into
 `build/bundle.js`. The older TypeScript `index.ts` is not built and does not serve the

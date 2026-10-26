@@ -412,7 +412,7 @@ export. **The executor calls them only on the language at `system_addresses.agen
 
 | Export | Parameters | Returns | Store route |
 |---|---|---|---|
-| `identityLog(did, from, src?)` | `string`, `number`, `string?` | `Promise<LogPage \| null>` | `GET /v1/logs/{scid}?from=`, at `src` when given |
+| `identityLog(did, from)` | `string`, `number` | `Promise<LogPage \| null>` | `GET /v1/logs/{scid}?from=` |
 | `identityHead(did)` | `string` | `Promise<SignedHead \| null>` | `GET /v1/heads/{scid}` |
 | `identityAppend(did, req)` | `string`, `AppendRequest` | `Promise<SignedHead>` | `POST /v1/logs/{scid}/events` |
 | `identityKeyOwner(multikey, waitSec?)` | `string`, `number` (0–8) | `Promise<KeyIndexEntry \| null>` | `GET /v1/keys/{multikey}?wait=` |
@@ -425,18 +425,11 @@ export. **The executor calls them only on the language at `system_addresses.agen
 | `identityClaimOffer(did, offerId, claim)` | `string`, `string`, `Claim` | `Promise<ClaimReceipt>` | `POST /v1/offers/{scid}/{offerId}/claim` |
 | `identityOfferState(did, offerId, key, waitSec?)` | `string`, `string`, `string`, `number` | `Promise<OfferProgress>` | `GET /v1/offers/{scid}/{offerId}/state` |
 
-`src` on `identityLog` is the did:scid `src` hint: where the DID's log may be fetched, in
-place of the language's own store. A language serves the forms it knows and refuses any other
-with `invalid`. The store language serves an HTTPS base (`store.example`,
-`https://store.example`, optionally with a path prefix; a scheme-less `src` is HTTPS) and
-refuses `http` and other schemes, userinfo, a query, a fragment and a host that is not a DNS
-name or an IP literal. A `src` only reads: the language never writes to it, and the head in a
-page from another host is data, and the executor decides whether it trusts it. The language
-checks only the form of `src`; refusing a host that resolves to a private, loopback or
-link-local address belongs to the executor, which resolves DNS and runs the fetch. A page
-over 256 events or over the size of 257 store bodies (64 KiB each) is refused as `invalid`
-(`too-large`). Signed, long-lived data (events, agent records, links) carries the bare
-DID, never a `src`.
+Every call goes to the language's own store. A did:scid `src` hint (a DID URL's `?src=`,
+another host of the log) is not part of this interface: the executor fetches such a host
+itself, over the did:scid host profile (`GET {base}/v1/logs/{scid}?from=`), with a transport
+that refuses non-public addresses when it connects. A log page over 256 events or over the
+size of 257 store bodies (64 KiB each) is refused as `invalid` (`too-large`).
 
 `did` is the full `did:scid:coasys:1:<scid>`. The wire types live in `ad4m-ldk`
 (`js/src/types.ts`, `rust/src/identity.rs`); JSON field names are camelCase.
@@ -459,11 +452,16 @@ Rules for an implementation:
 - `expressionGet` / `expressionCreate` keep working for agent profiles, on the store's
   `/v1/agents/{did}` routes. A `did:key` record's `profile` is the Agent as the agent's signed
   AD4M expression (the host's `createSignedExpression`), and `expressionGet` answers that
-  expression unchanged, so the executor's check of `proof.signature` holds as before. A
-  `did:scid` record's `profile` is the person's Agent as an AD4M expression authored by the
-  `did:scid` and signed by the record's `signedBy` (`proof.key` is that `did:key`). The
-  language answers it only when its author is the record's DID and its data an Agent naming
-  that DID. The executor verifies it under `proof.key` once the author's log lists that key.
+  expression unchanged, so the executor's check of `proof.signature` holds as before.
+- **A `did:scid` profile carries its record's proof.** A `did:scid` record's `profile` is the
+  Agent as an AD4M expression authored by the did:scid, with `proof.key` the record's
+  `signedBy` and no `proof.valid`, `proof.invalid` or `proof.record`. `expressionGet` answers
+  it exactly as stored plus one field, `proof.record` = `{version, anchor, sig}` of the record
+  (`AgentRecordProof`), and ignores a record whose profile is not of that form. The executor
+  then checks the record itself at its anchor, from signed data only: removing `proof.record`
+  gives back `profile`, `sig` must hold over `{profile, version, anchor}` (`coasys:link`) by
+  `proof.key`, and that key must be valid at `anchor` in the log. A profile signed before a
+  revocation so stays valid after it, as the anchor rule below says.
 - **An agent record's `anchor` is one seq.** `sig` covers `{profile, version, anchor}`. A
   `did:key` record's `anchor` is `null`; a `did:scid` record's is the seq of that log the
   signer knew when it signed. The store on write and the language on read keep a `did:scid`
@@ -473,8 +471,8 @@ Rules for an implementation:
   a fork freezes the identity anyway, so the anchor carries no DID, key id or hash.
 
 The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the
-calls it makes today are `log` (with an optional `src`), `keyOwner`, `append`, `openOffer`, `listOffers`, `claimOffer` and
-`offerState`; the language serves the others for apps and for later executor features.
+calls it makes today are `log`, `keyOwner`, `append`, `openOffer`, `listOffers`, `claimOffer`
+and `offerState`; the language serves the others for apps and for later executor features.
 
 ### 5.9 Token (agent language only, interfaces only)
 

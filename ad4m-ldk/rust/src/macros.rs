@@ -203,7 +203,7 @@ macro_rules! __ad4m_cap {
         // (a JS number is not a wasm-bindgen u64); answers go out
         // through `to_json_js`, so `None` is `null`.
         $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityLog",
-            __ad4m_identity_log, identity_log, (did: String), [from: u64], default [src: Option<String>]);
+            __ad4m_identity_log, identity_log, (did: String), [from: u64]);
         $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityHead",
             __ad4m_identity_head, identity_head, (did: String), []);
         $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityAppend",

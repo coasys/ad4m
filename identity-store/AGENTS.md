@@ -54,9 +54,10 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 ### The public did:scid host profile
 
 `GET /v1/logs/{scid}` and `GET /v1/heads/{scid}` make the store a public, read-only HTTPS
-host of `did:scid` logs: a browser, `coasys.id` or another vendor's resolver reads a log with
-no AD4M, and a DID URL's `src` hint can name the store (`did:scid:coasys:1:<scid>?src=<host>`;
-the agent language reads `{src}/v1/logs/{scid}?from=`).
+host of `did:scid` logs: a browser, `coasys.id`, another vendor's resolver or an executor
+reads a log with no agent language, and a DID URL's `src` hint can name the store
+(`did:scid:coasys:1:<scid>?src=<host>`; a resolver reads `{src}/v1/logs/{scid}?from=`). The
+agent language never fetches a `src`: it talks only to its configured store.
 
 - **CORS:** both routes answer `Access-Control-Allow-Origin: *` (GET only, no credentials),
   preflights included. Every other route, writes and the other reads, keeps `CORS_ORIGINS`.

@@ -14,8 +14,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ad4m_hash_chain::{decode_ed25519_multikey, encode_ed25519_multikey, sha256};
 use ad4m_ldk::identity::{
-    AgentRecord, AppendRequest, IdentityErrorCode, SignedRequest, LOG_PAGE_EVENTS,
-    MAX_LOG_PAGE_BYTES,
+    AgentRecord, AgentRecordProof, AppendRequest, IdentityErrorCode, SignedRequest,
+    LOG_PAGE_EVENTS, MAX_LOG_PAGE_BYTES,
 };
 use ad4m_ldk::prelude::{Expression, ExpressionProof, LanguageError, LanguageResult};
 use centralized_agent_language::agents::{self, AgentKey};
@@ -204,20 +204,13 @@ struct Recorded {
     body: String,
 }
 
-/// What the host answers for an `https://` base: the suite has no TLS, so a base either
-/// forwards to a local store's `http://` URL or answers a fixed reply.
-#[derive(Clone)]
-enum Remote {
-    Forward(String),
-    Reply(HttpReply),
-}
-
 /// The host's `httpFetch`: HTTP/1.1 over a TCP stream, recording each call.
 #[derive(Clone, Default)]
 struct Host {
     calls: Rc<RefCell<Vec<Recorded>>>,
     url: Rc<RefCell<String>>,
-    remotes: Rc<RefCell<Vec<(String, Remote)>>>,
+    /// Fixed replies for `https://` bases: the suite has no TLS.
+    remotes: Rc<RefCell<Vec<(String, HttpReply)>>>,
 }
 
 fn fetch_blocking(
@@ -302,17 +295,14 @@ impl Http for Host {
             headers: serde_json::from_str(headers_json).unwrap_or_default(),
             body: body.to_string(),
         });
-        let remote = self
+        let reply = self
             .remotes
             .borrow()
             .iter()
             .find(|(base, _)| url.starts_with(&format!("{base}/")))
-            .cloned();
-        match remote {
-            Some((base, Remote::Forward(to))) => {
-                fetch_blocking(&url.replacen(&base, &to, 1), method, headers_json, body)
-            }
-            Some((_, Remote::Reply(reply))) => Ok(reply),
+            .map(|(_, reply)| reply.clone());
+        match reply {
+            Some(reply) => Ok(reply),
             None => fetch_blocking(url, method, headers_json, body),
         }
     }
@@ -336,9 +326,9 @@ impl Host {
         self.calls.borrow().last().unwrap().clone()
     }
 
-    /// Answers calls under the `https://` `base` with `remote`.
-    fn serve(&self, base: &str, remote: Remote) {
-        self.remotes.borrow_mut().push((base.to_string(), remote));
+    /// Answers calls under the `https://` `base` with `reply`.
+    fn serve(&self, base: &str, reply: HttpReply) {
+        self.remotes.borrow_mut().push((base.to_string(), reply));
     }
 }
 
@@ -394,6 +384,7 @@ impl AgentKey for TestAgentKey {
                 key: format!("{did}#{}", &did["did:key:".len()..]),
                 valid: None,
                 invalid: None,
+                record: None,
             },
         })
     }
@@ -445,16 +436,11 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
 /// parses as RFC 3339 with milliseconds and `Z`; this check takes only a timestamp already in
 /// that form.
 fn executor_verifies(expression: &Expression) -> bool {
-    signature_holds_under(expression, &expression.author)
-}
-
-/// The signature check of [`executor_verifies`] under the did:key `did`. For a `did:scid`
-/// author the executor runs it under `proof.key`, once the author's log lists that key.
-fn signature_holds_under(expression: &Expression, did: &str) -> bool {
     let canonical = expression.timestamp.len() == 24
         && expression.timestamp.ends_with('Z')
         && expression.timestamp.as_bytes()[19] == b'.';
-    let Some(key) = did
+    let Some(key) = expression
+        .author
         .strip_prefix("did:key:")
         .and_then(decode_ed25519_multikey)
         .and_then(|k| VerifyingKey::from_bytes(&k).ok())
@@ -528,12 +514,12 @@ fn the_log_calls_answer_and_refuse_as_the_store_does() {
     let did = alice["did"].as_str().unwrap();
 
     assert!(block_on(store.head(did)).unwrap().is_none());
-    assert!(block_on(store.log(did, 0, None)).unwrap().is_none());
+    assert!(block_on(store.log(did, 0)).unwrap().is_none());
     let head = block_on(store.append(did, &append_req(vec![alice["incept"].clone()]))).unwrap();
     assert_eq!(head.seq, 0);
     assert_eq!(head.store, format!("did:key:{}", server.key));
     assert_eq!(block_on(store.head(did)).unwrap(), Some(head.clone()));
-    let page = block_on(store.log(did, 0, None)).unwrap().unwrap();
+    let page = block_on(store.log(did, 0)).unwrap().unwrap();
     assert_eq!(page.events, vec![alice["incept"].clone()]);
     assert!(!page.vouched);
 
@@ -830,11 +816,10 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
     let p = person(&mut apps, &store, name);
     let did = p["did"].as_str().unwrap().to_string();
     link(&mut apps, &store, name, &did, "gus phone");
-    let profile =
-        json!({ "did": did, "perspective": { "links": [] }, "directMessageLanguage": "lang://dm" });
+    let profile = scid_profile(&mut apps, name, "gus phone", &did);
     let record: AgentRecord = serde_json::from_value(apps.run(
         "record",
-        json!({ "name": name, "signer": "gus phone", "agent": profile, "version": 1 }),
+        json!({ "name": name, "signer": "gus phone", "profile": profile, "version": 1 }),
     ))
     .unwrap();
     let path = format!("/v1/agents/{did}");
@@ -850,18 +835,16 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
     let expression = block_on(agents::get(&store, &did, now_s()))
         .unwrap()
         .unwrap();
-    assert_eq!(serde_json::to_value(&expression).unwrap(), record.profile);
-    assert_eq!(expression.data, profile);
+    assert_eq!(expression.data, profile["data"]);
     assert_eq!(expression.author, did);
-    assert_eq!(expression.proof.key, record.signed_by);
-    assert!(signature_holds_under(&expression, &record.signed_by));
+    assert_carries_its_record(&expression, &record);
 
     // A record of this did signed by a key of another log: a hostile store's row, ignored.
     let other = person(&mut apps, &store, "ivy records");
     let hostile = apps.run(
         "record",
-        json!({ "name": "ivy records", "signer": "d1", "agent": profile, "version": 9,
-                "author": did, "did": did, "anchor": record.anchor }),
+        json!({ "name": "ivy records", "signer": "d1", "profile": profile, "version": 9,
+                "did": did, "anchor": record.anchor }),
     );
     assert_eq!(hostile["anchor"], json!(record.anchor));
     assert_eq!(
@@ -896,7 +879,8 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
         .unwrap()
         .is_some());
 
-    // Revoke d2: the record it signed before the revocation stays valid.
+    // Revoke d2: the record it signed before the revocation stays valid, and still carries
+    // its binding, so a reader checks it at its anchor rather than at the head.
     let anchor = record.anchor.unwrap();
     let revoke = apps.run("revoke", json!({ "name": name, "ids": ["d2"] }));
     block_on(store.append(&did, &append_req(vec![revoke.clone()]))).unwrap();
@@ -904,14 +888,15 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
         .as_u64()
         .unwrap();
     assert!(revoked_at > anchor);
-    assert!(block_on(agents::get(&store, &did, now_s()))
+    let after_revocation = block_on(agents::get(&store, &did, now_s()))
         .unwrap()
-        .is_some());
+        .unwrap();
+    assert_carries_its_record(&after_revocation, &record);
 
     // A row signed by d2 anchored at its revocation: ignored.
     let at_revoke = apps.run(
         "record",
-        json!({ "name": name, "signer": "gus phone", "agent": profile, "version": 2,
+        json!({ "name": name, "signer": "gus phone", "profile": profile, "version": 2,
                 "anchor": revoked_at }),
     );
     store_row(&at_revoke);
@@ -920,9 +905,10 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
         .is_none());
 
     // A row anchored past the log's head, by a key valid there: ignored.
+    let d1_profile = scid_profile(&mut apps, name, "d1", &did);
     let ahead = apps.run(
         "record",
-        json!({ "name": name, "signer": "d1", "agent": profile, "version": 3,
+        json!({ "name": name, "signer": "d1", "profile": d1_profile, "version": 3,
                 "anchor": revoked_at + 1 }),
     );
     store_row(&ahead);
@@ -932,60 +918,132 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
     // The same key anchored at the head: kept.
     let at_head = apps.run(
         "record",
-        json!({ "name": name, "signer": "d1", "agent": profile, "version": 3 }),
+        json!({ "name": name, "signer": "d1", "profile": d1_profile, "version": 3 }),
     );
     assert_eq!(at_head["anchor"], json!(revoked_at));
     store_row(&at_head);
-    assert!(block_on(agents::get(&store, &did, now_s()))
+    let kept = block_on(agents::get(&store, &did, now_s()))
         .unwrap()
-        .is_some());
+        .unwrap();
+    assert_carries_its_record(&kept, &serde_json::from_value(at_head).unwrap());
+}
+
+/// A `did:scid` person's profile as its agent record stores it: the Agent as an AD4M
+/// expression authored by `did`, `proof.key` the `did:key` of `signer` (the record's
+/// `signedBy`). The language does not check the expression's own signature (the executor
+/// does), so a fixed one stands in.
+fn scid_profile(apps: &mut Apps, name: &str, signer: &str, did: &str) -> Value {
+    let probe = apps.run(
+        "record",
+        json!({ "name": name, "signer": signer, "profile": {}, "version": 0 }),
+    );
+    json!({
+        "author": did,
+        "timestamp": "2027-01-15T08:00:00.000Z",
+        "data": { "did": did, "perspective": { "links": [] }, "directMessageLanguage": "lang://dm" },
+        "proof": { "key": probe["signedBy"], "signature": "ab".repeat(64) },
+    })
+}
+
+/// `expression` is `record`'s profile plus `proof.record` = `{version, anchor, sig}` of the
+/// record, and nothing else: without `proof.record` it is the stored profile exactly, and the
+/// record signature by `proof.key` holds over `{profile, version, anchor}` rebuilt from it.
+fn assert_carries_its_record(expression: &Expression, record: &AgentRecord) {
+    let mut answered = serde_json::to_value(expression).unwrap();
+    assert_eq!(
+        answered["proof"]["record"],
+        json!({ "version": record.version, "anchor": record.anchor.unwrap(), "sig": record.sig })
+    );
+    let binding: AgentRecordProof =
+        serde_json::from_value(answered["proof"]["record"].clone()).unwrap();
+    answered["proof"].as_object_mut().unwrap().remove("record");
+    assert_eq!(answered, record.profile, "the stored profile, unchanged");
+
+    // The reader's check, from the answer alone.
+    let key = expression.proof.key.clone();
+    let rebuilt = AgentRecord {
+        did: expression.author.clone(),
+        profile: answered,
+        version: binding.version,
+        signed_by: key.clone(),
+        anchor: Some(binding.anchor),
+        sig: binding.sig.clone(),
+    };
+    assert_eq!(rebuilt.signed_value(), record.signed_value());
+    let sig = ad4m_hash_chain::decode_proof_value(&binding.sig).unwrap();
+    assert!(ad4m_identity_core::verify_signed(
+        ad4m_identity_core::LINK_DOMAIN,
+        &rebuilt.signed_value(),
+        key.strip_prefix("did:key:").unwrap(),
+        &sig
+    ));
 }
 
 #[test]
-fn a_did_scid_record_answers_only_the_persons_profile_signed_by_the_records_key() {
+fn a_did_scid_profile_is_answered_only_when_its_record_binds_it_exactly() {
     let server = StoreProcess::start();
     let mut apps = Apps::start();
     let (_host, store) = Host::on(&server.url);
-    let name = "hal records";
+    let name = "lee binds";
     let p = person(&mut apps, &store, name);
     let did = p["did"].as_str().unwrap().to_string();
+    let good = scid_profile(&mut apps, name, "d1", &did);
+    let record: AgentRecord = serde_json::from_value(apps.run(
+        "record",
+        json!({ "name": name, "signer": "d1", "profile": good, "version": 1 }),
+    ))
+    .unwrap();
+    let body = serde_json::to_value(&record).unwrap();
     let path = format!("/v1/agents/{did}");
-    let agent = |d: &str| json!({ "did": d, "perspective": { "links": [] }, "directMessageLanguage": null });
-    let mut put = |fields: Value| -> AgentRecord {
-        let mut fields = fields;
-        fields["name"] = json!(name);
-        fields["signer"] = json!("d1");
-        let record = apps.run("record", fields);
-        let req = apps.signed(name, "d1", Some("d1"), "PUT", &path, Some(&record));
-        let record: AgentRecord = serde_json::from_value(record).unwrap();
-        block_on(store.put_agent(&record, Some(&req))).unwrap();
-        record
-    };
-    let answered = |store: &Store<Host>| block_on(agents::get(store, &did, now_s())).unwrap();
+    let req = apps.signed(name, "d1", Some("d1"), "PUT", &path, Some(&body));
+    block_on(store.put_agent(&record, Some(&req))).unwrap();
+    let answered = block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .unwrap();
+    assert_carries_its_record(&answered, &record);
 
-    // Signed by a key other than the record's (a device in no log).
-    put(json!({ "agent": agent(&did), "expressionSigner": "hal stranger", "version": 1 }));
-    assert!(answered(&store).is_none());
+    // Each profile below is signed into a valid record by d1, so only its form is at fault.
+    let mut bad: Vec<(&str, Value)> =
+        vec![("a plain Agent, not an expression", good["data"].clone())];
+    let mut extra = good.clone();
+    extra["extra"] = json!(1);
+    bad.push(("a field the expression would drop", extra));
+    let mut proof_extra = good.clone();
+    proof_extra["proof"]["extra"] = json!(1);
+    bad.push(("a proof field the expression would drop", proof_extra));
+    for flag in ["valid", "invalid"] {
+        let mut flagged = good.clone();
+        flagged["proof"][flag] = json!(true);
+        bad.push(("a verdict flag", flagged));
+    }
+    let mut bound = good.clone();
+    bound["proof"]["record"] = json!({ "version": 1, "anchor": 0, "sig": record.sig });
+    bad.push(("a binding already in the profile", bound));
+    let mut other_key = good.clone();
+    other_key["proof"]["key"] = json!(format!("did:key:{}", server.key));
+    bad.push(("proof.key not the record's signedBy", other_key));
+    let mut other_author = good.clone();
+    other_author["author"] = json!("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+    bad.push(("another author", other_author));
 
-    // Authored by another did.
-    let other = "did:scid:coasys:1:zOtherPerson";
-    put(json!({ "agent": agent(&did), "author": other, "version": 2 }));
-    assert!(answered(&store).is_none());
-
-    // An Agent naming another did.
-    put(json!({ "agent": agent(other), "version": 3 }));
-    assert!(answered(&store).is_none());
-
-    // A plain Agent with no signed expression.
-    put(json!({ "profile": agent(&did), "version": 4 }));
-    assert!(answered(&store).is_none());
-
-    // The person's profile signed by the record's key: answered unchanged.
-    let record = put(json!({ "agent": agent(&did), "version": 5 }));
-    let expression = answered(&store).unwrap();
-    assert_eq!(serde_json::to_value(&expression).unwrap(), record.profile);
-    assert_eq!(expression.proof.key, record.signed_by);
-    assert!(signature_holds_under(&expression, &record.signed_by));
+    for (case, profile) in bad {
+        let row = apps.run(
+            "record",
+            json!({ "name": name, "signer": "d1", "profile": profile, "version": 1 }),
+        );
+        let db = rusqlite::Connection::open(server.db()).unwrap();
+        db.execute(
+            "UPDATE agents SET record = ?1, version = 1 WHERE did = ?2",
+            rusqlite::params![row.to_string(), did],
+        )
+        .unwrap();
+        assert!(
+            block_on(agents::get(&store, &did, now_s()))
+                .unwrap()
+                .is_none(),
+            "{case}"
+        );
+    }
 }
 
 #[test]
@@ -1154,7 +1212,7 @@ fn bodies_are_the_inputs_canonical_json_and_the_signed_request_travels_unchanged
         ad4m_hash_chain::canonical_json(&serde_json::to_value(&request).unwrap()).unwrap()
     );
     assert_eq!(
-        block_on(store.log(did, 0, None)).unwrap().unwrap().events[0],
+        block_on(store.log(did, 0)).unwrap().unwrap().events[0],
         p["incept"]
     );
 
@@ -1207,175 +1265,51 @@ fn changing_the_store_setting_moves_every_call_and_a_silent_store_is_unavailable
 }
 
 #[test]
-fn a_src_hint_reads_the_log_from_that_host_and_every_other_call_stays_on_the_store() {
-    let home = StoreProcess::start();
-    let foreign = StoreProcess::start();
-    let mut apps = Apps::start();
-    let (host, store) = Host::on(&home.url);
-    let (_, foreign_store) = Host::on(&foreign.url);
-    let p = person(&mut apps, &foreign_store, "noor elsewhere");
-    let did = p["did"].as_str().unwrap();
-    let scid = did.rsplit(':').next().unwrap();
-    host.serve("https://logs.example", Remote::Forward(foreign.url.clone()));
-    host.serve(
-        "https://mirror.example/coasys",
-        Remote::Forward(foreign.url.clone()),
-    );
-
-    // Absent: the configured store, which does not hold the log.
-    assert!(block_on(store.log(did, 0, None)).unwrap().is_none());
-    assert_eq!(
-        host.last().url,
-        format!("{}/v1/logs/{scid}?from=0", home.url)
-    );
-
-    // Scheme-less: HTTPS, host in lower case, the trailing `/` dropped.
-    let page = block_on(store.log(did, 0, Some("Logs.Example/")))
-        .unwrap()
-        .unwrap();
-    assert_eq!(page.events, vec![p["incept"].clone()]);
-    // The foreign host's head comes back as it is, signed by that host's key.
-    assert_eq!(page.head.store, format!("did:key:{}", foreign.key));
-    let call = host.last();
-    assert_eq!(
-        call.url,
-        format!("https://logs.example/v1/logs/{scid}?from=0")
-    );
-    assert_eq!(call.method, "GET");
-    assert!(call.body.is_empty());
-
-    // An https base with a path prefix, and the next page from `from`.
-    let page = block_on(store.log(did, 1, Some("https://mirror.example/coasys")))
-        .unwrap()
-        .unwrap();
-    assert!(page.events.is_empty());
-    assert_eq!(
-        host.last().url,
-        format!("https://mirror.example/coasys/v1/logs/{scid}?from=1")
-    );
-
-    // An unknown log at the src host is `None`, as at the store.
-    let other = apps.run("person", json!({ "name": "noor nowhere" }));
-    assert!(
-        block_on(store.log(other["did"].as_str().unwrap(), 0, Some("logs.example")))
-            .unwrap()
-            .is_none()
-    );
-
-    // The other calls stay on the configured store.
-    assert!(block_on(store.head(did)).unwrap().is_none());
-    assert!(host
-        .last()
-        .url
-        .starts_with(&format!("{}/v1/heads/", home.url)));
-}
-
-#[test]
-fn a_src_that_is_not_an_https_base_is_refused_before_any_fetch() {
-    let mut apps = Apps::start();
-    let (host, store) = Host::on("http://127.0.0.1:9");
-    let p = apps.run("person", json!({ "name": "pia refused" }));
-    let did = p["did"].as_str().unwrap();
-    let refused = [
-        "",
-        "http://logs.example",
-        "HTTP://logs.example",
-        "ftp://logs.example",
-        "https://user@logs.example",
-        "user:pw@logs.example",
-        "logs.example?x=1",
-        "https://logs.example/?",
-        "logs.example#top",
-        "https://",
-        "https://logs.example:0",
-        "https://logs.example:65536",
-        "https://logs.example:x",
-        "https://logs.example./",
-        "https://-logs.example",
-        "https://logs_example.org",
-        "https://logs.example/a b",
-        "https://logs.example/a/../b",
-        "https://logs.example//b",
-        "https://[::1",
-        "https://[zz]",
-        "QmXyz://address",
-        "did:web:logs.example",
-        "logs.example\\evil",
-    ];
-    for src in refused {
-        let answer = block_on(store.log(did, 0, Some(src)));
-        match answer {
-            Err(error) => assert_eq!(
-                IdentityErrorCode::from_language_error(&error),
-                Some(IdentityErrorCode::Invalid {
-                    reason: "src".into()
-                }),
-                "{src:?}: {error}"
-            ),
-            Ok(page) => panic!("{src:?} was accepted: {page:?}"),
-        }
-    }
-    assert!(
-        host.calls.borrow().is_empty(),
-        "a refused src fetches nothing"
-    );
-}
-
-#[test]
 fn a_log_page_over_the_stores_limits_is_refused() {
-    let home = StoreProcess::start();
-    let foreign = StoreProcess::start();
+    let server = StoreProcess::start();
     let mut apps = Apps::start();
-    let (host, store) = Host::on(&home.url);
-    let (_, foreign_store) = Host::on(&foreign.url);
-    let p = person(&mut apps, &foreign_store, "omar large");
+    let (host, store) = Host::on(&server.url);
+    let p = person(&mut apps, &store, "omar large");
     let did = p["did"].as_str().unwrap();
-    let page = block_on(foreign_store.log(did, 0, None)).unwrap().unwrap();
+    let page = block_on(store.log(did, 0)).unwrap().unwrap();
+    // The configured store at `base`, answering `body` to every call.
+    let store_answering = |base: &str, body: Value| {
+        host.serve(
+            base,
+            HttpReply {
+                status: 200,
+                body: body.to_string(),
+            },
+        );
+        *host.url.borrow_mut() = base.to_string();
+    };
+    let too_large = IdentityErrorCode::Invalid {
+        reason: "too-large".into(),
+    };
 
     let mut many = serde_json::to_value(&page).unwrap();
     many["events"] = Value::Array(vec![json!({}); LOG_PAGE_EVENTS as usize + 1]);
     many["appendedAt"] = Value::Array(vec![json!(1); LOG_PAGE_EVENTS as usize + 1]);
-    host.serve(
-        "https://many.example",
-        Remote::Reply(HttpReply {
-            status: 200,
-            body: many.to_string(),
-        }),
-    );
+    store_answering("https://many.example", many);
+    assert_eq!(refusal(block_on(store.log(did, 0))), too_large);
+
     let mut big = serde_json::to_value(&page).unwrap();
     big["pad"] = json!("x".repeat(MAX_LOG_PAGE_BYTES));
-    host.serve(
-        "https://big.example",
-        Remote::Reply(HttpReply {
-            status: 200,
-            body: big.to_string(),
-        }),
-    );
-    let too_large = IdentityErrorCode::Invalid {
-        reason: "too-large".into(),
-    };
-    assert_eq!(
-        refusal(block_on(store.log(did, 0, Some("many.example")))),
-        too_large
-    );
-    assert_eq!(
-        refusal(block_on(store.log(did, 0, Some("big.example")))),
-        too_large
-    );
+    store_answering("https://big.example", big);
+    assert_eq!(refusal(block_on(store.log(did, 0))), too_large);
 
     // A full page within the limits passes.
     let mut full = serde_json::to_value(&page).unwrap();
     full["events"] = Value::Array(vec![json!({}); LOG_PAGE_EVENTS as usize]);
     full["appendedAt"] = Value::Array(vec![json!(1); LOG_PAGE_EVENTS as usize]);
-    host.serve(
-        "https://full.example",
-        Remote::Reply(HttpReply {
-            status: 200,
-            body: full.to_string(),
-        }),
-    );
-    let read = block_on(store.log(did, 0, Some("full.example")))
-        .unwrap()
-        .unwrap();
+    store_answering("https://full.example", full);
+    let read = block_on(store.log(did, 0)).unwrap().unwrap();
     assert_eq!(read.events.len(), LOG_PAGE_EVENTS as usize);
+    assert_eq!(
+        host.last().url,
+        format!(
+            "https://full.example/v1/logs/{}?from=0",
+            did.rsplit(':').next().unwrap()
+        )
+    );
 }
