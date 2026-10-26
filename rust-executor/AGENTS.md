@@ -148,9 +148,11 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `AgentService::save` / `try_save`.
 - **Identity** (`identity/`): an agent's device key (the wallet key) may speak
   for a `did:scid` whose log lists it; the master key and the 12 words never reach the executor
-  (apps hold them through `ad4m-identity-client`). Logs come only through the agent language
-  (`Capability::Identity*`, refused on any other language) and are kept after `fold` in
-  `KelCache`; a head counts only under a key of the config's `identity.storeKeys`, and
+  (apps hold them through `ad4m-identity-client`). The configured store's logs come through the
+  agent language (`Capability::Identity*`, refused on any other language); a DID URL's foreign
+  `src` is read by the executor itself (`identity/src_fetch.rs`, public addresses only at
+  connect). Both are kept after `fold` in `KelCache`; a head counts only under a key of the
+  config's `identity.storeKeys`, authorship reads a log only up to that head, and
   `identity.storeUrl` becomes the agent language's `storeUrl` setting at load. A different event
   at a held seq or a shorter log records a fork, keeps the history and fires `identity-fork`.
   `ad4m-executor init --operator <did:scid>` records the operator (`operator_record`, never
