@@ -77,14 +77,9 @@ pub async fn key_speaks_for(cache: &KelCache, did: &str, key: &str, now: u64) ->
 
 /// The id (`d<n>`) of the device key whose signing multikey is `key`; `None` for a master key
 /// or a key the log does not list. A master signs the log's events, never for the person.
-// The core gains `KeyState::device_key_id_of` on the base branch; until it lands here, the
-// lookup is local.
+/// The id of `key` among the log's device keys, never a master (`KeyState::device_key_id_of`).
 pub(super) fn device_key_id(state: &ad4m_identity_core::KeyState, key: &str) -> Option<String> {
-    state
-        .keys
-        .values()
-        .find(|record| record.sign == key)
-        .map(|record| record.id.clone())
+    state.device_key_id_of(&key.to_string()).cloned()
 }
 
 /// The cached log of `did` and its trusted seq ([`KelCache::trusted`]); `None` without one or
