@@ -125,8 +125,8 @@ rule. Each rule names the error that the reference implementation returns
   empty `revoke` on `rotate` is left out, never written as `[]` (`Format(NotCanonical)`).
   Without this, a receiver's hash could differ from the sender's.
 - **P7** The canonical JSON text of the event (section 4), proofs included, is at most
-  65 536 bytes (`Format(TooLarge)`). `offer`, `coSig`, `salt` and `can` have no length limit
-  of their own, so this limit stops one signed event from growing without bound.
+  65 536 bytes (`Format(TooLarge)`). `offer`, `coSig` and `can` have no length limit of their
+  own (`salt` has: K13), so this limit stops one signed event from growing without bound.
 
 **Order and links** (the hash-chain module, before any rule below):
 
