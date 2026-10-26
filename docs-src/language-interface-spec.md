@@ -306,8 +306,8 @@ agents **in** via `peersSetLocal` and pulls the set of remote
 participants **out** via `peersRemote`.
 
 **`peersSetLocal` is called at instance creation AND whenever a local
-agent joins or leaves the node.** It's not one-shot init — a second
-user logging into the same node after the Language instance is
+agent joins or leaves the executor.** It's not one-shot init — a second
+user logging into the same executor after the Language instance is
 already loaded must cause a fresh `peersSetLocal` call. The Language
 uses this for:
 
@@ -359,8 +359,8 @@ Language, not at the spec level.
 **Online fast-path** is handled by `telepresence.sendSignal` — when the
 recipient is online, the sender also (or instead) pushes the message
 through telepresence for instant delivery. **Offline delivery** falls
-through to `perspective-commit`, and the sender's node / friend relay
-/ DHT holds it until the recipient's node runs sync.
+through to `perspective-commit`, and the sender's executor / friend relay
+/ DHT holds it until the recipient's executor runs sync.
 
 > **Runtime divergence:** The AD4M runtime retains a flat
 > `direct-message` capability (`dmSendMessage`, `dmInbox`, etc.) and
@@ -468,7 +468,7 @@ stated explicitly here:
 > invocation consult this context and return values scoped to that
 > agent.
 
-This is how multi-user nodes work. A single Language instance shared by
+This is how multi-user executors work. A single Language instance shared by
 a perspective that multiple local agents participate in will see the
 acting agent change from call to call — Alice commits a diff on her
 behalf, then a moment later Bob commits a diff on his, and the same
@@ -483,7 +483,7 @@ primary agent" for some bootstrapping reason, it should do so during
 consult `agentDid()` / `agentSign()` fresh each time.
 
 **`peers.setLocal` is a different concept.** `setLocal` tells the
-Language about the *set of local agents that exist on this node*
+Language about the *set of local agents that exist on this executor*
 (used for routing and remote membership advertisement). The ambient
 acting agent is *which one of those local agents is currently
 acting*. Both concepts are needed; neither substitutes for the other.
@@ -653,7 +653,7 @@ Per-DNA signal delivery is built without per-call callbacks.
 
 A single language instance can register multiple DNAs and disambiguate them
 via `signal.zome_name` inside `handleHolochainSignal`. Multiple language instances on
-the same node never collide because each has its own DnaHash → instance entry.
+the same executor never collide because each has its own DnaHash → instance entry.
 
 > **Runtime divergence note:** The WIT definition (`ad4m-lang.wit`) specifies
 > `handle-holochain-signal(dna-nick, agent-did, signal-data)` — three named

@@ -60,16 +60,10 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
         diff |= a_byte ^ b_byte;
     }
 
-    // Also XOR the length difference to ensure different lengths are detected
-    // Note: This only works if lengths fit in u8, but for tokens/hashes this is fine
-    // For longer strings, we'd need a more sophisticated approach
-    if a_bytes.len() <= 255 && b_bytes.len() <= 255 {
-        diff |= (a_bytes.len() as u8) ^ (b_bytes.len() as u8);
-    } else {
-        // For very long strings, compare length bytes directly
-        let len_diff = a_bytes.len() ^ b_bytes.len();
-        diff |= (len_diff & 0xFF) as u8;
-        diff |= ((len_diff >> 8) & 0xFF) as u8;
+    // Fold in every byte of the length difference, so strings of different lengths differ
+    // whatever the lengths (a value followed by NUL padding is not equal to it).
+    for byte in (a_bytes.len() ^ b_bytes.len()).to_le_bytes() {
+        diff |= byte;
     }
 
     // Return true only if all bytes match and lengths are equal

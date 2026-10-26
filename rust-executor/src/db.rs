@@ -1,3 +1,5 @@
+use crate::secret::Secret;
+use crate::types::ModelApiInput;
 use crate::types::{
     AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput,
     NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
@@ -23,6 +25,10 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
+
+mod grants;
+mod tasks;
+pub use grants::GrantRow;
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -56,6 +62,23 @@ impl std::fmt::Display for InvalidDefaultModel {
 }
 
 impl std::error::Error for InvalidDefaultModel {}
+
+/// `update_model` was asked to keep a stored provider key while moving the model to
+/// another base URL. The key goes only to the endpoint it was set for, so the caller
+/// sends it again (or an empty key) with the new URL. A caller's mistake: a bad request.
+#[derive(Debug)]
+pub struct ApiKeyNotResent;
+
+impl std::fmt::Display for ApiKeyNotResent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "The model has a stored API key and the base URL changed: send apiKey again \
+             (an empty string for none) to move the model to another endpoint",
+        )
+    }
+}
+
+impl std::error::Error for ApiKeyNotResent {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentRequest {
@@ -123,6 +146,15 @@ fn flow_replica_row(row: &rusqlite::Row) -> rusqlite::Result<FlowReplicaStateRow
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+/// The key column for a sent `api`: the key, or empty for none. Reads the secret out
+/// because the database is where the executor keeps it.
+fn sent_api_key(api: &ModelApiInput) -> String {
+    api.api_key
+        .as_ref()
+        .map(|key| key.expose().to_string())
+        .unwrap_or_default()
+}
+
 lazy_static! {
     static ref AD4M_DB_INSTANCE: Arc<Mutex<Option<Ad4mDb>>> = Arc::new(Mutex::new(None));
 }
@@ -142,7 +174,7 @@ impl Ad4mDb {
         AD4M_DB_INSTANCE.clone()
     }
 
-    fn new(db_path: &str) -> Ad4mDbResult<Self> {
+    pub(crate) fn new(db_path: &str) -> Ad4mDbResult<Self> {
         let conn = Connection::open(db_path)?;
         Self::refuse_data_from_before_did_keys(&conn)?;
 
@@ -286,7 +318,8 @@ impl Ad4mDb {
                 prompt_examples TEXT NOT NULL,
                 metadata TEXT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                agent_did TEXT
              )",
             [],
         )?;
@@ -347,6 +380,9 @@ impl Ad4mDb {
              )",
             [],
         )?;
+
+        // The tokens the executor issued: see agent::grants.
+        Self::create_grants_table(&conn)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS email_verifications (
@@ -418,6 +454,12 @@ impl Ad4mDb {
         // Notifications used to name their owner by `user_email` (NULL for the main agent).
         // `migrate_notification_owners` moves them to `owner_did` once the agent's DID is known.
         alter_add_column("ALTER TABLE notifications ADD COLUMN owner_did TEXT")?;
+
+        // Owner of each AI task: the DID of the managed agent whose session created it. NULL
+        // marks a task of the main agent, which includes every row created before this
+        // column (a v0.12.0 data folder). Appended last so its `SELECT *` position matches a
+        // fresh table.
+        alter_add_column("ALTER TABLE tasks ADD COLUMN agent_did TEXT")?;
 
         // Add hosting columns to users table
         alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
@@ -614,6 +656,7 @@ impl Ad4mDb {
         }
     }
 
+    /// `agent_did` is the owning managed agent; `None` makes a task of the main agent.
     pub fn add_task(
         &self,
         name: String,
@@ -621,13 +664,14 @@ impl Ad4mDb {
         system_prompt: String,
         prompt_examples: Vec<AIPromptExamples>,
         metadata: Option<String>,
+        agent_did: Option<&str>,
     ) -> Result<String, rusqlite::Error> {
         let created_at = chrono::Utc::now().to_string();
         let updated_at = created_at.clone();
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, created_at, updated_at],
+            "INSERT INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, created_at, updated_at, agent_did],
         )?;
         Ok(id)
     }
@@ -892,7 +936,8 @@ impl Ad4mDb {
                 notification.trigger,
                 serde_json::to_string(&notification.perspective_ids).unwrap(),
                 notification.webhook_url,
-                notification.webhook_auth,
+                // The database is where the executor keeps the credential.
+                notification.webhook_auth.expose(),
                 owner_did,
             ],
         )?;
@@ -911,7 +956,7 @@ impl Ad4mDb {
             trigger: row.get(6)?,
             perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
             webhook_url: row.get(8)?,
-            webhook_auth: row.get(9)?,
+            webhook_auth: Secret::new(row.get::<_, String>(9)?),
             owner_did: row.get(10)?,
         })
     }
@@ -1028,7 +1073,8 @@ impl Ad4mDb {
                 updated_notification.trigger,
                 serde_json::to_string(&updated_notification.perspective_ids).unwrap(),
                 updated_notification.webhook_url,
-                updated_notification.webhook_auth,
+                // The database is where the executor keeps the credential.
+                updated_notification.webhook_auth.expose(),
                 updated_notification.granted,
                 updated_notification.owner_did,
             ],
@@ -2100,7 +2146,7 @@ impl Ad4mDb {
                 id,
                 model.name,
                 model.api.as_ref().map(|api| api.base_url.to_string()),
-                model.api.as_ref().map(|api| api.api_key.clone()),
+                model.api.as_ref().map(sent_api_key),
                 model.api.as_ref().map(|api| api.model.clone()),
                 model.api.as_ref().map(|api| serde_json::to_string(&api.api_type).unwrap()),
                 model.local.as_ref().map(|local| local.file_name.clone()),
@@ -2128,7 +2174,7 @@ impl Ad4mDb {
                 ) {
                     Some(ModelApi {
                         base_url: Url::parse(&base_url).unwrap(),
-                        api_key,
+                        api_key: Secret::new(api_key),
                         model,
                         api_type: ModelApiType::from_str(&api_type).unwrap(),
                         max_num_ctx: row.get::<_, Option<u32>>(13)?,
@@ -2187,7 +2233,7 @@ impl Ad4mDb {
             ) {
                 Some(ModelApi {
                     base_url: Url::parse(&base_url).unwrap(),
-                    api_key,
+                    api_key: Secret::new(api_key),
                     model,
                     api_type: ModelApiType::from_str(&api_type).unwrap(),
                     max_num_ctx: row.get::<_, Option<u32>>(13)?,
@@ -2238,9 +2284,14 @@ impl Ad4mDb {
         Ok(models)
     }
 
+    /// Replaces the model's settings with `model`. An `api` without a key keeps the stored
+    /// key, and fails with [`ApiKeyNotResent`] when that key is set and the base URL changes.
     pub fn update_model(&self, id: &str, model: &ModelInput) -> Ad4mDbResult<()> {
         let api_base_url = model.api.as_ref().map(|api| api.base_url.to_string());
-        let api_key = model.api.as_ref().map(|api| api.api_key.clone());
+        let api_key = match &model.api {
+            Some(api) if api.api_key.is_none() => Some(self.kept_api_key(id, &api.base_url)?),
+            api => api.as_ref().map(sent_api_key),
+        };
         let api_model = model.api.as_ref().map(|api| api.model.clone());
         let api_type = model.api.as_ref().map(|api| api.api_type.to_string());
         let api_max_num_ctx = model.api.as_ref().and_then(|api| api.max_num_ctx);
@@ -2292,6 +2343,32 @@ impl Ad4mDb {
             ],
         )?;
         Ok(())
+    }
+
+    /// The stored key an update without one keeps: empty when the model has none (or does
+    /// not exist), refused when it has one and `base_url` differs from the stored URL.
+    fn kept_api_key(&self, id: &str, base_url: &str) -> Ad4mDbResult<String> {
+        let stored: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT api_base_url, api_key FROM models WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((stored_url, Some(stored_key))) = stored else {
+            return Ok(String::new());
+        };
+        if stored_key.is_empty() {
+            return Ok(stored_key);
+        }
+        let same_endpoint = stored_url
+            .as_deref()
+            .is_some_and(|stored| crate::types::same_endpoint(stored, base_url));
+        if !same_endpoint {
+            return Err(ApiKeyNotResent.into());
+        }
+        Ok(stored_key)
     }
 
     pub fn remove_model(&self, id: &str) -> Ad4mDbResult<()> {
@@ -2462,7 +2539,7 @@ impl Ad4mDb {
 
         // Export tasks
         let tasks: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at FROM tasks"
+            "SELECT id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did FROM tasks"
         )?.query_map([], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -2472,7 +2549,8 @@ impl Ad4mDb {
                 "prompt_examples": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(4)?).unwrap_or(serde_json::Value::Null),
                 "metadata": row.get::<_, Option<String>>(5)?,
                 "created_at": row.get::<_, String>(6)?,
-                "updated_at": row.get::<_, String>(7)?
+                "updated_at": row.get::<_, String>(7)?,
+                "agent_did": row.get::<_, Option<String>>(8)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert("tasks".to_string(), serde_json::to_value(tasks)?);
@@ -2992,8 +3070,8 @@ impl Ad4mDb {
                             .and_then(|n| n.as_str())
                             .unwrap_or("<unknown>");
                         match self.conn.execute(
-                            "INSERT OR REPLACE INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) 
-                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            "INSERT OR REPLACE INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did)
+                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                             params![
                                 task["id"].as_str().unwrap_or(""),
                                 task["name"].as_str().unwrap_or(""),
@@ -3002,7 +3080,8 @@ impl Ad4mDb {
                                 task["prompt_examples"].to_string(),
                                 task["metadata"].as_str(),
                                 task["created_at"].as_str().unwrap_or(""),
-                                task["updated_at"].as_str().unwrap_or("")
+                                task["updated_at"].as_str().unwrap_or(""),
+                                task["agent_did"].as_str()
                             ],
                         ) {
                             Ok(_) => result.tasks.imported += 1,
@@ -4526,7 +4605,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec![perspective1.uuid.clone()],
             webhook_url: "http://test.webhook".to_string(),
-            webhook_auth: "test-auth".to_string(),
+            webhook_auth: "test-auth".into(),
         };
         let notification_id = db
             .add_notification(notification, "did:key:main", false)
@@ -4544,6 +4623,7 @@ mod tests {
                 "test system prompt".to_string(),
                 vec![task],
                 Some("test metadata".to_string()),
+                Some("did:key:task-owner"),
             )
             .unwrap();
 
@@ -4554,7 +4634,7 @@ mod tests {
             model_type: ModelType::Llm,
             api: Some(ModelApiInput {
                 base_url: "http://localhost:11434".to_string(),
-                api_key: "test-key".to_string(),
+                api_key: Some("test-key".into()),
                 model: "qwen3:32b".to_string(),
                 api_type: ModelApiType::Ollama.to_string(),
                 max_num_ctx: Some(16_384),
@@ -4603,6 +4683,11 @@ mod tests {
         let imported_task = tasks.first().unwrap();
         assert_eq!(imported_task.task_id, task_id);
         assert_eq!(imported_task.name, "Test Task");
+        // Without the owner, a restore would hand the user's task to the operator.
+        assert_eq!(
+            import_db.get_task_owner(&task_id).unwrap(),
+            Some(Some("did:key:task-owner".to_string()))
+        );
 
         // Verify models
         let models = import_db.get_models().unwrap();
@@ -4670,7 +4755,7 @@ mod tests {
             model_type: ModelType::Llm,
             api: Some(ModelApiInput {
                 base_url: "http://localhost:11434".to_string(),
-                api_key: String::new(),
+                api_key: None,
                 model: "qwen3:32b".to_string(),
                 api_type: ModelApiType::Ollama.to_string(),
                 max_num_ctx: None,
@@ -5091,7 +5176,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
-            webhook_auth: "Test Webhook Auth".to_string(),
+            webhook_auth: "Test Webhook Auth".into(),
         };
 
         // Add the test notification
@@ -5122,7 +5207,9 @@ mod tests {
             vec!["Test Perspective ID".to_string()]
         );
         assert_eq!(test_notification.webhook_url, "Test Webhook URL");
-        assert_eq!(test_notification.webhook_auth, "Test Webhook Auth");
+        assert!(test_notification
+            .webhook_auth
+            .expose_for_compare("Test Webhook Auth"));
 
         // Modify the test notification
         let updated_notification = Notification {
@@ -5135,7 +5222,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE predicate = 'test://updated'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
-            webhook_auth: "Test Webhook Auth".to_string(),
+            webhook_auth: "Test Webhook Auth".into(),
             owner_did: "did:key:main".to_string(),
         };
 
@@ -5178,7 +5265,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE data = 'DELETE this'".to_string(),
             perspective_ids: vec!["test".to_string()],
             webhook_url: "".to_string(),
-            webhook_auth: "".to_string(),
+            webhook_auth: "".into(),
         };
 
         let result1 = db.add_notification(notification1, "did:key:main", false);
@@ -5193,7 +5280,7 @@ mod tests {
             trigger: "DELETE FROM link WHERE id = 123".to_string(),
             perspective_ids: vec!["test".to_string()],
             webhook_url: "".to_string(),
-            webhook_auth: "".to_string(),
+            webhook_auth: "".into(),
         };
 
         let result2 = db.add_notification(notification2, "did:key:main", false);
@@ -5209,7 +5296,7 @@ mod tests {
             trigger: r#"SELECT * FROM link WHERE data = "Don\'t DELETE this""#.to_string(),
             perspective_ids: vec!["test".to_string()],
             webhook_url: "".to_string(),
-            webhook_auth: "".to_string(),
+            webhook_auth: "".into(),
         };
 
         let result3 = db.add_notification(notification3, "did:key:main", false);
@@ -5235,6 +5322,7 @@ mod tests {
                 model_id.clone(),
                 system_prompt.clone(),
                 prompt_examples.clone(),
+                None,
                 None,
             )
             .unwrap();
@@ -5271,7 +5359,7 @@ mod tests {
             name: "Test Model API".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.example.com".to_string(),
-                api_key: "test_api_key".to_string(),
+                api_key: Some("test_api_key".into()),
                 model: "llama3".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5314,10 +5402,12 @@ mod tests {
             retrieved_model_api.api.as_ref().unwrap().base_url,
             Url::parse("https://api.example.com").unwrap()
         );
-        assert_eq!(
-            retrieved_model_api.api.as_ref().unwrap().api_key,
-            "test_api_key"
-        );
+        assert!(retrieved_model_api
+            .api
+            .as_ref()
+            .unwrap()
+            .api_key
+            .expose_for_compare("test_api_key"));
         assert_eq!(retrieved_model_api.api.as_ref().unwrap().model, "llama3");
         assert_eq!(
             retrieved_model_api.api.as_ref().unwrap().api_type,
@@ -5376,7 +5466,7 @@ mod tests {
             name: "Test Model".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.example.com".to_string(),
-                api_key: "test_key".to_string(),
+                api_key: Some("test_key".into()),
                 model: "llama3".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5393,7 +5483,7 @@ mod tests {
             name: "Updated Model".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.example.org".to_string(),
-                api_key: "test_key".to_string(),
+                api_key: Some("test_key".into()),
                 model: "llama4".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5414,7 +5504,7 @@ mod tests {
 
         let api = retrieved_model.api.unwrap();
         assert_eq!(api.base_url, Url::parse("https://api.example.org").unwrap());
-        assert_eq!(api.api_key, "test_key");
+        assert!(api.api_key.expose_for_compare("test_key"));
         assert_eq!(api.model, "llama4");
         assert_eq!(api.api_type, ModelApiType::OpenAi);
 
@@ -5430,7 +5520,7 @@ mod tests {
             name: "Capped Ollama".to_string(),
             api: Some(ModelApiInput {
                 base_url: "http://localhost:11434".to_string(),
-                api_key: "".to_string(),
+                api_key: Some("".into()),
                 model: "qwen3:32b".to_string(),
                 api_type: ModelApiType::Ollama.to_string(),
                 max_num_ctx: Some(32_768),
@@ -5474,7 +5564,7 @@ mod tests {
             name: "Test LLM Model".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.example.com".to_string(),
-                api_key: "llm_key".to_string(),
+                api_key: Some("llm_key".into()),
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5503,7 +5593,7 @@ mod tests {
             name: "Test Transcription Model".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.transcribe.com".to_string(),
-                api_key: "transcribe_key".to_string(),
+                api_key: Some("transcribe_key".into()),
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5603,7 +5693,7 @@ mod tests {
             name: "test-model".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.test.com".to_string(),
-                api_key: "test-key".to_string(),
+                api_key: Some("test-key".into()),
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
@@ -5667,7 +5757,7 @@ mod tests {
             name: "an-llm".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.test.com".to_string(),
-                api_key: "test-key".to_string(),
+                api_key: Some("test-key".into()),
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,

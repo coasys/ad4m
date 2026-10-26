@@ -31,7 +31,8 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   write is held across `PrologService` awaits on purpose. Never hold `persisted` across an await;
   the idiom is `let h = self.persisted.lock().await.clone();`.
 - Every link write goes: persist to `SparqlStore` → Prolog facts (no-op when disabled) →
-  pubsub (`PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED`, fanned out per owner) → commit to
+  typed event (`Topic::LinkAdded/LinkRemoved/LinkUpdated`, one event to all owners via
+  `publish_to_owners`, the main agent if unowned) → commit to
   link language if `LinkStatus::Shared`. Use the same sequence; a helper `apply_diff` is planned.
 - SHACL triples are the source of truth for shapes. `shape_cache` on the instance is
   invalidated by `add_sdna_inner`. `get_shape(class)` → `Arc<ModelShape>`.
@@ -43,6 +44,20 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
+- **File descriptors.** Every perspective keeps one RocksDB store open
+  (`SparqlStore::new`), and only `PerspectiveInstance` holds it: the store's descriptors close
+  when the last clone of the removed instance drops, i.e. once its background loops have seen
+  `is_teardown`. A store holds 17 fixed descriptors (LOCK, LOG, MANIFEST, WAL, one directory
+  handle per column family) plus the SSTs in its table cache. `SparqlStore::new` opens with
+  `SPARQL_STORE_MAX_OPEN_FILES` (266): oxigraph's default is the process fd limit minus 48 *per
+  store*. RocksDB splits the table cache over 64 shards (oxigraph exposes `max_open_files` and
+  `fd_reserve`, not the shard bits); 266 keeps four SSTs per shard. One per shard (74) made
+  SSTs in the same shard evict each other, and lookups ran up to 8× slower. Budget:
+  `SPARQL_STORE_FD_BUDGET` = 274 per store (a full cache); a typical store holds about 70 and
+  a small one 20-30, so the soft fd limit must be raised at startup (`fd_limit`, #1462).
+  `sparql_store_fd_tests.rs` (Linux, `/proc/self/fd`) pins the option through the OPTIONS
+  file, measures a typical store against the budget, and checks the release on drop. Never open a second `SparqlStore` on a path that
+  is already open: RocksDB's LOCK refuses it, and `PerspectiveInstance::new` panics.
 
 ## Do / don't
 

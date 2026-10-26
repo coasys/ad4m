@@ -15,6 +15,24 @@ import axiod from "https://deno.land/x/axiod/mod.ts";
 
 const PROXY_URL = "https://bootstrap-store-gateway.perspect3vism.workers.dev";
 
+// A language's address is the hash of its bundle and its meta is published once,
+// so the meta under an address never changes: each is fetched at most once.
+const metaCache = new Map<string, any>();
+
+// Store `value` under `key`. A key that already exists holds the same content
+// (the key is the content's hash), so that counts as stored. Any other failure
+// throws.
+async function store(key: string, value: string): Promise<void> {
+    try {
+        await axiod.post(PROXY_URL, { key, value });
+    } catch (e: any) {
+        const data = e?.response?.data;
+        if (e?.response?.status == 400 && typeof data === "string" && data.includes("Key already exists")) return;
+        console.error(`[Cloudflare-based Language Language]: storing ${key} failed:`, data ?? e);
+        throw e;
+    }
+}
+
 // =============================================================================
 // Language definition
 // =============================================================================
@@ -42,35 +60,13 @@ const lang = defineLanguage({
 
             const expression = agentCreateSignedExpression(language.meta);
 
-            const key = `meta-${computed}`;
-            const metaPostData = {
-                key: key,
-                value: JSON.stringify(expression),
-            };
-            try {
-                const metaPostResult = await axiod.post(PROXY_URL, metaPostData);
-                if (metaPostResult.status != 200) {
-                    console.error("Upload language meta data gets error: ", metaPostResult);
-                }
-
-                const languageBundleBucketParams = {
-                    key: computed,
-                    value: language.bundle.toString(),
-                };
-                const bundlePostResult = await axiod.post(PROXY_URL, languageBundleBucketParams);
-                if (bundlePostResult.status != 200) {
-                    console.error("Upload language bundle data gets error: ", bundlePostResult);
-                }
-
-                return computed;
-            } catch (e: any) {
-                if (e.response.status == 400 && e.response.data.includes("Key already exists")) {
-                    console.log("[Cloudflare-based Language Language]: Tried to replace existing language. Ignoring...");
-                    return computed;
-                }
-                console.error("[Cloudflare-based Language Language]: Error storing Language: ", e.response.data);
-                throw e;
-            }
+            // The bundle first, so a stored meta never names a missing bundle.
+            // A publish that stores nothing must fail here: the store is
+            // consistent, so a reader that misses the language later will not
+            // try again.
+            await store(computed, language.bundle.toString());
+            await store(`meta-${computed}`, JSON.stringify(expression));
+            return computed;
         },
 
         async get(address: string): Promise<any> {
@@ -78,6 +74,7 @@ const lang = defineLanguage({
                 console.error("LanguageLanguage.get(): The address is not a valid hash");
                 return null;
             }
+            if (metaCache.has(address)) return metaCache.get(address);
             const metaDataKey = `meta-${address}`;
 
             let presignedUrl;
@@ -98,6 +95,8 @@ const lang = defineLanguage({
                 return null;
             }
 
+            // Not published: not cached, so a later read after a publish finds it.
+            if (metaObject) metaCache.set(address, metaObject);
             return metaObject;
         },
     },
