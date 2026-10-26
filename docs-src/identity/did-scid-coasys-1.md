@@ -405,8 +405,18 @@ freezes the identity, so a hash would add bytes to every record and link and ena
 - A key lookup (section 13, "Key lookup") is a hint, never proof. A host that answers "this
   signing key belongs to `did:scid:coasys:1:<scid>`" may be wrong or hostile. A resolver that
   uses the answer resolves that DID's log and accepts the answer only when the log lists the
-  key. A key enters a log only with its own signature (it co-signs the `incept` that lists it,
-  or the claim that an `add` spends), so a log cannot claim a key whose holder did not consent.
+  key.
+- A log listing a key does not prove that the key's holder agreed. An `incept` carries a
+  signature by every key it lists (rule K4), so replay proves their consent. An `add` is
+  signed by the master key only: its `coSig` covers the claim, which holds the offer secret and
+  a private hint that never enter the log, so replay cannot check it (`fold` does not read it,
+  section 3). Only the host that admitted the `add` checked the claim (section 14). So a
+  controller can write a log that replays correctly and lists another person's device key. A
+  resolver therefore takes a key lookup only from a host whose admission it trusts (one that
+  checks each claim and holds every key in one log), and confirms the answer against the log.
+  For the same reason, a verifier that maps a signing key to a person reads that person's log
+  from such a host: a log fetched from any other `src` can show the person's keys, but does not
+  prove that a key it lists speaks for that person.
 
 ## 12. Test vectors
 
@@ -468,7 +478,8 @@ GET /v1/keys/<signing multikey>?wait=<0..8>
   404                    the host knows no log that lists the key
 ```
 
-- The answer is a hint (section 11). The resolver confirms it against the named DID's log.
+- The answer is a hint (section 11). A resolver asks only a host whose admission it trusts,
+  and confirms the answer against the named DID's log.
 - A host that requires one key per identity (section 14) gives one answer per key. A host that
   does not may know several logs for one key, and then answers none (`404`), so a lookup never
   picks between identities.
