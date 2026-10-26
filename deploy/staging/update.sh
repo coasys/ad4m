@@ -40,7 +40,10 @@
 #   AD4M_STAGING_UNIT           executor unit [ad4m-staging.service]
 #   AD4M_STAGING_URL            executor URL [http://127.0.0.1:12400]
 #   AD4M_STAGING_BUILD_TIMEOUT  build time limit, timeout(1) syntax [3h]
-#   AD4M_STAGING_CUDA_ROOT      CUDA toolkit for the staging build [/usr/local/cuda]
+#   AD4M_STAGING_CUDA_ROOT      CUDA toolkit for the staging build [/usr/local/cuda-12.8]
+#                                 cudarc 0.13.9 accepts 12.8 and rejects 13.0. /usr/local/cuda is 13.0.
+#                                 12.8's math_functions.h on this host is patched for glibc 2.41
+#                                 (see /usr/local/cuda-12.8/GLIBC241-PATCH.txt).
 #   AD4M_LINK_SERVER_DEPLOY     link-server deploy script [~/bin/deploy-link-server.sh]
 #   AD4M_LINK_SERVER_INSTANCE   link-server instance to move with this branch [staging]
 #                                 also deploys link.ad4m.dev (prod) when that instance exists
@@ -436,7 +439,9 @@ if ! timeout "$BUILD_TIMEOUT" bash -euo pipefail -c '
   pnpm build-dapp
   (cd core && pnpm install --no-frozen-lockfile)
   pnpm run build-deno-snapshot
-  export CUDA_ROOT="${AD4M_STAGING_CUDA_ROOT:-/usr/local/cuda}"
+  export CUDA_ROOT="${AD4M_STAGING_CUDA_ROOT:-/usr/local/cuda-12.8}"
+  # cudarc reads `nvcc` from PATH, not from CUDA_ROOT. /usr/local/cuda/bin is 13.0.
+  export PATH="${CUDA_ROOT}/bin:${PATH}"
   export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-rpath,${CUDA_ROOT}/lib64"
   (cd cli && cargo build --release --features cuda)
 ' build "$SRC" "$sha" >"$build_log" 2>&1; then
