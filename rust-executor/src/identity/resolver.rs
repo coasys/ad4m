@@ -721,8 +721,8 @@ impl Resolver {
     }
 
     /// The log of `scid`: from the cache when it holds it (and `version`) and not `fresh`, else
-    /// from the sources in order, imported into the cache (which only extends), then from the
-    /// cache.
+    /// from the sources in order (after a `src` that answered, the configured store's events
+    /// too), imported into the cache (which only extends), then from the cache.
     async fn load(
         &self,
         scid: &str,
@@ -772,6 +772,19 @@ impl Resolver {
                     let fetched = self.fetch_untrusted(scid, Some(&base.base)).await;
                     if matches!(&fetched, Err(e) if !matches!(e, CacheError::Fork(_))) {
                         self.note_miss(&base.label, scid);
+                    }
+                    if fetched.is_ok() {
+                        // A foreign host may serve a prefix of the log, one that stops before a
+                        // revocation, and the cache keeps what it imports: read on from the
+                        // configured store, so a src cannot hide an event the store holds. A
+                        // store that holds no log of it changes nothing.
+                        match self.fetch_untrusted(scid, None).await {
+                            Ok(()) | Err(CacheError::NotFound) => {}
+                            Err(e) => loaded.skipped.push(SkippedSource {
+                                src: self.store_label(),
+                                reason: e.to_string(),
+                            }),
+                        }
                     }
                     (base.label, fetched)
                 }
@@ -1259,6 +1272,33 @@ mod tests {
             result.did_document.unwrap().get("alsoKnownAs").is_none(),
             "no store configured: no alsoKnownAs"
         );
+    }
+
+    #[tokio::test]
+    async fn a_src_that_serves_a_prefix_does_not_hide_a_revocation_the_store_holds() {
+        // d1 is revoked at seq 1; the foreign host serves only seq 0.
+        let mut log = TestLog::new(1);
+        let prefix = log.events.clone();
+        log.revoke_d1();
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        *store.foreign_events.lock().unwrap() = Some(prefix);
+        let (resolver, store) = resolver(
+            in_memory(vec![store.key.multikey()]),
+            store,
+            Some("https://store.example"),
+        );
+        let did = did_of(&log.scid());
+        let result = resolver
+            .resolve(&format!("{did}?src=203.0.113.7"), false)
+            .await;
+        assert_eq!(result.did_resolution_metadata.error, None, "{result:?}");
+        assert_eq!(foreign_srcs(&store), vec!["https://203.0.113.7"]);
+        assert!(
+            methods(&result).is_empty(),
+            "d1 is revoked at the store's head"
+        );
+        // Nor does the revoked key speak for the person on the expression read path.
+        assert!(!key_speaks_for(&resolver.cache, &did, &log.device.key(), 1).await);
     }
 
     #[tokio::test]

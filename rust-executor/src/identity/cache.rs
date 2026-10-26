@@ -556,6 +556,8 @@ pub(crate) mod tests {
         pub log_srcs: StdMutex<Vec<Option<String>>>,
         /// The key index's answer for every key, when set: a did:scid that need not list it.
         pub key_owner_override: StdMutex<Option<String>>,
+        /// What a `log` call with a `src` serves, when set; `events` otherwise.
+        pub foreign_events: StdMutex<Option<Vec<Event>>>,
     }
 
     impl FakeStore {
@@ -566,6 +568,7 @@ pub(crate) mod tests {
                 log_calls: AtomicUsize::new(0),
                 log_srcs: StdMutex::new(Vec::new()),
                 key_owner_override: StdMutex::new(None),
+                foreign_events: StdMutex::new(None),
             }
         }
     }
@@ -580,7 +583,8 @@ pub(crate) mod tests {
         ) -> Result<Option<LogPage>, IdentityError> {
             self.log_calls.fetch_add(1, Ordering::SeqCst);
             self.log_srcs.lock().unwrap().push(src.map(str::to_string));
-            let events = self.events.lock().unwrap().clone();
+            let foreign = src.and(self.foreign_events.lock().unwrap().clone());
+            let events = foreign.unwrap_or_else(|| self.events.lock().unwrap().clone());
             if events.is_empty() {
                 return Ok(None);
             }
