@@ -879,7 +879,7 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
         .unwrap()
         .is_some());
 
-    // Revoke d2: the record it signed before the revocation stays valid, and still carries
+    // Revoke d2: the record the store took before the revocation stays valid, and still carries
     // its binding, so a reader checks it at its anchor rather than at the head.
     let anchor = record.anchor.unwrap();
     let revoke = apps.run("revoke", json!({ "name": name, "ids": ["d2"] }));

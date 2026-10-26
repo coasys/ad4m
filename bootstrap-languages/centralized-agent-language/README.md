@@ -11,8 +11,11 @@ serves the identity interface, both on the shared identity store (`identity-stor
   signature holds. For a `did:scid` the record's `anchor` is one number, the seq of that log
   the signer knew when it signed; the read keeps the record only when the anchor is at or below
   the log's head and the log lists `signedBy`, without the bot mark and valid at the anchor (a
-  key revoked at seq N signs nothing valid anchored at or after N; a record signed before the
-  revocation stays valid). A record's profile is the agent's signed AD4M expression, answered
+  key revoked at seq N signs nothing valid anchored at or after N). The signer picks the
+  anchor, so the store orders arrivals: it takes a `did:scid` record only when `signedBy` is
+  also valid at the log's head when the record arrives, so a revoked key cannot backdate a new
+  record to an anchor before its revocation, and a record the store took before the revocation
+  stays valid. The read relies on that admission and checks at the anchor. A record's profile is the agent's signed AD4M expression, answered
   only when its author is the record's did and its data an Agent naming that did. A `did:key`
   read answers it unchanged, so the executor's signature check on every expression passes. A
   `did:scid` read answers it exactly as stored plus `proof.record` = `{version, anchor, sig}`

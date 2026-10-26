@@ -460,14 +460,18 @@ Rules for an implementation:
   (`AgentRecordProof`), and ignores a record whose profile is not of that form. The executor
   then checks the record itself at its anchor, from signed data only: removing `proof.record`
   gives back `profile`, `sig` must hold over `{profile, version, anchor}` (`coasys:link`) by
-  `proof.key`, and that key must be valid at `anchor` in the log. A profile signed before a
-  revocation so stays valid after it, as the anchor rule below says.
+  `proof.key`, and that key must be valid at `anchor` in the log. A profile the store took
+  before a revocation so stays valid after it, as the anchor rule below says.
 - **An agent record's `anchor` is one seq.** `sig` covers `{profile, version, anchor}`. A
   `did:key` record's `anchor` is `null`; a `did:scid` record's is the seq of that log the
   signer knew when it signed. The store on write and the language on read keep a `did:scid`
   record only when the anchor is at or below the log's head and the log lists `signedBy` (a
   bare `did:key`), without the bot mark and valid at the anchor: a key revoked at seq N signs
-  nothing valid anchored at or after N. The DID is the record's, the key id is in the log, and
+  nothing valid anchored at or after N. The signer picks the anchor, so the store, which
+  orders arrivals, also requires `signedBy` without the bot mark and valid at the log's head
+  when the record arrives (`403 signer` otherwise): a revoked key cannot backdate a new record
+  to an anchor before its revocation, and a record the store took before the revocation stays
+  valid. The language on read checks at the anchor and relies on that admission. The DID is the record's, the key id is in the log, and
   a fork freezes the identity anyway, so the anchor carries no DID, key id or hash.
 
 The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the

@@ -13,8 +13,10 @@
 //!   and replayed here with the identity core, every event's signatures checked) lists, valid
 //!   and without the bot mark at the record's anchor: the seq of that log the signer knew when
 //!   it signed, at or below the head. A key revoked at seq N signs nothing valid anchored at or
-//!   after N; a record anchored before the revocation stays valid. Any other record is ignored
-//!   (`None`).
+//!   after N; a record the store took before the revocation stays valid. The store also
+//!   requires `signedBy` valid at the log's head when a record arrives, so a revoked key
+//!   cannot backdate a new record past it; the read relies on that admission for arrival
+//!   order. Any other record is ignored (`None`).
 //!   A record's profile is the agent's signed profile expression, answered only when its
 //!   author is the record's did and its data is an Agent naming that did (the executor checks
 //!   the expression's signature on every read). A `did:key` record answers it as stored. A

@@ -120,10 +120,13 @@ tests name them by these names.
   number: the seq of the identity's log that the signer knew when it signed. The store accepts
   it only when the anchor is at or below the head (`400 anchor` otherwise) and `signedBy` is a
   bare `did:key` whose key the log lists (key id by `key_id_of`), without the bot mark and
-  valid at the anchor (`key_valid_at_time(key, anchor, now)`; `403 signer` otherwise). The
-  anchor places the signature in the log, so revocation needs no clock: a key revoked at seq N
-  signs nothing valid anchored at or after N, and a record signed before the revocation stays
-  valid. It carries no DID (the record is keyed by its did:scid), no key id (the log lists the
+  valid both at the anchor and at the log's current head (`key_valid_at_time(key, anchor,
+  now)` and `key_valid_at_time(key, head, now)`, no bot mark at either; `403 signer`
+  otherwise). The anchor places the signature in the log, so revocation needs no clock: a key
+  revoked at seq N signs nothing valid anchored at or after N. The signer picks the anchor, so
+  the head check is what stops a revoked key from backdating a new record below N: the store
+  orders arrivals, a record it took before the revocation stays valid (readers check at the
+  anchor), and one that arrives after it is refused whatever anchor it names. It carries no DID (the record is keyed by its did:scid), no key id (the log lists the
   key) and no hash (a hash only tells forked branches apart, and a fork freezes the identity).
   The old four-field anchor object does not parse: `400 malformed`. Offers' `by` and signed
   requests keep `kelSeq`/`kelHash`: they prove freshness at the head, once per action.
