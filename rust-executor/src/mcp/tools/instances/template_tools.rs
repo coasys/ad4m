@@ -14,6 +14,8 @@
 //! A tool that writes holds [`WRITES`] from reading the record until its write commits, and the
 //! version is read again just before the write: the bundle checks the caller's version against
 //! the record it was handed, and that record must still be the stored one when the result lands.
+//! The batch commits only if the record's version links are still those of that last read
+//! (`commit_batch_if`), so a save from the app landing after it is refused as well.
 //!
 //! The two tools' descriptions and arguments are the bundle's own ([`from_bundle`]), so they
 //! follow WE when the bundle is vendored again.
@@ -21,8 +23,9 @@
 use super::{check_setters, class_properties, error_json, fetch_instance, instance_uri};
 use super::{resolve_class, subject_class, validate_properties, Ad4mMcpHandler, WriteMode};
 use crate::agent::did_for_context;
-use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::perspective_instance::{ExpectedLinks, LinksChanged, PerspectiveInstance};
 use crate::tool_bundles::builtin;
+use deno_core::error::AnyError;
 use rmcp::{handler::server::wrapper::Parameters, model::Tool, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -166,33 +169,44 @@ impl Ad4mMcpHandler {
             ));
         }
         // WRITES keeps out the other template tool calls; this catches a write from anywhere else
-        // (the app's own save) while the bundle ran.
+        // (the app's own save) while the bundle ran. The version links are taken before this read
+        // and the write commits only if they still stand, so a save landing after it is caught too.
+        let expected = match version_links(&perspective, &class_name, &base_uri) {
+            Ok(expected) => expected,
+            Err(e) => return error_json(format!("Nothing was written: {e:#}.")),
+        };
         match fetch_instance(&perspective, &class_name, &base_uri).await {
             Ok(Some(now)) if now.get("version") == version.as_ref() => {}
-            _ => {
-                return error_json(format!(
-                    "Nothing was written: the record changed while '{name}' ran. Read it again, \
-                     then make the change against what it says now."
-                ))
-            }
+            _ => return error_json(record_changed(name)),
         }
+        #[cfg(test)]
+        pause::after_last_read(&base_uri).await;
 
         match self
-            .write_record(&p.perspective_id, &class_name, &base_uri, properties)
+            .write_record(
+                &p.perspective_id,
+                &class_name,
+                &base_uri,
+                properties,
+                expected,
+            )
             .await
         {
             Ok(()) => text,
-            Err(e) => error_json(format!("{e} The tool had said: {text}")),
+            Err(WriteError::Changed) => error_json(record_changed(name)),
+            Err(WriteError::Refused(e)) => error_json(format!("{e} The tool had said: {text}")),
         }
     }
-    /// Write what a tool answered with through the class's setters, every property in one batch.
+    /// Write what a tool answered with through the class's setters, every property in one batch,
+    /// committed only if the store still holds `expected`.
     async fn write_record(
         &self,
         perspective_id: &str,
         class_name: &str,
         base_uri: &str,
         properties: Map<String, Value>,
-    ) -> Result<(), String> {
+        expected: Vec<ExpectedLinks>,
+    ) -> Result<(), WriteError> {
         let (mut perspective, agent_context) =
             self.get_writable_perspective(perspective_id).await?;
         let (class_name, shape) = resolve_class(&perspective, class_name).await?;
@@ -212,7 +226,7 @@ impl Ad4mMcpHandler {
             validate_properties(&shape, &properties, WriteMode::Update).map_err(&refused)?;
         let missing = check_setters(&perspective, &shape, &validated.scalars).await;
         if !missing.is_empty() {
-            return Err(refused(missing));
+            return Err(refused(missing).into());
         }
 
         let batch_id = perspective.create_batch().await;
@@ -227,13 +241,90 @@ impl Ad4mMcpHandler {
             .await
         {
             perspective.discard_batch(&batch_id).await;
-            return Err(format!("Nothing was written: {e:#}."));
+            return Err(format!("Nothing was written: {e:#}.").into());
         }
-        perspective
-            .commit_batch(batch_id, &agent_context)
+        match perspective
+            .commit_batch_if(batch_id, &agent_context, &expected)
             .await
-            .map(|_| ())
-            .map_err(|e| format!("The write was not committed: {e:#}."))
+        {
+            Ok(_) => Ok(()),
+            Err(e) if e.is::<LinksChanged>() => Err(WriteError::Changed),
+            Err(e) => Err(format!("The write was not committed: {e:#}.").into()),
+        }
+    }
+}
+
+/// Why [`Ad4mMcpHandler::write_record`] wrote nothing.
+enum WriteError {
+    /// The record changed after the tool's last read of it.
+    Changed,
+    Refused(String),
+}
+
+impl From<String> for WriteError {
+    fn from(e: String) -> Self {
+        WriteError::Refused(e)
+    }
+}
+
+fn record_changed(name: &str) -> String {
+    format!(
+        "Nothing was written: the record changed while '{name}' ran. Read it again, then make \
+         the change against what it says now."
+    )
+}
+
+/// The record's version links as the store holds them now, for the write to expect. None for a
+/// class without a version.
+fn version_links(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    base_uri: &str,
+) -> Result<Vec<ExpectedLinks>, AnyError> {
+    let shape = perspective.get_shape(class_name)?;
+    let version = class_properties(&shape)
+        .into_iter()
+        .find(|p| p.name() == "version");
+    version
+        .map(|p| perspective.expect_links(base_uri, p.predicate()))
+        .into_iter()
+        .collect()
+}
+
+/// Test seam: parks a template tool call right after its last read of the record, before it
+/// writes, so a test can land another write in that gap.
+#[cfg(test)]
+pub(crate) mod pause {
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+
+    type Pause = (String, oneshot::Sender<()>, oneshot::Receiver<()>);
+    static PAUSE: Mutex<Option<Pause>> = Mutex::new(None);
+
+    /// Park the next call on `base_uri`: the first receiver fires when it has read the record,
+    /// and it goes on to write when the sender is used or dropped.
+    pub(crate) fn arm(base_uri: &str) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, on_reached) = oneshot::channel();
+        let (go, on_go) = oneshot::channel();
+        *PAUSE.lock().unwrap() = Some((base_uri.to_string(), reached, on_go));
+        (on_reached, go)
+    }
+
+    pub(super) async fn after_last_read(base_uri: &str) {
+        let armed = {
+            let mut pause = PAUSE.lock().unwrap();
+            match pause.take() {
+                Some((uri, reached, go)) if uri == base_uri => Some((reached, go)),
+                other => {
+                    *pause = other;
+                    None
+                }
+            }
+        };
+        if let Some((reached, go)) = armed {
+            let _ = reached.send(());
+            let _ = go.await;
+        }
     }
 }
 
