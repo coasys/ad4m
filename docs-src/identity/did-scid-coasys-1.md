@@ -125,8 +125,8 @@ rule. Each rule names the error that the reference implementation returns
   empty `revoke` on `rotate` is left out, never written as `[]` (`Format(NotCanonical)`).
   Without this, a receiver's hash could differ from the sender's.
 - **P7** The canonical JSON text of the event (section 4), proofs included, is at most
-  65 536 bytes (`Format(TooLarge)`). `offer`, `coSig`, `salt` and `can` have no length limit
-  of their own, so this limit stops one signed event from growing without bound.
+  65 536 bytes (`Format(TooLarge)`). `offer`, `coSig` and `can` have no length limit of their
+  own (`salt` has: K13), so this limit stops one signed event from growing without bound.
 
 **Order and links** (the hash-chain module, before any rule below):
 
@@ -166,8 +166,9 @@ rule. Each rule names the error that the reference implementation returns
 - **K11** `add` lists exactly one key (`AddNotOne`) and is signed by the current master only.
 - **K12** `revoke` names at least one key (`Format(EmptyRevoke)`), each a device key of this
   log (`UnknownKey`) that no earlier event ended (`RevokedKey`); signed by the current master.
-- **K13** `rotate`: `master` and `salt` hash to the stored `next` (`NextMismatch`); the revealed
-  key signs as `m<n+1>`; its `revoke` follows K12; `next` is a multihash or `null`.
+- **K13** `rotate`: `salt` is base58btc of 16 bytes (`Format(BadSalt)`); `master` and `salt`
+  hash to the stored `next` (`NextMismatch`); the revealed key signs as `m<n+1>`; its `revoke`
+  follows K12; `next` is a multihash or `null`.
 - **K14** `scope` names a device key (`UnknownKey`) that no event ended (`RevokedKey`) and that
   carries the bot mark (`NotABot`); signed by the current master. An `Until` key is never
   extended: its app adds a new key.

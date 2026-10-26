@@ -57,9 +57,12 @@ pub const KEL_DOMAIN: &str = "coasys:kel";
 /// The `proofPurpose` of every log proof.
 pub const PROOF_PURPOSE: &str = "assertionMethod";
 /// The largest event, in bytes of its canonical JSON text with its proofs (spec rule P7).
-/// `offer`, `coSig`, `salt` and a bot scope's `can` have no length of their own, so this bounds
-/// what one signed event can make every verifier and host parse and store.
+/// `offer`, `coSig` and a bot scope's `can` have no length of their own (a `rotate`'s `salt` is
+/// exactly 16 bytes of base58btc, rule K13), so this bounds what one signed event can make every
+/// verifier and host parse and store.
 pub const EVENT_MAX_BYTES: usize = 64 * 1024;
+/// The bytes of a next-key salt; a `rotate` carries it as base58btc (spec rule K13).
+pub const SALT_LEN: usize = 16;
 
 /// A key id: `m<n>` for master key *n*, `d<n>` for device keys.
 pub type KeyId = String;
