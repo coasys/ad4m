@@ -511,7 +511,11 @@ pub fn get_user_default_capabilities() -> Vec<Capability> {
         AGENT_UPDATE_CAPABILITY.clone(),
         AGENT_SIGN_CAPABILITY.clone(),
         AGENT_SUBSCRIBE_CAPABILITY.clone(),
-        // Note: Excluding LOCK, UNLOCK, PERMIT as these are admin operations
+        // Approving apps' requests for this user's own agent (#1399, D12):
+        // `agent.permitCapability`'s guard (`Owns { Request }`) limits it to requests that
+        // name this agent.
+        AGENT_PERMIT_CAPABILITY.clone(),
+        // Note: Excluding LOCK, UNLOCK as these are admin operations
 
         // Expression capabilities - allow users to create and manage expressions
         EXPRESSION_READ_CAPABILITY.clone(),

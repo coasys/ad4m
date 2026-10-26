@@ -5,7 +5,7 @@ use chrono::DateTime as ChronoDateTime;
 use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
-use oxigraph::store::Store;
+use oxigraph::store::{Store, StoreOptions};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
@@ -420,6 +420,30 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
     (source_iri, predicate_iri, target_term)
 }
 
+/// RocksDB `max_open_files` for every persistent store.
+///
+/// Oxigraph's default derives it from the process fd limit (limit minus 48),
+/// so each of an executor's stores (one per perspective) may claim nearly the
+/// whole limit, and raising the limit at startup raises every store's share.
+///
+/// RocksDB gives `max_open_files - 10` to its table cache (open SSTs), split
+/// into 64 shards (`table_cache_numshardbits = 6`, which oxigraph does not
+/// expose). 266 gives 256 entries, four per shard. With one per shard (74),
+/// two SSTs in one shard evict each other and every eviction reopens a file
+/// and rereads its index: lookups ran up to 8× slower well below 64 SSTs.
+pub const SPARQL_STORE_MAX_OPEN_FILES: u32 = 266;
+
+/// Most descriptors one persistent store holds: the 256 SSTs of a full table
+/// cache plus its fixed files (LOCK, LOG, MANIFEST, the WAL, and one directory
+/// handle per column family: 17 on a fresh store), with room for an SST being
+/// written by a flush or compaction. RocksDB compacts L0 long before a store
+/// fills its cache, so a typical store holds about 70.
+///
+/// N perspectives may need N × this, so the executor's soft `RLIMIT_NOFILE`
+/// must sit well above the 1024 default: `fd_limit::raise_fd_limit_at_startup`
+/// (#1462) raises it.
+pub const SPARQL_STORE_FD_BUDGET: usize = 274;
+
 /// Oxigraph-backed SPARQL store for AD4M link data.
 /// Uses RDF 1.2 reifiers: direct triples in default graph with metadata
 /// attached via `rdf:reifies` triple terms.
@@ -490,7 +514,11 @@ impl SparqlStore {
                     )
                 })?;
                 log::info!("Opening persistent SPARQL store at {:?}", store_path);
-                Store::open(&store_path).map_err(|e| {
+                Store::open_with_options(
+                    &store_path,
+                    StoreOptions::default().with_max_open_files(SPARQL_STORE_MAX_OPEN_FILES),
+                )
+                .map_err(|e| {
                     anyhow!(
                         "Failed to open persistent SPARQL store at {:?}: {}",
                         store_path,
@@ -4449,6 +4477,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "sparql_store_fd_tests.rs"]
+mod fd_tests;
 
 #[cfg(test)]
 mod parse_literal_tests {

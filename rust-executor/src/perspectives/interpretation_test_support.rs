@@ -289,8 +289,11 @@ pub(crate) async fn setup_interpretation_e2e(
             local: None,
             api: Some(ModelApiInput {
                 base_url,
-                api_key: std::env::var("INTERPRETATION_E2E_API_KEY")
-                    .unwrap_or_else(|_| "ollama".into()),
+                api_key: Some(
+                    std::env::var("INTERPRETATION_E2E_API_KEY")
+                        .unwrap_or_else(|_| "ollama".into())
+                        .into(),
+                ),
                 model,
                 api_type: crate::types::ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
