@@ -101,8 +101,13 @@ impl ExpressionCapability for CentralizedAgentLanguage {
 }
 
 impl IdentityCapability for CentralizedAgentLanguage {
-    async fn identity_log(&mut self, did: String, from: u64) -> LanguageResult<Option<LogPage>> {
-        self.store.log(&did, from).await
+    async fn identity_log(
+        &mut self,
+        did: String,
+        from: u64,
+        src: Option<String>,
+    ) -> LanguageResult<Option<LogPage>> {
+        self.store.log(&did, from, src.as_deref()).await
     }
 
     async fn identity_head(&mut self, did: String) -> LanguageResult<Option<SignedHead>> {

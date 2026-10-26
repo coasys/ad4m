@@ -82,11 +82,22 @@ pub trait ExpressionCapability: Language {
 /// The executor calls these only on the language at
 /// `system_addresses.agent_language`.
 pub trait IdentityCapability: Language {
-    /// `GET /v1/logs/{scid}?from=`
+    /// `GET /v1/logs/{scid}?from=`: one page of at most [`LOG_PAGE_EVENTS`](crate::identity::LOG_PAGE_EVENTS)
+    /// events from `from`.
+    ///
+    /// `src` is the did:scid `src` hint: where the DID's log may be fetched, in place of the
+    /// language's own store. A language serves the forms it knows (the store language: an
+    /// HTTPS base such as `store.example`, `https://store.example` or
+    /// `https://store.example/prefix`) and refuses any other with
+    /// `IdentityErrorCode::Invalid`. A `src` only ever reads: the head in a page from another
+    /// host is data, and the executor decides whether it trusts it. The language checks only
+    /// the form of `src`: refusing a host that resolves to a private, loopback or link-local
+    /// address belongs to the executor, which resolves DNS and runs the fetch.
     fn identity_log(
         &mut self,
         did: String,
         from: u64,
+        src: Option<String>,
     ) -> impl std::future::Future<Output = LanguageResult<Option<LogPage>>>;
     /// `GET /v1/heads/{scid}`
     fn identity_head(

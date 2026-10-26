@@ -25,6 +25,16 @@ serves the identity interface, both on the shared identity store (`identity-stor
 The store's base URL is the `storeUrl` language setting (`{"storeUrl": "https://…"}`), read on
 every call; without it, `https://store.coasys.org`.
 
+`identityLog(did, from, src?)` alone may read elsewhere: given a did:scid `src` hint that is an
+HTTPS base (`store.example`, `https://store.example`, `https://store.example/prefix`; a
+scheme-less one is HTTPS), it fetches `GET {src}/v1/logs/{scid}?from=` from that host. Any
+other `src` (`http`, userinfo, a query or fragment, a host that is not a DNS name or IP
+literal, an AD4M language address, a DID method) is refused as `invalid` (`src`) before any
+fetch. The language only reads from a `src` and passes its head on as data; the executor
+decides whether to trust it. Refusing hosts on private or loopback addresses is the
+executor's job (it resolves DNS and runs the fetch); the language checks only the form. A
+page over 256 events or 257 × 64 KiB is `invalid` (`too-large`), from a `src` or the store.
+
 The language is `rust-impl/` (the Rust ALDK port), which `pnpm build` bundles into
 `build/bundle.js`. The older TypeScript `index.ts` is not built and does not serve the
 identity interface.

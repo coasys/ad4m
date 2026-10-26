@@ -24,7 +24,13 @@ use crate::request::{Incoming, Signer, REQUEST_HEADER};
 use crate::{Store, MAX_WAIT_S};
 
 /// The largest body a route takes.
-pub const MAX_BODY: usize = 64 * 1024;
+pub const MAX_BODY: usize = ad4m_ldk::identity::MAX_STORE_BODY;
+/// `Cache-Control` of a log page that ends below the head: those events never change.
+pub const CACHE_SETTLED: &str = "public, max-age=31536000, immutable";
+/// `Cache-Control` of the log page that holds the head: the next append extends it.
+pub const CACHE_AT_HEAD: &str = "public, max-age=10";
+/// `Cache-Control` of a log the store does not hold (yet).
+pub const CACHE_NONE: &str = "no-store";
 /// Feed items per page.
 pub const FEED_PAGE: u32 = 256;
 
@@ -46,12 +52,20 @@ pub fn router(store: Arc<Store>) -> Router {
             header::CONTENT_TYPE,
             header::HeaderName::from_static(REQUEST_HEADER),
         ]);
+    // The public did:scid host profile: anyone may read a log and its head from any origin,
+    // so a browser or another resolver needs no AD4M. Writes keep the configured origins.
+    let public_reads = Router::new()
+        .route("/v1/logs/{scid}", get(log_page))
+        .route("/v1/heads/{scid}", get(head))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::any())
+                .allow_methods([Method::GET]),
+        );
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/pow", get(pow_params))
-        .route("/v1/logs/{scid}", get(log_page))
         .route("/v1/logs/{scid}/events", post(append))
-        .route("/v1/heads/{scid}", get(head))
         .route("/v1/keys/{multikey}", get(key_owner))
         .route("/v1/notes/{scid}", post(attach_note))
         .route("/v1/agents/{did}", get(agent).put(put_agent))
@@ -60,8 +74,9 @@ pub fn router(store: Arc<Store>) -> Router {
         .route("/v1/offers/{scid}/{offer_id}/claim", post(claim_offer))
         .route("/v1/offers/{scid}/{offer_id}/state", get(offer_state))
         .route("/v1/feed", get(feed))
-        .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(cors)
+        .merge(public_reads)
+        .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(store)
 }
 
@@ -136,9 +151,32 @@ async fn log_page(
     Query(q): Query<HashMap<String, String>>,
 ) -> Answer {
     let from = number(&q, "from")?.unwrap_or(0);
-    match store.log_page(&scid, from)? {
-        Some(page) => ok(page),
-        None => Err(ApiError::not_found(format!("no log {scid}"))),
+    let (mut answer, cache) = match store.log_page(&scid, from)? {
+        Some(page) => {
+            let cache = page_cache(from, page.events.len() as u64, page.head.seq);
+            (ok(page)?, cache)
+        }
+        None => (
+            ApiError::not_found(format!("no log {scid}")).into_response(),
+            CACHE_NONE,
+        ),
+    };
+    answer
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    Ok(answer)
+}
+
+/// The `Cache-Control` of the page of `events` events from `from` on a log whose head is
+/// `head_seq`: settled when its last event is below the head (a log only grows, so those
+/// events and their `appendedAt` never change), short-lived when it holds the head or is
+/// empty (the next append changes it).
+pub fn page_cache(from: u64, events: u64, head_seq: u64) -> &'static str {
+    // The last event is `from + events - 1`; below the head when `from + events <= head`.
+    if events > 0 && from.saturating_add(events) <= head_seq {
+        CACHE_SETTLED
+    } else {
+        CACHE_AT_HEAD
     }
 }
 
@@ -368,7 +406,18 @@ async fn feed(
 
 #[cfg(test)]
 mod tests {
-    use super::same_secret;
+    use super::{page_cache, same_secret, CACHE_AT_HEAD, CACHE_SETTLED};
+
+    #[test]
+    fn a_page_is_settled_only_when_it_ends_below_the_head() {
+        assert_eq!(page_cache(0, 256, 300), CACHE_SETTLED);
+        assert_eq!(page_cache(0, 256, 256), CACHE_SETTLED);
+        assert_eq!(page_cache(0, 256, 255), CACHE_AT_HEAD);
+        assert_eq!(page_cache(256, 45, 300), CACHE_AT_HEAD);
+        assert_eq!(page_cache(0, 1, 0), CACHE_AT_HEAD);
+        assert_eq!(page_cache(9, 0, 3), CACHE_AT_HEAD);
+        assert_eq!(page_cache(u64::MAX, 0, 3), CACHE_AT_HEAD);
+    }
 
     #[test]
     fn the_feed_token_matches_only_itself() {

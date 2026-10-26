@@ -99,7 +99,22 @@ impl TestStore {
         body: Option<Vec<u8>>,
         signed: Option<String>,
     ) -> Reply {
+        self.send_with(method, path, body, signed, &[]).await
+    }
+
+    /// `send` with extra request headers (`Origin`, a CORS preflight's headers).
+    pub async fn send_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Vec<u8>>,
+        signed: Option<String>,
+        headers: &[(&str, &str)],
+    ) -> Reply {
         let mut request = Request::builder().method(method).uri(path);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
         if body.is_some() {
             request = request.header("content-type", "application/json");
         }

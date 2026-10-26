@@ -162,7 +162,7 @@ export interface FlatLanguageExports {
     telepresenceRegisterSignalCallback?(callback: any): Promise<void>;
 
     // Identity (agent language only)
-    identityLog?(did: string, from: number): Promise<LogPage | null>;
+    identityLog?(did: string, from: number, src?: string): Promise<LogPage | null>;
     identityHead?(did: string): Promise<SignedHead | null>;
     identityAppend?(did: string, req: AppendRequest): Promise<SignedHead>;
     identityKeyOwner?(multikey: string, waitSec?: number): Promise<KeyIndexEntry | null>;

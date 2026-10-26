@@ -36,8 +36,8 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | Route | Answers |
 |---|---|
 | `POST /logs/{scid}/events` `AppendRequest` | `200 {head}` · `400 {error}` (`malformed`, `too-many-events`, `vouch-and-pow`, `expires`, a `ChainError` or `FoldError` name) · `403 pow` · `403 claim` · `404` a first event that is not #0 · `409 {head}` · `409 key-taken` · `413` · `503 vouch-unavailable` |
-| `GET /logs/{scid}?from=` | `200 LogPage` (≤ 256 events; `vouched: false`, no note, no pauses) · `404` |
-| `GET /heads/{scid}` | `200 SignedHead` · `404` |
+| `GET /logs/{scid}?from=` (public host profile) | `200 LogPage` (≤ 256 events; `vouched: false`, no note, no pauses) · `404` |
+| `GET /heads/{scid}` (public host profile) | `200 SignedHead` · `404` |
 | `GET /keys/{multikey}?wait=0..8` | `200 KeyIndexEntry` · `404` (at once, or at the timeout) · `400` wait > 8 |
 | `GET /pow` | `200 {bits, previousBits, changedAt}` |
 | `POST /notes/{scid}` `{token}` + signed request | `403 signer` · `503 vouch-unavailable` (no vouching service exists yet) |
@@ -50,6 +50,23 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `GET /offers/{scid}/{offerId}/state?key=&wait=` | `200 {state, seq?}` for the claiming key only · `404` |
 | `GET /feed?after=` `Authorization: Bearer <FEED_TOKEN>` | `200 {items, next}` · `401` |
 | `GET /health` | `200` |
+
+### The public did:scid host profile
+
+`GET /v1/logs/{scid}` and `GET /v1/heads/{scid}` make the store a public, read-only HTTPS
+host of `did:scid` logs: a browser, `coasys.id` or another vendor's resolver reads a log with
+no AD4M, and a DID URL's `src` hint can name the store (`did:scid:coasys:1:<scid>?src=<host>`;
+the agent language reads `{src}/v1/logs/{scid}?from=`).
+
+- **CORS:** both routes answer `Access-Control-Allow-Origin: *` (GET only, no credentials),
+  preflights included. Every other route, writes and the other reads, keeps `CORS_ORIGINS`.
+- **`Cache-Control` on `GET /logs`:** `public, max-age=31536000, immutable` for a page whose
+  last event is below the head (a log only grows, so those events and their `appendedAt`
+  never change); `public, max-age=10` for the page that holds the head and for an empty page
+  past it; `no-store` on `404`, so a log published a moment later is not hidden. A settled
+  page's `head` is the head when it was served: a reader takes the current head from the last
+  page or `/heads`. When vouching notes come, the `note` field must leave settled pages (or
+  their cache header must change), since a note attached later would not reach a cached page.
 
 ## Admission checks
 
@@ -113,7 +130,7 @@ tests name them by these names.
 | `IDENTITY_STORE_KEY` | `store-key` | the head key file (32-byte secret, base58btc); `serve` makes one when missing |
 | `IDENTITY_STORE_LISTEN` | `0.0.0.0:8080` | port 0 picks a free port |
 | `POW_BITS` | `22` | what `GET /v1/pow` publishes and a sent proof must meet |
-| `CORS_ORIGINS` | none | comma-separated browser origins |
+| `CORS_ORIGINS` | none | comma-separated browser origins (all routes but the public host profile's, which allow any origin) |
 | `FEED_TOKEN` | none | the mirror token; without one the feed answers `401` |
 
 `serve` prints `identity-store listening on http://<addr> store-key <multikey>` once it listens.

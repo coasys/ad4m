@@ -13,7 +13,10 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ad4m_hash_chain::{decode_ed25519_multikey, encode_ed25519_multikey, sha256};
-use ad4m_ldk::identity::{AgentRecord, AppendRequest, IdentityErrorCode, SignedRequest};
+use ad4m_ldk::identity::{
+    AgentRecord, AppendRequest, IdentityErrorCode, SignedRequest, LOG_PAGE_EVENTS,
+    MAX_LOG_PAGE_BYTES,
+};
 use ad4m_ldk::prelude::{Expression, ExpressionProof, LanguageError, LanguageResult};
 use centralized_agent_language::agents::{self, AgentKey};
 use centralized_agent_language::store::{encode_request, Http, HttpReply, Store, REQUEST_HEADER};
@@ -201,11 +204,20 @@ struct Recorded {
     body: String,
 }
 
+/// What the host answers for an `https://` base: the suite has no TLS, so a base either
+/// forwards to a local store's `http://` URL or answers a fixed reply.
+#[derive(Clone)]
+enum Remote {
+    Forward(String),
+    Reply(HttpReply),
+}
+
 /// The host's `httpFetch`: HTTP/1.1 over a TCP stream, recording each call.
 #[derive(Clone, Default)]
 struct Host {
     calls: Rc<RefCell<Vec<Recorded>>>,
     url: Rc<RefCell<String>>,
+    remotes: Rc<RefCell<Vec<(String, Remote)>>>,
 }
 
 fn fetch_blocking(
@@ -290,7 +302,19 @@ impl Http for Host {
             headers: serde_json::from_str(headers_json).unwrap_or_default(),
             body: body.to_string(),
         });
-        fetch_blocking(url, method, headers_json, body)
+        let remote = self
+            .remotes
+            .borrow()
+            .iter()
+            .find(|(base, _)| url.starts_with(&format!("{base}/")))
+            .cloned();
+        match remote {
+            Some((base, Remote::Forward(to))) => {
+                fetch_blocking(&url.replacen(&base, &to, 1), method, headers_json, body)
+            }
+            Some((_, Remote::Reply(reply))) => Ok(reply),
+            None => fetch_blocking(url, method, headers_json, body),
+        }
     }
 }
 
@@ -310,6 +334,11 @@ impl Host {
 
     fn last(&self) -> Recorded {
         self.calls.borrow().last().unwrap().clone()
+    }
+
+    /// Answers calls under the `https://` `base` with `remote`.
+    fn serve(&self, base: &str, remote: Remote) {
+        self.remotes.borrow_mut().push((base.to_string(), remote));
     }
 }
 
@@ -494,12 +523,12 @@ fn the_log_calls_answer_and_refuse_as_the_store_does() {
     let did = alice["did"].as_str().unwrap();
 
     assert!(block_on(store.head(did)).unwrap().is_none());
-    assert!(block_on(store.log(did, 0)).unwrap().is_none());
+    assert!(block_on(store.log(did, 0, None)).unwrap().is_none());
     let head = block_on(store.append(did, &append_req(vec![alice["incept"].clone()]))).unwrap();
     assert_eq!(head.seq, 0);
     assert_eq!(head.store, format!("did:key:{}", server.key));
     assert_eq!(block_on(store.head(did)).unwrap(), Some(head.clone()));
-    let page = block_on(store.log(did, 0)).unwrap().unwrap();
+    let page = block_on(store.log(did, 0, None)).unwrap().unwrap();
     assert_eq!(page.events, vec![alice["incept"].clone()]);
     assert!(!page.vouched);
 
@@ -1030,7 +1059,7 @@ fn bodies_are_the_inputs_canonical_json_and_the_signed_request_travels_unchanged
         ad4m_hash_chain::canonical_json(&serde_json::to_value(&request).unwrap()).unwrap()
     );
     assert_eq!(
-        block_on(store.log(did, 0)).unwrap().unwrap().events[0],
+        block_on(store.log(did, 0, None)).unwrap().unwrap().events[0],
         p["incept"]
     );
 
@@ -1080,4 +1109,178 @@ fn changing_the_store_setting_moves_every_call_and_a_silent_store_is_unavailable
         refusal(block_on(store.pow_params())),
         IdentityErrorCode::Unavailable
     );
+}
+
+#[test]
+fn a_src_hint_reads_the_log_from_that_host_and_every_other_call_stays_on_the_store() {
+    let home = StoreProcess::start();
+    let foreign = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (host, store) = Host::on(&home.url);
+    let (_, foreign_store) = Host::on(&foreign.url);
+    let p = person(&mut apps, &foreign_store, "noor elsewhere");
+    let did = p["did"].as_str().unwrap();
+    let scid = did.rsplit(':').next().unwrap();
+    host.serve("https://logs.example", Remote::Forward(foreign.url.clone()));
+    host.serve(
+        "https://mirror.example/coasys",
+        Remote::Forward(foreign.url.clone()),
+    );
+
+    // Absent: the configured store, which does not hold the log.
+    assert!(block_on(store.log(did, 0, None)).unwrap().is_none());
+    assert_eq!(
+        host.last().url,
+        format!("{}/v1/logs/{scid}?from=0", home.url)
+    );
+
+    // Scheme-less: HTTPS, host in lower case, the trailing `/` dropped.
+    let page = block_on(store.log(did, 0, Some("Logs.Example/")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.events, vec![p["incept"].clone()]);
+    // The foreign host's head comes back as it is, signed by that host's key.
+    assert_eq!(page.head.store, format!("did:key:{}", foreign.key));
+    let call = host.last();
+    assert_eq!(
+        call.url,
+        format!("https://logs.example/v1/logs/{scid}?from=0")
+    );
+    assert_eq!(call.method, "GET");
+    assert!(call.body.is_empty());
+
+    // An https base with a path prefix, and the next page from `from`.
+    let page = block_on(store.log(did, 1, Some("https://mirror.example/coasys")))
+        .unwrap()
+        .unwrap();
+    assert!(page.events.is_empty());
+    assert_eq!(
+        host.last().url,
+        format!("https://mirror.example/coasys/v1/logs/{scid}?from=1")
+    );
+
+    // An unknown log at the src host is `None`, as at the store.
+    let other = apps.run("person", json!({ "name": "noor nowhere" }));
+    assert!(
+        block_on(store.log(other["did"].as_str().unwrap(), 0, Some("logs.example")))
+            .unwrap()
+            .is_none()
+    );
+
+    // The other calls stay on the configured store.
+    assert!(block_on(store.head(did)).unwrap().is_none());
+    assert!(host
+        .last()
+        .url
+        .starts_with(&format!("{}/v1/heads/", home.url)));
+}
+
+#[test]
+fn a_src_that_is_not_an_https_base_is_refused_before_any_fetch() {
+    let mut apps = Apps::start();
+    let (host, store) = Host::on("http://127.0.0.1:9");
+    let p = apps.run("person", json!({ "name": "pia refused" }));
+    let did = p["did"].as_str().unwrap();
+    let refused = [
+        "",
+        "http://logs.example",
+        "HTTP://logs.example",
+        "ftp://logs.example",
+        "https://user@logs.example",
+        "user:pw@logs.example",
+        "logs.example?x=1",
+        "https://logs.example/?",
+        "logs.example#top",
+        "https://",
+        "https://logs.example:0",
+        "https://logs.example:65536",
+        "https://logs.example:x",
+        "https://logs.example./",
+        "https://-logs.example",
+        "https://logs_example.org",
+        "https://logs.example/a b",
+        "https://logs.example/a/../b",
+        "https://logs.example//b",
+        "https://[::1",
+        "https://[zz]",
+        "QmXyz://address",
+        "did:web:logs.example",
+        "logs.example\\evil",
+    ];
+    for src in refused {
+        let answer = block_on(store.log(did, 0, Some(src)));
+        match answer {
+            Err(error) => assert_eq!(
+                IdentityErrorCode::from_language_error(&error),
+                Some(IdentityErrorCode::Invalid {
+                    reason: "src".into()
+                }),
+                "{src:?}: {error}"
+            ),
+            Ok(page) => panic!("{src:?} was accepted: {page:?}"),
+        }
+    }
+    assert!(
+        host.calls.borrow().is_empty(),
+        "a refused src fetches nothing"
+    );
+}
+
+#[test]
+fn a_log_page_over_the_stores_limits_is_refused() {
+    let home = StoreProcess::start();
+    let foreign = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (host, store) = Host::on(&home.url);
+    let (_, foreign_store) = Host::on(&foreign.url);
+    let p = person(&mut apps, &foreign_store, "omar large");
+    let did = p["did"].as_str().unwrap();
+    let page = block_on(foreign_store.log(did, 0, None)).unwrap().unwrap();
+
+    let mut many = serde_json::to_value(&page).unwrap();
+    many["events"] = Value::Array(vec![json!({}); LOG_PAGE_EVENTS as usize + 1]);
+    many["appendedAt"] = Value::Array(vec![json!(1); LOG_PAGE_EVENTS as usize + 1]);
+    host.serve(
+        "https://many.example",
+        Remote::Reply(HttpReply {
+            status: 200,
+            body: many.to_string(),
+        }),
+    );
+    let mut big = serde_json::to_value(&page).unwrap();
+    big["pad"] = json!("x".repeat(MAX_LOG_PAGE_BYTES));
+    host.serve(
+        "https://big.example",
+        Remote::Reply(HttpReply {
+            status: 200,
+            body: big.to_string(),
+        }),
+    );
+    let too_large = IdentityErrorCode::Invalid {
+        reason: "too-large".into(),
+    };
+    assert_eq!(
+        refusal(block_on(store.log(did, 0, Some("many.example")))),
+        too_large
+    );
+    assert_eq!(
+        refusal(block_on(store.log(did, 0, Some("big.example")))),
+        too_large
+    );
+
+    // A full page within the limits passes.
+    let mut full = serde_json::to_value(&page).unwrap();
+    full["events"] = Value::Array(vec![json!({}); LOG_PAGE_EVENTS as usize]);
+    full["appendedAt"] = Value::Array(vec![json!(1); LOG_PAGE_EVENTS as usize]);
+    host.serve(
+        "https://full.example",
+        Remote::Reply(HttpReply {
+            status: 200,
+            body: full.to_string(),
+        }),
+    );
+    let read = block_on(store.log(did, 0, Some("full.example")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.events.len(), LOG_PAGE_EVENTS as usize);
 }

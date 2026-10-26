@@ -17,7 +17,7 @@ use crate::{Fault, Store};
 /// Events per append.
 pub const MAX_EVENTS: usize = 32;
 /// Events per log page.
-pub const PAGE_EVENTS: u32 = 256;
+pub const PAGE_EVENTS: u32 = ad4m_ldk::identity::LOG_PAGE_EVENTS;
 /// The furthest ahead an `expires` in an `incept` or `add` may lie: 400 days.
 pub const MAX_KEY_LIFE_S: u64 = 400 * 86_400;
 

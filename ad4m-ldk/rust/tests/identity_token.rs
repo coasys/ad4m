@@ -96,8 +96,16 @@ impl Language for Agent {
 }
 
 impl IdentityCapability for Agent {
-    async fn identity_log(&mut self, did: String, from: u64) -> LanguageResult<Option<LogPage>> {
-        self.calls.push(format!("log {did} {from}"));
+    async fn identity_log(
+        &mut self,
+        did: String,
+        from: u64,
+        src: Option<String>,
+    ) -> LanguageResult<Option<LogPage>> {
+        match src {
+            Some(src) => self.calls.push(format!("log {did} {from} {src}")),
+            None => self.calls.push(format!("log {did} {from}")),
+        }
         if self.appended.is_empty() {
             return Ok(None);
         }
@@ -283,7 +291,7 @@ fn shims_expand() {
 fn identity_calls_pass_events_through_unchanged() {
     let mut lang = block_on(Agent::init()).unwrap();
     assert_eq!(
-        block_on(lang.identity_log("did:scid:zScid".into(), 0)).unwrap(),
+        block_on(lang.identity_log("did:scid:zScid".into(), 0, None)).unwrap(),
         None
     );
 
@@ -304,9 +312,10 @@ fn identity_calls_pass_events_through_unchanged() {
         block_on(lang.identity_append("did:scid:zScid".into(), req)).unwrap(),
         head()
     );
-    let page = block_on(lang.identity_log("did:scid:zScid".into(), 0))
-        .unwrap()
-        .unwrap();
+    let page =
+        block_on(lang.identity_log("did:scid:zScid".into(), 0, Some("store.example".into())))
+            .unwrap()
+            .unwrap();
     assert_eq!(page.events, events);
     let page_json = serde_json::to_value(&page).unwrap();
     assert_eq!(page_json["events"], Value::Array(events.clone()));
@@ -336,7 +345,7 @@ fn identity_calls_pass_events_through_unchanged() {
         vec![
             "log did:scid:zScid 0",
             "append did:scid:zScid",
-            "log did:scid:zScid 0",
+            "log did:scid:zScid 0 store.example",
             "head did:scid:zScid",
             "keyOwner z6MkKey 8"
         ]

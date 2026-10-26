@@ -327,8 +327,19 @@ export interface OfferProgress {
  * throws an `IdentityError` carrying an `IdentityErrorCode`.
  */
 export interface IdentitySpec {
-    /** GET /v1/logs/{scid}?from= */
-    log(did: string, from: number): Promise<LogPage | null>;
+    /**
+     * GET /v1/logs/{scid}?from=: one page of at most 256 events from `from`.
+     *
+     * `src` is the did:scid `src` hint: where the DID's log may be fetched, in place of the
+     * language's own store. A language serves the forms it knows (the store language: an
+     * HTTPS base such as `store.example`, `https://store.example` or
+     * `https://store.example/prefix`) and refuses any other with `{ code: "invalid" }`. A
+     * `src` only ever reads: the head in a page from another host is data, and the executor
+     * decides whether it trusts it. The language checks only the form of `src`: refusing a
+     * host that resolves to a private, loopback or link-local address belongs to the
+     * executor, which resolves DNS and runs the fetch.
+     */
+    log(did: string, from: number, src?: string): Promise<LogPage | null>;
     /** GET /v1/heads/{scid} */
     head(did: string): Promise<SignedHead | null>;
     /** POST /v1/logs/{scid}/events */
