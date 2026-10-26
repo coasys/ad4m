@@ -1133,6 +1133,7 @@ mod tests {
     use crate::identity::types::DidDocument;
     use ad4m_identity_core::build::Signer;
     use std::sync::atomic::Ordering;
+    use tokio::sync::Notify;
 
     fn scid_url(input: &str) -> ScidUrl {
         match parse_did_url(input).unwrap() {
@@ -2082,6 +2083,88 @@ mod tests {
             "d1 is revoked at the store's head: {result:?}"
         );
         assert!(!key_speaks_for(&resolver.cache, &did, &log.device.key(), 1).await);
+    }
+
+    #[tokio::test]
+    async fn a_src_prefix_never_speaks_for_its_person_while_the_store_answer_is_pending() {
+        // d1 is revoked at seq 1; the foreign host serves only seq 0, and the store's answer is
+        // held back until a concurrent verifier has looked at the cache.
+        let mut log = TestLog::new(62);
+        let prefix = log.events.clone();
+        log.revoke_d1();
+        let host = log_host(Arc::new(FakeStore::new(prefix))).await;
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let resolver = local_resolver(trusting(), store);
+        let did = did_of(&log.scid());
+        let d1 = log.device.key();
+        let url = format!("{did}?src=log.example:{}", host.port);
+        let (result, ()) = tokio::join!(resolver.resolve(&url, false), async {
+            entered.notified().await;
+            // The src has answered and its prefix is in the shared cache (so this is the
+            // window); the store's answer is pending. Only the store-signed head makes a key
+            // speak, and the cache has none yet.
+            let held = resolver.cache.chain(&log.scid()).await.unwrap();
+            assert_eq!(held.map(|c| c.head().seq), Some(0), "the prefix is cached");
+            assert!(
+                !key_speaks_for(&resolver.cache, &did, &d1, 1).await,
+                "the src's prefix speaks for the person before the store answered"
+            );
+            assert!(!key_valid_at_anchor(&resolver.cache, &did, &d1, 0, 1).await);
+            release.notify_one();
+        });
+        assert_eq!(result.did_resolution_metadata.error, None, "{result:?}");
+        assert!(
+            methods(&result).is_empty(),
+            "d1 is revoked at the store's head"
+        );
+        assert!(!key_speaks_for(&resolver.cache, &did, &d1, 1).await);
+    }
+
+    #[tokio::test]
+    async fn a_src_log_never_speaks_when_the_store_cannot_answer() {
+        let log = TestLog::new(63);
+        let host = log_host(Arc::new(FakeStore::new(log.events.clone()))).await;
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        store.store_down.store(true, Ordering::SeqCst);
+        let resolver = local_resolver(trusting(), store);
+        let did = did_of(&log.scid());
+        let result = resolver
+            .resolve(&format!("{did}?src=log.example:{}", host.port), false)
+            .await;
+        assert_eq!(result.did_resolution_metadata.error, None, "{result:?}");
+        assert_eq!(
+            methods(&result),
+            vec!["#d1", "#d1-enc"],
+            "shown in resolution"
+        );
+        assert!(
+            resolver.cache.chain(&log.scid()).await.unwrap().is_some(),
+            "cached"
+        );
+        assert!(!key_speaks_for(&resolver.cache, &did, &log.device.key(), 1).await);
+        assert!(!key_valid_at_anchor(&resolver.cache, &did, &log.device.key(), 0, 1).await);
+    }
+
+    #[tokio::test]
+    async fn a_tampered_record_is_invalid_even_when_the_key_is_valid_at_the_head() {
+        // d1 is valid at the head, so only "never fall back to the head rule" refuses these.
+        let log = TestLog::new(64);
+        let did = did_of(&log.scid());
+        let profile = signed_profile(&did, &log.device);
+        let cache = cache_holding(&log).await;
+        let good = with_record(&profile, &log.device, 3, 0);
+        assert!(verifies(&cache, &good).await);
+        let mut garbage = good.clone();
+        garbage["proof"]["record"]["sig"] = Value::from("zNotASignature");
+        let mut version = good.clone();
+        version["proof"]["record"]["version"] = Value::from(4);
+        let mut not_an_object = good.clone();
+        not_an_object["proof"]["record"] = Value::from("0");
+        for bad in [garbage, version, not_an_object] {
+            assert!(!verifies(&cache, &bad).await, "{}", bad["proof"]["record"]);
+        }
     }
 }
 
