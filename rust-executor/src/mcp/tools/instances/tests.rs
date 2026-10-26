@@ -3312,11 +3312,11 @@ async fn the_template_tools_refuse_a_record_that_is_not_a_template() {
 #[tokio::test]
 async fn the_template_documentation_is_served_to_anyone() {
     crate::test_utils::init_v8_platform();
-    let anonymous = Ad4mMcpHandler::new(McpContext {
-        admin_credential: Some("test-admin".to_string()),
-        auth_token: Arc::new(RwLock::new(None)),
-        dynamic_class_tools: false,
-    });
+    let anonymous = Ad4mMcpHandler::new(McpContext::new(
+        Some("test-admin".into()),
+        crate::agent::capabilities::ListenerReach::Network,
+        false,
+    ));
     let read = |topic: &str| {
         anonymous.get_documentation(Parameters(
             crate::mcp::tools::docs::GetDocumentationParams {
