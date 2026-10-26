@@ -177,6 +177,8 @@ pub struct SignedRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RequestBody {
     pub did: String,
+    /// The `did:key` of the store the request is for; another store refuses it.
+    pub store: String,
     pub key_id: String,
     #[ts(type = "number")]
     pub kel_seq: u64,
@@ -243,7 +245,6 @@ pub enum OfferState {
     Expired,
     Cancelled,
     Contested,
-    Locked,
     Superseded,
 }
 

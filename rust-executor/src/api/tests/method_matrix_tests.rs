@@ -654,7 +654,8 @@ fn signed_offer() -> Value {
 fn signed_request() -> Value {
     json!({
         "req": {
-            "did": "did:scid:coasys:1:Qm", "keyId": "m0", "kelSeq": 0, "kelHash": "Qm",
+            "did": "did:scid:coasys:1:Qm", "store": "did:key:z6Mk", "keyId": "m0",
+            "kelSeq": 0, "kelHash": "Qm",
             "method": "GET", "path": "/v1/offers/Qm", "bodyHash": "Qm", "nonce": "n",
             "expires": 1,
         },

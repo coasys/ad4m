@@ -45,6 +45,8 @@ pub struct LinkFlow<'a, R: ExecutorRpc> {
     random: &'a dyn Random,
     unlocked: Unlocked,
     did: String,
+    /// The store's `did:key`, from the head the executor accepted: what a signed request names.
+    store: String,
     offer: Offer,
     offer_string: OfferString,
     _secret: Secret<[u8; 32]>,
@@ -64,6 +66,24 @@ async fn chain_of<R: ExecutorRpc>(
     fold(&executor.events(did).await?)
 }
 
+/// The `did:key` of the store whose head the executor accepted for `did`: a signed request is
+/// for that store only.
+async fn store_of<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+) -> Result<String, ClientError> {
+    executor
+        .log(did, 0, false)
+        .await?
+        .head
+        .map(|head| head.store)
+        .ok_or_else(|| {
+            ClientError::Protocol(format!(
+                "the executor accepted no head from the identity store for {did}"
+            ))
+        })
+}
+
 impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
     /// Opens an offer of `kind` (`Node` for an executor) for the identity `did`, whose store
     /// is at `store_url`, and makes its link.
@@ -80,6 +100,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             .ok_or_else(|| ClientError::Protocol(format!("{did} is not a did:scid:coasys:1")))?
             .to_string();
         let chain = chain_of(executor, did).await?;
+        let store = store_of(executor, did).await?;
         let unlocked = vault.unlock(&scid, MasterUse::Link, clock.now())?;
         let mut s = zeroize::Zeroizing::new([0u8; link::SECRET_LEN]);
         random.fill(&mut s[..]);
@@ -130,6 +151,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             random,
             unlocked,
             did: did.to_string(),
+            store,
             offer,
             offer_string,
             _secret: secret,
@@ -161,6 +183,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         let head = chain.head();
         let req = RequestBody {
             did: self.did.clone(),
+            store: self.store.clone(),
             key_id: master.id.clone(),
             kel_seq: head.seq,
             kel_hash: head.hash.clone(),
