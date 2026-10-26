@@ -97,7 +97,16 @@ impl Ad4mMcpHandler {
         let Some(tool) = builtin::tool(name) else {
             return error_json(format!("This executor's template tools have no '{name}'."));
         };
-        let perspective = match self.get_readable_perspective(&p.perspective_id).await {
+        // A tool that writes checks the write rule before it reads anything, as the other write
+        // tools do: a caller who may only read is refused as the RPC guard would refuse it.
+        let perspective = if tool.writes {
+            self.get_writable_perspective(&p.perspective_id)
+                .await
+                .map(|(perspective, _)| perspective)
+        } else {
+            self.get_readable_perspective(&p.perspective_id).await
+        };
+        let perspective = match perspective {
             Ok(v) => v,
             Err(e) => return e,
         };
