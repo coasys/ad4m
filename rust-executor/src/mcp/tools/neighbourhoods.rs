@@ -576,8 +576,8 @@ mod tests {
             "first template variable should declare SERVER_URL"
         );
         assert!(
-            server_url_line.contains("https://link.ad4m.dev"),
-            "SERVER_URL default must point to https://link.ad4m.dev"
+            server_url_line.contains("https://link-staging.ad4m.dev"),
+            "SERVER_URL default must point to https://link-staging.ad4m.dev"
         );
     }
 
@@ -632,7 +632,7 @@ mod tests {
 
         let server_url_line = &lines[marker_positions[0] + 1];
         assert!(
-            server_url_line.contains("https://link.ad4m.dev"),
+            server_url_line.contains("https://link-staging.ad4m.dev"),
             "SERVER_URL must remain at bundle default after clone: got {}",
             server_url_line
         );

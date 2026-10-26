@@ -55,7 +55,7 @@ import { commitNeedsKeyRetry, refreshSkippedByCooldown, type KeyRingStatus } fro
 // Variables and possibleTemplateParams below.
 
 //!@ad4m-template-variable
-const SERVER_URL = "https://link.ad4m.dev";
+const SERVER_URL = "https://link-staging.ad4m.dev";
 
 //!@ad4m-template-variable
 const UID = "<to-be-filled>";
