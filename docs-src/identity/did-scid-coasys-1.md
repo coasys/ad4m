@@ -372,10 +372,18 @@ clocks.
 
 - A signature by a device key `k` of identity X, anchored at seq `s`, holds only when X's log
   lists `k` and `key_valid_at(k, s)` (section 6). A key revoked at *N* signs nothing valid
-  anchored at or after *N*; content it signed anchored below *N* stays valid.
+  anchored at or after *N*; content anchored below *N* that was admitted before the revocation
+  stays valid.
 - An anchor past the head of the log the verifier holds is refused.
-- A reader that first sees a signature after the key's revocation, anchored before it, may flag
-  it. That is the reader's policy; the signature holds.
+- The signer picks the anchor, so the anchor alone cannot stop a holder of a revoked key from
+  backdating new content to a seq below *N*. The host that admits signed content (for an agent
+  record, the store that takes the `PUT`) orders arrivals: when the content arrives it also
+  checks `k` listed and valid at the head of the log it holds, and refuses the content
+  otherwise, whatever anchor it names. A revoked key so cannot backdate new content past that
+  host. Readers check at the anchor and rely on that host's admission for arrival order.
+- A reader that first sees a signature after the key's revocation, anchored before it, and
+  did not get it through such a host, may flag it. That is the reader's policy; the signature
+  holds.
 
 The anchor carries no DID, key id or hash. The identity is known from the content: a record is
 keyed by its did:scid, and a link's author key maps to its identity through a key lookup that

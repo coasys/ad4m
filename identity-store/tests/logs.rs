@@ -708,9 +708,13 @@ async fn a_did_scid_record_needs_a_signed_request_and_a_valid_non_bot_key_of_the
     assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
     assert_eq!(reply.body["error"], "malformed");
 
-    // The phone signs at the head it knows; then the phone is revoked.
+    // The phone signs at the head it knows and the store takes the record; the phone signs a
+    // second record it does not send yet; then the phone is revoked.
     let before_revoke = alice.chain.head().seq;
-    let signed_before = alice.agent_record(&phone.key, profile.clone(), 4);
+    let stored_before = alice.agent_record(&phone.key, profile.clone(), 4);
+    let reply = put(serde_json::to_vec(&stored_before).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let signed_before = alice.agent_record(&phone.key, profile.clone(), 5);
     let revoke = alice.revoke(&[&phone_id]);
     assert_eq!(
         t.append_push(&mut alice, revoke).await.status,
@@ -719,7 +723,7 @@ async fn a_did_scid_record_needs_a_signed_request_and_a_valid_non_bot_key_of_the
     let revoked_at = alice.chain.head().seq;
     assert!(revoked_at > before_revoke);
     // A record anchored at the revocation (or later) by the revoked key: 403.
-    let revoked = alice.agent_record(&phone.key, profile.clone(), 5);
+    let revoked = alice.agent_record(&phone.key, profile.clone(), 6);
     assert_eq!(revoked.anchor, Some(revoked_at));
     let put = |body: Vec<u8>| {
         let header = alice.request("d1", &d1, "PUT", &path, &body, later);
@@ -728,9 +732,23 @@ async fn a_did_scid_record_needs_a_signed_request_and_a_valid_non_bot_key_of_the
     let reply = put(serde_json::to_vec(&revoked).unwrap()).await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
     assert_eq!(reply.body["error"], "signer");
-    // A record the phone signed before its revocation stays valid.
+    // A record the phone signed before its revocation but sent after it: the store orders
+    // arrivals, and the key is no longer valid at the head: 403.
+    assert_eq!(signed_before.anchor, Some(before_revoke));
     let reply = put(serde_json::to_vec(&signed_before).unwrap()).await;
-    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signer");
+    // A thief with the revoked key signs a new record backdated to an anchor before the
+    // revocation; its signature verifies, and the store still refuses it: 403.
+    let backdated = alice.agent_record_at(&phone.key, profile.clone(), 7, before_revoke);
+    let reply = put(serde_json::to_vec(&backdated).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signer");
+    // The record stored before the revocation stays valid and is still served.
+    assert_eq!(
+        t.get(&path).await.body,
+        serde_json::to_value(&stored_before).unwrap()
+    );
     assert_eq!(t.get(&path).await.body["anchor"], json!(before_revoke));
 }
 

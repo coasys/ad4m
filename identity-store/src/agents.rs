@@ -7,10 +7,13 @@
 //! write it only while its scope is in force (the bot-scope check). A `did:scid` record comes
 //! with a signed request of that identity and carries its anchor: the seq of the identity's log
 //! that the signer knew when it signed. It is accepted only when the anchor lies at or below the
-//! log's head (`400 anchor` otherwise) and `signedBy` is a non-bot key the log lists, valid at
-//! the anchor: a key revoked at seq N signs no record anchored at or after N, and a record
-//! signed before a revocation stays valid. The key id comes from the log, the person from the
-//! record's did, so the anchor carries neither.
+//! log's head (`400 anchor` otherwise) and `signedBy` is a non-bot key the log lists, valid
+//! both at the anchor and at the log's head when the record arrives (`403 signer` otherwise).
+//! The signer picks the anchor, so the head check is what stops a key revoked at seq N from
+//! backdating a new record to an anchor below N: the store orders arrivals, so a record it
+//! accepted before a revocation stays valid (readers check at the anchor), and a record that
+//! arrives after the revocation is refused, whatever anchor it names. The key id comes from
+//! the log, the person from the record's did, so the anchor carries neither.
 //!
 //! The store does not read `profile`: the record signature covers it whatever it holds. The
 //! agent language puts a `did:key` agent's Agent there as that agent's signed AD4M expression,
@@ -107,20 +110,24 @@ impl Store {
                     "the signed request is another identity's",
                 ));
             }
-            if anchor > chain.head().seq {
+            let head = chain.head().seq;
+            if anchor > head {
                 return Err(ApiError::invalid(
                     "anchor",
                     "the anchor lies past the log's head",
                 ));
             }
             let state = chain.state();
-            let valid = state.key_id_of(&key.to_string()).is_some_and(|id| {
-                state.bot_scope_at(id, anchor).is_none() && state.key_valid_at_time(id, anchor, now)
-            });
+            let valid_at = |id, seq| {
+                state.bot_scope_at(id, seq).is_none() && state.key_valid_at_time(id, seq, now)
+            };
+            let valid = state
+                .key_id_of(&key.to_string())
+                .is_some_and(|id| valid_at(id, anchor) && valid_at(id, head));
             if !valid {
                 return Err(ApiError::forbidden(
                     "signer",
-                    "signedBy is not a non-bot key of this log valid at the anchor",
+                    "signedBy is not a non-bot key of this log valid at the anchor and at the head",
                 ));
             }
             if !record_signed_by(record, key) {
