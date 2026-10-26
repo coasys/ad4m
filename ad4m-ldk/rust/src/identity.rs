@@ -64,7 +64,7 @@ pub struct AppendRequest {
     pub pow: Option<Pow>,
 }
 
-/// A proof of work on a new log with no note (section 9 of
+/// A proof of work on a new log with no note (section 14, host admission policy, of
 /// `docs-src/identity/did-scid-coasys-1.md`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -23,7 +23,7 @@ words = [
     "dep:rand_core",
     "dep:getrandom",
 ]
-# wasm-bindgen exports: the `KelChain` class with `fold` and `import`.
+# wasm-bindgen exports: the `KelChain` class with `fold` and `import`, and `KelHandle.didDocument`.
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]

@@ -33,7 +33,7 @@ fn chain_error(e: &ChainError<FoldError>) -> ApiError {
     ApiError::invalid(&name, e.to_string())
 }
 
-/// How a new log with no vouching note is admitted (section 9 of
+/// How a new log with no vouching note is admitted (section 14, host admission policy, of
 /// `docs-src/identity/did-scid-coasys-1.md`). There is no brake yet: no
 /// bucket per address, no store-wide ceiling and no required proof of work. A proof that is
 /// sent must still meet `POW_BITS`, so the request format and the client's work stay those

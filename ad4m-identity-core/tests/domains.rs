@@ -1,4 +1,4 @@
-//! Signing domains (section 7 of the format spec): a log proof never verifies as a link,
+//! Signing domains (sections 7 and 16 of the format spec): a log proof never verifies as a link,
 //! request, head or note signature, and the reverse; labels are never signing domains.
 #![cfg(feature = "build")]
 

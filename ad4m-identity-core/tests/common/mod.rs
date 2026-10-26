@@ -12,9 +12,9 @@ use ad4m_identity_core::link::{
     OFFER_TTL_S,
 };
 use ad4m_identity_core::{
-    commitment, derive_scid, encode_x25519_multikey, error_code, event_hash, fold, fold_json, pow,
-    signing_bytes, verify_signed, BotScope, DeviceKey, Event, FoldError, KelChain, KelPolicy,
-    KeyLife, Multikey, Op, KEL_DOMAIN,
+    commitment, derive_scid, did_document, encode_x25519_multikey, error_code, event_hash, fold,
+    fold_json, pow, signing_bytes, verify_signed, BotScope, DeviceKey, Event, FoldError, KelChain,
+    KelPolicy, KeyLife, Multikey, Op, KEL_DOMAIN,
 };
 use ed25519_dalek::SigningKey;
 use serde_json::{json, Value};
@@ -628,6 +628,7 @@ pub const VECTOR_NAMES: &[&str] = &[
     "pow",
     "domains",
     "link",
+    "document",
 ];
 
 /// The fixed entropy of the words vector.
@@ -646,6 +647,7 @@ pub fn build_vectors() -> Vec<(&'static str, Value)> {
         ("pow", build_pow()),
         ("domains", build_domains()),
         ("link", build_link()),
+        ("document", build_document()),
     ]
 }
 
@@ -826,6 +828,7 @@ pub fn check_vector_file(name: &str, file: &Value) {
         "pow" => check_pow(file),
         "domains" => check_domains(file),
         "link" => check_link(file),
+        "document" => check_document(file),
         other => panic!("unknown vector file {other}"),
     }
 }
@@ -1185,6 +1188,56 @@ fn check_link(file: &Value) {
         file["deviceString"]["string"].as_str().unwrap()
     );
     assert_eq!(DeviceString::parse(&device.encode()).unwrap(), device);
+}
+
+/// The `alsoKnownAs` of the document vector: the DID URL of a host.
+pub fn document_also_known_as(did: &str) -> Vec<String> {
+    vec![format!("{did}?src=store.example")]
+}
+
+/// The document of `chain` at `version` as `{version, didDocument, didDocumentMetadata}`.
+fn document_case(chain: &KelChain, version: Option<u64>, aka: &[String]) -> Value {
+    let (document, metadata) = did_document(chain, version, aka).unwrap();
+    json!({"version": version, "didDocument": document, "didDocumentMetadata": metadata})
+}
+
+fn build_document() -> Value {
+    let log = vector_log();
+    let state = log.chain.state();
+    let aka = document_also_known_as(&state.did);
+    let documents: Vec<Value> = std::iter::once(None)
+        .chain((0..=log.seq()).map(Some))
+        .map(|version| document_case(&log.chain, version, &aka))
+        .collect();
+    let past = log.seq() + 1;
+    let error = did_document(&log.chain, Some(past), &aka).unwrap_err();
+    json!({
+        "description": "The DID document of the log of log.json at the head (version null) and after every seq, with alsoKnownAs; a version past the head is refused.",
+        "did": state.did,
+        "events": log.json(),
+        "alsoKnownAs": aka,
+        "documents": documents,
+        "refused": [{"version": past, "error": error.name()}],
+    })
+}
+
+fn check_document(file: &Value) {
+    let events: Vec<Value> = serde_json::from_value(file["events"].clone()).unwrap();
+    let chain = fold_json(&events).unwrap();
+    assert_eq!(chain.state().did, file["did"]);
+    let aka: Vec<String> = serde_json::from_value(file["alsoKnownAs"].clone()).unwrap();
+    for case in file["documents"].as_array().unwrap() {
+        let version = case["version"].as_u64();
+        assert_eq!(
+            document_case(&chain, version, &aka),
+            *case,
+            "version {version:?}"
+        );
+    }
+    for case in file["refused"].as_array().unwrap() {
+        let err = did_document(&chain, case["version"].as_u64(), &aka).unwrap_err();
+        assert_eq!(err.name(), case["error"]);
+    }
 }
 
 // ----- Time -----
