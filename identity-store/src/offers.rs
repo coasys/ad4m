@@ -7,7 +7,7 @@
 
 use ad4m_identity_core::link::{
     check_add, check_secret, claim_view, verify_claim, verify_offer, Claim, ClaimView, LinkError,
-    OfferKind, OfferState, SignedOffer, CONFIRM_GRACE_S, MAX_OPEN_OFFERS, MAX_WRONG_SECRETS,
+    OfferKind, OfferState, SignedOffer, CONFIRM_GRACE_S, MAX_OPEN_OFFERS,
 };
 use ad4m_identity_core::{Event, KeyState};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -23,7 +23,6 @@ pub const TOMBSTONE_S: u64 = 86_400;
 struct OfferRow {
     signed: SignedOffer,
     state: String,
-    wrong_secrets: u32,
     spent_seq: Option<u64>,
 }
 
@@ -66,18 +65,17 @@ fn refresh(conn: &Connection, scid: &str, now: u64) -> Result<bool, ApiError> {
 }
 
 fn read_offer(conn: &Connection, scid: &str, offer_id: &str) -> Result<Option<OfferRow>, ApiError> {
-    let row: Option<(String, String, i64, Option<i64>)> = conn
+    let row: Option<(String, String, Option<i64>)> = conn
         .query_row(
-            "SELECT signed, state, wrong_secrets, spent_seq FROM offers WHERE scid = ?1 AND offer_id = ?2",
+            "SELECT signed, state, spent_seq FROM offers WHERE scid = ?1 AND offer_id = ?2",
             params![scid, offer_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    row.map(|(signed, state, wrong, spent)| {
+    row.map(|(signed, state, spent)| {
         Ok(OfferRow {
             signed: parse(&signed)?,
             state,
-            wrong_secrets: from_sql(wrong) as u32,
             spent_seq: spent.map(from_sql),
         })
     })
@@ -126,7 +124,6 @@ fn offer_state(conn: &Connection, scid: &str, row: &OfferRow) -> Result<OfferSta
         "expired" => OfferState::Expired,
         "cancelled" => OfferState::Cancelled,
         "contested" => OfferState::Contested,
-        "locked" => OfferState::Locked,
         "superseded" => OfferState::Superseded,
         other => return Err(ApiError::internal(format!("unknown offer state {other}"))),
     })
@@ -314,9 +311,10 @@ impl Store {
     }
 
     /// `POST /v1/offers/{scid}/{offerId}/claim`. Checks, in order: the offer exists and is
-    /// live; a byte-for-byte repeat answers `200`; the secret (wrong ones count toward
-    /// `locked`); the bound key; the co-signature; the key in no log; then an unbound offer
-    /// that already holds another key's claim becomes `contested`.
+    /// live; a byte-for-byte repeat answers `200`; the secret (a wrong one changes nothing: `s`
+    /// is 256 bits, so no count of misses protects it, and an unauthenticated count would let
+    /// anyone end the offer); the bound key; the co-signature; the key in no log; then an
+    /// unbound offer that already holds another key's claim becomes `contested`.
     pub fn claim_offer(
         &self,
         scid: &str,
@@ -358,37 +356,18 @@ impl Store {
                 return Ok(ClaimAnswer::Repeat(receipt(&row.signed)));
             }
         }
-        let wrong =
-            |tx: rusqlite::Transaction<'_>, error: ApiError| -> Result<ClaimAnswer, ApiError> {
-                let count = row.wrong_secrets + 1;
-                tx.execute(
-                    "UPDATE offers SET wrong_secrets = ?3 WHERE scid = ?1 AND offer_id = ?2",
-                    params![scid, offer_id, count],
-                )?;
-                if count >= MAX_WRONG_SECRETS {
-                    end(&tx, scid, offer_id, "locked", now)?;
-                }
-                tx.commit()?;
-                Err(error)
-            };
         if !check_secret(&row.signed.offer, claim) {
-            let result = wrong(
-                tx,
-                ApiError::forbidden("secret", "the secret does not match the offer"),
-            );
-            drop(conn);
-            self.changed();
-            return result;
+            return Err(ApiError::forbidden(
+                "secret",
+                "the secret does not match the offer",
+            ));
         }
         if let Some(bound) = &row.signed.offer.device_key {
             if bound != &claim.device_key {
-                let result = wrong(
-                    tx,
-                    ApiError::forbidden("bound", "the offer is bound to another key"),
-                );
-                drop(conn);
-                self.changed();
-                return result;
+                return Err(ApiError::forbidden(
+                    "bound",
+                    "the offer is bound to another key",
+                ));
             }
         }
         match verify_claim(scid, claim) {

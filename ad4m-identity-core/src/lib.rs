@@ -56,6 +56,10 @@ pub const SCID_PLACEHOLDER: &str = "{SCID}";
 pub const KEL_DOMAIN: &str = "coasys:kel";
 /// The `proofPurpose` of every log proof.
 pub const PROOF_PURPOSE: &str = "assertionMethod";
+/// The largest event, in bytes of its canonical JSON text with its proofs (spec rule P7).
+/// `offer`, `coSig`, `salt` and a bot scope's `can` have no length of their own, so this bounds
+/// what one signed event can make every verifier and host parse and store.
+pub const EVENT_MAX_BYTES: usize = 64 * 1024;
 
 /// A key id: `m<n>` for master key *n*, `d<n>` for device keys.
 pub type KeyId = String;

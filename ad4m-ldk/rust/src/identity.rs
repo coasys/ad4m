@@ -117,10 +117,16 @@ pub struct SignedRequest {
     pub sig: String,
 }
 
+/// The signed part of a store request (`coasys:store-request`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestBody {
     pub did: String,
+    /// did:key of the store the request is for, as a [`SignedHead`] names its store: a store
+    /// refuses a request for another (`403 store`), so a request cannot be replayed to a second
+    /// store that holds the same log. A client takes it from its configured store keys
+    /// (`identity.storeKeys`) or from the `store` of a signed head it checked against them.
+    pub store: String,
     pub key_id: String,
     pub kel_seq: u64,
     pub kel_hash: String,
@@ -302,7 +308,6 @@ pub enum OfferState {
     Expired,
     Cancelled,
     Contested,
-    Locked,
     Superseded,
 }
 
@@ -351,6 +356,8 @@ pub enum ForbiddenReason {
     Bound,
     Cosig,
     Writer,
+    /// A signed request for another store.
+    Store,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

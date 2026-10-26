@@ -100,13 +100,25 @@ impl KeyState {
         self.masters.last().filter(|m| m.revoked.is_none())
     }
 
-    /// The key id of a signing multikey, master or device.
+    /// The key id of a signing multikey, master or device. For one key, one place (rule K8)
+    /// and log events. A content signer uses [`KeyState::device_key_id_of`].
     pub fn key_id_of(&self, sign: &Multikey) -> Option<&KeyId> {
         self.masters
             .iter()
             .chain(self.keys.values())
             .find(|r| &r.sign == sign)
             .map(|r| &r.id)
+    }
+
+    /// The key id of a device key (`d<n>`, bot keys included) with this signing multikey;
+    /// `None` for a master key and for a key the log does not list.
+    ///
+    /// Use this, not `key_id_of`, to find who signed content (links, records, logins): a master
+    /// never signs for the person (spec section 9). It signs log events and offers only, and the
+    /// DID document omits it. A content signature under a master key is not the person's. The
+    /// caller still checks validity at its seq (`key_valid_at`) and a bot key's scope.
+    pub fn device_key_id_of(&self, sign: &Multikey) -> Option<&KeyId> {
+        self.keys.values().find(|r| &r.sign == sign).map(|r| &r.id)
     }
 
     /// The id the next added device key must carry (`d1`, `d2`, …; spec rule K7).

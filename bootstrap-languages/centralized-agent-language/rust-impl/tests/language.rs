@@ -108,6 +108,11 @@ impl StoreProcess {
     fn db(&self) -> PathBuf {
         self.dir.path().join("store.sqlite")
     }
+
+    /// The store key's `did:key`: the `store` its signed requests name.
+    fn did(&self) -> String {
+        format!("did:key:{}", self.key)
+    }
 }
 
 impl Drop for StoreProcess {
@@ -153,9 +158,12 @@ impl Apps {
         answer["ok"].clone()
     }
 
-    /// A signed request of `name` by `signer` for `method path` with `body` sent as its JCS.
+    /// A signed request of `name` by `signer` for `method path` with `body` sent as its JCS,
+    /// for the store `server`.
+    #[allow(clippy::too_many_arguments)]
     fn signed(
         &mut self,
+        server: &StoreProcess,
         name: &str,
         signer: &str,
         key_id: Option<&str>,
@@ -168,7 +176,7 @@ impl Apps {
             .unwrap_or_default();
         let mut fields = json!({
             "name": name, "signer": signer, "method": method, "path": path,
-            "body": body, "expires": now_s() + 120,
+            "body": body, "expires": now_s() + 120, "store": server.did(),
         });
         if let Some(id) = key_id {
             fields["keyId"] = json!(id);
@@ -665,11 +673,11 @@ fn the_offer_calls_answer_and_refuse_as_the_store_does() {
         IdentityErrorCode::Invalid { .. }
     ));
     let list_path = format!("/v1/offers/{scid}");
-    let req = apps.signed(name, "master", None, "GET", &list_path, None);
+    let req = apps.signed(&server, name, "master", None, "GET", &list_path, None);
     let listed = block_on(store.list_offers(&did, &req, 0)).unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(serde_json::to_value(&listed[0].offer).unwrap(), offer);
-    let by_device = apps.signed(name, "d1", Some("d1"), "GET", &list_path, None);
+    let by_device = apps.signed(&server, name, "d1", Some("d1"), "GET", &list_path, None);
     assert_eq!(
         refusal(block_on(store.list_offers(&did, &by_device, 0))),
         IdentityErrorCode::Forbidden {
@@ -753,13 +761,14 @@ fn the_offer_calls_answer_and_refuse_as_the_store_does() {
         }
     );
     let cancel_path = format!("/v1/offers/{scid}/{offer_id}");
-    let req = apps.signed(name, "master", None, "DELETE", &cancel_path, None);
+    let req = apps.signed(&server, name, "master", None, "DELETE", &cancel_path, None);
     assert_eq!(
         refusal(block_on(store.cancel_offer(&did, &offer_id, &req))),
         IdentityErrorCode::NotFound
     );
     let open_id = open["offer"]["offerId"].as_str().unwrap();
     let req = apps.signed(
+        &server,
         name,
         "master",
         None,
@@ -812,6 +821,7 @@ fn attach_note_checks_the_signed_request_then_the_store_has_no_vouching_service(
     let did = p["did"].as_str().unwrap();
     let path = format!("/v1/notes/{}", p["scid"].as_str().unwrap());
     let req = apps.signed(
+        &server,
         name,
         "d1",
         Some("d1"),
@@ -854,7 +864,7 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
         }
     );
     let body = serde_json::to_value(&record).unwrap();
-    let req = apps.signed(name, "d1", Some("d1"), "PUT", &path, Some(&body));
+    let req = apps.signed(&server, name, "d1", Some("d1"), "PUT", &path, Some(&body));
     block_on(store.put_agent(&record, Some(&req))).unwrap();
     let expression = block_on(agents::get(&store, &did, now_s()))
         .unwrap()
@@ -964,6 +974,27 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
     assert!(block_on(agents::get(&store, &did, now_s()))
         .unwrap()
         .is_none());
+
+    // The same shape signed by the current master, valid at the head: ignored, because the
+    // master never signs for the person.
+    let master_profile = scid_profile(&mut apps, name, "master", &did);
+    let by_master = apps.run(
+        "record",
+        json!({ "name": name, "signer": "master", "profile": master_profile, "version": 5 }),
+    );
+    assert_eq!(
+        by_master["signedBy"],
+        format!(
+            "did:key:{}",
+            p["incept"]["master"]
+                .as_str()
+                .expect("the incept names its master")
+        )
+    );
+    store_row(&by_master);
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_none());
 }
 
 /// A `did:scid` person's profile as its agent record stores it: the Agent as an AD4M
@@ -1033,7 +1064,7 @@ fn a_did_scid_profile_is_answered_only_when_its_record_binds_it_exactly() {
     .unwrap();
     let body = serde_json::to_value(&record).unwrap();
     let path = format!("/v1/agents/{did}");
-    let req = apps.signed(name, "d1", Some("d1"), "PUT", &path, Some(&body));
+    let req = apps.signed(&server, name, "d1", Some("d1"), "PUT", &path, Some(&body));
     block_on(store.put_agent(&record, Some(&req))).unwrap();
     let answered = block_on(agents::get(&store, &did, now_s()))
         .unwrap()
@@ -1255,6 +1286,7 @@ fn bodies_are_the_inputs_canonical_json_and_the_signed_request_travels_unchanged
     );
 
     let req = apps.signed(
+        &server,
         name,
         "master",
         None,
@@ -1269,6 +1301,31 @@ fn bodies_are_the_inputs_canonical_json_and_the_signed_request_travels_unchanged
         encode_request(&req).unwrap()
     );
     assert_eq!(listed.body, "");
+}
+
+#[test]
+fn a_signed_request_for_another_store_is_refused_with_reason_store() {
+    let first = StoreProcess::start();
+    let second = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (_host, store) = Host::on(&second.url);
+    let name = "pia replays";
+    let p = person(&mut apps, &store, name);
+    let did = p["did"].as_str().unwrap();
+    let path = format!("/v1/offers/{}", p["scid"].as_str().unwrap());
+    // Signed for the first store, sent to the second, which holds the same log.
+    let req = apps.signed(&first, name, "master", None, "GET", &path, None);
+    assert_eq!(req.req.store, first.did());
+    assert_eq!(
+        refusal(block_on(store.list_offers(did, &req, 0))),
+        IdentityErrorCode::Forbidden {
+            reason: ad4m_ldk::identity::ForbiddenReason::Store
+        }
+    );
+    let req = apps.signed(&second, name, "master", None, "GET", &path, None);
+    assert!(block_on(store.list_offers(did, &req, 0))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

@@ -54,21 +54,36 @@ pub struct Reply {
 
 impl TestStore {
     pub fn new() -> TestStore {
-        Self::with_settings(Settings {
+        Self::with_settings(Self::settings())
+    }
+
+    /// The settings every test store runs with unless a test gives its own.
+    fn settings() -> Settings {
+        Settings {
             pow_bits: 8,
             feed_token: Some("mirror-token".into()),
             cors_origins: Vec::new(),
-        })
+        }
     }
 
     pub fn with_settings(settings: Settings) -> TestStore {
+        Self::with_key_and_settings(agent::TEST_STORE_SECRET, settings)
+    }
+
+    /// A second store under its own key (the key a person's requests name is the default
+    /// store's).
+    pub fn with_key(secret: [u8; 32]) -> TestStore {
+        Self::with_key_and_settings(secret, Self::settings())
+    }
+
+    fn with_key_and_settings(secret: [u8; 32], settings: Settings) -> TestStore {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(dir.path().join("store.sqlite")).unwrap();
         let clock = Arc::new(AtomicU64::new(T0));
         let read = clock.clone();
         let store = Store::new(
             db,
-            StoreKey::from_secret([7; 32]),
+            StoreKey::from_secret(secret),
             Arc::new(move || read.load(Ordering::SeqCst)),
             settings,
         );

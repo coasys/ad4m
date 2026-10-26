@@ -9,7 +9,8 @@
 //!   `{profile, version, anchor: null}`, so it covers the signed expression too. Sent as
 //!   `PUT /v1/agents/{did}` with no signed request.
 //! - `get` reads `GET /v1/agents/{did}` and keeps the record only when its signature holds:
-//!   for a `did:key`, by that key; for a `did:scid`, by a key that the log (read from the store
+//!   for a `did:key`, by that key; for a `did:scid`, by a device key (never a master: the master
+//!   never signs for the person) that the log (read from the store
 //!   and replayed here with the identity core, every event's signatures checked) lists, valid
 //!   and without the bot mark at the record's anchor: the seq of that log the signer knew when
 //!   it signed, at or below the head. A key revoked at seq N signs nothing valid anchored at or
@@ -278,7 +279,9 @@ async fn verified<H: Http>(
         return Ok(false);
     }
     let state = chain.state();
-    Ok(state.key_id_of(&key.to_string()).is_some_and(|id| {
+    // Device keys only, never a master: the master never signs for the person.
+    let device_id = state.device_key_id_of(&key.to_string());
+    Ok(device_id.is_some_and(|id| {
         state.bot_scope_at(id, anchor).is_none() && state.key_valid_at_time(id, anchor, now_s)
     }))
 }

@@ -40,12 +40,12 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `GET /heads/{scid}` (public host profile) | `200 SignedHead` · `404` |
 | `GET /keys/{multikey}?wait=0..8` | `200 KeyIndexEntry` · `404` (at once, or at the timeout) · `400` wait > 8 |
 | `GET /pow` | `200 {bits, previousBits, changedAt}` |
-| `POST /notes/{scid}` `{token}` + signed request | `403 signer` · `503 vouch-unavailable` (no vouching service exists yet) |
+| `POST /notes/{scid}` `{token}` + signed request | `403 signer`/`store` · `503 vouch-unavailable` (no vouching service exists yet) |
 | `GET /agents/{did}` | `200 AgentRecord` · `404` |
-| `PUT /agents/{did}` | `200` · `400 malformed`/`anchor` · `403 signer`/`writer` · `409 {version}` |
+| `PUT /agents/{did}` | `200` · `400 malformed`/`anchor` · `403 signer`/`writer`/`store` · `409 {version}` |
 | `POST /offers/{scid}` `SignedOffer` | `201 {offerId}` · `400` · `403 signer` · `404` · `409 {head}` · `409 offer-exists` · `429 identity` |
-| `GET /offers/{scid}?wait=` master-signed | `200 [{offer, state}]` (open and claimed) |
-| `DELETE /offers/{scid}/{offerId}` master-signed | `204` · `404` |
+| `GET /offers/{scid}?wait=` master-signed | `200 [{offer, state}]` (open and claimed) · `403 signer`/`store` |
+| `DELETE /offers/{scid}/{offerId}` master-signed | `204` · `403 signer`/`store` · `404` |
 | `POST /offers/{scid}/{offerId}/claim` `Claim` | `201`/`200` repeat `{state, kind, expires}` · `403 secret`/`bound`/`cosig` · `404` · `409 key-taken` · `410 {state}` |
 | `GET /offers/{scid}/{offerId}/state?key=&wait=` | `200 {state, seq?}` for the claiming key only · `404` |
 | `GET /feed?after=` `Authorization: Bearer <FEED_TOKEN>` | `200 {items, next}` · `401` |
@@ -106,10 +106,22 @@ tests name them by these names.
 
 - A `rotate` supersedes every open and claimed offer. Offer time states (expired, 24-hour
   tombstones) apply lazily when a request touches the identity's offers.
+- A wrong secret (`403 secret`) or a claim by another key on a bound offer (`403 bound`)
+  changes nothing: no miss count, no lockout. The claim route is unauthenticated, so a count
+  would let anyone who knows `(scid, offerId)` end the offer, and `s` is 256 bits, so a count
+  protects nothing against guessing.
 
 ## Rules
 
-- **Signed requests**: the key is valid at the head by the store's clock and has no bot mark;
+- **Signed requests**: `req` is `{did, store, keyId, kelSeq, kelHash, method, path, bodyHash,
+  nonce, expires}`, signed under `coasys:store-request`. `store` is this store key's `did:key`,
+  as a signed head names its store (`403 store` otherwise, checked first), so a request for
+  one store cannot be replayed to another that holds the same log prefix. No route publishes
+  the key on its own: a client knows it from configuration (the executor's
+  `identity.storeKeys`; `serve` prints it on start, `keygen` on creation), and the `store`
+  of every signed head (`GET /v1/heads/{scid}`, the `head` of a log page) names it once
+  checked against those keys. Then the key is valid at the head by the store's clock and has
+  no bot mark;
   `kelSeq`/`kelHash` name a held position; `expires` lies at most 5 minutes ahead; method and
   **path** (percent-decoded, without the query) match; `bodyHash` is the multihash of the raw
   body bytes; the nonce is new in 10 minutes. Offer routes take only the current master key.
@@ -119,7 +131,8 @@ tests name them by these names.
   `did:scid` record comes with a signed request of that identity, and its `anchor` is one
   number: the seq of the identity's log that the signer knew when it signed. The store accepts
   it only when the anchor is at or below the head (`400 anchor` otherwise) and `signedBy` is a
-  bare `did:key` whose key the log lists (key id by `key_id_of`), without the bot mark and
+  bare `did:key` whose key the log lists as a device key (looked up among `state.keys`, never
+  the masters: the master never signs for the person), without the bot mark and
   valid both at the anchor and at the log's current head (`key_valid_at_time(key, anchor,
   now)` and `key_valid_at_time(key, head, now)`, no bot mark at either; `403 signer`
   otherwise). The anchor places the signature in the log, so revocation needs no clock: a key

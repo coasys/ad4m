@@ -48,6 +48,8 @@ pub enum FormatError {
     EmptyAdd,
     #[error("a revoke must name at least one key")]
     EmptyRevoke,
+    #[error("the event is {0} bytes of canonical JSON, above the limit of 65536")]
+    TooLarge(usize),
 }
 
 /// The KEL's own refusals. They reach callers as `ChainError::Policy(FoldError)`.
@@ -107,6 +109,7 @@ impl FormatError {
             FormatError::InceptAfterGenesis => "InceptAfterGenesis",
             FormatError::EmptyAdd => "EmptyAdd",
             FormatError::EmptyRevoke => "EmptyRevoke",
+            FormatError::TooLarge(_) => "TooLarge",
         }
     }
 }

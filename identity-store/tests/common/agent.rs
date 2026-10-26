@@ -20,6 +20,14 @@ use ed25519_dalek::SigningKey;
 use identity_store::request::encode_header;
 use serde_json::Value;
 
+/// The secret of the store key the store tests run with (`TestStore`).
+pub const TEST_STORE_SECRET: [u8; 32] = [7; 32];
+
+/// The `did:key` of the test store's key: the `store` a person's requests name by default.
+pub fn test_store_did() -> String {
+    identity_store::StoreKey::from_secret(TEST_STORE_SECRET).did()
+}
+
 /// A key from a label: `sha256(label)` as the Ed25519 secret.
 pub fn key(label: &str) -> SigningKey {
     SigningKey::from_bytes(&sha256(label.as_bytes()))
@@ -101,6 +109,8 @@ pub struct Person {
     pub n: u32,
     /// Offers made so far (gives each a fresh id and secret).
     offers: u32,
+    /// The `did:key` of the store the person's signed requests are for.
+    pub store: String,
 }
 
 impl Person {
@@ -123,6 +133,7 @@ impl Person {
             events: vec![event],
             n: 0,
             offers: 0,
+            store: test_store_did(),
         }
     }
 
@@ -239,7 +250,7 @@ impl Person {
         .unwrap()
     }
 
-    /// The body of a signed request by `key_id` (signing with `signer`) at the person's head.
+    /// The body of a signed request by `key_id` at the person's head, for `self.store`.
     pub fn request_body(
         &self,
         key_id: &str,
@@ -251,6 +262,7 @@ impl Person {
         let head = self.chain.head();
         RequestBody {
             did: self.did(),
+            store: self.store.clone(),
             key_id: key_id.to_string(),
             kel_seq: head.seq,
             kel_hash: head.hash.clone(),

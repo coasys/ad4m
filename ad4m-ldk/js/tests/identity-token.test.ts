@@ -45,6 +45,7 @@ const events: JsonObject[] = [
 const request: SignedRequest = {
     req: {
         did: "did:scid:zScid",
+        store: "did:key:zStore",
         keyId: "m1",
         kelSeq: 1,
         kelHash: "zHash1",
