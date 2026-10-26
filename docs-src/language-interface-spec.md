@@ -459,7 +459,11 @@ Rules for an implementation:
 - `expressionGet` / `expressionCreate` keep working for agent profiles, on the store's
   `/v1/agents/{did}` routes. A `did:key` record's `profile` is the Agent as the agent's signed
   AD4M expression (the host's `createSignedExpression`), and `expressionGet` answers that
-  expression unchanged, so the executor's check of `proof.signature` holds as before.
+  expression unchanged, so the executor's check of `proof.signature` holds as before. A
+  `did:scid` record's `profile` is the person's Agent as an AD4M expression authored by the
+  `did:scid` and signed by the record's `signedBy` (`proof.key` is that `did:key`). The
+  language answers it only when its author is the record's DID and its data an Agent naming
+  that DID. The executor verifies it under `proof.key` once the author's log lists that key.
 - **An agent record's `anchor` is one seq.** `sig` covers `{profile, version, anchor}`. A
   `did:key` record's `anchor` is `null`; a `did:scid` record's is the seq of that log the
   signer knew when it signed. The store on write and the language on read keep a `did:scid`
@@ -469,7 +473,7 @@ Rules for an implementation:
   a fork freezes the identity anyway, so the anchor carries no DID, key id or hash.
 
 The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the
-calls it makes today are `log`, `append`, `openOffer`, `listOffers`, `claimOffer` and
+calls it makes today are `log` (with an optional `src`), `keyOwner`, `append`, `openOffer`, `listOffers`, `claimOffer` and
 `offerState`; the language serves the others for apps and for later executor features.
 
 ### 5.9 Token (agent language only, interfaces only)
