@@ -363,6 +363,14 @@ fn rotate_with_a_wrong_salt() {
 }
 
 #[test]
+fn rotate_with_a_malformed_salt() {
+    assert!(matches!(
+        format_of(refuse("rotate with a salt that is not 16 bytes of base58btc")),
+        FormatError::BadSalt(s) if s.is_empty()
+    ));
+}
+
+#[test]
 fn event_after_the_end() {
     assert_eq!(policy_of(refuse("event after the end")), FoldError::Ended);
 }

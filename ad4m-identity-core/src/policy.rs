@@ -38,6 +38,8 @@ pub enum FormatError {
     Proof(String),
     #[error("{0:?} is not a sha2-256 multihash")]
     BadHash(String),
+    #[error("salt {0:?} is not base58btc of 16 bytes")]
+    BadSalt(String),
     #[error("scid {got:?}, the incept derives {want:?}")]
     Scid { want: String, got: String },
     #[error("the first event of a log must be an incept")]
@@ -104,6 +106,7 @@ impl FormatError {
             FormatError::NotCanonical(_) => "NotCanonical",
             FormatError::Proof(_) => "Proof",
             FormatError::BadHash(_) => "BadHash",
+            FormatError::BadSalt(_) => "BadSalt",
             FormatError::Scid { .. } => "Scid",
             FormatError::NotIncept => "NotIncept",
             FormatError::InceptAfterGenesis => "InceptAfterGenesis",
@@ -250,6 +253,7 @@ impl ChainPolicy for KelPolicy {
                 if let Some(next) = next {
                     check_hash(next)?;
                 }
+                check_salt(salt)?;
                 if state.next.as_deref() != Some(commitment(master, salt).as_str()) {
                     return Err(FoldError::NextMismatch);
                 }
@@ -317,6 +321,20 @@ fn check_hash(hash: &Hash) -> Result<(), FoldError> {
     decode_hash(hash)
         .map(|_| ())
         .map_err(|_| FormatError::BadHash(hash.clone()).into())
+}
+
+/// A next-key salt is base58btc of [`SALT_LEN`] bytes, nothing else (spec rule K13). The text
+/// is bounded before decoding: 16 bytes take at most 22 base58 characters.
+fn check_salt(salt: &str) -> Result<(), FoldError> {
+    let ok = salt.len() <= 22
+        && bs58::decode(salt)
+            .into_vec()
+            .is_ok_and(|bytes| bytes.len() == crate::SALT_LEN);
+    if ok {
+        Ok(())
+    } else {
+        Err(FormatError::BadSalt(salt.to_string()).into())
+    }
 }
 
 fn check_actions(can: &[String]) -> Result<(), FoldError> {

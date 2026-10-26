@@ -570,6 +570,17 @@ pub fn refusal_cases() -> Vec<Case> {
         policy("NextMismatch"),
     );
 
+    // A salt that is not base58btc of 16 bytes is refused before the commitment is checked.
+    let mut empty_salt =
+        build::rotate_unsigned(&base.chain, &mk(&master(1)), "", Some(next(2)), &[]).unwrap();
+    sign(&mut empty_salt, "m1", &master(1));
+    case(
+        "rotate with a salt that is not 16 bytes of base58btc",
+        "5",
+        typed(&[first.clone(), empty_salt]),
+        format("BadSalt"),
+    );
+
     let mut ended = Log::new();
     ended.rotate(&[], true);
     assert_eq!(
