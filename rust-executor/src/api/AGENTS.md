@@ -143,7 +143,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-193 methods: Cap 72, Executor 33, Open 5, Operator 16, Owns 67.
+194 methods: Cap 72, Executor 33, Open 5, Operator 16, Owns 68.
 
 | Method | Guard |
 |---|---|
@@ -259,6 +259,7 @@ the guard checked:
 | `perspective.removeLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.removeSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.resyncSubscription` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.runAgent` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretationWithHarness` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
