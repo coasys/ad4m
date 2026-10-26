@@ -7,7 +7,7 @@ mod common;
 
 use ad4m_identity_core::{
     error_code, event_hash, fold, fold_json, import, ChainError, DeviceKey, Event, FoldError,
-    FormatError, ImportOutcome, KelPolicy, KeyLife,
+    FormatError, ImportOutcome, KelPolicy, KeyLife, EVENT_MAX_BYTES,
 };
 use common::*;
 use serde_json::json;
@@ -100,6 +100,38 @@ fn empty_proof_array() {
         format_of(refuse("empty proof array")),
         FormatError::NotCanonical(_)
     ));
+}
+
+#[test]
+fn event_too_large() {
+    assert!(matches!(
+        format_of(refuse("event too large")),
+        FormatError::TooLarge(n) if n > EVENT_MAX_BYTES
+    ));
+}
+
+#[test]
+fn event_size_limit_is_inclusive() {
+    // The limit counts the canonical text, proofs included: an event of exactly
+    // EVENT_MAX_BYTES parses, one byte more does not.
+    let mut add = Log::new().add_event(KeyLife::Standing);
+    let with_offer = |add: &mut Event, len: usize| {
+        if let ad4m_identity_core::Op::Add { offer, .. } = &mut add.op {
+            *offer = "x".repeat(len);
+        }
+    };
+    with_offer(&mut add, 0);
+    let rest = add.to_canonical_json().unwrap().len();
+    with_offer(&mut add, EVENT_MAX_BYTES - rest);
+    assert_eq!(add.to_canonical_json().unwrap().len(), EVENT_MAX_BYTES);
+    assert_eq!(Event::from_json(&json(&add)), Ok(add.clone()));
+    with_offer(&mut add, EVENT_MAX_BYTES - rest + 1);
+    assert_eq!(
+        Event::from_json(&json(&add)),
+        Err(FoldError::Format(FormatError::TooLarge(
+            EVENT_MAX_BYTES + 1
+        )))
+    );
 }
 
 #[test]
@@ -246,8 +278,15 @@ fn an_unsigned_incept_with_an_overlong_enc_key_is_refused_before_decoding() {
     d1.enc = format!("z{}", huge_base58());
     let event =
         ad4m_identity_core::build::incept_unsigned(&mk(&master(0)), next(1), vec![d1]).unwrap();
+    // As JSON, the 1 MiB key is above the event size limit (P7) and refused before any rule.
     let events = [json(&event)];
     let err = quickly(|| fold_json(&events).unwrap_err());
+    assert!(matches!(
+        format_of(err),
+        FormatError::TooLarge(n) if n > EVENT_MAX_BYTES
+    ));
+    // A typed event skips the parser: the key-type rule refuses it before decoding the key.
+    let err = quickly(|| fold(std::slice::from_ref(&event)).unwrap_err());
     assert_eq!(policy_of(err), FoldError::UnsupportedKeyType);
 }
 

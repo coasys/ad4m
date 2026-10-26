@@ -124,6 +124,9 @@ rule. Each rule names the error that the reference implementation returns
 - **P6** The event serialises back to exactly the JSON it came from: an empty `proof` or an
   empty `revoke` on `rotate` is left out, never written as `[]` (`Format(NotCanonical)`).
   Without this, a receiver's hash could differ from the sender's.
+- **P7** The canonical JSON text of the event (section 4), proofs included, is at most
+  65 536 bytes (`Format(TooLarge)`). `offer`, `coSig`, `salt` and `can` have no length limit
+  of their own, so this limit stops one signed event from growing without bound.
 
 **Order and links** (the hash-chain module, before any rule below):
 
@@ -226,7 +229,7 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
    `LogPage`, means the source gave no valid log. A resolver bounds the pages and bytes it
    reads from one source.
 3. **Verification.** The resolver folds the events with the rules of section 5, each event
-   parsed as JSON under P1–P6. Event #0 must give the SCID of the DID. Any failure means the
+   parsed as JSON under P1–P7. Event #0 must give the SCID of the DID. Any failure means the
    source gave no valid log: the resolver skips it and tries the next source. It may stop at
    the first source that gives a valid log or read further sources for a longer one; either
    way it keeps the longest valid log it holds. A shorter valid log never replaces a longer one
@@ -271,6 +274,10 @@ compares it with its own trusted time (`key_valid_at_time`, section 6). The refe
 | Ended log | no verification methods, every relationship empty; metadata `deactivated: true` | DID Core's deactivation |
 | `id`, `controller`, each method's `controller` | the DID | self-controlled |
 | `alsoKnownAs` | the DID URLs with `src` the caller gives (other hosts of this DID) | where else to look |
+
+A content signature by the person (a link, a record, a login) is valid only under a device key.
+A master key signs log events and offers only, so a verifier that finds the signer of content
+must not accept a master key (`KeyState::device_key_id_of`, not `key_id_of`).
 
 Methods are listed in key order (`d1`, `d2`, …, by number), each key's signing method before
 its `-enc` method. Method ids are relative DID URLs (`#d1`), resolved against `id`. The
@@ -401,6 +408,10 @@ freezes the identity, so a hash would add bytes to every record and link and ena
 - Only the words make master *n*+1, so whoever holds master *n* cannot rotate alone.
 - `fold` refuses unknown fields so that no personal data enters a log by accident. `offer` and
   `coSig` are opaque to `fold`.
+- Revocation burns a key for good. Rule K8 refuses a key that the log ever held, revoked or
+  not, so a revoked key can never return to this identity. A host that requires one key per
+  identity (section 14) also refuses it in every other log, so it can never speak for another
+  identity there either.
 - The core reads no clock. Expiries are compared with the caller's trusted time. The window a
   host accepts for a new `expires` is host policy (section 14).
 - A generic DID Core verifier ignores `coasys:expires` and `coasys:bot`. Bot keys sit outside
@@ -501,7 +512,8 @@ choose otherwise without breaking verification. A host re-runs `fold` on every a
 Coasys identity store adds these checks:
 
 - **One key per identity.** A host may require that a signing key appears in at most one log
-  it holds (rule K8 already holds within one log).
+  it holds (rule K8 already holds within one log). Revoked keys count: a log that ever listed
+  the key keeps it, so a revoked key can never enter another log on that host.
 - **Expiry window.** The store refuses an `expires` in the past or more than 400 days ahead.
 - **Proof of work for a log with no vouching note**, below.
 

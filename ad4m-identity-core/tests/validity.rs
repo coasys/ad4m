@@ -88,6 +88,28 @@ fn revoked_key_valid_before_and_invalid_from_its_revocation() {
 }
 
 #[test]
+fn content_signers_resolve_device_keys_only() {
+    // A master never signs for the person (spec section 9): `device_key_id_of` answers no
+    // master, current or replaced, while `key_id_of` still finds every key of the log.
+    let mut log = Log::new();
+    let bot_id = log.add(bot(&["read"], 2_000_000_000)); // d2 at 1
+    log.rotate(&[], false); // m1 at 2
+    let state = log.chain.state();
+    for (n, id) in [(0, "m0"), (1, "m1")] {
+        let key = mk(&master(n));
+        assert_eq!(state.device_key_id_of(&key), None, "{id}");
+        assert_eq!(state.key_id_of(&key).map(String::as_str), Some(id));
+    }
+    assert_eq!(state.current_master().unwrap().sign, mk(&master(1)));
+    assert_eq!(
+        state.device_key_id_of(&mk(&dev(1))).map(String::as_str),
+        Some("d1")
+    );
+    assert_eq!(state.device_key_id_of(&mk(&dev(2))), Some(&bot_id));
+    assert_eq!(state.device_key_id_of(&mk(&dev(9))), None);
+}
+
+#[test]
 fn bot_key_lapses_and_comes_back_with_a_later_scope() {
     let mut log = Log::new();
     let id = log.add(bot(&["read", "write"], 1_000)); // seq 1

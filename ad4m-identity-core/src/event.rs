@@ -216,7 +216,7 @@ const COMMON_FIELDS: &[&str] = &["format", "scid", "seq", "prev", "op", "proof"]
 const DEVICE_KEY_FIELDS: &[&str] = &["id", "sign", "enc", "kind", "can", "expires"];
 
 impl Event {
-    /// Parses one event from JSON under the parsing rules P1–P6 of the format
+    /// Parses one event from JSON under the parsing rules P1–P7 of the format
     /// spec.
     pub fn from_json(value: &Value) -> Result<Event, FoldError> {
         check_canonical(value)?;
@@ -323,11 +323,14 @@ fn format_err(e: FormatError) -> FoldError {
     FoldError::Format(e)
 }
 
-/// Refuses floats and integers outside ±(2^53 − 1) anywhere in `value`.
+/// Refuses floats and integers outside ±(2^53 − 1) anywhere in `value` (P1), and a canonical
+/// text longer than `EVENT_MAX_BYTES` (P7).
 fn check_canonical(value: &Value) -> Result<(), FoldError> {
-    canonical_json(value)
-        .map(|_| ())
-        .map_err(|e| format_err(FormatError::from(e)))
+    let text = canonical_json(value).map_err(|e| format_err(FormatError::from(e)))?;
+    if text.len() > crate::EVENT_MAX_BYTES {
+        return Err(format_err(FormatError::TooLarge(text.len())));
+    }
+    Ok(())
 }
 
 impl From<CanonError> for FormatError {
