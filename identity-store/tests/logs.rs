@@ -753,6 +753,31 @@ async fn a_did_scid_record_needs_a_signed_request_and_a_valid_non_bot_key_of_the
 }
 
 #[tokio::test]
+async fn a_did_scid_record_signed_by_a_bot_key_is_refused() {
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let bot = Device::new("alice bot");
+    t.link(
+        &mut alice,
+        &bot,
+        OfferKind::Bot,
+        Some(bot_scope(T0 + 86_400)),
+        None,
+    )
+    .await;
+    let d1 = alice.device_key(1);
+    let path = format!("/v1/agents/{}", alice.did());
+    // The person's own request carries it; the record is the bot's, valid at its anchor.
+    let record = alice.agent_record(&bot.key, json!({ "perspective": { "links": [] } }), 1);
+    let body = serde_json::to_vec(&record).unwrap();
+    let header = alice.request("d1", &d1, "PUT", &path, &body, t.now() + 60);
+    let reply = t.send("PUT", &path, Some(body), Some(header)).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signer");
+}
+
+#[tokio::test]
 async fn the_feed_answers_401_without_the_mirror_token_and_lists_appends_with_it() {
     let t = TestStore::new();
     let alice = Person::new("alice");
