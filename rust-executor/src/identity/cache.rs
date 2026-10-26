@@ -197,6 +197,36 @@ impl KelCache {
             .transpose()
     }
 
+    /// The cached log of `scid` with its trusted seq: the seq of the accepted head, while that
+    /// head still verifies under `identity.storeKeys` (heads persist across a change of the
+    /// keys) and the cached log reaches it with the same hash. `None` when the cache holds no
+    /// log or no such head.
+    ///
+    /// A listing proves nothing about the listed key's holder (an `add` carries only the
+    /// master's signature; the store checks the claim behind it), so every read that maps a key
+    /// to its person reads the log only up to this seq. Events past it (from a foreign `src`,
+    /// or not yet under a store head) are for resolution display only.
+    pub async fn trusted(&self, scid: &str) -> Result<Option<(KelChain, u64)>, CacheError> {
+        let Some(head) = self.accepted_head(scid)? else {
+            return Ok(None);
+        };
+        if !verify_head(&head, &self.store_keys) {
+            return Ok(None);
+        }
+        let Some(chain) = self.chain(scid).await? else {
+            return Ok(None);
+        };
+        let held = self
+            .store
+            .range(KEL_TYPE, &scid.to_string(), head.seq, 1)
+            .await
+            .map_err(storage)?;
+        let matches = held
+            .first()
+            .is_some_and(|entry| entry.seq == head.seq && entry.hash == head.hash);
+        Ok(matches.then_some((chain, head.seq)))
+    }
+
     fn accept_head(&self, head: &SignedHead) -> Result<(), CacheError> {
         let text = serde_json::to_string(head).map_err(storage)?;
         let meta = self.meta.lock().map_err(storage)?;
@@ -440,8 +470,9 @@ impl KelCache {
             let from = cached.as_ref().map_or(0, |c| c.head().seq);
             let Some(page) = backend.log(&did, from).await? else {
                 return match cached {
-                    // The store answers no log while the cache holds one: the shortest log.
-                    Some(chain) => {
+                    // The store answers no log of one it signed a head of: the shortest log. A
+                    // log only another host served is no evidence against the store.
+                    Some(chain) if self.accepted_head(scid)?.is_some() => {
                         let ours = chain.head();
                         let fork = ForkEvidence {
                             chain: scid.to_string(),
@@ -452,7 +483,7 @@ impl KelCache {
                         self.record_fork(&fork, "null").await?;
                         Err(CacheError::Fork(fork))
                     }
-                    None => Err(CacheError::NotFound),
+                    _ => Err(CacheError::NotFound),
                 };
             };
             let events = page
@@ -498,6 +529,26 @@ pub(crate) mod tests {
         let store = SqliteChainStore::open_in_memory().unwrap();
         let meta = Connection::open_in_memory().unwrap();
         KelCache::with(store, meta, store_keys).unwrap()
+    }
+
+    /// The store key [`FakeStore`] signs its heads with.
+    pub(crate) fn store_key() -> TestStoreKey {
+        TestStoreKey::new(9)
+    }
+
+    /// A cache in memory trusting [`store_key`] (and so [`FakeStore`]'s heads).
+    pub(crate) fn trusting() -> KelCache {
+        in_memory(vec![store_key().multikey()])
+    }
+
+    /// Takes `events` (a log from seq 0) into `cache` as the configured store would answer
+    /// them: with a head signed by [`store_key`] at their last event, so that event is the log's
+    /// trusted seq. The events may continue what the cache holds.
+    pub(crate) async fn accept_signed(cache: &KelCache, events: &[Event]) {
+        let chain = ad4m_identity_core::fold(events).unwrap();
+        let head = chain.head();
+        let signed = store_key().sign_head(chain.id(), head.seq, &head.hash, 1);
+        cache.accept(chain.id(), &signed, events).await.unwrap();
     }
 
     /// A person's log built with the core's builders: master m0 and one device d1.
@@ -559,7 +610,7 @@ pub(crate) mod tests {
     impl FakeStore {
         pub fn new(events: Vec<Event>) -> Self {
             FakeStore {
-                key: TestStoreKey::new(9),
+                key: store_key(),
                 events: StdMutex::new(events),
                 log_calls: AtomicUsize::new(0),
                 key_owner_override: StdMutex::new(None),
@@ -873,5 +924,52 @@ pub(crate) mod tests {
             ));
         }
         assert!(cache.fetching.lock().await.is_empty());
+    }
+
+    /// The trusted seq is the accepted, store-signed head's: events from `ingest` (any source)
+    /// extend the log but not that seq.
+    #[tokio::test]
+    async fn only_a_store_signed_head_moves_the_trusted_seq() {
+        let mut log = TestLog::new(1);
+        let cache = trusting();
+        cache.ingest(&log.scid(), &log.events).await.unwrap();
+        assert!(
+            cache.trusted(&log.scid()).await.unwrap().is_none(),
+            "no head"
+        );
+
+        accept_signed(&cache, &log.events).await;
+        let (_, seq) = cache.trusted(&log.scid()).await.unwrap().unwrap();
+        assert_eq!(seq, 0);
+
+        log.revoke_d1();
+        cache.ingest(&log.scid(), &log.events[1..]).await.unwrap();
+        let (chain, seq) = cache.trusted(&log.scid()).await.unwrap().unwrap();
+        assert_eq!(
+            (chain.head().seq, seq),
+            (1, 0),
+            "the log holds more than is trusted"
+        );
+
+        accept_signed(&cache, &log.events).await;
+        assert_eq!(cache.trusted(&log.scid()).await.unwrap().unwrap().1, 1);
+    }
+
+    /// An accepted head persists; once its key leaves `identity.storeKeys` it is trusted no
+    /// more.
+    #[tokio::test]
+    async fn a_head_under_a_key_no_longer_configured_is_not_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        let log = TestLog::new(1);
+        let store = FakeStore::new(log.events.clone());
+        {
+            let cache = KelCache::open(&path, vec![store.key.multikey()]).unwrap();
+            cache.refresh(&store, &log.scid()).await.unwrap();
+            assert!(cache.trusted(&log.scid()).await.unwrap().is_some());
+        }
+        let cache = KelCache::open(&path, vec![TestStoreKey::new(3).multikey()]).unwrap();
+        assert!(cache.accepted_head(&log.scid()).unwrap().is_some());
+        assert!(cache.trusted(&log.scid()).await.unwrap().is_none());
     }
 }

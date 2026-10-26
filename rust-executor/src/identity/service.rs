@@ -280,21 +280,28 @@ impl IdentityService {
         Ok(serde_json::to_value(&event)?)
     }
 
-    /// Records that `agent` speaks for the log `scid` when its device key is valid at the head.
+    /// Records that `agent` speaks for the log `scid` when its device key is valid at the log's
+    /// trusted seq (the accepted, store-signed head); the key's id when listed up to there.
     pub(super) async fn record_agent_if_listed(
         &self,
         agent: &AgentContext,
         scid: &str,
     ) -> Result<Option<String>, WsRpcError> {
         let (agent_did, key) = device_key(agent).map_err(WsRpcError::internal)?;
-        let Some(chain) = self.cache.chain(scid).await.map_err(cache_error)? else {
+        // Only up to the store-signed head: a log lists any key its master adds, so events a
+        // foreign `src` served never bind this agent to a person.
+        let Some((chain, trusted)) = self.cache.trusted(scid).await.map_err(cache_error)? else {
             return Ok(None);
         };
         let state = chain.state();
-        let Some(id) = state.key_id_of(&key).cloned() else {
+        let Some(id) = state
+            .record(&key)
+            .filter(|record| record.added <= trusted)
+            .map(|record| record.id.clone())
+        else {
             return Ok(None);
         };
-        if state.key_valid_at_time(&key, chain.head().seq, now()) {
+        if state.key_valid_at_time(&key, trusted, now()) {
             db(|db| db.set_agent_identity(&agent_did, scid, now()))
                 .map_err(|e| error(409, format!("identity-exists: {}", e.message)))?;
             // The main agent's status gains its identity (a managed agent's status event names
@@ -574,9 +581,9 @@ mod tests {
     }
 
     fn test_service() -> IdentityService {
-        use crate::identity::cache::tests::{in_memory, FakeStore};
+        use crate::identity::cache::tests::{trusting, FakeStore};
         let backend: Arc<dyn IdentityBackend> = Arc::new(FakeStore::new(vec![]));
-        let cache = Arc::new(in_memory(vec![]));
+        let cache = Arc::new(trusting());
         IdentityService {
             resolver: Arc::new(crate::identity::resolver::Resolver::new(
                 cache.clone(),
@@ -626,5 +633,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(proofs(&cosigned), Some(2));
+    }
+
+    /// Any controller can `add` an agent's key to its log (the `add` carries only the master's
+    /// signature): the agent is bound to that person only once a store-signed head covers it.
+    #[tokio::test]
+    async fn an_agent_is_bound_to_a_person_only_by_a_store_signed_listing() {
+        use crate::identity::cache::tests::accept_signed;
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let service = test_service();
+        let user = crate::test_utils::create_test_user(&format!(
+            "bind-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let agent = AgentContext::managed(user);
+        let (agent_did, key) = device_key(&agent).unwrap();
+
+        let mut log = TestLog::new(62);
+        let chain = log.chain();
+        let device = ad4m_identity_core::DeviceKey {
+            id: chain.state().next_device_id(),
+            enc: enc_key_of(&key).unwrap(),
+            sign: key.clone(),
+            life: ad4m_identity_core::KeyLife::Standing,
+        };
+        let mut add = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut add, "m0", &log.master).unwrap();
+        log.events.push(add);
+        let scid = log.scid();
+
+        // The store signed seq 0; the add at seq 1 came from elsewhere (a foreign src).
+        accept_signed(&service.cache, &log.events[..1]).await;
+        service.cache.ingest(&scid, &log.events[1..]).await.unwrap();
+        assert_eq!(
+            service.record_agent_if_listed(&agent, &scid).await.unwrap(),
+            None
+        );
+        assert_eq!(db(|db| db.agent_identity(&agent_did)).unwrap(), None);
+
+        accept_signed(&service.cache, &log.events).await;
+        assert_eq!(
+            service.record_agent_if_listed(&agent, &scid).await.unwrap(),
+            Some("d2".to_string())
+        );
+        assert_eq!(db(|db| db.agent_identity(&agent_did)).unwrap(), Some(scid));
     }
 }

@@ -35,19 +35,19 @@ impl IdentityService {
 }
 
 impl ClaimService<'_> {
-    /// Whether the main agent's key is valid in the log of the identity it speaks for.
+    /// Whether the main agent's key is valid in the log of the identity it speaks for, at the
+    /// log's trusted seq (the accepted, store-signed head; after a refresh from the store).
     async fn main_is_linked(&self) -> Result<bool, WsRpcError> {
         let main = AgentContext::main_agent();
         let (agent_did, key) = device_key(&main).map_err(WsRpcError::internal)?;
         let Some(scid) = db(|db| db.agent_identity(&agent_did))? else {
             return Ok(false);
         };
-        Ok(match self.identity.refreshed_or_cached(&scid).await? {
-            Some(chain) => chain
-                .state()
-                .key_valid_at_time(&key, chain.head().seq, now()),
-            None => false,
-        })
+        self.identity.refreshed_or_cached(&scid).await?;
+        let trusted = self.identity.cache.trusted(&scid).await;
+        Ok(trusted
+            .map_err(cache_error)?
+            .is_some_and(|(chain, seq)| chain.state().key_valid_at_time(&key, seq, now())))
     }
 
     /// Claims `params.offer` with the main wallet key. Refuses `no-operator` with no operator

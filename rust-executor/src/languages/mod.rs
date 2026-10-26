@@ -3269,7 +3269,7 @@ mod capability_routing_tests {
 #[cfg(test)]
 mod agent_language_profile_tests {
     use super::*;
-    use crate::identity::cache::tests::{in_memory, TestLog};
+    use crate::identity::cache::tests::{accept_signed, in_memory, trusting, TestLog};
     use crate::identity::cache::KelCache;
     use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
     use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
@@ -3304,11 +3304,11 @@ mod agent_language_profile_tests {
         bot
     }
 
-    /// A cache holding `logs`.
+    /// A cache holding `logs`, each under a head the configured store signed.
     async fn cache_of(logs: &[&TestLog]) -> KelCache {
-        let cache = in_memory(vec![]);
+        let cache = trusting();
         for log in logs {
-            cache.ingest(&log.scid(), &log.events).await.unwrap();
+            accept_signed(&cache, &log.events).await;
         }
         cache
     }
@@ -3407,7 +3407,7 @@ mod agent_language_profile_tests {
         assert_eq!(verdict_with(answered.clone(), Some(&cache)).await, VALID);
 
         log.revoke_d1();
-        cache.ingest(&log.scid(), &log.events[1..]).await.unwrap();
+        accept_signed(&cache, &log.events).await;
         assert_eq!(
             verdict_with(answered.clone(), Some(&cache)).await,
             VALID,

@@ -7,10 +7,10 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | File | What |
 |---|---|
 | `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`, `identity.allowPrivateSrc`), `write_agent_language_settings`, the `identity-fork` publisher; re-exports `verify_expression` |
-| `resolver.rs` | The one place that decides what a log says. `key_speaks_for`, `key_valid_at_anchor` and `verify_expression` (an expression by a `did:scid` author, for `LanguageController::verify_expression_proof`; `proof.record` anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Later checks (link anchors, verdicts, key login) belong here |
+| `resolver.rs` | The one place that decides what a log says. `key_speaks_for`, `key_valid_at_anchor` and `verify_expression` (all up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author, for `LanguageController::verify_expression_proof`; `proof.record` anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Later checks (link anchors, verdicts, key login) belong here |
 | `src_fetch.rs` | `SrcFetch`: the executor's reader of a foreign `src` over the did:scid host profile (`GET /v1/logs/{scid}?from=`), for `Resolver` only. `PublicOnly` (the client's DNS resolver: public addresses only), `refuse_private_host` (IP literals, `localhost`), no redirects, no proxy, HTTPS only, timeouts, body cap |
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
-| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh`, `ingest`, `accept`, forks |
+| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh`, `ingest`, `accept`, `trusted` (the log and its accepted head's seq), forks |
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner` |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
@@ -30,12 +30,28 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   here speaks HTTP.
 - The cache only extends a log. A different event at a held seq, or a signed head below the
   cached one (a shorter log never truncates a held one), records a fork, appends nothing and fires
-  `identity-fork` once per fork, to the sessions of the identity's local agents.
+  `identity-fork` once per fork, to the sessions of the identity's local agents. A store that
+  answers no log records a fork only when the cache holds a head that store signed; a log only
+  a foreign `src` served is no evidence against the store.
 - A head from the agent language counts only under `identity.storeKeys`; `ingest` takes events
   from any source with no head.
+- **Authorship reads a log only up to its trusted seq.** A log listing a key does not prove its
+  holder agreed: an `incept` carries every listed key's signature, an `add` only the master's
+  (its claim never enters the log, so only the store checks it; spec section 11). So every read
+  that maps a key to a person or decides authority goes through `KelCache::trusted`: the seq of
+  the accepted head, while it still verifies under the current `identity.storeKeys` and the
+  cached event at that seq has its hash. No such head: no key speaks for that person. The state
+  counts at that seq: a key added past it does not speak yet, a revocation past it does not
+  count yet. The readers: `key_speaks_for` and `key_valid_at_anchor` (so `verify_expression`,
+  with and without `proof.record`), the `did:key` confirmation in `resolve_key`,
+  `record_agent_if_listed` (binding a local agent to an identity) and `main_is_linked`
+  (`already-linked`). Events past the trusted seq, and every event a foreign `src` served, are
+  for resolution display only (`identity.resolve` shows them, `coasys:headTrusted: false`).
+  `identity.status`, `identity.log` and `identity.devices` show the cached log as it is.
+  Without `identity.storeKeys` no `did:scid` author verifies.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
-  first-link rule itself: `already-linked` while the main key is valid in a log, `no-operator`
-  without a record, `first-link` for another identity.
+  first-link rule itself: `already-linked` while the main key is valid in its identity's log at
+  the trusted seq, `no-operator` without a record, `first-link` for another identity.
 - With an operator record the main key may speak only for the operator's identity:
   `cosignIncept` for the main agent runs `main_incept_check` and refuses (`first-link`) an
   incept of any other identity. Managed users are not bound by the record.
@@ -49,18 +65,19 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
     `did:scid` profile from its agent record): the record's anchor. `sig` must be the key's
     `coasys:link` signature over `{profile, version, anchor}`, `profile` the expression without
     `proof.record` (and without `proof.valid`/`proof.invalid`), as `AgentRecord::signed_value`
-    builds it; the anchor must be at or below the cached head; the log must list the key as a
-    device key, valid at the anchor by the clock now (`key_valid_at_time`) and without the bot
-    mark there. A profile signed before a revocation stays valid after it. A `proof.record`
-    that does not hold (malformed, an unknown member, a bad signature, an anchor past the head,
-    a key not valid there) makes the expression invalid: the head rule is never tried instead.
-    The anchor counts only through the record signature.
-  - Without it: the cached head, by the clock now, without the bot mark.
+    builds it; the anchor must be at or below the trusted seq (not merely the cached head);
+    the log must list the key as a device key, valid at the anchor by the clock now
+    (`key_valid_at_time`) and without the bot mark there. A profile signed before a revocation
+    stays valid after it. A `proof.record` that does not hold (malformed, an unknown member, a
+    bad signature, an anchor past the trusted seq, a key not valid there) makes the expression
+    invalid: the head rule is never tried instead. The anchor counts only through the record
+    signature.
+  - Without it: the trusted seq, by the clock now, without the bot mark.
 
   The expression's own timestamp never counts. When the cached log does not admit the key (no
-  log yet, a log shorter than the anchor, or a device added since), the read refreshes that one
-  log from the store once and checks again; a store that cannot answer leaves it
-  `valid: false`.
+  log or no store-signed head yet, a trusted seq below the anchor, or a device added since),
+  the read refreshes that one log from the configured store once (which advances the accepted
+  head) and checks again; a store that cannot answer leaves it `valid: false`.
 - An agent keeps the first identity it joined (`identity_agents`); `agent.status` and
   `agent.get` carry it as `identity`, `did` stays the device `did:key` (and
   `agent.status().didDocument` the device's did:key document; `identity.resolve` serves the
@@ -91,16 +108,19 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   goes through `KelCache::refresh` (its head counts); a foreign `src` through
   `fetch_untrusted` and `SrcFetch` (`GET https://<src>/v1/logs/<scid>?from=<n>`, at most
   `MAX_PAGES` pages; events via `ingest`, head only a paging hint, read as `{events, head:
-  {seq}}` since a foreign host's head need not be signed). Either way the cache only
-  extends; a fork is recorded and the held log answers. A failed foreign fetch is remembered
+  {seq}}` since a foreign host's head need not be signed). After a `src` answers, the
+  configured store is read on too, so a `src` serving a prefix cannot hide an event the store
+  holds (a revocation); `coasys:source` stays the `src`. Either way the cache only extends; a fork is recorded and the held log answers. A failed foreign fetch is remembered
   per (host, SCID) for 5 minutes (`MISS_TTL`), `fresh` or not.
 - **`did:key`.** The store's key index (`IdentityBackend::key_owner`, the language's
   `identityKeyOwner`, `GET /v1/keys/{multikey}`) is a hint: the named log (cache, then store;
-  re-read once from the store when the cached log does not list the key) must list the key as a
-  device key. Answer: the person's document at the head with `coasys:keyId` and
-  `coasys:keyValid` (`key_valid_at` the head; a revoked key resolves, `false`). Unknown key:
-  `notFound`. A log that does not list it: `notFound` with `coasys:keyIndexMismatch: true` and
-  a warning in the log. A confirmed key → SCID sits in a bounded in-memory map.
+  re-read once from the store when the cached log does not list the key up to its trusted seq)
+  must list the key as a device key added at or below the trusted seq. Answer: the person's
+  document at the head with `coasys:keyId` and `coasys:keyValid` (`key_valid_at` the trusted
+  seq; a revoked key resolves, `false`). Unknown key: `notFound`. A log that does not list it:
+  `notFound` with `coasys:keyIndexMismatch: true` and a warning in the log. A log that lists it
+  only past its trusted seq (or has no store-signed head, e.g. only a foreign `src` served it):
+  `notFound`, no mismatch flag. A confirmed key → SCID sits in a bounded in-memory map.
 - **`src` and SSRF.** A `src` comes from untrusted input and executors run on servers. Public
   means `resolver::is_public`: no loopback, RFC 1918, fc00::/7, link-local, CGNAT 100.64/10,
   multicast, unspecified, 0/8, 240/4, 192.0.0/24, and IPv4-mapped/compatible/NAT64/6to4 forms

@@ -3,7 +3,9 @@
 //! `docs-src/identity/did-scid-coasys-1.md`).
 //!
 //! - [`key_speaks_for`] and [`verify_expression`]: a device key's signature for its person, by
-//!   the cached log (refreshed once when the cache does not admit the key).
+//!   the cached log up to its accepted, store-signed head (refreshed once from the store when
+//!   the cache does not admit the key). Events past that head, or from a foreign `src`, never
+//!   make a key speak.
 //! - [`Resolver::resolve`]: a DID URL (`did:scid:coasys:1:<scid>[?src=…&versionId=…][#dN]`) or a
 //!   bare device `did:key` to a DID Core resolution result, through the [`KelCache`] and the
 //!   [`IdentityBackend`]. The cache only extends: a log from any source is imported, never put
@@ -46,23 +48,32 @@ const MAP_BOUND: usize = 4096;
 // Keys that speak for an identity
 // ---------------------------------------------------------------------------------------------
 
-/// Whether the signing multikey `key` speaks for `did` by the cached log alone: the log lists
-/// it, valid at the cached head by `now` (unix seconds) and without the bot mark. `false` when
-/// the cache holds no log of `did` or cannot read it.
+/// Whether the signing multikey `key` speaks for `did` by the cached log alone, read up to its
+/// trusted seq ([`KelCache::trusted`]: the accepted, store-signed head): the log lists it,
+/// valid at that seq by `now` (unix seconds) and without the bot mark. A key added past the
+/// trusted seq does not count yet, nor does a revocation past it. `false` when the cache holds
+/// no log of `did`, no store-signed head of it, or cannot read it: a log only a foreign `src`
+/// served shows its keys but proves nothing about whose they are (spec section 11).
 pub async fn key_speaks_for(cache: &KelCache, did: &str, key: &str, now: u64) -> bool {
-    let chain = match cache.chain(scid_from(did)).await {
-        Ok(Some(chain)) => chain,
-        Ok(None) => return false,
-        Err(e) => {
-            log::warn!("identity: the cached log of {did} is unreadable: {e}");
-            return false;
-        }
+    let Some((chain, trusted)) = trusted_log(cache, did).await else {
+        return false;
     };
     let state = chain.state();
-    let head = chain.head().seq;
     state.key_id_of(&key.to_string()).is_some()
-        && state.bot_scope_at(key, head).is_none()
-        && state.key_valid_at_time(key, head, now)
+        && state.bot_scope_at(key, trusted).is_none()
+        && state.key_valid_at_time(key, trusted, now)
+}
+
+/// The cached log of `did` and its trusted seq ([`KelCache::trusted`]); `None` without one or
+/// when the cache cannot read it.
+async fn trusted_log(cache: &KelCache, did: &str) -> Option<(KelChain, u64)> {
+    match cache.trusted(scid_from(did)).await {
+        Ok(found) => found,
+        Err(e) => {
+            log::warn!("identity: the cached log of {did} is unreadable: {e}");
+            None
+        }
+    }
 }
 
 /// Verifies `expr`, authored by a `did:scid`, whose `proof.key` must be the bare `did:key` of a
@@ -74,12 +85,16 @@ pub async fn key_speaks_for(cache: &KelCache, did: &str, key: &str, now: u64) ->
 ///   ([`record_signature_holds`]) and the key be valid at the anchor ([`key_valid_at_anchor`]).
 ///   A profile signed before a revocation stays valid after it. A `record` that does not hold makes the
 ///   expression invalid; the head rule is never tried instead.
-/// - Without it, the key must be valid at the cached head by the clock now and without the bot
-///   mark (as a device key's signature counts everywhere in this module). The expression's own
-///   timestamp does not count: the signer states it.
+/// - Without it, the key must be valid at the log's trusted seq (its accepted, store-signed
+///   head) by the clock now and without the bot mark (as a device key's signature counts
+///   everywhere in this module). The expression's own timestamp does not count: the signer
+///   states it.
 ///
-/// When the cached log does not admit the key (no log yet, a log shorter than the anchor, or a
-/// device added since), the log is refreshed once through `backend` and checked again.
+/// Either way the log counts only up to its trusted seq: an `add` carries only the master's
+/// signature, so a log a foreign `src` served may list anyone's key. When the cached log does
+/// not admit the key (no log or no store-signed head yet, a trusted seq below the anchor, or a
+/// device added since), the log is refreshed once from the configured store through `backend`
+/// (which advances the accepted head) and checked again.
 pub async fn verify_expression<T: serde::Serialize>(
     cache: &KelCache,
     backend: Option<&dyn IdentityBackend>,
@@ -175,9 +190,10 @@ fn record_signature_holds<T: serde::Serialize>(
 }
 
 /// Whether the signing multikey `key` spoke for `did` at seq `anchor` of the cached log: the
-/// anchor is at or below the cached head, and the log lists `key` as a device key, valid at the
-/// anchor by `now` and without the bot mark there (the rule the store and the agent language
-/// apply to an agent record). A key revoked at seq N signs nothing valid anchored at or after N.
+/// anchor is at or below the log's trusted seq ([`KelCache::trusted`]: the accepted,
+/// store-signed head), and the log lists `key` as a device key, valid at the anchor by `now` and
+/// without the bot mark there (the rule the store and the agent language apply to an agent
+/// record). A key revoked at seq N signs nothing valid anchored at or after N.
 pub async fn key_valid_at_anchor(
     cache: &KelCache,
     did: &str,
@@ -185,15 +201,10 @@ pub async fn key_valid_at_anchor(
     anchor: u64,
     now: u64,
 ) -> bool {
-    let chain = match cache.chain(scid_from(did)).await {
-        Ok(Some(chain)) => chain,
-        Ok(None) => return false,
-        Err(e) => {
-            log::warn!("identity: the cached log of {did} is unreadable: {e}");
-            return false;
-        }
+    let Some((chain, trusted)) = trusted_log(cache, did).await else {
+        return false;
     };
-    if anchor > chain.head().seq {
+    if anchor > trusted {
         return false;
     }
     let state = chain.state();
@@ -698,7 +709,8 @@ impl Resolver {
     }
 
     /// A device `did:key`: the key index names an identity (a hint), the identity's log must
-    /// list the key, and the answer is the person's document at the head.
+    /// list the key at or below its trusted seq (the accepted, store-signed head), and the
+    /// answer is the person's document at the head, `coasys:keyValid` at the trusted seq.
     async fn resolve_key(&self, key: &str, fresh: bool) -> DidResolutionResult {
         let mut meta = DidResolutionMetadata::default();
         let known = self.keys.lock().ok().and_then(|k| k.get(key).cloned());
@@ -737,13 +749,20 @@ impl Resolver {
             },
         };
 
+        // The key's id and the seq that added it.
         let device_key = |chain: &KelChain| {
             chain
                 .state()
                 .keys
                 .values()
                 .find(|r| r.sign == key)
-                .map(|r| r.id.clone())
+                .map(|r| (r.id.clone(), r.added))
+        };
+        // Listed up to the log's trusted seq: the store admitted the key for this person.
+        let confirmed = |chain: &KelChain, trusted: Option<u64>| {
+            device_key(chain)
+                .zip(trusted)
+                .is_some_and(|((_, added), t)| added <= t)
         };
         let (mut chain, mut loaded) = match self.load(&scid, None, None, fresh).await {
             Ok(found) => found,
@@ -752,15 +771,18 @@ impl Resolver {
                 return failure(e, meta);
             }
         };
-        if device_key(&chain).is_none() && loaded.source.is_none() && !fresh {
-            // The cached log may predate the key: read it from the store once.
+        let mut trusted = self.trusted_seq(&scid).await;
+        if !confirmed(&chain, trusted) && loaded.source.is_none() && !fresh {
+            // The cached log may predate the key, or hold it only past its store-signed head:
+            // read it from the store once.
             if let Ok(found) = self.load(&scid, None, None, true).await {
                 (chain, loaded) = found;
+                trusted = self.trusted_seq(&scid).await;
             }
         }
         meta.source = Some(loaded.source.unwrap_or_else(|| "cache".into()));
         meta.skipped = loaded.skipped;
-        let Some(key_id) = device_key(&chain) else {
+        let Some((key_id, added)) = device_key(&chain) else {
             log::warn!(
                 "identity: the key index names {} for did:key:{key}, but its log does not list the key",
                 did_of(&scid)
@@ -774,15 +796,41 @@ impl Resolver {
                 meta,
             );
         };
+        // A log lists any key its master adds (spec section 11): only a listing up to the
+        // store-signed head maps the key to this person.
+        let Some(trusted) = trusted.filter(|t| added <= *t) else {
+            log::info!(
+                "identity: the log of {} lists did:key:{key} only past its store-signed head",
+                did_of(&scid)
+            );
+            return failure(
+                ResolveError::NotFound(format!(
+                    "no store-signed head of the log of {} lists this key",
+                    did_of(&scid)
+                )),
+                meta,
+            );
+        };
         if let Ok(mut keys) = self.keys.lock() {
             if keys.len() >= MAP_BOUND {
                 keys.clear();
             }
             keys.insert(key.to_string(), scid.clone());
         }
-        meta.key_valid = Some(chain.state().key_valid_at(key, chain.head().seq));
+        meta.key_valid = Some(chain.state().key_valid_at(key, trusted));
         meta.key_id = Some(key_id);
         self.answer(&chain, None, None, meta).await
+    }
+
+    /// The trusted seq of `scid`'s cached log ([`KelCache::trusted`]), `None` without one.
+    async fn trusted_seq(&self, scid: &str) -> Option<u64> {
+        match self.cache.trusted(scid).await {
+            Ok(found) => found.map(|(_, seq)| seq),
+            Err(e) => {
+                log::warn!("identity: the cached log of {scid} is unreadable: {e}");
+                None
+            }
+        }
     }
 
     /// The sources for `src`, in order: the `src`, then the configured store. A `src` that
@@ -809,8 +857,8 @@ impl Resolver {
     }
 
     /// The log of `scid`: from the cache when it holds it (and `version`) and not `fresh`, else
-    /// from the sources in order, imported into the cache (which only extends), then from the
-    /// cache.
+    /// from the sources in order (after a `src` that answered, the configured store too),
+    /// imported into the cache (which only extends), then from the cache.
     async fn load(
         &self,
         scid: &str,
@@ -877,8 +925,12 @@ impl Resolver {
                 }
             };
             match fetched {
+                // A foreign host may serve a prefix that stops before a revocation, and the
+                // cache keeps what it imports: after it, read on from the configured store, so
+                // a src cannot hide an event the store holds.
+                Ok(()) if foreign => loaded.source = Some(label),
                 Ok(()) => {
-                    loaded.source = Some(label);
+                    loaded.source.get_or_insert(label);
                     break;
                 }
                 // The cache keeps the log it held first; the fork is in the metadata.
@@ -1076,7 +1128,7 @@ fn failure(e: ResolveError, mut meta: DidResolutionMetadata) -> DidResolutionRes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::cache::tests::{in_memory, FakeStore, TestLog};
+    use crate::identity::cache::tests::{accept_signed, in_memory, trusting, FakeStore, TestLog};
     use crate::identity::src_fetch::test_host::{from_of, response, TestHost};
     use crate::identity::types::DidDocument;
     use ad4m_identity_core::build::Signer;
@@ -1356,7 +1408,8 @@ mod tests {
     #[tokio::test]
     async fn a_src_is_read_over_the_host_profile_and_its_head_is_not_trusted() {
         let log = TestLog::new(1);
-        let store = Arc::new(FakeStore::new(log.events.clone()));
+        // The configured store holds no log of this person, so only the src answers.
+        let store = Arc::new(FakeStore::new(Vec::new()));
         // The foreign host signs its head with the key the cache trusts: still, a foreign
         // src's head never counts.
         let host = log_host(Arc::new(FakeStore::new(log.events.clone()))).await;
@@ -1368,8 +1421,12 @@ mod tests {
         assert_eq!(host.connections(), 1, "the executor read the src itself");
         assert_eq!(
             store.log_calls.load(Ordering::SeqCst),
-            0,
-            "the agent language was not asked"
+            1,
+            "after the src, the configured store is read on"
+        );
+        assert!(
+            result.did_resolution_metadata.fork.is_none(),
+            "a store with no log of it is no fork: {result:?}"
         );
         assert_eq!(
             result.did_resolution_metadata.source.as_deref(),
@@ -1668,8 +1725,8 @@ mod tests {
     }
 
     async fn cache_holding(log: &TestLog) -> KelCache {
-        let cache = in_memory(vec![]);
-        cache.ingest(&log.scid(), &log.events).await.unwrap();
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
         cache
     }
 
@@ -1687,7 +1744,7 @@ mod tests {
         );
 
         log.revoke_d1();
-        cache.ingest(&log.scid(), &log.events[1..]).await.unwrap();
+        accept_signed(&cache, &log.events).await;
         assert!(
             verifies(&cache, &anchored).await,
             "signed at seq 0, before the revoke at seq 1"
@@ -1760,7 +1817,7 @@ mod tests {
 
         // Another log's valid key signing the record for this person.
         let other = TestLog::new(45);
-        cache.ingest(&other.scid(), &other.events).await.unwrap();
+        accept_signed(&cache, &other.events).await;
         let foreign = with_record(&signed_profile(&did, &other.device), &other.device, 1, 0);
         assert!(!verifies(&cache, &foreign).await);
     }
@@ -1834,6 +1891,197 @@ mod tests {
             .await
             .unwrap());
         assert_eq!(store.log_calls.load(Ordering::SeqCst), 1);
+    }
+
+    // --- authorship reads a log only up to its store-signed head -----------------------------
+
+    /// Appends an `add` of the standing device key `key` to `log`, signed by its master only:
+    /// what any controller can write, the key's holder agreeing or not (spec section 11).
+    fn add_key(log: &mut TestLog, key: &ed25519_dalek::SigningKey, seed: u8) {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{DeviceKey, KeyLife};
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: key.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
+            life: KeyLife::Standing,
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+    }
+
+    /// A log only ingested (as a foreign `src` serves it) that lists the victim's key: the key
+    /// does not speak for the log's person, so an expression by it authored as that person is
+    /// invalid, with or without a record.
+    #[tokio::test]
+    async fn a_log_without_a_store_signed_head_makes_no_key_speak() {
+        let victim = TestLog::new(50);
+        let mut attacker = TestLog::new(51);
+        add_key(&mut attacker, &victim.device, 52);
+        let x = did_of(&attacker.scid());
+        let cache = trusting();
+        accept_signed(&cache, &victim.events).await;
+        cache
+            .ingest(&attacker.scid(), &attacker.events)
+            .await
+            .unwrap();
+        let now = super::super::service::now();
+        assert!(cache.chain(&attacker.scid()).await.unwrap().is_some());
+        assert!(!key_speaks_for(&cache, &x, &victim.device.key(), now).await);
+        assert!(!key_speaks_for(&cache, &x, &attacker.device.key(), now).await);
+
+        let rewritten = signed_profile(&x, &victim.device);
+        assert!(!verifies(&cache, &rewritten).await);
+        assert!(!verifies(&cache, &with_record(&rewritten, &victim.device, 1, 1)).await);
+        // The victim's key still speaks for the victim, whose log is the store's.
+        let own = signed_profile(&did_of(&victim.scid()), &victim.device);
+        assert!(verifies(&cache, &own).await);
+    }
+
+    /// A key added past the accepted head does not speak until a store-signed head covers it.
+    #[tokio::test]
+    async fn a_key_added_past_the_accepted_head_speaks_only_once_the_head_is_accepted() {
+        let mut log = TestLog::new(53);
+        let did = did_of(&log.scid());
+        let cache = cache_holding(&log).await;
+        let second = ed25519_dalek::SigningKey::from_bytes(&[54; 32]);
+        add_key(&mut log, &second, 54);
+        cache.ingest(&log.scid(), &log.events[1..]).await.unwrap();
+        let now = super::super::service::now();
+        let profile = signed_profile(&did, &second);
+        assert!(!key_speaks_for(&cache, &did, &second.key(), now).await);
+        assert!(!verifies(&cache, &profile).await);
+        // The key listed at the trusted seq still speaks.
+        assert!(key_speaks_for(&cache, &did, &log.device.key(), now).await);
+
+        accept_signed(&cache, &log.events).await;
+        assert!(key_speaks_for(&cache, &did, &second.key(), now).await);
+        assert!(verifies(&cache, &profile).await);
+    }
+
+    /// A revocation past the accepted head is judged at the trusted seq too: the rule is the
+    /// state there.
+    #[tokio::test]
+    async fn a_revocation_past_the_accepted_head_counts_once_the_head_is_accepted() {
+        let mut log = TestLog::new(55);
+        let did = did_of(&log.scid());
+        let cache = cache_holding(&log).await;
+        log.revoke_d1();
+        cache.ingest(&log.scid(), &log.events[1..]).await.unwrap();
+        let profile = signed_profile(&did, &log.device);
+        assert!(verifies(&cache, &profile).await, "at the trusted seq 0");
+        accept_signed(&cache, &log.events).await;
+        assert!(
+            !verifies(&cache, &profile).await,
+            "revoked at the trusted seq 1"
+        );
+    }
+
+    /// An anchored profile whose anchor is past the trusted seq is invalid, even though the
+    /// cached log reaches it; valid once the head is accepted.
+    #[tokio::test]
+    async fn an_anchor_past_the_trusted_seq_is_invalid_until_the_head_is_accepted() {
+        let mut log = TestLog::new(56);
+        let did = did_of(&log.scid());
+        let cache = cache_holding(&log).await;
+        let second = ed25519_dalek::SigningKey::from_bytes(&[57; 32]);
+        add_key(&mut log, &second, 57);
+        cache.ingest(&log.scid(), &log.events[1..]).await.unwrap();
+        let anchored = with_record(&signed_profile(&did, &log.device), &log.device, 1, 1);
+        assert_eq!(
+            cache.chain(&log.scid()).await.unwrap().unwrap().head().seq,
+            1
+        );
+        assert!(
+            !verifies(&cache, &anchored).await,
+            "anchor 1 past trusted 0"
+        );
+        accept_signed(&cache, &log.events).await;
+        assert!(verifies(&cache, &anchored).await);
+    }
+
+    /// Through the resolver: resolving `did:scid:X?src=<foreign host>` caches X's log, which
+    /// lists the victim's key K; an expression by K with `author` rewritten to X still does not
+    /// verify, nor does `did:key:K` resolve to X. The foreign host signs its head with a key
+    /// the cache trusts: a foreign `src`'s head never counts.
+    #[tokio::test]
+    async fn a_foreign_log_listing_a_victims_key_does_not_make_it_speak() {
+        let victim = TestLog::new(58);
+        let mut attacker = TestLog::new(59);
+        add_key(&mut attacker, &victim.device, 60);
+        let x = did_of(&attacker.scid());
+        let host = log_host(Arc::new(FakeStore::new(attacker.events.clone()))).await;
+        // The configured store holds only the victim's log; its index names X for every key.
+        let store = Arc::new(FakeStore::new(victim.events.clone()));
+        *store.key_owner_override.lock().unwrap() = Some(x.clone());
+        let resolver = local_resolver(trusting(), store.clone());
+
+        let resolved = resolver
+            .resolve(&format!("{x}?src=log.example:{}", host.port), false)
+            .await;
+        assert_eq!(resolved.did_resolution_metadata.error, None, "{resolved:?}");
+        assert_eq!(resolved.did_resolution_metadata.head_trusted, Some(false));
+        assert_eq!(
+            methods(&resolved),
+            vec!["#d1", "#d1-enc", "#d2", "#d2-enc"],
+            "resolution shows the foreign log's keys"
+        );
+
+        let rewritten = signed_profile(&x, &victim.device);
+        let expr: crate::types::Expression<Value> =
+            serde_json::from_value(rewritten.clone()).unwrap();
+        let backend: &dyn IdentityBackend = store.as_ref();
+        assert!(
+            !verify_expression(&resolver.cache, Some(backend), &expr, None)
+                .await
+                .unwrap()
+        );
+        let anchored = with_record(&rewritten, &victim.device, 1, 1);
+        let expr: crate::types::Expression<Value> =
+            serde_json::from_value(anchored.clone()).unwrap();
+        assert!(!verify_expression(
+            &resolver.cache,
+            Some(backend),
+            &expr,
+            anchored["proof"].get("record")
+        )
+        .await
+        .unwrap());
+
+        let by_key = resolver
+            .resolve(&format!("did:key:{}", victim.device.key()), false)
+            .await;
+        assert_eq!(
+            by_key.did_resolution_metadata.error.as_deref(),
+            Some("notFound"),
+            "{by_key:?}"
+        );
+        assert_eq!(by_key.did_resolution_metadata.key_id, None);
+        assert!(by_key.did_document.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_src_that_serves_a_prefix_does_not_hide_a_revocation_the_store_holds() {
+        // d1 is revoked at seq 1; the foreign host serves only seq 0.
+        let mut log = TestLog::new(61);
+        let prefix = log.events.clone();
+        log.revoke_d1();
+        let host = log_host(Arc::new(FakeStore::new(prefix))).await;
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let resolver = local_resolver(trusting(), store);
+        let did = did_of(&log.scid());
+
+        let result = resolver
+            .resolve(&format!("{did}?src=log.example:{}", host.port), false)
+            .await;
+        assert_eq!(result.did_resolution_metadata.error, None, "{result:?}");
+        assert!(
+            methods(&result).is_empty(),
+            "d1 is revoked at the store's head: {result:?}"
+        );
+        assert!(!key_speaks_for(&resolver.cache, &did, &log.device.key(), 1).await);
     }
 }
 
