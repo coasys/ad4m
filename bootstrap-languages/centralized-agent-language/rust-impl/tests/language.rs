@@ -485,6 +485,30 @@ fn person(apps: &mut Apps, store: &Store<Host>, name: &str) -> Value {
 /// Links device `label` through the language: offer, claim, add.
 fn link(apps: &mut Apps, store: &Store<Host>, name: &str, did: &str, label: &str) {
     let (offer, s) = apps.offer(name);
+    link_with(apps, store, name, did, label, offer, s);
+}
+
+/// Links `label` as a bot that may write, through the language.
+fn link_bot(apps: &mut Apps, store: &Store<Host>, name: &str, did: &str, label: &str) {
+    let answer = apps.run(
+        "offer",
+        json!({ "name": name, "kind": "bot", "ttl": 300, "now": now_s(),
+                "bot": { "can": ["write"], "expires": now_s() + 86_400 } }),
+    );
+    let s = answer["s"].as_str().unwrap().to_string();
+    link_with(apps, store, name, did, label, answer["offer"].clone(), s);
+}
+
+/// Claims `offer` (with secret `s`) as `label` and appends the `add` that spends it.
+fn link_with(
+    apps: &mut Apps,
+    store: &Store<Host>,
+    name: &str,
+    did: &str,
+    label: &str,
+    offer: Value,
+    s: String,
+) {
     let offer_id = offer["offer"]["offerId"].as_str().unwrap().to_string();
     block_on(store.open_offer(&serde_json::from_value(offer.clone()).unwrap())).unwrap();
     let claim = apps.run(
@@ -926,6 +950,20 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
         .unwrap()
         .unwrap();
     assert_carries_its_record(&kept, &serde_json::from_value(at_head).unwrap());
+
+    // The same shape signed by a bot key of the log, valid at the head and with its own
+    // profile (`proof.key` its `did:key`): ignored, because a bot key never signs a record.
+    link_bot(&mut apps, &store, name, &did, "gus bot");
+    let bot_profile = scid_profile(&mut apps, name, "gus bot", &did);
+    let by_bot = apps.run(
+        "record",
+        json!({ "name": name, "signer": "gus bot", "profile": bot_profile, "version": 4 }),
+    );
+    assert_eq!(by_bot["signedBy"], bot_profile["proof"]["key"]);
+    store_row(&by_bot);
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_none());
 }
 
 /// A `did:scid` person's profile as its agent record stores it: the Agent as an AD4M
