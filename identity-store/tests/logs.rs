@@ -429,6 +429,43 @@ async fn signed_requests_expired_replayed_wrong_body_bot_key_and_revoked_key_are
 }
 
 #[tokio::test]
+async fn a_signed_request_for_one_store_is_refused_by_another_that_holds_the_same_log() {
+    let t = TestStore::new();
+    let other = TestStore::with_key([8; 32]);
+    assert_ne!(t.store_key(), other.store_key());
+    let alice = Person::new("alice");
+    t.publish(&alice).await;
+    other.publish(&alice).await;
+    let path = format!("/v1/notes/{}", alice.scid());
+    let body = serde_json::to_vec(&json!({ "token": "a-token" })).unwrap();
+    let later = t.now() + 60;
+    // The request names the first store's key, as its signed heads do.
+    let header = alice.master_request("POST", &path, &body, later);
+    let named = identity_store::request::decode_header(&header).unwrap();
+    assert_eq!(named.req.store, format!("did:key:{}", t.store_key()));
+    let head = t.get(&format!("/v1/heads/{}", alice.scid())).await;
+    assert_eq!(head.body["store"], json!(named.req.store));
+
+    // Replayed to the second store within `expires`: 403 store, whatever else holds.
+    let reply = other
+        .send("POST", &path, Some(body.clone()), Some(header.clone()))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "store");
+    // The first store takes it (to the vouching step).
+    let reply = t
+        .send("POST", &path, Some(body.clone()), Some(header))
+        .await;
+    assert_eq!(reply.body["error"], "vouch-unavailable", "{}", reply.body);
+    // A request for the second store passes there.
+    let mut for_other = Person::new("alice");
+    for_other.store = format!("did:key:{}", other.store_key());
+    let header = for_other.master_request("POST", &path, &body, later);
+    let reply = other.send("POST", &path, Some(body), Some(header)).await;
+    assert_eq!(reply.body["error"], "vouch-unavailable", "{}", reply.body);
+}
+
+#[tokio::test]
 async fn a_body_over_64_kib_gets_413_and_33_events_get_400() {
     let t = TestStore::new();
     let alice = Person::new("alice");
@@ -775,6 +812,48 @@ async fn a_did_scid_record_signed_by_a_bot_key_is_refused() {
     let reply = t.send("PUT", &path, Some(body), Some(header)).await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
     assert_eq!(reply.body["error"], "signer");
+}
+
+#[tokio::test]
+async fn a_did_scid_record_signed_by_the_master_is_refused() {
+    let t = TestStore::new();
+    let alice = Person::new("alice");
+    t.publish(&alice).await;
+    let path = format!("/v1/agents/{}", alice.did());
+    let profile = json!({ "perspective": { "links": [] } });
+    let master = alice.current_master();
+    let record = alice.agent_record(&master, profile.clone(), 1);
+    assert_eq!(
+        alice.chain.state().current_master().unwrap().sign,
+        record.signed_by.strip_prefix("did:key:").unwrap()
+    );
+    let body = serde_json::to_vec(&record).unwrap();
+    // With the master's own signed request, and with a device key's.
+    let by_master = alice.master_request("PUT", &path, &body, t.now() + 60);
+    let reply = t
+        .send("PUT", &path, Some(body.clone()), Some(by_master))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signer");
+    let by_d1 = alice.request(
+        "d1",
+        &alice.device_key(1),
+        "PUT",
+        &path,
+        &body,
+        t.now() + 60,
+    );
+    let reply = t.send("PUT", &path, Some(body), Some(by_d1)).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signer");
+    assert_eq!(t.get(&path).await.status, StatusCode::NOT_FOUND);
+    // The same record signed by d1 passes under the master's signed request: the record's own
+    // signer is what the rule reads.
+    let record = alice.agent_record(&alice.device_key(1), profile, 1);
+    let body = serde_json::to_vec(&record).unwrap();
+    let by_master = alice.master_request("PUT", &path, &body, t.now() + 60);
+    let reply = t.send("PUT", &path, Some(body), Some(by_master)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
 }
 
 #[tokio::test]

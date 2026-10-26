@@ -437,11 +437,17 @@ size of 257 store bodies (64 KiB each) is refused as `invalid` (`too-large`).
 Rules for an implementation:
 
 - **It signs nothing and holds no key.** Events, offers, claims and signed requests pass
-  through unchanged; a `SignedRequest` travels in the `X-Coasys-Request` header. Events are
+  through unchanged; a `SignedRequest` travels in the `X-Coasys-Request` header. Its `req`
+  is `{did, store, keyId, kelSeq, kelHash, method, path, bodyHash, nonce, expires}`, where
+  `store` is the `did:key` of the store the request is for (as a signed head names its
+  store): a store refuses a request for another as `forbidden` (`store`), so a request cannot
+  be replayed to a second store holding the same log. The signer takes it from
+  `identity.storeKeys`, or from the `store` of a head it checked against them. Events are
   opaque JSON objects, so a new event format needs no new language: the language never reads
   one; the executor and the store check each with the identity core.
 - **Refusals map one to one** onto `IdentityErrorCode` (`conflict` with the store's head,
-  `key-taken`, `forbidden` with a reason, `invalid`, `rate-limited`, `gone` with the offer's
+  `key-taken`, `forbidden` with a reason (`vouch`, `pow`, `claim`, `signer`, `secret`,
+  `bound`, `cosig`, `writer`, `store`), `invalid`, `rate-limited`, `gone` with the offer's
   state, `not-found`, `unavailable`). A refusal crosses the runtime as a language error whose
   message is the refusal as JSON (`IdentityError` in JS, `IdentityErrorCode::from_language_error`
   in Rust). A network failure or the 10-second host timeout is `unavailable`.
@@ -466,7 +472,8 @@ Rules for an implementation:
   `did:key` record's `anchor` is `null`; a `did:scid` record's is the seq of that log the
   signer knew when it signed. The store on write and the language on read keep a `did:scid`
   record only when the anchor is at or below the log's head and the log lists `signedBy` (a
-  bare `did:key`), without the bot mark and valid at the anchor: a key revoked at seq N signs
+  bare `did:key`) as a device key (never a master: the master never signs for the person),
+  without the bot mark and valid at the anchor: a key revoked at seq N signs
   nothing valid anchored at or after N. The signer picks the anchor, so the store, which
   orders arrivals, also requires `signedBy` without the bot mark and valid at the log's head
   when the record arrives (`403 signer` otherwise): a revoked key cannot backdate a new record

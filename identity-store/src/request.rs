@@ -1,5 +1,11 @@
 //! Signed requests: header `X-Coasys-Request` = base64url(JCS(SignedRequest)).
 //!
+//! A request names the store it is for: `store` is this store key's `did:key`, as a signed head
+//! names its store (`403 store` otherwise), so a request for one store cannot be replayed to
+//! another that holds the same log. A client knows the key from its configuration (the
+//! executor's `identity.storeKeys`, the `store-key` line `serve` prints); the `store` of a
+//! signed head checked against those keys names it too.
+//!
 //! A request passes when its key is valid at the store's head by the store's clock and carries
 //! no bot mark; `kelSeq`/`kelHash` name a position the store holds; `expires` lies ahead, at
 //! most 5 minutes; `method`, `path` and `bodyHash` match the request; the nonce is new in the
@@ -109,6 +115,12 @@ impl Store {
         let signed = decode_header(header)?;
         let req = &signed.req;
         let now = self.now();
+        if req.store != self.key.did() {
+            return Err(ApiError::forbidden(
+                "store",
+                "the request is signed for another store",
+            ));
+        }
         if let Some(did) = did {
             if req.did != did {
                 return Err(refuse("the request is signed for another identity"));

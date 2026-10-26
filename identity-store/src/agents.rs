@@ -7,7 +7,8 @@
 //! write it only while its scope is in force (the bot-scope check). A `did:scid` record comes
 //! with a signed request of that identity and carries its anchor: the seq of the identity's log
 //! that the signer knew when it signed. It is accepted only when the anchor lies at or below the
-//! log's head (`400 anchor` otherwise) and `signedBy` is a non-bot key the log lists, valid
+//! log's head (`400 anchor` otherwise) and `signedBy` is a non-bot device key the log lists (never
+//! a master: the master never signs for the person), valid
 //! both at the anchor and at the log's head when the record arrives (`403 signer` otherwise).
 //! The signer picks the anchor, so the head check is what stops a key revoked at seq N from
 //! backdating a new record to an anchor below N: the store orders arrivals, so a record it
@@ -121,13 +122,17 @@ impl Store {
             let valid_at = |id, seq| {
                 state.bot_scope_at(id, seq).is_none() && state.key_valid_at_time(id, seq, now)
             };
-            let valid = state
-                .key_id_of(&key.to_string())
-                .is_some_and(|id| valid_at(id, anchor) && valid_at(id, head));
+            // Device keys only, never a master: the master never signs for the person.
+            let device_id = state
+                .keys
+                .iter()
+                .find(|(_, r)| r.sign == key)
+                .map(|(id, _)| id);
+            let valid = device_id.is_some_and(|id| valid_at(id, anchor) && valid_at(id, head));
             if !valid {
                 return Err(ApiError::forbidden(
                     "signer",
-                    "signedBy is not a non-bot key of this log valid at the anchor and at the head",
+                    "signedBy is not a non-bot device key of this log valid at the anchor and at the head",
                 ));
             }
             if !record_signed_by(record, key) {

@@ -10,7 +10,8 @@ serves the identity interface, both on the shared identity store (`identity-stor
   the agent's key signs the record through the host; a read keeps a record only when its
   signature holds. For a `did:scid` the record's `anchor` is one number, the seq of that log
   the signer knew when it signed; the read keeps the record only when the anchor is at or below
-  the log's head and the log lists `signedBy`, without the bot mark and valid at the anchor (a
+  the log's head and the log lists `signedBy` as a device key (never a master), without the
+  bot mark and valid at the anchor (a
   key revoked at seq N signs nothing valid anchored at or after N). The signer picks the
   anchor, so the store orders arrivals: it takes a `did:scid` record only when `signedBy` is
   also valid at the log's head when the record arrives, so a revoked key cannot backdate a new
@@ -27,7 +28,8 @@ serves the identity interface, both on the shared identity store (`identity-stor
 - `identityLog`, `identityHead`, `identityAppend`, `identityKeyOwner`, `identityPowParams`,
   `identityAttachNote`, `identityPutAgent`, `identityOpenOffer`, `identityListOffers`,
   `identityCancelOffer`, `identityClaimOffer`, `identityOfferState`: one store route each.
-  The language signs nothing; a `SignedRequest` travels in `X-Coasys-Request`; every body goes
+  The language signs nothing; a `SignedRequest` (whose `req.store` names the store it is
+  for; another store refuses it as `forbidden` `store`) travels in `X-Coasys-Request`; every body goes
   out as the argument's canonical JSON (so a signer hashes `JCS(body)`); HTTP statuses map one
   to one onto `IdentityErrorCode`, and a network failure is `unavailable`.
 - No token interface: the executor answers `disabled`.

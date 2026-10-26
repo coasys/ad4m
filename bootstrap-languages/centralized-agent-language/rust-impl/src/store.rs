@@ -67,6 +67,7 @@ fn forbidden_reason(error: &str) -> Option<ForbiddenReason> {
         "bound" => ForbiddenReason::Bound,
         "cosig" => ForbiddenReason::Cosig,
         "writer" => ForbiddenReason::Writer,
+        "store" => ForbiddenReason::Store,
         _ => return None,
     })
 }
@@ -486,6 +487,12 @@ mod tests {
             refusal_of(403, r#"{"error":"cosig"}"#),
             IdentityErrorCode::Forbidden {
                 reason: ForbiddenReason::Cosig
+            }
+        );
+        assert_eq!(
+            refusal_of(403, r#"{"error":"store"}"#),
+            IdentityErrorCode::Forbidden {
+                reason: ForbiddenReason::Store
             }
         );
         assert_eq!(refusal_of(404, ""), IdentityErrorCode::NotFound);

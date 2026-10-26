@@ -20,7 +20,7 @@
 //! | `revoke` | `name`, `ids` | the `revoke` event (not pushed) |
 //! | `rotate` | `name` | the `rotate` event (not pushed) |
 //! | `push` | `name`, `event` | `{seq}`: the person's copy takes the event the store took |
-//! | `request` | `name`, `signer` (`master`, `d1` or a device label), `keyId?`, `method`, `path`, `body`, `expires` | the `SignedRequest` |
+//! | `request` | `name`, `signer` (`master`, `d1` or a device label), `keyId?`, `store` (the store's `did:key`), `method`, `path`, `body`, `expires` | the `SignedRequest` |
 //! | `record` | `name`, `signer`, `profile`, `version`, `did?`, `anchor?` | a `did:scid` `AgentRecord` anchored at the person's head, or at seq `anchor` (`did` replaces the person's: a hostile store's row) |
 //! | `didKeyRecord` | `device`, `profile`, `version` | a `did:key` `AgentRecord` signed by that key |
 
@@ -164,7 +164,9 @@ impl Apps {
             }
             "request" => {
                 let signer = self.signer(req)?;
+                let store = text(req, "store")?.to_string();
                 let person = self.person(req)?;
+                person.store = store;
                 let key_id = match req.get("keyId").and_then(Value::as_str) {
                     Some(id) => id.to_string(),
                     None => person.master_id(),

@@ -190,6 +190,13 @@ export interface KeyIndexEntry {
 /** The signed part of a store request. */
 export interface RequestBody {
     did: string;
+    /**
+     * did:key of the store the request is for, as a `SignedHead` names its store: a store
+     * refuses a request for another (`403 store`), so a request cannot be replayed to a second
+     * store that holds the same log. A client takes it from its configured store keys
+     * (`identity.storeKeys`) or from the `store` of a signed head it checked against them.
+     */
+    store: string;
     keyId: string;
     kelSeq: number;
     kelHash: string;
@@ -310,7 +317,6 @@ export type OfferState =
     | { state: "expired" }
     | { state: "cancelled" }
     | { state: "contested" }
-    | { state: "locked" }
     | { state: "superseded" };
 
 /** One item of `GET /v1/offers/{scid}`. */
@@ -383,7 +389,9 @@ export type IdentityForbiddenReason =
     | "secret"
     | "bound"
     | "cosig"
-    | "writer";
+    | "writer"
+    /** A signed request for another store. */
+    | "store";
 
 /** How the identity interface refuses a call; HTTP statuses map one to one. */
 export type IdentityErrorCode =

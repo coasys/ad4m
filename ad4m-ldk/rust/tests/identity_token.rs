@@ -27,6 +27,7 @@ fn request() -> SignedRequest {
     SignedRequest {
         req: RequestBody {
             did: "did:scid:zScid".into(),
+            store: "did:key:zStore".into(),
             key_id: "m1".into(),
             kel_seq: 1,
             kel_hash: "zHash1".into(),
@@ -497,10 +498,15 @@ fn identity_wire_types_use_ar01_field_names() {
 
     wire(
         &request(),
-        json!({"req": {"did": "did:scid:zScid", "keyId": "m1", "kelSeq": 1, "kelHash": "zHash1", "method": "GET",
-                       "path": "/v1/offers/zScid", "bodyHash": "zBody", "nonce": "zNonce", "expires": 1_700_000_300},
+        json!({"req": {"did": "did:scid:zScid", "store": "did:key:zStore", "keyId": "m1", "kelSeq": 1,
+                       "kelHash": "zHash1", "method": "GET", "path": "/v1/offers/zScid", "bodyHash": "zBody",
+                       "nonce": "zNonce", "expires": 1_700_000_300},
                "sig": "zReqSig"}),
     );
+    // `store` is required: a request that names no store does not parse.
+    let mut no_store = serde_json::to_value(request()).unwrap();
+    no_store["req"].as_object_mut().unwrap().remove("store");
+    assert!(serde_json::from_value::<SignedRequest>(no_store).is_err());
 
     wire(
         &AgentRecord {
@@ -651,11 +657,12 @@ fn offer_wire_types_use_ar02_field_names() {
         (OfferState::Expired, "expired"),
         (OfferState::Cancelled, "cancelled"),
         (OfferState::Contested, "contested"),
-        (OfferState::Locked, "locked"),
         (OfferState::Superseded, "superseded"),
     ] {
         wire(&state, json!({"state": name}));
     }
+    // No miss count ends an offer, so there is no `locked` state.
+    assert!(serde_json::from_value::<OfferState>(json!({"state": "locked"})).is_err());
     wire(
         &OfferOpened {
             offer_id: "zOffer".into(),
@@ -705,6 +712,7 @@ fn identity_error_codes_match_ar01() {
         (ForbiddenReason::Bound, "bound"),
         (ForbiddenReason::Cosig, "cosig"),
         (ForbiddenReason::Writer, "writer"),
+        (ForbiddenReason::Store, "store"),
     ] {
         wire(
             &IdentityErrorCode::Forbidden { reason },

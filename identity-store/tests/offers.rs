@@ -352,7 +352,7 @@ async fn an_open_offer_expires_and_a_claim_after_expires_is_410() {
 }
 
 #[tokio::test]
-async fn claims_with_a_wrong_secret_bound_key_cosig_or_taken_key_are_refused_and_five_wrong_secrets_lock(
+async fn claims_with_a_wrong_secret_bound_key_cosig_or_taken_key_are_refused_and_misses_never_end_the_offer(
 ) {
     let t = TestStore::new();
     let mut alice = Person::new("alice");
@@ -418,11 +418,12 @@ async fn claims_with_a_wrong_secret_bound_key_cosig_or_taken_key_are_refused_and
     let state = progress(&t, &scid, &offer.offer.offer_id, &first.sign_key()).await;
     assert_eq!(state.body["state"], "contested");
 
-    // Five wrong secrets lock an offer; a right one then gets 410 locked.
+    // Wrong secrets do not end an offer (the claim route is unauthenticated, so a count of
+    // misses would let anyone who knows the offer id end it): after many, the right one passes.
     let (offer, s) = alice.offer(OfferKind::Device, None, None, t.now() + 300);
     assert_eq!(t.open_offer(&offer).await.status, StatusCode::CREATED);
     let tablet = Device::new("tablet");
-    for i in 0..5u8 {
+    for i in 0..10u8 {
         let reply = t
             .claim(
                 &scid,
@@ -435,8 +436,30 @@ async fn claims_with_a_wrong_secret_bound_key_cosig_or_taken_key_are_refused_and
     let reply = t
         .claim(&scid, &tablet.claim(&scid, &offer.offer.offer_id, s, false))
         .await;
-    assert_eq!(reply.status, StatusCode::GONE);
-    assert_eq!(reply.body["state"], "locked");
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    // Nor do claims by the wrong key on a bound offer: the bound key still claims it.
+    let watch = Device::new("alice watch");
+    let (bound, s) = alice.offer(
+        OfferKind::Device,
+        Some(watch.sign_key()),
+        None,
+        t.now() + 300,
+    );
+    assert_eq!(t.open_offer(&bound).await.status, StatusCode::CREATED);
+    for _ in 0..10 {
+        let reply = t
+            .claim(
+                &scid,
+                &stranger.claim(&scid, &bound.offer.offer_id, s, false),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN);
+        assert_eq!(reply.body["error"], "bound");
+    }
+    let reply = t
+        .claim(&scid, &watch.claim(&scid, &bound.offer.offer_id, s, false))
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
     // An unknown offer id: 404.
     let reply = t
         .claim(
