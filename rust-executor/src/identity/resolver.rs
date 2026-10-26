@@ -9,11 +9,10 @@
 //!   [`IdentityBackend`]. The cache only extends: a log from any source is imported, never put
 //!   in place of a held one; a fork is recorded and reported.
 //!
-//! A `src` is a request to an address someone else chose: before one reaches the agent
-//! language the resolver checks it is HTTPS and that its host resolves to public addresses only
-//! ([`is_public`]), unless `identity.allowPrivateSrc` is set. The language resolves the name
-//! again when it fetches, so a name that changes its answer between the two lookups (DNS
-//! rebinding) or a redirect the fetch follows is not covered here (see `AGENTS.md`).
+//! A `src` is a request to an address someone else chose. The configured store is read through
+//! the agent language; a foreign `src` is read by the executor itself ([`SrcFetch`]), HTTPS
+//! only, connecting only to public addresses ([`is_public`]) and following no redirect, unless
+//! `identity.allowPrivateSrc` is set (see `src_fetch.rs` and `AGENTS.md`).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -25,6 +24,7 @@ use serde_json::Value;
 
 use super::backend::{IdentityBackend, IdentityError};
 use super::cache::{scid_from, CacheError, Ingested, KelCache};
+use super::src_fetch::{refuse_private_host, SrcFetch};
 use super::types::{
     convert, DidDocumentMetadata, DidResolutionMetadata, DidResolutionResult, ForkRecord,
     SkippedSource,
@@ -39,8 +39,6 @@ pub const MISS_TTL: Duration = Duration::from_secs(300);
 const MAX_PAGES: usize = 64;
 /// The most events a page holds (`identity-store`'s page size).
 const PAGE_EVENTS: usize = 256;
-/// How long the lookup of a `src` host may take.
-const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bounds of the in-memory maps (failed fetches, confirmed keys).
 const MAP_BOUND: usize = 4096;
 
@@ -67,16 +65,26 @@ pub async fn key_speaks_for(cache: &KelCache, did: &str, key: &str, now: u64) ->
         && state.key_valid_at_time(key, head, now)
 }
 
-/// Verifies `expr`, authored by a `did:scid`: its `proof.key` must be the bare `did:key` of a
-/// key that the author's log in `cache` lists, valid at the cached head by the clock now and
-/// without the bot mark (as a device key's signature counts everywhere in this module), and
-/// the expression's signature must hold under that key. The expression's own timestamp does
-/// not count: the signer states it. When the cached log does not admit the key (no log yet, or
-/// a device added since), the log is refreshed once through `backend` and checked again.
+/// Verifies `expr`, authored by a `did:scid`, whose `proof.key` must be the bare `did:key` of a
+/// key the author's log in `cache` lists, and whose own signature must hold under that key.
+///
+/// - With `record` (the expression's `proof.record`, which the agent language adds to a
+///   `did:scid` profile: `{version, anchor, sig}` of the agent record it came in), the key
+///   counts at the record's anchor, not at the head: the record signature must hold
+///   ([`record_signature_holds`]) and the key be valid at the anchor ([`key_valid_at_anchor`]).
+///   A profile signed before a revocation stays valid after it. A `record` that does not hold makes the
+///   expression invalid; the head rule is never tried instead.
+/// - Without it, the key must be valid at the cached head by the clock now and without the bot
+///   mark (as a device key's signature counts everywhere in this module). The expression's own
+///   timestamp does not count: the signer states it.
+///
+/// When the cached log does not admit the key (no log yet, a log shorter than the anchor, or a
+/// device added since), the log is refreshed once through `backend` and checked again.
 pub async fn verify_expression<T: serde::Serialize>(
     cache: &KelCache,
     backend: Option<&dyn IdentityBackend>,
     expr: &crate::types::Expression<T>,
+    record: Option<&Value>,
 ) -> Result<bool, deno_core::error::AnyError> {
     let Some(key) = expr
         .proof
@@ -86,17 +94,118 @@ pub async fn verify_expression<T: serde::Serialize>(
     else {
         return Ok(false);
     };
-    let mut admitted = key_speaks_for(cache, &expr.author, key, super::service::now()).await;
+    let anchored = match record {
+        Some(record) => match RecordProof::read(record) {
+            Some(record) => Some(record),
+            None => return Ok(false),
+        },
+        None => None,
+    };
+    if let Some(record) = &anchored {
+        // The anchor counts only through the record signature: check it before the log.
+        if !record_signature_holds(expr, key, record)? {
+            return Ok(false);
+        }
+    }
+    let anchor = anchored.as_ref().map(|r| r.anchor);
+    let admits = || async {
+        let now = super::service::now();
+        match anchor {
+            Some(anchor) => key_valid_at_anchor(cache, &expr.author, key, anchor, now).await,
+            None => key_speaks_for(cache, &expr.author, key, now).await,
+        }
+    };
+    let mut admitted = admits().await;
     if let (false, Some(backend)) = (admitted, backend) {
         if let Err(e) = cache.refresh(backend, &expr.author).await {
             log::info!("identity: refresh of {} failed ({e})", expr.author);
         }
-        admitted = key_speaks_for(cache, &expr.author, key, super::service::now()).await;
+        admitted = admits().await;
     }
     if !admitted {
         return Ok(false);
     }
     crate::agent::signatures::verify_by(expr, &expr.proof.key)
+}
+
+/// `proof.record` on a `did:scid` profile expression: the agent record's `version`, `anchor`
+/// and `sig` (`ad4m_ldk::identity::AgentRecordProof`). A member it does not name makes it
+/// malformed: nothing unsigned rides along.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordProof {
+    pub version: u64,
+    pub anchor: u64,
+    pub sig: String,
+}
+
+impl RecordProof {
+    fn read(value: &Value) -> Option<RecordProof> {
+        serde_json::from_value(value.clone()).ok()
+    }
+}
+
+/// Whether `record.sig` is `key`'s `coasys:link` signature over the agent record
+/// `{profile, version, anchor}`, `profile` being `expr` as the record stores it: `author`,
+/// `timestamp`, `data` and `proof: {key, signature}`, without `proof.record` or the
+/// `proof.valid`/`proof.invalid` flags (the typed expression carries none of them).
+fn record_signature_holds<T: serde::Serialize>(
+    expr: &crate::types::Expression<T>,
+    key: &str,
+    record: &RecordProof,
+) -> Result<bool, deno_core::error::AnyError> {
+    let agent_record = ad4m_ldk::identity::AgentRecord {
+        did: expr.author.clone(),
+        profile: serde_json::to_value(expr)?,
+        version: record.version,
+        signed_by: expr.proof.key.clone(),
+        anchor: Some(record.anchor),
+        sig: record.sig.clone(),
+    };
+    Ok(
+        ad4m_hash_chain::decode_proof_value(&agent_record.sig).is_some_and(|sig| {
+            ad4m_identity_core::verify_signed(
+                ad4m_identity_core::LINK_DOMAIN,
+                &agent_record.signed_value(),
+                key,
+                &sig,
+            )
+        }),
+    )
+}
+
+/// Whether the signing multikey `key` spoke for `did` at seq `anchor` of the cached log: the
+/// anchor is at or below the cached head, and the log lists `key` as a device key, valid at the
+/// anchor by `now` and without the bot mark there (the rule the store and the agent language
+/// apply to an agent record). A key revoked at seq N signs nothing valid anchored at or after N.
+pub async fn key_valid_at_anchor(
+    cache: &KelCache,
+    did: &str,
+    key: &str,
+    anchor: u64,
+    now: u64,
+) -> bool {
+    let chain = match cache.chain(scid_from(did)).await {
+        Ok(Some(chain)) => chain,
+        Ok(None) => return false,
+        Err(e) => {
+            log::warn!("identity: the cached log of {did} is unreadable: {e}");
+            return false;
+        }
+    };
+    if anchor > chain.head().seq {
+        return false;
+    }
+    let state = chain.state();
+    let Some(id) = state
+        .keys
+        .values()
+        .find(|record| record.sign == key)
+        .map(|record| record.id.clone())
+    else {
+        return false;
+    };
+    state.bot_scope_at(&id, anchor).is_none() && state.key_valid_at_time(&id, anchor, now)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -335,7 +444,7 @@ pub fn parse_did_url(input: &str) -> Result<Target, ResolveError> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpsBase {
     pub url: url::Url,
-    /// `https://<host>[:port][/path]`, without a trailing `/`: what the agent language gets.
+    /// `https://<host>[:port][/path]`, without a trailing `/`.
     pub base: String,
     /// `<host>[:port][/path]`: the `src` form, and the `coasys:source` of an answer.
     pub label: String,
@@ -451,38 +560,6 @@ pub fn is_public(ip: IpAddr) -> bool {
     }
 }
 
-/// Refuses a `src` host that is, or resolves to, any address that is not [`is_public`]. Every
-/// address of a name must be public: the fetch may use any of them.
-pub async fn check_public_host(url: &url::Url) -> Result<(), String> {
-    let refuse = |ip: IpAddr| Err(format!("{ip} is not a public address"));
-    match url.host() {
-        Some(url::Host::Ipv4(ip)) if !is_public(ip.into()) => refuse(ip.into()),
-        Some(url::Host::Ipv6(ip)) if !is_public(ip.into()) => refuse(ip.into()),
-        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => Ok(()),
-        Some(url::Host::Domain(name)) => {
-            let name = name.trim_end_matches('.').to_ascii_lowercase();
-            if name == "localhost" || name.ends_with(".localhost") {
-                return Err(format!("{name} is a loopback name"));
-            }
-            let port = url.port_or_known_default().unwrap_or(443);
-            let lookup = tokio::net::lookup_host((name.as_str(), port));
-            let addrs: Vec<IpAddr> = match tokio::time::timeout(DNS_TIMEOUT, lookup).await {
-                Ok(Ok(addrs)) => addrs.map(|a| a.ip()).collect(),
-                Ok(Err(e)) => return Err(format!("{name} does not resolve: {e}")),
-                Err(_) => return Err(format!("the lookup of {name} timed out")),
-            };
-            if addrs.is_empty() {
-                return Err(format!("{name} has no address"));
-            }
-            match addrs.into_iter().find(|ip| !is_public(*ip)) {
-                Some(ip) => Err(format!("{name} resolves to {ip}, not a public address")),
-                None => Ok(()),
-            }
-        }
-        None => Err("no host".into()),
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // The resolver
 // ---------------------------------------------------------------------------------------------
@@ -514,6 +591,8 @@ pub struct Resolver {
     store: Option<url::Url>,
     /// `identity.allowPrivateSrc`: skip the public-address check (tests, local development).
     allow_private_src: bool,
+    /// The reader of foreign `src` hosts, under the same `allowPrivateSrc`.
+    src_fetch: SrcFetch,
     /// Failed fetches from foreign hosts: `(host label, scid)` → when.
     misses: StdMutex<HashMap<(String, String), Instant>>,
     /// Device keys confirmed in a log: signing multikey → SCID.
@@ -539,9 +618,18 @@ impl Resolver {
             backend,
             store,
             allow_private_src,
+            src_fetch: SrcFetch::new(allow_private_src),
             misses: StdMutex::new(HashMap::new()),
             keys: StdMutex::new(HashMap::new()),
         }
+    }
+
+    /// This resolver with `src_fetch` as its reader of foreign hosts (tests: plain HTTP to local
+    /// hosts).
+    #[cfg(test)]
+    pub(crate) fn with_src_fetch(mut self, src_fetch: SrcFetch) -> Self {
+        self.src_fetch = src_fetch;
+        self
     }
 
     /// The configured store as a `src` (`host[:port][/path]`).
@@ -743,7 +831,7 @@ impl Resolver {
 
         let did = did_of(scid);
         for source in self.sources(src) {
-            let (label, fetched) = match source {
+            let (label, fetched, foreign) = match source {
                 Source::Skip(skipped) => {
                     loaded.skipped.push(skipped);
                     continue;
@@ -759,8 +847,10 @@ impl Resolver {
                         });
                         continue;
                     }
+                    // The transport refuses private addresses itself; an IP literal or a
+                    // loopback name is refused here, without a connection.
                     if !self.allow_private_src {
-                        if let Err(why) = check_public_host(&base.url).await {
+                        if let Err(why) = refuse_private_host(&base.url) {
                             log::info!("identity: refused src {}: {why}", base.label);
                             loaded.skipped.push(SkippedSource {
                                 src: base.label,
@@ -769,11 +859,11 @@ impl Resolver {
                             continue;
                         }
                     }
-                    let fetched = self.fetch_untrusted(scid, Some(&base.base)).await;
+                    let fetched = self.fetch_untrusted(scid, Some(&base)).await;
                     if matches!(&fetched, Err(e) if !matches!(e, CacheError::Fork(_))) {
                         self.note_miss(&base.label, scid);
                     }
-                    (base.label, fetched)
+                    (base.label, fetched, true)
                 }
                 Source::Store => {
                     let fetched = match self.cache.refresh(self.backend.as_ref(), &did).await {
@@ -783,7 +873,7 @@ impl Resolver {
                         Err(CacheError::BadHeadSignature) => self.fetch_untrusted(scid, None).await,
                         Err(e) => Err(e),
                     };
-                    (self.store_label(), fetched)
+                    (self.store_label(), fetched, false)
                 }
             };
             match fetched {
@@ -795,7 +885,11 @@ impl Resolver {
                 Err(CacheError::Fork(_)) => break,
                 Err(e) => loaded.skipped.push(SkippedSource {
                     src: label,
-                    reason: e.to_string(),
+                    // A foreign host is no identity store: its failure reads as itself.
+                    reason: match e {
+                        CacheError::Unavailable(why) if foreign => why,
+                        e => e.to_string(),
+                    },
                 }),
             }
         }
@@ -810,19 +904,32 @@ impl Resolver {
         }
     }
 
-    /// Reads `scid`'s log from `src` (the configured store when `None`) page by page from the
-    /// cached head and imports the events with no head: a host's head is a hint of how far to
-    /// page, never trusted.
-    async fn fetch_untrusted(&self, scid: &str, src: Option<&str>) -> Result<(), CacheError> {
+    /// Reads `scid`'s log page by page from the cached head and imports the events with no
+    /// head: a host's head is a hint of how far to page, never trusted. From the foreign host
+    /// `src` over the did:scid host profile ([`SrcFetch`]) when given, else from the configured
+    /// store through the agent language.
+    async fn fetch_untrusted(&self, scid: &str, src: Option<&HttpsBase>) -> Result<(), CacheError> {
         let did = did_of(scid);
         for _ in 0..MAX_PAGES {
             let cached = self.cache.chain(scid).await?;
             let from = cached.as_ref().map_or(0, |c| c.head().seq);
-            let Some(page) = self.backend.log(&did, from, src).await? else {
+            let page = match src {
+                Some(base) => self
+                    .src_fetch
+                    .page(base, scid, from)
+                    .await
+                    .map_err(CacheError::Unavailable)?
+                    .map(|page| (page.events, page.head.seq)),
+                None => self
+                    .backend
+                    .log(&did, from)
+                    .await?
+                    .map(|page| (page.events, page.head.seq)),
+            };
+            let Some((events, head_seq)) = page else {
                 return Err(CacheError::NotFound);
             };
-            let events = page
-                .events
+            let events = events
                 .iter()
                 .map(Event::from_json)
                 .collect::<Result<Vec<_>, _>>()
@@ -836,7 +943,7 @@ impl Resolver {
             match self.cache.ingest(scid, &events).await? {
                 Ingested::AlreadyHave => return Ok(()),
                 Ingested::Appended(head) => {
-                    if head.seq >= page.head.seq || events.len() < PAGE_EVENTS {
+                    if head.seq >= head_seq || events.len() < PAGE_EVENTS {
                         return Ok(());
                     }
                 }
@@ -970,6 +1077,7 @@ fn failure(e: ResolveError, mut meta: DidResolutionMetadata) -> DidResolutionRes
 mod tests {
     use super::*;
     use crate::identity::cache::tests::{in_memory, FakeStore, TestLog};
+    use crate::identity::src_fetch::test_host::{from_of, response, TestHost};
     use crate::identity::types::DidDocument;
     use ad4m_identity_core::build::Signer;
     use std::sync::atomic::Ordering;
@@ -1163,15 +1271,23 @@ mod tests {
         doc.verification_method.into_iter().map(|m| m.id).collect()
     }
 
-    fn foreign_srcs(store: &FakeStore) -> Vec<String> {
-        store
-            .log_srcs
-            .lock()
-            .unwrap()
-            .iter()
-            .flatten()
-            .cloned()
-            .collect()
+    /// A host on 127.0.0.1 serving `host_store`'s log over the did:scid host profile.
+    async fn log_host(host_store: Arc<FakeStore>) -> TestHost {
+        TestHost::start(move |target| match host_store.page(from_of(target)) {
+            Some(page) => response("200 OK", &[], &serde_json::to_vec(&page).unwrap()),
+            None => response("404 Not Found", &[], b""),
+        })
+        .await
+    }
+
+    /// A resolver with private srcs allowed that reads foreign hosts over plain HTTP, every
+    /// name answering 127.0.0.1 (the hosts of [`log_host`]).
+    fn local_resolver(cache: KelCache, store: Arc<FakeStore>) -> Resolver {
+        let backend: Arc<dyn IdentityBackend> = store;
+        let lookup: crate::identity::src_fetch::Lookup =
+            Arc::new(|_| Box::pin(async { Ok(vec!["127.0.0.1".parse().unwrap()]) }));
+        Resolver::new(Arc::new(cache), backend, None, true)
+            .with_src_fetch(SrcFetch::plain_http(true, lookup))
     }
 
     #[tokio::test]
@@ -1238,20 +1354,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_src_is_read_once_checked_and_its_head_is_not_trusted() {
+    async fn a_src_is_read_over_the_host_profile_and_its_head_is_not_trusted() {
         let log = TestLog::new(1);
         let store = Arc::new(FakeStore::new(log.events.clone()));
-        // The cache trusts the store's key: still, a foreign src's head never counts.
-        let (resolver, store) = resolver(in_memory(vec![store.key.multikey()]), store, None);
+        // The foreign host signs its head with the key the cache trusts: still, a foreign
+        // src's head never counts.
+        let host = log_host(Arc::new(FakeStore::new(log.events.clone()))).await;
+        let resolver = local_resolver(in_memory(vec![store.key.multikey()]), store.clone());
         let did = did_of(&log.scid());
-        let result = resolver
-            .resolve(&format!("{did}?src=203.0.113.7:8443"), false)
-            .await;
+        let src = format!("log.example:{}", host.port);
+        let result = resolver.resolve(&format!("{did}?src={src}"), false).await;
         assert_eq!(result.did_resolution_metadata.error, None, "{result:?}");
-        assert_eq!(foreign_srcs(&store), vec!["https://203.0.113.7:8443"]);
+        assert_eq!(host.connections(), 1, "the executor read the src itself");
+        assert_eq!(
+            store.log_calls.load(Ordering::SeqCst),
+            0,
+            "the agent language was not asked"
+        );
         assert_eq!(
             result.did_resolution_metadata.source.as_deref(),
-            Some("203.0.113.7:8443")
+            Some(src.as_str())
         );
         assert_eq!(result.did_resolution_metadata.head_trusted, Some(false));
         assert_eq!(methods(&result), vec!["#d1", "#d1-enc"]);
@@ -1282,7 +1404,10 @@ mod tests {
             Some("127.0.0.1:9")
         );
         assert_eq!(result.did_resolution_metadata.head_trusted, Some(true));
-        assert!(foreign_srcs(&store).is_empty());
+        assert!(
+            store.log_calls.load(Ordering::SeqCst) > 0,
+            "through the agent language"
+        );
         assert_eq!(
             result.did_document_metadata.version_id.as_deref(),
             Some("1")
@@ -1362,10 +1487,6 @@ mod tests {
                 "{src}: {skipped:?}"
             );
         }
-        assert!(
-            foreign_srcs(&store).is_empty(),
-            "no fetch reached a private host"
-        );
         // The configured store was still asked, as the next source.
         assert!(store.log_calls.load(Ordering::SeqCst) > 0);
     }
@@ -1373,22 +1494,23 @@ mod tests {
     #[tokio::test]
     async fn allow_private_src_lets_a_loopback_src_through() {
         let log = TestLog::new(1);
-        let store = Arc::new(FakeStore::new(log.events.clone()));
-        let backend: Arc<dyn IdentityBackend> = store.clone();
-        let resolver = Resolver::new(Arc::new(in_memory(vec![])), backend, None, true);
+        let host = log_host(Arc::new(FakeStore::new(log.events.clone()))).await;
+        let resolver = local_resolver(in_memory(vec![]), Arc::new(FakeStore::new(vec![])));
         let did = did_of(&log.scid());
         let result = resolver
-            .resolve(&format!("{did}?src=127.0.0.1:8443"), false)
+            .resolve(&format!("{did}?src=127.0.0.1:{}", host.port), false)
             .await;
         assert_eq!(result.did_resolution_metadata.error, None, "{result:?}");
-        assert_eq!(foreign_srcs(&store), vec!["https://127.0.0.1:8443"]);
+        assert_eq!(host.connections(), 1);
     }
 
     #[tokio::test]
     async fn a_failed_foreign_fetch_is_not_repeated_for_a_while() {
         let log = TestLog::new(1);
-        let (resolver, store) = resolver(in_memory(vec![]), Arc::new(FakeStore::new(vec![])), None);
-        let url = format!("{}?src=203.0.113.9", did_of(&log.scid()));
+        // The host holds no log: 404.
+        let host = log_host(Arc::new(FakeStore::new(vec![]))).await;
+        let resolver = local_resolver(in_memory(vec![]), Arc::new(FakeStore::new(vec![])));
+        let url = format!("{}?src=log.example:{}", did_of(&log.scid()), host.port);
         for _ in 0..3 {
             let result = resolver.resolve(&url, true).await;
             assert_eq!(
@@ -1396,11 +1518,49 @@ mod tests {
                 Some("notFound")
             );
         }
-        assert_eq!(foreign_srcs(&store).len(), 1, "one fetch, then the miss");
+        assert_eq!(host.connections(), 1, "one fetch, then the miss");
         let result = resolver.resolve(&url, true).await;
         assert!(result.did_resolution_metadata.skipped[0]
             .reason
             .contains("failed within"));
+    }
+
+    #[tokio::test]
+    async fn a_foreign_host_failure_is_skipped_with_its_reason() {
+        let log = TestLog::new(1);
+        let host = TestHost::start(|_| response("500 Internal Server Error", &[], b"")).await;
+        let resolver = local_resolver(in_memory(vec![]), Arc::new(FakeStore::new(vec![])));
+        let url = format!("{}?src=log.example:{}", did_of(&log.scid()), host.port);
+        let result = resolver.resolve(&url, true).await;
+        let skipped = &result.did_resolution_metadata.skipped;
+        assert_eq!(skipped[0].src, format!("log.example:{}", host.port));
+        assert_eq!(
+            skipped[0].reason,
+            "the host answered 500 Internal Server Error"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_that_answers_a_private_address_at_fetch_time_is_never_connected() {
+        // The up-front check passes a name; the address it answers when the client connects
+        // is what counts (DNS rebinding).
+        let log = TestLog::new(1);
+        let host = log_host(Arc::new(FakeStore::new(log.events.clone()))).await;
+        let lookup: crate::identity::src_fetch::Lookup =
+            Arc::new(|_| Box::pin(async { Ok(vec!["127.0.0.1".parse().unwrap()]) }));
+        let backend: Arc<dyn IdentityBackend> = Arc::new(FakeStore::new(vec![]));
+        let resolver = Resolver::new(Arc::new(in_memory(vec![])), backend, None, false)
+            .with_src_fetch(SrcFetch::plain_http(false, lookup));
+        let url = format!("{}?src=rebind.example:{}", did_of(&log.scid()), host.port);
+        let result = resolver.resolve(&url, true).await;
+        assert_eq!(
+            result.did_resolution_metadata.error.as_deref(),
+            Some("notFound")
+        );
+        let reason = &result.did_resolution_metadata.skipped[0].reason;
+        assert!(reason.contains("not a public address"), "{reason}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(host.connections(), 0);
     }
 
     #[tokio::test]
@@ -1491,5 +1651,244 @@ mod tests {
         assert_eq!(meta.error.as_deref(), Some("notFound"), "{result:?}");
         assert_eq!(meta.key_index_mismatch, Some(true));
         assert!(result.did_document.is_none());
+    }
+
+    // --- did:scid expressions: proof.record anchors the key ----------------------------------
+
+    use super::test_profiles::{signed_profile, with_record};
+
+    /// `verify_expression` on the JSON expression `answered`, its `proof.record` read as
+    /// `verify_expression_proof_with` reads it.
+    async fn verifies(cache: &KelCache, answered: &Value) -> bool {
+        let expr: crate::types::Expression<Value> =
+            serde_json::from_value(answered.clone()).unwrap();
+        verify_expression(cache, None, &expr, answered["proof"].get("record"))
+            .await
+            .unwrap()
+    }
+
+    async fn cache_holding(log: &TestLog) -> KelCache {
+        let cache = in_memory(vec![]);
+        cache.ingest(&log.scid(), &log.events).await.unwrap();
+        cache
+    }
+
+    #[tokio::test]
+    async fn a_profile_anchored_before_a_revocation_stays_valid_after_it() {
+        let mut log = TestLog::new(41);
+        let did = did_of(&log.scid());
+        let profile = signed_profile(&did, &log.device);
+        let anchored = with_record(&profile, &log.device, 1, 0);
+        let cache = cache_holding(&log).await;
+        assert!(verifies(&cache, &anchored).await);
+        assert!(
+            verifies(&cache, &profile).await,
+            "the head rule, before the revoke"
+        );
+
+        log.revoke_d1();
+        cache.ingest(&log.scid(), &log.events[1..]).await.unwrap();
+        assert!(
+            verifies(&cache, &anchored).await,
+            "signed at seq 0, before the revoke at seq 1"
+        );
+        // Without proof.record the rule is the head's, unchanged: d1 is revoked there.
+        assert!(!verifies(&cache, &profile).await);
+    }
+
+    #[tokio::test]
+    async fn a_profile_anchored_at_or_after_the_revocation_is_invalid() {
+        let mut log = TestLog::new(42);
+        let did = did_of(&log.scid());
+        log.revoke_d1();
+        let cache = cache_holding(&log).await;
+        let profile = signed_profile(&did, &log.device);
+        assert!(!verifies(&cache, &with_record(&profile, &log.device, 1, 1)).await);
+    }
+
+    #[tokio::test]
+    async fn an_anchor_past_the_head_is_invalid() {
+        let log = TestLog::new(43);
+        let did = did_of(&log.scid());
+        let cache = cache_holding(&log).await;
+        let profile = signed_profile(&did, &log.device);
+        assert!(!verifies(&cache, &with_record(&profile, &log.device, 1, 1)).await);
+        assert!(!verifies(&cache, &with_record(&profile, &log.device, 1, 7)).await);
+    }
+
+    #[tokio::test]
+    async fn a_tampered_record_is_invalid_and_never_falls_back_to_the_head() {
+        let mut log = TestLog::new(44);
+        let did = did_of(&log.scid());
+        let profile = signed_profile(&did, &log.device);
+        // Signed anchored at seq 1, so the key is not valid there once revoked at seq 1...
+        log.revoke_d1();
+        let cache = cache_holding(&log).await;
+        let at_one = with_record(&profile, &log.device, 3, 1);
+        assert!(!verifies(&cache, &at_one).await);
+
+        // ...and moving the anchor back, unsigned, does not help.
+        let mut earlier = at_one.clone();
+        earlier["proof"]["record"]["anchor"] = Value::from(0);
+        assert!(!verifies(&cache, &earlier).await, "the anchor is signed");
+        let mut version = with_record(&profile, &log.device, 3, 0);
+        assert!(verifies(&cache, &version).await);
+        version["proof"]["record"]["version"] = Value::from(4);
+        assert!(!verifies(&cache, &version).await, "the version is signed");
+
+        // A changed profile breaks the record signature (and the expression's).
+        let mut changed = with_record(&profile, &log.device, 3, 0);
+        changed["data"]["directMessageLanguage"] = Value::from("lang://other");
+        assert!(!verifies(&cache, &changed).await);
+
+        // Malformed records: a missing or an unsigned extra member, a bad signature.
+        let good = with_record(&profile, &log.device, 3, 0);
+        let mut missing = good.clone();
+        missing["proof"]["record"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sig");
+        let mut extra = good.clone();
+        extra["proof"]["record"]["head"] = Value::from(1);
+        let mut garbage = good.clone();
+        garbage["proof"]["record"]["sig"] = Value::from("zNotASignature");
+        let mut not_an_object = good.clone();
+        not_an_object["proof"]["record"] = Value::from("0");
+        for bad in [missing, extra, garbage, not_an_object] {
+            assert!(!verifies(&cache, &bad).await, "{}", bad["proof"]["record"]);
+        }
+
+        // Another log's valid key signing the record for this person.
+        let other = TestLog::new(45);
+        cache.ingest(&other.scid(), &other.events).await.unwrap();
+        let foreign = with_record(&signed_profile(&did, &other.device), &other.device, 1, 0);
+        assert!(!verifies(&cache, &foreign).await);
+    }
+
+    #[tokio::test]
+    async fn a_record_that_holds_needs_the_expression_signature_too() {
+        let log = TestLog::new(46);
+        let did = did_of(&log.scid());
+        let cache = cache_holding(&log).await;
+        let mut profile = signed_profile(&did, &log.device);
+        // The expression's own signature is broken; the record signs the broken profile.
+        profile["proof"]["signature"] = Value::from(hex::encode([7u8; 64]));
+        assert!(!verifies(&cache, &with_record(&profile, &log.device, 1, 0)).await);
+    }
+
+    /// Adds a bot key (`read`, never expiring) to `log` at the next seq; its secret.
+    fn add_bot(log: &mut TestLog, seed: u8) -> ed25519_dalek::SigningKey {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 4_000_000_000,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        bot
+    }
+
+    #[tokio::test]
+    async fn a_bot_key_signs_no_anchored_profile() {
+        let mut log = TestLog::new(47);
+        let bot = add_bot(&mut log, 78);
+        let cache = cache_holding(&log).await;
+        let did = did_of(&log.scid());
+        let by_bot = signed_profile(&did, &bot);
+        assert!(!verifies(&cache, &with_record(&by_bot, &bot, 1, 1)).await);
+        // The standing device key at the same anchor does verify.
+        let by_device = signed_profile(&did, &log.device);
+        assert!(verifies(&cache, &with_record(&by_device, &log.device, 1, 1)).await);
+    }
+
+    #[tokio::test]
+    async fn an_anchored_profile_refreshes_a_log_shorter_than_its_anchor_once() {
+        let mut log = TestLog::new(48);
+        let did = did_of(&log.scid());
+        let store = FakeStore::new(vec![]);
+        let cache = in_memory(vec![store.key.multikey()]);
+        cache.ingest(&log.scid(), &log.events).await.unwrap();
+        // The store holds seq 1 (a bot added); the cache only seq 0.
+        add_bot(&mut log, 79);
+        *store.events.lock().unwrap() = log.events.clone();
+        let anchored = with_record(&signed_profile(&did, &log.device), &log.device, 1, 1);
+        assert!(!verifies(&cache, &anchored).await, "past the cached head");
+        let expr: crate::types::Expression<Value> =
+            serde_json::from_value(anchored.clone()).unwrap();
+        let record = anchored["proof"].get("record");
+        assert!(verify_expression(&cache, Some(&store), &expr, record)
+            .await
+            .unwrap());
+        assert_eq!(store.log_calls.load(Ordering::SeqCst), 1);
+        // Now cached: no second read.
+        assert!(verify_expression(&cache, Some(&store), &expr, record)
+            .await
+            .unwrap());
+        assert_eq!(store.log_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// `did:scid` profile expressions as the agent language answers them, for tests here and in
+/// `languages`.
+#[cfg(test)]
+pub(crate) mod test_profiles {
+    use ad4m_identity_core::build::Signer;
+    use ed25519_dalek::SigningKey;
+    use serde_json::{json, Value};
+
+    /// An Agent profile authored by `author`, signed by the device key `signer` the way
+    /// `create_signed_expression` signs, `proof.key` the signer's `did:key`: what an agent
+    /// record stores as its `profile`.
+    pub fn signed_profile(author: &str, signer: &SigningKey) -> Value {
+        let data = crate::js_core::utils::sort_json_value(&json!({
+            "did": author,
+            "perspective": { "links": [] },
+            "directMessageLanguage": "lang://dm",
+        }));
+        let timestamp = chrono::Utc::now();
+        let signature = ed25519_dalek::Signer::sign(
+            signer,
+            &crate::agent::signatures::hash_data_and_timestamp(&data, &timestamp),
+        );
+        json!({
+            "author": author,
+            "timestamp": timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "data": data,
+            "proof": {
+                "key": format!("did:key:{}", signer.key()),
+                "signature": hex::encode(signature.to_bytes()),
+            },
+        })
+    }
+
+    /// `profile` with `proof.record`: `signer`'s `coasys:link` signature over the agent record
+    /// `{profile, version, anchor}`, as the agent language answers a `did:scid` profile.
+    pub fn with_record(profile: &Value, signer: &SigningKey, version: u64, anchor: u64) -> Value {
+        let record = ad4m_ldk::identity::AgentRecord {
+            did: profile["author"].as_str().unwrap().to_string(),
+            profile: profile.clone(),
+            version,
+            signed_by: profile["proof"]["key"].as_str().unwrap().to_string(),
+            anchor: Some(anchor),
+            sig: String::new(),
+        };
+        let bytes = ad4m_identity_core::signing_bytes(
+            ad4m_identity_core::LINK_DOMAIN,
+            &record.signed_value(),
+        )
+        .unwrap();
+        let sig = ad4m_hash_chain::encode_proof_value(&signer.sign(&bytes));
+        let mut answered = profile.clone();
+        answered["proof"]["record"] = json!({ "version": version, "anchor": anchor, "sig": sig });
+        answered
     }
 }

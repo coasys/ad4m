@@ -438,7 +438,7 @@ impl KelCache {
         loop {
             let cached = self.chain(scid).await?;
             let from = cached.as_ref().map_or(0, |c| c.head().seq);
-            let Some(page) = backend.log(&did, from, None).await? else {
+            let Some(page) = backend.log(&did, from).await? else {
                 return match cached {
                     // The store answers no log while the cache holds one: the shortest log.
                     Some(chain) => {
@@ -552,8 +552,6 @@ pub(crate) mod tests {
         pub key: TestStoreKey,
         pub events: StdMutex<Vec<Event>>,
         pub log_calls: AtomicUsize,
-        /// The `src` of every `log` call, in order.
-        pub log_srcs: StdMutex<Vec<Option<String>>>,
         /// The key index's answer for every key, when set: a did:scid that need not list it.
         pub key_owner_override: StdMutex<Option<String>>,
     }
@@ -564,25 +562,16 @@ pub(crate) mod tests {
                 key: TestStoreKey::new(9),
                 events: StdMutex::new(events),
                 log_calls: AtomicUsize::new(0),
-                log_srcs: StdMutex::new(Vec::new()),
                 key_owner_override: StdMutex::new(None),
             }
         }
-    }
 
-    #[async_trait]
-    impl IdentityBackend for FakeStore {
-        async fn log(
-            &self,
-            _did: &str,
-            from: u64,
-            src: Option<&str>,
-        ) -> Result<Option<LogPage>, IdentityError> {
-            self.log_calls.fetch_add(1, Ordering::SeqCst);
-            self.log_srcs.lock().unwrap().push(src.map(str::to_string));
+        /// The page from seq `from` with a signed head; `None` while it holds no log. Also
+        /// what the resolver's HTTP test hosts serve.
+        pub fn page(&self, from: u64) -> Option<LogPage> {
             let events = self.events.lock().unwrap().clone();
             if events.is_empty() {
-                return Ok(None);
+                return None;
             }
             let chain = ad4m_identity_core::fold(&events).unwrap();
             let head = chain.head();
@@ -591,14 +580,22 @@ pub(crate) mod tests {
                 .filter(|e| e.seq >= from)
                 .map(|e| serde_json::to_value(e).unwrap())
                 .collect();
-            Ok(Some(LogPage {
+            Some(LogPage {
                 appended_at: vec![0; page.len()],
                 events: page,
                 head: self.key.sign_head(chain.id(), head.seq, &head.hash, 1),
                 note: None,
                 vouched: false,
                 pauses: vec![],
-            }))
+            })
+        }
+    }
+
+    #[async_trait]
+    impl IdentityBackend for FakeStore {
+        async fn log(&self, _did: &str, from: u64) -> Result<Option<LogPage>, IdentityError> {
+            self.log_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.page(from))
         }
         /// The index of the one log it holds (every device key, revoked ones too), unless
         /// `key_owner_override` names another identity.

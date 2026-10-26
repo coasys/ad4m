@@ -104,6 +104,7 @@ dependencies = [
  "holochain_cli_bundle",
  "holochain_types",
  "http-body-util",
+ "hyper 0.14.32",
  "include_dir",
  "itertools 0.10.5",
  "json5",

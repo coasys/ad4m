@@ -196,6 +196,8 @@ scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prol
 
 ad4m-client = { path = "../rust-client", version="0.13.1-staging.3" }
 reqwest = { version = "0.11.20", features = ["json", "native-tls", "blocking", "stream"] }
+# reqwest 0.11's DNS `Name` (the identity resolver's public-address-only `dns_resolver`).
+hyper_014 = { package = "hyper", version = "0.14.21", default-features = false, features = ["tcp", "client"] }
 
 # rusqlite = { version = "0.29.0", git = "https://github.com/coasys/rusqlite.git", rev = "12ec1330bd4b46411ab9895364da4a3e172d0fbb", features = ["bundled"] }
 # Bumped from 0.34 to 0.40 to match coasys/deno v2.9.5's deno_cache which pins

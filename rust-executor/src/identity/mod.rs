@@ -15,6 +15,7 @@ pub mod head;
 pub mod operator;
 pub mod resolver;
 pub mod service;
+pub mod src_fetch;
 pub mod types;
 
 use std::path::Path;

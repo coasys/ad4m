@@ -370,7 +370,7 @@ impl IdentityService {
         let from = events.iter().map(|e| e.seq).min().unwrap_or(0);
         let page = self
             .backend
-            .log(did, from, None)
+            .log(did, from)
             .await
             .map_err(backend_error)?
             .ok_or_else(|| backend_error(IdentityError::Conflict(stored.clone())))?;

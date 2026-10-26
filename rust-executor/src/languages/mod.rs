@@ -2603,9 +2603,22 @@ impl LanguageController {
                 // while signing always uses alphabetically sorted keys.
                 expr.data = crate::js_core::utils::sort_json_value(&expr.data);
                 let verdict = if expr.author.starts_with(ad4m_identity_core::DID_PREFIX) {
+                    // The agent record a did:scid profile came in (the agent language adds it
+                    // as `proof.record`); the typed expression does not carry it.
+                    let record = expr_json
+                        .get("proof")
+                        .and_then(|proof| proof.get("record"))
+                        .filter(|record| !record.is_null())
+                        .cloned();
                     match cache {
                         Some(cache) => {
-                            crate::identity::verify_expression(cache, backend, &expr).await
+                            crate::identity::verify_expression(
+                                cache,
+                                backend,
+                                &expr,
+                                record.as_ref(),
+                            )
+                            .await
                         }
                         None => Ok(false),
                     }
@@ -3256,7 +3269,6 @@ mod capability_routing_tests {
 #[cfg(test)]
 mod agent_language_profile_tests {
     use super::*;
-    use crate::agent::signatures::hash_data_and_timestamp;
     use crate::identity::cache::tests::{in_memory, TestLog};
     use crate::identity::cache::KelCache;
     use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
@@ -3270,23 +3282,7 @@ mod agent_language_profile_tests {
     /// expression authored by `author`, signed by the device key `signer` the way
     /// `create_signed_expression` signs, `proof.key` the signer's `did:key`.
     fn scid_profile(author: &str, signer: &SigningKey) -> JsonValue {
-        let data = crate::js_core::utils::sort_json_value(&serde_json::json!({
-            "did": author,
-            "perspective": { "links": [] },
-            "directMessageLanguage": "lang://dm",
-        }));
-        let timestamp = chrono::Utc::now();
-        let signature =
-            ed25519_dalek::Signer::sign(signer, &hash_data_and_timestamp(&data, &timestamp));
-        serde_json::json!({
-            "author": author,
-            "timestamp": timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            "data": data,
-            "proof": {
-                "key": format!("did:key:{}", signer.key()),
-                "signature": hex::encode(signature.to_bytes()),
-            },
-        })
+        crate::identity::resolver::test_profiles::signed_profile(author, signer)
     }
 
     /// Adds a bot key (`read`, never expiring) to `log`, signed by its master; its secret.
@@ -3396,6 +3392,45 @@ mod agent_language_profile_tests {
         // An author whose log the cache does not hold.
         let by_unknown = scid_profile(&did_of(&unknown), &unknown.device);
         assert_eq!(verdict_with(by_unknown, Some(&cache)).await, INVALID);
+    }
+
+    /// The agent language answers a `did:scid` profile with its agent record as `proof.record`
+    /// (built here from a real `AgentRecord`): the controller checks the key at the record's
+    /// anchor, so a profile signed before a revocation reads valid after it.
+    #[tokio::test]
+    async fn a_did_scid_profile_with_its_record_verifies_at_the_records_anchor() {
+        use crate::identity::resolver::test_profiles::with_record;
+        let mut log = TestLog::new(37);
+        let cache = cache_of(&[&log]).await;
+        let profile = scid_profile(&did_of(&log), &log.device);
+        let answered = with_record(&profile, &log.device, 1, 0);
+        assert_eq!(verdict_with(answered.clone(), Some(&cache)).await, VALID);
+
+        log.revoke_d1();
+        cache.ingest(&log.scid(), &log.events[1..]).await.unwrap();
+        assert_eq!(
+            verdict_with(answered.clone(), Some(&cache)).await,
+            VALID,
+            "anchored at seq 0, before the revoke"
+        );
+        // An expression a verification already flagged reads the same.
+        let mut flagged = answered.clone();
+        LanguageController::verify_expression_proof_with(&mut flagged, Some(&cache), None).await;
+        assert_eq!(verdict_with(flagged, Some(&cache)).await, VALID);
+
+        // The same profile without its record: the head rule, and d1 is revoked there.
+        assert_eq!(verdict_with(profile.clone(), Some(&cache)).await, INVALID);
+        // An anchor moved without the record signature.
+        let mut tampered = answered.clone();
+        tampered["proof"]["record"]["anchor"] = JsonValue::from(1);
+        assert_eq!(verdict_with(tampered, Some(&cache)).await, INVALID);
+        // A record signed anchored at the revoke.
+        let at_revoke = with_record(&profile, &log.device, 2, 1);
+        assert_eq!(verdict_with(at_revoke, Some(&cache)).await, INVALID);
+        // `proof.record: null` is no record: the head rule.
+        let mut null_record = profile.clone();
+        null_record["proof"]["record"] = JsonValue::Null;
+        assert_eq!(verdict_with(null_record, Some(&cache)).await, INVALID);
     }
 
     /// What the centralized agent language's `expressionGet` answers for a did:key agent's
