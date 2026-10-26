@@ -9,8 +9,9 @@
 use std::time::Duration;
 
 use ad4m_ldk::identity::{
-    AppendRequest, Claim, ClaimReceipt, ForbiddenReason, IdentityErrorCode, LogPage, OfferListing,
-    OfferOpened, OfferProgress, RateLimitScope, SignedHead, SignedOffer, SignedRequest,
+    AppendRequest, Claim, ClaimReceipt, ForbiddenReason, IdentityErrorCode, KeyIndexEntry, LogPage,
+    OfferListing, OfferOpened, OfferProgress, RateLimitScope, SignedHead, SignedOffer,
+    SignedRequest,
 };
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -81,7 +82,21 @@ impl From<IdentityErrorCode> for IdentityError {
 /// The agent language's identity calls the executor makes today.
 #[async_trait]
 pub trait IdentityBackend: Send + Sync {
-    async fn log(&self, did: &str, from: u64) -> Result<Option<LogPage>, IdentityError>;
+    /// One page of `did`'s log from seq `from`: from the HTTPS base `src` when given (a did:scid
+    /// `src` the resolver checked), else from the configured store.
+    async fn log(
+        &self,
+        did: &str,
+        from: u64,
+        src: Option<&str>,
+    ) -> Result<Option<LogPage>, IdentityError>;
+    /// The store's key index: the identity a signing multikey sits in. A hint only: the
+    /// resolver checks the named log lists the key.
+    async fn key_owner(
+        &self,
+        multikey: &str,
+        wait_s: u8,
+    ) -> Result<Option<KeyIndexEntry>, IdentityError>;
     async fn append(&self, did: &str, req: &AppendRequest) -> Result<SignedHead, IdentityError>;
     async fn open_offer(&self, offer: &SignedOffer) -> Result<OfferOpened, IdentityError>;
     async fn list_offers(
@@ -192,9 +207,29 @@ fn json<T: serde::Serialize>(value: &T) -> Result<Value, IdentityError> {
 
 #[async_trait]
 impl IdentityBackend for AgentLanguageBackend {
-    async fn log(&self, did: &str, from: u64) -> Result<Option<LogPage>, IdentityError> {
-        self.call(Capability::IdentityLog, &[did.into(), from.into()])
-            .await
+    async fn log(
+        &self,
+        did: &str,
+        from: u64,
+        src: Option<&str>,
+    ) -> Result<Option<LogPage>, IdentityError> {
+        let mut args: Vec<Value> = vec![did.into(), from.into()];
+        if let Some(src) = src {
+            args.push(src.into());
+        }
+        self.call(Capability::IdentityLog, &args).await
+    }
+
+    async fn key_owner(
+        &self,
+        multikey: &str,
+        wait_s: u8,
+    ) -> Result<Option<KeyIndexEntry>, IdentityError> {
+        self.call(
+            Capability::IdentityKeyOwner,
+            &[multikey.into(), wait_s.into()],
+        )
+        .await
     }
 
     async fn append(&self, did: &str, req: &AppendRequest) -> Result<SignedHead, IdentityError> {
@@ -258,6 +293,18 @@ mod tests {
         let script = call_script("identityLog", &[json!("did:scid:coasys:1:Qm\"x"), json!(3)]);
         assert!(script.contains(r#"language.identityLog("did:scid:coasys:1:Qm\"x", 3)"#));
         assert!(script.is_ascii());
+        // A did:scid `src` goes as the third argument.
+        let script = call_script(
+            "identityLog",
+            &[
+                json!("did:scid:coasys:1:Qm"),
+                json!(0),
+                json!("https://store.example:8443"),
+            ],
+        );
+        assert!(script.contains(
+            r#"language.identityLog("did:scid:coasys:1:Qm", 0, "https://store.example:8443")"#
+        ));
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod claim;
 pub mod device;
 pub mod head;
 pub mod operator;
+pub mod resolver;
 pub mod service;
 pub mod types;
 
@@ -23,6 +24,8 @@ use crate::api::ws_handler::WsRpcError;
 use crate::events::{Audience, Event, Topic};
 use backend::AgentLanguageBackend;
 use cache::{CacheError, KelCache};
+pub use resolver::verify_expression;
+use resolver::Resolver;
 use service::IdentityService;
 use types::IdentityForkEvent;
 
@@ -36,6 +39,9 @@ pub struct IdentitySettings {
     pub store_url: Option<String>,
     /// The store keys (multikeys) a head must be signed by. Empty: no head is accepted.
     pub store_keys: Vec<String>,
+    /// `identity.allowPrivateSrc`: let a DID URL's `src` reach loopback and private addresses.
+    /// Off by default; for tests and local development only.
+    pub allow_private_src: bool,
 }
 
 /// Opens the key-log cache in the executor database at `db_path` and starts the module. Called
@@ -48,10 +54,24 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
             "identity: identity.storeKeys is not set, so no head from the identity store is accepted"
         );
     }
+    if settings.allow_private_src {
+        log::warn!(
+            "identity: identity.allowPrivateSrc is set, so a DID URL's src may reach loopback and private addresses"
+        );
+    }
+    let backend: Arc<dyn backend::IdentityBackend> = Arc::new(AgentLanguageBackend);
+    let cache = Arc::new(cache);
+    let resolver = Resolver::new(
+        cache.clone(),
+        backend.clone(),
+        settings.store_url.as_deref(),
+        settings.allow_private_src,
+    );
     let service = IdentityService {
-        backend: Arc::new(AgentLanguageBackend),
-        cache: Arc::new(cache),
+        backend,
+        cache,
         store_url: settings.store_url.clone(),
+        resolver: Arc::new(resolver),
     };
     if SERVICE.set(Arc::new(service)).is_err() {
         log::warn!("identity: the module was started twice; keeping the first");
@@ -65,42 +85,6 @@ pub fn service() -> Result<Arc<IdentityService>, WsRpcError> {
         code: 503,
         message: "unavailable: the identity module has not started".into(),
     })
-}
-
-/// Verifies `expr`, authored by a `did:scid`: its `proof.key` must be the bare `did:key` of a
-/// key that the author's log in `cache` lists, valid at the cached head by the clock now and
-/// without the bot mark (as a device key's signature counts everywhere in this module), and
-/// the expression's signature must hold under that key. The expression's own timestamp does
-/// not count: the signer states it. When the cached log does not admit the key (no log yet, or
-/// a device added since), the log is refreshed once through `backend` and checked again.
-pub async fn verify_expression<T: serde::Serialize>(
-    cache: &KelCache,
-    backend: Option<&dyn backend::IdentityBackend>,
-    expr: &crate::types::Expression<T>,
-) -> Result<bool, deno_core::error::AnyError> {
-    let Some(key) = expr
-        .proof
-        .key
-        .strip_prefix("did:key:")
-        .filter(|key| ad4m_hash_chain::decode_ed25519_multikey(key).is_some())
-    else {
-        return Ok(false);
-    };
-    let mut admitted = cache
-        .key_speaks_for(&expr.author, key, service::now())
-        .await;
-    if let (false, Some(backend)) = (admitted, backend) {
-        if let Err(e) = cache.refresh(backend, &expr.author).await {
-            log::info!("identity: refresh of {} failed ({e})", expr.author);
-        }
-        admitted = cache
-            .key_speaks_for(&expr.author, key, service::now())
-            .await;
-    }
-    if !admitted {
-        return Ok(false);
-    }
-    crate::agent::signatures::verify_by(expr, &expr.proof.key)
 }
 
 /// `identity-fork`, to the sessions of the identity's local agents, when the cache finds two
@@ -197,6 +181,7 @@ pub fn settings_from_config() -> IdentitySettings {
         .map(|c| IdentitySettings {
             store_url: c.identity_store_url.clone(),
             store_keys: c.identity_store_keys.clone().unwrap_or_default(),
+            allow_private_src: c.identity_allow_private_src.unwrap_or(false),
         })
         .unwrap_or_default()
 }
@@ -210,7 +195,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let settings = IdentitySettings {
             store_url: Some("http://127.0.0.1:9".into()),
-            store_keys: vec![],
+            ..Default::default()
         };
         write_agent_language_settings(dir.path(), "QmAgent", &settings).unwrap();
         let path = dir.path().join("QmAgent").join("settings.json");
@@ -232,7 +217,7 @@ mod tests {
     fn store_url(url: &str) -> IdentitySettings {
         IdentitySettings {
             store_url: Some(url.into()),
-            store_keys: vec![],
+            ..Default::default()
         }
     }
 

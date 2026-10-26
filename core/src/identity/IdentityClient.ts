@@ -1,6 +1,7 @@
 import { ApiClient } from "../apiClient";
 import type { ClaimOfferResult } from "../generated/api/ClaimOfferResult";
 import type { DeviceView } from "../generated/api/DeviceView";
+import type { DidResolutionResult } from "../generated/api/DidResolutionResult";
 import type { IdentityLog } from "../generated/api/IdentityLog";
 import type { IdentityStatus } from "../generated/api/IdentityStatus";
 import type { JoinStatus } from "../generated/api/JoinStatus";
@@ -32,6 +33,26 @@ export class IdentityClient {
     /** A log through the executor's cache; `fresh` refreshes it from the store first. */
     async log(did: string, from?: number, fresh?: boolean): Promise<IdentityLog> {
         return this.#apiClient.call("identity.log", { did, from, fresh });
+    }
+
+    /**
+     * Resolves a `did:scid:coasys:1` DID URL (`?src=`, `?versionId=`, `#d1`) or a bare device
+     * `did:key` to a W3C DID Core resolution result. The executor answers from its key-log
+     * cache unless `fresh`, or the cache lacks the log or the asked version. A refusal comes
+     * back as `didResolutionMetadata.error` (`invalidDid`, `invalidDidUrl`, `notFound`, …), not
+     * as a thrown error. With a fragment, `didDocument` is null and `verificationMethod` holds
+     * that method. For a `did:key`, `didResolutionMetadata["coasys:keyId"]` and
+     * `["coasys:keyValid"]` say which key of the person's log it is and whether it is valid.
+     */
+    async resolve(
+        didUrl: string,
+        options: { fresh?: boolean; accept?: string } = {},
+    ): Promise<DidResolutionResult> {
+        return this.#apiClient.call("identity.resolve", {
+            didUrl,
+            fresh: options.fresh,
+            accept: options.accept,
+        });
     }
 
     /** Adds this agent's device-key proof to an `incept` that lists its key. */

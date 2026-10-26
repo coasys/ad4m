@@ -1,5 +1,6 @@
 /**
- * Identity end to end (create, link, the first-link refusal, revoke, fork, restart): executors
+ * Identity end to end (create, link, the first-link refusal, revoke, DID resolution on an
+ * executor that never saw the log, fork, restart): executors
  * with no Holochain, a real identity-store this suite starts on a temp file, and the
  * centralized agent language seeded as every executor's agent language.
  *
@@ -203,6 +204,64 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         const devices = await a.client.identity.devices();
         expect(devices.find((d) => d.keyId === "d2")!.revokedSeq).to.equal(2);
         expect((await a.client.identity.status()).revoked).to.be.null;
+    });
+
+    it("resolves the DID on an executor that never saw its log", async () => {
+        const d = await startNode("d");
+        // The store's host as a did:scid src. It names d's configured store, so d reads it
+        // through the store (the agent language fetches a foreign src over HTTPS only).
+        const storeHost = store.url.replace(/^https?:\/\//, "").replace(/\/$/, "");
+        const resolved = await d.client.identity.resolve(`${did}?src=${storeHost}`);
+        const meta = resolved.didResolutionMetadata;
+        expect(meta.error, meta["coasys:message"]).to.be.undefined;
+        expect(meta.contentType).to.equal("application/did+ld+json");
+        expect(meta["coasys:source"]).to.equal(storeHost);
+        expect(meta["coasys:headTrusted"]).to.equal(true);
+        const doc = resolved.didDocument!;
+        expect(doc.id).to.equal(did);
+        expect(doc.alsoKnownAs).to.deep.equal([`${did}?src=${storeHost}`]);
+        const ids = doc.verificationMethod.map((m) => m.id);
+        expect(ids).to.include("#d1");
+        expect(ids).to.not.include("#d2");
+        expect(resolved.didDocumentMetadata.versionId).to.equal("2");
+        expect(resolved.didDocumentMetadata.deactivated).to.equal(false);
+
+        // Version 1 (before the revoke) lists both device keys, from d's cache now.
+        const v1 = await d.client.identity.resolve(`${did}?versionId=1`);
+        expect(v1.didResolutionMetadata["coasys:source"]).to.equal("cache");
+        expect(v1.didDocument!.verificationMethod.map((m) => m.id)).to.include.members(["#d1", "#d2"]);
+        expect(v1.didDocumentMetadata.nextVersionId).to.equal("2");
+        const method = await d.client.identity.resolve(`${did}?versionId=1#d2`);
+        expect(method.didDocument).to.be.null;
+        expect(method.verificationMethod!.id).to.equal(`${did}#d2`);
+
+        const timed = await d.client.identity.resolve(`${did}?versionTime=2026-01-01T00:00:00Z`);
+        expect(timed.didResolutionMetadata.error).to.equal("invalidDidUrl");
+        expect(timed.didDocument).to.be.null;
+        const past = await d.client.identity.resolve(`${did}?versionId=9`);
+        expect(past.didResolutionMetadata.error).to.equal("notFound");
+
+        // A src at another loopback port is refused before any fetch (identity.allowPrivateSrc
+        // is off); the configured store still answers.
+        const refused = await d.client.identity.resolve(`${did}?src=127.0.0.1:1`, { fresh: true });
+        expect(refused.didResolutionMetadata.error).to.be.undefined;
+        expect(refused.didResolutionMetadata["coasys:skipped"]![0].src).to.equal("127.0.0.1:1");
+        expect(refused.didResolutionMetadata["coasys:skipped"]![0].reason).to.match(/^refused/);
+
+        // B's revoked device key still names its person, through the store's key index.
+        const bKey = (await b.client.identity.status()).deviceKey;
+        const byKey = await d.client.identity.resolve(`did:key:${bKey}`);
+        expect(byKey.didResolutionMetadata.error, byKey.didResolutionMetadata["coasys:message"]).to.be.undefined;
+        expect(byKey.didDocument!.id).to.equal(did);
+        expect(byKey.didResolutionMetadata["coasys:keyId"]).to.equal("d2");
+        expect(byKey.didResolutionMetadata["coasys:keyValid"]).to.equal(false);
+        const aKey = (await a.client.identity.status()).deviceKey;
+        const byAKey = await d.client.identity.resolve(`did:key:${aKey}`);
+        expect(byAKey.didResolutionMetadata["coasys:keyId"]).to.equal("d1");
+        expect(byAKey.didResolutionMetadata["coasys:keyValid"]).to.equal(true);
+
+        // agent.status keeps the device's did:key document.
+        expect((await d.client.agent.status()).did).to.match(/^did:key:/);
     });
 
     it("raises identity-fork on A when the store answers a shorter log, and keeps A's history", async () => {

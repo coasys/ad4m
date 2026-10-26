@@ -168,6 +168,9 @@ pub struct Ad4mConfig {
     /// `identity.storeKeys`: the store keys (Ed25519 multikeys) a head from the store must be
     /// signed by. A list, so the store's key can rotate.
     pub identity_store_keys: Option<Vec<String>>,
+    /// `identity.allowPrivateSrc`: let the `src` of a DID URL that `identity.resolve` reads
+    /// reach loopback and private addresses. Off by default; for tests and local development.
+    pub identity_allow_private_src: Option<bool>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -546,6 +549,7 @@ impl Ad4mConfig {
             sfu_preferred_node: None,
             identity_store_url: None,
             identity_store_keys: None,
+            identity_allow_private_src: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,

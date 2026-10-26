@@ -13,9 +13,9 @@ use crate::agent::capabilities::{
     AGENT_READ_CAPABILITY, AGENT_SIGN_CAPABILITY, AGENT_UPDATE_CAPABILITY,
 };
 use crate::identity::types::{
-    ClaimOfferParams, ClaimOfferResult, CosignInceptParams, DeviceView, IdentityLog,
-    IdentityStatus, JoinStatus, JoinStatusParams, LogParams, OfferListing, OfferOpened,
-    OffersParams, OpenOfferParams, PublishParams, SignedHead,
+    ClaimOfferParams, ClaimOfferResult, CosignInceptParams, DeviceView, DidResolutionResult,
+    IdentityLog, IdentityStatus, JoinStatus, JoinStatusParams, LogParams, OfferListing,
+    OfferOpened, OffersParams, OpenOfferParams, PublishParams, ResolveParams, SignedHead,
 };
 use crate::types::RequestContext;
 
@@ -38,6 +38,17 @@ async fn log(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcErr
         .log(&p.did, p.from.unwrap_or(0), p.fresh.unwrap_or(false))
         .await?;
     answer(log)
+}
+
+/// A DID resolution result in every case: a refusal is `didResolutionMetadata.error`, not an
+/// RPC error.
+async fn resolve(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: ResolveParams = parse(params)?;
+    let result = crate::identity::service()?
+        .resolver
+        .resolve_as(&p.did_url, p.fresh.unwrap_or(false), p.accept.as_deref())
+        .await;
+    answer(result)
 }
 
 async fn cosign_incept(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -110,6 +121,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<LogParams, IdentityLog>("identity.log", log)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // Any DID's document: public data derived from public logs.
+    map.method::<ResolveParams, DidResolutionResult>("identity.resolve", resolve)
+        .read()
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     // Signs with the agent's own device key.
     map.method::<CosignInceptParams, Value>("identity.cosignIncept", cosign_incept)
         .guard(Guard::Cap(AGENT_SIGN_CAPABILITY.clone()));
@@ -155,6 +170,7 @@ mod tests {
             ("identity.offers", cap(&AGENT_READ_CAPABILITY)),
             ("identity.openOffer", cap(&AGENT_UPDATE_CAPABILITY)),
             ("identity.publish", cap(&AGENT_UPDATE_CAPABILITY)),
+            ("identity.resolve", cap(&AGENT_READ_CAPABILITY)),
             ("identity.status", cap(&AGENT_READ_CAPABILITY)),
         ];
         let got: Vec<(String, String)> = map

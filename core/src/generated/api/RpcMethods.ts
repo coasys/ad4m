@@ -37,6 +37,7 @@ import type { CreateUserRequest } from "./CreateUserRequest";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
 import type { DeviceView } from "./DeviceView";
+import type { DidResolutionResult } from "./DidResolutionResult";
 import type { EmbedRequest } from "./EmbedRequest";
 import type { EntanglementProof } from "./EntanglementProof";
 import type { EntanglementProofPreflightRequest } from "./EntanglementProofPreflightRequest";
@@ -143,6 +144,7 @@ import type { PublishNeighbourhoodRequest } from "./PublishNeighbourhoodRequest"
 import type { PublishParams } from "./PublishParams";
 import type { RequestCapabilityRequest } from "./RequestCapabilityRequest";
 import type { RequestPaymentRequest } from "./RequestPaymentRequest";
+import type { ResolveParams } from "./ResolveParams";
 import type { RunInterpretationRequest } from "./RunInterpretationRequest";
 import type { RunInterpretationWithHarnessRequest } from "./RunInterpretationWithHarnessRequest";
 import type { RuntimeComputeLogParams } from "./RuntimeComputeLogParams";
@@ -261,6 +263,7 @@ export interface RpcMethods {
   "identity.offers": { params: OffersParams; result: Array<OfferListing> };
   "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
   "identity.publish": { params: PublishParams; result: SignedHead };
+  "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
@@ -435,6 +438,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "identity.joinStatus",
   "identity.log",
   "identity.offers",
+  "identity.resolve",
   "identity.status",
   "language.all",
   "language.get",

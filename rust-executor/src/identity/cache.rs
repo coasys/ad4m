@@ -169,25 +169,6 @@ impl KelCache {
         Ok(Some(chain))
     }
 
-    /// Whether the signing multikey `key` speaks for `did` by the cached log alone: the log
-    /// lists it, valid at the cached head by `now` (unix seconds) and without the bot mark.
-    /// `false` when the cache holds no log of `did` or cannot read it.
-    pub async fn key_speaks_for(&self, did: &str, key: &str, now: u64) -> bool {
-        let chain = match self.chain(scid_from(did)).await {
-            Ok(Some(chain)) => chain,
-            Ok(None) => return false,
-            Err(e) => {
-                log::warn!("identity: the cached log of {did} is unreadable: {e}");
-                return false;
-            }
-        };
-        let state = chain.state();
-        let head = chain.head().seq;
-        state.key_id_of(&key.to_string()).is_some()
-            && state.bot_scope_at(key, head).is_none()
-            && state.key_valid_at_time(key, head, now)
-    }
-
     /// The cached events of `scid` from seq `from` on.
     pub async fn stored_events(&self, scid: &str, from: u64) -> Result<Vec<Event>, CacheError> {
         let entries = self
@@ -457,7 +438,7 @@ impl KelCache {
         loop {
             let cached = self.chain(scid).await?;
             let from = cached.as_ref().map_or(0, |c| c.head().seq);
-            let Some(page) = backend.log(&did, from).await? else {
+            let Some(page) = backend.log(&did, from, None).await? else {
                 return match cached {
                     // The store answers no log while the cache holds one: the shortest log.
                     Some(chain) => {
@@ -505,8 +486,8 @@ pub(crate) mod tests {
     use ad4m_identity_core::build::{cosign, incept_human, revoke, Signer};
     use ad4m_identity_core::{DeviceKey, KeyLife};
     use ad4m_ldk::identity::{
-        AppendRequest, Claim, ClaimReceipt, LogPage, OfferListing, OfferOpened, OfferProgress,
-        SignedOffer, SignedRequest,
+        AppendRequest, Claim, ClaimReceipt, KeyIndexEntry, LogPage, OfferListing, OfferOpened,
+        OfferProgress, SignedOffer, SignedRequest,
     };
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
@@ -571,6 +552,10 @@ pub(crate) mod tests {
         pub key: TestStoreKey,
         pub events: StdMutex<Vec<Event>>,
         pub log_calls: AtomicUsize,
+        /// The `src` of every `log` call, in order.
+        pub log_srcs: StdMutex<Vec<Option<String>>>,
+        /// The key index's answer for every key, when set: a did:scid that need not list it.
+        pub key_owner_override: StdMutex<Option<String>>,
     }
 
     impl FakeStore {
@@ -579,14 +564,22 @@ pub(crate) mod tests {
                 key: TestStoreKey::new(9),
                 events: StdMutex::new(events),
                 log_calls: AtomicUsize::new(0),
+                log_srcs: StdMutex::new(Vec::new()),
+                key_owner_override: StdMutex::new(None),
             }
         }
     }
 
     #[async_trait]
     impl IdentityBackend for FakeStore {
-        async fn log(&self, _did: &str, from: u64) -> Result<Option<LogPage>, IdentityError> {
+        async fn log(
+            &self,
+            _did: &str,
+            from: u64,
+            src: Option<&str>,
+        ) -> Result<Option<LogPage>, IdentityError> {
             self.log_calls.fetch_add(1, Ordering::SeqCst);
+            self.log_srcs.lock().unwrap().push(src.map(str::to_string));
             let events = self.events.lock().unwrap().clone();
             if events.is_empty() {
                 return Ok(None);
@@ -606,6 +599,51 @@ pub(crate) mod tests {
                 vouched: false,
                 pauses: vec![],
             }))
+        }
+        /// The index of the one log it holds (every device key, revoked ones too), unless
+        /// `key_owner_override` names another identity.
+        async fn key_owner(
+            &self,
+            multikey: &str,
+            _wait_s: u8,
+        ) -> Result<Option<KeyIndexEntry>, IdentityError> {
+            let events = self.events.lock().unwrap().clone();
+            if events.is_empty() {
+                return Ok(None);
+            }
+            let chain = ad4m_identity_core::fold(&events).unwrap();
+            let head = chain.head();
+            let signed = self.key.sign_head(chain.id(), head.seq, &head.hash, 1);
+            let overridden = self.key_owner_override.lock().unwrap().clone();
+            let record = chain
+                .state()
+                .keys
+                .values()
+                .find(|r| r.sign == multikey)
+                .cloned();
+            Ok(match (overridden, record) {
+                (Some(did), _) => Some(KeyIndexEntry {
+                    did,
+                    key_id: "d1".into(),
+                    added: 0,
+                    revoked: None,
+                    bot: None,
+                    expires: None,
+                    paused: false,
+                    head: signed,
+                }),
+                (None, Some(record)) => Some(KeyIndexEntry {
+                    did: chain.state().did.clone(),
+                    key_id: record.id,
+                    added: record.added,
+                    revoked: record.revoked,
+                    bot: None,
+                    expires: record.expires,
+                    paused: false,
+                    head: signed,
+                }),
+                (None, None) => None,
+            })
         }
         async fn append(&self, _: &str, _: &AppendRequest) -> Result<SignedHead, IdentityError> {
             unimplemented_call("append")

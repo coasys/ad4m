@@ -610,6 +610,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     // The identity calls.
     ("identity.log", || json!({ "did": "did:scid:coasys:1:Qm" })),
+    (
+        "identity.resolve",
+        || json!({ "didUrl": "did:scid:coasys:1:Qm" }),
+    ),
     ("identity.cosignIncept", || json!({ "event": {} })),
     ("identity.publish", || json!({ "events": [] })),
     (

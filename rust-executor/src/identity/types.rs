@@ -341,6 +341,204 @@ pub struct AgentWithIdentity {
     pub identity: Option<String>,
 }
 
+/// `identity.resolve` params.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveParams {
+    /// A `did:scid:coasys:1:<scid>` DID URL (`?src=`, `?versionId=`, `#d1`), or a bare device
+    /// `did:key:z6Mk…`.
+    pub did_url: String,
+    /// Read the log from its sources even when the cache holds it.
+    #[ts(optional)]
+    #[serde(default)]
+    pub fresh: Option<bool>,
+    /// The representation asked for; only `application/did+ld+json` (the default).
+    #[ts(optional)]
+    #[serde(default)]
+    pub accept: Option<String>,
+}
+
+/// `identity.resolve`: a W3C DID Core resolution result. `didDocument` is the JSON-LD the
+/// identity core writes (`ad4m_identity_core::did_document`); with a fragment (`#d1`) it is
+/// `null` and `verificationMethod` holds that one method, its `id` made absolute
+/// (`<did>#d1`). On an error both are `null` and `didResolutionMetadata.error` names it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DidResolutionResult {
+    #[ts(as = "Option<DidDocument>")]
+    pub did_document: Option<Value>,
+    pub did_document_metadata: DidDocumentMetadata,
+    pub did_resolution_metadata: DidResolutionMetadata,
+    #[ts(as = "Option<DidVerificationMethod>", optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_method: Option<Value>,
+}
+
+/// DID document metadata: seqs as decimal strings (DID Core makes them strings). Empty on an
+/// error.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DidDocumentMetadata {
+    /// The seq whose state the document shows.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    /// The seq after it, when the log holds one.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_version_id: Option<String>,
+    /// The log has ended (whatever the version).
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deactivated: Option<bool>,
+}
+
+/// DID resolution metadata, with the executor's `coasys:` members.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DidResolutionMetadata {
+    /// `application/did+ld+json` on success.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// The DID Core error: `invalidDid`, `invalidDidUrl`, `methodNotSupported`, `notFound`,
+    /// `representationNotSupported`, `internalError`.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Why, in words, with an error.
+    #[ts(optional)]
+    #[serde(
+        rename = "coasys:message",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub message: Option<String>,
+    /// The host that answered the log (`host[:port][/path]`), or `cache`.
+    #[ts(optional)]
+    #[serde(
+        rename = "coasys:source",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source: Option<String>,
+    /// The log's head is one the cache accepted signed by a key of `identity.storeKeys`.
+    #[ts(optional)]
+    #[serde(
+        rename = "coasys:headTrusted",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub head_trusted: Option<bool>,
+    /// The first fork the cache recorded for the log; the document is from the log it held
+    /// first.
+    #[ts(optional)]
+    #[serde(
+        rename = "coasys:fork",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fork: Option<ForkRecord>,
+    /// For a `did:key`: the key's id in its person's log (`d2`).
+    #[ts(optional)]
+    #[serde(
+        rename = "coasys:keyId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub key_id: Option<String>,
+    /// For a `did:key`: the key is valid at the head (a revoked key still resolves to its
+    /// person, with `false`).
+    #[ts(optional)]
+    #[serde(
+        rename = "coasys:keyValid",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub key_valid: Option<bool>,
+    /// For a `did:key`: the key index named an identity whose log does not list the key.
+    #[ts(optional)]
+    #[serde(
+        rename = "coasys:keyIndexMismatch",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub key_index_mismatch: Option<bool>,
+    /// Sources the resolver did not use, with why (refused address, unsupported scheme, a
+    /// failed fetch).
+    #[serde(
+        rename = "coasys:skipped",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    #[ts(as = "Option<Vec<SkippedSource>>", optional)]
+    pub skipped: Vec<SkippedSource>,
+}
+
+/// A source of a resolution the resolver did not read from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedSource {
+    pub src: String,
+    pub reason: String,
+}
+
+/// The JSON-LD of a `did:scid:coasys:1` DID document (the TypeScript contract of
+/// `DidResolutionResult.didDocument`; the executor passes on the core's own JSON).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DidDocument {
+    #[serde(rename = "@context")]
+    pub context: Vec<String>,
+    pub id: String,
+    pub controller: String,
+    pub verification_method: Vec<DidVerificationMethod>,
+    pub authentication: Vec<String>,
+    pub assertion_method: Vec<String>,
+    pub key_agreement: Vec<String>,
+    pub capability_invocation: Vec<String>,
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub also_known_as: Option<Vec<String>>,
+}
+
+/// A verification method of a [`DidDocument`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DidVerificationMethod {
+    /// `#d1` in a document; `<did>#d1` when dereferenced alone.
+    pub id: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub controller: String,
+    pub public_key_multibase: String,
+    /// An `Until` key's expiry (unix seconds).
+    #[ts(type = "number", optional)]
+    #[serde(
+        rename = "coasys:expires",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expires: Option<u64>,
+    /// A bot key's scope at the document's seq.
+    #[ts(optional)]
+    #[serde(
+        rename = "coasys:bot",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub bot: Option<DidBotScope>,
+}
+
+/// `coasys:bot`: what a bot key may do, until when.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DidBotScope {
+    pub can: Vec<String>,
+    #[ts(type = "number")]
+    pub expires: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

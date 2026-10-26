@@ -43,6 +43,11 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, echo: p }),
     'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, fork: null }),
     'identity.devices': [],
+    'identity.resolve': (p: Record<string, unknown>) => ({
+        didDocument: { '@context': ['https://www.w3.org/ns/did/v1'], id: p.didUrl, controller: p.didUrl, verificationMethod: [], authentication: [], assertionMethod: [], keyAgreement: [], capabilityInvocation: [] },
+        didDocumentMetadata: { versionId: '2', deactivated: false },
+        didResolutionMetadata: { contentType: 'application/did+ld+json', 'coasys:source': 'cache', 'coasys:headTrusted': true },
+    }),
     'agent.generate': { did: 'did:test:generated', didDocument: 'doc', isInitialized: true, isUnlocked: true },
     'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
     'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
@@ -1259,6 +1264,24 @@ describe('IdentityClient', () => {
     test('log() sends the did, from and fresh', async () => {
         await ad4m.identity.log('did:scid:coasys:1:QmTest', 2, true);
         expect(lastRpcCall!.params).toMatchObject({ did: 'did:scid:coasys:1:QmTest', from: 2, fresh: true });
+    });
+
+    test('resolve() sends the DID URL and fresh, and returns the resolution result', async () => {
+        const url = 'did:scid:coasys:1:QmTest?src=store.example&versionId=2';
+        const result = await ad4m.identity.resolve(url, { fresh: true });
+        expect(lastRpcCall!.type).toBe('identity.resolve');
+        expect(lastRpcCall!.params).toMatchObject({ didUrl: url, fresh: true });
+        expect(result.didDocument!.id).toBe(url);
+        expect(result.didDocumentMetadata.versionId).toBe('2');
+        expect(result.didResolutionMetadata['coasys:source']).toBe('cache');
+        expect(result.didResolutionMetadata['coasys:headTrusted']).toBe(true);
+    });
+
+    test('resolve() without options leaves fresh unset', async () => {
+        await ad4m.identity.resolve('did:key:z6MkTest');
+        expect(lastRpcCall!.type).toBe('identity.resolve');
+        expect(lastRpcCall!.params.didUrl).toBe('did:key:z6MkTest');
+        expect(lastRpcCall!.params.fresh).toBeUndefined();
     });
 
     test('agent.status() carries the identity beside the device did', async () => {

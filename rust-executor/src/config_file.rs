@@ -239,6 +239,10 @@ pub struct IdentityFileSettings {
     /// The store's head keys (Ed25519 multikeys, `z6Mk…`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_keys: Option<Vec<String>>,
+    /// Let a DID URL's `src` reach loopback and private addresses (tests, local development).
+    /// Off by default: on a server a `src` comes from untrusted input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_private_src: Option<bool>,
 }
 
 /// Secret keys someone may paste into the config file, as JSON pointers,
@@ -534,6 +538,7 @@ impl ExecutorConfigFile {
             sfu_stun_server: self.sfu_stun_server.clone(),
             identity_store_url: self.identity.as_ref().and_then(|i| i.store_url.clone()),
             identity_store_keys: self.identity.as_ref().and_then(|i| i.store_keys.clone()),
+            identity_allow_private_src: self.identity.as_ref().and_then(|i| i.allow_private_src),
             admin_credential: secrets.admin_credential.clone(),
             ..Ad4mConfig::unprepared()
         })
@@ -553,7 +558,7 @@ mod tests {
     fn identity_keys_reach_the_executor_config() {
         let file = parse(
             r#"{"identity": {"storeUrl": "http://127.0.0.1:8080",
-                "storeKeys": ["z6MkA", "z6MkB"]}}"#,
+                "storeKeys": ["z6MkA", "z6MkB"], "allowPrivateSrc": true}}"#,
         )
         .unwrap();
         let config = file.to_ad4m_config(&ExecutorSecrets::default()).unwrap();
@@ -565,6 +570,7 @@ mod tests {
             config.identity_store_keys,
             Some(vec!["z6MkA".to_string(), "z6MkB".to_string()])
         );
+        assert_eq!(config.identity_allow_private_src, Some(true));
         assert!(parse(r#"{"identity": {"storeUrls": "x"}}"#).is_err());
         let unset = parse("{}")
             .unwrap()
@@ -572,6 +578,7 @@ mod tests {
             .unwrap();
         assert_eq!(unset.identity_store_url, None);
         assert_eq!(unset.identity_store_keys, None);
+        assert_eq!(unset.identity_allow_private_src, None);
     }
 
     /// The SFU keys an operator behind NAT sets reach the executor's config.

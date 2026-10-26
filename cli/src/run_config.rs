@@ -326,6 +326,15 @@ pub struct RunArgs {
         value_parser = non_empty(StringValueParser::new())
     )]
     pub identity_store_keys: Option<Vec<String>>,
+    /// Let the `src` of a DID URL that `identity.resolve` reads reach loopback and private
+    /// addresses (`identity.allowPrivateSrc`). Off by default; for tests and local development.
+    #[arg(
+        long,
+        action,
+        env = "AD4M_IDENTITY_ALLOW_PRIVATE_SRC",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
+    pub identity_allow_private_src: Option<bool>,
 }
 
 /// Only the literal `true` enables the insecure mode; the usual "off"
@@ -373,10 +382,17 @@ impl RunArgs {
         overlay(&mut file.sfu_udp_port, &self.sfu_udp_port);
         overlay(&mut file.sfu_public_addr, &self.sfu_public_addr);
         overlay(&mut file.sfu_stun_server, &self.sfu_stun_server);
-        if self.identity_store_url.is_some() || self.identity_store_keys.is_some() {
+        if self.identity_store_url.is_some()
+            || self.identity_store_keys.is_some()
+            || self.identity_allow_private_src.is_some()
+        {
             let identity = file.identity.get_or_insert_with(Default::default);
             overlay(&mut identity.store_url, &self.identity_store_url);
             overlay(&mut identity.store_keys, &self.identity_store_keys);
+            overlay(
+                &mut identity.allow_private_src,
+                &self.identity_allow_private_src,
+            );
         }
         overlay(
             &mut file.auto_permit_cap_requests,
@@ -731,6 +747,13 @@ pub(crate) mod tests {
             "http://127.0.0.1:8081",
             "http://127.0.0.1:8082",
         ),
+        (
+            "/identity/allowPrivateSrc",
+            "AD4M_IDENTITY_ALLOW_PRIVATE_SRC",
+            "--identity-allow-private-src",
+            "true",
+            "false",
+        ),
     ];
 
     /// For every row of [`OVERRIDABLE`]: the variable alone, the flag alone,
@@ -770,6 +793,7 @@ pub(crate) mod tests {
             identity: Some(rust_executor::config_file::IdentityFileSettings {
                 store_url: Some("http://127.0.0.1:8080".into()),
                 store_keys: Some(vec!["z6MkA".into()]),
+                allow_private_src: Some(false),
             }),
         };
         let file_json = serde_json::to_value(&file).unwrap();
@@ -1087,7 +1111,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 41, "every flag of run has a variable");
+        assert_eq!(checked, 42, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

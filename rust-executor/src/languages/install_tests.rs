@@ -165,7 +165,7 @@ async fn the_agent_language_is_not_loaded_when_its_store_url_cannot_be_written()
     let languages = crate::test_utils::test_languages_directory();
     let settings = crate::identity::IdentitySettings {
         store_url: Some("http://127.0.0.1:9".into()),
-        store_keys: vec![],
+        ..Default::default()
     };
 
     // `settings.json` is a directory: the setting cannot be written.
@@ -185,7 +185,9 @@ async fn the_agent_language_is_not_loaded_when_its_store_url_cannot_be_written()
         .await
         .agent_language
         .replace(agent.clone());
-    let identity_call = AgentLanguageBackend.log("did:scid:coasys:1:Qm", 0).await;
+    let identity_call = AgentLanguageBackend
+        .log("did:scid:coasys:1:Qm", 0, None)
+        .await;
     controller.system_addresses.lock().await.agent_language = previous_agent;
 
     // Control: with a writable settings file the same call goes on to fetch the language.

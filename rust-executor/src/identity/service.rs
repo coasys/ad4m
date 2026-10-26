@@ -139,6 +139,8 @@ pub struct IdentityService {
     pub cache: Arc<KelCache>,
     /// `identity.storeUrl`: the store the agent language reaches; an offer must name it.
     pub store_url: Option<String>,
+    /// DID resolution (`identity.resolve`) over the same cache and backend.
+    pub resolver: Arc<super::resolver::Resolver>,
 }
 
 impl IdentityService {
@@ -368,7 +370,7 @@ impl IdentityService {
         let from = events.iter().map(|e| e.seq).min().unwrap_or(0);
         let page = self
             .backend
-            .log(did, from)
+            .log(did, from, None)
             .await
             .map_err(backend_error)?
             .ok_or_else(|| backend_error(IdentityError::Conflict(stored.clone())))?;
@@ -573,9 +575,17 @@ mod tests {
 
     fn test_service() -> IdentityService {
         use crate::identity::cache::tests::{in_memory, FakeStore};
+        let backend: Arc<dyn IdentityBackend> = Arc::new(FakeStore::new(vec![]));
+        let cache = Arc::new(in_memory(vec![]));
         IdentityService {
-            backend: Arc::new(FakeStore::new(vec![])),
-            cache: Arc::new(in_memory(vec![])),
+            resolver: Arc::new(crate::identity::resolver::Resolver::new(
+                cache.clone(),
+                backend.clone(),
+                None,
+                false,
+            )),
+            backend,
+            cache,
             store_url: None,
         }
     }

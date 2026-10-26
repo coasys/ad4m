@@ -157,7 +157,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   replaced by `init`); `identity.claimOffer` (operator only) claims with the main wallet key and
   refuses `already-linked` / `no-operator` / `first-link` inside
   `ClaimService::claim_for_main`. `agent.status` and `agent.get` gain `identity`; `did` stays the
-  device `did:key`.
+  device `did:key`. `identity.resolve` (`identity/resolver.rs`) answers a DID Core resolution
+  result for a `did:scid:coasys:1` DID URL or a device `did:key`; a URL's `src` must name a
+  public HTTPS host unless `identity.allowPrivateSrc` is set.
 
 ## Do / don't
 
