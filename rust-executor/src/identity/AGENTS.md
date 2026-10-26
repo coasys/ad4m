@@ -48,7 +48,9 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   (`already-linked`). Events past the trusted seq, and every event a foreign `src` served, are
   for resolution display only (`identity.resolve` shows them, `coasys:headTrusted: false`).
   `identity.status`, `identity.log` and `identity.devices` show the cached log as it is.
-  Without `identity.storeKeys` no `did:scid` author verifies.
+  Without `identity.storeKeys` no `did:scid` author verifies, and `identity.publish` and
+  `identity.claimOffer` refuse with `no-store-keys` before the store commits anything: a log
+  the executor can never accept would still take the agent's key for every identity.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
   first-link rule itself: `already-linked` while the main key is valid in its identity's log at
   the trusted seq, `no-operator` without a record, `first-link` for another identity.

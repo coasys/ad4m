@@ -141,6 +141,12 @@ impl KelCache {
         })
     }
 
+    /// Whether `identity.storeKeys` names at least one key: without one the cache accepts no
+    /// head, so no log ever has a trusted seq and no publish or claim can bind an agent.
+    pub fn trusts_a_store(&self) -> bool {
+        !self.store_keys.is_empty()
+    }
+
     /// Calls `listener` for each fork recorded for the first time.
     pub fn set_fork_listener(&mut self, listener: ForkListener) {
         self.on_fork = Some(listener);
