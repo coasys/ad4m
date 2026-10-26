@@ -8,8 +8,11 @@ serves the identity interface, both on the shared identity store (`identity-stor
   call to mock.ad4m.dev any more). For a `did:key` agent the host signs the Agent as an AD4M
   expression (`createSignedExpression`), that signed expression is the record's `profile`, and
   the agent's key signs the record through the host; a read keeps a record only when its
-  signature holds (for a `did:scid`, by an unrevoked, non-bot key of that log at an anchor the
-  log holds). A `did:key` read answers the stored signed expression unchanged, so the
+  signature holds. For a `did:scid` the record's `anchor` is one number, the seq of that log
+  the signer knew when it signed; the read keeps the record only when the anchor is at or below
+  the log's head and the log lists `signedBy`, without the bot mark and valid at the anchor (a
+  key revoked at seq N signs nothing valid anchored at or after N; a record signed before the
+  revocation stays valid). A `did:key` read answers the stored signed expression unchanged, so the
   executor's signature check on every expression passes, and only when its author is the
   record's did and its data an Agent naming that did. A `did:scid` record's profile is a
   plain Agent, answered as an expression built from the record; the executor cannot verify

@@ -132,17 +132,6 @@ pub struct RequestBody {
     pub expires: u64,
 }
 
-/// The log position a signature by a logged key names: the verdict on the
-/// signature is taken at that seq.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Anchor {
-    pub kel_did: String,
-    pub key_id: String,
-    pub kel_seq: u64,
-    pub kel_hash: String,
-}
-
 /// `PUT /v1/agents/{did}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,9 +145,14 @@ pub struct AgentRecord {
     pub version: u64,
     /// The device did:key that signed.
     pub signed_by: String,
-    /// Required for a did:scid record.
+    /// The content anchor: the seq of the signer's identity log that the signer knew when it
+    /// signed. Required for a did:scid record, `null` for a did:key record. The signature holds
+    /// only when the log lists `signedBy` and that key is valid at this seq (a key revoked at
+    /// seq N signs nothing valid anchored at or after N), and the seq is at or below the log's
+    /// head. The person is the record's did and the key id is read from the log, so the anchor
+    /// carries neither; nor a hash, since a fork freezes the identity anyway.
     #[serde(default)]
-    pub anchor: Option<Anchor>,
+    pub anchor: Option<u64>,
     /// `coasys:link` scheme over {profile, version, anchor}.
     pub sig: String,
 }

@@ -828,7 +828,7 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
     let profile = json!({ "perspective": { "links": [] }, "directMessageLanguage": "lang://dm" });
     let record: AgentRecord = serde_json::from_value(apps.run(
         "record",
-        json!({ "name": name, "signer": "gus phone", "keyId": "d2", "profile": profile, "version": 1 }),
+        json!({ "name": name, "signer": "gus phone", "profile": profile, "version": 1 }),
     ))
     .unwrap();
     let path = format!("/v1/agents/{did}");
@@ -851,9 +851,10 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
     let other = person(&mut apps, &store, "ivy records");
     let hostile = apps.run(
         "record",
-        json!({ "name": "ivy records", "signer": "d1", "keyId": "d1", "profile": profile, "version": 9,
+        json!({ "name": "ivy records", "signer": "d1", "profile": profile, "version": 9,
                 "did": did, "anchor": record.anchor }),
     );
+    assert_eq!(hostile["anchor"], json!(record.anchor));
     assert_eq!(
         hostile["signedBy"],
         format!(
@@ -872,25 +873,63 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
     assert!(block_on(agents::get(&store, &did, now_s()))
         .unwrap()
         .is_none());
-    {
+    // `row` as the store's row for this did.
+    let store_row = |row: &Value| {
         let db = rusqlite::Connection::open(server.db()).unwrap();
         db.execute(
             "UPDATE agents SET record = ?1, version = 1 WHERE did = ?2",
-            rusqlite::params![body.to_string(), did],
+            rusqlite::params![row.to_string(), did],
         )
         .unwrap();
-    }
+    };
+    store_row(&body);
     assert!(block_on(agents::get(&store, &did, now_s()))
         .unwrap()
         .is_some());
 
-    // Revoke d2: its record is ignored.
+    // Revoke d2: the record it signed before the revocation stays valid.
+    let anchor = record.anchor.unwrap();
     let revoke = apps.run("revoke", json!({ "name": name, "ids": ["d2"] }));
     block_on(store.append(&did, &append_req(vec![revoke.clone()]))).unwrap();
-    apps.run("push", json!({ "name": name, "event": revoke }));
+    let revoked_at = apps.run("push", json!({ "name": name, "event": revoke }))["seq"]
+        .as_u64()
+        .unwrap();
+    assert!(revoked_at > anchor);
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_some());
+
+    // A row signed by d2 anchored at its revocation: ignored.
+    let at_revoke = apps.run(
+        "record",
+        json!({ "name": name, "signer": "gus phone", "profile": profile, "version": 2,
+                "anchor": revoked_at }),
+    );
+    store_row(&at_revoke);
     assert!(block_on(agents::get(&store, &did, now_s()))
         .unwrap()
         .is_none());
+
+    // A row anchored past the log's head, by a key valid there: ignored.
+    let ahead = apps.run(
+        "record",
+        json!({ "name": name, "signer": "d1", "profile": profile, "version": 3,
+                "anchor": revoked_at + 1 }),
+    );
+    store_row(&ahead);
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_none());
+    // The same key anchored at the head: kept.
+    let at_head = apps.run(
+        "record",
+        json!({ "name": name, "signer": "d1", "profile": profile, "version": 3 }),
+    );
+    assert_eq!(at_head["anchor"], json!(revoked_at));
+    store_row(&at_head);
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_some());
 }
 
 #[test]

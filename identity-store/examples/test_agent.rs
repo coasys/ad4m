@@ -21,7 +21,7 @@
 //! | `rotate` | `name` | the `rotate` event (not pushed) |
 //! | `push` | `name`, `event` | `{seq}`: the person's copy takes the event the store took |
 //! | `request` | `name`, `signer` (`master`, `d1` or a device label), `keyId?`, `method`, `path`, `body`, `expires` | the `SignedRequest` |
-//! | `record` | `name`, `signer`, `keyId`, `profile`, `version`, `did?`, `anchor?` | a `did:scid` `AgentRecord` (`did`/`anchor` replace the person's, re-signed: a hostile store's row) |
+//! | `record` | `name`, `signer`, `profile`, `version`, `did?`, `anchor?` | a `did:scid` `AgentRecord` anchored at the person's head, or at seq `anchor` (`did` replaces the person's: a hostile store's row) |
 //! | `didKeyRecord` | `device`, `profile`, `version` | a `did:key` `AgentRecord` signed by that key |
 
 #[path = "../tests/common/agent.rs"]
@@ -183,19 +183,21 @@ impl Apps {
             }
             "record" => {
                 let signer = self.signer(req)?;
-                let key_id = text(req, "keyId")?.to_string();
                 let profile = field(req, "profile")?.clone();
                 let version = number(req, "version")?;
                 let person = self.person(req)?;
-                let mut record = person.agent_record(&key_id, &signer, profile, version);
-                // A hostile store's row for the suites: another did or anchor, re-signed.
+                let mut record = match req.get("anchor") {
+                    Some(_) => {
+                        let anchor = number(req, "anchor")?;
+                        person.agent_record_at(&signer, profile, version, anchor)
+                    }
+                    None => person.agent_record(&signer, profile, version),
+                };
+                // A hostile store's row for the suites: another did (the signature does not
+                // cover the did, so it still holds).
                 if let Some(did) = req.get("did").and_then(Value::as_str) {
                     record.did = did.to_string();
                 }
-                if req.get("anchor").is_some() {
-                    record.anchor = Some(parse(req, "anchor")?);
-                }
-                record.sig = agent::sign_record(&record, &signer);
                 to_json(&record)
             }
             "didKeyRecord" => {

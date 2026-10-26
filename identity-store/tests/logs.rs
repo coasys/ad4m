@@ -654,18 +654,28 @@ async fn a_did_scid_record_needs_a_signed_request_and_a_valid_non_bot_key_of_the
     let profile = json!({ "perspective": { "links": [] } });
     let later = t.now() + 60;
 
-    let record = alice.agent_record("d1", &d1, profile.clone(), 1);
-    let body = serde_json::to_vec(&record).unwrap();
-    let header = alice.request("d1", &d1, "PUT", &path, &body, later);
-    let reply = t.send("PUT", &path, Some(body.clone()), Some(header)).await;
+    // `body` as the person's PUT of its record, with a signed request by d1.
+    let put = |body: Vec<u8>| {
+        let header = alice.request("d1", &d1, "PUT", &path, &body, later);
+        t.send("PUT", &path, Some(body), Some(header))
+    };
+
+    let record = alice.agent_record(&d1, profile.clone(), 1);
+    assert_eq!(record.anchor, Some(alice.chain.head().seq));
+    let reply = put(serde_json::to_vec(&record).unwrap()).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     assert_eq!(
         t.get(&path).await.body,
         serde_json::to_value(&record).unwrap()
     );
+    // The anchor is one number on the wire.
+    assert_eq!(
+        t.get(&path).await.body["anchor"],
+        json!(alice.chain.head().seq)
+    );
 
     // No signed request: 403.
-    let record2 = alice.agent_record("d1", &d1, profile.clone(), 2);
+    let record2 = alice.agent_record(&d1, profile.clone(), 2);
     let body2 = serde_json::to_vec(&record2).unwrap();
     assert_eq!(
         t.send("PUT", &path, Some(body2), None).await.status,
@@ -674,26 +684,54 @@ async fn a_did_scid_record_needs_a_signed_request_and_a_valid_non_bot_key_of_the
     // A record signed by a key from another log: 403.
     let bob = Person::new("bob");
     t.publish(&bob).await;
-    let stranger = alice.agent_record("d1", &bob.device_key(1), profile.clone(), 3);
-    let body3 = serde_json::to_vec(&stranger).unwrap();
-    let header = alice.request("d1", &d1, "PUT", &path, &body3, later);
+    let stranger = alice.agent_record(&bob.device_key(1), profile.clone(), 3);
     assert_eq!(
-        t.send("PUT", &path, Some(body3), Some(header)).await.status,
+        put(serde_json::to_vec(&stranger).unwrap()).await.status,
         StatusCode::FORBIDDEN
     );
-    // A record signed by a key revoked at the head: 403.
+    // A record anchored past the head: 400 anchor.
+    let ahead = alice.agent_record_at(&d1, profile.clone(), 3, alice.chain.head().seq + 1);
+    let reply = put(serde_json::to_vec(&ahead).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "anchor");
+    // A record anchored before its key entered the log: 403.
+    let early = alice.agent_record_at(&phone.key, profile.clone(), 3, 0);
+    assert_eq!(
+        put(serde_json::to_vec(&early).unwrap()).await.status,
+        StatusCode::FORBIDDEN
+    );
+    // The four-field anchor of before is not a seq: 400 malformed.
+    let mut old = serde_json::to_value(alice.agent_record(&d1, profile.clone(), 3)).unwrap();
+    old["anchor"] = json!({ "kelDid": alice.did(), "keyId": "d1", "kelSeq": 1,
+                            "kelHash": alice.chain.head().hash });
+    let reply = put(serde_json::to_vec(&old).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "malformed");
+
+    // The phone signs at the head it knows; then the phone is revoked.
+    let before_revoke = alice.chain.head().seq;
+    let signed_before = alice.agent_record(&phone.key, profile.clone(), 4);
     let revoke = alice.revoke(&[&phone_id]);
     assert_eq!(
         t.append_push(&mut alice, revoke).await.status,
         StatusCode::OK
     );
-    let revoked = alice.agent_record(&phone_id, &phone.key, profile, 4);
-    let body4 = serde_json::to_vec(&revoked).unwrap();
-    let header = alice.request("d1", &d1, "PUT", &path, &body4, later);
-    assert_eq!(
-        t.send("PUT", &path, Some(body4), Some(header)).await.status,
-        StatusCode::FORBIDDEN
-    );
+    let revoked_at = alice.chain.head().seq;
+    assert!(revoked_at > before_revoke);
+    // A record anchored at the revocation (or later) by the revoked key: 403.
+    let revoked = alice.agent_record(&phone.key, profile.clone(), 5);
+    assert_eq!(revoked.anchor, Some(revoked_at));
+    let put = |body: Vec<u8>| {
+        let header = alice.request("d1", &d1, "PUT", &path, &body, later);
+        t.send("PUT", &path, Some(body), Some(header))
+    };
+    let reply = put(serde_json::to_vec(&revoked).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signer");
+    // A record the phone signed before its revocation stays valid.
+    let reply = put(serde_json::to_vec(&signed_before).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(t.get(&path).await.body["anchor"], json!(before_revoke));
 }
 
 #[tokio::test]

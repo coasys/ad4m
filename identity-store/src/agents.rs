@@ -5,8 +5,12 @@
 //! (`anchor` is `null` for a `did:key` record), by the device key `signedBy` names. A
 //! `did:key` record is signed by that key itself and needs no signed request; a bot key may
 //! write it only while its scope is in force (the bot-scope check). A `did:scid` record comes
-//! with a signed request of that identity, names an anchor in its log, and is signed by a
-//! non-bot key of that log valid at the head.
+//! with a signed request of that identity and carries its anchor: the seq of the identity's log
+//! that the signer knew when it signed. It is accepted only when the anchor lies at or below the
+//! log's head (`400 anchor` otherwise) and `signedBy` is a non-bot key the log lists, valid at
+//! the anchor: a key revoked at seq N signs no record anchored at or after N, and a record
+//! signed before a revocation stays valid. The key id comes from the log, the person from the
+//! record's did, so the anchor carries neither.
 //!
 //! The store does not read `profile`: the record signature covers it whatever it holds. The
 //! agent language puts a `did:key` agent's Agent there as that agent's signed AD4M expression,
@@ -89,7 +93,7 @@ impl Store {
             self.check_bot_writer(key, now)?;
         } else if let Some(scid) = scid_of(did) {
             let verified = self.verify_request(incoming, Some(did), Signer::AnyKey)?;
-            let anchor = record.anchor.as_ref().ok_or_else(|| {
+            let anchor = record.anchor.ok_or_else(|| {
                 ApiError::invalid("malformed", "a did:scid record names its anchor")
             })?;
             let key = record
@@ -97,22 +101,26 @@ impl Store {
                 .strip_prefix("did:key:")
                 .ok_or_else(|| ApiError::invalid("malformed", "signedBy is a did:key"))?;
             let chain = &verified.chain;
+            if verified.scid != scid {
+                return Err(ApiError::forbidden(
+                    "signer",
+                    "the signed request is another identity's",
+                ));
+            }
+            if anchor > chain.head().seq {
+                return Err(ApiError::invalid(
+                    "anchor",
+                    "the anchor lies past the log's head",
+                ));
+            }
             let state = chain.state();
-            let in_log = state
-                .key_id_of(&key.to_string())
-                .filter(|id| **id == anchor.key_id);
-            let valid = in_log.is_some()
-                && anchor.kel_did == did
-                && chain.hash_at(anchor.kel_seq) == Some(&anchor.kel_hash)
-                && state
-                    .bot_scope_at(&anchor.key_id, chain.head().seq)
-                    .is_none()
-                && state.key_valid_at_time(&anchor.key_id, chain.head().seq, now)
-                && verified.scid == scid;
+            let valid = state.key_id_of(&key.to_string()).is_some_and(|id| {
+                state.bot_scope_at(id, anchor).is_none() && state.key_valid_at_time(id, anchor, now)
+            });
             if !valid {
                 return Err(ApiError::forbidden(
                     "signer",
-                    "signedBy is not a non-bot key of this log valid at the head, or the anchor is wrong",
+                    "signedBy is not a non-bot key of this log valid at the anchor",
                 ));
             }
             if !record_signed_by(record, key) {

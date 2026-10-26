@@ -42,7 +42,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `GET /pow` | `200 {bits, previousBits, changedAt}` |
 | `POST /notes/{scid}` `{token}` + signed request | `403 signer` · `503 vouch-unavailable` (no vouching service exists yet) |
 | `GET /agents/{did}` | `200 AgentRecord` · `404` |
-| `PUT /agents/{did}` | `200` · `403 signer`/`writer` · `409 {version}` |
+| `PUT /agents/{did}` | `200` · `400 malformed`/`anchor` · `403 signer`/`writer` · `409 {version}` |
 | `POST /offers/{scid}` `SignedOffer` | `201 {offerId}` · `400` · `403 signer` · `404` · `409 {head}` · `409 offer-exists` · `429 identity` |
 | `GET /offers/{scid}?wait=` master-signed | `200 [{offer, state}]` (open and claimed) |
 | `DELETE /offers/{scid}/{offerId}` master-signed | `204` · `404` |
@@ -113,6 +113,19 @@ tests name them by these names.
   **path** (percent-decoded, without the query) match; `bodyHash` is the multihash of the raw
   body bytes; the nonce is new in 10 minutes. Offer routes take only the current master key.
   The agent language sends every body as its canonical JSON, so a signer hashes `JCS(body)`.
+- **Agent records**: `sig` is the `coasys:link` signature of `{profile, version, anchor}` by
+  `signedBy`. A `did:key` record is signed by that key and its `anchor` is `null`. A
+  `did:scid` record comes with a signed request of that identity, and its `anchor` is one
+  number: the seq of the identity's log that the signer knew when it signed. The store accepts
+  it only when the anchor is at or below the head (`400 anchor` otherwise) and `signedBy` is a
+  bare `did:key` whose key the log lists (key id by `key_id_of`), without the bot mark and
+  valid at the anchor (`key_valid_at_time(key, anchor, now)`; `403 signer` otherwise). The
+  anchor places the signature in the log, so revocation needs no clock: a key revoked at seq N
+  signs nothing valid anchored at or after N, and a record signed before the revocation stays
+  valid. It carries no DID (the record is keyed by its did:scid), no key id (the log lists the
+  key) and no hash (a hash only tells forked branches apart, and a fork freezes the identity).
+  The old four-field anchor object does not parse: `400 malformed`. Offers' `by` and signed
+  requests keep `kelSeq`/`kelHash`: they prove freshness at the head, once per action.
 - **No brake yet**: a `#0` without a note is admitted with `admitted_by = 'brake'`; a `pow`
   that is sent must meet `POW_BITS` (`403 pow` otherwise); no address or global buckets, no
   `/metrics`. A vouching token answers `503 vouch-unavailable` and commits nothing. No pairing

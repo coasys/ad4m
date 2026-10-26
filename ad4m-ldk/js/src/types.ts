@@ -189,14 +189,6 @@ export interface SignedRequest {
     sig: string;
 }
 
-/** The log position a signature by a logged key names: the verdict on the signature is taken at that seq. */
-export interface Anchor {
-    kelDid: string;
-    keyId: string;
-    kelSeq: number;
-    kelHash: string;
-}
-
 /** `PUT /v1/agents/{did}`. */
 export interface AgentRecord {
     /** did:scid, or did:key for a bot or a device-only identity. */
@@ -210,8 +202,15 @@ export interface AgentRecord {
     version: number;
     /** The device did:key that signed. */
     signedBy: string;
-    /** Required for a did:scid record. */
-    anchor: Anchor | null;
+    /**
+     * The content anchor: the seq of the signer's identity log that the signer knew when it
+     * signed. Required for a did:scid record, null for a did:key record. The signature holds only
+     * when the log lists signedBy and that key is valid at this seq (a key revoked at seq N signs
+     * nothing valid anchored at or after N), and the seq is at or below the log's head. The
+     * person is the record's did and the key id is read from the log, so the anchor carries
+     * neither; nor a hash, since a fork freezes the identity anyway.
+     */
+    anchor: number | null;
     /** `coasys:link` scheme over {profile, version, anchor}. */
     sig: string;
 }
