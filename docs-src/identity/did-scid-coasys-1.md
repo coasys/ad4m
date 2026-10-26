@@ -402,6 +402,11 @@ freezes the identity, so a hash would add bytes to every record and link and ena
 - A `src` fetched from untrusted data is a request to an address someone else chose. A
   resolver on a server limits it (HTTPS only, public addresses only, no redirect to another
   host).
+- A key lookup (section 13, "Key lookup") is a hint, never proof. A host that answers "this
+  signing key belongs to `did:scid:coasys:1:<scid>`" may be wrong or hostile. A resolver that
+  uses the answer resolves that DID's log and accepts the answer only when the log lists the
+  key. A key enters a log only with its own signature (it co-signs the `incept` that lists it,
+  or the claim that an `add` spends), so a log cannot claim a key whose holder did not consent.
 
 ## 12. Test vectors
 
@@ -423,8 +428,8 @@ a changed hash in `log.json` or `proofs.json` is a format change.
 # Part B — Host profile (normative for hosts)
 
 A host stores logs and answers resolution requests. A host that serves logs over HTTPS follows
-section 13; everything else it offers (appending, signed heads, key lookups, feeds) is outside
-this profile.
+section 13. A host may also answer key lookups (section 13, "Key lookup"). Everything else it
+offers (appending, signed heads, feeds) is outside this profile.
 
 ## 13. Retrieval over HTTPS
 
@@ -451,6 +456,24 @@ GET /v1/logs/<scid>?from=<n>
 - A full page (256 events) that ends below the head never changes, because a host never
   replaces a stored event: it may be cached as immutable. The page that holds the head changes
   with every append and is cached briefly.
+
+### Key lookup (optional)
+
+A device signs as its `did:key`. A reader that holds only that key finds the person through a
+host's key index:
+
+```
+GET /v1/keys/<signing multikey>?wait=<0..8>
+  200 application/json   { did, keyId, … }   the DID whose log lists the key, and its id there
+  404                    the host knows no log that lists the key
+```
+
+- The answer is a hint (section 11). The resolver confirms it against the named DID's log.
+- A host that requires one key per identity (section 14) gives one answer per key. A host that
+  does not may know several logs for one key, and then answers none (`404`), so a lookup never
+  picks between identities.
+- `wait` holds the request open up to that many seconds for a key that is not listed yet, so a
+  device that just claimed an offer learns its identity as soon as the `add` lands.
 
 ## 14. Admission (host policy)
 
