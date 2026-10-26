@@ -524,10 +524,11 @@ fn offer_states_name_themselves_on_the_wire() {
         OfferState::Expired,
         OfferState::Cancelled,
         OfferState::Contested,
-        OfferState::Locked,
         OfferState::Superseded,
     ] {
         assert_eq!(serde_json::to_value(&state).unwrap()["state"], state.name());
     }
-    assert!(claimed_state.is_live() && OfferState::Open.is_live() && !OfferState::Locked.is_live());
+    assert!(
+        claimed_state.is_live() && OfferState::Open.is_live() && !OfferState::Expired.is_live()
+    );
 }

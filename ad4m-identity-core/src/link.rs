@@ -29,8 +29,6 @@ pub const OFFER_TTL_S: u64 = 300;
 pub const CONFIRM_GRACE_S: u64 = 300;
 /// Offers in `open` or `claimed` per identity.
 pub const MAX_OPEN_OFFERS: usize = 5;
-/// Wrong secrets that lock an offer.
-pub const MAX_WRONG_SECRETS: u32 = 5;
 /// The signing domain of offers.
 pub const OFFER_DOMAIN: &str = "coasys:offer";
 /// The signing domain of claim co-signatures.
@@ -176,7 +174,6 @@ pub enum OfferState {
     Expired,
     Cancelled,
     Contested,
-    Locked,
     Superseded,
 }
 
@@ -190,7 +187,6 @@ impl OfferState {
             OfferState::Expired => "expired",
             OfferState::Cancelled => "cancelled",
             OfferState::Contested => "contested",
-            OfferState::Locked => "locked",
             OfferState::Superseded => "superseded",
         }
     }
