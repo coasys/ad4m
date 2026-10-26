@@ -41,6 +41,7 @@ use super::types::{
     ToolCallDelta, ToolDef, Usage,
 };
 use crate::agent::capabilities::AI_PROMPT_CAPABILITY;
+use crate::agent::session::Session;
 use crate::ai_service::AIService;
 use crate::billing::check_compute_credits;
 use crate::types::{ModelType, RequestContext};
@@ -312,7 +313,7 @@ async fn chat_stream(
         Event::default().data(serde_json::to_string(&role_chunk).unwrap())
     ));
 
-    tokio::spawn({
+    spawn_until_over(&auth.session, {
         let event_tx = event_tx.clone();
         let stream_model = stream_model.clone();
         let id = id.clone();
@@ -438,6 +439,21 @@ async fn chat_stream(
 
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
     Ok(Sse::new(stream).into_response())
+}
+
+/// Spawns `forward`, the task that feeds an SSE stream, and drops it once `session` is over
+/// (revoked or expired): the stream then ends, as the session's sockets close.
+pub(super) fn spawn_until_over(
+    session: &Session,
+    forward: impl std::future::Future<Output = ()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    let over = session.over();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = over => {}
+            _ = forward => {}
+        }
+    })
 }
 
 /// Emit the final SSE chunk carrying an empty delta and `finish_reason`.

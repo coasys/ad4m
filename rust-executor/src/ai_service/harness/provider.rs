@@ -225,34 +225,18 @@ impl<P: ToolProvider + ?Sized + 'static> ToolProvider for FilteredProvider<P> {
 /// Behaviour:
 /// - `tools()` — for each inner schema, strip the bound parameter names from
 ///   `properties` and `required`. Non-object schemas pass through unchanged.
-/// - `call()` — merge the bound values into `args` (bound values do NOT
-///   override an argument the LLM already supplied; the strip step keeps the
-///   LLM from seeing them, so this is defense-in-depth) and delegate.
+/// - `call()` — write the bound values into `args` and delegate. A bound value
+///   always replaces an argument of the same name that the LLM sent: the
+///   binding states the scope of the pass (the perspective it runs on), and
+///   transcript content must not steer a call outside it.
 pub struct BoundArgsProvider<P: ToolProvider + ?Sized> {
     inner: Arc<P>,
     bindings: std::collections::BTreeMap<String, Value>,
-    /// Whether a bound value replaces one the LLM supplied anyway. See [`Self::forcing`].
-    force: bool,
 }
 
 impl<P: ToolProvider + ?Sized> BoundArgsProvider<P> {
     pub fn new(inner: Arc<P>, bindings: std::collections::BTreeMap<String, Value>) -> Self {
-        Self {
-            inner,
-            bindings,
-            force: false,
-        }
-    }
-
-    /// The same, but a bound value always wins — for a binding that is a boundary rather than a
-    /// convenience. An agent session is scoped to one perspective: a model that names another one
-    /// out of band must still act on the session's, not on any other the caller can reach.
-    pub fn forcing(inner: Arc<P>, bindings: std::collections::BTreeMap<String, Value>) -> Self {
-        Self {
-            inner,
-            bindings,
-            force: true,
-        }
+        Self { inner, bindings }
     }
 }
 
@@ -274,7 +258,7 @@ where
     }
 
     async fn call(&self, name: &str, mut args: Value) -> Result<String> {
-        merge_bound_into_args(&mut args, &self.bindings, self.force);
+        merge_bound_into_args(&mut args, &self.bindings);
         self.inner.call(name, args).await
     }
 }
@@ -299,11 +283,7 @@ fn strip_bound_from_schema(
     }
 }
 
-fn merge_bound_into_args(
-    args: &mut Value,
-    bindings: &std::collections::BTreeMap<String, Value>,
-    force: bool,
-) {
+fn merge_bound_into_args(args: &mut Value, bindings: &std::collections::BTreeMap<String, Value>) {
     // Small local models occasionally send `null` or an unwrapped scalar when
     // the (post-strip) schema is empty; coerce to an object so injection can
     // land regardless of the caller's shape.
@@ -312,11 +292,7 @@ fn merge_bound_into_args(
     }
     if let Value::Object(map) = args {
         for (k, v) in bindings {
-            if force {
-                map.insert(k.clone(), v.clone());
-            } else {
-                map.entry(k.clone()).or_insert_with(|| v.clone());
-            }
+            map.insert(k.clone(), v.clone());
         }
     }
 }
@@ -715,41 +691,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bound_args_does_not_override_llm_supplied_value() {
-        // Defense-in-depth: the schema hides the param, but if an out-of-band
-        // arg smuggles it in, respect the LLM's value rather than clobbering.
+    async fn bound_args_replace_an_llm_supplied_value() {
+        // The schema hides the param, but a model steered by transcript content
+        // can still send it. The bound perspective wins, so the pass stays on it.
         let inner = Arc::new(MockProvider::new(vec![schema_with_perspective_id()]));
         let recorder = inner.clone();
         let bound = BoundArgsProvider::new(inner, perspective_id_bound());
         let out = bound
             .call(
                 "extbelief_query",
-                json!({"perspective_id": "override", "limit": 1}),
+                json!({"perspective_id": "another-users-perspective", "limit": 1}),
             )
             .await;
         assert!(out.is_ok());
         let calls = recorder.recorded_calls();
-        assert_eq!(calls[0].1["perspective_id"], "override");
-    }
-
-    #[tokio::test]
-    async fn forced_bound_args_override_an_llm_supplied_value() {
-        let inner = Arc::new(MockProvider::new(vec![schema_with_perspective_id()]));
-        let recorder = inner.clone();
-        let bound = BoundArgsProvider::forcing(inner, perspective_id_bound());
-        let out = bound
-            .call(
-                "extbelief_query",
-                json!({"perspective_id": "somewhere-else", "limit": 1}),
-            )
-            .await;
-        assert!(out.is_ok());
-        let calls = recorder.recorded_calls();
-        assert_ne!(calls[0].1["perspective_id"], "somewhere-else");
-        assert_eq!(
-            calls[0].1["perspective_id"],
-            perspective_id_bound()["perspective_id"]
-        );
+        assert_eq!(calls[0].1["perspective_id"], "uuid-under-test");
         assert_eq!(calls[0].1["limit"], 1);
     }
 

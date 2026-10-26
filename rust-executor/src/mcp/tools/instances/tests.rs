@@ -7,7 +7,16 @@ use crate::mcp::server::McpContext;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::perspectives::register_perspective;
 use rmcp::handler::server::wrapper::Parameters;
-use tokio::sync::RwLock;
+
+/// A context whose MCP session presented the admin credential: the operator.
+fn admin_context(dynamic_class_tools: bool) -> McpContext {
+    McpContext::new(
+        Some("test-admin".into()),
+        crate::agent::capabilities::ListenerReach::Loopback,
+        dynamic_class_tools,
+    )
+    .with_token("test-admin")
+}
 
 /// Flux-shaped Channel: string / boolean / integer scalars, one
 /// `has_child` collection, class + property interpretation hints.
@@ -124,11 +133,7 @@ async fn setup_with(
     let (perspective, _shapes, _ctx) = setup_perspective_no_llm(classes).await;
     let uuid = perspective.persisted.lock().await.uuid.clone();
     register_perspective(uuid.clone(), perspective);
-    let handler = Ad4mMcpHandler::new(McpContext {
-        admin_credential: Some("test-admin".to_string()),
-        auth_token: Arc::new(RwLock::new(Some("test-admin".to_string()))),
-        dynamic_class_tools,
-    });
+    let handler = Ad4mMcpHandler::new(admin_context(dynamic_class_tools));
     let guard = PerspectiveGuard(uuid.clone());
     (handler, uuid, guard)
 }
@@ -240,7 +245,7 @@ const LOCAL_CACHE_SDNA: &str = r#"{
 }"#;
 
 /// `describe_perspective` is the only place a client can learn that a property
-/// stays on this node. Until `ShapeProperty` carried `local`, the model-query
+/// stays on this executor. Until `ShapeProperty` carried `local`, the model-query
 /// layer parsed the flag out of the SHACL graph and threw it away, so the
 /// description could not say it at all.
 #[tokio::test(flavor = "multi_thread")]
@@ -1280,6 +1285,124 @@ async fn instance_tools_round_trip_typed_data() {
     assert!(err.contains("Widget") && err.contains("Channel") && err.contains("Message"));
 }
 
+/// What a request without a token on a loopback listener contributes, proxied (with a
+/// forwarding header) or not.
+fn tokenless_request(proxied: bool) -> crate::mcp::tools::RequestAuth {
+    let mut request = axum::http::Request::builder();
+    if proxied {
+        request = request.header("x-forwarded-for", "203.0.113.9");
+    }
+    let (parts, _) = request
+        .extension(crate::agent::capabilities::ListenerReach::Loopback)
+        .body(())
+        .unwrap()
+        .into_parts();
+    crate::mcp::tools::RequestAuth {
+        header: None,
+        reach: Some(crate::api::auth::listener_reach(&parts)),
+    }
+}
+
+// On a loopback listener of an executor without an admin credential, a caller without a
+// token is the operator unless its request came through a proxy (#1059). What a tool resolves
+// without the request in hand (`session()` for tools/list's class tools, the login tools'
+// call without a token, `sign_in`) must read the request's reach, not the listener's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proxied_request_without_a_token_is_not_the_operator_anywhere() {
+    let (_admin, _uuid, _guard) = setup(true).await;
+    let handler = Ad4mMcpHandler::new(McpContext::new(
+        None,
+        crate::agent::capabilities::ListenerReach::Loopback,
+        true,
+    ));
+    let names = |tools: Vec<rmcp::model::Tool>| -> Vec<String> {
+        tools.iter().map(|t| t.name.to_string()).collect()
+    };
+
+    let local = handler.for_request(&tokenless_request(false));
+    assert!(local.session().await.unwrap().is_operator());
+    assert!(local.tokenless_session().unwrap().is_operator());
+    let listed = names(local.exposed_tools().await);
+    assert!(listed.iter().any(|n| n == "channel_create"), "{listed:?}");
+
+    let proxied = handler.for_request(&tokenless_request(true));
+    let err = proxied.session().await.unwrap_err();
+    assert!(err.starts_with("Authentication required"), "{err}");
+    assert!(!proxied.tokenless_session().unwrap().is_authenticated());
+    let listed = names(proxied.exposed_tools().await);
+    assert!(
+        !listed
+            .iter()
+            .any(|n| n.starts_with("channel_") || n.starts_with("message_")),
+        "a proxied caller lists the operator's classes: {listed:?}"
+    );
+}
+
+/// `tools/list` on a fresh MCP session (no remembered caller) with `header` as its
+/// `Authorization` credential, on a network listener: the names it lists.
+async fn listed_on_a_fresh_session(header: Option<&str>) -> Vec<String> {
+    let handler = Ad4mMcpHandler::new(McpContext::new(
+        Some("test-admin".into()),
+        crate::agent::capabilities::ListenerReach::Network,
+        true,
+    ));
+    listed_names(&handler, header).await
+}
+
+async fn listed_names(handler: &Ad4mMcpHandler, header: Option<&str>) -> Vec<String> {
+    let auth = crate::mcp::tools::RequestAuth {
+        header: header.map(str::to_string),
+        reach: Some(crate::agent::capabilities::ListenerReach::Network),
+    };
+    handler
+        .listed_tools(auth)
+        .await
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect()
+}
+
+fn lists_classes(names: &[String]) -> bool {
+    names
+        .iter()
+        .any(|n| n.starts_with("channel_") || n.starts_with("message_"))
+}
+
+// tools/list authenticates with its own request's header, as tools/call does: a client that
+// discovers tools before its first call sees what that credential may read, and only that.
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_list_authenticates_with_its_request_header() {
+    let (_admin, _uuid, _guard) = setup(true).await;
+
+    let listed = listed_on_a_fresh_session(Some("test-admin")).await;
+    assert!(listed.iter().any(|n| n == "channel_create"), "{listed:?}");
+
+    for header in [None, Some("not-a-credential")] {
+        let listed = listed_on_a_fresh_session(header).await;
+        assert!(
+            !lists_classes(&listed),
+            "{header:?} lists private classes: {listed:?}"
+        );
+        assert!(listed.iter().any(|n| n == "instance_create"), "{listed:?}");
+    }
+
+    // A fresh header replaces a remembered session that expired.
+    let expired = crate::agent::session::Session::for_test(
+        crate::agent::session::Principal::Agent(crate::agent::AgentContext::main_agent()),
+    )
+    .expiring_at(1);
+    let handler = Ad4mMcpHandler::new(
+        McpContext::new(
+            Some("test-admin".into()),
+            crate::agent::capabilities::ListenerReach::Network,
+            true,
+        )
+        .with_session(std::sync::Arc::new(expired)),
+    );
+    let listed = listed_names(&handler, Some("test-admin")).await;
+    assert!(listed.iter().any(|n| n == "channel_create"), "{listed:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dynamic_tools_are_hidden_unless_flag_is_set() {
     let (hidden, uuid, _guard) = setup(false).await;
@@ -1328,11 +1451,7 @@ async fn dynamic_tools_are_hidden_unless_flag_is_set() {
     assert!(text.contains("dynamicClassTools"));
 
     // Same perspective, flag on: both surfaces are advertised.
-    let shown = Ad4mMcpHandler::new(McpContext {
-        admin_credential: Some("test-admin".to_string()),
-        auth_token: Arc::new(RwLock::new(Some("test-admin".to_string()))),
-        dynamic_class_tools: true,
-    });
+    let shown = Ad4mMcpHandler::new(admin_context(true));
     let names: Vec<String> = shown
         .exposed_tools()
         .await
@@ -3157,6 +3276,99 @@ async fn template_update_writes_nothing_the_class_schema_refuses() {
     assert_eq!(after["version"], 1, "{after}");
 }
 
+/// A class the perspective defines that WE's reference does not know.
+const SIGHTING_SDNA: &str = r#"{
+  "target_class": "ns://Sighting",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Sighting"}
+  ],
+  "properties": [
+    {"path":"ns://species","name":"species","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://species","target":"value"}]}
+  ]
+}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_template_may_query_a_class_the_perspective_defines() {
+    crate::test_utils::init_v8_platform();
+    let (handler, uuid, _guard) = setup_with(
+        &[("Template", TEMPLATE_SDNA), ("Sighting", SIGHTING_SDNA)],
+        false,
+    )
+    .await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                properties: Some(props(&[
+                    ("schema", small_template()),
+                    ("version", json!(1)),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let base_uri = created["base_uri"].as_str().expect("created").to_string();
+
+    let read = handler
+        .template_read(template_params(&uuid, &base_uri, json!({})))
+        .await;
+    assert!(read.contains("species"), "the model is described: {read}");
+
+    let checked = handler
+        .template_update(template_params(
+            &uuid,
+            &base_uri,
+            json!({
+                "version": 1,
+                "dry_run": true,
+                "patches": [{ "targetId": "n2", "node": {
+                    "type": "Column",
+                    "$queries": { "rows": { "entity": "Sighting", "limit": 5 } },
+                    "children": []
+                } }]
+            }),
+        ))
+        .await;
+    assert!(checked.starts_with("Valid"), "{checked}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_updates_from_the_same_version_save_once() {
+    let (handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let update = |text: &str| {
+        handler.template_update(template_params(
+            &uuid,
+            &base_uri,
+            json!({
+                "version": 1,
+                "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": [text] } }]
+            }),
+        ))
+    };
+    let (first, second) = tokio::join!(update("One"), update("Two"));
+    let saved = [&first, &second]
+        .iter()
+        .filter(|answer| answer.starts_with("Saved as version 2."))
+        .count();
+    // The other reads the record the first saved. No file language runs here, so it cannot decode
+    // that schema and errors before it reaches the version check: what matters is that it saves
+    // nothing.
+    assert_eq!(saved, 1, "{first}\n{second}");
+    let after = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri: base_uri.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 2, "{after}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_template_tools_refuse_a_record_that_is_not_a_template() {
     crate::test_utils::init_v8_platform();
@@ -3193,11 +3405,11 @@ async fn the_template_tools_refuse_a_record_that_is_not_a_template() {
 #[tokio::test]
 async fn the_template_documentation_is_served_to_anyone() {
     crate::test_utils::init_v8_platform();
-    let anonymous = Ad4mMcpHandler::new(McpContext {
-        admin_credential: Some("test-admin".to_string()),
-        auth_token: Arc::new(RwLock::new(None)),
-        dynamic_class_tools: false,
-    });
+    let anonymous = Ad4mMcpHandler::new(McpContext::new(
+        Some("test-admin".into()),
+        crate::agent::capabilities::ListenerReach::Network,
+        false,
+    ));
     let read = |topic: &str| {
         anonymous.get_documentation(Parameters(
             crate::mcp::tools::docs::GetDocumentationParams {

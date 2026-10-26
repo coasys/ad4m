@@ -8,7 +8,6 @@ use crate::ai_service::harness::provider::{ToolProvider, ToolSchema};
 use crate::ai_service::harness::{
     CompletionSource, CreditGate, HarnessCompletion, HarnessToolCall,
 };
-use crate::mcp::server::McpContext;
 use crate::mcp::tools::Ad4mMcpHandler;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::perspectives::{register_perspective, unregister_perspective};
@@ -110,11 +109,9 @@ async fn fixture() -> Fixture {
         register_perspective(uuid.clone(), perspective);
         uuids.push(uuid);
     }
-    let handler = Arc::new(Ad4mMcpHandler::new(McpContext {
-        admin_credential: Some("test-admin".to_string()),
-        auth_token: Arc::new(tokio::sync::RwLock::new(Some("test-admin".to_string()))),
-        dynamic_class_tools: false,
-    }));
+    let handler = Arc::new(crate::mcp::tools::test_support::handler_as(
+        crate::mcp::tools::test_support::operator(),
+    ));
     let mut notes = Vec::new();
     for uuid in &uuids {
         let created: Value = serde_json::from_str(

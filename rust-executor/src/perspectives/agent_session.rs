@@ -208,11 +208,13 @@ pub enum AgentSessionError {
     Failed(#[from] anyhow::Error),
 }
 
-/// Run one session to the model's final answer, as `agent_context`, with the node's model.
+/// Run one session to the model's final answer, as `agent_context`, with the node's model. Its
+/// tools act as `caller`, the session the request arrived on, so they reach what the caller
+/// reaches and stop once that session's grant ends.
 pub async fn run_agent_session(
     request: AgentSessionRequest<'_>,
     agent_context: &AgentContext,
-    auth_token: Option<String>,
+    caller: Arc<crate::agent::session::Session>,
     credit_gate: Option<Arc<dyn CreditGate>>,
 ) -> Result<AgentReply, AgentSessionError> {
     check_request(&request).map_err(AgentSessionError::Invalid)?;
@@ -229,23 +231,25 @@ pub async fn run_agent_session(
     };
 
     let handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::new(
-        crate::mcp::server::McpContext {
-            admin_credential: crate::perspectives::interpretation::harness_admin_credential(
-                &auth_token,
-            ),
-            auth_token: Arc::new(tokio::sync::RwLock::new(auth_token.clone())),
+        crate::mcp::server::McpContext::new(
+            // The session is held; no token arrives that a credential would decide.
+            None,
+            // No request headers reach the tools, so nothing shows them local.
+            crate::agent::capabilities::ListenerReach::Network,
             // Only the static surface is offered (`session_tools`); the flag gates the MCP
             // transport, and the harness bridge lists the per-class tools whatever it says.
-            dynamic_class_tools: false,
-        },
+            false,
+        )
+        .scoped_to(request.perspective_uuid)
+        .with_session(caller),
     ));
     let tools = session_tools(handler, request.perspective_uuid, request.write_tools);
 
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow!("the AI service is not ready: {e:#}"))?;
-    // A session with a caller bills the user it acts as, as interpretation does.
-    let bill_to = auth_token.and(agent_context.managed_did().map(str::to_string));
+    // The user it acts as pays, as for an interpretation pass with a caller.
+    let bill_to = agent_context.managed_did().map(str::to_string);
     let model = Arc::new(
         crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
             Arc::new(service),
@@ -266,7 +270,7 @@ pub(crate) fn session_tools(
     let all: Arc<dyn ToolProvider> = Arc::new(
         crate::mcp::tools::provider_impl::Ad4mToolProvider::new(handler),
     );
-    let bound: Arc<dyn ToolProvider> = Arc::new(BoundArgsProvider::forcing(
+    let bound: Arc<dyn ToolProvider> = Arc::new(BoundArgsProvider::new(
         all,
         BTreeMap::from([(
             "perspective_id".to_string(),
