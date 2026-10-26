@@ -435,7 +435,7 @@ page from another host is data, and the executor decides whether it trusts it. T
 checks only the form of `src`; refusing a host that resolves to a private, loopback or
 link-local address belongs to the executor, which resolves DNS and runs the fetch. A page
 over 256 events or over the size of 257 store bodies (64 KiB each) is refused as `invalid`
-(`too-large`). Signed, long-lived data (events, agent records, link anchors) carries the bare
+(`too-large`). Signed, long-lived data (events, agent records, links) carries the bare
 DID, never a `src`.
 
 `did` is the full `did:scid:coasys:1:<scid>`. The wire types live in `ad4m-ldk`
@@ -460,6 +460,13 @@ Rules for an implementation:
   `/v1/agents/{did}` routes. A `did:key` record's `profile` is the Agent as the agent's signed
   AD4M expression (the host's `createSignedExpression`), and `expressionGet` answers that
   expression unchanged, so the executor's check of `proof.signature` holds as before.
+- **An agent record's `anchor` is one seq.** `sig` covers `{profile, version, anchor}`. A
+  `did:key` record's `anchor` is `null`; a `did:scid` record's is the seq of that log the
+  signer knew when it signed. The store on write and the language on read keep a `did:scid`
+  record only when the anchor is at or below the log's head and the log lists `signedBy` (a
+  bare `did:key`), without the bot mark and valid at the anchor: a key revoked at seq N signs
+  nothing valid anchored at or after N. The DID is the record's, the key id is in the log, and
+  a fork freezes the identity anyway, so the anchor carries no DID, key id or hash.
 
 The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the
 calls it makes today are `log`, `append`, `openOffer`, `listOffers`, `claimOffer` and

@@ -10,8 +10,11 @@
 //!   `PUT /v1/agents/{did}` with no signed request.
 //! - `get` reads `GET /v1/agents/{did}` and keeps the record only when its signature holds:
 //!   for a `did:key`, by that key; for a `did:scid`, by a key that the log (read from the store
-//!   and replayed here with the identity core, every event's signatures checked) lists at the
-//!   anchor, valid and without the bot mark at the head. Any other record is ignored (`None`).
+//!   and replayed here with the identity core, every event's signatures checked) lists, valid
+//!   and without the bot mark at the record's anchor: the seq of that log the signer knew when
+//!   it signed, at or below the head. A key revoked at seq N signs nothing valid anchored at or
+//!   after N; a record anchored before the revocation stays valid. Any other record is ignored
+//!   (`None`).
 //!   A record answers its stored signed expression unchanged (the executor checks that
 //!   signature on every read), and only when the expression's author is the record's did and
 //!   its data is an Agent naming that did. A `did:scid` person's profile is an AD4M expression
@@ -225,22 +228,23 @@ async fn verified<H: Http>(
     if !record.did.starts_with(ad4m_identity_core::DID_PREFIX) {
         return Ok(false);
     }
-    let (Some(anchor), Some(key)) = (&record.anchor, record.signed_by.strip_prefix("did:key:"))
+    let (Some(anchor), Some(key)) = (record.anchor, record.signed_by.strip_prefix("did:key:"))
     else {
         return Ok(false);
     };
-    if anchor.kel_did != record.did || !signature_holds(record, key) {
+    if !signature_holds(record, key) {
         return Ok(false);
     }
     let Some(chain) = read_log(store, &record.did).await? else {
         return Ok(false);
     };
+    if anchor > chain.head().seq {
+        return Ok(false);
+    }
     let state = chain.state();
-    let head = chain.head().seq;
-    Ok(state.key_id_of(&key.to_string()) == Some(&anchor.key_id)
-        && chain.hash_at(anchor.kel_seq) == Some(&anchor.kel_hash)
-        && state.bot_scope_at(&anchor.key_id, head).is_none()
-        && state.key_valid_at_time(&anchor.key_id, head, now_s))
+    Ok(state.key_id_of(&key.to_string()).is_some_and(|id| {
+        state.bot_scope_at(id, anchor).is_none() && state.key_valid_at_time(id, anchor, now_s)
+    }))
 }
 
 /// The whole log of `did` from the store, replayed (every event's signatures checked).

@@ -15,7 +15,7 @@ use ad4m_identity_core::{
     commitment, did_of, encode_x25519_multikey, fold, signing_bytes, BotScope, DeviceKey, Event,
     KelChain, KelPolicy, KeyLife, Op,
 };
-use ad4m_ldk::identity::{AgentRecord, Anchor, RequestBody, SignedRequest};
+use ad4m_ldk::identity::{AgentRecord, RequestBody, SignedRequest};
 use ed25519_dalek::SigningKey;
 use identity_store::request::encode_header;
 use serde_json::Value;
@@ -297,41 +297,40 @@ impl Person {
         )
     }
 
-    /// The agent record of the person, signed by device key `key_id` (secret `signer`) and
-    /// anchored at the head. Its profile is `agent` as the person's AD4M expression signed by
-    /// `signer` ([`signed_profile`]).
-    pub fn agent_record(
+    /// The agent record of the person, signed by `signer` and anchored at the head. Its
+    /// profile is `agent` as the person's AD4M expression signed by `signer`
+    /// ([`signed_profile`]).
+    pub fn agent_record(&self, signer: &SigningKey, agent: Value, version: u64) -> AgentRecord {
+        self.agent_record_at(signer, agent, version, self.chain.head().seq)
+    }
+
+    /// [`Person::agent_record`] anchored at seq `anchor`.
+    pub fn agent_record_at(
         &self,
-        key_id: &str,
         signer: &SigningKey,
         agent: Value,
         version: u64,
+        anchor: u64,
     ) -> AgentRecord {
         let profile = signed_profile(&self.did(), signer, &agent, PROFILE_TIME);
-        self.record_with_profile(key_id, signer, profile, version)
+        self.record_with_profile(signer, profile, version, anchor)
     }
 
-    /// The agent record of the person with `profile` stored as given, signed by device key
-    /// `key_id` (secret `signer`) and anchored at the head.
+    /// The agent record of the person with `profile` stored as given, signed by `signer` and
+    /// anchored at seq `anchor`.
     pub fn record_with_profile(
         &self,
-        key_id: &str,
         signer: &SigningKey,
         profile: Value,
         version: u64,
+        anchor: u64,
     ) -> AgentRecord {
-        let head = self.chain.head();
         let mut record = AgentRecord {
             did: self.did(),
             profile,
             version,
             signed_by: did_key(signer),
-            anchor: Some(Anchor {
-                kel_did: self.did(),
-                key_id: key_id.to_string(),
-                kel_seq: head.seq,
-                kel_hash: head.hash.clone(),
-            }),
+            anchor: Some(anchor),
             sig: String::new(),
         };
         record.sig = sign_record(&record, signer);

@@ -193,6 +193,12 @@ test("identity: events and requests pass through unchanged, as free functions", 
     await identityPutAgent!(record);
     assert.deepEqual(calls.at(-1), ["putAgent", [record, undefined]]);
     assert.equal(calls.at(-1)![1][0], record);
+
+    // A did:scid record's anchor is one seq of its log.
+    const scidRecord: AgentRecord = { ...record, did: "did:scid:zScid", signedBy: "did:key:zDev", anchor: 12 };
+    await identityPutAgent!(scidRecord, request);
+    assert.deepEqual(calls.at(-1), ["putAgent", [scidRecord, request]]);
+    assert.deepEqual(JSON.parse(JSON.stringify(scidRecord)).anchor, 12);
 });
 
 test("identity: offer and claim calls", async () => {

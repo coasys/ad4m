@@ -517,18 +517,37 @@ fn identity_wire_types_use_ar01_field_names() {
             profile: json!({"perspective": {"links": []}, "directMessageLanguage": "lang://x"}),
             version: 3,
             signed_by: "did:key:zDev".into(),
-            anchor: Some(Anchor {
-                kel_did: "did:scid:zScid".into(),
-                key_id: "d1".into(),
-                kel_seq: 1,
-                kel_hash: "zHash1".into(),
-            }),
+            anchor: Some(1),
             sig: "zRec".into(),
         },
         json!({"did": "did:scid:zScid", "profile": {"perspective": {"links": []}, "directMessageLanguage": "lang://x"},
-               "version": 3, "signedBy": "did:key:zDev",
-               "anchor": {"kelDid": "did:scid:zScid", "keyId": "d1", "kelSeq": 1, "kelHash": "zHash1"}, "sig": "zRec"}),
+               "version": 3, "signedBy": "did:key:zDev", "anchor": 1, "sig": "zRec"}),
     );
+}
+
+#[test]
+fn an_agent_record_anchor_is_one_seq_and_signs_as_that_number() {
+    let record = |anchor| AgentRecord {
+        did: "did:scid:zScid".into(),
+        profile: json!({}),
+        version: 3,
+        signed_by: "did:key:zDev".into(),
+        anchor,
+        sig: "zRec".into(),
+    };
+    assert_eq!(
+        record(Some(7)).signed_value(),
+        json!({"profile": {}, "version": 3, "anchor": 7})
+    );
+    assert_eq!(
+        record(None).signed_value(),
+        json!({"profile": {}, "version": 3, "anchor": null})
+    );
+    // The four-field anchor of before does not parse.
+    let old = json!({"did": "did:scid:zScid", "profile": {}, "version": 3, "signedBy": "did:key:zDev",
+                     "anchor": {"kelDid": "did:scid:zScid", "keyId": "d1", "kelSeq": 1, "kelHash": "zHash1"},
+                     "sig": "zRec"});
+    assert!(serde_json::from_value::<AgentRecord>(old).is_err());
 }
 
 #[test]
