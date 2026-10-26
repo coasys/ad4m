@@ -1961,6 +1961,72 @@
     {
       "error": {
         "code": "policy",
+        "format": "BadSalt",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "format": "coasys/1",
+          "master": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
+          "next": "QmVvFnLYvMzZ2XJuoBvyZsqt9qn6hZo4MUTMC8Fj9aHJXd",
+          "op": "rotate",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3kog8AMG4VQiEP8DH9WLpakYnkpQRbiDn4kr23TK1eybTb9mqUwmWbkoKAJnxTJhxWAgfRpuZ6mxqZ8xyLRcjXrq",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m1"
+            }
+          ],
+          "salt": "",
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "rotate with a salt that is not 16 bytes of base58btc",
+      "rule": "5"
+    },
+    {
+      "error": {
+        "code": "policy",
         "reason": "Ended"
       },
       "events": [

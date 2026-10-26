@@ -30,8 +30,7 @@ pub const WORD_COUNT: usize = 12;
 pub const PATH_PURPOSE: u32 = 7133;
 /// The second index of the master-key path.
 pub const PATH_ACCOUNT: u32 = 0;
-/// The salt length in bytes.
-pub const SALT_LEN: usize = 16;
+pub use crate::SALT_LEN;
 /// The HKDF salt of every derivation from the seed.
 pub const HKDF_SALT: &[u8] = b"coasys/1";
 /// The HKDF `info` of the recovery key.
