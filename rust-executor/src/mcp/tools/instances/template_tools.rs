@@ -8,18 +8,32 @@
 //! expression, a value of the wrong type or cardinality is refused, and the schema and its version
 //! change together. Each call runs in a fresh isolate, so a record is seen by that call alone.
 //!
+//! The bundle also gets the perspective's models ([`models`]): a template may query any class
+//! the perspective defines, and WE's rules refuse a `$query` naming one they were not told of.
+//!
+//! A tool that writes holds [`WRITES`] from reading the record until its write commits, and the
+//! version is read again just before the write: the bundle checks the caller's version against
+//! the record it was handed, and that record must still be the stored one when the result lands.
+//!
 //! The two tools' descriptions and arguments are the bundle's own ([`from_bundle`]), so they
 //! follow WE when the bundle is vendored again.
 
-use super::{check_setters, error_json, fetch_instance, instance_uri, resolve_class};
-use super::{subject_class, validate_properties, Ad4mMcpHandler, WriteMode};
+use super::{check_setters, class_properties, error_json, fetch_instance, instance_uri};
+use super::{resolve_class, subject_class, validate_properties, Ad4mMcpHandler, WriteMode};
 use crate::agent::did_for_context;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::tool_bundles::builtin;
 use rmcp::{handler::server::wrapper::Parameters, model::Tool, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Held by a tool that writes, from reading the record until its write commits, so two updates
+/// cannot both start from the same version. One for every record: calls run one at a time in the
+/// bundle anyway (`builtin::call`), so a finer lock would buy nothing.
+static WRITES: Mutex<()> = Mutex::const_new(());
 
 /// Parameters for a template tool: the record, and the tool's own arguments beside them
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -96,6 +110,11 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
+        let _writing = if tool.writes {
+            Some(WRITES.lock().await)
+        } else {
+            None
+        };
         let applies_to = &builtin::declared().applies_to;
         let mut record = None;
         for class_name in applies_to {
@@ -116,9 +135,11 @@ impl Ad4mMcpHandler {
             ));
         };
 
+        let version = instance.get("version").cloned();
         let input = json!({
             "record": { "id": base_uri, "className": class_name, "properties": instance },
             "args": Value::Object(p.arguments),
+            "models": models(&perspective).await,
             "author": did_for_context(&agent_context).ok(),
         });
         let answer = match builtin::call(name, input).await {
@@ -134,6 +155,17 @@ impl Ad4mMcpHandler {
             return error_json(format!(
                 "'{name}' says it writes nothing, yet answered with properties to write; nothing was written."
             ));
+        }
+        // WRITES keeps out the other template tool calls; this catches a write from anywhere else
+        // (the app's own save) while the bundle ran.
+        match fetch_instance(&perspective, &class_name, &base_uri).await {
+            Ok(Some(now)) if now.get("version") == version.as_ref() => {}
+            _ => {
+                return error_json(format!(
+                    "Nothing was written: the record changed while '{name}' ran. Read it again, \
+                     then make the change against what it says now."
+                ))
+            }
         }
 
         match self
@@ -194,4 +226,57 @@ impl Ad4mMcpHandler {
             .map(|_| ())
             .map_err(|e| format!("The write was not committed: {e:#}."))
     }
+}
+
+/// The perspective's models as the bundle takes them (WE's `EntityManifestEntry`): each class by
+/// name with its properties. WE's own classes are named in its reference already; the bundle
+/// describes the others to the model in full.
+async fn models(perspective: &PerspectiveInstance) -> Vec<Value> {
+    let mut names = perspective
+        .get_subject_classes_from_shacl()
+        .await
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    names
+        .iter()
+        .filter_map(|name| {
+            let shape = perspective.get_shape(name).ok()?;
+            let properties: Vec<Value> = class_properties(&shape)
+                .iter()
+                .filter(|p| !p.flag())
+                .map(|p| {
+                    let kind = match p.type_name().as_str() {
+                        "reference" => "uri",
+                        "integer" | "number" => "number",
+                        "boolean" => "boolean",
+                        _ => "string",
+                    };
+                    let mut v = json!({
+                        "name": p.name(),
+                        "predicate": p.predicate(),
+                        "type": kind,
+                        "isCollection": p.collection(),
+                        "required": p.required(),
+                        "writable": p.writable(),
+                    });
+                    if let Some((_, target)) = p.relation() {
+                        v["relatedEntity"] = json!(target);
+                    }
+                    if let Some(language) = p.resolve_language() {
+                        v["resolveLanguage"] = json!(language);
+                    }
+                    if p.reverse() {
+                        v["reverse"] = json!(true);
+                    }
+                    v
+                })
+                .collect();
+            Some(json!({
+                "name": name,
+                "targetClass": shape.target_class,
+                "properties": properties,
+            }))
+        })
+        .collect()
 }

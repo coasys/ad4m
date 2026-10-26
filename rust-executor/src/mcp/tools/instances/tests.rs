@@ -3276,6 +3276,99 @@ async fn template_update_writes_nothing_the_class_schema_refuses() {
     assert_eq!(after["version"], 1, "{after}");
 }
 
+/// A class the perspective defines that WE's reference does not know.
+const SIGHTING_SDNA: &str = r#"{
+  "target_class": "ns://Sighting",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Sighting"}
+  ],
+  "properties": [
+    {"path":"ns://species","name":"species","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://species","target":"value"}]}
+  ]
+}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_template_may_query_a_class_the_perspective_defines() {
+    crate::test_utils::init_v8_platform();
+    let (handler, uuid, _guard) = setup_with(
+        &[("Template", TEMPLATE_SDNA), ("Sighting", SIGHTING_SDNA)],
+        false,
+    )
+    .await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                properties: Some(props(&[
+                    ("schema", small_template()),
+                    ("version", json!(1)),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let base_uri = created["base_uri"].as_str().expect("created").to_string();
+
+    let read = handler
+        .template_read(template_params(&uuid, &base_uri, json!({})))
+        .await;
+    assert!(read.contains("species"), "the model is described: {read}");
+
+    let checked = handler
+        .template_update(template_params(
+            &uuid,
+            &base_uri,
+            json!({
+                "version": 1,
+                "dry_run": true,
+                "patches": [{ "targetId": "n2", "node": {
+                    "type": "Column",
+                    "$queries": { "rows": { "entity": "Sighting", "limit": 5 } },
+                    "children": []
+                } }]
+            }),
+        ))
+        .await;
+    assert!(checked.starts_with("Valid"), "{checked}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_updates_from_the_same_version_save_once() {
+    let (handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let update = |text: &str| {
+        handler.template_update(template_params(
+            &uuid,
+            &base_uri,
+            json!({
+                "version": 1,
+                "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": [text] } }]
+            }),
+        ))
+    };
+    let (first, second) = tokio::join!(update("One"), update("Two"));
+    let saved = [&first, &second]
+        .iter()
+        .filter(|answer| answer.starts_with("Saved as version 2."))
+        .count();
+    // The other reads the record the first saved. No file language runs here, so it cannot decode
+    // that schema and errors before it reaches the version check: what matters is that it saves
+    // nothing.
+    assert_eq!(saved, 1, "{first}\n{second}");
+    let after = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri: base_uri.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 2, "{after}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_template_tools_refuse_a_record_that_is_not_a_template() {
     crate::test_utils::init_v8_platform();
