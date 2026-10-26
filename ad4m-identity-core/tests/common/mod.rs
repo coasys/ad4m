@@ -295,6 +295,14 @@ pub fn refusal_cases() -> Vec<Case> {
         format("NotCanonical"),
     );
     case(
+        "event too large",
+        "10",
+        with_second(&base, &add, |v| {
+            v["offer"] = json!("x".repeat(ad4m_identity_core::EVENT_MAX_BYTES))
+        }),
+        format("TooLarge"),
+    );
+    case(
         "can without bot mark",
         "8",
         with_second(&base, &add, |v| v["add"][0]["can"] = json!(["read"])),
