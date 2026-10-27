@@ -1658,9 +1658,20 @@ impl PerspectiveInstance {
                 // error path below queues the diff. Legacy languages that
                 // implement perspective-sync still behave correctly because
                 // they throw from commit() when not synced.
-                let mut immediate_commits_remaining = self.immediate_commits_remaining.lock().await;
-                if *immediate_commits_remaining > 0 {
-                    *immediate_commits_remaining -= 1;
+                // Take the slot and release the lock before the language call:
+                // a slow commit must not hold up other commits or
+                // set_immediate_commits.
+                let immediate = {
+                    let mut immediate_commits_remaining =
+                        self.immediate_commits_remaining.lock().await;
+                    if *immediate_commits_remaining > 0 {
+                        *immediate_commits_remaining -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if immediate {
                     link_language.commit(diff.clone()).await
                 } else {
                     Err(anyhow!("Debouncing commit burst"))

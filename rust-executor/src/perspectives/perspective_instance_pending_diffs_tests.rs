@@ -251,3 +251,79 @@ async fn the_backoff_starts_again_after_a_success() {
         attempts
     );
 }
+
+/// A slow link-language commit must not block other commits on the same
+/// perspective, nor `set_immediate_commits`, and the burst limit still holds:
+/// with one immediate commit allowed and that one in flight, a second commit
+/// returns at once and goes to the pending queue.
+///
+/// The test seam's commit is synchronous, so the slow commit blocks a worker
+/// thread on a std channel; the multi-thread runtime keeps the others free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_commit_does_not_block_other_commits() {
+    use std::sync::mpsc;
+
+    Ad4mDb::init_global_instance(":memory:").unwrap();
+    let perspective = PerspectiveInstance::new(
+        PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("slow commit".to_string()),
+            shared_url: Some("neighbourhood://test".to_string()),
+            neighbourhood: Some(DecoratedNeighbourhoodExpression::default()),
+            state: PerspectiveState::Synced,
+            owners: None,
+        },
+        None,
+    );
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let entered_tx = std::sync::Mutex::new(entered_tx);
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in_language = calls.clone();
+    *perspective.link_language.write().await = Some(Language::with_test_commit(
+        "slow-link-language".to_string(),
+        Arc::new(move |_diff| {
+            calls_in_language.fetch_add(1, Ordering::SeqCst);
+            entered_tx.lock().unwrap().send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30))
+                .map_err(|_| anyhow!("never released"))?;
+            Ok(None)
+        }),
+    ));
+    perspective.set_immediate_commits(1).await;
+
+    let slow = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.commit(&add("slow")).await })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the first commit reaches the language");
+
+    let second =
+        tokio::time::timeout(Duration::from_secs(2), perspective.commit(&add("second"))).await;
+    let reset = tokio::time::timeout(
+        Duration::from_secs(2),
+        perspective.set_immediate_commits(IMMEDIATE_COMMITS_COUNT),
+    )
+    .await;
+
+    release_tx.send(()).unwrap();
+    slow.await.unwrap().unwrap();
+
+    second
+        .expect("a second commit waited for the slow language call")
+        .unwrap();
+    reset.expect("set_immediate_commits waited for the slow language call");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the second commit found the burst limit at 0 and skipped the language"
+    );
+    assert_eq!(pending(&perspective), 1, "the second commit was queued");
+}
