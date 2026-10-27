@@ -72,6 +72,23 @@ tokio::task_local! {
     static BEFORE_ROUTING_CACHE_WRITE: RoutingCacheWriteHook;
 }
 
+/// Test seam: [`sweep_link_metadata`] fails for the perspectives named here,
+/// so a test can see what startup does when the sweep fails.
+#[cfg(test)]
+static FAIL_METADATA_SWEEP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Remove the links in the store's metadata vocabulary that `p`'s store holds
+/// (see [`sparql_store::SparqlStore::purge_link_metadata_links`]).
+fn sweep_link_metadata(p: &PerspectiveInstance) -> Result<usize, deno_core::anyhow::Error> {
+    #[cfg(test)]
+    if FAIL_METADATA_SWEEP.lock().unwrap().contains(&p.uuid) {
+        return Err(deno_core::anyhow::anyhow!(
+            "induced metadata-vocabulary sweep failure"
+        ));
+    }
+    p.sparql_store.purge_link_metadata_links()
+}
+
 /// Set the application data path for perspective storage
 ///
 /// This must be called before creating perspectives to enable file-based storage.
@@ -100,7 +117,10 @@ pub struct SerializedPerspective {
     pub links: Vec<LinkExpression>,
 }
 
-pub fn initialize_from_db() {
+/// Open every perspective in the database, each in its own task. Returns the
+/// tasks, so a test can wait for them.
+pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
+    let mut tasks = Vec::new();
     let handles = Ad4mDb::global_instance()
         .lock()
         .expect("Couldn't get write lock on Ad4mDb")
@@ -125,7 +145,7 @@ pub fn initialize_from_db() {
         }
 
         // Spawn async task to initialize perspective
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             let p = PerspectiveInstance::new(handle_clone.clone(), None);
 
             // Run literal:// → literal: URI migration (idempotent)
@@ -143,6 +163,27 @@ pub fn initialize_from_db() {
                 }
                 Ok(_) => {} // Already migrated or nothing to migrate
                 Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
+            }
+
+            // A store written before it refused links in its metadata
+            // vocabulary may hold some (#1564): remove them. A perspective
+            // whose store could not be swept does not open, so nothing reads
+            // provenance from it; the next start tries again.
+            match sweep_link_metadata(&p) {
+                Ok(0) => {}
+                Ok(removed) => log::warn!(
+                    "Removed {} link(s) in the metadata vocabulary from perspective {}",
+                    removed,
+                    handle_clone.uuid
+                ),
+                Err(e) => {
+                    log::error!(
+                        "Not opening perspective {}: its metadata-vocabulary sweep failed: {}",
+                        handle_clone.uuid,
+                        e
+                    );
+                    return;
+                }
             }
 
             // No named-graph → reifier migration. The named-graph storage model
@@ -222,8 +263,9 @@ pub fn initialize_from_db() {
                 // Start background tasks
                 tokio::spawn(p.start_background_tasks());
             }
-        });
+        }));
     }
+    tasks
 }
 
 pub async fn add_perspective(

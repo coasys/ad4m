@@ -251,8 +251,45 @@ describe('WakerSubscriptionManager', () => {
       { instances: [{ id: 'test://model-row' }] },
       [{ source: 'test://message', timestamp: '2026-10-01T12:00:00.000Z' }, { timestamp: 'no source' }],
     ]);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [] }]]);
+    expect(wakes).toEqual([
+      [{ address: 'test://message', parents: [], ancestors: [], timestamp: '2026-10-01T12:00:00.000Z', verified: false }],
+    ]);
     expect(queries).toHaveLength(1);
+  });
+
+  /**
+   * #1563: a mention wake says who wrote the mention link, when, and whether its proof verified,
+   * from the row the executor's mention query returns (`author`, `timestamp`, `proofValid`). The
+   * query is newest first, so of two rows for one record the first one's provenance is kept.
+   */
+  it('carries each mention row\'s author, timestamp and proof verdict to onWake', async () => {
+    const { wakes } = await wakeWith(() => [], 0, 'test://message', [
+      [
+        { source: 'test://message', author: 'did:key:zEditor', timestamp: '2026-10-27T00:41:23.437Z', proofValid: 'true' },
+        { source: 'test://message', author: 'did:key:zWriter', timestamp: '2026-10-27T00:41:22.242Z', proofValid: 'true' },
+        { source: 'test://unsigned', author: 'did:key:zClaimed', timestamp: '2026-10-27T00:40:00.000Z', proofValid: 'false' },
+      ],
+    ]);
+    expect(wakes).toEqual([
+      [
+        {
+          address: 'test://message',
+          parents: [],
+          ancestors: [],
+          author: 'did:key:zEditor',
+          timestamp: '2026-10-27T00:41:23.437Z',
+          verified: true,
+        },
+        {
+          address: 'test://unsigned',
+          parents: [],
+          ancestors: [],
+          author: 'did:key:zClaimed',
+          timestamp: '2026-10-27T00:40:00.000Z',
+          verified: false,
+        },
+      ],
+    ]);
   });
 
   /**
@@ -280,12 +317,12 @@ describe('WakerSubscriptionManager', () => {
       'ad4m://Container',
       { parent: { ids: ['test://message'], direction: 'in' }, properties: [] },
     ]);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'], ancestors: [] }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'], ancestors: [], verified: false }]]);
   });
 
   it('reports no parents, without a warning, when the executor returns no instances', async () => {
     const { wakes, warnings } = await wakeWith(() => true);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [] }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], verified: false }]]);
     expect(warnings).toEqual([]);
   });
 
@@ -293,7 +330,7 @@ describe('WakerSubscriptionManager', () => {
     const { wakes, queries } = await wakeWith(() => [], undefined, 'addr://msg-1', [
       [{ source: 'addr://msg-1' }, { source: 'addr://msg-1' }],
     ]);
-    expect(wakes).toEqual([[{ address: 'addr://msg-1', parents: [], ancestors: [] }]]);
+    expect(wakes).toEqual([[{ address: 'addr://msg-1', parents: [], ancestors: [], verified: false }]]);
     // The parent lookup runs once, not once per row.
     expect(queries).toHaveLength(1);
   });
@@ -453,6 +490,7 @@ describe('WakerSubscriptionManager', () => {
           address: 'test://message',
           parents: ['test://channel', 'test://block'],
           ancestors: ['test://call', 'test://space', 'ad4m://self'],
+          verified: false,
         },
       ],
     ]);
@@ -487,7 +525,7 @@ describe('WakerSubscriptionManager', () => {
     const address = 'test://bad> . ?s ?p ?o . #';
     const { wakes, queries } = await wakeWith(() => [], 3, address);
     expect(queries[0][1].parent.ids).toEqual([address]);
-    expect(wakes[0][0]).toEqual({ address, parents: [], ancestors: [] });
+    expect(wakes[0][0]).toEqual({ address, parents: [], ancestors: [], verified: false });
   });
 
   it('reads a model subscription by row id', async () => {
