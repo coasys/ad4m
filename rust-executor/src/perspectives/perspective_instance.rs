@@ -39,7 +39,7 @@ use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, PoisonError};
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::{sleep, Instant};
@@ -72,6 +72,9 @@ pub(crate) use subscriptions::result_json;
 mod subscription_triggers;
 // Registering this executor's owners with the link language.
 mod local_agents;
+// Committing a batch only if the links it expects still stand.
+mod expected_links;
+pub use expected_links::{ExpectedLinks, LinksChanged};
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -630,6 +633,10 @@ pub struct PerspectiveInstance {
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
     pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
+    /// Held by every write to `sparql_store` ([`Self::persist_link_diff`]), and by
+    /// [`Self::commit_batch_if`] from checking what it expects through its write, so no other
+    /// write lands in between. A std mutex: held for store calls, never across an await.
+    persist_lock: Arc<std::sync::Mutex<()>>,
     /// In-memory cache of parsed `ModelShape` instances keyed by class name.
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
@@ -734,6 +741,7 @@ impl PerspectiveInstance {
                 crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
+            persist_lock: Arc::new(std::sync::Mutex::new(())),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
             abstract_cache: Arc::new(std::sync::RwLock::new(Default::default())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -4167,6 +4175,16 @@ impl PerspectiveInstance {
     }
 
     pub(crate) async fn persist_link_diff(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
+        let _persisting = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.write_link_diff(diff);
+        Ok(())
+    }
+
+    /// The store write of [`Self::persist_link_diff`], for a caller that holds `persist_lock`.
+    fn write_link_diff(&self, diff: &PerspectiveDiff) {
         // IMPORTANT: Process removals BEFORE additions!
         // The remove_link function matches by source/predicate/target (not unique ID).
         // If we add first and remove second, we'd delete the newly added links too.
@@ -4204,8 +4222,6 @@ impl PerspectiveInstance {
         // is a real concern in production it should be addressed via
         // configuration (smaller write_buffer_size, more memtables) or a
         // throttled background flush, not a per-write fsync.
-
-        Ok(())
     }
 
     /// Record the links of a diff into `changed_predicates`. A link without a
@@ -6652,115 +6668,7 @@ impl PerspectiveInstance {
         batch_uuid: String,
         context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
-        // Take the batch out of the store without holding the lock for the commit
-        let TimestampedBatch {
-            mut diff, updates, ..
-        } = match self.batch_store.write().await.remove(&batch_uuid) {
-            Some(batch) => batch,
-            None => return Err(anyhow!("No batch found with given UUID")),
-        };
-        #[cfg(test)]
-        if self.fail_next_commit.swap(false, Ordering::SeqCst) {
-            drop(diff);
-            return Err(anyhow!("injected fault (test seam): commit_batch failed"));
-        }
-
-        // An update whose halves are both still staged commits as an update.
-        // Later work in the batch may have dropped one half; then the other
-        // stays a plain addition or removal.
-        let updates: Vec<(LinkExpression, LinkExpression)> = updates
-            .into_iter()
-            .filter(|(old, new)| {
-                let (Some(r), Some(a)) = (
-                    diff.removals.iter().position(|l| l == old),
-                    diff.additions.iter().position(|l| l == new),
-                ) else {
-                    return false;
-                };
-                diff.removals.remove(r);
-                diff.additions.remove(a);
-                true
-            })
-            .collect();
-
-        let mut persist_diff = PerspectiveDiff::empty();
-        // Only Shared links reach the link language.
-        let mut shared_diff = PerspectiveDiff::empty();
-        // Additions and removals, published as ADDED / REMOVED.
-        let mut published = DecoratedPerspectiveDiff {
-            additions: Vec::new(),
-            removals: Vec::new(),
-        };
-
-        for link in diff.additions {
-            let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr = create_signed_expression(link.data.normalize(), context)?;
-            let mut stored = LinkExpression::from(signed_expr);
-            stored.status = Some(status.clone());
-            persist_diff.additions.push(stored.clone());
-            if status == LinkStatus::Shared {
-                shared_diff.additions.push(stored.clone());
-            }
-            published
-                .additions
-                .push(DecoratedLinkExpression::from((stored, status)));
-        }
-
-        for link in diff.removals {
-            let status = link.status.clone().unwrap_or(LinkStatus::Shared);
-            persist_diff.removals.push(link.clone());
-            if status == LinkStatus::Shared {
-                shared_diff.removals.push(link.clone());
-            }
-            published
-                .removals
-                .push(DecoratedLinkExpression::from((link, status)));
-        }
-
-        // Both halves of an update carry the stored status `update_link` gave them.
-        let mut combined_diff = published.clone();
-        let mut updated = Vec::new();
-        for (old, new) in updates {
-            let status = new.status.clone().unwrap_or_default();
-            persist_diff.removals.push(old.clone());
-            persist_diff.additions.push(new.clone());
-            if status == LinkStatus::Shared {
-                shared_diff.removals.push(old.clone());
-                shared_diff.additions.push(new.clone());
-            }
-            let old = DecoratedLinkExpression::from((old, status.clone()));
-            let new = DecoratedLinkExpression::from((new, status));
-            combined_diff.removals.push(old.clone());
-            combined_diff.additions.push(new.clone());
-            updated.push((old, new));
-        }
-
-        if (!shared_diff.additions.is_empty() || !shared_diff.removals.is_empty())
-            && self.has_link_language().await
-        {
-            self.spawn_commit_and_handle_error(&shared_diff);
-        }
-
-        // Only update storage / subscription engines when there are changes.
-        // The SPARQL store must be updated first so any subscription re-checks
-        // triggered by update_prolog_engines() see the committed batch state.
-        if !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty() {
-            self.persist_link_diff(&persist_diff).await?;
-
-            // Queue the Prolog fact update and the notification + live-query checks
-            self.update_prolog_engines(combined_diff.clone()).await;
-
-            // Publish link-added/-removed/-updated to WS subscribers. The
-            // single-mutation paths publish their own diff, and
-            // spawn_prolog_facts_update deliberately does not (no double
-            // delivery there), so a batch must publish here or its links never
-            // reach WS subscribers. Updates go out as `link-updated`, not as a
-            // removal plus an addition.
-            self.pubsub_publish_diff(&published).await;
-            self.publish_link_updates(&updated).await;
-        }
-
-        Ok(combined_diff)
+        self.commit_batch_if(batch_uuid, context, &[]).await
     }
 }
 
@@ -7997,6 +7905,90 @@ mod tests {
 
         let links_after = perspective.get_links(&query).await.unwrap();
         assert_eq!(links_after.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn commit_batch_if_writes_nothing_once_an_expected_link_changed() {
+        let mut perspective = setup().await;
+        let ctx = AgentContext::main_agent();
+        let link = |predicate: &str, target: &str| Link {
+            source: "test://record".to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        };
+        let body = |perspective: &PerspectiveInstance| {
+            perspective
+                .sparql_store
+                .query_links(
+                    Some("test://record"),
+                    Some("test://body"),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .len()
+        };
+        perspective
+            .add_link(
+                link("test://version", "test://v1"),
+                LinkStatus::Shared,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        // Another write lands between taking the expectation and committing.
+        let expected = perspective
+            .expect_links("test://record", "test://version")
+            .unwrap();
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .add_link(
+                link("test://body", "test://from-batch"),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        perspective
+            .add_link(
+                link("test://version", "test://v2"),
+                LinkStatus::Shared,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let refused = perspective
+            .commit_batch_if(batch_id, &ctx, &[expected])
+            .await
+            .unwrap_err();
+        assert!(refused.is::<LinksChanged>(), "{refused:#}");
+        assert_eq!(body(&perspective), 0, "nothing of the batch is written");
+
+        // Taken again, the expectation holds and the batch commits.
+        let expected = perspective
+            .expect_links("test://record", "test://version")
+            .unwrap();
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .add_link(
+                link("test://body", "test://from-batch"),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        perspective
+            .commit_batch_if(batch_id, &ctx, &[expected])
+            .await
+            .unwrap();
+        assert_eq!(body(&perspective), 1);
     }
 
     #[tokio::test]
