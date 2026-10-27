@@ -2030,7 +2030,7 @@ impl Ad4mDb {
         max_count: Option<usize>,
     ) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
         let mut stmt = self.conn.prepare(
-            "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2",
+            "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2 ORDER BY id",
         )?;
         let diffs_iter = stmt.query_map(params![perspective_uuid, true], |row| {
             let additions: Vec<LinkExpression> =

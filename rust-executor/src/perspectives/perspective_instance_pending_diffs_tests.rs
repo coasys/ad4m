@@ -2,12 +2,17 @@
 //! link language, on tokio's paused clock.
 //!
 //! The fake language rejects every commit while it is "down" (a dead link
-//! server). Accepted links are recorded in order as `+target` / `-target`.
+//! server), and while up refuses any diff that adds a link to `REFUSED`.
+//! Accepted links are recorded in order as `+target` / `-target`.
 
 use super::*;
 use crate::db::Ad4mDb;
 use crate::types::{DecoratedNeighbourhoodExpression, ExpressionProof, Link, PerspectiveState};
 use std::sync::atomic::AtomicUsize;
+
+/// The fake language refuses, whenever it is up, any diff that adds a link
+/// to this target.
+const REFUSED: &str = "refused";
 
 #[derive(Default)]
 struct FakeLanguage {
@@ -23,6 +28,9 @@ impl FakeLanguage {
         self.attempts.fetch_add(1, Ordering::SeqCst);
         if self.down.load(Ordering::SeqCst) {
             return Err(anyhow!("link server unreachable"));
+        }
+        if diff.additions.iter().any(|l| l.data.target == REFUSED) {
+            return Err(anyhow!("link server refused the diff"));
         }
         self.batches
             .lock()
@@ -212,10 +220,12 @@ async fn a_failing_language_is_retried_with_backoff() {
 
     let attempts = fake.attempts();
     // 100 ms doubling to a 30 s cap: about 9 attempts in the first minute,
-    // then 2 a minute (28 in all). Retrying every 100 ms would be ~6,000;
-    // without the cap the wait grows to 51.2 s and gives about 20.
+    // then 2 a minute (28 in all). Each attempt makes 3 calls: the batch,
+    // its oldest diff alone, the rest. Retrying every 100 ms would be
+    // ~18,000 calls; without the cap the wait grows to 51.2 s and gives
+    // about 60.
     assert!(
-        (25..=60).contains(&attempts),
+        (75..=180).contains(&attempts),
         "10 simulated minutes against a dead language made {} commit attempts",
         attempts
     );
@@ -250,4 +260,30 @@ async fn the_backoff_starts_again_after_a_success() {
         "a second outage got {} attempts in its first 10 s: the backoff did not reset",
         attempts
     );
+}
+
+/// A diff the language refuses while it accepts the others is dropped, and
+/// the diffs queued before and after it still reach the language, in order.
+#[tokio::test(start_paused = true)]
+async fn a_refused_diff_does_not_block_the_diffs_behind_it() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("before"));
+    enqueue(&perspective, &add(REFUSED));
+    enqueue(&perspective, &add("after"));
+    let task = start_loop(&perspective);
+
+    let drained = run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    // A later write is no longer queued behind the refused diff.
+    perspective.commit(&add("later")).await.unwrap();
+    task.abort();
+
+    assert!(
+        drained.is_some(),
+        "{} diffs still pending after {} commit attempts",
+        pending(&perspective),
+        fake.attempts()
+    );
+    assert_eq!(fake.committed(), vec!["+before", "+after", "+later"]);
+    assert_eq!(pending(&perspective), 0);
 }
