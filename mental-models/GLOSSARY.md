@@ -24,6 +24,8 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Agent profile** (`Agent` in `types/domain.rs`): The public record of one agent: its DID, its public perspective and its direct-message language address. [Agent profiles](agents/identity/profiles.md) — not: public profile, `Agent` record
 
+**Agent session** (`perspective.runAgent`, `run_agent_session`): A conversation with an LLM in one perspective, through the harness, over the perspective's static MCP reads and the writes the caller names, acting as the caller. [MCP server](agents/interfaces/mcp-server.md) — not: session (a `Session` is a connection's identity)
+
 **AI service** (`AIService`, `rust-executor/src/ai_service/`): The executor service that runs local and remote LLMs, embedding models, transcription and AI tasks. [AI service](agents/executor/services/ai.md)
 
 **AI task** (`tasks` table, `AIService::add_task`): A stored system prompt with examples, bound to one model and owned by the agent that created it. [AI service](agents/executor/services/ai.md)
@@ -126,7 +128,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Hard-wired class** (`hardwired_class.rs`, `hardwired_sdna/`): A subject class that the executor registers itself from bundled JSON, such as `FlowInstance`, `InterpretationRun` or `AutoProcessor`. [Social DNA](perspectives/social-dna/README.md) — not: built-in class (except for the abstract `ad4m://TextContent`)
 
-**Harness** (`ai_service/harness/`, `run_with_tools`): The tool-calling LLM loop that interpretation can use instead of a single prompt. [Interpretation](perspectives/social-dna/interpretation/README.md)
+**Harness** (`ai_service/harness/`, `run_with_tools`): The tool-calling LLM loop that interpretation can use instead of a single prompt, and that agent sessions run. [Interpretation](perspectives/social-dna/interpretation/README.md)
 
 **Holochain service** (`HolochainService`, `HolochainServiceInterface`): The executor service that runs the conductor behind one actor channel. [Holochain service](agents/executor/services/holochain.md)
 

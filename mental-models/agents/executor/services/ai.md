@@ -16,7 +16,7 @@ The **AI service** (`AIService`) runs models for the executor: LLMs (large langu
    |---|---|
    | WebSocket RPC | `ai.prompt`, `ai.embed`, `ai.transcriptionOpen` |
    | OpenAI-compatible HTTP API under `/v1` | `/chat/completions`, `/completions`, `/embeddings`, `/audio/*`, `/realtime`, `/models` |
-   | the **harness** (`harness/`), the tool-calling loop that interpretation uses | `run_with_tools` ([Interpretation](../../../perspectives/social-dna/interpretation/README.md)) |
+   | the **harness** (`harness/`), the tool-calling loop that interpretation and agent sessions use | `run_with_tools` ([Interpretation](../../../perspectives/social-dna/interpretation/README.md), [MCP server](../../interfaces/mcp-server.md)) |
 
 4. Streaming goes through `prompt_messages_stream`.
 5. AI calls bill through `bill_ai_operation` or `CreditGate` ([Billing and hosting](billing-and-hosting.md)).
