@@ -69,6 +69,7 @@ import ad4mPlugin, {
   _parkedSubscriptionsForTests,
   stateToSave,
   parkSubscription,
+  restoreSavedSubscriptions,
   readsMentionText,
 } from "./index";
 import { STATIC_TOOL_DEFS } from "./staticToolDefs";
@@ -4345,6 +4346,123 @@ describe("a saved mention subscription that reads message text", () => {
       second.disposeAll();
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
+  });
+
+  it("survives cold starts in saved order until the executor can re-derive it", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "ad4m-parked-"));
+    const current: WakerSubscription = {
+      id: textQuery.id,
+      type: "mention",
+      perspective: textQuery.perspective,
+      channel: "",
+      query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
+    };
+    // One process start: load the file, restore what it holds in its order,
+    // and stop without anything else happening.
+    async function coldStart(executorAnswers: boolean, opening: unknown[]): Promise<string[][]> {
+      _resetModuleState();
+      const state = loadWakerState(stateDir);
+      const woken: string[][] = [];
+      const manager = new WakerSubscriptionManager({
+        perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) },
+        logger: makeMockLogger(),
+        QuerySubscriptionProxy: vi.fn(function () {
+          return {
+            initialized: Promise.resolve(),
+            subscribe: vi.fn(() => Promise.resolve()),
+            dispose: vi.fn(),
+            onResult: vi.fn(),
+            result: opening,
+          };
+        }),
+        debounceMs: 10,
+        onWake: (_sub, _result, mentions) => {
+          woken.push((mentions ?? []).map((m) => m.address));
+          return true;
+        },
+        previousSeenMessages: state.seenMessages,
+        // The plugin's onPersist.
+        onPersist: (subs, seen) => {
+          const next = stateToSave(subs, seen);
+          saveWakerState(stateDir, next.subscriptions, next.seenMessages);
+        },
+      });
+      try {
+        await restoreSavedSubscriptions(
+          state.subscriptions,
+          state.seenMessages,
+          executorAnswers
+            ? () => manager.subscribe(current)
+            : () => Promise.reject(new Error("Update the executor.")),
+          (s) => manager.subscribe(s),
+          makeMockLogger(),
+        );
+        if (executorAnswers) await vi.waitFor(() => expect(woken).not.toEqual([]));
+      } finally {
+        manager.disposeAll();
+      }
+      return woken;
+    }
+
+    try {
+      saveWakerState(stateDir, [textQuery, children], { [textQuery.id]: ["msg-old"] });
+      for (const start of [1, 2]) {
+        expect(await coldStart(false, []), `start ${start}`).toEqual([]);
+        const state = loadWakerState(stateDir);
+        expect(state.subscriptions.map((s) => s.id).sort(), `start ${start}`).toEqual(
+          ["children-p", textQuery.id],
+        );
+        expect(state.seenMessages[textQuery.id], `start ${start}`).toEqual(["msg-old"]);
+      }
+      // The executor is updated; msg-new was written while it was parked.
+      const woken = await coldStart(true, [{ source: "msg-old" }, { source: "msg-new" }]);
+      expect(woken).toEqual([["msg-new"]]);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lets go of a saved subscription that fails to restore, once the loop is done with it", async () => {
+    const persisted: { subs: WakerSubscription[]; seen?: Record<string, string[]> } = { subs: [] };
+    const { manager } = managerSavingTo(persisted);
+    const broken: WakerSubscription = { ...children, id: "children-broken", channel: "we://call/2" };
+    try {
+      await restoreSavedSubscriptions(
+        [broken, children],
+        { [broken.id]: ["x"] },
+        vi.fn(),
+        (s) => (s.id === broken.id ? Promise.reject(new Error("boom")) : manager.subscribe(s)),
+        makeMockLogger(),
+      );
+      expect(persisted.subs.map((s) => s.id)).toEqual(["children-p"]);
+      expect(persisted.seen).not.toHaveProperty(broken.id);
+    } finally {
+      manager.disposeAll();
+    }
+  });
+
+  it("stops restoring once a new attempt owns the restore", async () => {
+    const createLive = vi.fn().mockResolvedValue(undefined);
+    let superseded = false;
+    await restoreSavedSubscriptions(
+      [children, { ...children, id: "children-2" }],
+      {},
+      vi.fn(),
+      (s) => {
+        superseded = true;
+        return createLive(s);
+      },
+      makeMockLogger(),
+      () => superseded,
+    );
+    expect(createLive).toHaveBeenCalledTimes(1);
+    // What it had not reached is still held for the persist.
+    expect(stateToSave([], {}).subscriptions.map((s) => s.id)).toEqual(["children-p", "children-2"]);
+
+    // Superseded before it starts: it opens nothing.
+    createLive.mockClear();
+    await restoreSavedSubscriptions([children], {}, vi.fn(), createLive, makeMockLogger(), () => true);
+    expect(createLive).not.toHaveBeenCalled();
   });
 
   it("is re-derived, not parked, when the executor answers", async () => {
