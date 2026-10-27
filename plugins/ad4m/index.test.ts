@@ -70,6 +70,7 @@ import ad4mPlugin, {
   stateToSave,
   parkSubscription,
   restoreSavedSubscriptions,
+  retryParkedSubscriptions,
   readsMentionText,
 } from "./index";
 import { STATIC_TOOL_DEFS } from "./staticToolDefs";
@@ -4444,6 +4445,95 @@ describe("a saved mention subscription that reads message text", () => {
     } finally {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
+  });
+
+  it("is asked again while the waker runs, and wakes on a link-only mention once the executor answers", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "ad4m-parked-retry-"));
+    const current: WakerSubscription = {
+      id: textQuery.id,
+      type: "mention",
+      perspective: textQuery.perspective,
+      channel: "",
+      query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
+    };
+    const woken: string[][] = [];
+    saveWakerState(stateDir, [textQuery, children], { [textQuery.id]: ["msg-old"] });
+    const state = loadWakerState(stateDir);
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) },
+      logger: makeMockLogger(),
+      QuerySubscriptionProxy: vi.fn(function () {
+        return {
+          initialized: Promise.resolve(),
+          subscribe: vi.fn(() => Promise.resolve()),
+          dispose: vi.fn(),
+          onResult: vi.fn(),
+          // msg-new holds no name, only the we://mention link to the DID.
+          result: [{ source: "msg-old" }, { source: "msg-new" }],
+        };
+      }),
+      debounceMs: 10,
+      onWake: (_sub, _result, mentions) => {
+        woken.push((mentions ?? []).map((m) => m.address));
+        return true;
+      },
+      previousSeenMessages: state.seenMessages,
+      onPersist: (subs, seen) => {
+        const next = stateToSave(subs, seen);
+        saveWakerState(stateDir, next.subscriptions, next.seenMessages);
+      },
+    });
+    // The first ask fails (MCP not up yet), the next one answers.
+    const rederive = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("MCP HTTP 503"))
+      .mockImplementation(() => manager.subscribe(current));
+    let waits = 0;
+    try {
+      await restoreSavedSubscriptions(
+        state.subscriptions,
+        state.seenMessages,
+        rederive,
+        (s) => manager.subscribe(s),
+        makeMockLogger(),
+      );
+      expect(_parkedSubscriptionsForTests().has(textQuery.id)).toBe(true);
+
+      await retryParkedSubscriptions(rederive, makeMockLogger(), () => false, async () => {
+        waits++;
+      });
+
+      expect(waits).toBe(1);
+      expect(rederive).toHaveBeenCalledTimes(2);
+      expect(_parkedSubscriptionsForTests().size).toBe(0);
+      await vi.waitFor(() => expect(woken).toEqual([["msg-new"]]));
+      const saved = loadWakerState(stateDir);
+      expect(saved.subscriptions.find((s) => s.id === textQuery.id)).toEqual(current);
+    } finally {
+      manager.disposeAll();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("is no longer parked once the executor answers, with no state file to persist to", async () => {
+    parkSubscription(textQuery, { [textQuery.id]: ["msg-old"] });
+    let waits = 0;
+    await retryParkedSubscriptions(vi.fn().mockResolvedValue("Subscribed"), makeMockLogger(), () => false, async () => {
+      if (++waits > 1) throw new Error("asked again after the executor answered");
+    });
+    expect(_parkedSubscriptionsForTests().size).toBe(0);
+    expect(stateToSave([], {})).toEqual({ subscriptions: [], seenMessages: {} });
+  });
+
+  it("stops asking again once the waker stops", async () => {
+    parkSubscription(textQuery, {});
+    const rederive = vi.fn().mockRejectedValue(new Error("Update the executor."));
+    let stopped = false;
+    await retryParkedSubscriptions(rederive, makeMockLogger(), () => stopped, async () => {
+      if (rederive.mock.calls.length === 2) stopped = true;
+    });
+    expect(rederive).toHaveBeenCalledTimes(2);
+    expect(_parkedSubscriptionsForTests().has(textQuery.id)).toBe(true);
   });
 
   it("lets go of a saved subscription that fails to restore, once the loop is done with it", async () => {

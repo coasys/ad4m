@@ -130,7 +130,8 @@ let _wakerGeneration = 0;
 /**
  * Saved mention subscriptions that read message text and could not be asked
  * of the executor again at restore ({@link restoreSavedSubscription}). They
- * are not opened, but stay in the saved state, so the next restore asks again.
+ * are not opened, but stay in the saved state, and are asked again
+ * ({@link retryParkedSubscriptions}).
  */
 const _parkedSubscriptions = new Map<string, WakerSubscription>();
 /**
@@ -278,9 +279,8 @@ export function readsMentionText(sub: WakerSubscription): boolean {
  * neither the active nor the pending set, and the next persist would delete it
  * from disk. A text query ({@link readsMentionText}) is not opened, since
  * nothing would filter its rows; it goes to `park`, which keeps it saved, with
- * its seen set. The next start asks again. Nothing asks before that, so a
- * transient failure leaves mentions in that perspective off until the next
- * start, or until `ad4m_subscribe_to_mentions` is called for it.
+ * its seen set, and {@link retryParkedSubscriptions} asks again every
+ * `WAKER_RETRY_MS` while the waker runs.
  */
 export async function restoreSavedSubscription(
   sub: WakerSubscription,
@@ -300,8 +300,8 @@ export async function restoreSavedSubscription(
       logger.warn(
         `[ad4m-waker] Could not re-derive ${sub.id} (${err?.message ?? err}); not opening it: ` +
           "it reads message text, which this waker no longer checks for a mention. " +
-          "It stays saved and is asked of the executor again at the next start, " +
-          "or now by calling ad4m_subscribe_to_mentions for the perspective.",
+          "It stays saved and is asked of the executor again every " +
+          `${WAKER_RETRY_MS / 1000}s.`,
       );
       park(sub);
       return;
@@ -383,6 +383,37 @@ export async function restoreSavedSubscriptions(
       logger.error(`[ad4m-waker] Failed to restore ${sub.id}: ${err.message}`);
     }
     finishRestoring(sub.id);
+  }
+}
+
+/**
+ * Ask the executor again for each parked subscription
+ * ({@link restoreSavedSubscription}) after every `wait`, until none is parked
+ * or `stale` turns true. One the executor now answers for is open under its
+ * id with the current query, so it is no longer parked. Covers a re-derive that failed only because the
+ * executor's MCP side was not up yet, and an executor updated while the
+ * waker runs.
+ */
+export async function retryParkedSubscriptions(
+  rederiveMention: (perspectiveId: string) => Promise<unknown>,
+  logger: { info: (message: string) => void },
+  stale: () => boolean,
+  wait: () => Promise<void>,
+): Promise<void> {
+  while (_parkedSubscriptions.size > 0) {
+    await wait();
+    for (const sub of Array.from(_parkedSubscriptions.values())) {
+      if (stale()) return;
+      // Unsubscribed while an earlier one was asked.
+      if (!_parkedSubscriptions.has(sub.id)) continue;
+      try {
+        await rederiveMention(sub.perspective);
+        release(sub.id);
+        logger.info(`[ad4m-waker] Re-derived ${sub.id}; it no longer reads message text`);
+      } catch (err: any) {
+        logger.info(`[ad4m-waker] ${sub.id} still not opened: ${err?.message ?? err}`);
+      }
+    }
   }
 }
 
@@ -1235,7 +1266,7 @@ Notes:
       const parked = Array.from(_parkedSubscriptions.values());
       if (parked.length > 0) {
         sections.push(
-          `Not opened — saved by an older executor, they read message text, and the executor could not re-derive them at start; asked again at the next start (${parked.length}):\n` +
+          `Not opened — saved by an older executor, they read message text, and the executor could not re-derive them at start; asked again every ${WAKER_RETRY_MS / 1000}s (${parked.length}):\n` +
             parked.map(describe).join("\n") +
             "\nThese are NOT listening. To ask again now, call ad4m_subscribe_to_mentions for the perspective; or update the executor.",
         );
@@ -1597,6 +1628,13 @@ Notes:
         createLiveSubscription,
         logger,
         stale,
+      );
+      // Detached: a parked subscription must not hold up the connect.
+      void retryParkedSubscriptions(subscribeToMentionsForPerspective, logger, stale, () =>
+        new Promise<void>((resolve) => {
+          const timer: ReturnType<typeof setTimeout> = setTimeout(resolve, WAKER_RETRY_MS);
+          (timer as { unref?: () => void }).unref?.();
+        }),
       );
     }
     return true;

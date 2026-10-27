@@ -260,7 +260,9 @@ pub const MENTION_WINDOW: usize = 50;
 /// link may claim any author, so it does not count either.
 ///
 /// The DID is compared as a string literal, escaped, rather than spliced in
-/// as an IRI. Rows carry `source`, which the waker reads as the mentioned
+/// as an IRI. `?source` needs no `isIRI` check: the store writes every link
+/// source as an IRI (`sparql_store::make_direct_triple`), and only links
+/// carry this predicate. Rows carry `source`, which the waker reads as the mentioned
 /// record, and the mention link's provenance (#1563): `author`, `timestamp`
 /// and `proofValid`, which the waker hands the woken agent with the record.
 /// Pure over its input, so it unit-tests without an agent.
@@ -269,7 +271,7 @@ pub fn build_mention_query(did: &str) -> String {
     format!(
         "SELECT ?source ?author ?timestamp ?proofValid WHERE {{ \
          ?source <{MENTION_PREDICATE}> ?mentioned . \
-         FILTER(isIRI(?source) && STR(?mentioned) = \"{did}\") \
+         FILTER(STR(?mentioned) = \"{did}\") \
          ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <{MENTION_PREDICATE}> ?mentioned )>> . \
          ?reifier <ad4m://ontology/author> ?author . \
          ?reifier <ad4m://ontology/timestamp> ?timestamp . \
