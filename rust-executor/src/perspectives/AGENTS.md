@@ -39,6 +39,9 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - `get_subject_data` currently routes through Prolog and, while Prolog is disabled, returns only
   `author`/`timestamp` with no other properties. Migrating it to `model_query` is planned (spec
   item 1). Prefer `model_query` for reads.
+- `commit`: holds `commit_order` from its pending-queue check until the diff is sent or queued,
+  so a commit whose language call fails is queued ahead of every later one. The immediate-commit
+  counter has its own short lock: `set_immediate_commits` never waits for a language call.
 - `pending_diffs_loop`: a failed `commit_pending_diffs` is logged at warn and retried after
   100 ms doubling to 30 s, reset on success (tests: `perspective_instance_pending_diffs_tests.rs`).
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
