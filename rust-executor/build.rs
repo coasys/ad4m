@@ -143,12 +143,17 @@ fn download_alliance_dna() {
 }
 
 /// Downloads WE's agent tools release into `OUT_DIR`, and fails the build unless every file has
-/// the sha256 pinned in `WE_AGENT_TOOLS_FILES`. A file already there with that hash is kept, so a
-/// build that has downloaded them once needs no network again.
+/// the sha256 pinned in `WE_AGENT_TOOLS_FILES`. A file already there with that hash is kept, so
+/// once both are, they need no network again.
+///
+/// The script re-runs whenever either file changes. `include_str!` makes them inputs of the
+/// executor crate only, so without that a cached file changed after its check would be compiled
+/// in unchecked; and one that was deleted would fail the build until the script ran again.
 fn download_we_agent_tools() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     for (name, pinned) in WE_AGENT_TOOLS_FILES {
         let dest = Path::new(&out_dir).join(name);
+        println!("cargo:rerun-if-changed={}", dest.display());
         if sha256_of(&dest).as_deref() == Some(pinned) {
             continue;
         }
@@ -187,6 +192,18 @@ fn download_we_agent_tools() {
                 name, url, got, pinned, WE_AGENT_TOOLS_VERSION
             );
         }
+        // Cargo takes a file newer than the start of this run for a change, so one written now
+        // would re-run the script, and recompile the crate, on the next build as well. Date it
+        // back to this script's binary, which was built before the run started.
+        let built = std::env::current_exe()
+            .and_then(std::fs::metadata)
+            .and_then(|m| m.modified())
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&partial)
+            .and_then(|f| f.set_modified(built))
+            .unwrap();
         std::fs::rename(&partial, &dest).unwrap();
     }
 }
