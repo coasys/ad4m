@@ -3595,7 +3595,11 @@ async fn over_mcp_an_update_against_the_version_read_is_saved() {
     let saved = client
         .call(
             "template_update",
-            template_arguments(&uuid, &base_uri, rename(read["version"].as_i64().unwrap(), "Goodbye")),
+            template_arguments(
+                &uuid,
+                &base_uri,
+                rename(read["version"].as_i64().unwrap(), "Goodbye"),
+            ),
         )
         .await;
     assert!(saved.starts_with("Saved as version 2."), "{saved}");
@@ -3701,7 +3705,11 @@ async fn over_mcp_a_call_the_template_tools_cannot_run_says_why() {
     let unversioned = client
         .call(
             "template_update",
-            template_arguments(&uuid, &base_uri, json!({ "patches": rename(1, "x")["patches"] })),
+            template_arguments(
+                &uuid,
+                &base_uri,
+                json!({ "patches": rename(1, "x")["patches"] }),
+            ),
         )
         .await;
     assert!(unversioned.contains("version"), "{unversioned}");
@@ -3722,7 +3730,10 @@ async fn over_mcp_a_stored_template_that_is_not_one_is_reported() {
             template_arguments(&uuid, &base_uri, json!({})),
         )
         .await;
-    let error = parse(&read)["error"].as_str().unwrap_or_default().to_string();
+    let error = parse(&read)["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     assert!(error.contains("'template_read' failed"), "{read}");
 }
 
