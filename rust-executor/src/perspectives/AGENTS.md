@@ -41,6 +41,9 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   item 1). Prefer `model_query` for reads.
 - `pending_diffs_loop`: a failed `commit_pending_diffs` is logged at warn and retried after
   100 ms doubling to 30 s, reset on success (tests: `perspective_instance_pending_diffs_tests.rs`).
+  When a batch of several diffs fails, the oldest diff is sent alone, then the rest. A diff refused
+  while the language accepts the rest is dropped and logged at error level (its links stay local).
+  It is never sent again after its successors, because that would reorder it behind newer diffs.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
