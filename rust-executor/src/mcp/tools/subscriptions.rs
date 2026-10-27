@@ -185,7 +185,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent in a neighbourhood. A mention is a `we://mention` link from the record that mentions the agent (a post, a message) to the agent's DID, which is how WE stores one; the name the text shows plays no part. It is a SPARQL query: the source of every such link another agent wrote, with a valid signature, newest first. Links the agent authored itself never match, so its own reply mentioning it does not wake it. The waker opens it with perspective.subscribeQuery and, when it fires, resolves the parent channels of each mentioned record in a second query. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent in a neighbourhood. A mention is a `we://mention` link from the record that mentions the agent (a post, a message) to the agent's DID, which is how WE stores one; the name the text shows plays no part. It is a SPARQL query: the source of every such link another agent wrote, with a valid signature, newest first. Links the agent authored itself never match, so its own reply mentioning it does not wake it. Temporarily, until WE's transcriber writes that link, it also matches a spoken transcript line (`we://text_source` \"spoken\") that says one of the agent's profile names as a whole word; such a row carries `via: \"spoken-name\"`. Typed text never matches by name. The waker opens it with perspective.subscribeQuery and, when it fires, resolves the parent channels of each mentioned record in a second query. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -203,13 +203,15 @@ impl Ad4mMcpHandler {
             Ok(context) => context,
             Err(e) => return json!({"error": e}).to_string(),
         };
-        let did = match AgentService::get_agent_for_context(&context) {
-            Ok(a) => a.did,
+        let agent = match AgentService::get_agent_for_context(&context) {
+            Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
+        let did = agent.did.clone();
+        let spoken_names = profile_names(&agent);
 
         let perspective_id = &params.0.perspective_id;
-        let query = build_mention_query(&did);
+        let query = build_mention_query(&did, &spoken_names);
         let sub_id = build_mention_sub_id(perspective_id);
 
         let subscription = json!({
@@ -222,12 +224,21 @@ impl Ad4mMcpHandler {
             "did": did,
             "perspective_id": perspective_id,
             "predicate": MENTION_PREDICATE,
+            "spoken_names": spoken_names,
             "query": query,
             "subscription": subscription,
             "message": format!(
                 "Add the subscription entry to your waker config and restart the waker. \
-                 This single query watches for {} links to {} in perspective {}.",
-                MENTION_PREDICATE, did, perspective_id
+                 This single query watches for {} links to {} in perspective {}, \
+                 and for spoken transcript lines that say {}.",
+                MENTION_PREDICATE,
+                did,
+                perspective_id,
+                if spoken_names.is_empty() {
+                    "no name (your profile has none)".to_string()
+                } else {
+                    format!("[{}]", spoken_names.join(", "))
+                }
             ),
         })
         .to_string()
@@ -265,20 +276,111 @@ pub const MENTION_WINDOW: usize = 50;
 /// carry this predicate. Rows carry `source`, which the waker reads as the mentioned
 /// record, and the mention link's provenance (#1563): `author`, `timestamp`
 /// and `proofValid`, which the waker hands the woken agent with the record.
-/// Pure over its input, so it unit-tests without an agent.
-pub fn build_mention_query(did: &str) -> String {
+///
+/// With `spoken_names`, the query also finds spoken lines that say one of
+/// them, see [`spoken_name_mentions`]; their rows carry `via`.
+/// Pure over its inputs, so it unit-tests without an agent.
+pub fn build_mention_query(did: &str, spoken_names: &[String]) -> String {
     let did = escape_sparql_literal(did);
-    format!(
-        "SELECT ?source ?author ?timestamp ?proofValid WHERE {{ \
-         ?source <{MENTION_PREDICATE}> ?mentioned . \
+    let mention_links = format!(
+        "?source <{MENTION_PREDICATE}> ?mentioned . \
          FILTER(STR(?mentioned) = \"{did}\") \
-         ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <{MENTION_PREDICATE}> ?mentioned )>> . \
+         ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <{MENTION_PREDICATE}> ?mentioned )>> ."
+    );
+    let mentions = match spoken_name_mentions(spoken_names) {
+        Some(spoken) => format!("{{ {mention_links} }} UNION {{ {spoken} }}"),
+        None => mention_links,
+    };
+    format!(
+        "SELECT ?source ?author ?timestamp ?proofValid ?via WHERE {{ \
+         {mentions} \
          ?reifier <ad4m://ontology/author> ?author . \
          ?reifier <ad4m://ontology/timestamp> ?timestamp . \
          ?reifier <ad4m://ontology/proofValid> ?proofValid . \
          FILTER(STR(?proofValid) = \"true\" && STR(?author) != \"{did}\") \
          }} ORDER BY DESC(?timestamp) LIMIT {MENTION_WINDOW}"
     )
+}
+
+// ----------------------------------------------------------------------------
+// TEMPORARY: spoken-name fallback, until WE links spoken mentions.
+//
+// WE's transcriber writes a spoken line as a TextBlock with
+// `we://text_source "spoken"` and no `we://mention` link, so a bot named in a
+// call is not mentioned by link. Until the transcriber writes that link,
+// the mention query also finds spoken lines that say the agent's name as a
+// whole word (decided on #1557). Typed text never matches by name.
+//
+// To remove: delete this section and the `spoken_names` parameter of
+// `build_mention_query`, its `UNION` and `?via`, and `profile_names` in
+// `get_mention_waker_config`; in core, `MentionMessage.spokenName`; in the
+// plugin, its wake-message lines; and the tests named `spoken_*`.
+// ----------------------------------------------------------------------------
+
+/// WE's `TextBlock.source` predicate (`we://text_source`).
+pub const TEXT_SOURCE_PREDICATE: &str = "we://text_source";
+/// The `TextBlock.source` value WE's transcriber writes: a recogniser heard
+/// the line. `typed` and `corrected` lines are not matched by name.
+pub const SPOKEN: &str = "spoken";
+/// WE's `TextBlock.text` predicate: the block's words.
+pub const TEXT_PREDICATE: &str = "we://text";
+/// The `via` a spoken-name row carries; a `we://mention` row has none.
+pub const VIA_SPOKEN_NAME: &str = "spoken-name";
+
+/// The agent's names from its profile (`flux://profile` username, given and
+/// family name), the names a speaker would say.
+pub fn profile_names(agent: &crate::types::Agent) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for link in agent.perspective.iter().flat_map(|p| &p.links) {
+        if link.data.source != "flux://profile" {
+            continue;
+        }
+        if !matches!(
+            link.data.predicate.as_deref(),
+            Some("sioc://has_username" | "sioc://has_given_name" | "sioc://has_family_name")
+        ) {
+            continue;
+        }
+        let name = Ad4mMcpHandler::resolve_literal_value(&link.data.target)
+            .trim()
+            .to_string();
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The `UNION` branch of [`build_mention_query`] for spoken lines: a record
+/// with `we://text_source "spoken"` whose `we://text` holds one of `names` as
+/// a whole word, case-insensitively, joined to the text link's reifier, so
+/// the shared filters keep only lines another agent spoke, verified, and the
+/// row's provenance is the speaker's. `None` without names.
+///
+/// A word is letters, marks, digits and `_`, as the old waker filter had it:
+/// "Data," matches, "metadata" does not. Each name is regex-escaped, then the
+/// pattern is escaped as a SPARQL string literal.
+pub fn spoken_name_mentions(names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    const NOT_WORD: &str = r"[^\p{L}\p{M}\p{N}_]";
+    let alternatives = names
+        .iter()
+        .map(|name| regex::escape(name))
+        .collect::<Vec<_>>()
+        .join("|");
+    let pattern = escape_sparql_literal(&format!(
+        "(?:^|{NOT_WORD})(?:{alternatives})(?:{NOT_WORD}|$)"
+    ));
+    Some(format!(
+        "?source <{TEXT_SOURCE_PREDICATE}> ?textSource . \
+         FILTER(STR(?textSource) = \"{SPOKEN}\") \
+         ?source <{TEXT_PREDICATE}> ?text . \
+         FILTER(REGEX(STR(?text), \"{pattern}\", \"i\")) \
+         ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <{TEXT_PREDICATE}> ?text )>> . \
+         BIND(\"{VIA_SPOKEN_NAME}\" AS ?via)"
+    ))
 }
 
 /// Build a mention-subscription id keyed on the perspective.
@@ -324,7 +426,7 @@ mod tests {
     #[test]
     fn mention_query_reads_we_mention_links_to_the_did_by_others() {
         assert_eq!(MENTION_PREDICATE, "we://mention");
-        let q = build_mention_query("did:key:zAgent");
+        let q = build_mention_query("did:key:zAgent", &[]);
         assert!(
             crate::perspectives::perspective_instance::is_sparql_query(&q),
             "{q}"
@@ -354,10 +456,77 @@ mod tests {
             "newest first, bounded: {q}"
         );
 
-        let hostile = build_mention_query(r#"did:x" || true || ""#);
+        let hostile = build_mention_query(r#"did:x" || true || ""#, &[]);
         assert!(
             hostile.contains(r#"STR(?mentioned) = "did:x\" || true || \"""#),
             "{hostile}"
+        );
+    }
+
+    /// TEMPORARY spoken-name fallback: the names a speaker would say are the
+    /// profile's username, given and family name, each once, trimmed. Not its
+    /// other fields, and not links outside `flux://profile`.
+    #[test]
+    fn spoken_names_are_the_profile_names() {
+        use crate::types::domain::Perspective;
+        use crate::types::{Agent, DecoratedLinkExpression, Link};
+        let link = |source: &str, predicate: &str, value: &str| DecoratedLinkExpression {
+            data: Link {
+                source: source.to_string(),
+                predicate: Some(predicate.to_string()),
+                target: Ad4mMcpHandler::encode_literal(value),
+            },
+            ..Default::default()
+        };
+        let agent = Agent {
+            did: "did:key:zAgent".to_string(),
+            perspective: Some(Perspective {
+                links: vec![
+                    link("flux://profile", "sioc://has_username", "Data"),
+                    link("flux://profile", "sioc://has_given_name", " Data "),
+                    link("flux://profile", "sioc://has_family_name", "Soong"),
+                    link("flux://profile", "sioc://has_bio", "An android"),
+                    link("flux://profile", "sioc://has_given_name", ""),
+                    link("ad4m://elsewhere", "sioc://has_username", "Lore"),
+                ],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(profile_names(&agent), vec!["Data", "Soong"]);
+        assert!(profile_names(&Agent::default()).is_empty());
+    }
+
+    /// TEMPORARY spoken-name fallback: without names the query is the link
+    /// query alone; with names it adds a `UNION` branch over spoken lines.
+    /// A quote in a name stays inside the REGEX's string literal.
+    #[test]
+    fn spoken_names_add_a_union_branch_over_spoken_lines() {
+        assert!(spoken_name_mentions(&[]).is_none());
+        assert!(!build_mention_query("did:key:zAgent", &[]).contains("UNION"));
+
+        let q = build_mention_query("did:key:zAgent", &["Data".to_string()]);
+        assert!(
+            crate::perspectives::perspective_instance::is_sparql_query(&q),
+            "{q}"
+        );
+        assert!(
+            q.contains("} UNION { ?source <we://text_source> ?textSource ."),
+            "{q}"
+        );
+        assert!(q.contains(r#"FILTER(STR(?textSource) = "spoken")"#), "{q}");
+        assert!(q.contains(r#"BIND("spoken-name" AS ?via)"#), "{q}");
+
+        let hostile = spoken_name_mentions(&[r#"x", "i")) || true || ("#.to_string()]).unwrap();
+        let regex = hostile
+            .split("REGEX(STR(?text), \"")
+            .nth(1)
+            .and_then(|rest| rest.split("\", \"i\")").next())
+            .unwrap_or_else(|| panic!("{hostile}"));
+        assert!(
+            regex
+                .char_indices()
+                .all(|(i, c)| c != '"' || regex.as_bytes()[i - 1] == b'\\'),
+            "an unescaped quote in {regex}"
         );
     }
 
