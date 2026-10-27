@@ -133,6 +133,12 @@ let _wakerGeneration = 0;
  * are not opened, but stay in the saved state, so the next restore asks again.
  */
 const _parkedSubscriptions = new Map<string, WakerSubscription>();
+/**
+ * The saved seen set of each parked subscription. The manager persists seen
+ * sets only for what it opened, so without this the first persist would drop
+ * it, and the next start would take what came meanwhile as history.
+ */
+const _parkedSeenMessages = new Map<string, string[]>();
 
 /** How long to wait for the executor to answer before giving up on one attempt. */
 const WAKER_CONNECT_TIMEOUT_MS = 10_000;
@@ -264,8 +270,10 @@ export function readsMentionText(sub: WakerSubscription): boolean {
  * seen. If that fails, a link query runs as saved: dropped, it would be in
  * neither the active nor the pending set, and the next persist would delete it
  * from disk. A text query ({@link readsMentionText}) is not opened, since
- * nothing would filter its rows; it goes to `park`, which keeps it saved. The
- * next start asks again.
+ * nothing would filter its rows; it goes to `park`, which keeps it saved, with
+ * its seen set. The next start asks again. Nothing asks before that, so a
+ * transient failure leaves mentions in that perspective off until the next
+ * start, or until `ad4m_subscribe_to_mentions` is called for it.
  */
 export async function restoreSavedSubscription(
   sub: WakerSubscription,
@@ -285,7 +293,8 @@ export async function restoreSavedSubscription(
       logger.warn(
         `[ad4m-waker] Could not re-derive ${sub.id} (${err?.message ?? err}); not opening it: ` +
           "it reads message text, which this waker no longer checks for a mention. " +
-          "It stays saved and is asked of the executor again at the next start.",
+          "It stays saved and is asked of the executor again at the next start, " +
+          "or now by calling ad4m_subscribe_to_mentions for the perspective.",
       );
       park(sub);
       return;
@@ -298,13 +307,39 @@ export async function restoreSavedSubscription(
 }
 
 /**
- * The subscriptions to save: the manager's active ones, then every parked one
- * that no live subscription has replaced under the same id.
+ * Park a saved subscription ({@link restoreSavedSubscription}), with its seen
+ * set from the saved state if it had one.
  */
-export function subscriptionsToSave(active: WakerSubscription[]): WakerSubscription[] {
-  const live = new Set(active.map((s) => s.id));
-  for (const id of live) _parkedSubscriptions.delete(id);
-  return [...active, ..._parkedSubscriptions.values()];
+export function parkSubscription(
+  sub: WakerSubscription,
+  savedSeenMessages: Record<string, string[]>,
+): void {
+  _parkedSubscriptions.set(sub.id, sub);
+  if (Object.prototype.hasOwnProperty.call(savedSeenMessages, sub.id)) {
+    _parkedSeenMessages.set(sub.id, savedSeenMessages[sub.id]);
+  }
+}
+
+/** Forget a parked subscription and its seen set. */
+function unpark(id: string): void {
+  _parkedSubscriptions.delete(id);
+  _parkedSeenMessages.delete(id);
+}
+
+/**
+ * The state to save: the manager's active subscriptions and seen sets, then
+ * every parked subscription, with its seen set, that no live subscription has
+ * replaced under the same id.
+ */
+export function stateToSave(
+  active: WakerSubscription[],
+  seenMessages: Record<string, string[]>,
+): { subscriptions: WakerSubscription[]; seenMessages: Record<string, string[]> } {
+  for (const sub of active) unpark(sub.id);
+  return {
+    subscriptions: [...active, ..._parkedSubscriptions.values()],
+    seenMessages: { ...Object.fromEntries(_parkedSeenMessages), ...seenMessages },
+  };
 }
 
 /** @internal The parked subscriptions, for tests. */
@@ -333,6 +368,7 @@ export function _resetModuleState(): void {
   _wakerRetryTimer = null;
   _wakerGeneration = 0;
   _parkedSubscriptions.clear();
+  _parkedSeenMessages.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -958,7 +994,7 @@ Notes:
       // A parked one is saved but not open: forget it, and persist without it.
       for (const sub of Array.from(_parkedSubscriptions.values())) {
         if (sub.perspective === params.perspective_id) {
-          _parkedSubscriptions.delete(sub.id);
+          unpark(sub.id);
           disposeLiveSubscription(sub.id);
           found = true;
         }
@@ -1136,7 +1172,7 @@ Notes:
         sections.push(
           `Not opened — saved by an older executor, they read message text, and the executor could not re-derive them at start; asked again at the next start (${parked.length}):\n` +
             parked.map(describe).join("\n") +
-            "\nThese are NOT listening. Update the executor, or unsubscribe and subscribe again.",
+            "\nThese are NOT listening. To ask again now, call ad4m_subscribe_to_mentions for the perspective; or update the executor.",
         );
       }
       return { content: [{ type: "text", text: sections.join("\n\n") }] };
@@ -1424,7 +1460,9 @@ Notes:
       onWake: (sub, _result, mentions) =>
         postWake(config, sub, _pluginAgentDid, logger, mentions),
       onPersist: (subs, seenMessages) => {
-        if (_stateDir) saveWakerState(_stateDir, subscriptionsToSave(subs), seenMessages);
+        if (!_stateDir) return;
+        const state = stateToSave(subs, seenMessages);
+        saveWakerState(_stateDir, state.subscriptions, state.seenMessages);
       },
     });
     if (stale()) {
@@ -1495,7 +1533,7 @@ Notes:
             subscribeToMentionsForPerspective,
             createLiveSubscription,
             logger,
-            (parked) => _parkedSubscriptions.set(parked.id, parked),
+            (parked) => parkSubscription(parked, savedState.seenMessages),
           );
           if (stale()) return true;
           if (_parkedSubscriptions.has(sub.id)) continue;
