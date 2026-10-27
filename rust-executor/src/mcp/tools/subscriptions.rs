@@ -253,7 +253,9 @@ pub const MENTION_WINDOW: usize = 50;
 ///
 /// The link is joined to its reifier for its author, timestamp and proof
 /// verdict, the same `rdf:reifies` + `ad4m://ontology/*` facts the model query
-/// reads them from. A link the agent wrote itself is not a mention of it: a
+/// reads them from. Only the store writes those facts: it refuses any link in
+/// that vocabulary (`sparql_store::is_link_metadata`, #1564), so no peer can
+/// add an author or a verdict to someone else's mention. A link the agent wrote itself is not a mention of it: a
 /// bot's own reply mentioning it would wake it again (#1459). An unverified
 /// link may claim any author, so it does not count either.
 ///

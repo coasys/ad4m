@@ -2884,6 +2884,137 @@ async fn a_mention_row_carries_the_mention_links_author_timestamp_and_verdict() 
     assert_eq!(row["proofValid"], "true", "{row}");
 }
 
+/// The reifier the store keeps `source -predicate-> target`'s metadata on. Any
+/// peer can name it: it is a hash of the link's public data.
+fn reifier_of(
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+    source: &str,
+    predicate: &str,
+    target: &str,
+) -> String {
+    let found = parse(
+        &perspective
+            .sparql_query(format!(
+                "SELECT ?r WHERE {{ ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+                 <<( <{source}> <{predicate}> <{target}> )>> }}"
+            ))
+            .unwrap(),
+    );
+    found[0]["r"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no reifier for {source} {predicate} {target}: {found}"))
+        .to_string()
+}
+
+/// A mention's author, timestamp and verdict are the executor's facts about
+/// the signed mention link, which no peer link can write or erase (#1564). A
+/// member who validly signs links in that vocabulary, on the reifier of
+/// someone else's mention, adds no second author, no later time and no "true"
+/// to a link whose signature failed; removals of those facts strip nothing.
+/// The same holds once the store is rebuilt from the links the perspective
+/// kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_links_cannot_write_or_erase_a_mentions_provenance() {
+    use crate::agent::signatures::TestSigner;
+    use crate::mcp::tools::subscriptions::{build_mention_query, MENTION_PREDICATE};
+    use crate::types::PerspectiveDiff;
+    let me = TestSigner::generate();
+    let writer = TestSigner::generate();
+    let member = TestSigner::generate();
+    let impostor = TestSigner::generate();
+
+    let (_handler, uuid, _guard) = setup_with(&[], false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let mut unverified = signed_link(&member, "ad4m://claimed", MENTION_PREDICATE, &me.did, 2);
+    unverified.author = impostor.did.clone();
+    perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(vec![
+            signed_link(&writer, "ad4m://post", MENTION_PREDICATE, &me.did, 1),
+            unverified,
+        ]))
+        .await
+        .expect("the mentions");
+    let genuine = reifier_of(&perspective, "ad4m://post", MENTION_PREDICATE, &me.did);
+    let claimed = reifier_of(&perspective, "ad4m://claimed", MENTION_PREDICATE, &me.did);
+
+    let ontology = |name: &str| format!("ad4m://ontology/{name}");
+    let as_string = |value: &str| format!("literal:string:{value}");
+    let additions = vec![
+        signed_link(
+            &member,
+            &genuine,
+            &ontology("author"),
+            &as_string(&impostor.did),
+            3,
+        ),
+        signed_link(&member, &genuine, &ontology("author"), &impostor.did, 3),
+        signed_link(
+            &member,
+            &genuine,
+            &ontology("timestamp"),
+            &as_string("2099-01-01T00:00:00.000Z"),
+            3,
+        ),
+        signed_link(
+            &member,
+            &claimed,
+            &ontology("proofValid"),
+            &as_string("true"),
+            3,
+        ),
+    ];
+    let removals = vec![
+        signed_link(
+            &member,
+            &genuine,
+            &ontology("author"),
+            &as_string(&writer.did),
+            4,
+        ),
+        signed_link(
+            &member,
+            &genuine,
+            &ontology("proofValid"),
+            &as_string("true"),
+            4,
+        ),
+    ];
+    perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(additions))
+        .await
+        .expect("the member's additions");
+    perspective
+        .diff_from_link_language(PerspectiveDiff::from_removals(removals))
+        .await
+        .expect("the member's removals");
+
+    let only_the_writers_mention = |stage: &str| {
+        let rows = parse(
+            &perspective
+                .sparql_query(build_mention_query(&me.did))
+                .unwrap(),
+        );
+        assert_eq!(
+            rows,
+            serde_json::json!([{
+                "source": "ad4m://post",
+                "author": writer.did,
+                "timestamp": "2026-10-01T12:01:00.000Z",
+                "proofValid": "true",
+            }]),
+            "{stage}"
+        );
+    };
+    only_the_writers_mention("as the links arrived");
+
+    let kept = perspective
+        .get_links(&crate::types::LinkQuery::default())
+        .await
+        .unwrap();
+    perspective.sync_existing_links_to_sparql(&kept).unwrap();
+    only_the_writers_mention("after a rebuild from the kept links");
+}
+
 // ── Containers (#1446): We's shapes as We writes them ───────────────────────
 
 /// We's `CollectionBlock` and `TextBlock` as the SDK writes them.
