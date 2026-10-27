@@ -127,6 +127,8 @@ impl Ad4mMcpHandler {
             "add_child" => dispatch_static_tool!(add_child),
             "get_children" => dispatch_static_tool!(get_children),
             "execute_commands" => dispatch_static_tool!(execute_commands),
+            "template_read" => dispatch_static_tool!(template_read),
+            "template_update" => dispatch_static_tool!(template_update),
             // ── fallback: per-class dynamic tools ───────────────────────
             _ => {
                 // `handle_dynamic_tool` expects the args as a
