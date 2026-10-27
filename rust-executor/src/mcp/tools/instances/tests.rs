@@ -3370,6 +3370,39 @@ async fn two_updates_from_the_same_version_save_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_update_held_up_in_one_perspective_does_not_hold_up_another() {
+    // An update holds its record's lock from its first read to its write. One parked there, as
+    // one waiting on a slow read would be, must not keep a template in another perspective waiting.
+    let (handler, a, _guard_a, record_a) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let (_, b, _guard_b, record_b) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let update = |uuid: &str, base_uri: &str| {
+        handler.template_update(template_params(
+            uuid,
+            base_uri,
+            json!({
+                "version": 1,
+                "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": ["Bye"] } }]
+            }),
+        ))
+    };
+
+    let (reached, go) = super::template_tools::pause::arm(&record_a);
+    let held = update(&a, &record_a);
+    let other = async {
+        reached.await.expect("the update in A reads its record");
+        let other =
+            tokio::time::timeout(std::time::Duration::from_secs(60), update(&b, &record_b)).await;
+        let _ = go.send(());
+        other
+    };
+    let (held, other) = tokio::join!(held, other);
+
+    let other = other.expect("the update in B waited for the one held up in A");
+    assert!(other.starts_with("Saved as version 2."), "{other}");
+    assert!(held.starts_with("Saved as version 2."), "{held}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_app_save_after_the_tool_s_last_read_is_not_overwritten() {
     // The app saves through instance_update, which takes no template lock: the tool has read the
     // record for the last time, the app's save lands, and only then does the tool write.

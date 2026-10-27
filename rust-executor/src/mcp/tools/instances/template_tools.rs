@@ -11,8 +11,8 @@
 //! The bundle also gets the perspective's models ([`models`]): a template may query any class
 //! the perspective defines, and WE's rules refuse a `$query` naming one they were not told of.
 //!
-//! A tool that writes holds [`WRITES`] from reading the record until its write commits, and the
-//! version is read again just before the write: the bundle checks the caller's version against
+//! A tool that writes holds its record's lock ([`lock_record`]) from reading the record until its
+//! write commits, and the version is read again just before the write: the bundle checks the caller's version against
 //! the record it was handed, and that record must still be the stored one when the result lands.
 //! The batch commits only if the record's version links are still those of that last read
 //! (`commit_batch_if`), so a save from the app landing after it is refused as well.
@@ -30,13 +30,35 @@ use rmcp::{handler::server::wrapper::Parameters, model::Tool, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, PoisonError, Weak};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
-/// Held by a tool that writes, from reading the record until its write commits, so two updates
-/// cannot both start from the same version. One for every record: calls run one at a time in the
-/// bundle anyway (`builtin::call`), so a finer lock would buy nothing.
-static WRITES: Mutex<()> = Mutex::const_new(());
+/// One lock per record, by perspective and record URI, held by a tool that writes from reading the
+/// record until its write commits ([`lock_record`]). A lock nobody holds or waits for is pruned.
+type RecordLocks = std::sync::Mutex<HashMap<(String, String), Weak<Mutex<()>>>>;
+static WRITES: LazyLock<RecordLocks> = LazyLock::new(Default::default);
+
+/// The lock of record `base_uri` in perspective `perspective_id`, so two updates of it cannot both
+/// start from the same version. Only that record's: reading a record can wait long (a joined
+/// perspective that has not synced the record's class yet), and that must not hold up a template
+/// in another perspective, or another record.
+async fn lock_record(perspective_id: &str, base_uri: &str) -> OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = WRITES.lock().unwrap_or_else(PoisonError::into_inner);
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let key = (perspective_id.to_string(), base_uri.to_string());
+        match locks.get(&key).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        }
+    };
+    lock.lock_owned().await
+}
 
 /// Parameters for a template tool: the record, and the tool's own arguments beside them
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -123,7 +145,7 @@ impl Ad4mMcpHandler {
         };
 
         let _writing = if tool.writes {
-            Some(WRITES.lock().await)
+            Some(lock_record(&p.perspective_id, &base_uri).await)
         } else {
             None
         };
@@ -168,9 +190,10 @@ impl Ad4mMcpHandler {
                 "'{name}' says it writes nothing, yet answered with properties to write; nothing was written."
             ));
         }
-        // WRITES keeps out the other template tool calls; this catches a write from anywhere else
-        // (the app's own save) while the bundle ran. The version links are taken before this read
-        // and the write commits only if they still stand, so a save landing after it is caught too.
+        // The record's lock keeps out the other template tool calls; this catches a write from
+        // anywhere else (the app's own save) while the bundle ran. The version links are taken
+        // before this read and the write commits only if they still stand, so a save landing after
+        // it is caught too.
         let expected = match version_links(&perspective, &class_name, &base_uri) {
             Ok(expected) => expected,
             Err(e) => return error_json(format!("Nothing was written: {e:#}.")),
