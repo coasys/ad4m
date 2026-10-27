@@ -94,6 +94,12 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   trigger or refresh cooldown. Never make delivery depend on a one-shot
   request succeeding (BUG-103: a single `/render` timeout after a key grant
   lost a member's history).
+- **A link the key it names does not open costs that link only.** Its
+  ciphertext or payload is malformed, and a key version is fixed by its
+  rotation's commitment, so no key ever opens it: `openWireLink` logs it and
+  returns `UNOPENABLE`, inbound skips it and `retryHeld` releases it. It must
+  never throw: a throw aborts the rest of a catch-up batch whose cursor has
+  already moved, and the held links `retryHeld` released before it.
 - **Commit: the store follows the server, nothing is echoed.**
   `sync.commit()` writes a diff to the language's store only after the
   server accepted the POST, so a failed commit leaves no local-only links.

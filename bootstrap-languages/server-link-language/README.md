@@ -188,7 +188,9 @@ and runs whenever the key ring loads (init, a `keys-granted` push, a commit)
 and at the end of every catch-up; while links are held, each catch-up
 re-reads `/keys` first. A later operation on the same link replaces its held
 one, so a link added and then removed before the key arrived is never
-emitted.
+emitted. A link the key it names does not open (malformed ciphertext or
+payload) is logged and skipped, inbound or held: no key ever opens it, and it
+costs that one link, not the rest of its batch or the other held links.
 
 ### Sync strategy
 
