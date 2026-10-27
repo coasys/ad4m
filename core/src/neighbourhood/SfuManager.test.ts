@@ -632,6 +632,78 @@ test("leaving stops a pending rebuild for an unlisted session", async () => {
     }
 })
 
+test("after a cancelled grace, a later roster without this agent starts a new one", async () => {
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        api.emitRoster(roster([ALICE, ME]))
+        await flush()
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a second roster without this agent keeps the first grace, and one listing it cancels both", async () => {
+    // Others leaving while this session is unlisted publish more rosters without it.
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE, BOB], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(1_000)
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(1_000)
+        api.emitRoster(roster([ALICE, ME]))
+        await flush()
+        await jest.advanceTimersByTimeAsync(10_000)
+
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        expect(currentPc().closed).toBe(false)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a rebuild for ICE ends the old grace, and the new connection gets its own", async () => {
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(1_000)
+        await iceState("failed")
+        expect(FakePeerConnection.instances).toHaveLength(2)
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(2_999)
+        expect(FakePeerConnection.instances).toHaveLength(2)
+        await jest.advanceTimersByTimeAsync(1)
+        expect(FakePeerConnection.instances).toHaveLength(3)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("a rejoin the executor cannot take yet is retried, and succeeds once it can", async () => {
     // A restart or an outage: the executor refuses for a while, then is back.
     jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
