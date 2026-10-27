@@ -307,7 +307,7 @@ async fn main() -> Result<()> {
                 hc_proxy_url,
                 hc_bootstrap_url,
                 connect_holochain,
-                admin_credential,
+                admin_credential: admin_credential.map(Into::into),
                 enable_multi_user,
                 enable_mcp,
                 mcp_port,

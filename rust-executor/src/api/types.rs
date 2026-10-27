@@ -66,6 +66,12 @@ pub struct PublicPerspectiveInput {
 #[ts(export)]
 pub struct RequestCapabilityRequest {
     pub auth_info: AuthInfoInput,
+    // The agent the app asks to act as (#1399): a managed user's email or an agent's DID.
+    // Absent: the executor's main agent. (A plain comment: ts-rs copies doc comments into
+    // the generated type with trailing whitespace.)
+    #[serde(default)]
+    #[ts(optional)]
+    pub agent: Option<String>,
 }
 
 #[derive(Deserialize, TS)]
@@ -417,7 +423,31 @@ pub struct NotificationInput {
     pub trigger: String,
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
-    pub webhook_auth: String,
+    /// Sent as the bearer credential to `webhookUrl`. Results and events say only
+    /// whether one is set (`hasWebhookAuth`).
+    #[ts(type = "string")]
+    pub webhook_auth: crate::secret::Secret,
+}
+
+/// `NotificationInput` for `runtime.updateNotification`. Clients see only `hasWebhookAuth`,
+/// so the credential is optional here.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationUpdateInput {
+    pub description: String,
+    pub app_name: String,
+    pub app_url: String,
+    pub app_icon_path: Option<String>,
+    pub trigger: String,
+    pub perspective_ids: Vec<String>,
+    pub webhook_url: String,
+    /// Without it the update keeps the stored credential, and fails if `webhookUrl`
+    /// changes too, because a credential goes only to the webhook it was set for. An empty
+    /// string clears it.
+    #[serde(default)]
+    #[ts(as = "Option<String>")]
+    pub webhook_auth: Option<crate::secret::Secret>,
 }
 
 /// Grant/revoke a notification (partial update for grant status only)

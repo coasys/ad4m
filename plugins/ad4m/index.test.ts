@@ -1831,14 +1831,20 @@ describe("ad4mPlugin", () => {
     }
 
     // Parameter schemas come from the captured defs with $schema stripped;
-    // everything else (including get_documentation's $defs/$ref enum) is
-    // passed through as the executor emits it.
+    // everything else is passed through as the executor emits it.
+    // get_documentation's topic is a string: the executor's own topics, and
+    // the template topics under "template".
     const getDoc = registeredTools.find((t) => t.name === "ad4m_get_documentation");
     expect(getDoc!.parameters.$schema).toBeUndefined();
     expect(getDoc!.parameters.required).toEqual(["topic"]);
-    expect(getDoc!.parameters.properties.topic.$ref).toBe("#/$defs/DocTopic");
-    expect(getDoc!.parameters.$defs.DocTopic.oneOf.map((o: any) => o.const))
-      .toEqual(["overview", "architecture", "usage", "flux", "models"]);
+    expect(getDoc!.parameters.properties.topic.type).toBe("string");
+    for (const topic of ["overview", "architecture", "usage", "flux", "models"]) {
+      expect(getDoc!.parameters.properties.topic.description).toContain(`"${topic}"`);
+    }
+    // The template tools take the record and the arguments WE's bundle declares.
+    const update = registeredTools.find((t) => t.name === "ad4m_template_update");
+    expect(update!.parameters.required).toEqual(["perspective_id", "base_uri", "version", "patches"]);
+    expect(registeredTools.map((t) => t.name)).toContain("ad4m_template_read");
     const transcript = registeredTools.find((t) => t.name === "ad4m_instance_transcript");
     // The transcript reads through the built-in TextContent (#1446): no
     // class, no text property to pick.
@@ -3706,7 +3712,7 @@ describe("WakerSubscriptionManager", () => {
     manager.disposeAll();
   });
 
-  it("should hint at the node operator for a locked executor, on both message shapes", () => {
+  it("should hint at the executor's operator for a locked executor, on both message shapes", () => {
     const current = hintFor("RPC error 403: Executor is locked: the wallet has not been unlocked since the last restart.");
     const legacy = hintFor("RPC error 403: main key not found");
     for (const hint of [current, legacy]) {
@@ -4201,14 +4207,14 @@ describe("isLoopbackEndpoint", () => {
 describe("explainCapabilityFailure", () => {
   // Regression: against a LOCKED executor, setup used to say "obtain a JWT
   // token manually" — naming the one remedy that cannot work, since a locked
-  // node rejects a pasted token too. Observed on Marvin 2026-09-09: the
+  // executor rejects a pasted token too. Observed on Marvin 2026-09-09: the
   // operator hand-edited a JWT into the config chasing a cause that was not
   // the token.
-  it("names the lock, and says a JWT will not help, when the node is locked", () => {
+  it("names the lock, and says a JWT will not help, when the executor is locked", () => {
     const { lines } = explainCapabilityFailure({
       capData: { request_id: "req-1", code: "123456" },
       // Deliberately terser than the executor's real message: the action has
-      // to come from our own line, not from whatever the node happened to say.
+      // to come from our own line, not from whatever the executor happened to say.
       statusData: {
         authenticated: false,
         executor_locked: true,
@@ -4220,7 +4226,10 @@ describe("explainCapabilityFailure", () => {
     expect(text).toContain("unlockAgent");
     // The remedy must not be the one that cannot work.
     expect(text).toContain("will not help");
+    expect(text).toContain("a locked executor rejects it too");
     expect(text).toContain("ad4m-setup");
+    // Our own lines call it the executor, never "the node".
+    expect(text).not.toMatch(/\bnode\b/i);
   });
 
   it("does not print a JWT prompt under a warning that a JWT will not help", () => {
@@ -4248,7 +4257,7 @@ describe("explainCapabilityFailure", () => {
     expect(lines).toContain("Ask the operator, then retry.");
   });
 
-  it("blames the unconfirmed handshake, not the lock, on an unlocked node", () => {
+  it("blames the unconfirmed handshake, not the lock, on an unlocked executor", () => {
     const { lines } = explainCapabilityFailure({
       capData: { request_id: "req-1", code: "123456" },
       statusData: { authenticated: false, executor_locked: false },
@@ -4258,7 +4267,7 @@ describe("explainCapabilityFailure", () => {
     expect(text).not.toContain("LOCKED");
     // Here a manually obtained JWT genuinely is a remedy.
     expect(text).toContain("JWT");
-    // We checked and the node is fine — do not hedge about the lock state.
+    // We checked and the executor is fine — do not hedge about the lock state.
     expect(text).not.toContain("lock state is unknown");
   });
 
@@ -4377,7 +4386,7 @@ describe("redactForDisplay", () => {
   });
 
   it("keeps the locked-executor token placeholder visible", () => {
-    // This is the string a locked node produces, and it is the one the logger
+    // This is the string a locked executor produces, and it is the one the logger
     // elided to `<unloc…tup>` — destroying an instruction while leaking a real
     // secret in the same output.
     const placeholder = "<unlock the executor first, then re-run ad4m-setup>";

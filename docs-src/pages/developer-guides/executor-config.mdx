@@ -72,6 +72,13 @@ out to get its default.
 turn multi-user off on a data directory where it was enabled before: the
 executor records multi-user as on in its database and only ever sets it.
 
+Multi-user mode needs an admin credential. Without one, a caller with no
+token on a loopback listener is the operator, who could act as every user:
+`run` refuses `multi_user_config.enabled: true` (and a data directory whose
+database has multi-user on) when no admin credential is set, even with
+`--insecure-no-admin-credential`, and `user.setMultiUserEnabled(true)`
+answers 403.
+
 **`tls_config`** starts an HTTPS/WSS listener on `0.0.0.0:<tls_port>`. The
 plain RPC port then stays on `127.0.0.1`.
 
@@ -173,7 +180,7 @@ Environment=AD4M_UNLOCK_PASSPHRASE_FILE=%d/unlock-passphrase
 ### Unlocking at startup
 
 With `AD4M_UNLOCK_PASSPHRASE_FILE` set, the executor unlocks its agent
-itself once it has started, as `agent.unlock` would, so a restarted node
+itself once it has started, as `agent.unlock` would, so a restarted executor
 serves requests without anyone unlocking it. It logs
 `Agent unlocked at startup` on success. On a wrong passphrase it logs an
 error starting `Unlocking the agent at startup … failed`, keeps running
