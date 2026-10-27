@@ -32,6 +32,8 @@ An explicit `MCP_HOST` environment variable sets the plain listener's address in
 
 The interpretation harness calls the same tools in the process (`mcp/tools/harness_bridge.rs`), with the dynamic tools included.
 
+`template_read` / `template_update` edit a WE template by WE's own rules. Those rules are a **tool bundle**: WE's JavaScript, downloaded from a WE release by `build.rs` (version and sha256 pinned) and compiled in. Each call runs it in a fresh sandbox isolate (`tool_bundles/`) with two ops of its own (random bytes, a log line), a time limit and a memory cap; calls run one at a time. The bundle declares the tools' descriptions and serves the `template` documentation topics. The tool reads and writes the record itself. `template_update` commits with `commit_batch_if`, so it writes only if the record's version is still the one it read ([Link write path](../../perspectives/links/write-path.md)).
+
 </details>
 
 <details><summary>Where in the code</summary>
@@ -41,6 +43,7 @@ The interpretation harness calls the same tools in the process (`mcp/tools/harne
 - [rust-executor/src/mcp/tools/mod.rs](../../../rust-executor/src/mcp/tools/mod.rs): `Ad4mMcpHandler`, `AUTH_TOOLS`, `admit_tool_call`, `listed_tools`, `session`, `get_agent_context`, `call_method`, `admit_method`.
 - [rust-executor/src/mcp/tools/auth.rs](../../../rust-executor/src/mcp/tools/auth.rs): login and capability tools, `auth_status`.
 - [rust-executor/src/mcp/tools/instances/](../../../rust-executor/src/mcp/tools/instances), [dynamic.rs](../../../rust-executor/src/mcp/tools/dynamic.rs): instance tools (see [Perspectives](../../perspectives/README.md)).
+- [rust-executor/src/mcp/tools/instances/template_tools.rs](../../../rust-executor/src/mcp/tools/instances/template_tools.rs): `template_read`, `template_update`, `from_bundle`; [rust-executor/src/tool_bundles/](../../../rust-executor/src/tool_bundles): `BundleSandbox`, `builtin` (WE's bundle).
 - [rust-executor/src/mcp/tools/harness_bridge.rs](../../../rust-executor/src/mcp/tools/harness_bridge.rs): in-process tool calls.
 - [rust-executor/src/mcp/shacl.rs](../../../rust-executor/src/mcp/shacl.rs): class shapes for the tools, read by `load_class` and by `load_class_properties_with_uri`.
 - [rust-executor/src/mcp/docs/](../../../rust-executor/src/mcp/docs): the `get_documentation` topics.

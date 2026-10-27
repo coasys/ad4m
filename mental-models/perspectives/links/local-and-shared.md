@@ -27,7 +27,8 @@ Every stored link has a **link status**: `Shared` (the default) or `Local`. In a
 
 - [types/domain.rs](../../../rust-executor/src/types/domain.rs): `LinkStatus`.
 - [api/perspectives_ws.rs](../../../rust-executor/src/api/perspectives_ws.rs): `parse_link_status`, `add_link`, `remove_links_bulk`.
-- [perspectives/perspective_instance.rs](../../../rust-executor/src/perspectives/perspective_instance.rs): `add_link_expression` (the `Shared` check), `link_mutations` (a removal keeps the stored status), `commit_batch` (splits a batch into shared and local).
+- [perspectives/perspective_instance.rs](../../../rust-executor/src/perspectives/perspective_instance.rs): `add_link_expression` (the `Shared` check), `link_mutations` (a removal keeps the stored status), `commit_batch`.
+- [perspectives/perspective_instance/expected_links.rs](../../../rust-executor/src/perspectives/perspective_instance/expected_links.rs): `commit_batch_if` (splits a batch into shared and local).
 - [model_query/sparql_builder.rs](../../../rust-executor/src/perspectives/model_query/sparql_builder.rs): `link_status_filter`, `local_status_filter`.
 - SDK: `local` option in [core/src/model/decorators.ts](../../../core/src/model/decorators.ts).
 

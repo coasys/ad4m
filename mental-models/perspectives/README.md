@@ -37,7 +37,7 @@ PerspectiveInstance (one per uuid, in PERSPECTIVES)   │ (see Languages)
 
 - [rust-executor/src/perspectives/](../../rust-executor/src/perspectives): the whole subsystem. Start with its [AGENTS.md](../../rust-executor/src/perspectives/AGENTS.md).
 - [perspectives/mod.rs](../../rust-executor/src/perspectives/mod.rs): registry `PERSPECTIVES`, `add_perspective`, `get_perspective`, `remove_perspective`, `import_perspective` / `export_perspective`, routing of link-language callbacks.
-- [perspectives/perspective_instance.rs](../../rust-executor/src/perspectives/perspective_instance.rs): `PerspectiveInstance`, one `impl` block in a file of about 9,900 lines (tests included). It holds link writes, sync, SDNA, subjects, queries, subscriptions, telepresence and the auto-processor.
+- [perspectives/perspective_instance.rs](../../rust-executor/src/perspectives/perspective_instance.rs): `PerspectiveInstance`, one `impl` block in a file of about 9,800 lines (tests included). It holds link writes, sync, SDNA, subjects, queries, subscriptions, telepresence and the auto-processor.
 - [types/domain.rs](../../rust-executor/src/types/domain.rs): `PerspectiveHandle`, `PerspectiveState`.
 - [api/perspectives_ws.rs](../../rust-executor/src/api/perspectives_ws.rs): every `perspective.*` RPC method; `get_perspective_with_access`.
 - SDK: [core/src/perspectives/PerspectiveProxy.ts](../../core/src/perspectives/PerspectiveProxy.ts).

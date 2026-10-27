@@ -314,6 +314,8 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Templated language** (`language_apply_template_on_source`): A language made by templating a source language; its meta carries `templateAppliedParams` and `templateSourceLanguageAddress`. [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
 
+**Tool bundle** (`tool_bundles/`, `BundleSandbox`, `tool_bundles::builtin`): An app's JavaScript for its agents' tools, which the executor runs in a sandbox isolate that reaches no executor op. The one compiled in is WE's, behind `template_read` and `template_update`. [MCP server](agents/interfaces/mcp-server.md) — not: language
+
 **Transition proposal** (`FlowTransitionProposal`): A signed set of links that proposes moving a flow instance to a state and carries its votes. [Flow consensus](perspectives/social-dna/flows/consensus.md)
 
 **Trusted agent** (`RuntimeService::get_trusted_agents`): A DID whose languages this executor installs without a template check: the seed list, the main agent and the database list. [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
