@@ -2891,7 +2891,13 @@ mod tests {
         );
         let forged_verdict = make_link(&member, &c, &ontology("proofValid"), "literal:string:true");
         let forged_reifies = make_link(&member, &g, RDF_REIFIES, "ad4m://elsewhere");
-        for forged in [&forged_author, &forged_verdict, &forged_reifies] {
+        let forged_bookkeeping = swept_flag(&member);
+        for forged in [
+            &forged_author,
+            &forged_verdict,
+            &forged_reifies,
+            &forged_bookkeeping,
+        ] {
             let refused = svc.add_link(forged).unwrap_err().to_string();
             assert!(refused.contains("metadata vocabulary"), "{refused}");
         }
@@ -2902,6 +2908,7 @@ mod tests {
             &format!("literal:string:{}", writer.did),
         );
         assert!(svc.remove_link(&erase).is_err());
+        assert!(svc.remove_link(&forged_bookkeeping).is_err());
         assert_eq!(
             mention_rows(&svc, &me.did),
             only_the_writers_mention(&writer)
@@ -2919,7 +2926,8 @@ mod tests {
     /// A store written before it refused those links keeps what they stated
     /// until the sweep: it removes them, and gives the link they targeted
     /// back its own author, time and verdict, including an annotation a
-    /// forged link happened to equal. Once swept, a store is not swept again.
+    /// forged link happened to equal. A swept store is swept again: nothing
+    /// in it says it was.
     #[test]
     fn the_sweep_removes_metadata_links_a_store_already_holds() {
         let (me, writer, member, impostor) = (
@@ -2970,7 +2978,145 @@ mod tests {
         assert_eq!(links[1].proof.valid, Some(true));
 
         svc.add_link_unguarded(&forged[4]).unwrap();
-        assert_eq!(svc.purge_link_metadata_links().unwrap(), 0, "swept once");
+        assert_eq!(svc.purge_link_metadata_links().unwrap(), 1, "swept again");
+        assert_eq!(
+            mention_rows(&svc, &me.did),
+            only_the_writers_mention(&writer)
+        );
+    }
+
+    /// A link stating, in the store's bookkeeping vocabulary, that the store
+    /// was swept: what a member could sign before the store refused it.
+    fn swept_flag(member: &TestSigner) -> LinkExpression {
+        make_link(
+            member,
+            "ad4m://system/migration",
+            "ad4m://system/linkMetadataSwept",
+            "literal:string:true",
+        )
+    }
+
+    /// A perspective in the executor's database whose store, at
+    /// `<data path>/perspectives/<uuid>`, an older executor wrote: a genuine
+    /// mention, a claimed one, and links in the metadata vocabulary on both.
+    /// When dropped, it forgets the perspective and restores the data path.
+    struct OldStore {
+        _dir: tempfile::TempDir,
+        previous_path: Option<String>,
+        uuid: String,
+        me: TestSigner,
+        writer: TestSigner,
+    }
+
+    impl OldStore {
+        fn new(extra: impl Fn(&TestSigner) -> Vec<LinkExpression>) -> Self {
+            crate::test_utils::setup_wallet();
+            crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+            crate::agent::AgentService::init_global_test_instance();
+            let dir = tempfile::tempdir().unwrap();
+            let previous_path = crate::perspectives::get_app_data_path();
+            crate::perspectives::set_app_data_path(dir.path().to_str().unwrap().to_string());
+            let handle = crate::types::PerspectiveHandle::new_from_name("old store".to_string());
+            crate::db::Ad4mDb::with_global_instance(|db| db.add_perspective(&handle)).unwrap();
+
+            let (me, writer, member, impostor) = (
+                TestSigner::generate(),
+                TestSigner::generate(),
+                TestSigner::generate(),
+                TestSigner::generate(),
+            );
+            let store_path = dir.path().join("perspectives").join(&handle.uuid);
+            let svc = SparqlStore::new(Some(store_path.to_str().unwrap())).unwrap();
+            let (genuine, claimed, g, c) = two_mentions(&writer, &member, &impostor, &me.did);
+            svc.add_link(&genuine).unwrap();
+            svc.add_link(&claimed).unwrap();
+            let as_string = |v: &str| format!("literal:string:{v}");
+            let mut old_links = vec![
+                make_link(&member, &g, &ontology("author"), &as_string(&impostor.did)),
+                make_link(&member, &c, &ontology("proofValid"), &as_string("true")),
+            ];
+            old_links.extend(extra(&member));
+            for link in &old_links {
+                svc.add_link_unguarded(link).unwrap();
+            }
+            assert_ne!(
+                mention_rows(&svc, &me.did),
+                only_the_writers_mention(&writer)
+            );
+            drop(svc);
+
+            OldStore {
+                _dir: dir,
+                previous_path,
+                uuid: handle.uuid,
+                me,
+                writer,
+            }
+        }
+
+        /// Start the executor's perspectives, wait for them, and return this
+        /// one if it opened.
+        async fn start(
+            &self,
+        ) -> Option<crate::perspectives::perspective_instance::PerspectiveInstance> {
+            for task in crate::perspectives::initialize_from_db() {
+                task.await.unwrap();
+            }
+            crate::perspectives::get_perspective(&self.uuid)
+        }
+
+        fn forget(&self) {
+            crate::perspectives::PERSPECTIVES
+                .write()
+                .unwrap()
+                .remove(&self.uuid);
+        }
+    }
+
+    impl Drop for OldStore {
+        fn drop(&mut self) {
+            self.forget();
+            crate::perspectives::FAIL_METADATA_SWEEP
+                .lock()
+                .unwrap()
+                .retain(|uuid| uuid != &self.uuid);
+            *crate::perspectives::APP_DATA_PATH.write().unwrap() = self.previous_path.take();
+        }
+    }
+
+    /// An old store may also hold a member's link saying the store was
+    /// swept. Startup does not take the store's word for it: it opens the
+    /// perspective with the mention's own provenance.
+    #[tokio::test]
+    async fn startup_sweeps_an_old_store_that_says_it_was_swept() {
+        let old = OldStore::new(|member| vec![swept_flag(member)]);
+        let p = old.start().await.expect("the perspective opens");
+        assert_eq!(
+            mention_rows(&p.sparql_store, &old.me.did),
+            only_the_writers_mention(&old.writer)
+        );
+    }
+
+    /// When the sweep fails, the perspective does not open over a store that
+    /// may still hold forged provenance. The next start opens it swept.
+    #[tokio::test]
+    async fn startup_does_not_open_a_perspective_whose_sweep_failed() {
+        let old = OldStore::new(|_| vec![]);
+        crate::perspectives::FAIL_METADATA_SWEEP
+            .lock()
+            .unwrap()
+            .push(old.uuid.clone());
+        assert!(old.start().await.is_none(), "opened unswept");
+
+        crate::perspectives::FAIL_METADATA_SWEEP
+            .lock()
+            .unwrap()
+            .retain(|uuid| uuid != &old.uuid);
+        let p = old.start().await.expect("the perspective opens");
+        assert_eq!(
+            mention_rows(&p.sparql_store, &old.me.did),
+            only_the_writers_mention(&old.writer)
+        );
     }
 
     // ── Error messages ──
