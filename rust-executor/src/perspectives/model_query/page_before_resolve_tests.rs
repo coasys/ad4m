@@ -354,6 +354,52 @@ async fn a_post_hydration_where_on_a_file_reads_the_decoded_file() {
     files.stop().await;
 }
 
+/// A sort on a field inside a decoded file (`file.file_type`) decodes the file
+/// before it picks the page, as it did when every value was resolved first.
+#[tokio::test]
+async fn a_sort_on_a_field_of_a_decoded_file_picks_the_page_from_decoded_values() {
+    let files = FileLanguage::serve(Duration::ZERO).await;
+    // 12 items: `rank` = 7i mod 13 is distinct for each, so the order has no ties.
+    let n = 12;
+    let store = seed(n, Some(&files));
+    // `focus` keeps the fetched expression data, so `file` decodes to an object.
+    let shape = format!(
+        r#"{{
+        "className": "Item",
+        "properties": {{
+            "type": {{ "predicate": "ad4m://type", "required": true, "flag": true, "initial": "item://Item" }},
+            "kind": {{ "predicate": "item://kind" }},
+            "rank": {{ "predicate": "item://rank" }},
+            "file": {{ "predicate": "item://file", "resolveLanguage": "{}", "transform": {{ "type": "focus" }} }}
+        }},
+        "relations": {{}}
+    }}"#,
+        files.address
+    );
+
+    let (rows, total, _) = run(
+        &store,
+        &shape,
+        json!({
+            "order": [["file.file_type", "DESC"], ["rank", "ASC"]],
+            "limit": 5,
+            "offset": 2,
+        }),
+    )
+    .await;
+
+    let mut expected: Vec<usize> = (0..n).collect();
+    expected.sort_by(|&a, &b| {
+        file_type(b)
+            .cmp(file_type(a))
+            .then(((a * 7) % 13).cmp(&((b * 7) % 13)))
+    });
+    let page: Vec<usize> = expected.into_iter().skip(2).take(5).collect();
+    assert_eq!(ids(&rows), page.iter().map(|&i| id(i)).collect::<Vec<_>>());
+    assert_eq!(total, n);
+    files.stop().await;
+}
+
 // ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------

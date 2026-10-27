@@ -1055,7 +1055,14 @@ fn read_before_window(query: &ModelQueryInput) -> HashSet<String> {
     if let Some(clause) = &query.where_clause {
         walk(clause, &mut names);
     }
-    names.extend(query.order.iter().flatten().map(|(key, _)| key.clone()));
+    // A dotted sort key (`file.name`) reads a field of the decoded `file`.
+    names.extend(
+        query
+            .order
+            .iter()
+            .flatten()
+            .map(|(key, _)| key.split('.').next().unwrap_or(key).to_string()),
+    );
     names
 }
 
