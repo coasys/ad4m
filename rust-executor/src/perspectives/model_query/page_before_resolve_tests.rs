@@ -7,7 +7,8 @@
 //! stores; run them with
 //! `cargo test --release -p ad4m-executor --lib page_before_resolve -- --ignored --nocapture --test-threads=1`.
 
-use super::test_helpers::execute_model_query_from_json;
+use super::query::execute_model_query;
+use super::test_helpers::{execute_model_query_from_json, StaticShapeResolver};
 use super::types::ModelQueryInput;
 use crate::languages::language_runtime::LanguageOperation;
 use crate::languages::language_runtime_handle::LanguageRuntimeHandle;
@@ -263,6 +264,57 @@ async fn a_post_hydration_where_fetches_files_for_the_page_only() {
         page.len(),
         "fetched files for rows off the page"
     );
+    files.stop().await;
+}
+
+/// A reverse property holds the ids of the instances pointing at the row, not
+/// an expression: the page pass leaves it as it is, as it did when the only
+/// pass ran before reverse relations were filled in.
+#[tokio::test]
+async fn a_reverse_property_keeps_its_source_id() {
+    let files = FileLanguage::serve(Duration::ZERO).await;
+    let store = seed(4, None);
+    // The holder's id has the file language's scheme, so a resolve pass would fetch it.
+    let holder = format!("{}://holder", files.address);
+    store
+        .add_link(&link(&holder, "item://holds", &id(2), &ts(2)))
+        .unwrap();
+    // A SHACL `belongsToOne` with `resolveLanguage` loads this way; the JSON
+    // shape format has no field for it, so the parsed shape is adjusted.
+    let (resolver, parsed) = StaticShapeResolver::from_json(
+        "Item",
+        r#"{
+        "className": "Item",
+        "properties": {
+            "type": { "predicate": "ad4m://type", "required": true, "flag": true, "initial": "item://Item" },
+            "kind": { "predicate": "item://kind" }
+        },
+        "relations": {
+            "heldBy": { "predicate": "item://holds", "kind": "belongsToOne", "direction": "reverse", "targetClassName": "" }
+        }
+    }"#,
+    )
+    .unwrap();
+    let mut shape = parsed.as_ref().clone();
+    for property in shape.properties.iter_mut().filter(|p| p.name == "heldBy") {
+        property.resolve_language = Some(files.address.clone());
+    }
+    let mut query: ModelQueryInput = serde_json::from_value(
+        json!({ "where": { "kind": "post", "timestamp": { "gt": 0 } }, "limit": 10 }),
+    )
+    .unwrap();
+    query.include_unverified = Some(true);
+    let rows = execute_model_query(&store, &shape, &query, &resolver)
+        .await
+        .unwrap()
+        .instances;
+
+    let held = rows
+        .iter()
+        .find(|r| r["id"] == json!(id(2)))
+        .expect("item 2");
+    assert_eq!(held["heldBy"], json!(holder), "{held}");
+    assert_eq!(files.gets(), 0, "resolved a reverse property's source id");
     files.stop().await;
 }
 

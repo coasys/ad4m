@@ -1087,6 +1087,9 @@ async fn resolve_language_transforms(
         .properties
         .iter()
         .filter(|p| !p.is_deterministic_literal() || p.transform.is_some())
+        // A reverse property holds the ids of the instances that point here,
+        // filled in between the two passes, not a value to resolve.
+        .filter(|p| p.direction.as_deref() != Some("reverse"))
         .filter(|p| resolve(&p.name))
         .collect();
 
