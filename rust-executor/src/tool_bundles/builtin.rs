@@ -2,11 +2,11 @@
 //!
 //! WE's rules for its templates (what a valid one is, how a patch applies, the reference an agent
 //! reads) are JavaScript, and change with every WE release. Rather than a copy in Rust, the
-//! executor carries WE's own build of them: `template_tools.bundle.js`, vendored by
-//! `scripts/vendor-template-tools.sh`, which also writes `template_tools.json`: the bundle's tools
-//! as the bundle declares them, and the WE commit they came from. Reading the tools from that file
-//! keeps the tool list static, so it is known without starting an isolate; a test checks it says
-//! what the bundle exports.
+//! executor carries WE's own build of them, from a WE release: `build.rs` downloads the release's
+//! `agent-tools.bundle.js` and `agent-tools.json` (each toolset's tools as the bundle declares
+//! them, and the WE commit they came from), checks both against the hashes it pins, and this file
+//! compiles them in. Reading the tools from the manifest keeps the tool list static, so it is
+//! known without starting an isolate; a test checks it says what the bundle exports.
 //!
 //! **A record is seen by one call.** Each tool call runs in a fresh isolate of its own, started
 //! from the bundle and dropped after the call, so nothing a call hands the bundle is there for any
@@ -20,11 +20,15 @@
 use super::{BundleSandbox, SandboxError, SandboxLimits};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{OnceCell, Semaphore};
 
 /// The bundle, as WE builds it.
-pub const SOURCE: &str = include_str!("template_tools.bundle.js");
+pub const SOURCE: &str = include_str!(concat!(env!("OUT_DIR"), "/agent-tools.bundle.js"));
+
+/// The release's manifest for [`SOURCE`].
+const MANIFEST: &str = include_str!(concat!(env!("OUT_DIR"), "/agent-tools.json"));
 
 /// The name the bundle exports its template toolset under, and the documentation topic every one
 /// of its topics sits under.
@@ -41,9 +45,8 @@ pub struct TemplateTool {
     pub writes: bool,
 }
 
-/// What `template_tools.json` says about the bundle beside it.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// What the release's manifest says about the template toolset in the bundle.
+#[derive(Debug)]
 pub struct Declared {
     /// The WE commit the bundle was built from.
     pub commit: String,
@@ -52,9 +55,32 @@ pub struct Declared {
     pub tools: Vec<TemplateTool>,
 }
 
+/// `agent-tools.json`: the WE commit, and every toolset the bundle exports.
+#[derive(Deserialize)]
+struct Manifest {
+    commit: String,
+    toolsets: HashMap<String, Toolset>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Toolset {
+    applies_to: Vec<String>,
+    tools: Vec<TemplateTool>,
+}
+
 static DECLARED: LazyLock<Declared> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("template_tools.json"))
-        .expect("template_tools.json is written by vendor-template-tools.sh")
+    let mut manifest: Manifest =
+        serde_json::from_str(MANIFEST).expect("agent-tools.json is the release's manifest");
+    let toolset = manifest
+        .toolsets
+        .remove(TOOLSET)
+        .expect("the release's bundle exports a template toolset");
+    Declared {
+        commit: manifest.commit,
+        applies_to: toolset.applies_to,
+        tools: toolset.tools,
+    }
 });
 
 /// The tools the bundle exports, and what they work on.
@@ -75,7 +101,7 @@ fn source() -> Arc<str> {
 /// Call a tool with `input` (the record, the arguments, the author) and await its answer, in a
 /// fresh isolate that ends with the call.
 pub async fn call(tool: &str, input: Value) -> Result<Value, SandboxError> {
-    call_with(TOOLSET, source(), tool, input).await
+    call_with(TOOLSET, source(), SandboxLimits::default(), tool, input).await
 }
 
 /// How many tool calls may run at once, each in an isolate of its own. One, as when every call
@@ -86,19 +112,23 @@ const CALLS_AT_ONCE: usize = 1;
 async fn call_with(
     name: &'static str,
     source: Arc<str>,
+    limits: SandboxLimits,
     tool: &str,
     input: Value,
 ) -> Result<Value, SandboxError> {
     static SLOTS: Semaphore = Semaphore::const_new(CALLS_AT_ONCE);
     let tool = tool.to_string();
-    // On a task of its own, which holds the slot until the isolate's thread has ended: a caller
-    // that gives up must not free it while the isolate still runs or holds its memory.
+    // Waited for by the caller: one that gives up while it waits leaves the queue, and its call
+    // never runs.
+    let slot = SLOTS
+        .acquire()
+        .await
+        .map_err(|_| SandboxError::Closed("the template tools' calls were closed".into()))?;
+    // Then on a task of its own, which holds the slot until the isolate's thread has ended: a
+    // caller that gives up must not free it while the isolate still runs or holds its memory.
     tokio::spawn(async move {
-        let _slot = SLOTS
-            .acquire()
-            .await
-            .map_err(|_| SandboxError::Closed("the template tools' calls were closed".into()))?;
-        let sandbox = BundleSandbox::start(name, source, SandboxLimits::default()).await?;
+        let _slot = slot;
+        let sandbox = BundleSandbox::start(name, source, limits).await?;
         let answer = sandbox
             .call(&["toolsets", TOOLSET, "call"], vec![json!(tool), input])
             .await;
@@ -137,11 +167,11 @@ mod tests {
     use crate::test_utils::init_v8_platform;
 
     #[tokio::test]
-    async fn template_tools_json_says_what_the_bundle_exports() {
+    async fn the_manifest_says_what_the_bundle_exports() {
         init_v8_platform();
         let sandbox = BundleSandbox::start(TOOLSET, source(), SandboxLimits::default())
             .await
-            .expect("the vendored bundle loads");
+            .expect("the released bundle loads");
         let applies_to: Vec<String> = serde_json::from_value(
             sandbox
                 .read(&["toolsets", TOOLSET, "appliesTo"])
@@ -155,7 +185,7 @@ mod tests {
         assert_eq!(
             (applies_to, tools),
             (declared().applies_to.clone(), declared().tools.clone()),
-            "template_tools.json is stale: run scripts/vendor-template-tools.sh"
+            "agent-tools.json does not describe the bundle released with it"
         );
     }
 
@@ -169,11 +199,12 @@ mod tests {
         assert!(!is_topic("templates"));
     }
 
-    /// Stands in for the bundle: its one tool keeps its isolate busy for a while.
+    /// Stands in for the bundle: its one tool keeps its isolate busy for a while, 300 ms unless
+    /// the input says `ms`.
     const SLOW: &str = r#"
     export const toolsets = {
       template: {
-        call: async () => { const until = Date.now() + 300; while (Date.now() < until) {} return { text: "ok" }; },
+        call: async (_tool, input) => { const until = Date.now() + (input.ms ?? 300); while (Date.now() < until) {} return { text: "ok" }; },
       },
     };
     "#;
@@ -200,7 +231,15 @@ mod tests {
         init_v8_platform();
         let name = "slots-at-once";
         let calls = (0..4)
-            .map(|_| tokio::spawn(call_with(name, Arc::from(SLOW), "slow", json!({}))))
+            .map(|_| {
+                tokio::spawn(call_with(
+                    name,
+                    Arc::from(SLOW),
+                    SandboxLimits::default(),
+                    "slow",
+                    json!({}),
+                ))
+            })
             .collect();
         assert_eq!(
             most_isolates_while(name, calls).await,
@@ -214,7 +253,14 @@ mod tests {
         init_v8_platform();
         let name = "slots-released";
         for _ in 0..3 {
-            let answer = call_with(name, Arc::from(SLOW), "slow", json!({})).await;
+            let answer = call_with(
+                name,
+                Arc::from(SLOW),
+                SandboxLimits::default(),
+                "slow",
+                json!({}),
+            )
+            .await;
             assert_eq!(answer, Ok(json!({ "text": "ok" })));
             assert_eq!(
                 crate::tool_bundles::sandbox::running::count(name),
@@ -228,14 +274,103 @@ mod tests {
     async fn a_template_tool_call_given_up_on_keeps_its_turn_until_its_isolate_is_done() {
         init_v8_platform();
         let name = "slots-given-up";
-        let given_up = tokio::spawn(call_with(name, Arc::from(SLOW), "slow", json!({})));
+        let given_up = tokio::spawn(call_with(
+            name,
+            Arc::from(SLOW),
+            SandboxLimits::default(),
+            "slow",
+            json!({}),
+        ));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         given_up.abort();
-        let next = tokio::spawn(call_with(name, Arc::from(SLOW), "slow", json!({})));
+        let next = tokio::spawn(call_with(
+            name,
+            Arc::from(SLOW),
+            SandboxLimits::default(),
+            "slow",
+            json!({}),
+        ));
         assert_eq!(
             most_isolates_while(name, vec![next]).await,
             1,
             "the next call started while the given-up one still ran"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_template_tool_call_given_up_on_while_it_waits_never_runs() {
+        init_v8_platform();
+        use crate::tool_bundles::sandbox::running;
+        let wait = |ms| tokio::time::sleep(std::time::Duration::from_millis(ms));
+        let slow = |name, ms: u64| {
+            tokio::spawn(call_with(
+                name,
+                Arc::from(SLOW),
+                SandboxLimits::default(),
+                "slow",
+                json!({ "ms": ms }),
+            ))
+        };
+        let (holder, given_up, next) = ("queue-holder", "queue-given-up", "queue-next");
+
+        let holding = slow(holder, 1500);
+        while running::count(holder) == 0 {
+            wait(2).await;
+        }
+        let waiting = slow(given_up, 300);
+        wait(100).await;
+        waiting.abort();
+        let live = slow(next, 300);
+        wait(100).await;
+        assert_eq!(
+            running::count(holder),
+            1,
+            "the first call ended before the others queued behind it"
+        );
+
+        assert_eq!(live.await.unwrap(), Ok(json!({ "text": "ok" })));
+        assert_eq!(
+            running::most(given_up),
+            0,
+            "the call given up on while it waited for its turn ran anyway"
+        );
+        assert_eq!(holding.await.unwrap(), Ok(json!({ "text": "ok" })));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_template_tool_call_whose_isolate_fails_to_load_keeps_its_turn_until_the_isolate_is_done(
+    ) {
+        init_v8_platform();
+        // Never finishes loading, so the load runs into its time limit.
+        const HANGS: &str = "while (true) {}\nexport const toolsets = {};";
+        // Throws while loading, once it holds enough that tearing the isolate down takes a while.
+        const THROWS: &str = "globalThis.kept = Array.from({ length: 2000000 }, (_, i) => ({ i }));\nthrow new Error(\"no\");\nexport const toolsets = {};";
+        let short = SandboxLimits {
+            call_timeout: std::time::Duration::from_millis(300),
+            ..SandboxLimits::default()
+        };
+        let mut still_running = vec![];
+        for (name, source, limits, failed) in [
+            (
+                "load-hangs",
+                HANGS,
+                short,
+                (|a| matches!(a, Err(SandboxError::Timeout(_)))) as fn(&_) -> bool,
+            ),
+            ("load-throws", THROWS, SandboxLimits::default(), |a| {
+                matches!(a, Err(SandboxError::Load(_)))
+            }),
+        ] {
+            let answer = call_with(name, Arc::from(source), limits, "slow", json!({})).await;
+            assert!(failed(&answer), "{name}: {answer:?}");
+            if crate::tool_bundles::sandbox::running::count(name) != 0 {
+                still_running.push(name);
+            }
+        }
+        assert_eq!(
+            still_running,
+            Vec::<&str>::new(),
+            "the call gave up its turn while the isolate that failed to load still ran"
         );
     }
 

@@ -3370,6 +3370,89 @@ async fn two_updates_from_the_same_version_save_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_update_held_up_in_one_perspective_does_not_hold_up_another() {
+    // An update holds its record's lock from its first read to its write. One parked there, as
+    // one waiting on a slow read would be, must not keep a template in another perspective waiting.
+    let (handler, a, _guard_a, record_a) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let (_, b, _guard_b, record_b) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let update = |uuid: &str, base_uri: &str| {
+        handler.template_update(template_params(
+            uuid,
+            base_uri,
+            json!({
+                "version": 1,
+                "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": ["Bye"] } }]
+            }),
+        ))
+    };
+
+    let (reached, go) = super::template_tools::pause::arm(&record_a);
+    let held = update(&a, &record_a);
+    let other = async {
+        reached.await.expect("the update in A reads its record");
+        let other =
+            tokio::time::timeout(std::time::Duration::from_secs(60), update(&b, &record_b)).await;
+        let _ = go.send(());
+        other
+    };
+    let (held, other) = tokio::join!(held, other);
+
+    let other = other.expect("the update in B waited for the one held up in A");
+    assert!(other.starts_with("Saved as version 2."), "{other}");
+    assert!(held.starts_with("Saved as version 2."), "{held}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_save_after_the_tool_s_last_read_is_not_overwritten() {
+    // The app saves through instance_update, which takes no template lock: the tool has read the
+    // record for the last time, the app's save lands, and only then does the tool write.
+    let (handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let get = || {
+        handler.instance_get(Parameters(InstanceGetParams {
+            perspective_id: uuid.clone(),
+            class_name: "Template".into(),
+            base_uri: base_uri.clone(),
+        }))
+    };
+    let mut app_template = small_template();
+    app_template["children"][0]["children"] = json!(["From the app"]);
+
+    let (reached, go) = super::template_tools::pause::arm(&base_uri);
+    let tool = handler.template_update(template_params(
+        &uuid,
+        &base_uri,
+        json!({
+            "version": 1,
+            "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": ["From the tool"] } }]
+        }),
+    ));
+    let app = async {
+        reached.await.expect("the tool reads the record");
+        let saved = handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri: base_uri.clone(),
+                properties: props(&[("schema", app_template), ("version", json!(2))]),
+            }))
+            .await;
+        let saved_record = parse(&get().await);
+        let _ = go.send(());
+        (saved, saved_record)
+    };
+    let (answer, (saved, saved_record)) = tokio::join!(tool, app);
+
+    assert!(!saved.contains("error"), "{saved}");
+    assert_eq!(saved_record["version"], 2, "{saved_record}");
+    assert!(
+        answer.contains("the record changed while 'template_update' ran"),
+        "{answer}"
+    );
+    let after = parse(&get().await);
+    assert_eq!(after, saved_record, "the app's save stands");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_template_tools_refuse_a_record_that_is_not_a_template() {
     crate::test_utils::init_v8_platform();
     let (handler, uuid, _guard) = setup(false).await;
@@ -3400,6 +3483,369 @@ async fn the_template_tools_refuse_a_record_that_is_not_a_template() {
             .contains("works on Template"),
         "{wrong}"
     );
+}
+
+// ── template tools over MCP ──────────────────────────────────────────────
+//
+// These call the tools as a client does: `tools/call` over HTTP to a real MCP server, so the call
+// passes `call_tool`'s gate and the tool router, and the arguments are decoded from the JSON the
+// client sent (the tool's own beside the record's two). The callers who may not write, or may not
+// reach the perspective, hold a session the server's HTTP path would open from a granted token;
+// they call the same tool methods the router dispatches to.
+
+/// An MCP session on a real MCP server, as the operator.
+struct McpClient {
+    url: String,
+    session: String,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl McpClient {
+    async fn operator() -> Self {
+        let (url, session) =
+            crate::mcp::server::tests::local_server_session(Some("template-admin".into())).await;
+        McpClient {
+            url,
+            session,
+            next_id: std::sync::atomic::AtomicU64::new(2),
+        }
+    }
+
+    /// The JSON-RPC answer to `tools/call` of `tool` with `arguments`.
+    async fn answer(&self, tool: &str, arguments: Value) -> Value {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::mcp::server::tests::call_with(
+            &self.url,
+            &self.session,
+            id,
+            tool,
+            arguments,
+            &[("authorization", "Bearer template-admin")],
+        )
+        .await
+    }
+
+    /// The text `tool` answered with.
+    async fn call(&self, tool: &str, arguments: Value) -> String {
+        let answer = self.answer(tool, arguments).await;
+        answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no text in {answer}"))
+            .to_string()
+    }
+
+    async fn template(&self, uuid: &str, base_uri: &str) -> Value {
+        parse(
+            &self
+                .call(
+                    "instance_get",
+                    json!({ "perspective_id": uuid, "class_name": "Template", "base_uri": base_uri }),
+                )
+                .await,
+        )
+    }
+}
+
+/// A Template's arguments for a template tool: the record's two, and the tool's own.
+fn template_arguments(uuid: &str, base_uri: &str, own: Value) -> Value {
+    let mut arguments = own;
+    arguments["perspective_id"] = json!(uuid);
+    arguments["base_uri"] = json!(base_uri);
+    arguments
+}
+
+/// The text of a stored schema file, as the template tools write it.
+fn schema_file_text(record: &Value) -> String {
+    use base64::Engine;
+    let file: Value = match &record["schema"] {
+        Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+        other => other.clone(),
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(file["data_base64"].as_str().unwrap_or_default())
+        .unwrap_or_else(|e| panic!("the schema is not a file ({e}): {record}"));
+    String::from_utf8(bytes).expect("the schema file is text")
+}
+
+fn rename(version: i64, text: &str) -> Value {
+    json!({
+        "version": version,
+        "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": [text] } }]
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_mcp_an_update_against_the_version_read_is_saved() {
+    let (_handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let client = McpClient::operator().await;
+
+    let read = parse(
+        &client
+            .call(
+                "template_read",
+                template_arguments(&uuid, &base_uri, json!({})),
+            )
+            .await,
+    );
+    assert_eq!(read["version"], 1, "{read}");
+    assert!(read.to_string().contains("Hello"), "{read}");
+
+    let saved = client
+        .call(
+            "template_update",
+            template_arguments(
+                &uuid,
+                &base_uri,
+                rename(read["version"].as_i64().unwrap(), "Goodbye"),
+            ),
+        )
+        .await;
+    assert!(saved.starts_with("Saved as version 2."), "{saved}");
+
+    let after = client.template(&uuid, &base_uri).await;
+    assert_eq!(after["version"], 2, "{after}");
+    let schema = schema_file_text(&after);
+    assert!(
+        schema.contains("Goodbye") && !schema.contains("Hello"),
+        "the patch is what was saved: {schema}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_mcp_an_update_against_a_stale_version_changes_nothing() {
+    let (_handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let client = McpClient::operator().await;
+    let read = parse(
+        &client
+            .call(
+                "template_read",
+                template_arguments(&uuid, &base_uri, json!({})),
+            )
+            .await,
+    );
+    assert_eq!(read["version"], 1, "{read}");
+
+    // Somebody saves after the agent read: the version it holds is stale now.
+    let bumped = client
+        .call(
+            "instance_update",
+            json!({
+                "perspective_id": uuid, "class_name": "Template", "base_uri": base_uri,
+                "properties": { "version": 2 }
+            }),
+        )
+        .await;
+    assert!(!bumped.contains("error"), "{bumped}");
+    let before = client.template(&uuid, &base_uri).await;
+
+    let stale = client
+        .call(
+            "template_update",
+            template_arguments(&uuid, &base_uri, rename(1, "Goodbye")),
+        )
+        .await;
+    assert!(stale.contains("has changed since it was read"), "{stale}");
+    assert!(!stale.contains("Saved"), "{stale}");
+    assert_eq!(client.template(&uuid, &base_uri).await, before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_mcp_a_call_the_template_tools_cannot_run_says_why() {
+    let (_handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let client = McpClient::operator().await;
+    let before = client.template(&uuid, &base_uri).await;
+    let error_of = |answer: String| -> String {
+        let answer = parse(&answer);
+        answer["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("not an error: {answer}"))
+            .to_string()
+    };
+
+    // No record named: the server refuses the arguments before the tool runs.
+    let unnamed = client
+        .answer("template_read", json!({ "perspective_id": uuid }))
+        .await;
+    assert!(
+        unnamed["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("base_uri")),
+        "{unnamed}"
+    );
+
+    // A record that is not there.
+    let missing = error_of(
+        client
+            .call(
+                "template_read",
+                template_arguments(&uuid, "we://no-such-template", json!({})),
+            )
+            .await,
+    );
+    assert!(
+        missing.contains("no such record at 'we://no-such-template'"),
+        "{missing}"
+    );
+
+    // A patch naming a node the template does not have.
+    let mut no_node = rename(1, "Goodbye");
+    no_node["patches"][0]["targetId"] = json!("n99");
+    let refused = client
+        .call(
+            "template_update",
+            template_arguments(&uuid, &base_uri, no_node),
+        )
+        .await;
+    assert!(refused.contains("n99"), "{refused}");
+    assert!(!refused.contains("Saved"), "{refused}");
+
+    // An update without the version it was read at.
+    let unversioned = client
+        .call(
+            "template_update",
+            template_arguments(
+                &uuid,
+                &base_uri,
+                json!({ "patches": rename(1, "x")["patches"] }),
+            ),
+        )
+        .await;
+    assert!(unversioned.contains("version"), "{unversioned}");
+    assert!(!unversioned.contains("Saved"), "{unversioned}");
+
+    assert_eq!(client.template(&uuid, &base_uri).await, before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_mcp_a_stored_template_that_is_not_one_is_reported() {
+    let sdna = literal_template_sdna();
+    let (_handler, uuid, _guard, base_uri) =
+        template_setup(&sdna, json!("this is not a template")).await;
+    let client = McpClient::operator().await;
+    let read = client
+        .call(
+            "template_read",
+            template_arguments(&uuid, &base_uri, json!({})),
+        )
+        .await;
+    let error = parse(&read)["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(error.contains("'template_read' failed"), "{read}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_mcp_an_unknown_perspective_is_not_found() {
+    crate::test_utils::init_v8_platform();
+    let client = McpClient::operator().await;
+    for tool in ["template_read", "template_update"] {
+        let answer = parse(
+            &client
+                .call(
+                    tool,
+                    template_arguments(
+                        "00000000-0000-0000-0000-000000000000",
+                        "we://t",
+                        rename(1, "x"),
+                    ),
+                )
+                .await,
+        );
+        assert_eq!(answer["status"], 404, "{tool}: {answer}");
+    }
+}
+
+/// A handler whose MCP session holds `session`.
+fn handler_holding(session: crate::agent::session::Session) -> Ad4mMcpHandler {
+    Ad4mMcpHandler::new(
+        McpContext::new(
+            Some("test-admin".into()),
+            crate::agent::capabilities::ListenerReach::Network,
+            false,
+        )
+        .with_session(std::sync::Arc::new(session)),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_update_refuses_a_caller_who_may_only_read_before_it_runs() {
+    use crate::agent::capabilities::{perspective_query_capability, WILD_CARD};
+    use crate::agent::session::{Principal, Session};
+    let (admin, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let reader = handler_holding(
+        Session::for_test(Principal::Agent(crate::agent::AgentContext::main_agent()))
+            .with_caps(vec![perspective_query_capability(vec![WILD_CARD.into()])]),
+    );
+
+    let read = parse(
+        &reader
+            .template_read(template_params(&uuid, &base_uri, json!({})))
+            .await,
+    );
+    assert_eq!(read["version"], 1, "the reader reads: {read}");
+
+    // The refusal is the RPC guard's own answer and nothing else: the tool did not run.
+    let refused = reader
+        .template_update(template_params(&uuid, &base_uri, rename(1, "Goodbye")))
+        .await;
+    let answer = parse(&refused);
+    assert_eq!(answer["status"], 403, "{refused}");
+    assert!(!refused.contains("Saved"), "{refused}");
+
+    let after = parse(
+        &admin
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri,
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 1, "{after}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_template_tools_do_not_reach_another_owner_s_perspective() {
+    use crate::agent::capabilities::{
+        perspective_query_capability, perspective_update_capability, WILD_CARD,
+    };
+    use crate::agent::session::{Principal, Session};
+    let (admin, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let did = "did:key:z6MkTemplateToolsOtherUser";
+    let stranger = handler_holding(
+        Session::for_test(Principal::Agent(crate::agent::AgentContext::managed(
+            did.to_string(),
+        )))
+        .with_caps(vec![
+            perspective_query_capability(vec![WILD_CARD.into()]),
+            perspective_update_capability(vec![WILD_CARD.into()]),
+        ])
+        .with_did(did),
+    );
+
+    let read = stranger
+        .template_read(template_params(&uuid, &base_uri, json!({})))
+        .await;
+    assert_eq!(parse(&read)["status"], 404, "{read}");
+    assert!(!read.contains("Hello"), "{read}");
+    let update = stranger
+        .template_update(template_params(&uuid, &base_uri, rename(1, "Goodbye")))
+        .await;
+    assert_eq!(parse(&update)["status"], 404, "{update}");
+
+    let after = parse(
+        &admin
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri,
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 1, "{after}");
 }
 
 #[tokio::test]

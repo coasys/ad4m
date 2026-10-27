@@ -104,7 +104,7 @@ causes no side effect.
 | `auth.rs` | login / capability request flow |
 | `perspectives.rs` | perspective + link CRUD |
 | `instances/` | the static instance surface: `instance_query` / `_get` / `_create` / `_update` / `_remove`, `instance_add_to_collection` / `_remove_from_collection`, `instance_transcript`, child links, and `describe_perspective`. Class-agnostic — the class is a parameter, not a tool name; `instance_transcript` takes no class at all, it is one model query on the built-in TextContent (#1446). Also `execute_commands` (`commands.rs`), the deliberate raw-SDNA escape hatch: it runs actions directly and does **not** go through the class's SHACL validation, so it is the one tool here that can write a shape the model would reject |
-| `instances/template_tools.rs` | `template_read` / `template_update`: a WE template, edited by WE's own rules (`tool_bundles/builtin.rs`). Their descriptions and arguments are the bundle's (`from_bundle`); the record is read and written here, through the class setters, like `instance_update`. The bundle gets the perspective's models (`models`), so a template may query its own classes; `template_update` holds `WRITES` from reading the record to the commit and re-reads the version before writing |
+| `instances/template_tools.rs` | `template_read` / `template_update`: a WE template, edited by WE's own rules (`tool_bundles/builtin.rs`). Their descriptions and arguments are the bundle's (`from_bundle`); the record is read and written here, through the class setters, like `instance_update`. The bundle gets the perspective's models (`models`), so a template may query its own classes; `template_update` holds its record's lock (`lock_record`, one per perspective and record, so a slow read holds up no other template) from reading the record to the commit and re-reads the version before writing |
 | `dynamic.rs` | Generates one tool per SHACL class (`query_<Class>`, `create_<Class>`, …) from `mcp/shacl.rs`. Exposed over MCP **only** with `dynamicClassTools` (off by default); always merged into the in-process harness surface |
 | `docs.rs` | `get_documentation` — the executor's own agent docs, one `DocTopic` per markdown file, compiled in via `include_str!`; `template` and the topics under it are served by the template tools' bundle |
 | `flows.rs` | SHACLFlow state/transition tools |
@@ -133,6 +133,10 @@ is a second, raw-link parser slated for deletion.
   agents see, so a behaviour added only to `dynamic.rs` is invisible unless the
   operator opted into `dynamicClassTools`.
 - Adding a doc topic means three edits that must stay in step: the markdown file,
-  the `DocTopic` variant (+ `ALL`), and the plugin's `DocTopic` schema in
-  `plugins/ad4m/staticToolDefs.ts`. `docs_only_point_at_served_topics` and
-  `get_documentation_serves_every_topic` fail if you miss one.
+  the `DocTopic` variant (+ `ALL`), and the `topic` description of
+  `GetDocumentationParams` (`docs.rs`), which names every topic: `topic` is a plain
+  string, so that description, captured into `plugins/ad4m/staticToolDefs.ts`, is all
+  an agent learns the topics from. `docs_only_point_at_served_topics` and
+  `get_documentation_serves_every_topic` fail if you miss one of the first two; the
+  plugin's `index.test.ts` checks that the captured description names the topics in
+  its list, so add the new one there too.
