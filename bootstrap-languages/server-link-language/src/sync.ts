@@ -112,13 +112,31 @@ function toWireLink(link: LinkExpression): WireLinkExpression {
     return encryptLinkForWire(link, key, version);
 }
 
-/** The link a wire link carries, or null when it is encrypted with a key
- *  version this agent does not hold (yet). Other failures throw. */
-function openWireLink(wireLink: WireLinkExpression): LinkExpression | null {
+/** A wire link the key it names does not open. */
+const UNOPENABLE = Symbol("unopenable");
+
+/**
+ * The link a wire link carries, or null when it is encrypted with a key
+ * version this agent does not hold (yet). A link the key it names does not
+ * open (malformed ciphertext or payload) is logged and `UNOPENABLE`: a key
+ * version is fixed by its rotation's commitment, so no later key opens it
+ * either, and it costs that one link, not the diff, the catch-up batch or
+ * the held links around it.
+ */
+function openWireLink(wireLink: WireLinkExpression): LinkExpression | null | typeof UNOPENABLE {
     if (isEncryptedLinkData(wireLink.data)) {
         const keyRing = deps().getKeyRing();
-        if (!keyRing || !keyRing.has(wireLink.key_version ?? 1)) return null;
-        return decryptLinkFromWire(wireLink, keyRing);
+        const version = wireLink.key_version ?? 1;
+        if (!keyRing || !keyRing.has(version)) return null;
+        try {
+            return decryptLinkFromWire(wireLink, keyRing);
+        } catch (err) {
+            console.error(
+                `[server-link-language] skipping link ${heldId(wireLink)}: key version ${version} does not open it:`,
+                err instanceof Error ? err.message : err,
+            );
+            return UNOPENABLE;
+        }
     }
     return {
         author: wireLink.author ?? "",
@@ -170,6 +188,7 @@ function heldId(wireLink: WireLinkExpression): string {
  */
 function openOrHold(wireLink: WireLinkExpression, op: store.HeldOp): LinkExpression | null {
     const link = openWireLink(wireLink);
+    if (link === UNOPENABLE) return null;
     if (!link) {
         store.holdLink(heldId(wireLink), op, wireLink);
         return null;
@@ -244,7 +263,9 @@ export function retryHeld(): PerspectiveDiff {
     for (const held of store.heldLinks()) {
         const link = openWireLink(held.link);
         if (!link) continue;
+        // Opened, or never will be: either way it no longer waits for a key.
         store.releaseHeld(held.id);
+        if (link === UNOPENABLE) continue;
         (held.op === "add" ? additions : removals).push(link);
     }
     if (additions.length + removals.length > 0) {

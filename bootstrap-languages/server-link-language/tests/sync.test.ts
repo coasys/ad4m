@@ -1240,3 +1240,71 @@ describe("sync: no history is lost", () => {
         assert.equal(emitCounts("additions").get("kept"), undefined);
     });
 });
+
+describe("sync: a link no key opens costs that link only", () => {
+    /** `link` encrypted with `key`, its ciphertext altered so the key it names
+     *  does not open it (an AES-GCM tag failure). */
+    function unopenable(link: LinkExpression, key: Uint8Array, version: number) {
+        const wire = encryptLinkForWire(link, key, version);
+        const data = wire.data as { ciphertext: string; nonce: string };
+        const flipped = (parseInt(data.ciphertext.slice(0, 2), 16) ^ 0xff).toString(16).padStart(2, "0");
+        return { ...wire, data: { ...data, ciphertext: flipped + data.ciphertext.slice(2) } };
+    }
+
+    it("held links around one the key does not open are all emitted once the key is held", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const roomKey = generateRoomKey();
+        // Held in this order under a missing key: valid, unopenable, valid.
+        syncModule.applyInboundWireDiff(
+            { additions: [encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1)], removals: [] }, 1, "rev-1");
+        syncModule.applyInboundWireDiff(
+            { additions: [unopenable(makeLink({ source: "b" }), roomKey, 1)], removals: [] }, 2, "rev-2");
+        syncModule.applyInboundWireDiff(
+            { additions: [encryptLinkForWire(makeLink({ source: "c" }), roomKey, 1)], removals: [] }, 3, "rev-3");
+        assert.equal(emittedDiffs.length, 0);
+
+        keyRing = new Map([[1, roomKey]]);
+        for (let i = 0; i < 2; i++) {
+            try { syncModule.retryHeld(); } catch { /* the defect: a throw here must not lose a link */ }
+        }
+
+        const added = emitCounts("additions");
+        assert.equal(added.get("a"), 1, "a valid held link before the unopenable one reaches the executor");
+        assert.equal(added.get("c"), 1, "a valid held link after the unopenable one reaches the executor");
+        assert.equal(added.get("b"), undefined);
+        assert.equal(syncModule.hasHeldLinks(), false, "nothing stays held for a key the member already has");
+    });
+
+    it("a catch-up batch with a link the key does not open still applies the rest of the batch", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const roomKey = generateRoomKey();
+        keyRing = new Map([[1, roomKey]]);
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=0"),
+            () => jsonResponse({
+                diffs: [
+                    { additions: [encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1)], removals: [] },
+                    { additions: [unopenable(makeLink({ source: "b" }), roomKey, 1)], removals: [] },
+                    { additions: [encryptLinkForWire(makeLink({ source: "c" }), roomKey, 1)], removals: [] },
+                ],
+                revision: "rev-3",
+                sequence: 3,
+            }),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=3"),
+            () => jsonResponse({ diffs: [], revision: "rev-3", sequence: 3 }),
+        );
+
+        for (let i = 0; i < 2; i++) {
+            try { await syncModule.catchUp(); } catch { /* the defect: a throw here must not lose a link */ }
+        }
+
+        const added = emitCounts("additions");
+        assert.equal(added.get("a"), 1);
+        assert.equal(added.get("c"), 1, "the entry after the unopenable one is applied");
+        assert.equal(store.getSequence(), 3);
+    });
+});
