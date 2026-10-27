@@ -1380,16 +1380,17 @@ impl PerspectiveInstance {
                     // One diff the language refuses must not hold back the
                     // diffs behind it. Send the oldest alone: if it goes
                     // through, the next tick sends the rest. If the language
-                    // refuses it, takes the rest, then refuses it again, it
-                    // refuses that diff for good: drop it. If it takes
-                    // neither, it is down: keep the batch and back off.
+                    // refuses it but takes the rest, it refuses that diff for
+                    // good: drop it, since sending it after the rest would
+                    // reorder it behind newer diffs. If it takes neither, it
+                    // is down: keep the batch and back off.
                     Err(e) if pending_ids.len() > 1 => {
                         let (oldest, oldest_ids) = Ad4mDb::with_global_instance(|db| {
                             db.get_pending_diffs(&uuid, Some(1))
                         })?;
                         match link_language.commit(oldest.clone()).await {
                             Ok(_) => oldest_ids,
-                            Err(_) => {
+                            Err(refusal) => {
                                 // The batch concatenates its diffs oldest first.
                                 let rest = PerspectiveDiff {
                                     additions: pending_diffs.additions[oldest.additions.len()..]
@@ -1403,16 +1404,13 @@ impl PerspectiveInstance {
                                         pending_ids.len()
                                     )));
                                 }
-                                // The language is up, so a second refusal is not a blip.
-                                if let Err(refusal) = link_language.commit(oldest.clone()).await {
-                                    log::error!(
+                                log::error!(
                                     "💾 perspective {}: the link language refused a diff and accepted the {} after it; dropped it, its links stay local only: {:#}\n{:?}",
                                     uuid,
                                     pending_ids.len() - 1,
                                     refusal,
                                     oldest
-                                    );
-                                }
+                                );
                                 pending_ids
                             }
                         }
