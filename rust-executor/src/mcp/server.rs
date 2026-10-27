@@ -954,4 +954,27 @@ mod tests {
         let refused = call(&url, &session, 4, "get_my_did", &forwarded).await;
         assert!(refused.contains("Authentication required."), "{refused}");
     }
+
+    // Sessions live in memory, so a restart forgets every id a client holds. The MCP
+    // Streamable HTTP transport says an unknown session is a 404, which tells the client
+    // to initialize again; a 401 reads as an auth failure and the client drops the tools.
+    #[tokio::test]
+    async fn an_unknown_session_id_is_not_found() {
+        let (url, _session) = local_server_session(Some("http-admin".into())).await;
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("authorization", "Bearer http-admin")
+            .header("mcp-session-id", "a-session-this-executor-never-opened")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "auth_status", "arguments": {} }
+            }))
+            .send()
+            .await
+            .expect("tools/call");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
 }
