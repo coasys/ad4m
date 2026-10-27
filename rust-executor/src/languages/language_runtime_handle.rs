@@ -2,6 +2,7 @@ use log::{debug, error, info};
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::{
     mpsc::{self, UnboundedSender},
@@ -14,6 +15,16 @@ use crate::languages::LanguageContext;
 
 use super::language_runtime::{LanguageOperation, LanguageRuntime, LanguageRuntimeRequest};
 
+/// How long a caller waits for a script call into a language (`Execute`), from send to result.
+///
+/// A language serves its calls one at a time, and nothing interrupts a call once it runs: a
+/// call that never returns blocks every later call to it. The deadline does not end such a
+/// call. It ends the wait of its caller and of the callers queued behind it, who get an error
+/// instead of waiting for ever, and the runtime does not start a call whose caller has gone.
+/// It is for hangs, not slow calls: a large encrypted commit can take over 30 s. It is twice
+/// the SDK's 30 s call timeout and six of host.js's 10 s HTTP fetch timeouts.
+pub(crate) const LANGUAGE_CALL_DEADLINE: Duration = Duration::from_secs(60);
+
 /// Handle to a per-language runtime running in its own thread.
 /// Thin communication layer that sends requests to a LanguageRuntime
 /// via a channel.
@@ -22,6 +33,8 @@ pub struct LanguageRuntimeHandle {
     pub language_address: String,
     pub language_name: Option<String>,
     tx: UnboundedSender<LanguageRuntimeRequest>,
+    /// How long a caller waits for a script call: `LANGUAGE_CALL_DEADLINE`.
+    call_deadline: Duration,
 }
 
 impl LanguageRuntimeHandle {
@@ -70,6 +83,7 @@ impl LanguageRuntimeHandle {
             language_address,
             language_name: None,
             tx,
+            call_deadline: LANGUAGE_CALL_DEADLINE,
         })
     }
 
@@ -84,7 +98,15 @@ impl LanguageRuntimeHandle {
             language_address,
             language_name: None,
             tx,
+            call_deadline: LANGUAGE_CALL_DEADLINE,
         }
+    }
+
+    /// Test-only: a shorter deadline, so a test of it does not wait a minute.
+    #[cfg(test)]
+    pub(crate) fn with_call_deadline(mut self, deadline: Duration) -> Self {
+        self.call_deadline = deadline;
+        self
     }
 
     /// Send an operation and wait for the result.
@@ -98,6 +120,9 @@ impl LanguageRuntimeHandle {
             &op_name[..op_name.len().min(100)]
         );
 
+        // Load, init and teardown have no deadline: init may install a Holochain app for
+        // minutes.
+        let is_call = matches!(operation, LanguageOperation::Execute(..));
         self.tx
             .send(LanguageRuntimeRequest {
                 operation,
@@ -106,9 +131,20 @@ impl LanguageRuntimeHandle {
             })
             .map_err(|e| format!("Language runtime channel closed: {}", e))?;
 
-        let result = response_rx
-            .await
-            .map_err(|e| format!("Language runtime dropped without responding: {}", e))?;
+        let response = if is_call {
+            tokio::time::timeout(self.call_deadline, response_rx)
+                .await
+                .unwrap_or_else(|_| {
+                    Ok(Err(format!(
+                        "Call to language {} passed its deadline of {:?}",
+                        self.language_address, self.call_deadline
+                    )))
+                })
+        } else {
+            response_rx.await
+        };
+        let result =
+            response.map_err(|e| format!("Language runtime dropped without responding: {}", e))?;
 
         match &result {
             Ok(_) => debug!("[handle:{}] Operation completed OK", self.language_address),

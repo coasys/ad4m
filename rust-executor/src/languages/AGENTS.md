@@ -15,6 +15,17 @@ Language in its own Deno isolate on its own OS thread. Split plan: spec item 9.
 | `conductor_languages.rs` | `load_link_and_installed_languages`: the system-language steps whose constructors wait for the Holochain conductor (known link languages, installed languages). Run in the background after generate/unlock by `agent::conductor_startup` |
 | `language_context.rs`, `capability.rs`, `literal.rs`, `byte_array.rs`, `error.rs`, `wasm_delegate.rs` | context passed at load, per-language capability grants, `Literal` codec, `LanguageError` |
 
+A runtime serves its calls one at a time, in send order, and never abandons or
+interrupts a call it has started: commits must reach the link language in the
+order they were made, and the `AgentContext` thread-local holds one agent at a
+time, so a call that resumed beside a later one would sign as the later call's
+agent. A caller waits for a script call (`Execute`) at most
+`LANGUAGE_CALL_DEADLINE` (60 s from send) and then gets an error; the runtime
+does not start a call whose caller has stopped waiting. A call that never
+returns (a hung `await` or a JS CPU loop) still blocks its language, but its
+callers and the ones behind it get errors instead of waiting for ever. Load,
+init and teardown have no deadline.
+
 Calls into a Language are built as JS source via `format!` and evaluated (≈20
 sites in `mod.rs`). A malformed template used to deadlock that language forever
 (`js_core/mod.rs` comments). Keep templates small and escape inputs with

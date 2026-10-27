@@ -417,6 +417,12 @@ impl LanguageRuntime {
                                 }
 
                                 let result = match request.operation {
+                                    // Its caller stopped waiting (the call deadline). Nobody
+                                    // would get the result, and the caller may have queued the
+                                    // work again: a commit goes to the pending diffs.
+                                    LanguageOperation::Execute(..) if request.response_tx.is_closed() => {
+                                        Err(format!("Call to language {} not started: its caller stopped waiting", addr))
+                                    }
                                     LanguageOperation::Execute(script, ref agent_ctx) => {
                                         set_runtime_agent_context(agent_ctx);
                                         let r = self.execute(&script).await;
