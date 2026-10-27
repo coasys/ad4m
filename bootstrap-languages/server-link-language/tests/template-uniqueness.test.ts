@@ -5,7 +5,8 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { initAdapters, getConfig, resetAdapters } from "../src/adapters.js";
-import { adminRotates } from "../src/room-keys.js";
+import { adminRotates, afterFailedKeyRead } from "../src/room-keys.js";
+import { generateRoomKey } from "../src/encryption.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const bundlePath = resolve(__dirname, "..", "build", "bundle.js");
@@ -101,5 +102,21 @@ describe("adminRotates", () => {
     it("does not rotate while it holds a key, or when the key ring errored", () => {
         assert.strictEqual(adminRotates("ready", false), false);
         assert.strictEqual(adminRotates("error", false), false);
+    });
+});
+
+describe("afterFailedKeyRead", () => {
+    it("keeps a loaded key ring when a refresh fails: commits still encrypt, inbound links still open", () => {
+        const ring = new Map([[1, generateRoomKey()]]);
+        const after = afterFailedKeyRead("ready", ring);
+        assert.strictEqual(after.status, "ready");
+        assert.strictEqual(after.ring, ring);
+    });
+
+    it("is an error when no ring was loaded: commits refuse plaintext", () => {
+        for (const status of ["none", "pending", "error"] as const) {
+            assert.deepStrictEqual(afterFailedKeyRead(status, null), { status: "error", ring: null });
+        }
+        assert.deepStrictEqual(afterFailedKeyRead("ready", new Map()), { status: "error", ring: null });
     });
 });

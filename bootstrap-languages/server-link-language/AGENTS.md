@@ -174,6 +174,9 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   on a commit, on a `keys-granted` push, and on every sync while it holds
   links it cannot open. A version whose box does not open is left out of the
   ring (`buildKeyRing`), so one bad grant costs that version, not the room.
+  A failed re-read keeps a ring already loaded (`afterFailedKeyRead`): only a
+  member that never loaded one is `error`, so one failed `/keys` read never
+  refuses commits or holds inbound links.
 - **Room keys are sealed to DIDs.** A member's X25519 key is the Montgomery
   form of the Ed25519 key in its `did:key`. The language seals itself
   (`sealToDid`, src/encryption.ts) and opens with the `agentOpenSealed(box)`

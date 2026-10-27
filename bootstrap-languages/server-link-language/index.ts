@@ -22,7 +22,7 @@ import * as syncModule from "./src/sync.js";
 import * as telepresenceModule from "./src/telepresence.js";
 import { WsClient } from "./src/ws-client.js";
 import { buildKeyRing, opensOwnBoxes, type KeyRing } from "./src/encryption.js";
-import { adminRotates, grantMissingRoomKeys, rotateRoomKey, type KeyRingStatus } from "./src/room-keys.js";
+import { adminRotates, afterFailedKeyRead, grantMissingRoomKeys, rotateRoomKey, type KeyRingStatus } from "./src/room-keys.js";
 
 import {
     initAdapters,
@@ -157,11 +157,12 @@ async function setupKeyRing(): Promise<void> {
         console.log(`[server-link-language] E2E key ring acquired (${versions.length} version(s): ${versions.join(", ")})`);
     } catch (err) {
         if (gen !== lifecycleGen) return;
-        keyRingStatus = "error";
-        keyRing = null;
+        ({ status: keyRingStatus, ring: keyRing } = afterFailedKeyRead(keyRingStatus, keyRing));
         console.error(
-            "[server-link-language] failed to acquire/decrypt E2E key ring — " +
-            "refusing to commit plaintext until this resolves:",
+            keyRingStatus === "ready"
+                ? "[server-link-language] key ring refresh failed — keeping the key ring already loaded:"
+                : "[server-link-language] failed to acquire/decrypt E2E key ring — " +
+                  "refusing to commit plaintext until this resolves:",
             err,
         );
         return;

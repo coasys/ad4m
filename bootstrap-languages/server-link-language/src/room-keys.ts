@@ -35,6 +35,22 @@ export function adminRotates(status: KeyRingStatus, rotatedThisRun: boolean): bo
 }
 
 /**
+ * The key ring after a `/keys` read or open failed (network, server, a locked
+ * agent). The keys already held are still the room's keys: a loaded ring
+ * stays loaded, so commits still encrypt and inbound links still open. Catch-up
+ * re-reads `/keys` while any link is held, so dropping the ring here would
+ * turn one failed read into refused commits and held links. Only a ring that
+ * never loaded becomes "error".
+ */
+export function afterFailedKeyRead(
+    status: KeyRingStatus,
+    ring: KeyRing | null,
+): { status: KeyRingStatus; ring: KeyRing | null } {
+    if (status === "ready" && ring && ring.size > 0) return { status, ring };
+    return { status: "error", ring: null };
+}
+
+/**
  * Room admin only (the server refuses anyone else): a new room key version,
  * sealed to the DID of every ACL member. Returns null, and rotates nothing,
  * when no member's DID can be sealed to.
