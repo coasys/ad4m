@@ -23,7 +23,7 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 
 | Tool                                                                 | Description                                                         |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `ad4m_subscribe_to_mentions(perspective_id)`                         | Watch for any item whose text carries your name or DID              |
+| `ad4m_subscribe_to_mentions(perspective_id)`                         | Watch for any item that mentions you (links to your DID with `we://mention`) |
 | `ad4m_subscribe_to_children(perspective_id, expression_address)`     | Watch for new children under a parent, of any class (messages in a channel, blocks in a call, …) |
 | `ad4m_unsubscribe_from_mentions(perspective_id)`                     | Stop watching mentions in a neighbourhood                           |
 | `ad4m_unsubscribe_from_children(perspective_id, expression_address)` | Stop watching that parent                                           |
@@ -47,11 +47,11 @@ For mention subscriptions, the wake message includes per-item details with resol
 ```
 
 The `Mentioned items` section lists each item that triggered the wake:
-- **Item** — the base address of the instance whose property text carried your name or DID
+- **Item** — the address of the record that mentions you: the source of the `we://mention` link to your DID
 - **Parents** — every container holding this item: whatever links it with `ad4m://has_child`, and every instance of a class whose own `children` relation holds it (a We call holding a block through `we://child`)
 - **Ancestors** — everything above the parents, nearest first, a few levels up (absent when there is nothing above them)
 
-**The item is not necessarily a message.** The subscription is a SPARQL query over links, not over a `Message` class: it matches any link whose literal target contains one of your profile names or your DID as a whole word, case-insensitively ("data" matches "hi Data!", not "metadata"), excluding `ad4m://ontology/*` proof metadata and links you authored yourself, so your own reply naming you does not wake you. If the space declares a `Message` class with a `body` property, the query is scoped to that one predicate for speed; in a space with a user-defined ontology and no such class it scans every other link. So the address you are handed is the source of whichever link carried your name — a task, a proposal, a comment, a field of a class this space invented. Treat "message" as one possible answer, never the assumption.
+**The item is not necessarily a message.** The subscription is a SPARQL query over links, not over a class: it matches every `we://mention` link to your DID, which is how WE stores a mention (a post's root or a feed line links to each person it mentions). The name the text shows plays no part, so you are woken whatever label the writer's app gave you. Links you authored yourself never match, so your own reply mentioning you does not wake you, and neither does a link whose signature does not verify. So the address you are handed is whatever links to you as a mention: a post, a line in a feed, or a record of a class this space invented. Treat "message" as one possible answer, never the assumption.
 
 An item can have multiple parents when an app derives further containers from it (auto-generated summary threads, for example).
 

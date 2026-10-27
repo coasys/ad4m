@@ -1948,10 +1948,8 @@ describe("ad4mPlugin", () => {
               {
                 type: "text",
                 text: JSON.stringify({
-                  class: "ad4m://TextContent",
-                  query: "SELECT * FROM link WHERE ...",
-                  terms: ["TestAgent", "did:key:zTest"],
-                  names: ["TestAgent"],
+                  query: "SELECT ?source ?timestamp WHERE { ... }",
+                  predicate: "we://mention",
                   did: "did:key:zTest",
                 }),
               },
@@ -2026,10 +2024,8 @@ describe("ad4mPlugin", () => {
               {
                 type: "text",
                 text: JSON.stringify({
-                  class: "ad4m://TextContent",
-                  query: "SELECT * FROM link WHERE ...",
-                  terms: ["TestAgent", "did:key:zTest"],
-                  names: ["TestAgent"],
+                  query: "SELECT ?source ?timestamp WHERE { ... }",
+                  predicate: "we://mention",
                   did: "did:key:zTest",
                 }),
               },
@@ -2167,36 +2163,27 @@ describe("ad4mPlugin", () => {
     }
   }
 
-  it("ad4m_subscribe_to_mentions opens the executor's mention query as a model query on its class (#1446)", async () => {
-    const query = JSON.stringify({ where: { OR: [{ text: { contains: "TestAgent" } }] } });
-    const { opened, active } = await subscribeToMentions({
-      class: "ad4m://TextContent",
+  it("ad4m_subscribe_to_mentions opens the executor's mention query as SPARQL over the we://mention link", async () => {
+    const query = "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }";
+    const { result, opened, active } = await subscribeToMentions({
       query,
-      terms: ["TestAgent", "did:key:zTest"],
-      names: ["TestAgent"],
+      predicate: "we://mention",
       did: "did:key:zTest",
+      subscription: { id: "mention-persp-uuid-1", perspective: "persp-uuid-1", query },
     });
-    expect(opened.map((args) => [args[0], args[1], args[3]])).toEqual([["persp-uuid-1", query, "ad4m://TextContent"]]);
-    expect(active.map((sub) => sub.className)).toEqual(["ad4m://TextContent"]);
-    // The waker's whole-word check reads them.
-    expect(active.map((sub) => sub.terms)).toEqual([["TestAgent", "did:key:zTest"]]);
+    // Three arguments: no class, so the proxy subscribes with SPARQL.
+    expect(opened.map((args) => [args[0], args[1], args.length])).toEqual([["persp-uuid-1", query, 3]]);
+    expect(active.map((sub) => [sub.id, sub.query, sub.className])).toEqual([
+      ["mention-persp-uuid-1", query, undefined],
+    ]);
+    expect(JSON.stringify(result)).toContain("we://mention links to did:key:zTest");
   });
 
-  it("ad4m_subscribe_to_mentions refuses a mention query without its terms", async () => {
+  it("ad4m_subscribe_to_mentions refuses an executor that still reads mentions from message text", async () => {
     const { result, opened, active } = await subscribeToMentions({
       class: "ad4m://TextContent",
       query: JSON.stringify({ where: { OR: [{ text: { contains: "TestAgent" } }] } }),
-      names: ["TestAgent"],
-      did: "did:key:zTest",
-    });
-    expect(JSON.stringify(result)).toContain("without its terms");
-    expect(opened).toEqual([]);
-    expect(active).toEqual([]);
-  });
-
-  it("ad4m_subscribe_to_mentions refuses an executor that still answers with SPARQL", async () => {
-    const { result, opened, active } = await subscribeToMentions({
-      query: "SELECT ?source ?predicate ?target WHERE { ... }",
+      terms: ["TestAgent", "did:key:zTest"],
       names: ["TestAgent"],
       did: "did:key:zTest",
     });
@@ -3544,8 +3531,6 @@ describe("WakerSubscriptionManager", () => {
     await expect(manager.subscribe({
       id: "mention-fail",
       type: "mention",
-      className: "ad4m://TextContent",
-      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "",
       query: "SELECT * FROM link",
@@ -3616,8 +3601,6 @@ describe("WakerSubscriptionManager", () => {
     await expect(manager.subscribe({
       id: "mention-gone",
       type: "mention",
-      className: "ad4m://TextContent",
-      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "",
       query: "SELECT * FROM link",
@@ -3733,8 +3716,6 @@ describe("WakerSubscriptionManager", () => {
     await manager.subscribe({
       id: "test-false",
       type: "mention",
-      className: "ad4m://TextContent",
-      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "",
       query: "SELECT * FROM link",
@@ -3746,7 +3727,7 @@ describe("WakerSubscriptionManager", () => {
     expect(wakeCount).toBe(0);
 
     // Deliver a real result — should fire
-    mock.deliver({ instances: [{ id: 'channel-1', text: "hi bot" }] });
+    mock.deliver([{ source: 'channel-1' }]);
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
     // Seen messages should contain the message address
@@ -3772,20 +3753,18 @@ describe("WakerSubscriptionManager", () => {
     await manager.subscribe({
       id: "test-seen",
       type: "mention",
-      className: "ad4m://TextContent",
-      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "",
       query: "SELECT * FROM link",
     });
 
     // Deliver same message that was already seen — should NOT wake
-    mock.deliver({ instances: [{ id: 'channel-1', text: "hi bot" }] });
+    mock.deliver([{ source: 'channel-1' }]);
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(0);
 
     // Deliver a new message — should wake
-    mock.deliver({ instances: [{ id: 'channel-1', text: "hi bot" }, { id: 'channel-2', text: "hi bot" }] });
+    mock.deliver([{ source: 'channel-1' }, { source: 'channel-2' }]);
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
 
@@ -3860,15 +3839,13 @@ describe("WakerSubscriptionManager", () => {
     await manager.subscribe({
       id: "test-multi-parent",
       type: "mention",
-      className: "ad4m://TextContent",
-      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "fallback-channel",
       query: "SELECT * FROM link",
     });
 
-    // Mention model results carry the record id and its text.
-    mock.deliver({ instances: [{ id: 'msg-1', text: "hi bot" }, { id: 'msg-2', text: "hi bot" }] });
+    // Mention rows name the mentioned record as `source`.
+    mock.deliver([{ source: 'msg-1' }, { source: 'msg-2' }]);
     await new Promise(r => setTimeout(r, 50));
 
     // Per message: one step in for its parents, one bounded walk for what is above them.
@@ -3907,14 +3884,12 @@ describe("WakerSubscriptionManager", () => {
     await manager.subscribe({
       id: "test-no-parent",
       type: "mention",
-      className: "ad4m://TextContent",
-      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "fallback-channel",
       query: "SELECT * FROM link",
     });
 
-    mock.deliver({ instances: [{ id: 'msg-1', text: "hi bot" }] });
+    mock.deliver([{ source: 'msg-1' }]);
     await new Promise(r => setTimeout(r, 50));
 
     expect(capturedMentions).toHaveLength(1);
@@ -3947,14 +3922,12 @@ describe("WakerSubscriptionManager", () => {
     await manager.subscribe({
       id: "test-parent-fail",
       type: "mention",
-      className: "ad4m://TextContent",
-      terms: ["bot"],
       perspective: "fake-uuid",
       channel: "fallback-channel",
       query: "SELECT * FROM link",
     });
 
-    mock.deliver({ instances: [{ id: 'msg-1', text: "hi bot" }] });
+    mock.deliver([{ source: 'msg-1' }]);
     await new Promise(r => setTimeout(r, 50));
 
     // Should still wake with empty parents for the message
@@ -3991,8 +3964,6 @@ describe("WakerSubscriptionManager disposal races", () => {
   const sub: WakerSubscription = {
     id: "mention-race",
     type: "mention",
-    className: "ad4m://TextContent",
-    terms: ["bot"],
     perspective: "fake-uuid",
     channel: "",
     query: "SELECT * FROM link",
@@ -4114,8 +4085,10 @@ describe("restoreSavedSubscription", () => {
     query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . }",
   };
 
-  it("asks the executor again for a mention subscription saved without its class or terms", async () => {
-    for (const saved of [legacy, { ...legacy, className: "ad4m://TextContent" }]) {
+  it("asks the executor again for every saved mention subscription, whatever query it was saved with", async () => {
+    const current = { ...legacy, query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }" };
+    const textContent = { ...legacy, className: "ad4m://TextContent", query: '{"properties":["text"]}' };
+    for (const saved of [legacy, textContent, current]) {
       const rederive = vi.fn().mockResolvedValue("Subscribed");
       const createLive = vi.fn().mockResolvedValue(undefined);
       await restoreSavedSubscription(saved, rederive, createLive, { warn: vi.fn() });
@@ -4124,10 +4097,9 @@ describe("restoreSavedSubscription", () => {
     }
   });
 
-  it("opens a current subscription as saved", async () => {
-    const current = { ...legacy, className: "ad4m://TextContent", terms: ["bot"] };
+  it("opens a subscription that is not a mention as saved", async () => {
     const children: WakerSubscription = { id: "c", type: "children", perspective: "p", channel: "chan", query: "q" };
-    for (const saved of [current, children]) {
+    for (const saved of [children]) {
       const rederive = vi.fn();
       const createLive = vi.fn().mockResolvedValue(undefined);
       await restoreSavedSubscription(saved, rederive, createLive, { warn: vi.fn() });

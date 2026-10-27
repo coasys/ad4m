@@ -240,12 +240,13 @@ export function withWakerTarget(message: string, executorUrl: string): string {
 }
 
 /**
- * Restore one saved subscription at waker start. A mention subscription saved
- * before mentions were read through TextContent (#1446), or without the terms
- * the whole-word check needs, is asked of the executor again. If that fails it
- * runs as saved: dropped, it would be in neither the active nor the pending
- * set, and the next persist would delete it from disk. The next start asks
- * again.
+ * Restore one saved subscription at waker start. A saved mention subscription
+ * is asked of the executor again, so it follows the executor's current mention
+ * query (one saved from an older executor read message text, not the
+ * `we://mention` link). Its id is the same, so what it already woke on stays
+ * seen. If that fails it runs as saved: dropped, it would be in neither the
+ * active nor the pending set, and the next persist would delete it from disk.
+ * The next start asks again.
  */
 export async function restoreSavedSubscription(
   sub: WakerSubscription,
@@ -253,7 +254,7 @@ export async function restoreSavedSubscription(
   createLive: (sub: WakerSubscription) => Promise<void>,
   logger: { warn: (message: string) => void },
 ): Promise<void> {
-  if (sub.type !== "mention" || (sub.className && sub.terms?.length)) {
+  if (sub.type !== "mention") {
     await createLive(sub);
     return;
   }
@@ -801,16 +802,13 @@ Notes:
       throw new Error(data.error);
     }
 
+    // SPARQL over the `we://mention` links to the agent's DID that others wrote.
     const subscription: WakerSubscription = {
       id: data.subscription?.id ?? existingId,
       type: "mention",
       perspective: perspectiveId,
       channel: "",
-      // A model query over the built-in TextContent (#1446).
-      className: data.class ?? data.subscription?.class,
       query: data.query ?? data.subscription?.query,
-      // The query matches substrings; the waker keeps whole-word mentions of these.
-      terms: data.terms ?? data.subscription?.terms,
       neighbourhood: data.neighbourhood,
     };
 
@@ -819,14 +817,9 @@ Notes:
         "MCP tool did not return a query. Is the perspective accessible?",
       );
     }
-    if (!subscription.className) {
+    if (data.class ?? data.subscription?.class) {
       throw new Error(
-        "MCP tool returned a SPARQL mention query; this waker reads mentions through TextContent. Update the executor.",
-      );
-    }
-    if (!Array.isArray(subscription.terms) || subscription.terms.length === 0) {
-      throw new Error(
-        "MCP tool returned a mention query without its terms; the waker cannot tell a whole-word mention from a substring. Update the executor.",
+        "MCP tool returned a mention query that reads message text; this waker reads mentions through the we://mention link. Update the executor.",
       );
     }
 
@@ -835,7 +828,7 @@ Notes:
     return (
       `Subscribed to mentions in perspective ${perspectiveId}. ` +
       `Subscription ID: ${subscription.id}. ` +
-      `Watching for: ${(data.names ?? []).join(", ")} and DID ${data.did ?? "unknown"}.`
+      `Watching for ${data.predicate ?? "we://mention"} links to ${data.did ?? "unknown"}.`
     );
   }
 
@@ -864,8 +857,9 @@ Notes:
     name: "ad4m_subscribe_to_mentions",
     description:
       "Subscribe to mentions of this agent in a neighbourhood. " +
-      "Creates a live waker subscription that watches for any item whose text carries " +
-      "your name or DID — a message, or an instance of whatever class this space defines — " +
+      "Creates a live waker subscription that watches for any item that mentions you " +
+      "(links to your DID with we://mention, as WE writes a mention) — a post, a feed line, " +
+      "or an instance of whatever class this space defines — " +
       "and wakes you when detected. " +
       "Note: this is called automatically when you join or publish a neighbourhood.",
     parameters: {
