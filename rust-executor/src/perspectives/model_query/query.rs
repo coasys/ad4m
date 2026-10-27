@@ -22,7 +22,7 @@ use super::sparql_builder::{
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
-    ScopeDirection, ShapeResolver, SortKey, SparqlPagination,
+    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::SparqlStore;
@@ -821,8 +821,14 @@ pub(super) async fn execute_model_query_inner(
         });
     }
 
-    // Apply transform expressions for resolveLanguage properties
-    resolve_language_transforms(&shape, &mut instances).await?;
+    // Apply transform expressions for resolveLanguage properties. A language-backed value is a
+    // fetch per row, so only what the filter and sort below read is resolved for every row; the
+    // rest waits for the page.
+    let read_before_window = read_before_window(query_input);
+    resolve_language_transforms(shape, &mut instances, |name| {
+        read_before_window.contains(name)
+    })
+    .await?;
 
     // Resolve reverse relations
     let reverse_rels: Vec<(String, String, bool)> = shape
@@ -936,6 +942,12 @@ pub(super) async fn execute_model_query_inner(
         }
     };
 
+    // The language-backed values the filter and sort did not read, for the page only.
+    resolve_language_transforms(shape, &mut paginated, |name| {
+        !read_before_window.contains(name)
+    })
+    .await?;
+
     // Evaluate property/relation getters (post-pagination)
     if !paginated.is_empty() {
         let deep_query = query_input.deep_query.unwrap_or(true);
@@ -1017,6 +1029,36 @@ pub(super) async fn execute_model_query_inner(
     })
 }
 
+/// Every property the `where` and the `order` name, read as [`matches_where`] and
+/// [`sort_instances`] read them: the values the post-hydration filter and sort need, so the ones a
+/// language holds are resolved before them. A name too many costs a fetch per row; a name missing
+/// would filter or sort on the undecoded value.
+fn read_before_window(query: &ModelQueryInput) -> HashSet<String> {
+    fn walk(clause: &BTreeMap<String, WhereCondition>, names: &mut HashSet<String>) {
+        for (name, condition) in clause {
+            match (name.as_str(), condition) {
+                ("OR" | "AND", WhereCondition::SubClauses(branches)) => {
+                    branches.iter().for_each(|branch| walk(branch, names))
+                }
+                ("NOT", _) => {
+                    if let Some(branch) = condition.as_not_clause() {
+                        walk(&branch, names);
+                    }
+                }
+                _ => {
+                    names.insert(name.clone());
+                }
+            }
+        }
+    }
+    let mut names: HashSet<String> = HashSet::new();
+    if let Some(clause) = &query.where_clause {
+        walk(clause, &mut names);
+    }
+    names.extend(query.order.iter().flatten().map(|(key, _)| key.clone()));
+    names
+}
+
 /// Apply transform expressions to expression-resolved properties.
 ///
 /// Properties whose values are stored as signed expression URIs (rather than
@@ -1027,9 +1069,13 @@ pub(super) async fn execute_model_query_inner(
 ///   - `Some(<addr>)`    → expression on that custom language.
 /// Values stored as deterministic `literal:` IRIs (i.e. `resolve_language ==
 /// None`) are left untouched by the per-value check below.
+///
+/// Only the properties whose name `resolve` accepts are touched, so a pipeline
+/// can resolve some before its filter and the rest after its page, each once.
 async fn resolve_language_transforms(
     shape: &ModelShape,
     instances: &mut [Value],
+    resolve: impl Fn(&str) -> bool,
 ) -> Result<(), Error> {
     // Two kinds of properties need post-hydration work here:
     //   - expression-resolved properties (`resolve_language` set): fetch the
@@ -1041,6 +1087,7 @@ async fn resolve_language_transforms(
         .properties
         .iter()
         .filter(|p| !p.is_deterministic_literal() || p.transform.is_some())
+        .filter(|p| resolve(&p.name))
         .collect();
 
     if resolve_props.is_empty() {
