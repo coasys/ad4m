@@ -127,6 +127,12 @@ let _wakerRetryTimer: ReturnType<typeof setTimeout> | null = null;
  * `_subscriptionManager`, or restore subscriptions into it.
  */
 let _wakerGeneration = 0;
+/**
+ * Saved mention subscriptions that read message text and could not be asked
+ * of the executor again at restore ({@link restoreSavedSubscription}). They
+ * are not opened, but stay in the saved state, so the next restore asks again.
+ */
+const _parkedSubscriptions = new Map<string, WakerSubscription>();
 
 /** How long to wait for the executor to answer before giving up on one attempt. */
 const WAKER_CONNECT_TIMEOUT_MS = 10_000;
@@ -240,19 +246,33 @@ export function withWakerTarget(message: string, executorUrl: string): string {
 }
 
 /**
+ * Whether `sub` is a mention subscription saved before mentions were
+ * `we://mention` links: a model query over message text (`className`). Its
+ * query matches substrings, and the waker no longer checks a row's text for
+ * a whole-word mention, so opened as saved it wakes on any record whose text
+ * holds a term anywhere ("bot" in "robots").
+ */
+export function readsMentionText(sub: WakerSubscription): boolean {
+  return sub.type === "mention" && Boolean(sub.className);
+}
+
+/**
  * Restore one saved subscription at waker start. A saved mention subscription
  * is asked of the executor again, so it follows the executor's current mention
  * query (one saved from an older executor read message text, not the
  * `we://mention` link). Its id is the same, so what it already woke on stays
- * seen. If that fails it runs as saved: dropped, it would be in neither the
- * active nor the pending set, and the next persist would delete it from disk.
- * The next start asks again.
+ * seen. If that fails, a link query runs as saved: dropped, it would be in
+ * neither the active nor the pending set, and the next persist would delete it
+ * from disk. A text query ({@link readsMentionText}) is not opened, since
+ * nothing would filter its rows; it goes to `park`, which keeps it saved. The
+ * next start asks again.
  */
 export async function restoreSavedSubscription(
   sub: WakerSubscription,
   rederiveMention: (perspectiveId: string) => Promise<unknown>,
   createLive: (sub: WakerSubscription) => Promise<void>,
   logger: { warn: (message: string) => void },
+  park: (sub: WakerSubscription) => void = () => {},
 ): Promise<void> {
   if (sub.type !== "mention") {
     await createLive(sub);
@@ -261,11 +281,35 @@ export async function restoreSavedSubscription(
   try {
     await rederiveMention(sub.perspective);
   } catch (err: any) {
+    if (readsMentionText(sub)) {
+      logger.warn(
+        `[ad4m-waker] Could not re-derive ${sub.id} (${err?.message ?? err}); not opening it: ` +
+          "it reads message text, which this waker no longer checks for a mention. " +
+          "It stays saved and is asked of the executor again at the next start.",
+      );
+      park(sub);
+      return;
+    }
     logger.warn(
       `[ad4m-waker] Could not re-derive ${sub.id} (${err?.message ?? err}); restoring it as saved`,
     );
     await createLive(sub);
   }
+}
+
+/**
+ * The subscriptions to save: the manager's active ones, then every parked one
+ * that no live subscription has replaced under the same id.
+ */
+export function subscriptionsToSave(active: WakerSubscription[]): WakerSubscription[] {
+  const live = new Set(active.map((s) => s.id));
+  for (const id of live) _parkedSubscriptions.delete(id);
+  return [...active, ..._parkedSubscriptions.values()];
+}
+
+/** @internal The parked subscriptions, for tests. */
+export function _parkedSubscriptionsForTests(): Map<string, WakerSubscription> {
+  return _parkedSubscriptions;
 }
 
 /** @internal Inject a subscription manager, for tests that cannot connect a real waker. */
@@ -288,6 +332,7 @@ export function _resetModuleState(): void {
   if (_wakerRetryTimer) clearTimeout(_wakerRetryTimer);
   _wakerRetryTimer = null;
   _wakerGeneration = 0;
+  _parkedSubscriptions.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -910,6 +955,14 @@ Notes:
           break;
         }
       }
+      // A parked one is saved but not open: forget it, and persist without it.
+      for (const sub of Array.from(_parkedSubscriptions.values())) {
+        if (sub.perspective === params.perspective_id) {
+          _parkedSubscriptions.delete(sub.id);
+          disposeLiveSubscription(sub.id);
+          found = true;
+        }
+      }
       return {
         content: [
           {
@@ -1076,6 +1129,14 @@ Notes:
           `Pending — not accepted by the executor yet (rejected, or no answer before the timeout), being re-attempted (${pending.length}):\n` +
             pending.map(describe).join("\n") +
             "\nThese are NOT listening yet.",
+        );
+      }
+      const parked = Array.from(_parkedSubscriptions.values());
+      if (parked.length > 0) {
+        sections.push(
+          `Not opened — saved by an older executor, they read message text, and the executor could not re-derive them at start; asked again at the next start (${parked.length}):\n` +
+            parked.map(describe).join("\n") +
+            "\nThese are NOT listening. Update the executor, or unsubscribe and subscribe again.",
         );
       }
       return { content: [{ type: "text", text: sections.join("\n\n") }] };
@@ -1363,7 +1424,7 @@ Notes:
       onWake: (sub, _result, mentions) =>
         postWake(config, sub, _pluginAgentDid, logger, mentions),
       onPersist: (subs, seenMessages) => {
-        if (_stateDir) saveWakerState(_stateDir, subs, seenMessages);
+        if (_stateDir) saveWakerState(_stateDir, subscriptionsToSave(subs), seenMessages);
       },
     });
     if (stale()) {
@@ -1434,8 +1495,10 @@ Notes:
             subscribeToMentionsForPerspective,
             createLiveSubscription,
             logger,
+            (parked) => _parkedSubscriptions.set(parked.id, parked),
           );
           if (stale()) return true;
+          if (_parkedSubscriptions.has(sub.id)) continue;
           logger.info(
             `[ad4m-waker] Restored: ${sub.id} (${sub.type}, perspective=${sub.perspective})`,
           );

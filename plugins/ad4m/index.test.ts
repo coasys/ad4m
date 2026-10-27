@@ -66,6 +66,9 @@ import {
 import ad4mPlugin, {
   _resetModuleState,
   _setSubscriptionManagerForTests,
+  _parkedSubscriptionsForTests,
+  subscriptionsToSave,
+  readsMentionText,
 } from "./index";
 import { STATIC_TOOL_DEFS } from "./staticToolDefs";
 import { WakerSubscriptionManager, hintFor } from "./wakerSubscriptionManager";
@@ -4140,6 +4143,154 @@ describe("restoreSavedSubscription", () => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("Perspective not accessible"));
     } finally {
       manager.disposeAll();
+    }
+  });
+});
+
+describe("a saved mention subscription that reads message text", () => {
+  // What get_mention_waker_config returned before mentions were we://mention
+  // links (#1446): a model query over TextContent, matching substrings, with
+  // the terms the waker used to check for a whole word. #1505's shape has none.
+  const textQuery: WakerSubscription = {
+    id: "mention-persp-text",
+    type: "mention",
+    perspective: "persp-text",
+    channel: "",
+    className: "ad4m://TextContent",
+    query: JSON.stringify({ where: { OR: [{ text: { contains: "bot" } }] }, properties: ["text"] }),
+    // Not a field any more; saved files still carry it.
+    terms: ["bot"],
+  } as WakerSubscription & { terms?: string[] };
+  const withoutTerms = { ...textQuery, terms: undefined };
+  const children: WakerSubscription = {
+    id: "children-p",
+    type: "channel-messages",
+    perspective: "persp-text",
+    channel: "we://call/1",
+    className: "ad4m://Container",
+    query: "{}",
+  };
+
+  beforeEach(() => _resetModuleState());
+  afterEach(() => _resetModuleState());
+
+  function managerSavingTo(persisted: { subs: WakerSubscription[] }) {
+    const constructed: any[][] = [];
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn() },
+      logger: makeMockLogger(),
+      QuerySubscriptionProxy: vi.fn(function (...args: any[]) {
+        constructed.push(args);
+        return {
+          initialized: Promise.resolve(),
+          subscribe: vi.fn(() => Promise.resolve()),
+          dispose: vi.fn(),
+          onResult: vi.fn(),
+        };
+      }),
+      debounceMs: 10,
+      onWake: () => {},
+      // The plugin's onPersist.
+      onPersist: (subs: WakerSubscription[]) => { persisted.subs = subscriptionsToSave(subs); },
+    });
+    return { manager, constructed };
+  }
+  const park = (sub: WakerSubscription) => _parkedSubscriptionsForTests().set(sub.id, sub);
+
+  it("is told apart from a link query", () => {
+    expect(readsMentionText(textQuery)).toBe(true);
+    expect(readsMentionText(withoutTerms)).toBe(true);
+    expect(readsMentionText({ ...textQuery, className: undefined, query: "SELECT ?source WHERE {}" })).toBe(false);
+    expect(readsMentionText(children)).toBe(false);
+  });
+
+  for (const [label, saved] of [["with its terms", textQuery], ["without terms (#1505)", withoutTerms]] as const) {
+    it(`is not opened when the executor cannot re-derive it, and stays saved, ${label}`, async () => {
+      const persisted: { subs: WakerSubscription[] } = { subs: [] };
+      const { manager, constructed } = managerSavingTo(persisted);
+      const warn = vi.fn();
+      try {
+        for (const sub of [saved, children]) {
+          await restoreSavedSubscription(
+            sub,
+            () => Promise.reject(new Error("MCP tool returned a mention query that reads message text; Update the executor.")),
+            (s) => manager.subscribe(s),
+            { warn },
+            park,
+          );
+        }
+        // Nothing reads the text query: its rows would wake with no mention check.
+        expect(constructed.map((args) => args[3])).toEqual(["ad4m://Container"]);
+        expect(manager.getActive().map((s) => s.id)).toEqual(["children-p"]);
+        expect(manager.getPending()).toEqual([]);
+        // The children subscription's persist keeps the text one on disk.
+        expect(persisted.subs.map((s) => s.id)).toEqual(["children-p", "mention-persp-text"]);
+        expect(persisted.subs[1]).toEqual(saved);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("not opening it"));
+      } finally {
+        manager.disposeAll();
+      }
+    });
+  }
+
+  it("is replaced once a re-derived subscription with its id is live", async () => {
+    const persisted: { subs: WakerSubscription[] } = { subs: [] };
+    const { manager } = managerSavingTo(persisted);
+    try {
+      park(textQuery);
+      const current: WakerSubscription = {
+        id: textQuery.id,
+        type: "mention",
+        perspective: textQuery.perspective,
+        channel: "",
+        query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
+      };
+      await manager.subscribe(current);
+      expect(persisted.subs).toEqual([current]);
+      expect(_parkedSubscriptionsForTests().size).toBe(0);
+    } finally {
+      manager.disposeAll();
+    }
+  });
+
+  it("is re-derived, not parked, when the executor answers", async () => {
+    const rederive = vi.fn().mockResolvedValue("Subscribed");
+    const createLive = vi.fn();
+    await restoreSavedSubscription(textQuery, rederive, createLive, { warn: vi.fn() }, park);
+    expect(rederive).toHaveBeenCalledWith("persp-text");
+    expect(createLive).not.toHaveBeenCalled();
+    expect(_parkedSubscriptionsForTests().size).toBe(0);
+  });
+
+  it("is listed as not listening, and unsubscribing forgets it", async () => {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+    ad4mPlugin({
+      pluginConfig: {},
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn(),
+      registerCli: vi.fn(),
+    });
+    const persisted: { subs: WakerSubscription[] } = { subs: [] };
+    const { manager } = managerSavingTo(persisted);
+    _setSubscriptionManagerForTests(manager);
+    try {
+      park(textQuery);
+      const tool = (name: string) => registeredTools.find((t) => t.name === name)!;
+      const listed: string = (await tool("ad4m_list_waker_subscriptions").execute("c1", {})).content[0].text;
+      expect(listed).toContain("Not opened");
+      expect(listed).toContain("mention-persp-text");
+      expect(listed).toContain("NOT listening");
+
+      const res = await tool("ad4m_unsubscribe_from_mentions").execute("c2", { perspective_id: "persp-text" });
+      expect(res.content[0].text).toContain("Unsubscribed from mentions in perspective persp-text");
+      expect(_parkedSubscriptionsForTests().size).toBe(0);
+      expect(persisted.subs).toEqual([]);
+      const after: string = (await tool("ad4m_list_waker_subscriptions").execute("c3", {})).content[0].text;
+      expect(after).not.toContain("mention-persp-text");
+    } finally {
+      manager.disposeAll();
+      _setSubscriptionManagerForTests(null);
     }
   });
 });
