@@ -1601,10 +1601,11 @@ describe("buildWakeMessage", () => {
   });
 
   /**
-   * #1563: who wrote the mention and when decides how the agent treats the text, so the wake says
-   * it per item, and says when the proof did not verify or the subscription's query gave no author.
+   * #1563: the wake says per item who signed its mention link and when, and says when the proof
+   * did not verify or the subscription's query gave no author. It names the mention link, since
+   * that signer need not be whoever wrote the item's text (#1564).
    */
-  it("gives each mentioned item's author, timestamp and proof verdict", () => {
+  it("gives each mentioned item's mention-link signer, timestamp and proof verdict", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
       {
         address: "msg-1",
@@ -1616,9 +1617,11 @@ describe("buildWakeMessage", () => {
       },
       { address: "msg-2", parents: ["channel-abc"], ancestors: [], verified: false },
     ]);
-    expect(msg).toContain("  Item: msg-1\n  Author: did:key:zJosh (signature verified)\n  Time: 2026-10-27T00:41:23.437Z");
-    expect(msg).toContain("  Item: msg-2\n  Author: (unknown) (signature NOT verified)");
-    expect(msg.match(/Time:/g)).toHaveLength(1);
+    expect(msg).toContain(
+      "  Item: msg-1\n  Mention link signed by: did:key:zJosh (signature verified)\n  Mention link time: 2026-10-27T00:41:23.437Z",
+    );
+    expect(msg).toContain("  Item: msg-2\n  Mention link signed by: (unknown) (signature NOT verified)");
+    expect(msg.match(/Mention link time:/g)).toHaveLength(1);
   });
 
   it("shows (unknown) parents when empty", () => {

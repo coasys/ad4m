@@ -30,11 +30,12 @@ export function buildWakeMessage(
     lines.push(`Mentioned items (${mentions.length}):`);
     for (const m of mentions) {
       lines.push(`  Item: ${m.address}`);
-      // Who signed the mention decides whether its text is a request or only data.
+      // Who put the mention on the item, and when: the mention link's signer,
+      // not necessarily whoever wrote the item's text.
       lines.push(
-        `  Author: ${m.author ?? "(unknown)"} (signature ${m.verified ? "verified" : "NOT verified"})`,
+        `  Mention link signed by: ${m.author ?? "(unknown)"} (signature ${m.verified ? "verified" : "NOT verified"})`,
       );
-      if (m.timestamp) lines.push(`  Time: ${m.timestamp}`);
+      if (m.timestamp) lines.push(`  Mention link time: ${m.timestamp}`);
       if (m.parents.length > 0) {
         lines.push(`  Parents: ${m.parents.join(", ")}`);
       } else {

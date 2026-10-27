@@ -50,8 +50,9 @@ export interface MentionMessage {
    */
   ancestors: string[];
   /**
-   * The DID that signed the mention link (the row's `author`), so the agent knows whose
-   * request it is reading. Absent when the subscription's query returns no `author`; the
+   * The DID that signed the mention link (the row's `author`): who put the mention on the
+   * record. Only that link is theirs; the record's text and other properties are other links,
+   * which may be someone else's. Absent when the subscription's query returns no `author`; the
    * executor's mention query always does.
    */
   author?: string;
