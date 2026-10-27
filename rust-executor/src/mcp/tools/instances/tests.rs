@@ -3370,6 +3370,56 @@ async fn two_updates_from_the_same_version_save_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_app_save_after_the_tool_s_last_read_is_not_overwritten() {
+    // The app saves through instance_update, which takes no template lock: the tool has read the
+    // record for the last time, the app's save lands, and only then does the tool write.
+    let (handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let get = || {
+        handler.instance_get(Parameters(InstanceGetParams {
+            perspective_id: uuid.clone(),
+            class_name: "Template".into(),
+            base_uri: base_uri.clone(),
+        }))
+    };
+    let mut app_template = small_template();
+    app_template["children"][0]["children"] = json!(["From the app"]);
+
+    let (reached, go) = super::template_tools::pause::arm(&base_uri);
+    let tool = handler.template_update(template_params(
+        &uuid,
+        &base_uri,
+        json!({
+            "version": 1,
+            "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": ["From the tool"] } }]
+        }),
+    ));
+    let app = async {
+        reached.await.expect("the tool reads the record");
+        let saved = handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri: base_uri.clone(),
+                properties: props(&[("schema", app_template), ("version", json!(2))]),
+            }))
+            .await;
+        let saved_record = parse(&get().await);
+        let _ = go.send(());
+        (saved, saved_record)
+    };
+    let (answer, (saved, saved_record)) = tokio::join!(tool, app);
+
+    assert!(!saved.contains("error"), "{saved}");
+    assert_eq!(saved_record["version"], 2, "{saved_record}");
+    assert!(
+        answer.contains("the record changed while 'template_update' ran"),
+        "{answer}"
+    );
+    let after = parse(&get().await);
+    assert_eq!(after, saved_record, "the app's save stands");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_template_tools_refuse_a_record_that_is_not_a_template() {
     crate::test_utils::init_v8_platform();
     let (handler, uuid, _guard) = setup(false).await;
