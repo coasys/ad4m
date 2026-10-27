@@ -145,6 +145,22 @@ pub fn initialize_from_db() {
                 Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
             }
 
+            // A store written before it refused links in its metadata
+            // vocabulary may hold some (#1564): remove them once.
+            match p.sparql_store.purge_link_metadata_links() {
+                Ok(0) => {}
+                Ok(removed) => log::warn!(
+                    "Removed {} link(s) in the metadata vocabulary from perspective {}",
+                    removed,
+                    handle_clone.uuid
+                ),
+                Err(e) => log::error!(
+                    "Metadata-vocabulary sweep failed for perspective {}: {}",
+                    handle_clone.uuid,
+                    e
+                ),
+            }
+
             // No named-graph → reifier migration. The named-graph storage model
             // never shipped: `git tag --contains` on the commit that replaced it
             // (`7aeeb8982`) is empty, and the last release tag carrying

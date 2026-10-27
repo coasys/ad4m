@@ -26,6 +26,8 @@ const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
 const ONT_PREFIX: &str = "ad4m://ontology/";
 /// Where the store keeps its own bookkeeping, apart from any link.
 const MIGRATION_SUBJECT: &str = "ad4m://system/migration";
+/// Set once [`SparqlStore::purge_link_metadata_links`] has swept the store.
+const LINK_METADATA_SWEPT: &str = "ad4m://system/linkMetadataSwept";
 
 /// Whether a link with `predicate` would state one of the store's own facts
 /// about a link: an `rdf:reifies`, or a fact in the [`ONT_PREFIX`] vocabulary.
@@ -553,6 +555,100 @@ fn write_link_quads(
         ));
     }
     Ok(())
+}
+
+/// The link `reifier` stands for, from the facts on it that are the link's own
+/// (see [`SparqlStore::purge_link_metadata_links`]), with its status. `None`
+/// when `reifier` is no link's, or no author and timestamp on it hash to it.
+fn signed_link_of(
+    tx: &Transaction<'_>,
+    reifier: &NamedNode,
+) -> Result<Option<(LinkExpression, LinkStatus)>, Error> {
+    let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+    let mut triple = None;
+    for quad in tx.quads_for_pattern(
+        Some(reifier.as_ref().into()),
+        Some(rdf_reifies),
+        None,
+        Some(GraphNameRef::DefaultGraph),
+    ) {
+        if let Term::Triple(t) = quad?.object {
+            if !is_link_metadata(t.predicate.as_str()) {
+                triple = Some(*t);
+            }
+        }
+    }
+    let Some(triple) = triple else {
+        return Ok(None);
+    };
+    let NamedOrBlankNode::NamedNode(source) = &triple.subject else {
+        return Ok(None);
+    };
+    let values = |predicate: &str| -> Result<Vec<String>, Error> {
+        let mut found = Vec::new();
+        for quad in tx.quads_for_pattern(
+            Some(reifier.as_ref().into()),
+            Some(NamedNodeRef::new_unchecked(predicate)),
+            None,
+            Some(GraphNameRef::DefaultGraph),
+        ) {
+            if let Term::Literal(l) = quad?.object {
+                found.push(l.value().to_string());
+            }
+        }
+        Ok(found)
+    };
+    let canonical = storage_term_to_target_string(&triple.object);
+    let link_with =
+        |author: &str, timestamp: &str, target: &str, key: &str, sig: &str| LinkExpression {
+            author: author.to_string(),
+            timestamp: timestamp.to_string(),
+            data: Link {
+                source: source.as_str().to_string(),
+                predicate: Some(triple.predicate.as_str().to_string()),
+                target: target.to_string(),
+            },
+            proof: crate::types::ExpressionProof {
+                key: key.to_string(),
+                signature: sig.to_string(),
+            },
+            status: None,
+        };
+
+    let (authors, timestamps) = (values(ONT_AUTHOR)?, values(ONT_TIMESTAMP)?);
+    let Some((author, timestamp)) = authors
+        .iter()
+        .flat_map(|a| timestamps.iter().map(move |t| (a, t)))
+        .find(|(a, t)| &make_reifier_iri(&link_with(a, t, &canonical, "", "")) == reifier)
+    else {
+        return Ok(None);
+    };
+
+    let mut targets = values(ONT_WIRE_TARGET)?;
+    targets.push(canonical.clone());
+    let (mut keys, sigs) = (values(ONT_PROOF_KEY)?, values(ONT_PROOF_SIG)?);
+    // A signature verifies against the author's DID whatever key it names,
+    // so the key the link was stored with is the one naming the author.
+    keys.sort_by_key(|key| !key.starts_with(author.as_str()));
+    let verified = targets.iter().find_map(|target| {
+        keys.iter().find_map(|key| {
+            sigs.iter()
+                .map(|sig| link_with(author, timestamp, target, key, sig))
+                .find(|link| link.compute_proof_valid())
+        })
+    });
+    let link = verified.unwrap_or_else(|| {
+        let first = |v: &[String]| v.first().cloned().unwrap_or_default();
+        link_with(author, timestamp, &targets[0], &first(&keys), &first(&sigs))
+    });
+    // A link's status is the executor's own bookkeeping, not signed; with
+    // more than one stated, a peer's link is Shared.
+    let statuses = values(ONT_STATUS)?;
+    let status = match statuses.as_slice() {
+        [only] if only == status_str(&LinkStatus::Local) => LinkStatus::Local,
+        _ => LinkStatus::Shared,
+    };
+    Ok(Some((link, status)))
 }
 
 /// RocksDB `max_open_files` for every persistent store.
@@ -1607,6 +1703,109 @@ impl SparqlStore {
             self.insert_link_triples(link)?;
         }
         self.flush()?;
+        Ok(())
+    }
+
+    /// Remove every link in the store's metadata vocabulary that a store
+    /// written before [`is_link_metadata`] was refused still holds, and give
+    /// each link one of them targeted back the facts it was signed with
+    /// (#1564). Runs once per store: it marks the store swept. Returns how
+    /// many links it removed.
+    ///
+    /// A link in that vocabulary is the only reified triple with such a
+    /// predicate: the store never reifies its own annotations. Each goes with
+    /// its reifier, its annotations and its direct triple. The direct triple
+    /// may equal an annotation the store wrote on the targeted reifier, so
+    /// each targeted link is rewritten afterwards from the facts the
+    /// targeted reifier holds that are its own: the author and timestamp
+    /// whose [`make_reifier_iri`] is that reifier, and the key, signature and
+    /// signed target that verify, if any do; its verdict is computed again.
+    pub fn purge_link_metadata_links(&self) -> Result<usize, Error> {
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let mut tx = self.store.start_transaction()?;
+        let marker = QuadRef::new(
+            NamedNodeRef::new_unchecked(MIGRATION_SUBJECT),
+            NamedNodeRef::new_unchecked(LINK_METADATA_SWEPT),
+            LiteralRef::new_simple_literal("true"),
+            GraphNameRef::DefaultGraph,
+        );
+        if tx.contains(marker)? {
+            return Ok(0);
+        }
+
+        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+        let mut metadata_links: Vec<(NamedOrBlankNode, Triple)> = Vec::new();
+        for quad in tx.quads_for_pattern(
+            None,
+            Some(rdf_reifies),
+            None,
+            Some(GraphNameRef::DefaultGraph),
+        ) {
+            let quad = quad?;
+            if let Term::Triple(triple) = quad.object {
+                if is_link_metadata(triple.predicate.as_str()) {
+                    metadata_links.push((quad.subject, *triple));
+                }
+            }
+        }
+
+        let mut targeted: Vec<NamedNode> = metadata_links
+            .iter()
+            .filter_map(|(_, triple)| match &triple.subject {
+                NamedOrBlankNode::NamedNode(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
+        targeted.sort();
+        targeted.dedup();
+        let mut restored = Vec::new();
+        for reifier in &targeted {
+            if let Some(link) = signed_link_of(&tx, reifier)? {
+                restored.push(link);
+            }
+        }
+
+        for (reifier, triple) in &metadata_links {
+            let own: Vec<_> = tx
+                .quads_for_pattern(
+                    Some(reifier.as_ref()),
+                    None,
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                )
+                .collect::<Result<Vec<_>, _>>()?;
+            for quad in &own {
+                tx.remove(quad);
+            }
+            tx.remove(QuadRef::new(
+                triple.subject.as_ref(),
+                triple.predicate.as_ref(),
+                triple.object.as_ref(),
+                GraphNameRef::DefaultGraph,
+            ));
+        }
+        for (link, status) in &restored {
+            write_link_quads(&mut tx, link, status)?;
+        }
+        tx.insert(marker);
+        tx.commit()?;
+        Ok(metadata_links.len())
+    }
+
+    /// Store `link` without refusing a link in the metadata vocabulary: the
+    /// state of a store written before the store refused them.
+    #[cfg(test)]
+    pub(crate) fn add_link_unguarded(&self, link: &LinkExpression) -> Result<(), Error> {
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let mut tx = self.store.start_transaction()?;
+        write_link_quads(&mut tx, link, link.status.as_ref().unwrap())?;
+        tx.commit()?;
         Ok(())
     }
 }
@@ -2715,6 +2914,63 @@ mod tests {
             only_the_writers_mention(&writer)
         );
         assert_eq!(svc.get_all_links().unwrap().len(), 2);
+    }
+
+    /// A store written before it refused those links keeps what they stated
+    /// until the sweep: it removes them, and gives the link they targeted
+    /// back its own author, time and verdict, including an annotation a
+    /// forged link happened to equal. Once swept, a store is not swept again.
+    #[test]
+    fn the_sweep_removes_metadata_links_a_store_already_holds() {
+        let (me, writer, member, impostor) = (
+            TestSigner::generate(),
+            TestSigner::generate(),
+            TestSigner::generate(),
+            TestSigner::generate(),
+        );
+        let svc = new_service();
+        let (genuine, claimed, g, c) = two_mentions(&writer, &member, &impostor, &me.did);
+        svc.add_link(&genuine).unwrap();
+        svc.add_link(&claimed).unwrap();
+        let as_string = |v: &str| format!("literal:string:{v}");
+        let forged = [
+            make_link(&member, &g, &ontology("author"), &as_string(&impostor.did)),
+            make_link(&member, &g, &ontology("author"), &as_string(&writer.did)),
+            make_link(
+                &member,
+                &g,
+                &ontology("timestamp"),
+                &as_string("2099-01-01T00:00:00.000Z"),
+            ),
+            make_link(&member, &g, &ontology("proofKey"), &as_string(&member.did)),
+            make_link(&member, &c, &ontology("proofValid"), &as_string("true")),
+        ];
+        for link in &forged {
+            svc.add_link_unguarded(link).unwrap();
+        }
+        assert_ne!(
+            mention_rows(&svc, &me.did),
+            only_the_writers_mention(&writer)
+        );
+
+        assert_eq!(svc.purge_link_metadata_links().unwrap(), forged.len());
+        assert_eq!(
+            mention_rows(&svc, &me.did),
+            only_the_writers_mention(&writer)
+        );
+        let mut links = svc.get_all_links().unwrap();
+        links.sort_by(|a, b| a.data.source.cmp(&b.data.source));
+        assert_eq!(links.len(), 2, "{links:?}");
+        assert_eq!(links[0].data.source, "ad4m://claimed");
+        assert_eq!(links[0].proof.valid, Some(false));
+        assert_eq!(links[1].data.source, "ad4m://post");
+        assert_eq!(links[1].author, writer.did);
+        assert_eq!(links[1].timestamp, T1);
+        assert_eq!(links[1].proof.key, genuine.proof.key);
+        assert_eq!(links[1].proof.valid, Some(true));
+
+        svc.add_link_unguarded(&forged[4]).unwrap();
+        assert_eq!(svc.purge_link_metadata_links().unwrap(), 0, "swept once");
     }
 
     // ── Error messages ──
