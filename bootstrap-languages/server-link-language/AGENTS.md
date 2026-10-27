@@ -52,7 +52,7 @@ src/store.ts               — local link store (indexed) + sync cursor (revisio
 src/api.ts                  — typed HTTP client, one function per server endpoint
 src/auth.ts                  — DID challenge-response + JWT-expiry-driven token refresh
 src/ws-client.ts               — WebSocket lifecycle: typed dispatch, send queue, exponential-backoff reconnect
-src/sync.ts                     — commit / catch-up / bootstrap; the ONE inbound-diff choke point (applyInboundWireDiff)
+src/sync.ts                     — commit / catch-up / bootstrap; the ONE inbound path (openOrHold → applyAndEmit), held links (retryHeld)
 src/telepresence.ts              — online-agent roster + outbound signal/broadcast/status
 src/encryption.ts                 — room keys sealed to DIDs via the executor, key ring, AES-256-GCM link encryption
 src/room-keys.ts                   — admin rotation (seals to every ACL member) and any member's grants
@@ -74,13 +74,32 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   does not break the swappable-adapter guarantee. Pure library
   imports (`@noble/curves`, `@noble/ciphers`, `@noble/hashes`) are fine
   anywhere — they contain no runtime coupling.
-- **`applyInboundWireDiff` (src/sync.ts) is the only place that calls
-  `emitDiff`.** The AD4M executor discards `perspectiveSyncSync()`'s return
-  value — `emitPerspectiveDiff` is the only thing that makes an inbound
-  link queryable. HTTP catch-up (`catchUp()`) and the WebSocket `"diff"`
-  handler (wired in `index.ts`) both funnel through this one function. If
-  you add a new inbound-diff source, route it through
-  `applyInboundWireDiff` — do not call `store.applyDiff` + emit separately.
+- **`applyAndEmit` (src/sync.ts) is the only place that calls `emitDiff`.**
+  The AD4M executor discards `perspectiveSyncSync()`'s return value —
+  `emitPerspectiveDiff` is the only thing that makes an inbound link
+  queryable. HTTP catch-up (`catchUp()` → `applyInboundWireDiff`), the
+  WebSocket `"diff"` handler (wired in `index.ts`), the startup snapshot
+  (`bootstrap()`) and `retryHeld()` all go through `openOrHold` and
+  `applyAndEmit`. It emits the change to the store (additions it lacked,
+  removals of links it held), so every link that enters the store is
+  emitted once and repeats emit nothing. If you add a new inbound-diff
+  source, route it through these — do not call `store.applyDiff` + emit
+  separately.
+- **A link no key opens yet is held, never dropped.** `openOrHold` stores it
+  under `held/<link_hash>` with its op; a later op on the same link replaces
+  it. `retryHeld()` opens what the key ring opens: `setupKeyRing` calls it
+  after every successful load, `catchUp` at the end of every cycle (re-reading
+  `/keys` first while anything is held). Because nothing is lost the cursor
+  may move past held links; there is no recovery re-bootstrap, key-ring-size
+  trigger or refresh cooldown. Never make delivery depend on a one-shot
+  request succeeding (BUG-103: a single `/render` timeout after a key grant
+  lost a member's history).
+- **A link the key it names does not open costs that link only.** Its
+  ciphertext or payload is malformed, and a key version is fixed by its
+  rotation's commitment, so no key ever opens it: `openWireLink` logs it and
+  returns `UNOPENABLE`, inbound skips it and `retryHeld` releases it. It must
+  never throw: a throw aborts the rest of a catch-up batch whose cursor has
+  already moved, and the held links `retryHeld` released before it.
 - **Commit: the store follows the server, nothing is echoed.**
   `sync.commit()` writes a diff to the language's store only after the
   server accepted the POST, so a failed commit leaves no local-only links.
@@ -157,14 +176,13 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   and version and refuses versions the granter lacks). A member whose key
   status is `pending` (no box it holds opens: no member holding a key has
   been online since it joined, or its boxes are in an older format; an admin
-  in that state rotates) re-reads `/keys` on every sync, skipping the 10 s refresh cooldown
-  (`refreshSkippedByCooldown`, src/key-ring-policy.ts), so it sees the room on
-  the first sync after the grant. A version whose box does not open is left
-  out of the ring (`buildKeyRing`), so one bad grant costs that version, not
-  the room. The key ring
-  loads once during `init()`'s `setupKeyRing()` and the `version` field in
-  `KeysResponse` remains unused for mid-session detection — a periodic `/keys`
-  re-fetch or a dedicated WS push message would close that gap.
+  in that state rotates, `adminRotates` in src/room-keys.ts) re-reads `/keys`
+  on a commit, on a `keys-granted` push, and on every sync while it holds
+  links it cannot open. A version whose box does not open is left out of the
+  ring (`buildKeyRing`), so one bad grant costs that version, not the room.
+  A failed re-read keeps a ring already loaded (`afterFailedKeyRead`): only a
+  member that never loaded one is `error`, so one failed `/keys` read never
+  refuses commits or holds inbound links.
 - **Room keys are sealed to DIDs.** A member's X25519 key is the Montgomery
   form of the Ed25519 key in its `did:key`. The language seals itself
   (`sealToDid`, src/encryption.ts) and opens with the `agentOpenSealed(box)`

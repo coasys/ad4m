@@ -155,11 +155,11 @@ executor's language sandbox runs a full `deno_runtime` worker (not a bare
 
 | Module | Responsibility |
 |---|---|
-| `src/store.ts` | Local link store (indexed by source/target/predicate) + sync cursor (revision, sequence) |
+| `src/store.ts` | Local link store (indexed by source/target/predicate) + sync cursor (revision, sequence) + held links (inbound, waiting for a key) |
 | `src/api.ts` | Typed HTTP client for every server endpoint |
 | `src/auth.ts` | DID challenge-response flow + token expiry tracking/refresh |
 | `src/ws-client.ts` | WebSocket lifecycle: connect, typed message dispatch, send queue, exponential-backoff reconnect |
-| `src/sync.ts` | Commit (stored locally once the server accepted it, not echoed back) / catch-up sync / cold-start bootstrap; the single inbound-diff choke point |
+| `src/sync.ts` | Commit (stored locally once the server accepted it, not echoed back) / catch-up sync / cold-start bootstrap; the single inbound path |
 | `src/telepresence.ts` | Online-agent roster + outbound signal/broadcast/status |
 | `src/encryption.ts` | Room keys sealed to DIDs (through the executor), key ring, AES-256-GCM link encryption |
 | `src/room-keys.ts` | Room admin's rotation and any member's grants of the versions it holds |
@@ -169,25 +169,43 @@ executor's language sandbox runs a full `deno_runtime` worker (not a bare
 
 The AD4M executor **discards the return value of `perspectiveSyncSync()`**.
 The only way an inbound link becomes queryable is calling
-`emitPerspectiveDiff(diff)`. Every inbound diff in this language — HTTP
-catch-up batch entries and WebSocket `"diff"` pushes alike — funnels through
-one function, `applyInboundWireDiff` in `src/sync.ts`, which is the only
-place that calls it. See the module doc comment there before adding a second
+`emitPerspectiveDiff(diff)`. Every inbound link in this language — HTTP
+catch-up entries, WebSocket `"diff"` pushes and the startup `/render`
+snapshot alike — goes through one path in `src/sync.ts`: `openOrHold`, then
+`applyAndEmit`, the only place that calls it. `applyAndEmit` emits what
+changed in the language's store (additions it did not hold, removals of
+links it held), so each link reaches the executor once, however many paths
+deliver it. See the module doc comment there before adding a second
 inbound-diff path.
+
+### Links that arrive before their key
+
+A member can receive links encrypted with a room key version it does not
+hold yet: it joined before a member holding the key granted it. Such a link
+is **held** in the store (`held/<link_hash>`), never dropped, so the sequence
+cursor moves on safely. `retryHeld` opens every held link the key ring opens,
+and runs whenever the key ring loads (init, a `keys-granted` push, a commit)
+and at the end of every catch-up; while links are held, each catch-up
+re-reads `/keys` first. A later operation on the same link replaces its held
+one, so a link added and then removed before the key arrived is never
+emitted. A link the key it names does not open (malformed ciphertext or
+payload) is logged and skipped, inbound or held: no key ever opens it, and it
+costs that one link, not the rest of its batch or the other held links.
 
 ### Sync strategy
 
-- `init()` runs a one-shot `bootstrap()`: fetch the full `/render` snapshot
-  + `/revision`, populate the local store, and record the sequence cursor —
-  far cheaper than replaying the room's entire diff history on every fresh
-  instance.
+- `init()` runs a one-shot `bootstrap()`: fetch the full `/render` snapshot,
+  apply it to the local store as the room's current state (emitting what it
+  adds and removes), and record the sequence cursor — far cheaper than
+  replaying the room's entire diff history on every fresh instance. A stored
+  link whose encrypted copy in the snapshot no key opens yet is kept.
 - The WebSocket pushes live diffs. On every (re)connect, `ws-client.ts`'s
   `onOpen` handler also triggers an HTTP catch-up (`GET /sync?since=<cursor>`)
   as a belt-and-braces gap-fill for whatever happened while offline.
 - `sync.sync()` (called by the runtime on its own timer) always performs the
   same HTTP catch-up. This is deliberately unconditional rather than
   branching on "is the WebSocket connected": because `since` only advances
-  after a diff is actually applied, a WebSocket that already delivered
+  after a diff is applied (or its links held), a WebSocket that already delivered
   everything live simply gets back an empty `diffs[]` — there's no separate
   "skip" branch to get wrong.
 
@@ -246,9 +264,9 @@ source code.
 E2E encryption activates automatically — the admin's language instance
 generates the initial room key during `init()` when no E2E exists yet.
 Members receive later keys from any member holding them (grants run on
-`peer-joined`, at init and after every sync); a member waiting for its first keys
-re-checks `/keys` on every sync, without the 10 s refresh cooldown.
-There is no plaintext mode.
+`peer-joined`, at init and after every sync); a member holding links it
+cannot open yet re-checks `/keys` on every sync, and a `keys-granted` push
+re-checks at once. There is no plaintext mode.
 
 ## Publishing
 

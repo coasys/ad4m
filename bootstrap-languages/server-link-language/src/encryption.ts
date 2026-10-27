@@ -297,6 +297,22 @@ export function statusField(status: string | undefined): { status?: string } {
 }
 
 /**
+ * The `link_hash` an encrypted wire link carries: SHA-256 of the canonical
+ * plaintext fields, the same inputs as the server's linkHash. Identifies a
+ * link across its encrypted copies (each has a fresh nonce).
+ */
+export function wireLinkHash(link: LinkExpression): string {
+    const canonical = JSON.stringify({
+        source: link.data.source,
+        predicate: link.data.predicate ?? null,
+        target: link.data.target,
+        author: link.author,
+        timestamp: link.timestamp,
+    });
+    return bytesToHex(sha256(utf8ToBytes(canonical)));
+}
+
+/**
  * Encrypts the entire LinkExpression (author, timestamp, proof, data) for
  * the wire. No metadata remains in cleartext — the server receives only
  * `{data: {ciphertext, nonce}, link_hash}`. The `link_hash` is a SHA-256
@@ -305,14 +321,7 @@ export function statusField(status: string | undefined): { status?: string } {
  * without seeing the plaintext.
  */
 export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array, keyVersion?: number): WireLinkExpression {
-    const canonical = JSON.stringify({
-        source: link.data.source,
-        predicate: link.data.predicate ?? null,
-        target: link.data.target,
-        author: link.author,
-        timestamp: link.timestamp,
-    });
-    const linkHashHex = bytesToHex(sha256(utf8ToBytes(canonical)));
+    const linkHash = wireLinkHash(link);
 
     const fullPayload: Record<string, unknown> = {
         author: link.author,
@@ -327,7 +336,7 @@ export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array, ke
 
     return {
         data: { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) },
-        link_hash: linkHashHex,
+        link_hash: linkHash,
         ...(keyVersion !== undefined ? { key_version: keyVersion } : {}),
     };
 }
