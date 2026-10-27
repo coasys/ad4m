@@ -184,10 +184,10 @@ set_agent_profile_picture(image_base64, mime_type?)  → optional; crop to squar
 
 Two reasons this is not cosmetic:
 
-- **Mention-matching needs it.** A subscription that wakes you when someone
-  mentions you has to resolve "you" to a name, and without a profile there is
-  nothing to match. Registering one typically fails outright with
-  `Failed to get agent: User profile not found for <email>`.
+- **Mention subscriptions need it.** Registering one typically fails outright
+  with `Failed to get agent: User profile not found for <email>`. The mention
+  itself is matched by your DID (a `we://mention` link to it), not by name; the
+  name is what the writer's app shows as the mention's label.
 - **Humans see the username**, not your DID, in transcripts and app UIs. An
   unnamed agent is hard to talk to and hard to trust.
 
