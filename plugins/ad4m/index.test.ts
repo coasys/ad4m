@@ -1556,8 +1556,8 @@ describe("buildWakeMessage", () => {
 
   it("builds a mention wake message with per-item parents", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: ["channel-abc", "conversation-xyz"], ancestors: [] },
-      { address: "msg-2", parents: ["channel-abc"], ancestors: [] },
+      { address: "msg-1", parents: ["channel-abc", "conversation-xyz"], ancestors: [], verified: false },
+      { address: "msg-2", parents: ["channel-abc"], ancestors: [], verified: false },
     ]);
     expect(msg).toContain("You were @mentioned in an AD4M neighbourhood.");
     expect(msg).toContain("Agent DID: did:key:z6Mk123");
@@ -1576,7 +1576,7 @@ describe("buildWakeMessage", () => {
    */
   it("labels a mentioned address class-agnostically", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "task-1", parents: ["board-abc"], ancestors: [] },
+      { address: "task-1", parents: ["board-abc"], ancestors: [], verified: false },
     ]);
     expect(msg).toContain("Item: task-1");
     expect(msg).not.toContain("Message:");
@@ -1593,16 +1593,37 @@ describe("buildWakeMessage", () => {
 
   it("lists the ancestors above the parents, and says nothing when there are none", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: ["thread-1"], ancestors: ["call-1", "space-1"] },
-      { address: "msg-2", parents: ["thread-2"], ancestors: [] },
+      { address: "msg-1", parents: ["thread-1"], ancestors: ["call-1", "space-1"], verified: false },
+      { address: "msg-2", parents: ["thread-2"], ancestors: [], verified: false },
     ]);
     expect(msg).toContain("Ancestors: call-1, space-1");
     expect(msg.match(/Ancestors:/g)).toHaveLength(1);
   });
 
+  /**
+   * #1563: who wrote the mention and when decides how the agent treats the text, so the wake says
+   * it per item, and says when the proof did not verify or the subscription's query gave no author.
+   */
+  it("gives each mentioned item's author, timestamp and proof verdict", () => {
+    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
+      {
+        address: "msg-1",
+        parents: ["channel-abc"],
+        ancestors: [],
+        author: "did:key:zJosh",
+        timestamp: "2026-10-27T00:41:23.437Z",
+        verified: true,
+      },
+      { address: "msg-2", parents: ["channel-abc"], ancestors: [], verified: false },
+    ]);
+    expect(msg).toContain("  Item: msg-1\n  Author: did:key:zJosh (signature verified)\n  Time: 2026-10-27T00:41:23.437Z");
+    expect(msg).toContain("  Item: msg-2\n  Author: (unknown) (signature NOT verified)");
+    expect(msg.match(/Time:/g)).toHaveLength(1);
+  });
+
   it("shows (unknown) parents when empty", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: [], ancestors: [] },
+      { address: "msg-1", parents: [], ancestors: [], verified: false },
     ]);
     expect(msg).toContain("Parents: (unknown)");
   });

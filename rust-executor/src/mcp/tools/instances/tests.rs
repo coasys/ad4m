@@ -2674,9 +2674,12 @@ async fn instance_update_returns_the_store_error_of_the_abstract_check() {
 
 /// Run the waker's mention query for `did` over `links` (`source`,
 /// `predicate`, `target`, each with its expression), delivered the way a
-/// peer's links arrive (`diff_from_link_language`), and return the rows'
-/// `source`s in the order the query gives them.
-async fn mention_rows(did: &str, links: Vec<crate::types::LinkExpression>) -> Vec<String> {
+/// peer's links arrive (`diff_from_link_language`), and return its rows in
+/// the order the query gives them.
+async fn mention_query_rows(
+    did: &str,
+    links: Vec<crate::types::LinkExpression>,
+) -> Vec<serde_json::Value> {
     use crate::types::PerspectiveDiff;
     let (_handler, uuid, _guard) = setup_with(&[], false).await;
     let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
@@ -2689,6 +2692,13 @@ async fn mention_rows(did: &str, links: Vec<crate::types::LinkExpression>) -> Ve
     found
         .as_array()
         .unwrap_or_else(|| panic!("{found}"))
+        .clone()
+}
+
+/// The `source` of each row [`mention_query_rows`] returns, in its order.
+async fn mention_rows(did: &str, links: Vec<crate::types::LinkExpression>) -> Vec<String> {
+    mention_query_rows(did, links)
+        .await
         .iter()
         .map(|row| {
             row["source"]
@@ -2796,6 +2806,82 @@ async fn the_mention_query_holds_the_newest_window() {
         .map(|i| format!("ad4m://m{i:03}"))
         .collect();
     assert_eq!(rows, newest);
+}
+
+/// A typed WE message that @-mentions the agent, with the links WE wrote for
+/// it in a live space (2026-10-27): the chip's label "@Data" runs into the
+/// next word, so the text holds "@Datai" and no whole-word "Data", and the
+/// DID is only in the `marks` JSON and the `we://mention` link. A whole-word
+/// name match on the text did not wake the agent; the mention link does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_we_at_mention_whose_label_runs_into_the_next_word_is_a_mention() {
+    use crate::agent::signatures::TestSigner;
+    use crate::mcp::tools::subscriptions::MENTION_PREDICATE;
+    let me = TestSigner::generate();
+    let other = TestSigner::generate();
+    let block = "ad4m://obj/qxxtzxsmhyskwmatpzklxjmt";
+    let marks = format!(
+        r#"[{{"start":0,"end":5,"type":"mention","did":"{}"}}]"#,
+        me.did
+    );
+    let rows = mention_rows(
+        &me.did,
+        vec![
+            signed_link(&other, block, "we://flag", "we://text_block", 0),
+            signed_link(
+                &other,
+                block,
+                "we://text",
+                "literal:string:@Datai have taken a dump of prod successfully",
+                0,
+            ),
+            signed_link(
+                &other,
+                block,
+                "we://marks",
+                &format!("literal:string:{marks}"),
+                0,
+            ),
+            signed_link(&other, block, "we://text_source", "literal:string:typed", 0),
+            signed_link(&other, block, MENTION_PREDICATE, &me.did, 1),
+        ],
+    )
+    .await;
+    assert_eq!(rows, vec![block]);
+}
+
+/// Each row carries the mention link's provenance (#1563): the DID that
+/// signed it, its timestamp, and the proof verdict, so a woken agent knows
+/// who mentioned it and when without a second query. Taken from the mention
+/// link itself, not from the record's other links: an edit by someone else
+/// that adds the mention shows that editor.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mention_row_carries_the_mention_links_author_timestamp_and_verdict() {
+    use crate::agent::signatures::TestSigner;
+    use crate::mcp::tools::subscriptions::MENTION_PREDICATE;
+    let me = TestSigner::generate();
+    let writer = TestSigner::generate();
+    let editor = TestSigner::generate();
+    let rows = mention_query_rows(
+        &me.did,
+        vec![
+            signed_link(
+                &writer,
+                "ad4m://post",
+                "we://text",
+                "literal:string:@Data hi",
+                0,
+            ),
+            signed_link(&editor, "ad4m://post", MENTION_PREDICATE, &me.did, 2),
+        ],
+    )
+    .await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row["source"], "ad4m://post", "{row}");
+    assert_eq!(row["author"], editor.did.as_str(), "{row}");
+    assert_eq!(row["timestamp"], "2026-10-01T12:02:00.000Z", "{row}");
+    assert_eq!(row["proofValid"], "true", "{row}");
 }
 
 // ── Containers (#1446): We's shapes as We writes them ───────────────────────
