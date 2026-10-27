@@ -136,8 +136,14 @@ function mapped(mid: string, agentDid: string, mediaKind: "audio" | "video"): Tr
     return { mid, agentDid, mediaKind }
 }
 
-function roster(participants: string[], overrides: Partial<SfuRoomRoster> = {}): SfuRoomRoster {
-    return { neighbourhoodUrl: URL, roomName: ROOM, participants, ...overrides }
+/** The room's roster as the executor publishes it: this agent is in it, unless `withoutMe`. */
+function roster(
+    participants: string[],
+    overrides: Partial<SfuRoomRoster> = {},
+    { withoutMe = false } = {},
+): SfuRoomRoster {
+    const listed = withoutMe || participants.includes(ME) ? participants : [...participants, ME]
+    return { neighbourhoodUrl: URL, roomName: ROOM, participants: listed, ...overrides }
 }
 
 function deferred<T>() {
@@ -553,6 +559,77 @@ test("a failed connection leaves, then joins this executor again", async () => {
     ])
     expect(api.sfuCallJoin).toHaveBeenLastCalledWith(URL, ROOM, expect.any(String))
     expect(FakePeerConnection.instances).toHaveLength(2)
+})
+
+test("a roster that leaves this agent out rebuilds the call after the grace", async () => {
+    // The server dropped this session; ICE never said so (E6, CI job 53158).
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const dropped = currentPc()
+        api.log.length = 0
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(2_999)
+        expect(api.log).toEqual([])
+
+        await jest.advanceTimersByTimeAsync(1)
+        expect(dropped.closed).toBe(true)
+        expect(api.log).toEqual([
+            "unsubscribe-offer",
+            "unsubscribe-roster",
+            "sfuCallLeave",
+            "subscribe-offer",
+            "subscribe-roster",
+            "sfuCallJoin",
+        ])
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a roster that lists this agent again within the grace cancels the rebuild", async () => {
+    // A roster published just before this join landed can arrive after it.
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        api.log.length = 0
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(1_000)
+        api.emitRoster(roster([ALICE, ME]))
+        await flush()
+        await jest.advanceTimersByTimeAsync(10_000)
+
+        expect(api.log).toEqual([])
+        expect(currentPc().closed).toBe(false)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("leaving stops a pending rebuild for an unlisted session", async () => {
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+
+        await manager.leave()
+        await jest.advanceTimersByTimeAsync(10_000)
+
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    } finally {
+        jest.useRealTimers()
+    }
 })
 
 test("a rejoin the executor cannot take yet is retried, and succeeds once it can", async () => {
