@@ -24,13 +24,14 @@ const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
 /// The vocabulary of the facts the store writes about each link on its
 /// reifier: author, timestamp, proof, verdict, status, signed target.
 const ONT_PREFIX: &str = "ad4m://ontology/";
+/// The vocabulary of the store's own bookkeeping.
+const SYSTEM_PREFIX: &str = "ad4m://system/";
 /// Where the store keeps its own bookkeeping, apart from any link.
 const MIGRATION_SUBJECT: &str = "ad4m://system/migration";
-/// Set once [`SparqlStore::purge_link_metadata_links`] has swept the store.
-const LINK_METADATA_SWEPT: &str = "ad4m://system/linkMetadataSwept";
 
-/// Whether a link with `predicate` would state one of the store's own facts
-/// about a link: an `rdf:reifies`, or a fact in the [`ONT_PREFIX`] vocabulary.
+/// Whether a link with `predicate` would state one of the store's own facts:
+/// an `rdf:reifies`, a fact about a link in the [`ONT_PREFIX`] vocabulary, or
+/// bookkeeping in the [`SYSTEM_PREFIX`] vocabulary.
 ///
 /// The store writes those facts in the same default graph as the link
 /// triples, on reifier IRIs any peer can compute, so an application link in
@@ -38,7 +39,9 @@ const LINK_METADATA_SWEPT: &str = "ad4m://system/linkMetadataSwept";
 /// else's link, and its removal would delete one (#1564). The store refuses
 /// such links, and reads skip such triples as metadata.
 pub(crate) fn is_link_metadata(predicate: &str) -> bool {
-    predicate == RDF_REIFIES || predicate.starts_with(ONT_PREFIX)
+    predicate == RDF_REIFIES
+        || predicate.starts_with(ONT_PREFIX)
+        || predicate.starts_with(SYSTEM_PREFIX)
 }
 
 /// Refuse a link [`is_link_metadata`] marks.
@@ -1709,8 +1712,12 @@ impl SparqlStore {
     /// Remove every link in the store's metadata vocabulary that a store
     /// written before [`is_link_metadata`] was refused still holds, and give
     /// each link one of them targeted back the facts it was signed with
-    /// (#1564). Runs once per store: it marks the store swept. Returns how
-    /// many links it removed.
+    /// (#1564). Returns how many links it removed.
+    ///
+    /// It runs each time a perspective opens and keeps no record that it ran:
+    /// a record in the store could be one more such link, and one outside it
+    /// would not follow the store when a snapshot is restored. On a store
+    /// with none of these links it only reads.
     ///
     /// A link in that vocabulary is the only reified triple with such a
     /// predicate: the store never reifies its own annotations. Each goes with
@@ -1726,16 +1733,6 @@ impl SparqlStore {
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
-        let marker = QuadRef::new(
-            NamedNodeRef::new_unchecked(MIGRATION_SUBJECT),
-            NamedNodeRef::new_unchecked(LINK_METADATA_SWEPT),
-            LiteralRef::new_simple_literal("true"),
-            GraphNameRef::DefaultGraph,
-        );
-        if tx.contains(marker)? {
-            return Ok(0);
-        }
-
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
         let mut metadata_links: Vec<(NamedOrBlankNode, Triple)> = Vec::new();
         for quad in tx.quads_for_pattern(
@@ -1750,6 +1747,9 @@ impl SparqlStore {
                     metadata_links.push((quad.subject, *triple));
                 }
             }
+        }
+        if metadata_links.is_empty() {
+            return Ok(0);
         }
 
         let mut targeted: Vec<NamedNode> = metadata_links
@@ -1790,7 +1790,6 @@ impl SparqlStore {
         for (link, status) in &restored {
             write_link_quads(&mut tx, link, status)?;
         }
-        tx.insert(marker);
         tx.commit()?;
         Ok(metadata_links.len())
     }

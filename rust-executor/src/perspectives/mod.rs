@@ -166,7 +166,9 @@ pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
             }
 
             // A store written before it refused links in its metadata
-            // vocabulary may hold some (#1564): remove them once.
+            // vocabulary may hold some (#1564): remove them. A perspective
+            // whose store could not be swept does not open, so nothing reads
+            // provenance from it; the next start tries again.
             match sweep_link_metadata(&p) {
                 Ok(0) => {}
                 Ok(removed) => log::warn!(
@@ -174,11 +176,14 @@ pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
                     removed,
                     handle_clone.uuid
                 ),
-                Err(e) => log::error!(
-                    "Metadata-vocabulary sweep failed for perspective {}: {}",
-                    handle_clone.uuid,
-                    e
-                ),
+                Err(e) => {
+                    log::error!(
+                        "Not opening perspective {}: its metadata-vocabulary sweep failed: {}",
+                        handle_clone.uuid,
+                        e
+                    );
+                    return;
+                }
             }
 
             // No named-graph → reifier migration. The named-graph storage model
