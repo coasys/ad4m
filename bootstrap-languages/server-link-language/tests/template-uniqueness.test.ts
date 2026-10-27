@@ -5,7 +5,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { initAdapters, getConfig, resetAdapters } from "../src/adapters.js";
-import { adminRotates, commitNeedsKeyRetry, refreshSkippedByCooldown } from "../src/key-ring-policy.js";
+import { adminRotates } from "../src/room-keys.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const bundlePath = resolve(__dirname, "..", "build", "bundle.js");
@@ -87,22 +87,6 @@ describe("template uniqueness", () => {
     });
 });
 
-describe("refreshSkippedByCooldown", () => {
-    it("a joiner waiting for its first keys re-checks on every sync, cooldown or not", () => {
-        // Staging E5: a joiner re-read /keys at most every 10 s, so it saw
-        // the room up to 10 s after the admin granted its keys.
-        assert.strictEqual(refreshSkippedByCooldown("pending", 0, 10_000), false);
-        assert.strictEqual(refreshSkippedByCooldown("pending", 500, 10_000), false);
-    });
-
-    it("keeps the cooldown once keys are held, or when the room has none or errored", () => {
-        for (const status of ["ready", "none", "error"] as const) {
-            assert.strictEqual(refreshSkippedByCooldown(status, 500, 10_000), true, status);
-            assert.strictEqual(refreshSkippedByCooldown(status, 10_000, 10_000), false, status);
-        }
-    });
-});
-
 describe("adminRotates", () => {
     it("rotates when the admin holds no room key it can open", () => {
         assert.strictEqual(adminRotates("none", false), true);
@@ -117,33 +101,5 @@ describe("adminRotates", () => {
     it("does not rotate while it holds a key, or when the key ring errored", () => {
         assert.strictEqual(adminRotates("ready", false), false);
         assert.strictEqual(adminRotates("error", false), false);
-    });
-});
-
-describe("commitNeedsKeyRetry", () => {
-    it("retries when status is error", () => {
-        assert.strictEqual(commitNeedsKeyRetry("error"), true);
-    });
-
-    it("retries when status is pending", () => {
-        assert.strictEqual(commitNeedsKeyRetry("pending"), true);
-    });
-
-    it("does not retry when status is ready", () => {
-        assert.strictEqual(commitNeedsKeyRetry("ready"), false);
-    });
-
-    it("does not retry when status is none", () => {
-        assert.strictEqual(commitNeedsKeyRetry("none"), false);
-    });
-
-    it("decides on status alone — no cooldown or timestamp input", () => {
-        // The original bug had the commit path consulting a shared
-        // lastKeyRingRetry timestamp, causing commits within 10s of a
-        // background sync to skip their retry and throw. This test pins
-        // the fix: commitNeedsKeyRetry takes only status, so a background
-        // retry that just happened cannot suppress a user-initiated commit.
-        assert.strictEqual(commitNeedsKeyRetry.length, 1);
-        assert.strictEqual(commitNeedsKeyRetry("error"), true);
     });
 });

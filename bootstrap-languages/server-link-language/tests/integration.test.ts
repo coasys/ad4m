@@ -144,6 +144,7 @@ function wireClient(
   serverUrl: string,
   roomId: string,
   agent: RealAgent,
+  storage: MemoryStorage = new MemoryStorage(),
 ): { emittedDiffs: PerspectiveDiff[]; syncStates: string[] } {
   resetAdapters();
   syncModule._resetBatchStateForTests();
@@ -153,7 +154,7 @@ function wireClient(
   const syncStates: string[] = [];
 
   initAdapters({
-    storage: new MemoryStorage(),
+    storage,
     transport: new FetchTransport(),
     agent,
     wsFactory: new NullWsFactory(),
@@ -300,10 +301,11 @@ describe("integration: bootstrap (cold-start /render pull)", () => {
 
     await syncModule.bootstrap();
 
-    // bootstrap() does NOT emit diffs (it populates the store silently)
-    assert.equal(bDiffs.length, 0, "bootstrap must not emit diffs");
+    // The executor only learns of links from emitted diffs: bootstrap emits
+    // the room's links, each once.
+    const emitted = bDiffs.flatMap((d) => d.additions).map((l) => (l.data as { source: string }).source).sort();
+    assert.deepEqual(emitted, ["test://boot-0", "test://boot-1", "test://boot-2"]);
 
-    // But the store should have all 3 links
     const links = store.allLinks().links;
     assert.equal(links.length, 3, "B's store must contain all 3 of A's links");
 
@@ -341,10 +343,10 @@ describe("integration: catch-up sync", () => {
 
     // B bootstraps (gets both links), then A commits a third
     const agentB = RealAgent.create();
-    const { emittedDiffs: bDiffs } = wireClient(server.url, roomId, agentB);
+    const bStorage = new MemoryStorage();
+    wireClient(server.url, roomId, agentB, bStorage);
     await syncModule.bootstrap();
     assert.equal(store.allLinks().links.length, 2);
-    const seqAfterBootstrap = store.getSequence();
 
     // Switch back to A and commit a third link
     wireClient(server.url, roomId, agentA);
@@ -358,27 +360,12 @@ describe("integration: catch-up sync", () => {
       removals: [],
     });
 
-    // Switch to B, set the sequence cursor to where bootstrap left off, and catch up
-    const bDiffs2: PerspectiveDiff[] = [];
-    wireClient(server.url, roomId, agentB);
-    // Re-bootstrap to restore B's store state
-    await syncModule.bootstrap();
-    // Manually set sequence to simulate B having bootstrapped earlier
-    store.setSequence(seqAfterBootstrap);
+    // B, with its store and cursor from the bootstrap, catches up
+    const { emittedDiffs: bDiffs2 } = wireClient(server.url, roomId, agentB, bStorage);
+    await syncModule.catchUp();
 
-    syncModule.initSync({
-      config: { serverUrl: server.url, roomId },
-      getToken: () => auth.getValidToken(),
-      emitDiff: (diff) => bDiffs2.push(diff),
-      emitSyncState: () => {},
-      getKeyRing: () => null,
-    });
-
-    const lastDiff = await syncModule.catchUp();
-
-    assert.ok(bDiffs2.length >= 1, "catch-up must emit the missed diff");
     const sources = bDiffs2.flatMap((d) => d.additions).map((l) => (l.data as { source: string }).source);
-    assert.ok(sources.includes("test://missed"), "missed link must appear in emitted diffs");
+    assert.deepEqual(sources, ["test://missed"], "catch-up emits only the missed link");
   });
 });
 
