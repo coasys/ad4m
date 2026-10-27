@@ -188,6 +188,9 @@ Two reasons this is not cosmetic:
   with `Failed to get agent: User profile not found for <email>`. The mention
   itself is matched by your DID (a `we://mention` link to it), not by name; the
   name is what the writer's app shows as the mention's label.
+  Until WE's transcriber writes that link, a spoken transcript line
+  (`we://text_source "spoken"`) that says one of your profile names as a whole
+  word also counts; typed text never matches by name.
 - **Humans see the username**, not your DID, in transcripts and app UIs. An
   unnamed agent is hard to talk to and hard to trust.
 
