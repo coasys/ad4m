@@ -91,11 +91,14 @@ pub struct BundleSandbox {
     source: Arc<str>,
     limits: SandboxLimits,
     live: Arc<Mutex<Option<Live>>>,
+    /// One per isolate thread started and maybe not yet ended: closed when that thread ends.
+    threads: Arc<std::sync::Mutex<Vec<oneshot::Receiver<()>>>>,
 }
 
 impl BundleSandbox {
     /// Start a sandbox and load `source`, an ES module, into it. Fails if the module does not
-    /// load. `name` is for logs and the module's URL, not an identity.
+    /// load, once the isolate it was loaded into has ended and released its memory. `name` is for
+    /// logs and the module's URL, not an identity.
     pub async fn start(
         name: impl Into<String>,
         source: impl Into<Arc<str>>,
@@ -106,8 +109,23 @@ impl BundleSandbox {
             source: source.into(),
             limits,
             live: Arc::new(Mutex::new(None)),
+            threads: Arc::default(),
         };
-        let live = spawn_isolate(&sandbox.name, sandbox.source.clone(), limits).await?;
+        let live = match spawn_isolate(
+            &sandbox.name,
+            sandbox.source.clone(),
+            limits,
+            &sandbox.threads,
+        )
+        .await
+        {
+            Ok(live) => live,
+            Err(e) => {
+                // A load that failed or was stopped leaves its thread tearing the isolate down.
+                sandbox.close().await;
+                return Err(e);
+            }
+        };
         *sandbox.live.lock().await = Some(live);
         Ok(sandbox)
     }
@@ -124,6 +142,18 @@ impl BundleSandbox {
     /// `JSON.stringify` leaves them.
     pub async fn read(&self, path: &[&str]) -> Result<Value, SandboxError> {
         self.send(path, None).await
+    }
+
+    /// Stop the isolate and wait until every isolate thread this sandbox started has ended, so
+    /// the memory they held is released. Waits for a call still running to finish or be stopped
+    /// at its time limit. A call made afterwards starts a fresh isolate.
+    pub async fn close(&self) {
+        // Without its queue, an isolate's thread ends once it has answered what it was given.
+        self.live.lock().await.take();
+        let threads = std::mem::take(&mut *self.threads.lock().expect("never poisoned"));
+        for ended in threads {
+            let _ = ended.await;
+        }
     }
 
     async fn send(&self, path: &[&str], args: Option<String>) -> Result<Value, SandboxError> {
@@ -155,7 +185,9 @@ impl BundleSandbox {
         }
         if live.is_none() {
             info!("[tool-bundle:{}] starting a fresh isolate", self.name);
-            *live = Some(spawn_isolate(&self.name, self.source.clone(), self.limits).await?);
+            *live = Some(
+                spawn_isolate(&self.name, self.source.clone(), self.limits, &self.threads).await?,
+            );
         }
         let current = live.as_ref().expect("set above");
 
@@ -204,7 +236,15 @@ async fn spawn_isolate(
     name: &str,
     source: Arc<str>,
     limits: SandboxLimits,
+    threads: &std::sync::Mutex<Vec<oneshot::Receiver<()>>>,
 ) -> Result<Live, SandboxError> {
+    let (ended_tx, ended_rx) = oneshot::channel::<()>();
+    {
+        let mut threads = threads.lock().expect("never poisoned");
+        // Forget the threads that have ended; a sender is only ever dropped, never used.
+        threads.retain_mut(|t| matches!(t.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        threads.push(ended_rx);
+    }
     let (tx, rx) = mpsc::unbounded_channel::<Request>();
     let (handle_tx, handle_rx) = oneshot::channel::<v8::IsolateHandle>();
     let (ready_tx, ready_rx) = oneshot::channel::<Result<(), SandboxError>>();
@@ -214,6 +254,9 @@ async fn spawn_isolate(
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
+            // Dropped last, when everything else on this thread is gone: how `close` learns the
+            // thread has ended.
+            let _ended = ended_tx;
             #[cfg(test)]
             let _running = running::Thread::start(&thread_bundle);
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -266,14 +309,20 @@ pub(super) mod running {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
-    fn threads() -> &'static Mutex<HashMap<String, usize>> {
-        static THREADS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    /// Per name: the threads running now, and the most that ever ran at once.
+    fn threads() -> &'static Mutex<HashMap<String, (usize, usize)>> {
+        static THREADS: OnceLock<Mutex<HashMap<String, (usize, usize)>>> = OnceLock::new();
         THREADS.get_or_init(Default::default)
     }
 
     /// The isolate threads of the sandbox called `name` that have not ended yet.
     pub fn count(name: &str) -> usize {
-        threads().lock().unwrap().get(name).copied().unwrap_or(0)
+        threads().lock().unwrap().get(name).map_or(0, |n| n.0)
+    }
+
+    /// The most isolate threads called `name` that were ever running at once; 0 if none started.
+    pub fn most(name: &str) -> usize {
+        threads().lock().unwrap().get(name).map_or(0, |n| n.1)
     }
 
     /// Counts its thread as running until dropped, which is when the thread ends.
@@ -281,11 +330,10 @@ pub(super) mod running {
 
     impl Thread {
         pub(super) fn start(name: &str) -> Self {
-            *threads()
-                .lock()
-                .unwrap()
-                .entry(name.to_string())
-                .or_default() += 1;
+            let mut threads = threads().lock().unwrap();
+            let (now, most) = threads.entry(name.to_string()).or_default();
+            *now += 1;
+            *most = (*most).max(*now);
             Self(name.to_string())
         }
     }
@@ -293,7 +341,7 @@ pub(super) mod running {
     impl Drop for Thread {
         fn drop(&mut self) {
             if let Some(n) = threads().lock().unwrap().get_mut(&self.0) {
-                *n -= 1;
+                n.0 -= 1;
             }
         }
     }
