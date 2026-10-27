@@ -16,7 +16,7 @@
 //! the record it was handed, and that record must still be the stored one when the result lands.
 //!
 //! The two tools' descriptions and arguments are the bundle's own ([`from_bundle`]), so they
-//! follow WE when the bundle is vendored again.
+//! follow WE when `build.rs` is pinned to a newer WE release.
 
 use super::{check_setters, class_properties, error_json, fetch_instance, instance_uri};
 use super::{resolve_class, subject_class, validate_properties, Ad4mMcpHandler, WriteMode};

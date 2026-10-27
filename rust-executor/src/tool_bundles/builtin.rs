@@ -2,11 +2,11 @@
 //!
 //! WE's rules for its templates (what a valid one is, how a patch applies, the reference an agent
 //! reads) are JavaScript, and change with every WE release. Rather than a copy in Rust, the
-//! executor carries WE's own build of them: `template_tools.bundle.js`, vendored by
-//! `scripts/vendor-template-tools.sh`, which also writes `template_tools.json`: the bundle's tools
-//! as the bundle declares them, and the WE commit they came from. Reading the tools from that file
-//! keeps the tool list static, so it is known without starting an isolate; a test checks it says
-//! what the bundle exports.
+//! executor carries WE's own build of them, from a WE release: `build.rs` downloads the release's
+//! `agent-tools.bundle.js` and `agent-tools.json` (each toolset's tools as the bundle declares
+//! them, and the WE commit they came from), checks both against the hashes it pins, and this file
+//! compiles them in. Reading the tools from the manifest keeps the tool list static, so it is
+//! known without starting an isolate; a test checks it says what the bundle exports.
 //!
 //! **A record is seen by one call.** Each tool call runs in a fresh isolate of its own, started
 //! from the bundle and dropped after the call, so nothing a call hands the bundle is there for any
@@ -20,11 +20,15 @@
 use super::{BundleSandbox, SandboxError, SandboxLimits};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{OnceCell, Semaphore};
 
 /// The bundle, as WE builds it.
-pub const SOURCE: &str = include_str!("template_tools.bundle.js");
+pub const SOURCE: &str = include_str!(concat!(env!("OUT_DIR"), "/agent-tools.bundle.js"));
+
+/// The release's manifest for [`SOURCE`].
+const MANIFEST: &str = include_str!(concat!(env!("OUT_DIR"), "/agent-tools.json"));
 
 /// The name the bundle exports its template toolset under, and the documentation topic every one
 /// of its topics sits under.
@@ -41,9 +45,8 @@ pub struct TemplateTool {
     pub writes: bool,
 }
 
-/// What `template_tools.json` says about the bundle beside it.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// What the release's manifest says about the template toolset in the bundle.
+#[derive(Debug)]
 pub struct Declared {
     /// The WE commit the bundle was built from.
     pub commit: String,
@@ -52,9 +55,32 @@ pub struct Declared {
     pub tools: Vec<TemplateTool>,
 }
 
+/// `agent-tools.json`: the WE commit, and every toolset the bundle exports.
+#[derive(Deserialize)]
+struct Manifest {
+    commit: String,
+    toolsets: HashMap<String, Toolset>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Toolset {
+    applies_to: Vec<String>,
+    tools: Vec<TemplateTool>,
+}
+
 static DECLARED: LazyLock<Declared> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("template_tools.json"))
-        .expect("template_tools.json is written by vendor-template-tools.sh")
+    let mut manifest: Manifest =
+        serde_json::from_str(MANIFEST).expect("agent-tools.json is the release's manifest");
+    let toolset = manifest
+        .toolsets
+        .remove(TOOLSET)
+        .expect("the release's bundle exports a template toolset");
+    Declared {
+        commit: manifest.commit,
+        applies_to: toolset.applies_to,
+        tools: toolset.tools,
+    }
 });
 
 /// The tools the bundle exports, and what they work on.
@@ -137,11 +163,11 @@ mod tests {
     use crate::test_utils::init_v8_platform;
 
     #[tokio::test]
-    async fn template_tools_json_says_what_the_bundle_exports() {
+    async fn the_manifest_says_what_the_bundle_exports() {
         init_v8_platform();
         let sandbox = BundleSandbox::start(TOOLSET, source(), SandboxLimits::default())
             .await
-            .expect("the vendored bundle loads");
+            .expect("the released bundle loads");
         let applies_to: Vec<String> = serde_json::from_value(
             sandbox
                 .read(&["toolsets", TOOLSET, "appliesTo"])
@@ -155,7 +181,7 @@ mod tests {
         assert_eq!(
             (applies_to, tools),
             (declared().applies_to.clone(), declared().tools.clone()),
-            "template_tools.json is stale: run scripts/vendor-template-tools.sh"
+            "agent-tools.json does not describe the bundle released with it"
         );
     }
 

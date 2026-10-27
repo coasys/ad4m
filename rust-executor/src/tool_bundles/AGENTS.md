@@ -9,7 +9,7 @@ else. Not Languages: no network, storage, agent or holochain access.
 |---|---|
 | `sandbox.rs` | `BundleSandbox`: one bare `JsRuntime` per bundle on its own thread; `call(path, args)` / `read(path)`, JSON in and out; time limit on the load and on each call, memory cap on the V8 heap and (through the isolate's ArrayBuffer allocator) on buffers |
 | `bootstrap.js` | Runs before the bundle: the only globals it gets beyond the language (`structuredClone`, `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `crypto.getRandomValues`, `console`), removes `Deno` and `WebAssembly`, makes `ArrayBuffer`/`SharedArrayBuffer` fixed-length only, evaluates to the invoker |
-| `builtin.rs` | WE's template tools, compiled in: `template_tools.bundle.js` (WE's build of `@we/agent-tools`) and `template_tools.json` (its tools as it declares them, and the WE commit). `call` runs a tool in a fresh isolate; `read_doc` serves the `template` topics from one kept isolate. Both files are written by `scripts/vendor-template-tools.sh`, never by hand; a test fails when they disagree |
+| `builtin.rs` | WE's template tools, compiled in from `OUT_DIR`: `agent-tools.bundle.js` (WE's build of `@we/agent-tools`) and `agent-tools.json` (its toolsets' tools as it declares them, and the WE commit). `call` runs a tool in a fresh isolate; `read_doc` serves the `template` topics from one kept isolate. `build.rs` downloads both from the WE release `agent-tools-v<WE_AGENT_TOOLS_VERSION>` and fails the build unless their sha256 match the ones it pins; a new bundle is a new version and hashes there, nothing else. A test fails when the two files disagree |
 | `tests.rs` | Fixture bundles: calls, isolation, limits |
 
 ## Invariants
