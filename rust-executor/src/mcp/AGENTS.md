@@ -133,6 +133,10 @@ is a second, raw-link parser slated for deletion.
   agents see, so a behaviour added only to `dynamic.rs` is invisible unless the
   operator opted into `dynamicClassTools`.
 - Adding a doc topic means three edits that must stay in step: the markdown file,
-  the `DocTopic` variant (+ `ALL`), and the plugin's `DocTopic` schema in
-  `plugins/ad4m/staticToolDefs.ts`. `docs_only_point_at_served_topics` and
-  `get_documentation_serves_every_topic` fail if you miss one.
+  the `DocTopic` variant (+ `ALL`), and the `topic` description of
+  `GetDocumentationParams` (`docs.rs`), which names every topic: `topic` is a plain
+  string, so that description, captured into `plugins/ad4m/staticToolDefs.ts`, is all
+  an agent learns the topics from. `docs_only_point_at_served_topics` and
+  `get_documentation_serves_every_topic` fail if you miss one of the first two; the
+  plugin's `index.test.ts` checks that the captured description names the topics in
+  its list, so add the new one there too.
