@@ -505,8 +505,12 @@ if start_and_gate; then
   [[ $agent_state == no-agent ]] && note=" (no agent yet)"
   log "deployed $sha$note"
   if [[ -n $deployed ]]; then link previous "$deployed"; fi
+  # Write the pending marker in this same update. A kill during the cleanup
+  # below must still retry; a later quiet check syncs only when the marker
+  # matches. Clear it only after both requested link-servers succeed.
   set_status deployed_sha "$sha" subject "$subject" deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    previous_sha "${deployed:-null}" in_flight null last_result "deployed$note"
+    previous_sha "${deployed:-null}" in_flight null last_result "deployed$note" \
+    link_server_pending "$sha"
   if [[ $agent_state == unlocked ]]; then set_status agent unlocked; fi
   # Keep what a rollback by hand to $deployed needs: its build and its data.
   prune_snapshots "${deployed:-none}"
@@ -514,7 +518,6 @@ if start_and_gate; then
     while read -r old; do
       [[ $old == "$sha" || $old == "$deployed" ]] || rm -rf "${STATE:?}/releases/$old"
     done
-  set_status link_server_pending "$sha"
   if sync_link_servers "$sha"; then
     set_status link_server_pending null
     exit 0
