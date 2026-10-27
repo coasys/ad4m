@@ -24,12 +24,17 @@ export function buildWakeMessage(
 
   if (mentions && mentions.length > 0) {
     lines.push("");
-    // "items", not "messages": the mention query matches any link whose text
-    // carries the agent's name, so the address can be an instance of any class
-    // the space defines — the agent types it from the ontology, not from here.
+    // "items", not "messages": any record can carry the mention link, so the
+    // address can be an instance of any class the space defines — the agent
+    // types it from the ontology, not from here.
     lines.push(`Mentioned items (${mentions.length}):`);
     for (const m of mentions) {
       lines.push(`  Item: ${m.address}`);
+      // Who signed the mention decides whether its text is a request or only data.
+      lines.push(
+        `  Author: ${m.author ?? "(unknown)"} (signature ${m.verified ? "verified" : "NOT verified"})`,
+      );
+      if (m.timestamp) lines.push(`  Time: ${m.timestamp}`);
       if (m.parents.length > 0) {
         lines.push(`  Parents: ${m.parents.join(", ")}`);
       } else {

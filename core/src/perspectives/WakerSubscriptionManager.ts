@@ -49,6 +49,30 @@ export interface MentionMessage {
    * parents have none, or the walk could not be made.
    */
   ancestors: string[];
+  /**
+   * The DID that signed the mention link (the row's `author`), so the agent knows whose
+   * request it is reading. Absent when the subscription's query returns no `author`; the
+   * executor's mention query always does.
+   */
+  author?: string;
+  /** That link's timestamp, ISO 8601 (the row's `timestamp`). Absent as `author` is. */
+  timestamp?: string;
+  /**
+   * Whether the link's signature verified for `author` (the row's `proofValid` is `"true"`).
+   * The executor's mention query returns verified links only, so a mention it found is `true`;
+   * a row without the verdict is `false`.
+   */
+  verified: boolean;
+}
+
+/** The provenance of a mention row's link, as {@link MentionMessage} carries it. */
+function provenanceOf(row: any): Pick<MentionMessage, "author" | "timestamp" | "verified"> {
+  const provenance: Pick<MentionMessage, "author" | "timestamp" | "verified"> = {
+    verified: row?.proofValid === "true" || row?.proofValid === true,
+  };
+  if (typeof row?.author === "string") provenance.author = row.author;
+  if (typeof row?.timestamp === "string") provenance.timestamp = row.timestamp;
+  return provenance;
 }
 
 export interface WakerLogger {
@@ -340,6 +364,8 @@ export class WakerSubscriptionManager {
         // Only wake for records we haven't seen before.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
+        // The first row per record: the mention query is newest first.
+        const provenance = new Map<string, Pick<MentionMessage, "author" | "timestamp" | "verified">>();
 
         for (const item of rows as any[]) {
           // A SPARQL row names the record as `source`, a model row as `id`.
@@ -347,6 +373,7 @@ export class WakerSubscriptionManager {
           if (typeof address !== "string" || !address || currentSeen.has(address)) continue;
           currentSeen.add(address);
           newMessages.push(address);
+          provenance.set(address, provenanceOf(item));
         }
 
         if (newMessages.length === 0) {
@@ -382,7 +409,7 @@ export class WakerSubscriptionManager {
             `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}` +
               (ancestors.length ? `; ancestors: ${ancestors.join(", ")}` : ""),
           );
-          mentions.push({ address: msgAddr, parents, ancestors });
+          mentions.push({ address: msgAddr, parents, ancestors, ...provenance.get(msgAddr)! });
         }
 
         this.seenMessages.set(sub.id, currentSeen);

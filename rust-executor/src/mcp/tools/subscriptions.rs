@@ -259,18 +259,20 @@ pub const MENTION_WINDOW: usize = 50;
 ///
 /// The DID is compared as a string literal, escaped, rather than spliced in
 /// as an IRI. Rows carry `source`, which the waker reads as the mentioned
-/// record. Pure over its input, so it unit-tests without an agent.
+/// record, and the mention link's provenance (#1563): `author`, `timestamp`
+/// and `proofValid`, which the waker hands the woken agent with the record.
+/// Pure over its input, so it unit-tests without an agent.
 pub fn build_mention_query(did: &str) -> String {
     let did = escape_sparql_literal(did);
     format!(
-        "SELECT ?source ?timestamp WHERE {{ \
+        "SELECT ?source ?author ?timestamp ?proofValid WHERE {{ \
          ?source <{MENTION_PREDICATE}> ?mentioned . \
          FILTER(isIRI(?source) && STR(?mentioned) = \"{did}\") \
          ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <{MENTION_PREDICATE}> ?mentioned )>> . \
          ?reifier <ad4m://ontology/author> ?author . \
          ?reifier <ad4m://ontology/timestamp> ?timestamp . \
-         ?reifier <ad4m://ontology/proofValid> \"true\" . \
-         FILTER(STR(?author) != \"{did}\") \
+         ?reifier <ad4m://ontology/proofValid> ?proofValid . \
+         FILTER(STR(?proofValid) = \"true\" && STR(?author) != \"{did}\") \
          }} ORDER BY DESC(?timestamp) LIMIT {MENTION_WINDOW}"
     )
 }
@@ -323,7 +325,10 @@ mod tests {
             crate::perspectives::perspective_instance::is_sparql_query(&q),
             "{q}"
         );
-        assert!(q.starts_with("SELECT ?source "), "{q}");
+        assert!(
+            q.starts_with("SELECT ?source ?author ?timestamp ?proofValid "),
+            "the record and its mention link's provenance: {q}"
+        );
         assert!(
             q.contains("?source <we://mention> ?mentioned ."),
             "the mention link: {q}"
@@ -337,12 +342,8 @@ mod tests {
             "through that link's reifier: {q}"
         );
         assert!(
-            q.contains(r#"FILTER(STR(?author) != "did:key:zAgent")"#),
-            "by someone else: {q}"
-        );
-        assert!(
-            q.contains(r#"?reifier <ad4m://ontology/proofValid> "true""#),
-            "verified: {q}"
+            q.contains(r#"FILTER(STR(?proofValid) = "true" && STR(?author) != "did:key:zAgent")"#),
+            "verified, by someone else: {q}"
         );
         assert!(
             q.ends_with(&format!("ORDER BY DESC(?timestamp) LIMIT {MENTION_WINDOW}")),
