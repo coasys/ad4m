@@ -20,6 +20,8 @@ import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "..
 import { AllInstancesResult } from "../model/types";
 import { LiveQuery, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
+import type { AgentMessage } from "../generated/api/AgentMessage";
+import type { AgentReply } from "../generated/api/AgentReply";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
 import { SHACLShape } from "../shacl/SHACLShape";
@@ -433,6 +435,24 @@ export class PerspectiveProxy {
             emitDebugEvents,
             options,
         )
+    }
+
+    /**
+     * Ask a model something about this perspective, or ask it to change something, with the
+     * executor's own tools — including the tools apps install for their records. It reads freely;
+     * it writes only with the tools named in `settings.writeTools`, as you. Answers with the
+     * model's final reply.
+     *
+     * @param messages the conversation so far, the person's request last
+     * @param settings `context` (what the person is looking at), `writeTools`, `model`, `maxToolCalls`
+     * @param options `signal` / `timeoutMs` (default {@link LONG_TIMEOUT_MS})
+     */
+    async runAgent(
+        messages: AgentMessage[],
+        settings?: Parameters<PerspectiveClient['runAgent']>[2],
+        options?: CallOptions,
+    ): Promise<AgentReply> {
+        return await this.#client.runAgent(this.#handle.uuid, messages, settings, options)
     }
 
     /**

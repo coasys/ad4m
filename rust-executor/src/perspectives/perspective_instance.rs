@@ -627,6 +627,10 @@ pub struct PerspectiveInstance {
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
+    /// Held by `commit` from its pending-queue check until the diff is sent or
+    /// queued, so a diff that fails after a slow language call is queued ahead
+    /// of every diff committed after it.
+    commit_order: Arc<Mutex<()>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
     batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
@@ -733,6 +737,7 @@ impl PerspectiveInstance {
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
+            commit_order: Arc::new(Mutex::new(())),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
@@ -1631,6 +1636,14 @@ impl PerspectiveInstance {
             return Ok(());
         }
 
+        // One commit at a time decides "send now or queue". Without this, a
+        // diff committed while a slow language call is in flight is queued
+        // (or sent) first, and if that call then fails, its diff is queued
+        // behind the newer one: peers see the newer diff first. The
+        // immediate-commit counter has its own short lock, so
+        // set_immediate_commits never waits for a language call.
+        let _commit_order = self.commit_order.lock().await;
+
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
         let (_, pending_ids) =
             Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
@@ -1670,9 +1683,20 @@ impl PerspectiveInstance {
                 // error path below queues the diff. Legacy languages that
                 // implement perspective-sync still behave correctly because
                 // they throw from commit() when not synced.
-                let mut immediate_commits_remaining = self.immediate_commits_remaining.lock().await;
-                if *immediate_commits_remaining > 0 {
-                    *immediate_commits_remaining -= 1;
+                // Take the slot and release the counter lock before the
+                // language call: a slow commit must not hold up
+                // set_immediate_commits.
+                let immediate = {
+                    let mut immediate_commits_remaining =
+                        self.immediate_commits_remaining.lock().await;
+                    if *immediate_commits_remaining > 0 {
+                        *immediate_commits_remaining -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if immediate {
                     link_language.commit(diff.clone()).await
                 } else {
                     Err(anyhow!("Debouncing commit burst"))

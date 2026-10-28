@@ -80,6 +80,6 @@
       "pako": "2.1.0"
     }
   },
-  "version": "0.13.1-staging.4",
+  "version": "0.13.1-staging.5",
   "packageManager": "pnpm@9.15.0"
 }
