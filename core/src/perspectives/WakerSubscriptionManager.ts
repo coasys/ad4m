@@ -14,19 +14,142 @@ export interface WakerSubscription {
   channel: string;
   /**
    * SPARQL, or with `className` a model query (JSON) over that class. A
-   * mention subscription's is SPARQL from the executor's
-   * `get_mention_waker_config`: the source of every `we://mention` link to
-   * the agent's DID that another agent wrote. Each row's `source` is the
-   * mentioned record.
+   * mention subscription's, from the executor's `get_mention_waker_config`,
+   * is a model query over the built-in `ad4m://TextContent`: every record
+   * whose text, in a link another agent wrote, contains one of `terms`. A
+   * mention subscription saved without `className` (#1557) holds the
+   * `we://mention` link query here instead, as `linkQuery` would.
    */
   query: string;
   /**
-   * The class `query` reads, as a model query: a children subscription has
-   * the built-in `ad4m://Container`, from `generate_waker_query` (#1446).
-   * Without it `query` is SPARQL.
+   * The class `query` reads, as a model query. A mention subscription has
+   * one, from the executor's `get_mention_waker_config`: the built-in
+   * `ad4m://TextContent`; a children subscription has the built-in
+   * `ad4m://Container`, from `generate_waker_query` (#1446). Without it
+   * `query` is SPARQL.
    */
   className?: string;
+  /**
+   * A mention subscription's terms (profile names and the DID), from
+   * `get_mention_waker_config`. The query matches substrings, so a record
+   * wakes only when its text holds one of these as a whole word
+   * ({@link holdsAWholeWordTerm}); without them a mention subscription with
+   * a `className` is refused.
+   */
+  terms?: string[];
+  /**
+   * A mention subscription's second query, SPARQL from
+   * `get_mention_waker_config`: the source of every `we://mention` link to
+   * the agent's DID that another agent wrote, with its author, timestamp and
+   * proof verdict. Each row's `source` is the mentioned record, whatever its
+   * text says. The manager opens it beside `query`; a record both find
+   * wakes once.
+   */
+  linkQuery?: string;
   neighbourhood?: string;
+}
+
+/** A letter, combining mark, digit or underscore: what a term must not touch. */
+const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
+
+/**
+ * The elements a message's HTML is made of. A `<` before any other name is text:
+ * We stores plain text, where "<hey Data> can you look" is words.
+ */
+const ELEMENT =
+  "a|abbr|b|bdi|bdo|blockquote|br|caption|center|cite|code|col|colgroup|dd|del|details|dfn|div|dl|dt|em|" +
+  "figcaption|figure|font|h[1-6]|hr|i|img|ins|kbd|label|li|mark|ol|p|pre|q|s|samp|section|article|small|" +
+  "span|strike|strong|sub|summary|sup|table|tbody|td|tfoot|th|thead|time|tr|u|ul|var|wbr|script|style";
+/** An attribute: a name, then optionally `=` and a quoted value (which may hold `>`) or an unquoted one. */
+const ATTRIBUTE = `\\s+[A-Za-z_:][-\\w:.]*(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s"'=<>\`]+))?`;
+/**
+ * Markup: a comment, a `<script>`/`<style>` element with its contents, or a tag of
+ * a known element whose rest is a valid attribute list. "a < b" and
+ * "if a <b then ask Data, else c -> d" are text: the comma is no attribute.
+ */
+const TAG = new RegExp(
+  `<!--[\\s\\S]*?-->` +
+    `|<(script|style)(?=[\\s/>])(?:${ATTRIBUTE})*\\s*>[\\s\\S]*?<\\/\\1\\s*>` +
+    `|<(?:${ELEMENT})(?=[\\s/>])(?:${ATTRIBUTE})*\\s*\\/?>` +
+    `|<\\/(?:${ELEMENT})\\s*>`,
+  "gi",
+);
+/** Tags that break a line: replaced by a space, so `<p>hi</p><p>Data</p>` keeps "Data" a word. */
+const BREAKING_TAG = /^<\/?(?:p|div|br|hr|li|ul|ol|h[1-6]|blockquote|pre|tr|td|th|table|section|article)\b/i;
+/**
+ * The attributes a mention puts its target's DID in: Flux's `<a data-type="mention"
+ * href="did:…">`, older Flux messages' `<span data-id="did:…">`, and We's editor chip
+ * `<span class="we-mention" data-did="did:…">`.
+ */
+const ATTRIBUTES = new RegExp(ATTRIBUTE, "g");
+const MENTION_TARGET = /^\s+(?:href|data-id|data-did)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))$/i;
+
+/**
+ * How much of a record's text the word check reads. Dropping markup costs time
+ * quadratic in a run of unclosed `<script>`, `<style>` or `<!--` openers, so a
+ * very long text could hold the event loop for seconds, and a row that holds
+ * no term is checked again on every result while it is in the window. A term
+ * past this many characters does not wake.
+ */
+export const MENTION_TEXT_LIMIT = 16_384;
+
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+function decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (whole, ref: string) => {
+    if (ref[0] !== "#") return ENTITIES[ref.toLowerCase()] ?? whole;
+    const code = ref[1] === "x" || ref[1] === "X" ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+  });
+}
+
+/**
+ * What a reader sees of `text`, and the DIDs its mentions point at. `text` may be
+ * HTML (TextContent allows it): tag names and attributes are markup, not words, so
+ * a bot named "Data" must not wake on `data-type="mention"` in a mention of
+ * someone else. Plain text passes through unchanged, apart from entities.
+ */
+function readableParts(text: string): { visible: string; targets: string[] } {
+  const targets: string[] = [];
+  const visible = text.replace(TAG, (tag, scriptOrStyle?: string) => {
+    if (scriptOrStyle) return " ";
+    if (tag.startsWith("<!--")) return "";
+    // Parse complete attributes first: a DID-shaped string inside `title`
+    // is not a target attribute and must not wake an agent.
+    for (const attribute of tag.matchAll(ATTRIBUTES)) {
+      const target = MENTION_TARGET.exec(attribute[0]);
+      if (target) targets.push(decodeEntities(target[1] ?? target[2] ?? target[3]));
+    }
+    return BREAKING_TAG.test(tag) ? " " : "";
+  });
+  return { visible: decodeEntities(visible), targets };
+}
+
+/**
+ * Whether `text` holds one of `terms` as a whole word, case-insensitively:
+ * "Data" is in "hi Data!", "@data" and "Data's turn", not in "metadata" or
+ * "database". A term is matched literally (regex characters, quotes) and must
+ * not touch a letter, mark, digit or underscore on either side, so a name
+ * that starts or ends with punctuation still matches. Same rule as #1459's
+ * SPARQL `(?:^|\W)term(?:\W|$)`.
+ *
+ * The rule runs on the visible text only: in HTML, tags and attributes are
+ * dropped and entities decoded first. A mention's target attribute
+ * (`href`, `data-id`, `data-did`) matches an exact, case-sensitive DID term, which
+ * is how a mention by DID is found when the DID is not in the visible text.
+ *
+ * The mention query's `contains` matches substrings (model query has no word
+ * match); this is the check that keeps "data" from waking on "metadata".
+ * It reads the first {@link MENTION_TEXT_LIMIT} characters only.
+ */
+export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
+  const { visible, targets } = readableParts(text.slice(0, MENTION_TEXT_LIMIT));
+  return terms.some((term) => {
+    if (!term) return false;
+    if (term.startsWith("did:") && targets.includes(term)) return true;
+    const escaped = term.replace(/[\\^$.*+?()[\]{}|\/]/g, "\\$&");
+    return new RegExp(`(?<!${WORD_CHAR})${escaped}(?!${WORD_CHAR})`, "iu").test(visible);
+  });
 }
 
 /** The built-in `Container` (`Container.builtinUri`; not imported, so the
@@ -53,7 +176,7 @@ export interface MentionMessage {
    * The DID that signed the mention link (the row's `author`): who put the mention on the
    * record. Only that link is theirs; the record's text and other properties are other links,
    * which may be someone else's. Absent when the subscription's query returns no `author`; the
-   * executor's mention query always does.
+   * executor's mention query always does. With `byText`, the record's author instead.
    */
   author?: string;
   /** That link's timestamp, ISO 8601 (the row's `timestamp`). Absent as `author` is. */
@@ -61,19 +184,51 @@ export interface MentionMessage {
   /**
    * Whether the link's signature verified for `author` (the row's `proofValid` is `"true"`).
    * The executor's mention query returns verified links only, so a mention it found is `true`;
-   * a row without the verdict is `false`.
+   * a row without the verdict is `false`. With `byText`, `true`: a model query withholds links
+   * whose signature does not verify (#1113).
    */
   verified: boolean;
+  /**
+   * `true` when the record woke because its text holds one of the subscription's terms as a whole
+   * word, and the link query found no `we://mention` link for it. `author` and `timestamp` are
+   * then the record's (a model row's: its earliest link's), not a mention link's. Absent for a
+   * mention link.
+   */
+  byText?: true;
 }
 
-/** The provenance of a mention row's link, as {@link MentionMessage} carries it. */
-function provenanceOf(row: any): Pick<MentionMessage, "author" | "timestamp" | "verified"> {
-  const provenance: Pick<MentionMessage, "author" | "timestamp" | "verified"> = {
-    verified: row?.proofValid === "true" || row?.proofValid === true,
+type Provenance = Pick<MentionMessage, "author" | "timestamp" | "verified" | "byText">;
+
+/** The provenance of a mention row, as {@link MentionMessage} carries it. */
+function provenanceOf(row: any, byText: boolean): Provenance {
+  const provenance: Provenance = {
+    verified: byText || row?.proofValid === "true" || row?.proofValid === true,
   };
   if (typeof row?.author === "string") provenance.author = row.author;
   if (typeof row?.timestamp === "string") provenance.timestamp = row.timestamp;
+  if (byText) provenance.byText = true;
   return provenance;
+}
+
+/** One live query of a subscription: a mention subscription has up to two. */
+interface QueryPath {
+  query: string;
+  /** The model query's class; without it `query` is SPARQL. */
+  className?: string;
+  /** A mention text query's terms: a row wakes only when its text holds one as a whole word. */
+  terms?: string[];
+}
+
+/**
+ * The queries `sub` opens. A mention subscription opens its `linkQuery` and its `query`; one
+ * saved before either existed opens what it has.
+ */
+function queryPaths(sub: WakerSubscription): QueryPath[] {
+  const main: QueryPath = { query: sub.query, className: sub.className };
+  if (sub.type !== "mention") return [main];
+  const paths: QueryPath[] = sub.linkQuery ? [{ query: sub.linkQuery }] : [];
+  paths.push(sub.className ? { ...main, terms: sub.terms ?? [] } : main);
+  return paths;
 }
 
 export interface WakerLogger {
@@ -186,7 +341,8 @@ export class WakerSubscriptionManager {
   private subscribeTimeoutMs: number;
   private retryWakeMs: number;
 
-  private proxies = new Map<string, any>();
+  /** Each subscription's live queries: one, or a mention subscription's two. */
+  private proxies = new Map<string, any[]>();
   private activeSubscriptions = new Map<string, WakerSubscription>();
   /** Subscriptions the executor rejected, waiting to be re-attempted. */
   private pendingSubscriptions = new Map<string, WakerSubscription>();
@@ -219,6 +375,11 @@ export class WakerSubscriptionManager {
    * address. They accumulate across a debounce window, so one wake names all of them.
    */
   private undelivered = new Map<string, Map<string, MentionMessage>>();
+  /**
+   * Per mention subscription: the provenance of each record read but not yet delivered, so a
+   * mention link found after a text match for the same record can still replace it.
+   */
+  private provenances = new Map<string, Map<string, Provenance>>();
   /** Failed wake attempts in a row per subscription, for the retry backoff. */
   private wakeFailures = new Map<string, number>();
 
@@ -249,7 +410,8 @@ export class WakerSubscriptionManager {
   }
 
   /**
-   * Create a live subscription: SPARQL, or a model query when `sub.className` is set.
+   * Create a live subscription: SPARQL, or a model query when `sub.className` is set, and
+   * beside it a mention subscription's `linkQuery` (SPARQL).
    * If a subscription with the same id already exists, it is disposed first.
    */
   async subscribe(sub: WakerSubscription): Promise<void> {
@@ -261,22 +423,40 @@ export class WakerSubscriptionManager {
       throw new Error("WakerSubscriptionManager: QuerySubscriptionProxy must be provided via constructor options");
     }
     const QuerySubscriptionProxy = this.QuerySubscriptionProxyCtor;
+    if (sub.type === "mention" && sub.className && !sub.terms?.length) {
+      // Without terms the whole-word check cannot run, and every substring
+      // ("metadata" for "data") would wake the agent.
+      throw new Error(
+        `Waker subscription ${sub.id}: a mention subscription needs its terms (get_mention_waker_config returns them)`,
+      );
+    }
 
     this.logger.info(
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
     );
-    this.logger.info(`[waker] ${sub.id}: ${sub.className ? `model query over ${sub.className}` : "SPARQL query"}:\n${sub.query}`);
-
-    const proxy = sub.className
-      ? new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient, sub.className)
-      : new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient);
-    // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
-    // rejects this promise internally when subscribe() fails, and if nobody catches
-    // it before the next microtask it crashes the process.
-    if (proxy.initialized && typeof proxy.initialized.catch === "function") {
-      proxy.initialized.catch(() => {});
+    const paths = queryPaths(sub);
+    for (const path of paths) {
+      this.logger.info(`[waker] ${sub.id}: ${path.className ? `model query over ${path.className}` : "SPARQL query"}:\n${path.query}`);
     }
-    // One deadline for the whole handshake: `proxy.subscribe()` and the
+
+    const proxies = paths.map((path) => {
+      const proxy = path.className
+        ? new QuerySubscriptionProxy(sub.perspective, path.query, this.perspectiveClient, path.className)
+        : new QuerySubscriptionProxy(sub.perspective, path.query, this.perspectiveClient);
+      // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
+      // rejects this promise internally when subscribe() fails, and if nobody catches
+      // it before the next microtask it crashes the process.
+      if (proxy.initialized && typeof proxy.initialized.catch === "function") {
+        proxy.initialized.catch(() => {});
+      }
+      return proxy;
+    });
+    const disposeProxies = () => {
+      for (const proxy of proxies) {
+        try { proxy.dispose(); } catch {}
+      }
+    };
+    // One deadline for the whole handshake: every proxy's `subscribe()` and the
     // `initialized` promise it resolves share the budget, so a hang in either
     // surfaces as the same loud-but-recoverable failure a rejection does.
     const budgetMs = this.subscribeTimeoutMs;
@@ -290,18 +470,20 @@ export class WakerSubscriptionManager {
           )
         : step;
     try {
-      await bounded(proxy.subscribe(), "subscribe handshake");
-      if (this.isStale(sub.id, token)) {
-        try { proxy.dispose(); } catch {}
-        return;
+      for (const proxy of proxies) {
+        await bounded(proxy.subscribe(), "subscribe handshake");
+        if (this.isStale(sub.id, token)) {
+          disposeProxies();
+          return;
+        }
+        await bounded(proxy.initialized, "subscription initialization");
       }
-      await bounded(proxy.initialized, "subscription initialization");
     } catch (err: any) {
       const msg = err?.message ?? String(err);
       this.logger.warn(
         `[waker] ${sub.id}: subscription failed — ${msg}`,
       );
-      try { proxy.dispose(); } catch {}
+      disposeProxies();
       // A dispose that landed mid-attempt wins: don't re-queue something the
       // caller has since asked us to forget.
       if (this.isStale(sub.id, token)) return;
@@ -327,7 +509,7 @@ export class WakerSubscriptionManager {
       );
     }
     if (this.isStale(sub.id, token)) {
-      try { proxy.dispose(); } catch {}
+      disposeProxies();
       return;
     }
     this.pendingSubscriptions.delete(sub.id);
@@ -338,13 +520,14 @@ export class WakerSubscriptionManager {
     const seen = new Set<string>(this.previousSeenMessages[sub.id] ?? []);
     this.seenMessages.set(sub.id, seen);
     this.delivered.set(sub.id, new Set(seen));
+    this.provenances.set(sub.id, new Map());
     if (seen.size > 0) {
       this.logger.info(`[waker] ${sub.id}: seeded ${seen.size} seen message(s) from persisted state`);
     }
 
-    // `opening` is the result the subscription holds when it opens (`proxy.result`): `onResult`
+    // `opening` is the result a query holds when it opens (`proxy.result`): `onResult`
     // only reports later changes, so this is the one chance to see what was written meanwhile.
-    const handleResult = async (result: any, opening = false) => {
+    const handleResult = async (path: QueryPath, result: any, opening = false) => {
       this.logger.info(
         `[waker] ${sub.id}: ${opening ? "opening result" : "onResult fired"} — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
       );
@@ -352,29 +535,55 @@ export class WakerSubscriptionManager {
       // A model subscription delivers `{ instances }`, SPARQL an array of
       // rows. Anything else (e.g. `false` on a disconnect/reconnect) is
       // ignored.
-      const rows: unknown = sub.className ? result?.instances : result;
+      const rows: unknown = path.className ? result?.instances : result;
       if (!Array.isArray(rows)) {
         this.logger.warn(
-          `[waker] ${sub.id}: ignoring result without ${sub.className ? "instances" : "rows"}: ${JSON.stringify(result)}`,
+          `[waker] ${sub.id}: ignoring result without ${path.className ? "instances" : "rows"}: ${JSON.stringify(result)}`,
         );
         return;
       }
 
       if (sub.type === "mention") {
-        // For mention subscriptions: track seen record ids.
+        // For mention subscriptions: track seen record ids, across both
+        // queries, so a record both find wakes once.
         // Only wake for records we haven't seen before.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
-        // The first row per record: the mention query is newest first.
-        const provenance = new Map<string, Pick<MentionMessage, "author" | "timestamp" | "verified">>();
+        // Each record's provenance until its wake is delivered. The first row per record wins
+        // (each query is newest first), except that a mention link's beats a text match's.
+        const provenance = this.provenances.get(sub.id) ?? new Map<string, Provenance>();
+        this.provenances.set(sub.id, provenance);
+        const byText = path.terms !== undefined;
 
+        const terms = path.terms ?? [];
         for (const item of rows as any[]) {
           // A SPARQL row names the record as `source`, a model row as `id`.
-          const address = sub.className ? item?.id : item?.source;
-          if (typeof address !== "string" || !address || currentSeen.has(address)) continue;
+          const address = path.className ? item?.id : item?.source;
+          if (typeof address !== "string" || !address) continue;
+          if (currentSeen.has(address)) {
+            // Found by the text query first, its wake still pending: say it is a mention link.
+            if (!byText && provenance.get(address)?.byText) {
+              const link = provenanceOf(item, false);
+              provenance.set(address, link);
+              const pending = this.undelivered.get(sub.id);
+              const read = pending?.get(address);
+              if (read) {
+                pending!.set(address, { address, parents: read.parents, ancestors: read.ancestors, ...link });
+              }
+            }
+            continue;
+          }
+          if (terms.length) {
+            // The mention query matched a substring; wake only on a whole word.
+            const text = Array.isArray(item.text) ? item.text.join(" ") : item.text;
+            if (typeof text !== "string" || !holdsAWholeWordTerm(text, terms)) {
+              this.logger.debug(`[waker] ${sub.id}: ${address} holds no term as a whole word, skipping`);
+              continue;
+            }
+          }
           currentSeen.add(address);
           newMessages.push(address);
-          provenance.set(address, provenanceOf(item));
+          provenance.set(address, provenanceOf(item, byText));
         }
 
         if (newMessages.length === 0) {
@@ -388,7 +597,10 @@ export class WakerSubscriptionManager {
           // A new subscription: what it opens on is history, readable on demand, not news.
           this.seenMessages.set(sub.id, currentSeen);
           const done = this.delivered.get(sub.id) ?? new Set<string>();
-          for (const address of newMessages) done.add(address);
+          for (const address of newMessages) {
+            done.add(address);
+            provenance.delete(address);
+          }
           this.delivered.set(sub.id, done);
           this.logger.info(
             `[waker] ${sub.id}: ${newMessages.length} existing mention(s) taken as history, not woken`,
@@ -410,6 +622,7 @@ export class WakerSubscriptionManager {
             `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}` +
               (ancestors.length ? `; ancestors: ${ancestors.join(", ")}` : ""),
           );
+          // Read now: the link query may have found it while the parents resolved.
           mentions.push({ address: msgAddr, parents, ancestors, ...provenance.get(msgAddr)! });
         }
 
@@ -440,19 +653,20 @@ export class WakerSubscriptionManager {
         );
       }
     };
-    proxy.onResult((result: any) => handleResult(result));
+    proxies.forEach((proxy, i) => proxy.onResult((result: any) => handleResult(paths[i], result)));
 
     if (this.isStale(sub.id, token)) {
-      try { proxy.dispose(); } catch {}
+      disposeProxies();
       return;
     }
-    this.proxies.set(sub.id, proxy);
+    this.proxies.set(sub.id, proxies);
     this.activeSubscriptions.set(sub.id, sub);
     // After a restart this wakes on mentions written while the waker was down; on a new
     // subscription it records the existing ones as history.
-    if (proxy.result !== undefined) {
+    for (const [i, proxy] of proxies.entries()) {
+      if (proxy.result === undefined) continue;
       try {
-        await handleResult(proxy.result, true);
+        await handleResult(paths[i], proxy.result, true);
       } catch (e: any) {
         this.logger.warn(`[waker] ${sub.id}: reading the opening result failed: ${e?.message ?? e}`);
       }
@@ -518,15 +732,14 @@ export class WakerSubscriptionManager {
   dispose(id: string, persist = true): void {
     // Invalidate any subscribe() for this id that is still awaiting.
     this.generations.set(id, (this.generations.get(id) ?? 0) + 1);
-    const proxy = this.proxies.get(id);
-    if (proxy) {
+    for (const proxy of this.proxies.get(id) ?? []) {
       try {
         proxy.dispose();
       } catch {
         /* ignore */
       }
-      this.proxies.delete(id);
     }
+    this.proxies.delete(id);
     const timer = this.debounceTimers.get(id);
     if (timer) {
       clearTimeout(timer);
@@ -537,6 +750,7 @@ export class WakerSubscriptionManager {
     this.seenMessages.delete(id);
     this.delivered.delete(id);
     this.undelivered.delete(id);
+    this.provenances.delete(id);
     this.wakeFailures.delete(id);
     if (persist) this.persist();
   }
@@ -584,8 +798,10 @@ export class WakerSubscriptionManager {
     }
     this.wakeFailures.delete(sub.id);
     const done = this.delivered.get(sub.id) ?? new Set<string>();
+    const provenance = this.provenances.get(sub.id);
     for (const mention of mentions) {
       pending.delete(mention.address);
+      provenance?.delete(mention.address);
       done.add(mention.address);
     }
     this.delivered.set(sub.id, done);

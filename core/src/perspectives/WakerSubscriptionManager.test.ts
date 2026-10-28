@@ -1,4 +1,4 @@
-import { WakerSubscriptionManager, hintFor } from './WakerSubscriptionManager';
+import { MENTION_TEXT_LIMIT, WakerSubscriptionManager, hintFor, holdsAWholeWordTerm } from './WakerSubscriptionManager';
 
 /**
  * Regression guard for the fork that used to exist between this file and
@@ -577,5 +577,271 @@ describe('WakerSubscriptionManager', () => {
       expect(hint).toContain('operator');
     }
     expect(hintFor('connection refused')).toBe('');
+  });
+
+  /**
+   * A mention subscription as `get_mention_waker_config` returns it (#1557, scope of 2026-10-28):
+   * the `we://mention` link query and the TextContent text query with its terms, opened together.
+   */
+  const bothSub = {
+    ...sub,
+    id: 'mention-both',
+    className: 'ad4m://TextContent',
+    query: '{"where":{"OR":[]},"properties":["text"]}',
+    terms: ['Data', 'did:key:zBot'],
+    linkQuery: sub.query,
+  };
+
+  /** `bothSub` opened, with a hand for each query's results and the wakes they produced. */
+  async function bothHarness(options: { debounceMs?: number; initial?: { link?: any; text?: any } } = {}) {
+    const delivers: Record<string, (result: any) => Promise<void>> = {};
+    const opened: any[][] = [];
+    const ProxyClass = function (...args: any[]) {
+      opened.push(args);
+      const kind: 'link' | 'text' = args[3] ? 'text' : 'link';
+      return {
+        initialized: Promise.resolve(true),
+        subscribe: () => Promise.resolve(),
+        dispose: () => {},
+        result: options.initial?.[kind],
+        onResult: (cb: (result: any) => Promise<void>) => { delivers[kind] = cb; },
+      };
+    };
+    const wakes: any[] = [];
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: {
+        querySparql: () => Promise.resolve([]),
+        modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }),
+      },
+      logger: noopLogger(),
+      QuerySubscriptionProxy: ProxyClass,
+      debounceMs: options.debounceMs ?? 10,
+      retryPendingMs: 60_000,
+      onWake: (_sub, _result, mentions) => { wakes.push(mentions); },
+    });
+    await manager.subscribe(bothSub);
+    return {
+      manager,
+      opened,
+      wakes,
+      link: (rows: any[]) => delivers.link(rows),
+      text: (rows: any[]) => delivers.text({ instances: rows }),
+      /** Let every debounce window close, then stop. */
+      settle: async () => {
+        await new Promise((r) => setTimeout(r, (options.debounceMs ?? 10) + 60));
+        manager.disposeAll();
+      },
+    };
+  }
+
+  const linkRow = (source: string) => ({
+    source,
+    author: 'did:key:zLinker',
+    timestamp: '2026-10-28T00:10:00.000Z',
+    proofValid: 'true',
+  });
+  const textRow = (id: string, text: string) => ({
+    id,
+    text,
+    author: 'did:key:zWriter',
+    timestamp: '2026-10-28T00:09:00.000Z',
+  });
+  const linked = {
+    parents: [],
+    ancestors: [],
+    author: 'did:key:zLinker',
+    timestamp: '2026-10-28T00:10:00.000Z',
+    verified: true,
+  };
+  const byText = {
+    parents: [],
+    ancestors: [],
+    author: 'did:key:zWriter',
+    timestamp: '2026-10-28T00:09:00.000Z',
+    verified: true,
+    byText: true,
+  };
+
+  it('opens a mention subscription as the we://mention link query and the TextContent text query', async () => {
+    const h = await bothHarness();
+    h.manager.disposeAll();
+    expect(h.opened).toEqual([
+      [sub.perspective, bothSub.linkQuery, expect.anything()],
+      [sub.perspective, bothSub.query, expect.anything(), 'ad4m://TextContent'],
+    ]);
+  });
+
+  it('wakes on a mention link whatever the text says', async () => {
+    const h = await bothHarness();
+    // WE's chip label runs into the next word: "@Datai" holds no whole-word "Data".
+    await h.text([textRow('test://linked', '@Datai have taken a dump of prod')]);
+    await h.link([linkRow('test://linked')]);
+    await h.settle();
+    expect(h.wakes).toEqual([[{ address: 'test://linked', ...linked }]]);
+  });
+
+  it('wakes on plain typed text that names the agent, with no mention link, and says so', async () => {
+    const h = await bothHarness();
+    await h.text([textRow('test://typed', 'Data, can you check the logs?')]);
+    await h.settle();
+    expect(h.wakes).toEqual([[{ address: 'test://typed', ...byText }]]);
+  });
+
+  it('wakes on a Flux HTML mention, by name and by the DID in its anchor', async () => {
+    const h = await bothHarness();
+    await h.text([
+      textRow('test://flux-name', '<p>hi <a data-type="mention" href="did:key:zOther" data-label="Data">@Data</a> </p>'),
+      textRow('test://flux-did', '<p>hi <a data-type="mention" href="did:key:zBot" data-label="Bot">@Bot</a> </p>'),
+      textRow('test://flux-other', '<p>hi <a data-type="mention" href="did:key:zOther" data-label="Marvin">@Marvin</a> </p>'),
+    ]);
+    await h.settle();
+    expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://flux-name', 'test://flux-did']]);
+  });
+
+  it('does not wake on text that holds the name only inside a word', async () => {
+    const h = await bothHarness();
+    await h.text([textRow('test://meta', 'the metadata is stale'), textRow('test://db', 'a database row')]);
+    await h.settle();
+    expect(h.wakes).toEqual([]);
+  });
+
+  it("wakes once for a record both queries find, text first, with the mention link's provenance", async () => {
+    const h = await bothHarness({ debounceMs: 40 });
+    await h.text([textRow('test://both', 'Data, look')]);
+    await h.link([linkRow('test://both')]);
+    await h.settle();
+    expect(h.wakes).toEqual([[{ address: 'test://both', ...linked }]]);
+  });
+
+  it("wakes once for a record both queries find, link first, and keeps the link's provenance", async () => {
+    const h = await bothHarness({ debounceMs: 40 });
+    await h.link([linkRow('test://both')]);
+    await h.text([textRow('test://both', 'Data, look')]);
+    await h.settle();
+    expect(h.wakes).toEqual([[{ address: 'test://both', ...linked }]]);
+  });
+
+  it('does not wake again when the link query finds a record its text already woke on', async () => {
+    const h = await bothHarness();
+    await h.text([textRow('test://both', 'Data, look')]);
+    await waitUntil(() => h.wakes.length > 0, 1000);
+    await new Promise((r) => setTimeout(r, 20));
+    await h.link([linkRow('test://both')]);
+    await h.settle();
+    expect(h.wakes).toEqual([[{ address: 'test://both', ...byText }]]);
+  });
+
+  it('takes what either query opens on as history', async () => {
+    const h = await bothHarness({
+      initial: { link: [linkRow('test://old-link')], text: { instances: [textRow('test://old-text', 'hi Data')] } },
+    });
+    await h.text([textRow('test://old-link', 'hi Data'), textRow('test://old-text', 'hi Data'), textRow('test://new', 'hi Data')]);
+    await h.link([linkRow('test://old-text')]);
+    await h.settle();
+    expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://new']]);
+  });
+
+  it('does not mark substring candidates as seen before a later whole-word edit', async () => {
+    const h = await bothHarness();
+    await h.text([textRow('test://message', 'robots, metadata')]);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(h.wakes).toEqual([]);
+    await h.text([textRow('test://message', 'hi Data')]);
+    await h.settle();
+    expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://message']]);
+  });
+
+  // #1459's table (`mention_query_matches_the_name_as_a_whole_word_only` and the regex-characters
+  // case), now the waker's check: the query returns these as substring candidates
+  // (`the_mention_query_returns_substring_candidates_with_their_text` in Rust).
+  it('holds a term only as a whole word, case-insensitively and literally', () => {
+    const holds = (text: string, terms = ['Data']) => holdsAWholeWordTerm(text, terms);
+    expect(['hi Data!', 'DATA, look', '@data', 'data', "Data's turn"].filter((t) => !holds(t))).toEqual([]);
+    expect(['the metadata is stale', 'a database row', 'datas', '_data', 'dataé'].filter((t) => holds(t))).toEqual([]);
+    expect(holds('ask J.R. (bot) please', ['J.R. (bot)'])).toBe(true);
+    expect(holds('ask JxRx (bot) please', ['J.R. (bot)'])).toBe(false);
+    expect(holds('hi a"b\\c!', ['a"b\\c'])).toBe(true);
+    expect(holds('hi a"bc!', ['a"b\\c'])).toBe(false);
+    // The DID, inside a mention's HTML as apps write it.
+    expect(holds('<span data-id="did:key:zBot">@bot</span>', ['did:key:zBot'])).toBe(true);
+    expect(holds('did:key:zBotX', ['did:key:zBot'])).toBe(false);
+    expect(holds('hi Data', ['', 'Bob'])).toBe(false);
+  });
+
+  it('reads HTML as its visible text, and a mention by the DID in its target attribute', () => {
+    const bot = ['Data', 'did:key:zBot'];
+    const holds = (text: string) => holdsAWholeWordTerm(text, bot);
+    // Markup is not words: attribute names and values never wake "Data".
+    expect(holds('<div data-x="1">hi</div>')).toBe(false);
+    expect(holds('<p class="data">see the <a href="https://x.dev/data">notes</a></p>')).toBe(false);
+    // Another user's mention, in each app's markup.
+    expect(holds('<p>hi <a data-type="mention" href="did:key:zOther" data-label="Marvin">@Marvin</a> </p>')).toBe(false);
+    expect(holds('<span data-id="did:key:zOther">@Marvin</span> can you look?')).toBe(false);
+    expect(holds('<span class="we-mention" data-did="did:key:zOther">@Marvin</span> can you look?')).toBe(false);
+    // Visible words still count, inside and between elements.
+    expect(holds('<p>hey Data</p>')).toBe(true);
+    expect(holds('<p>hi</p><p>Data, look</p>')).toBe(true);
+    expect(holds('<p>hey <strong>@Data</strong>&nbsp;&amp; Bob</p>')).toBe(true);
+    expect(holds('meta<b>data</b>')).toBe(false);
+    // Flux's mention (tiptap `mention` node), by name and by DID alone.
+    expect(holds('<p>hi <a data-type="mention" href="did:key:zBot" data-label="Data">@Data</a> </p>')).toBe(true);
+    expect(holds('<p>hi <a data-type="mention" href="did:key:zBot" data-label="Bot">@Bot</a> </p>')).toBe(true);
+    expect(holds('<span data-id="did:key:zBot">@bot</span>')).toBe(true);
+    expect(holds('<a href="did:key:zBotExtra">@Other</a>')).toBe(false);
+    expect(holds('<a href="did:key:zbot">@Other</a>')).toBe(false);
+    expect(holds('<a href="Data">@Other</a>')).toBe(false);
+    expect(holds("<a title=' href=\"did:key:zBot\"'>@Other</a>")).toBe(false);
+    expect(holds('<a href=did:key:zBot>@Other</a>')).toBe(true);
+    // We stores a block as plain `text` with the DID in `marks`, so the name is what is read;
+    // its editor's chip carries the DID in `data-did`.
+    expect(holds('hey @Data can you look?')).toBe(true);
+    expect(holds('<span class="we-mention" data-did="did:key:zBot">@Bot</span> can you look?')).toBe(true);
+    // Plain text with a bare "<" is not markup.
+    expect(holds('a < b and Data > c')).toBe(true);
+    // Nor is "<" before a known element name without a valid attribute list, or before an unknown name.
+    expect(holds('if a <b then ask Data, else c -> d')).toBe(true);
+    expect(holds('<hey Data> can you look')).toBe(true);
+    // A real tag glued to a word is still markup, and inline tags glue as a reader sees them:
+    // "a<b>Data</b>" reads "aData", like "meta<b>data</b>" above.
+    expect(holds('a<b>Data</b>')).toBe(false);
+    expect(holds('a <b class=x>Data</b>!')).toBe(true);
+    // A quoted attribute value may hold ">": the tag ends at the real ">".
+    expect(holds('<span title="a > b" data-x="Data">hi</span>')).toBe(false);
+    expect(holds('<a title="x>y" href="did:key:zBot">@Bot</a>')).toBe(true);
+    // Script and style contents are not visible text; comments are not either.
+    expect(holds('<style>.Data { color: red }</style><p>hi</p>')).toBe(false);
+    expect(holds('<script>let Data = 1</script>hi')).toBe(false);
+    expect(holds('hi <!-- Data --> there')).toBe(false);
+  });
+
+  it('reads a bounded prefix, so a long run of unclosed openers cannot stall the waker', () => {
+    const bot = ['Data', 'did:key:zBot'];
+    // Unbounded, each of these took seconds: every unclosed opener scans to the end.
+    for (const opener of ['<script>', '<style>', '<!--']) {
+      const started = Date.now();
+      expect(holdsAWholeWordTerm('the metadata ' + opener.repeat(125_000), bot)).toBe(false);
+      expect(holdsAWholeWordTerm('hey Data ' + opener.repeat(125_000), bot)).toBe(true);
+      expect(Date.now() - started).toBeLessThan(1000);
+    }
+    // Within the limit a long message still wakes, by name and by DID target.
+    const filler = 'lorem ipsum '.repeat(1000);
+    expect(holdsAWholeWordTerm(filler + 'ask Data', bot)).toBe(true);
+    expect(holdsAWholeWordTerm(`${filler}<a href="did:key:zBot">@Bot</a>`, bot)).toBe(true);
+    // Past it, it does not.
+    expect(holdsAWholeWordTerm('x'.repeat(MENTION_TEXT_LIMIT) + ' Data', bot)).toBe(false);
+  });
+
+  it('refuses a mention subscription without its terms', async () => {
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: function () { throw new Error('must not open'); },
+      onWake: () => {},
+    });
+    const { terms: _terms, ...withoutTerms } = bothSub;
+    await expect(manager.subscribe(withoutTerms)).rejects.toThrow(/needs its terms/);
+    await expect(manager.subscribe({ ...bothSub, terms: [] })).rejects.toThrow(/needs its terms/);
+    expect(manager.getActive()).toEqual([]);
+    expect(manager.getPending()).toEqual([]);
   });
 });
