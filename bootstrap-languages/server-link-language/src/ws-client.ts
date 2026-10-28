@@ -26,6 +26,8 @@ export interface WsClientHandlers {
     onPeerJoined(msg: Extract<ServerWsMessage, { type: "peer-joined" }>): void;
     onPeerLeft(msg: Extract<ServerWsMessage, { type: "peer-left" }>): void;
     onStatusChanged?(msg: Extract<ServerWsMessage, { type: "status-changed" }>): void;
+    /** A member sealed room key versions to this agent. */
+    onKeysGranted(msg: Extract<ServerWsMessage, { type: "keys-granted" }>): void;
     /** Called on every successful (re)connect — the natural point to kick
      * off an HTTP catch-up sync in case anything was missed while offline. */
     onOpen?(): void;
@@ -219,6 +221,9 @@ export class WsClient {
                 break;
             case "status-changed":
                 this.opts.handlers.onStatusChanged?.(msg);
+                break;
+            case "keys-granted":
+                this.opts.handlers.onKeysGranted(msg);
                 break;
             default:
                 console.warn(
