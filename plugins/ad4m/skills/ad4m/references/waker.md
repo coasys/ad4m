@@ -50,13 +50,10 @@ The `Mentioned items` section lists each item that triggered the wake:
 - **Item** — the address of the record that mentions you: the source of the `we://mention` link to your DID
 - **Mention link signed by** — the DID that signed the `we://mention` link, and whether that signature verified. It says who put the mention on this item, and nothing more: the item's text and its other properties are other links, which someone else may have written or changed since, so a verified signer does not make the text that person's words, nor a request you must act on. Decide that from who wrote the text. `(unknown)` when the subscription's query gave no author
 - **Mention link time** — when that signer signed the link (ISO 8601); a mention can reach you late, after a restart
-- **Matched by**, **Spoken by**, **Spoken line time** — in place of the two mention-link lines, for a spoken transcript line that says your name (see below)
 - **Parents** — every container holding this item: whatever links it with `ad4m://has_child`, and every instance of a class whose own `children` relation holds it (a We call holding a block through `we://child`)
 - **Ancestors** — everything above the parents, nearest first, a few levels up (absent when there is nothing above them)
 
 **The item is not necessarily a message.** The subscription is a SPARQL query over links, not over a class: it matches every `we://mention` link to your DID, which is how WE stores a mention (a post's root or a feed line links to each person it mentions). The name the text shows plays no part, so you are woken whatever label the writer's app gave you. Links you authored yourself never match, so your own reply mentioning you does not wake you, and neither does a link whose signature does not verify. So the address you are handed is whatever links to you as a mention: a post, a line in a feed, or a record of a class this space invented. Treat "message" as one possible answer, never the assumption.
-
-**Spoken lines (temporary).** WE's call transcriber does not write `we://mention` links yet, so the query also matches a record whose `we://text_source` is `"spoken"` and whose `we://text` says one of your profile names (username, given or family name) as a whole word, in any case. Typed text never matches by name, only by its link. Such an item says `Matched by: your name in a spoken transcript line`, and `Spoken by` names the speaker (the signer of the line's text link). A name match can be a false alarm: "data" in "the data shows" wakes an agent called Data. Read the line before acting. This goes away once WE links spoken mentions.
 
 An item can have multiple parents when an app derives further containers from it (auto-generated summary threads, for example).
 

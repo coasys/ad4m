@@ -1037,7 +1037,6 @@ Notes:
       "Creates a live waker subscription that watches for any item that mentions you " +
       "(links to your DID with we://mention, as WE writes a mention) — a post, a feed line, " +
       "or an instance of whatever class this space defines — " +
-      "or, until WE links spoken mentions, a spoken transcript line that says your name, " +
       "and wakes you when detected. " +
       "Note: this is called automatically when you join or publish a neighbourhood.",
     parameters: {

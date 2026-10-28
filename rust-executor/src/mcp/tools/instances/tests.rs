@@ -2681,16 +2681,6 @@ async fn mention_query_rows(
     did: &str,
     links: Vec<crate::types::LinkExpression>,
 ) -> Vec<serde_json::Value> {
-    named_mention_query_rows(did, &[], links).await
-}
-
-/// [`mention_query_rows`] for an agent whose profile holds `names`: the query
-/// also finds spoken lines that say one of them.
-async fn named_mention_query_rows(
-    did: &str,
-    names: &[&str],
-    links: Vec<crate::types::LinkExpression>,
-) -> Vec<serde_json::Value> {
     use crate::types::PerspectiveDiff;
     let (_handler, uuid, _guard) = setup_with(&[], false).await;
     let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
@@ -2698,8 +2688,7 @@ async fn named_mention_query_rows(
         .diff_from_link_language(PerspectiveDiff::from_additions(links))
         .await
         .expect("diff_from_link_language");
-    let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-    let query = crate::mcp::tools::subscriptions::build_mention_query(did, &names);
+    let query = crate::mcp::tools::subscriptions::build_mention_query(did);
     let found = parse(&perspective.sparql_query(query).unwrap());
     found
         .as_array()
@@ -2862,114 +2851,6 @@ async fn a_we_at_mention_whose_label_runs_into_the_next_word_is_a_mention() {
     assert_eq!(rows, vec![block]);
 }
 
-/// A spoken WE transcript line: `we://text_source "spoken"` and its words in
-/// `we://text`, written by `speaker` at `minutes`.
-fn spoken_line(
-    speaker: &crate::agent::signatures::TestSigner,
-    line: &str,
-    source: &str,
-    text: &str,
-    minutes: i64,
-) -> Vec<crate::types::LinkExpression> {
-    vec![
-        signed_link(
-            speaker,
-            line,
-            "we://text_source",
-            &format!("literal:string:{source}"),
-            minutes,
-        ),
-        signed_link(
-            speaker,
-            line,
-            "we://text",
-            &crate::mcp::tools::Ad4mMcpHandler::encode_literal(text),
-            minutes,
-        ),
-    ]
-}
-
-/// Until WE's transcriber writes `we://mention` links (#1557, temporary), a
-/// spoken line that says one of the agent's names as a whole word, in any
-/// case, is a mention. Not a typed, corrected or unmarked block that says it,
-/// not a word that only contains it, not a line the agent spoke itself, and
-/// not a line whose signature does not verify. A regex character in a name
-/// matches only itself.
-#[tokio::test(flavor = "multi_thread")]
-async fn spoken_lines_that_say_the_agents_name_are_mentions() {
-    use crate::agent::signatures::TestSigner;
-    let me = TestSigner::generate();
-    let other = TestSigner::generate();
-    let someone_else = TestSigner::generate();
-    let mut forged = spoken_line(&other, "ad4m://forged", "spoken", "Data, listen", 9);
-    for link in &mut forged {
-        link.author = someone_else.did.clone();
-    }
-    let links = [
-        spoken_line(
-            &other,
-            "ad4m://hey",
-            "spoken",
-            "Hey, data, can you check?",
-            1,
-        ),
-        spoken_line(&other, "ad4m://thanks", "spoken", "thanks Data", 2),
-        spoken_line(
-            &other,
-            "ad4m://metadata",
-            "spoken",
-            "the metadata is off",
-            3,
-        ),
-        spoken_line(&other, "ad4m://typed", "typed", "Data, look at this", 4),
-        spoken_line(&other, "ad4m://corrected", "corrected", "Data, please", 5),
-        spoken_line(&other, "ad4m://unmarked", "", "Data, please", 6),
-        spoken_line(&me, "ad4m://mine", "spoken", "I am Data", 7),
-        spoken_line(&other, "ad4m://not-a-dot", "spoken", "ask Drx Soong", 8),
-        forged,
-    ]
-    .concat();
-    let rows = named_mention_query_rows(&me.did, &["Data", "Dr. Soong"], links).await;
-    let sources: Vec<&str> = rows.iter().filter_map(|r| r["source"].as_str()).collect();
-    assert_eq!(sources, vec!["ad4m://thanks", "ad4m://hey"], "{rows:?}");
-    let row = &rows[0];
-    assert_eq!(row["via"], "spoken-name", "{row}");
-    assert_eq!(row["author"], other.did.as_str(), "the speaker: {row}");
-    assert_eq!(row["timestamp"], "2026-10-01T12:02:00.000Z", "{row}");
-    assert_eq!(row["proofValid"], "true", "{row}");
-}
-
-/// The spoken-name fallback leaves typed text to its `we://mention` link: the
-/// "@Datai" message still wakes through its link, with no `via`, and a typed
-/// line that only says the name does not.
-#[tokio::test(flavor = "multi_thread")]
-async fn spoken_names_leave_typed_text_to_its_mention_link() {
-    use crate::agent::signatures::TestSigner;
-    use crate::mcp::tools::subscriptions::MENTION_PREDICATE;
-    let me = TestSigner::generate();
-    let other = TestSigner::generate();
-    let block = "ad4m://obj/qxxtzxsmhyskwmatpzklxjmt";
-    let mut links = spoken_line(
-        &other,
-        block,
-        "typed",
-        "@Datai have taken a dump of prod successfully",
-        0,
-    );
-    links.push(signed_link(&other, block, MENTION_PREDICATE, &me.did, 1));
-    links.extend(spoken_line(
-        &other,
-        "ad4m://typed",
-        "typed",
-        "Data, look at this",
-        2,
-    ));
-    let rows = named_mention_query_rows(&me.did, &["Data"], links).await;
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0]["source"], block, "{rows:?}");
-    assert!(rows[0].get("via").is_none(), "{rows:?}");
-}
-
 /// Each row carries the mention link's provenance (#1563): the DID that
 /// signed it, its timestamp, and the proof verdict, so a woken agent knows
 /// who mentioned it and when without a second query. Taken from the mention
@@ -3111,7 +2992,7 @@ async fn peer_links_cannot_write_or_erase_a_mentions_provenance() {
     let only_the_writers_mention = |stage: &str| {
         let rows = parse(
             &perspective
-                .sparql_query(build_mention_query(&me.did, &[]))
+                .sparql_query(build_mention_query(&me.did))
                 .unwrap(),
         );
         assert_eq!(

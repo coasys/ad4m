@@ -64,25 +64,15 @@ export interface MentionMessage {
    * a row without the verdict is `false`.
    */
   verified: boolean;
-  /**
-   * TEMPORARY, until WE's transcriber writes `we://mention` links: `true` when the record is a
-   * spoken transcript line that says the agent's name (the row's `via` is `"spoken-name"`), not a
-   * mention link. `author`, `timestamp` and `verified` are then the line's text link's: the
-   * speaker's. Absent for a mention link.
-   */
-  spokenName?: true;
 }
 
-type Provenance = Pick<MentionMessage, "author" | "timestamp" | "verified" | "spokenName">;
-
 /** The provenance of a mention row's link, as {@link MentionMessage} carries it. */
-function provenanceOf(row: any): Provenance {
-  const provenance: Provenance = {
+function provenanceOf(row: any): Pick<MentionMessage, "author" | "timestamp" | "verified"> {
+  const provenance: Pick<MentionMessage, "author" | "timestamp" | "verified"> = {
     verified: row?.proofValid === "true" || row?.proofValid === true,
   };
   if (typeof row?.author === "string") provenance.author = row.author;
   if (typeof row?.timestamp === "string") provenance.timestamp = row.timestamp;
-  if (row?.via === "spoken-name") provenance.spokenName = true;
   return provenance;
 }
 
@@ -376,7 +366,7 @@ export class WakerSubscriptionManager {
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
         // The first row per record: the mention query is newest first.
-        const provenance = new Map<string, Provenance>();
+        const provenance = new Map<string, Pick<MentionMessage, "author" | "timestamp" | "verified">>();
 
         for (const item of rows as any[]) {
           // A SPARQL row names the record as `source`, a model row as `id`.

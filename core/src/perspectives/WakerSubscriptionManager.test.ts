@@ -293,43 +293,6 @@ describe('WakerSubscriptionManager', () => {
   });
 
   /**
-   * TEMPORARY spoken-name fallback (#1557): a row the executor found as a spoken line that says
-   * the agent's name carries `via: "spoken-name"`, and its wake says so; a mention link's row has
-   * no `via`, and its wake has no `spokenName`.
-   */
-  it('marks a spoken-name row\'s mention as spokenName, and only that one', async () => {
-    const { wakes } = await wakeWith(() => [], 0, 'test://line', [
-      [
-        { source: 'test://line', author: 'did:key:zSpeaker', timestamp: '2026-10-27T00:41:23.437Z', proofValid: 'true', via: 'spoken-name' },
-        { source: 'test://post', author: 'did:key:zWriter', timestamp: '2026-10-27T00:41:22.242Z', proofValid: 'true' },
-        { source: 'test://other', proofValid: 'true', via: 'something-else' },
-      ],
-    ]);
-    expect(wakes).toEqual([
-      [
-        {
-          address: 'test://line',
-          parents: [],
-          ancestors: [],
-          author: 'did:key:zSpeaker',
-          timestamp: '2026-10-27T00:41:23.437Z',
-          verified: true,
-          spokenName: true,
-        },
-        {
-          address: 'test://post',
-          parents: [],
-          ancestors: [],
-          author: 'did:key:zWriter',
-          timestamp: '2026-10-27T00:41:22.242Z',
-          verified: true,
-        },
-        { address: 'test://other', parents: [], ancestors: [], verified: true },
-      ],
-    ]);
-  });
-
-  /**
    * Containment as a map of child → holders, answered as the executor's `Container` answers: a
    * step in returns each id's holders, a transitive walk in returns everything above the ids,
    * breadth first, each once, never an anchor, up to `maxDepth`.

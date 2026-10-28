@@ -2851,11 +2851,8 @@ mod tests {
     /// The waker's mention query over `svc`.
     fn mention_rows(svc: &SparqlStore, me: &str) -> Value {
         serde_json::from_str(
-            &svc.query(&crate::mcp::tools::subscriptions::build_mention_query(
-                me,
-                &[],
-            ))
-            .unwrap(),
+            &svc.query(&crate::mcp::tools::subscriptions::build_mention_query(me))
+                .unwrap(),
         )
         .unwrap()
     }

@@ -8674,27 +8674,6 @@ mod tests {
         );
     }
 
-    /// TEMPORARY spoken-name fallback (#1557): a live mention subscription
-    /// re-runs only when a write touches a predicate of its query, so the
-    /// spoken branch's `we://text_source` and `we://text` must be among them,
-    /// or a spoken line arriving after the subscription opened never wakes.
-    /// (An empty set would re-run it on every write; the query has none.)
-    #[test]
-    fn spoken_names_mention_subscription_re_runs_on_spoken_lines() {
-        let query = crate::mcp::tools::subscriptions::build_mention_query(
-            "did:key:zAgent",
-            &["Data".to_string()],
-        );
-        let predicates = extract_predicates_from_sparql(&query);
-        assert!(!predicates.is_empty(), "{query}");
-        for predicate in ["we://mention", "we://text_source", "we://text"] {
-            assert!(
-                predicates.contains(predicate),
-                "{predicate} missing from {predicates:?}"
-            );
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Shape cache: lazy load from SHACL, invalidation on re-write,
     // and explicit error for unknown classes.

@@ -1625,33 +1625,6 @@ describe("buildWakeMessage", () => {
     expect(msg.match(/Mention link time:/g)).toHaveLength(1);
   });
 
-  /**
-   * TEMPORARY spoken-name fallback (#1557): a spoken line that says the agent's name has no
-   * mention link, so its wake says it was a name match in speech and names the speaker, not a
-   * mention-link signer.
-   */
-  it("says a spoken-name mention was a name heard in a transcript line, by its speaker", () => {
-    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      {
-        address: "line-1",
-        parents: ["call-1"],
-        ancestors: [],
-        author: "did:key:zNico",
-        timestamp: "2026-10-27T00:41:23.437Z",
-        verified: true,
-        spokenName: true,
-      },
-      { address: "msg-2", parents: ["channel-abc"], ancestors: [], author: "did:key:zJosh", verified: true },
-    ]);
-    expect(msg).toContain(
-      "  Item: line-1\n  Matched by: your name in a spoken transcript line (no we://mention link; a name match can be a false alarm)\n" +
-        "  Spoken by: did:key:zNico (signature verified)\n  Spoken line time: 2026-10-27T00:41:23.437Z\n  Parents: call-1",
-    );
-    expect(msg).toContain("  Item: msg-2\n  Mention link signed by: did:key:zJosh (signature verified)");
-    expect(msg.match(/Mention link signed by:/g)).toHaveLength(1);
-    expect(msg.match(/Matched by:/g)).toHaveLength(1);
-  });
-
   it("shows (unknown) parents when empty", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
       { address: "msg-1", parents: [], ancestors: [], verified: false },
