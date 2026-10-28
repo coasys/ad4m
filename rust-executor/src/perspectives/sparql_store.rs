@@ -2848,13 +2848,22 @@ mod tests {
         (genuine, claimed, g, c)
     }
 
-    /// The waker's mention query over `svc`.
+    /// Every `we://mention` link to `me` that another agent wrote and whose
+    /// signature verified, with the provenance its reifier holds: the facts
+    /// a model query's `__links` reads for a mention relation.
     fn mention_rows(svc: &SparqlStore, me: &str) -> Value {
-        serde_json::from_str(
-            &svc.query(&crate::mcp::tools::subscriptions::build_mention_query(me))
-                .unwrap(),
-        )
-        .unwrap()
+        let query = format!(
+            "SELECT ?source ?author ?timestamp ?proofValid WHERE {{ \
+             ?source <we://mention> ?mentioned . \
+             FILTER(STR(?mentioned) = \"{me}\") \
+             ?reifier <{RDF_REIFIES}> <<( ?source <we://mention> ?mentioned )>> . \
+             ?reifier <{ONT_PREFIX}author> ?author . \
+             ?reifier <{ONT_PREFIX}timestamp> ?timestamp . \
+             ?reifier <{ONT_PREFIX}proofValid> ?proofValid . \
+             FILTER(STR(?proofValid) = \"true\" && STR(?author) != \"{me}\") \
+             }} ORDER BY DESC(?timestamp)"
+        );
+        serde_json::from_str(&svc.query(&query).unwrap()).unwrap()
     }
 
     fn only_the_writers_mention(writer: &TestSigner) -> Value {

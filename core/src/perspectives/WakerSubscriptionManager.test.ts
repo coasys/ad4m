@@ -1,4 +1,28 @@
-import { WakerSubscriptionManager, hintFor } from './WakerSubscriptionManager';
+import { WakerSubscriptionManager, hintFor, holdsAWholeWordTerm, mentionOf } from './WakerSubscriptionManager';
+
+/** The agent the mention subscriptions below are for, and another one. */
+const ME = 'did:key:zAgent';
+const OTHER = 'did:key:zOther';
+
+/**
+ * A row of the executor's mention query (a model query over TextContent): its `text`, and its
+ * mention and text links with their provenance under `__links`, as `links: ["mentions", "text"]`
+ * returns them.
+ */
+function row(id: string, text: string, links: { mentions?: any[]; text?: any[] } = {}) {
+  return { id, text, __links: { mentions: links.mentions ?? [], text: links.text ?? [] } };
+}
+
+/** A link as `__links` carries it. */
+function link(target: string, author: string, timestamp: string, valid = true) {
+  return { author, timestamp, data: { target }, proof: { key: '', signature: '', valid, invalid: !valid } };
+}
+
+/** A record found through its text alone, which names the agent as a whole word. */
+const named = (id: string) => row(id, 'hi Data!');
+
+/** A model subscription's result. */
+const result = (...rows: any[]) => ({ instances: rows, totalCount: rows.length });
 
 /**
  * Regression guard for the fork that used to exist between this file and
@@ -25,8 +49,11 @@ describe('WakerSubscriptionManager', () => {
     type: 'mention' as const,
     perspective: 'fake-uuid',
     channel: '',
-    // What `get_mention_waker_config` returns: SPARQL over `we://mention` links to the agent.
-    query: 'SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }',
+    // What `get_mention_waker_config` returns: a model query over TextContent, its terms and DID.
+    className: 'ad4m://TextContent',
+    query: JSON.stringify({ where: { OR: [{ mentions: { eq: ME, author: { not: ME } } }] }, links: ['mentions', 'text'] }),
+    terms: ['Data', ME],
+    did: ME,
   };
 
   /** A QuerySubscriptionProxy stand-in whose registration the executor rejects. */
@@ -194,7 +221,7 @@ describe('WakerSubscriptionManager', () => {
     answer: (scope: any) => unknown,
     ancestorDepth?: number,
     address = 'test://message',
-    deliveries: any[] = [[{ source: address }]],
+    deliveries: any[] = [result(named(address))],
   ) {
     let deliver: ((result: any) => Promise<void>) | undefined;
     const opened: any[][] = [];
@@ -241,39 +268,95 @@ describe('WakerSubscriptionManager', () => {
     return { wakes, queries, warnings, opened };
   }
 
-  it('opens a mention subscription as a SPARQL query', async () => {
+  it('opens a mention subscription as a model query over TextContent', async () => {
     const { opened } = await wakeWith(() => []);
-    expect(opened).toEqual([[sub.perspective, sub.query, expect.anything()]]);
+    expect(opened).toEqual([[sub.perspective, sub.query, expect.anything(), 'ad4m://TextContent']]);
   });
 
-  it('wakes on each SPARQL row by its source, whatever else the row holds, and ignores a result that is not rows', async () => {
+  it('refuses a mention subscription without its TextContent class, terms or DID', async () => {
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: function () { throw new Error('never opened'); },
+      onWake: () => {},
+    });
+    // What an older executor saved: SPARQL over `we://mention` links, or a TextContent query
+    // over the text alone.
+    const sparql = { ...sub, className: undefined, terms: undefined, did: undefined, query: 'SELECT ?source WHERE { }' };
+    const textOnly = { ...sub, did: undefined };
+    const noTerms = { ...sub, terms: [] };
+    for (const old of [sparql, textOnly, noTerms]) {
+      await expect(manager.subscribe(old)).rejects.toThrow('needs its TextContent class, terms and DID');
+    }
+    expect(manager.getActive()).toEqual([]);
+    expect(manager.getPending()).toEqual([]);
+  });
+
+  it('ignores a result that is not instances, and a row without an id', async () => {
     const { wakes, queries } = await wakeWith(() => [], 0, 'test://message', [
-      { instances: [{ id: 'test://model-row' }] },
-      [{ source: 'test://message', timestamp: '2026-10-01T12:00:00.000Z' }, { timestamp: 'no source' }],
+      [{ source: 'test://sparql-row' }],
+      result(named('test://message'), { text: 'hi Data, no id' }),
     ]);
-    expect(wakes).toEqual([
-      [{ address: 'test://message', parents: [], ancestors: [], timestamp: '2026-10-01T12:00:00.000Z', verified: false }],
-    ]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], verified: false }]]);
     expect(queries).toHaveLength(1);
   });
 
   /**
-   * #1563: a mention wake says who wrote the mention link, when, and whether its proof verified,
-   * from the row the executor's mention query returns (`author`, `timestamp`, `proofValid`). The
-   * query is newest first, so of two rows for one record the first one's provenance is kept.
+   * #1557: one query, two paths. A row whose mention link names the agent, in a verified link
+   * another agent wrote, wakes as it is: WE's chip label ran into the next word ("@Datai") and
+   * the whole-word check dropped it. A row found only through its text wakes on a whole word
+   * only. A link the agent wrote, one that did not verify, or one to someone else does not
+   * count as a mention; such a row falls back to its text.
    */
-  it('carries each mention row\'s author, timestamp and proof verdict to onWake', async () => {
-    const { wakes } = await wakeWith(() => [], 0, 'test://message', [
-      [
-        { source: 'test://message', author: 'did:key:zEditor', timestamp: '2026-10-27T00:41:23.437Z', proofValid: 'true' },
-        { source: 'test://message', author: 'did:key:zWriter', timestamp: '2026-10-27T00:41:22.242Z', proofValid: 'true' },
-        { source: 'test://unsigned', author: 'did:key:zClaimed', timestamp: '2026-10-27T00:40:00.000Z', proofValid: 'false' },
-      ],
+  it('wakes through the mention link whatever the text, and through the text on a whole word only', async () => {
+    const at = '2026-10-27T00:41:23.437Z';
+    const { wakes } = await wakeWith(() => [], 0, 'unused', [
+      result(
+        row('test://chip', '@Datai have taken a dump of prod', { mentions: [link(ME, OTHER, at)] }),
+        row('test://spoken', 'Hey, data!', { text: [link('literal:string:Hey', OTHER, at)] }),
+        row('test://metadata', 'the metadata is stale'),
+        row('test://own-link', '@Datai', { mentions: [link(ME, ME, at)] }),
+        row('test://forged', '@Datai', { mentions: [link(ME, OTHER, at, false)] }),
+        row('test://someone-else', '@Bobi', { mentions: [link('did:key:zBob', OTHER, at)] }),
+        row('test://html-chip', `<p>hey <span class="we-mention" data-did="${ME}">@someone</span></p>`),
+        row('test://html-attr', '<p data-type="mention">for someone else</p>'),
+      ),
+    ]);
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0].map((m: any) => m.address)).toEqual(['test://chip', 'test://spoken', 'test://html-chip']);
+  });
+
+  /**
+   * #1563: a mention wake says who wrote the link the mention is in, when, and whether its proof
+   * verified: the mention link's (the newest of the agent's) on the relation path, the newest text
+   * link another agent wrote on the text path. A record that matches both wakes once, with the
+   * mention link's.
+   */
+  it('carries the provenance of the link the mention is in, once per record', async () => {
+    const { wakes } = await wakeWith(() => [], 0, 'unused', [
+      result(
+        row('test://both', 'hey Data', {
+          mentions: [
+            link(ME, 'did:key:zWriter', '2026-10-27T00:41:22.242Z'),
+            link(ME, 'did:key:zEditor', '2026-10-27T00:41:23.437Z'),
+            link('did:key:zBob', 'did:key:zLater', '2026-10-27T00:42:00.000Z'),
+          ],
+          text: [link('literal:string:hey', 'did:key:zWriter', '2026-10-27T00:41:22.242Z')],
+        }),
+        row('test://named', 'Data, can you look?', {
+          text: [
+            link('literal:string:old', 'did:key:zWriter', '2026-10-27T00:40:00.000Z'),
+            link('literal:string:new', 'did:key:zEditor', '2026-10-27T00:40:30.000Z'),
+            link('literal:string:mine', ME, '2026-10-27T00:40:40.000Z'),
+          ],
+        }),
+        row('test://both', 'hey Data', { mentions: [link(ME, 'did:key:zWriter', '2026-10-27T00:41:22.242Z')] }),
+      ),
     ]);
     expect(wakes).toEqual([
       [
         {
-          address: 'test://message',
+          address: 'test://both',
           parents: [],
           ancestors: [],
           author: 'did:key:zEditor',
@@ -281,15 +364,28 @@ describe('WakerSubscriptionManager', () => {
           verified: true,
         },
         {
-          address: 'test://unsigned',
+          address: 'test://named',
           parents: [],
           ancestors: [],
-          author: 'did:key:zClaimed',
-          timestamp: '2026-10-27T00:40:00.000Z',
-          verified: false,
+          author: 'did:key:zEditor',
+          timestamp: '2026-10-27T00:40:30.000Z',
+          verified: true,
         },
       ],
     ]);
+  });
+
+  it('wakes on a record once its mention link arrives, after its text alone did not', async () => {
+    const h = await mentionHarness(10);
+    await h.deliver(result(row('test://late-link', '@Datai have news')));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(h.wakes).toEqual([]);
+    await h.deliver(
+      result(row('test://late-link', '@Datai have news', { mentions: [link(ME, OTHER, '2026-10-27T00:41:23.437Z')] })),
+    );
+    await waitUntil(() => h.wakes.length > 0, 1000);
+    h.manager.disposeAll();
+    expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://late-link']]);
   });
 
   /**
@@ -326,9 +422,9 @@ describe('WakerSubscriptionManager', () => {
     expect(warnings).toEqual([]);
   });
 
-  it('deduplicates two result rows for the same source in one mention pass', async () => {
+  it('deduplicates two result rows for the same record in one mention pass', async () => {
     const { wakes, queries } = await wakeWith(() => [], undefined, 'addr://msg-1', [
-      [{ source: 'addr://msg-1' }, { source: 'addr://msg-1' }],
+      result(named('addr://msg-1'), named('addr://msg-1')),
     ]);
     expect(wakes).toEqual([[{ address: 'addr://msg-1', parents: [], ancestors: [], verified: false }]]);
     // The parent lookup runs once, not once per row.
@@ -376,7 +472,7 @@ describe('WakerSubscriptionManager', () => {
       previousSeenMessages: opening?.previousSeen,
     } as any);
     await manager.subscribe({ ...sub, id: 'mention-harness' });
-    const msg = (...ids: string[]) => ids.map((source) => ({ source }));
+    const msg = (...ids: string[]) => result(...ids.map(named));
     return { manager, deliver: (r: any) => deliver!(r), msg, wakes, persistedSeen };
   }
 
@@ -385,7 +481,7 @@ describe('WakerSubscriptionManager', () => {
    * opened after the restart already holds it, but the waker only listened for later changes.
    */
   it('wakes on a mention the restored subscription already holds when it opens', async () => {
-    const msg = (...ids: string[]) => ids.map((source) => ({ source }));
+    const msg = (...ids: string[]) => result(...ids.map(named));
     const h = await mentionHarness(10, undefined, {
       initial: msg('test://during-downtime', 'test://old'),
       previousSeen: { 'mention-harness': ['test://old'] },
@@ -397,7 +493,7 @@ describe('WakerSubscriptionManager', () => {
 
   it('takes the mentions a new subscription opens on as history, and wakes only on later ones', async () => {
     const h = await mentionHarness(10, undefined, {
-      initial: [{ source: 'test://old' }],
+      initial: result(named('test://old')),
     });
     await h.deliver(h.msg('test://new', 'test://old'));
     await waitUntil(() => h.wakes.length > 0, 1000);
@@ -577,5 +673,47 @@ describe('WakerSubscriptionManager', () => {
       expect(hint).toContain('operator');
     }
     expect(hintFor('connection refused')).toBe('');
+  });
+});
+
+/** Ported from #1459 through dev's whole-word check, which the text path keeps. */
+describe('holdsAWholeWordTerm', () => {
+  it.each([
+    ['hi Data!', true],
+    ['the metadata is stale', false],
+    ['DATA, look', true],
+    ['a database row', false],
+    ['@data', true],
+    ["Data's turn", true],
+    ['@Datai have taken a dump', false],
+    ['<p>ask <b>Data</b></p>', true],
+    ['<p data-type="mention">someone</p>', false],
+    [`<a data-type="mention" href="${ME}">@x</a>`, true],
+  ])('%s -> %s', (text, expected) => {
+    expect(holdsAWholeWordTerm(text, ['Data', ME])).toBe(expected);
+  });
+});
+
+describe('mentionOf', () => {
+  const at = '2026-10-27T00:41:23.437Z';
+  const sub = { did: ME, terms: ['Data', ME] };
+
+  it('takes a verified mention link to the agent by someone else, whatever the text', () => {
+    expect(mentionOf(row('x', 'nothing', { mentions: [link(ME, OTHER, at)] }), sub)).toEqual({
+      author: OTHER,
+      timestamp: at,
+      verified: true,
+    });
+  });
+
+  it('falls back to a whole-word text mention when the link is the agent\'s own, unverified or someone else\'s', () => {
+    for (const mention of [link(ME, ME, at), link(ME, OTHER, at, false), link('did:key:zBob', OTHER, at)]) {
+      expect(mentionOf(row('x', '@Datai', { mentions: [mention] }), sub)).toBeNull();
+      expect(mentionOf(row('x', 'hi Data', { mentions: [mention] }), sub)).toEqual({ verified: false });
+    }
+  });
+
+  it('needs the DID for the link path', () => {
+    expect(mentionOf(row('x', 'nothing', { mentions: [link(ME, OTHER, at)] }), { terms: ['Data'] })).toBeNull();
   });
 });

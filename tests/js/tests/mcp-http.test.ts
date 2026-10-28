@@ -152,6 +152,23 @@ const MESSAGE_SHACL = JSON.stringify({
     destructor_actions: []
 });
 
+// MESSAGE_SHACL with its mention links, WE's `we://mention`, as TextContent's
+// (optional) `mentions`: for the waker tests that mention through a link.
+// MESSAGE_SHACL itself has no mention relation and still conforms to
+// TextContent, through its text.
+const MENTION_MESSAGE_SHACL = (() => {
+    const shacl = JSON.parse(MESSAGE_SHACL);
+    shacl.properties.push({
+        path: "we://mention",
+        name: "mentioned",
+        node_kind: "IRI",
+        relation_kind: "hasMany",
+        collection: true,
+        alias: { TextContent: "mentions" },
+    });
+    return JSON.stringify(shacl);
+})();
+
 // WakerSubscriptionManager — the canonical implementation, exported from core.
 // plugins/ad4m/wakerSubscriptionManager.ts is a re-export of this same module.
 import { Literal, WakerSubscriptionManager } from "@coasys/ad4m";
@@ -1451,11 +1468,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     // 8. Waker Subscription Integration Tests
     //
     // Tests the full subscription pipeline:
-    //   get_mention_waker_config → SPARQL subscription → a peer's message
-    //   with a `we://mention` link to the agent → verify the subscription fires
+    //   get_mention_waker_config → a model subscription over TextContent → a
+    //   peer's message with a `we://mention` link to the agent, or naming it in
+    //   its text → verify the subscription fires
     // ========================================================================
 
-    describe("8. Waker Subscription (SPARQL Live Query)", function() {
+    describe("8. Waker Subscription (Live Query)", function() {
         // Uses WakerSubscriptionManager from @coasys/ad4m — the single
         // implementation; the OpenClaw plugin re-exports this same class.
         let wakerClient: Ad4mClient;
@@ -1528,7 +1546,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             await callMcpTool(MCP_BASE_URL, 'add_model', {
                 perspective_id: wakerPerspectiveUuid,
                 class_name: "Message",
-                shacl_json: MESSAGE_SHACL,
+                shacl_json: MENTION_MESSAGE_SHACL,
             }, mcpSessionId);
 
             // Create a channel
@@ -1541,23 +1559,28 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("Waker test channel:", wakerChannelAddr);
         });
 
-        it("should get mention waker config as SPARQL over we://mention links to the agent", async function() {
+        it("should get mention waker config as one model query over TextContent's mentions and text", async function() {
             var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
                 perspective_id: wakerPerspectiveUuid,
             }, mcpSessionId);
             console.log("Mention waker config:", JSON.stringify(config, null, 2));
 
             expect(config.did).to.equal(agentDid);
-            expect(config.predicate).to.equal("we://mention");
-            // SPARQL: no model-query class, no names or terms.
-            expect(config.class).to.be.undefined;
-            expect(config.terms).to.be.undefined;
-            expect(config.query).to.be.a('string');
-            expect(config.query).to.match(/^SELECT \?source /);
-            expect(config.query).to.include('<we://mention>');
-            expect(config.query).to.include('STR(?mentioned) = "' + agentDid + '"');
-            expect(config.query).to.include('STR(?author) != "' + agentDid + '"');
+            expect(config.class).to.equal("ad4m://TextContent");
+            expect(config.names).to.include("wakerbot");
+            expect(config.names).to.include("WakerTest");
+            expect(config.terms).to.include("wakerbot");
+            expect(config.terms[config.terms.length - 1]).to.equal(agentDid);
+            var query = JSON.parse(config.query);
+            var notMe = { not: agentDid };
+            // The mention relation first, then the text, each through a link someone else wrote.
+            expect(query.where.OR[0]).to.deep.equal({ mentions: { eq: agentDid, author: notMe } });
+            expect(query.where.OR.slice(1)).to.deep.include({ text: { contains: "wakerbot", author: notMe } });
+            expect(query.links).to.deep.equal(["mentions", "text"]);
+            expect(config.subscription.class).to.equal(config.class);
             expect(config.subscription.query).to.equal(config.query);
+            expect(config.subscription.terms).to.deep.equal(config.terms);
+            expect(config.subscription.did).to.equal(agentDid);
             console.log("Mention query:", config.query);
         });
 
@@ -1583,6 +1606,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: wakerPerspectiveUuid,
                 channel: "",
                 query: config.query,
+                className: config.class,
+                terms: config.terms,
+                did: config.did,
             });
 
             // Wait for subscription to initialize — should NOT fire onWake for empty result
@@ -1621,6 +1647,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     perspective: wakerPerspectiveUuid,
                     channel: "",
                     query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
                 }).catch(reject);
             });
 
@@ -1658,7 +1687,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             await callMcpTool(MCP_BASE_URL, 'add_model', {
                 perspective_id: freshPerspId,
                 class_name: "Message",
-                shacl_json: MESSAGE_SHACL,
+                shacl_json: MENTION_MESSAGE_SHACL,
             }, mcpSessionId);
 
             var freshChannel = "flux://no-mention-channel-" + Date.now();
@@ -1693,14 +1722,18 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: freshPerspId,
                 channel: "",
                 query: config.query,
+                className: config.class,
+                terms: config.terms,
+                did: config.did,
             });
 
             await sleep(1000);
 
-            // Text alone is not a mention, even naming the agent or its DID: only
-            // the `we://mention` link is. Nor is a mention of someone else.
-            await peerSays(freshPerspId, freshChannel, "Hey @wakerbot, " + agentDid + " — no link here.");
-            await peerSays(freshPerspId, freshChannel, "Hey @someone", [peer.did]);
+            // "wakerbots" and "WakerTesting" contain the agent's names but do not
+            // name it, and there is no mention link. Nor is a mention link to
+            // someone else a mention of the agent.
+            await peerSays(freshPerspId, freshChannel, "Just a normal message about wakerbots and WakerTesting metadata.");
+            await peerSays(freshPerspId, freshChannel, "Hey @someonei", [peer.did]);
             console.log("Non-mention message created in fresh perspective");
 
             await sleep(5000);
@@ -1728,7 +1761,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             await callMcpTool(MCP_BASE_URL, 'add_model', {
                 perspective_id: ownPerspId,
                 class_name: "Message",
-                shacl_json: MESSAGE_SHACL,
+                shacl_json: MENTION_MESSAGE_SHACL,
             }, mcpSessionId);
             var ownChannel = "flux://own-write-channel-" + Date.now();
             await callMcpTool(MCP_BASE_URL, 'channel_create', {
@@ -1755,11 +1788,14 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: ownPerspId,
                 channel: "",
                 query: config.query,
+                className: config.class,
+                terms: config.terms,
+                did: config.did,
             });
             await sleep(1000);
 
-            // A bot's reply that mentions itself (e2e 2026-10-15 woke the bot again):
-            // its own message, with its own `we://mention` link to its DID.
+            // A bot's reply that names and mentions itself (e2e 2026-10-15 woke the
+            // bot again): its own message, with its own `we://mention` link to its DID.
             var createResult = await callMcpTool(MCP_BASE_URL, 'message_create', {
                 perspective_id: ownPerspId,
                 body: "wakerbot here: on it, " + agentDid,
@@ -1767,7 +1803,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             expect(createResult.created).to.be.true;
             await wakerClient.perspective.addLink(ownPerspId, {
-                source: ownChannel,
+                source: createResult.expression_address,
                 predicate: "we://mention",
                 target: agentDid,
             } as any);
@@ -1793,7 +1829,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             await callMcpTool(MCP_BASE_URL, 'add_model', {
                 perspective_id: didPerspId,
                 class_name: "Message",
-                shacl_json: MESSAGE_SHACL,
+                shacl_json: MENTION_MESSAGE_SHACL,
             }, mcpSessionId);
 
             var didChannel = "flux://did-mention-channel-" + Date.now();
@@ -1830,6 +1866,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     perspective: didPerspId,
                     channel: "",
                     query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
                 }).catch(reject);
             });
 
@@ -1843,6 +1882,66 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("DID mention onWake fired!");
             var resultArr = Array.isArray(wake.result) ? wake.result : [wake.result];
             expect(resultArr.length).to.be.greaterThan(0);
+        });
+
+        // A record that names the agent in its text, with no mention link (a
+        // spoken line, an app that writes no link), wakes it on a whole word.
+        it("should fire onWake on a plain-text mention by name, with no mention link", async function() {
+            this.timeout(30000);
+
+            var textPerspResult = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
+                name: "Waker Text Mention Test",
+            }, mcpSessionId);
+            var textPerspId = textPerspResult.uuid;
+            // A Message with text and no mention relation: TextContent's
+            // `mentions` is optional, so it still conforms, and wakes by text.
+            await callMcpTool(MCP_BASE_URL, 'add_model', {
+                perspective_id: textPerspId,
+                class_name: "Message",
+                shacl_json: MESSAGE_SHACL,
+            }, mcpSessionId);
+            var textChannel = "flux://text-mention-channel-" + Date.now();
+
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: textPerspId,
+            }, mcpSessionId);
+
+            var manager: any;
+            var wakePromise = new Promise<any[]>(function(resolve, reject) {
+                var timeout = setTimeout(function() {
+                    reject(new Error("WakerSubscriptionManager did not fire onWake for a text mention within 15s"));
+                }, 15000);
+                manager = new WakerSubscriptionManager({
+                    perspectiveClient: wakerClient.perspective,
+                    logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                    QuerySubscriptionProxy,
+                    debounceMs: 100,
+                    onWake: function(_sub: any, _result: any, mentions?: any[]) {
+                        clearTimeout(timeout);
+                        resolve(mentions ?? []);
+                    },
+                });
+                manager.subscribe({
+                    id: "test-text-mention-" + Date.now(),
+                    type: "mention" as const,
+                    perspective: textPerspId,
+                    channel: "",
+                    query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
+                }).catch(reject);
+            });
+
+            await sleep(2000);
+            var named = await peerSays(textPerspId, textChannel, "wakerbot, can you look at this?");
+
+            var mentions = await wakePromise;
+            manager.disposeAll();
+            expect(mentions.map(function(m: any) { return m.address; })).to.deep.equal([named]);
+            // The provenance is the text link's: the peer wrote it.
+            expect(mentions[0].author).to.equal(peer.did);
+            expect(mentions[0].verified).to.equal(true);
         });
 
         // Test 11 (#1446): a mention under a message held by a We-style block.
@@ -1908,6 +2007,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     perspective: wakerPerspectiveUuid,
                     channel: "",
                     query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
                 }).then(async function() {
                     await sleep(1000);
                     // The block files the message through its own relation, then a peer writes it.

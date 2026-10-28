@@ -71,7 +71,7 @@ import ad4mPlugin, {
   parkSubscription,
   restoreSavedSubscriptions,
   retryParkedSubscriptions,
-  readsMentionText,
+  savedByAnOlderExecutor,
 } from "./index";
 import { STATIC_TOOL_DEFS } from "./staticToolDefs";
 import { WakerSubscriptionManager, hintFor } from "./wakerSubscriptionManager";
@@ -1602,11 +1602,11 @@ describe("buildWakeMessage", () => {
   });
 
   /**
-   * #1563: the wake says per item who signed its mention link and when, and says when the proof
-   * did not verify or the subscription's query gave no author. It names the mention link, since
-   * that signer need not be whoever wrote the item's text (#1564).
+   * #1563: the wake says per item who signed the link the mention is in and when, and says when
+   * the proof did not verify or no such link came with the row. That signer (of the mention link,
+   * or of the text that names the agent) need not be whoever wrote the rest of the item (#1564).
    */
-  it("gives each mentioned item's mention-link signer, timestamp and proof verdict", () => {
+  it("gives each mentioned item's mention signer, timestamp and proof verdict", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
       {
         address: "msg-1",
@@ -1619,10 +1619,10 @@ describe("buildWakeMessage", () => {
       { address: "msg-2", parents: ["channel-abc"], ancestors: [], verified: false },
     ]);
     expect(msg).toContain(
-      "  Item: msg-1\n  Mention link signed by: did:key:zJosh (signature verified)\n  Mention link time: 2026-10-27T00:41:23.437Z",
+      "  Item: msg-1\n  Mentioned by: did:key:zJosh (signature verified)\n  Mentioned at: 2026-10-27T00:41:23.437Z",
     );
-    expect(msg).toContain("  Item: msg-2\n  Mention link signed by: (unknown) (signature NOT verified)");
-    expect(msg.match(/Mention link time:/g)).toHaveLength(1);
+    expect(msg).toContain("  Item: msg-2\n  Mentioned by: (unknown) (signature NOT verified)");
+    expect(msg.match(/Mentioned at:/g)).toHaveLength(1);
   });
 
   it("shows (unknown) parents when empty", () => {
@@ -1984,8 +1984,10 @@ describe("ad4mPlugin", () => {
               {
                 type: "text",
                 text: JSON.stringify({
-                  query: "SELECT ?source ?timestamp WHERE { ... }",
-                  predicate: "we://mention",
+                  class: "ad4m://TextContent",
+                  query: JSON.stringify({ where: { OR: [] }, links: ["mentions", "text"] }),
+                  terms: ["TestAgent", "did:key:zTest"],
+                  names: ["TestAgent"],
                   did: "did:key:zTest",
                 }),
               },
@@ -2060,8 +2062,10 @@ describe("ad4mPlugin", () => {
               {
                 type: "text",
                 text: JSON.stringify({
-                  query: "SELECT ?source ?timestamp WHERE { ... }",
-                  predicate: "we://mention",
+                  class: "ad4m://TextContent",
+                  query: JSON.stringify({ where: { OR: [] }, links: ["mentions", "text"] }),
+                  terms: ["TestAgent", "did:key:zTest"],
+                  names: ["TestAgent"],
                   did: "did:key:zTest",
                 }),
               },
@@ -2199,33 +2203,38 @@ describe("ad4mPlugin", () => {
     }
   }
 
-  it("ad4m_subscribe_to_mentions opens the executor's mention query as SPARQL over the we://mention link", async () => {
-    const query = "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }";
-    const { result, opened, active } = await subscribeToMentions({
-      query,
-      predicate: "we://mention",
-      did: "did:key:zTest",
-      subscription: { id: "mention-persp-uuid-1", perspective: "persp-uuid-1", query },
-    });
-    // Three arguments: no class, so the proxy subscribes with SPARQL.
-    expect(opened.map((args) => [args[0], args[1], args.length])).toEqual([["persp-uuid-1", query, 3]]);
-    expect(active.map((sub) => [sub.id, sub.query, sub.className])).toEqual([
-      ["mention-persp-uuid-1", query, undefined],
-    ]);
-    expect(JSON.stringify(result)).toContain("we://mention links to did:key:zTest");
-  });
-
-  it("ad4m_subscribe_to_mentions refuses an executor that still reads mentions from message text", async () => {
+  it("ad4m_subscribe_to_mentions opens the executor's mention query over TextContent, with its terms and DID", async () => {
+    const query = JSON.stringify({ where: { OR: [] }, links: ["mentions", "text"] });
     const { result, opened, active } = await subscribeToMentions({
       class: "ad4m://TextContent",
-      query: JSON.stringify({ where: { OR: [{ text: { contains: "TestAgent" } }] } }),
+      query,
       terms: ["TestAgent", "did:key:zTest"],
       names: ["TestAgent"],
       did: "did:key:zTest",
+      subscription: { id: "mention-persp-uuid-1", perspective: "persp-uuid-1", query },
     });
-    expect(JSON.stringify(result)).toContain("Update the executor");
-    expect(opened).toEqual([]);
-    expect(active).toEqual([]);
+    expect(opened.map((args) => [args[0], args[1], args[3]])).toEqual([
+      ["persp-uuid-1", query, "ad4m://TextContent"],
+    ]);
+    expect(active.map((sub) => [sub.id, sub.className, sub.terms, sub.did])).toEqual([
+      ["mention-persp-uuid-1", "ad4m://TextContent", ["TestAgent", "did:key:zTest"], "did:key:zTest"],
+    ]);
+    expect(JSON.stringify(result)).toContain("mention links to did:key:zTest and for TestAgent in text");
+  });
+
+  it("ad4m_subscribe_to_mentions refuses an older executor's mention query", async () => {
+    const older = [
+      // #1557 before TextContent had `mentions`: SPARQL over we://mention links.
+      { query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }", did: "did:key:zTest" },
+      // A TextContent query without the DID a mention link is checked against.
+      { class: "ad4m://TextContent", query: "{}", terms: ["TestAgent"], names: ["TestAgent"] },
+    ];
+    for (const data of older) {
+      const { result, opened, active } = await subscribeToMentions(data);
+      expect(JSON.stringify(result)).toContain("Update the executor");
+      expect(opened).toEqual([]);
+      expect(active).toEqual([]);
+    }
   });
 
   // Test 12 (#1446): a container whose children are not Messages (a We call
@@ -3512,6 +3521,49 @@ describe("ad4mPlugin", () => {
 // WakerSubscriptionManager unit tests
 // ============================================================================
 
+/**
+ * What `get_mention_waker_config` returns for a mention subscription: a model
+ * query over TextContent, with the terms and DID the waker checks rows against.
+ */
+const MENTION_CONFIG = {
+  className: "ad4m://TextContent",
+  query: JSON.stringify({ where: { OR: [] }, links: ["mentions", "text"] }),
+  terms: ["Data", "did:key:zAgent"],
+  did: "did:key:zAgent",
+};
+
+/** The mention query's result: records whose text names the agent as a whole word. */
+const named = (...ids: string[]) => ({
+  instances: ids.map((id) => ({ id, text: "hi Data", __links: { mentions: [], text: [] } })),
+  totalCount: ids.length,
+});
+
+/**
+ * The mention query's result with msg-old, which names the agent, and msg-new, which mentions it
+ * only through its mention link: WE's chip label runs into the next word.
+ */
+const OLD_AND_LINK_ONLY = {
+  instances: [
+    { id: "msg-old", text: "hi Data", __links: { mentions: [], text: [] } },
+    {
+      id: "msg-new",
+      text: "@Datai have news",
+      __links: {
+        mentions: [
+          {
+            author: "did:key:zOther",
+            timestamp: "2026-10-27T00:41:23.437Z",
+            data: { target: MENTION_CONFIG.did },
+            proof: { valid: true },
+          },
+        ],
+        text: [],
+      },
+    },
+  ],
+  totalCount: 2,
+};
+
 describe("WakerSubscriptionManager", () => {
   /** Create a mock QuerySubscriptionProxy that lets tests control onResult delivery. */
   function makeMockProxy() {
@@ -3569,7 +3621,7 @@ describe("WakerSubscriptionManager", () => {
       type: "mention",
       perspective: "fake-uuid",
       channel: "",
-      query: "SELECT * FROM link",
+      ...MENTION_CONFIG,
     })).rejects.toThrow(/main key not found/);
 
     expect(manager.has("mention-fail")).toBe(false);
@@ -3605,7 +3657,7 @@ describe("WakerSubscriptionManager", () => {
       type: "mention" as const,
       perspective: "fake-uuid",
       channel: "",
-      query: "SELECT * FROM link",
+      ...MENTION_CONFIG,
     };
     await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting every/);
     expect(manager.getPending()).toHaveLength(1);
@@ -3639,7 +3691,7 @@ describe("WakerSubscriptionManager", () => {
       type: "mention",
       perspective: "fake-uuid",
       channel: "",
-      query: "SELECT * FROM link",
+      ...MENTION_CONFIG,
     })).rejects.toThrow();
     expect(manager.getPending()).toHaveLength(1);
 
@@ -3674,7 +3726,7 @@ describe("WakerSubscriptionManager", () => {
       type: "mention" as const,
       perspective: "fake-uuid",
       channel: "",
-      query: "SELECT * FROM link",
+      ...MENTION_CONFIG,
     };
     await expect(manager.subscribe(sub)).rejects.toThrow(
       /timed out after 50ms[\s\S]*re-attempting every/,
@@ -3712,7 +3764,7 @@ describe("WakerSubscriptionManager", () => {
       type: "mention" as const,
       perspective: "fake-uuid",
       channel: "",
-      query: "SELECT * FROM link",
+      ...MENTION_CONFIG,
     };
     await expect(manager.subscribe(sub)).rejects.toThrow(/timed out/);
     expect(manager.getPending()).toHaveLength(1);
@@ -3754,7 +3806,7 @@ describe("WakerSubscriptionManager", () => {
       type: "mention",
       perspective: "fake-uuid",
       channel: "",
-      query: "SELECT * FROM link",
+      ...MENTION_CONFIG,
     });
 
     // Deliver `false` — should be ignored
@@ -3763,7 +3815,7 @@ describe("WakerSubscriptionManager", () => {
     expect(wakeCount).toBe(0);
 
     // Deliver a real result — should fire
-    mock.deliver([{ source: 'channel-1' }]);
+    mock.deliver(named('channel-1'));
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
     // Seen messages should contain the message address
@@ -3791,16 +3843,16 @@ describe("WakerSubscriptionManager", () => {
       type: "mention",
       perspective: "fake-uuid",
       channel: "",
-      query: "SELECT * FROM link",
+      ...MENTION_CONFIG,
     });
 
     // Deliver same message that was already seen — should NOT wake
-    mock.deliver([{ source: 'channel-1' }]);
+    mock.deliver(named('channel-1'));
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(0);
 
     // Deliver a new message — should wake
-    mock.deliver([{ source: 'channel-1' }, { source: 'channel-2' }]);
+    mock.deliver(named('channel-1', 'channel-2'));
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
 
@@ -3877,11 +3929,11 @@ describe("WakerSubscriptionManager", () => {
       type: "mention",
       perspective: "fake-uuid",
       channel: "fallback-channel",
-      query: "SELECT * FROM link",
+      ...MENTION_CONFIG,
     });
 
-    // Mention rows name the mentioned record as `source`.
-    mock.deliver([{ source: 'msg-1' }, { source: 'msg-2' }]);
+    // Mention rows name the mentioned record by `id`.
+    mock.deliver(named('msg-1', 'msg-2'));
     await new Promise(r => setTimeout(r, 50));
 
     // Per message: one step in for its parents, one bounded walk for what is above them.
@@ -3922,10 +3974,10 @@ describe("WakerSubscriptionManager", () => {
       type: "mention",
       perspective: "fake-uuid",
       channel: "fallback-channel",
-      query: "SELECT * FROM link",
+      ...MENTION_CONFIG,
     });
 
-    mock.deliver([{ source: 'msg-1' }]);
+    mock.deliver(named('msg-1'));
     await new Promise(r => setTimeout(r, 50));
 
     expect(capturedMentions).toHaveLength(1);
@@ -3960,10 +4012,10 @@ describe("WakerSubscriptionManager", () => {
       type: "mention",
       perspective: "fake-uuid",
       channel: "fallback-channel",
-      query: "SELECT * FROM link",
+      ...MENTION_CONFIG,
     });
 
-    mock.deliver([{ source: 'msg-1' }]);
+    mock.deliver(named('msg-1'));
     await new Promise(r => setTimeout(r, 50));
 
     // Should still wake with empty parents for the message
@@ -4002,7 +4054,7 @@ describe("WakerSubscriptionManager disposal races", () => {
     type: "mention",
     perspective: "fake-uuid",
     channel: "",
-    query: "SELECT * FROM link",
+    ...MENTION_CONFIG,
   };
 
   it("dispose() during subscribe() must not leave a live subscription behind", async () => {
@@ -4122,7 +4174,7 @@ describe("restoreSavedSubscription", () => {
   };
 
   it("asks the executor again for every saved mention subscription, whatever query it was saved with", async () => {
-    const current = { ...legacy, query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }" };
+    const current = { ...legacy, ...MENTION_CONFIG };
     const textContent = { ...legacy, className: "ad4m://TextContent", query: '{"properties":["text"]}' };
     for (const saved of [legacy, textContent, current]) {
       const rederive = vi.fn().mockResolvedValue("Subscribed");
@@ -4144,7 +4196,7 @@ describe("restoreSavedSubscription", () => {
     }
   });
 
-  it("keeps a legacy mention subscription running, and saved, when the executor cannot re-derive it", async () => {
+  it("keeps a mention subscription this version saved running, and saved, when the executor cannot re-derive it", async () => {
     // Before, a failed re-derive only logged: the subscription was in neither
     // the active nor the pending set, so the next persist deleted it.
     const persisted: { subs: WakerSubscription[] } = { subs: [] };
@@ -4166,7 +4218,7 @@ describe("restoreSavedSubscription", () => {
     const warn = vi.fn();
     try {
       await restoreSavedSubscription(
-        legacy,
+        { ...legacy, ...MENTION_CONFIG },
         () => Promise.reject(new Error("Perspective not accessible")),
         (sub) => manager.subscribe(sub),
         { warn },
@@ -4180,10 +4232,10 @@ describe("restoreSavedSubscription", () => {
   });
 });
 
-describe("a saved mention subscription that reads message text", () => {
-  // What get_mention_waker_config returned before mentions were we://mention
-  // links (#1446): a model query over TextContent, matching substrings, with
-  // the terms the waker used to check for a whole word. #1505's shape has none.
+describe("a mention subscription saved by an older executor", () => {
+  // What get_mention_waker_config returned before TextContent had `mentions`
+  // (#1499): a model query over TextContent's text alone, with its terms and
+  // no DID. #1505's shape has no terms either.
   const textQuery: WakerSubscription = {
     id: "mention-persp-text",
     type: "mention",
@@ -4191,10 +4243,18 @@ describe("a saved mention subscription that reads message text", () => {
     channel: "",
     className: "ad4m://TextContent",
     query: JSON.stringify({ where: { OR: [{ text: { contains: "bot" } }] }, properties: ["text"] }),
-    // Not a field any more; saved files still carry it.
     terms: ["bot"],
-  } as WakerSubscription & { terms?: string[] };
+  };
   const withoutTerms = { ...textQuery, terms: undefined };
+  // And what #1557 returned before this change: SPARQL over we://mention links.
+  const linkQuery: WakerSubscription = {
+    ...textQuery,
+    className: undefined,
+    terms: undefined,
+    query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
+  };
+  // What this version saves.
+  const current: WakerSubscription = { ...textQuery, ...MENTION_CONFIG };
   const children: WakerSubscription = {
     id: "children-p",
     type: "channel-messages",
@@ -4238,14 +4298,41 @@ describe("a saved mention subscription that reads message text", () => {
   }
   const park = (sub: WakerSubscription) => parkSubscription(sub, {});
 
-  it("is told apart from a link query", () => {
-    expect(readsMentionText(textQuery)).toBe(true);
-    expect(readsMentionText(withoutTerms)).toBe(true);
-    expect(readsMentionText({ ...textQuery, className: undefined, query: "SELECT ?source WHERE {}" })).toBe(false);
-    expect(readsMentionText(children)).toBe(false);
+  it("is told apart from one this version saved", () => {
+    expect(savedByAnOlderExecutor(textQuery)).toBe(true);
+    expect(savedByAnOlderExecutor(withoutTerms)).toBe(true);
+    expect(savedByAnOlderExecutor(linkQuery)).toBe(true);
+    expect(savedByAnOlderExecutor(current)).toBe(false);
+    expect(savedByAnOlderExecutor(children)).toBe(false);
   });
 
-  for (const [label, saved] of [["with its terms", textQuery], ["without terms (#1505)", withoutTerms]] as const) {
+  it("is opened as saved, when this version saved it and the executor cannot re-derive it", async () => {
+    const persisted: { subs: WakerSubscription[]; seen?: Record<string, string[]> } = { subs: [] };
+    const { manager, constructed } = managerSavingTo(persisted);
+    const warn = vi.fn();
+    try {
+      await restoreSavedSubscription(
+        current,
+        () => Promise.reject(new Error("MCP HTTP 503")),
+        (s) => manager.subscribe(s),
+        { warn },
+        park,
+      );
+      expect(constructed.map((args) => args[3])).toEqual(["ad4m://TextContent"]);
+      expect(manager.getActive()).toEqual([current]);
+      expect(_parkedSubscriptionsForTests().size).toBe(0);
+      expect(persisted.subs).toEqual([current]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("restoring it as saved"));
+    } finally {
+      manager.disposeAll();
+    }
+  });
+
+  for (const [label, saved] of [
+    ["over the text, with its terms (#1499)", textQuery],
+    ["over the text, without terms (#1505)", withoutTerms],
+    ["over we://mention links (#1557)", linkQuery],
+  ] as const) {
     it(`is not opened when the executor cannot re-derive it, and stays saved, ${label}`, async () => {
       const persisted: { subs: WakerSubscription[]; seen?: Record<string, string[]> } = { subs: [] };
       const savedSeen = { [saved.id]: ["msg-old"] };
@@ -4255,17 +4342,17 @@ describe("a saved mention subscription that reads message text", () => {
         for (const sub of [saved, children]) {
           await restoreSavedSubscription(
             sub,
-            () => Promise.reject(new Error("MCP tool returned a mention query that reads message text; Update the executor.")),
+            () => Promise.reject(new Error("MCP tool returned a mention query without the TextContent class, terms and DID. Update the executor.")),
             (s) => manager.subscribe(s),
             { warn },
             (s) => parkSubscription(s, savedSeen),
           );
         }
-        // Nothing reads the text query: its rows would wake with no mention check.
+        // The manager would refuse it: nothing opens it.
         expect(constructed.map((args) => args[3])).toEqual(["ad4m://Container"]);
         expect(manager.getActive().map((s) => s.id)).toEqual(["children-p"]);
         expect(manager.getPending()).toEqual([]);
-        // The children subscription's persist keeps the text one on disk.
+        // The children subscription's persist keeps the older one on disk.
         expect(persisted.subs.map((s) => s.id)).toEqual(["children-p", "mention-persp-text"]);
         expect(persisted.subs[1]).toEqual(saved);
         // So is what it woke on: the next start must not take what came meanwhile as history.
@@ -4287,7 +4374,7 @@ describe("a saved mention subscription that reads message text", () => {
         type: "mention",
         perspective: textQuery.perspective,
         channel: "",
-        query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
+        ...MENTION_CONFIG,
       };
       await manager.subscribe(current);
       expect(persisted.subs).toEqual([current]);
@@ -4356,12 +4443,12 @@ describe("a saved mention subscription that reads message text", () => {
       type: "mention",
       perspective: textQuery.perspective,
       channel: "",
-      query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
+      ...MENTION_CONFIG,
     };
     const second = new WakerSubscriptionManager({
       perspectiveClient,
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: proxyOpeningOn([{ source: "msg-old" }, { source: "msg-new" }]),
+      QuerySubscriptionProxy: proxyOpeningOn(OLD_AND_LINK_ONLY),
       debounceMs: 10,
       onWake: (_sub, _result, mentions) => {
         woken.push((mentions ?? []).map((m) => m.address));
@@ -4386,11 +4473,11 @@ describe("a saved mention subscription that reads message text", () => {
       type: "mention",
       perspective: textQuery.perspective,
       channel: "",
-      query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
+      ...MENTION_CONFIG,
     };
     // One process start: load the file, restore what it holds in its order,
     // and stop without anything else happening.
-    async function coldStart(executorAnswers: boolean, opening: unknown[]): Promise<string[][]> {
+    async function coldStart(executorAnswers: boolean, opening: unknown): Promise<string[][]> {
       _resetModuleState();
       const state = loadWakerState(stateDir);
       const woken: string[][] = [];
@@ -4446,7 +4533,7 @@ describe("a saved mention subscription that reads message text", () => {
         expect(state.seenMessages[textQuery.id], `start ${start}`).toEqual(["msg-old"]);
       }
       // The executor is updated; msg-new was written while it was parked.
-      const woken = await coldStart(true, [{ source: "msg-old" }, { source: "msg-new" }]);
+      const woken = await coldStart(true, OLD_AND_LINK_ONLY);
       expect(woken).toEqual([["msg-new"]]);
     } finally {
       fs.rmSync(stateDir, { recursive: true, force: true });
@@ -4460,7 +4547,7 @@ describe("a saved mention subscription that reads message text", () => {
       type: "mention",
       perspective: textQuery.perspective,
       channel: "",
-      query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
+      ...MENTION_CONFIG,
     };
     const woken: string[][] = [];
     saveWakerState(stateDir, [textQuery, children], { [textQuery.id]: ["msg-old"] });
@@ -4475,7 +4562,7 @@ describe("a saved mention subscription that reads message text", () => {
           dispose: vi.fn(),
           onResult: vi.fn(),
           // msg-new holds no name, only the we://mention link to the DID.
-          result: [{ source: "msg-old" }, { source: "msg-new" }],
+          result: OLD_AND_LINK_ONLY,
         };
       }),
       debounceMs: 10,

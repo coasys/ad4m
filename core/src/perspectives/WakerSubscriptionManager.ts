@@ -12,26 +12,128 @@ export interface WakerSubscription {
   type: "mention" | "channel-messages";
   perspective: string;
   channel: string;
-  /**
-   * SPARQL, or with `className` a model query (JSON) over that class. A
-   * mention subscription's is SPARQL from the executor's
-   * `get_mention_waker_config`: the source of every `we://mention` link to
-   * the agent's DID that another agent wrote. Each row's `source` is the
-   * mentioned record.
-   */
+  /** SPARQL, or with `className` a model query (JSON) over that class. */
   query: string;
   /**
-   * The class `query` reads, as a model query: a children subscription has
-   * the built-in `ad4m://Container`, from `generate_waker_query` (#1446).
-   * Without it `query` is SPARQL.
+   * The class `query` reads, as a model query. A mention subscription has the
+   * built-in `ad4m://TextContent`, from the executor's `get_mention_waker_config`;
+   * a children subscription the built-in `ad4m://Container`, from
+   * `generate_waker_query` (#1446). Without it `query` is SPARQL.
    */
   className?: string;
+  /**
+   * A mention subscription's terms (profile names and the DID), from
+   * `get_mention_waker_config`. The query matches text by substring, so a
+   * record found only through its text wakes only when the text holds one of
+   * these as a whole word ({@link holdsAWholeWordTerm}).
+   */
+  terms?: string[];
+  /**
+   * A mention subscription's agent DID, from `get_mention_waker_config`. A
+   * record whose TextContent `mentions` links it, in a verified link another
+   * agent wrote, wakes whatever its text says ({@link mentionOf}).
+   */
+  did?: string;
   neighbourhood?: string;
 }
 
 /** The built-in `Container` (`Container.builtinUri`; not imported, so the
  *  plugin bundle does not pull in the model layer). */
 const CONTAINER = "ad4m://Container";
+
+/** A letter, combining mark, digit or underscore: what a term must not touch. */
+const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
+
+/**
+ * The elements a message's HTML is made of. A `<` before any other name is text:
+ * We stores plain text, where "<hey Data> can you look" is words.
+ */
+const ELEMENT =
+  "a|abbr|b|bdi|bdo|blockquote|br|caption|center|cite|code|col|colgroup|dd|del|details|dfn|div|dl|dt|em|" +
+  "figcaption|figure|font|h[1-6]|hr|i|img|ins|kbd|label|li|mark|ol|p|pre|q|s|samp|section|article|small|" +
+  "span|strike|strong|sub|summary|sup|table|tbody|td|tfoot|th|thead|time|tr|u|ul|var|wbr|script|style";
+/** An attribute: a name, then optionally `=` and a quoted value (which may hold `>`) or an unquoted one. */
+const ATTRIBUTE = `\\s+[A-Za-z_:][-\\w:.]*(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s"'=<>\`]+))?`;
+/**
+ * Markup: a comment, a `<script>`/`<style>` element with its contents, or a tag of
+ * a known element whose rest is a valid attribute list. "a < b" and
+ * "if a <b then ask Data, else c -> d" are text: the comma is no attribute.
+ */
+const TAG = new RegExp(
+  `<!--[\\s\\S]*?-->` +
+    `|<(script|style)(?=[\\s/>])(?:${ATTRIBUTE})*\\s*>[\\s\\S]*?<\\/\\1\\s*>` +
+    `|<(?:${ELEMENT})(?=[\\s/>])(?:${ATTRIBUTE})*\\s*\\/?>` +
+    `|<\\/(?:${ELEMENT})\\s*>`,
+  "gi",
+);
+/** Tags that break a line: replaced by a space, so `<p>hi</p><p>Data</p>` keeps "Data" a word. */
+const BREAKING_TAG = /^<\/?(?:p|div|br|hr|li|ul|ol|h[1-6]|blockquote|pre|tr|td|th|table|section|article)\b/i;
+/**
+ * The attributes a mention puts its target's DID in: Flux's `<a data-type="mention"
+ * href="did:…">`, older Flux messages' `<span data-id="did:…">`, and We's editor chip
+ * `<span class="we-mention" data-did="did:…">`.
+ */
+const ATTRIBUTES = new RegExp(ATTRIBUTE, "g");
+const MENTION_TARGET = /^\s+(?:href|data-id|data-did)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))$/i;
+
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+function decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (whole, ref: string) => {
+    if (ref[0] !== "#") return ENTITIES[ref.toLowerCase()] ?? whole;
+    const code = ref[1] === "x" || ref[1] === "X" ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+  });
+}
+
+/**
+ * What a reader sees of `text`, and the DIDs its mentions point at. `text` may be
+ * HTML (TextContent allows it): tag names and attributes are markup, not words, so
+ * a bot named "Data" must not wake on `data-type="mention"` in a mention of
+ * someone else. Plain text passes through unchanged, apart from entities.
+ */
+function readableParts(text: string): { visible: string; targets: string[] } {
+  const targets: string[] = [];
+  const visible = text.replace(TAG, (tag, scriptOrStyle?: string) => {
+    if (scriptOrStyle) return " ";
+    if (tag.startsWith("<!--")) return "";
+    // Parse complete attributes first: a DID-shaped string inside `title`
+    // is not a target attribute and must not wake an agent.
+    for (const attribute of tag.matchAll(ATTRIBUTES)) {
+      const target = MENTION_TARGET.exec(attribute[0]);
+      if (target) targets.push(decodeEntities(target[1] ?? target[2] ?? target[3]));
+    }
+    return BREAKING_TAG.test(tag) ? " " : "";
+  });
+  return { visible: decodeEntities(visible), targets };
+}
+
+/**
+ * Whether `text` holds one of `terms` as a whole word, case-insensitively:
+ * "Data" is in "hi Data!", "@data" and "Data's turn", not in "metadata" or
+ * "database". A term is matched literally (regex characters, quotes) and must
+ * not touch a letter, mark, digit or underscore on either side, so a name
+ * that starts or ends with punctuation still matches. Same rule as #1459's
+ * SPARQL `(?:^|\W)term(?:\W|$)`.
+ *
+ * The rule runs on the visible text only: in HTML, tags and attributes are
+ * dropped and entities decoded first. A mention's target attribute
+ * (`href`, `data-id`, `data-did`) matches an exact, case-sensitive DID term, which
+ * is how a mention by DID is found when the DID is not in the visible text.
+ *
+ * The mention query's `contains` matches substrings (model query has no word
+ * match); this is the check that keeps "data" from waking on "metadata" when
+ * a record is found through its text alone ({@link mentionOf}).
+ */
+export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
+  const { visible, targets } = readableParts(text);
+  return terms.some((term) => {
+    if (!term) return false;
+    if (term.startsWith("did:") && targets.includes(term)) return true;
+    const escaped = term.replace(/[\\^$.*+?()[\]{}|\/]/g, "\\$&");
+    return new RegExp(`(?<!${WORD_CHAR})${escaped}(?!${WORD_CHAR})`, "iu").test(visible);
+  });
+}
 
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
@@ -50,30 +152,74 @@ export interface MentionMessage {
    */
   ancestors: string[];
   /**
-   * The DID that signed the mention link (the row's `author`): who put the mention on the
-   * record. Only that link is theirs; the record's text and other properties are other links,
-   * which may be someone else's. Absent when the subscription's query returns no `author`; the
-   * executor's mention query always does.
+   * The DID that signed the link the mention is in: the mention link to the agent's DID when
+   * the record mentions it through TextContent's `mentions`, else the text link that names it.
+   * Only that link is theirs; the record's other links may be someone else's. Absent when the
+   * row carries no such link.
    */
   author?: string;
-  /** That link's timestamp, ISO 8601 (the row's `timestamp`). Absent as `author` is. */
+  /** That link's timestamp, ISO 8601. Absent as `author` is. */
   timestamp?: string;
   /**
-   * Whether the link's signature verified for `author` (the row's `proofValid` is `"true"`).
-   * The executor's mention query returns verified links only, so a mention it found is `true`;
-   * a row without the verdict is `false`.
+   * Whether that link's signature verified for `author`. The executor's mention query reads
+   * verified links only, so a mention it found is `true`; a row without the link is `false`.
    */
   verified: boolean;
 }
 
-/** The provenance of a mention row's link, as {@link MentionMessage} carries it. */
-function provenanceOf(row: any): Pick<MentionMessage, "author" | "timestamp" | "verified"> {
+/** A link as a model row's `__links` carries it (`DecoratedLinkExpression`). */
+interface RowLink {
+  author?: unknown;
+  timestamp?: unknown;
+  data?: { target?: unknown };
+  proof?: { valid?: unknown };
+}
+
+/** The provenance {@link MentionMessage} carries, from one link. */
+function provenanceOf(link: RowLink | undefined): Pick<MentionMessage, "author" | "timestamp" | "verified"> {
   const provenance: Pick<MentionMessage, "author" | "timestamp" | "verified"> = {
-    verified: row?.proofValid === "true" || row?.proofValid === true,
+    verified: link?.proof?.valid === true,
   };
-  if (typeof row?.author === "string") provenance.author = row.author;
-  if (typeof row?.timestamp === "string") provenance.timestamp = row.timestamp;
+  if (typeof link?.author === "string") provenance.author = link.author;
+  if (typeof link?.timestamp === "string") provenance.timestamp = link.timestamp;
   return provenance;
+}
+
+/** The links a model row carries for `key` under `__links`, oldest first. */
+function rowLinks(row: any, key: string): RowLink[] {
+  const links: unknown = row?.__links?.[key];
+  return Array.isArray(links) ? links : [];
+}
+
+/**
+ * Whether a row of the executor's mention query (a model query over TextContent, #1557)
+ * mentions the subscription's agent, and the provenance of the link it does so in; `null`
+ * when it does not.
+ *
+ * - Through `mentions`: a verified link to the agent's DID that another agent wrote, in the
+ *   row's `__links.mentions`. It wakes whatever the text says: WE's chip label may run into
+ *   the next word ("@Datai have…"). Its provenance is that link's (the newest such).
+ * - Through the text alone: the query matched a substring, so the text must hold a term as a
+ *   whole word ({@link holdsAWholeWordTerm}). Its provenance is the newest text link another
+ *   agent wrote, in `__links.text`.
+ *
+ * A record that matches both is one row, so it wakes once, through `mentions`.
+ */
+export function mentionOf(
+  row: any,
+  sub: Pick<WakerSubscription, "did" | "terms">,
+): Pick<MentionMessage, "author" | "timestamp" | "verified"> | null {
+  const did = sub.did;
+  const byOthers = (links: RowLink[]) => links.filter((l) => typeof l.author === "string" && l.author !== did);
+  const linked = byOthers(rowLinks(row, "mentions")).filter(
+    (l) => l.data?.target === did && l.proof?.valid === true,
+  );
+  if (did && linked.length) return provenanceOf(linked[linked.length - 1]);
+
+  const text = Array.isArray(row?.text) ? row.text.join(" ") : row?.text;
+  if (typeof text !== "string" || !holdsAWholeWordTerm(text, sub.terms ?? [])) return null;
+  const written = byOthers(rowLinks(row, "text"));
+  return provenanceOf(written[written.length - 1]);
 }
 
 export interface WakerLogger {
@@ -261,6 +407,14 @@ export class WakerSubscriptionManager {
       throw new Error("WakerSubscriptionManager: QuerySubscriptionProxy must be provided via constructor options");
     }
     const QuerySubscriptionProxy = this.QuerySubscriptionProxyCtor;
+    if (sub.type === "mention" && (!sub.className || !sub.terms?.length || !sub.did)) {
+      // The rows are TextContent's: without terms the whole-word check cannot
+      // run, so every substring ("metadata" for "data") would wake the agent;
+      // without the DID no mention link can be told to be the agent's.
+      throw new Error(
+        `Waker subscription ${sub.id}: a mention subscription needs its TextContent class, terms and DID (get_mention_waker_config returns them)`,
+      );
+    }
 
     this.logger.info(
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
@@ -365,16 +519,20 @@ export class WakerSubscriptionManager {
         // Only wake for records we haven't seen before.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
-        // The first row per record: the mention query is newest first.
         const provenance = new Map<string, Pick<MentionMessage, "author" | "timestamp" | "verified">>();
 
         for (const item of rows as any[]) {
-          // A SPARQL row names the record as `source`, a model row as `id`.
-          const address = sub.className ? item?.id : item?.source;
+          const address = item?.id;
           if (typeof address !== "string" || !address || currentSeen.has(address)) continue;
+          // Through `mentions` as it is; through the text alone, a whole word only.
+          const mention = mentionOf(item, sub);
+          if (!mention) {
+            this.logger.debug(`[waker] ${sub.id}: ${address} has no mention link and no term as a whole word, skipping`);
+            continue;
+          }
           currentSeen.add(address);
           newMessages.push(address);
-          provenance.set(address, provenanceOf(item));
+          provenance.set(address, mention);
         }
 
         if (newMessages.length === 0) {

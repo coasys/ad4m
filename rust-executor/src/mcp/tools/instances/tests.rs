@@ -2673,38 +2673,155 @@ async fn instance_update_returns_the_store_error_of_the_abstract_check() {
     assert_eq!(got["body"], "hello", "{got}");
 }
 
-/// Run the waker's mention query for `did` over `links` (`source`,
-/// `predicate`, `target`, each with its expression), delivered the way a
-/// peer's links arrive (`diff_from_link_language`), and return its rows in
-/// the order the query gives them.
+/// A WE-like text block whose text property and `we://mention` relation
+/// carry other names, aliased to TextContent's `text` and `mentions`. (WE's
+/// own `TextBlock`, [`WE_TEXT_BLOCK_SDNA`], names them `text` and
+/// `mentions` and conforms by name.)
+const ALIASED_WE_BLOCK_SDNA: &str = r#"{
+  "target_class": "we://TextBlock",
+  "properties": [
+    {"path":"we://flag","name":"flag","has_value":"we://text_block","min_count":1,"max_count":1},
+    {"path":"we://text","name":"body","datatype":"xsd:string","max_count":1,"alias":{"TextContent":"text"}},
+    {"path":"we://mention","name":"mentionedAgents","node_kind":"IRI","relation_kind":"hasMany","collection":true,"alias":{"TextContent":"mentions"}}
+  ]
+}"#;
+
+/// WE's mention predicate, in the fixtures only: the executor knows no app's
+/// predicate, it reads whatever a class aliases to `mentions`.
+const WE_MENTION: &str = "we://mention";
+
+/// [`ALIASED_NOTE_SDNA`] with a relation of another name, `cc`, aliased to
+/// TextContent's `mentions`.
+const MENTION_NOTE_SDNA: &str = r#"{
+  "target_class": "app://Note",
+  "properties": [
+    {"path":"app://kind","name":"kind","has_value":"app://note","min_count":1,"max_count":1},
+    {"path":"app://content","name":"content","datatype":"xsd:string","min_count":1,"max_count":1,"alias":{"TextContent":"text"}},
+    {"path":"app://cc","name":"cc","node_kind":"IRI","relation_kind":"hasMany","collection":true,"alias":{"TextContent":"mentions"}}
+  ]
+}"#;
+
+/// A chat line with `text` and no mention relation: it conforms to
+/// TextContent, whose `mentions` is optional, and mentions no one through it.
+const TEXT_ONLY_CHAT_SDNA: &str = r#"{
+  "target_class": "app://Chat",
+  "properties": [
+    {"path":"app://chat_kind","name":"kind","has_value":"app://chat","min_count":1,"max_count":1},
+    {"path":"app://chat_text","name":"text","datatype":"xsd:string","max_count":1}
+  ]
+}"#;
+
+/// The links of a [`TEXT_ONLY_CHAT_SDNA`] line `id` with `text`, by `signer`
+/// at `minutes`.
+fn text_only_chat(
+    signer: &crate::agent::signatures::TestSigner,
+    id: &str,
+    text: &str,
+    minutes: i64,
+) -> Vec<crate::types::LinkExpression> {
+    vec![
+        signed_link(signer, id, "app://chat_kind", "app://chat", minutes),
+        signed_link(signer, id, "app://chat_text", &as_text(text), minutes),
+    ]
+}
+
+/// `literal:string:` with `text` encoded, as a string property is stored.
+fn as_text(text: &str) -> String {
+    format!("literal:string:{}", urlencoding::encode(text))
+}
+
+/// The links of a WE text block `id` with `text`, by `signer` at `minutes`.
+fn we_block(
+    signer: &crate::agent::signatures::TestSigner,
+    id: &str,
+    text: &str,
+    minutes: i64,
+) -> Vec<crate::types::LinkExpression> {
+    vec![
+        signed_link(signer, id, "we://flag", "we://text_block", minutes),
+        signed_link(signer, id, "we://text", &as_text(text), minutes),
+    ]
+}
+
+/// The links of a [`MENTION_NOTE_SDNA`] note `id` with `text`, by `signer`
+/// at `minutes`: another class, whose `mentions` is `app://cc`.
+fn app_note(
+    signer: &crate::agent::signatures::TestSigner,
+    id: &str,
+    text: &str,
+    minutes: i64,
+) -> Vec<crate::types::LinkExpression> {
+    vec![
+        signed_link(signer, id, "app://kind", "app://note", minutes),
+        signed_link(signer, id, "app://content", &as_text(text), minutes),
+    ]
+}
+
+/// Run the waker's mention query for `did` and `names` over `links`,
+/// delivered the way a peer's links arrive (`diff_from_link_language`), in a
+/// perspective with the aliased WE-like block, the aliased note and the
+/// text-only chat line, and return its rows in the order the query gives
+/// them.
 async fn mention_query_rows(
     did: &str,
+    names: &[&str],
     links: Vec<crate::types::LinkExpression>,
 ) -> Vec<serde_json::Value> {
+    mention_query_rows_in(
+        &[
+            ("TextBlock", ALIASED_WE_BLOCK_SDNA),
+            ("Note", MENTION_NOTE_SDNA),
+            ("Chat", TEXT_ONLY_CHAT_SDNA),
+        ],
+        did,
+        names,
+        links,
+    )
+    .await
+}
+
+/// [`mention_query_rows`] in a perspective with `classes`.
+async fn mention_query_rows_in(
+    classes: &[(&str, &str)],
+    did: &str,
+    names: &[&str],
+    links: Vec<crate::types::LinkExpression>,
+) -> Vec<serde_json::Value> {
+    use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
     use crate::types::PerspectiveDiff;
-    let (_handler, uuid, _guard) = setup_with(&[], false).await;
+    let (_handler, uuid, _guard) = setup_with(classes, false).await;
     let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
     perspective
         .diff_from_link_language(PerspectiveDiff::from_additions(links))
         .await
         .expect("diff_from_link_language");
-    let query = crate::mcp::tools::subscriptions::build_mention_query(did);
-    let found = parse(&perspective.sparql_query(query).unwrap());
-    found
+    let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    let query = crate::mcp::tools::subscriptions::build_mention_query(&names, did);
+    let found = parse(
+        &perspective
+            .model_query(TEXT_CONTENT_URI, &query.to_string())
+            .await
+            .unwrap(),
+    );
+    found["instances"]
         .as_array()
         .unwrap_or_else(|| panic!("{found}"))
         .clone()
 }
 
-/// The `source` of each row [`mention_query_rows`] returns, in its order.
-async fn mention_rows(did: &str, links: Vec<crate::types::LinkExpression>) -> Vec<String> {
-    mention_query_rows(did, links)
+/// The `id` of each row [`mention_query_rows`] returns, in its order.
+async fn mention_rows(
+    did: &str,
+    names: &[&str],
+    links: Vec<crate::types::LinkExpression>,
+) -> Vec<String> {
+    mention_query_rows(did, names, links)
         .await
         .iter()
         .map(|row| {
-            row["source"]
+            row["id"]
                 .as_str()
-                .unwrap_or_else(|| panic!("a row without its source: {row}"))
+                .unwrap_or_else(|| panic!("a row without its id: {row}"))
                 .to_string()
         })
         .collect()
@@ -2737,47 +2854,189 @@ fn signed_link(
     )
 }
 
-/// A mention is WE's `we://mention` link to the agent's DID, from whatever
-/// mentions it (a post's root, a feed line), whatever its text says. The
-/// query returns each such link's source, newest first, and nothing else: not
-/// a link the agent wrote itself (its own reply mentioning it, #1459), not a
-/// link whose signature does not verify for the author it claims, not a
-/// mention of someone else, and not another predicate to the DID.
+/// One model query over TextContent finds a record that mentions the agent
+/// through a `mentions` relation, whatever its text says, or through its
+/// text, whatever its relations say, in any class that conforms, one without
+/// a mention relation included. Not a
+/// record the agent wrote itself (its own reply mentioning it, #1459), not a
+/// mention link whose signature does not verify for the author it claims, not
+/// a mention of someone else, and not another predicate to the DID. A record
+/// found both ways is one row. Text matches by substring ("metadata"): the
+/// waker keeps only whole words on that path (`WakerSubscriptionManager`).
 #[tokio::test(flavor = "multi_thread")]
-async fn the_mention_query_returns_we_mention_links_to_the_agent_by_others() {
+async fn the_mention_query_finds_mention_links_and_text_mentions_by_others() {
     use crate::agent::signatures::TestSigner;
-    use crate::mcp::tools::subscriptions::MENTION_PREDICATE;
     let me = TestSigner::generate();
     let other = TestSigner::generate();
     let someone_else = TestSigner::generate();
-    let mut forged = signed_link(&other, "ad4m://forged", MENTION_PREDICATE, &me.did, 5);
+    let mut links = Vec::new();
+
+    // Through the mention link, the text naming no one.
+    links.extend(we_block(&other, "ad4m://link", "look at this", 1));
+    links.push(signed_link(&other, "ad4m://link", WE_MENTION, &me.did, 1));
+    // Through the text, no mention link.
+    links.extend(we_block(&other, "ad4m://name", "Data, can you look?", 2));
+    // The DID in the text, in another class.
+    links.extend(app_note(&other, "ad4m://did", &format!("cc {}", me.did), 3));
+    // Both: one row.
+    links.extend(we_block(&other, "ad4m://both", "hey Data", 4));
+    links.push(signed_link(&other, "ad4m://both", WE_MENTION, &me.did, 4));
+    // A second class whose own predicate is aliased to `mentions`.
+    links.extend(app_note(&other, "ad4m://cc", "fyi", 5));
+    links.push(signed_link(&other, "ad4m://cc", "app://cc", &me.did, 5));
+    // A substring: a candidate the waker drops.
+    links.extend(we_block(
+        &other,
+        "ad4m://metadata",
+        "the metadata is stale",
+        6,
+    ));
+
+    // The agent's own record, by name and by link.
+    links.extend(we_block(&me, "ad4m://mine", "Data here, on it", 7));
+    links.push(signed_link(&me, "ad4m://mine", WE_MENTION, &me.did, 7));
+    // A mention link whose signature fails for the author it claims.
+    links.extend(we_block(&other, "ad4m://forged", "hello there", 8));
+    let mut forged = signed_link(&other, "ad4m://forged", WE_MENTION, &me.did, 8);
     forged.author = someone_else.did.clone();
-    let rows = mention_rows(
+    links.push(forged);
+    // A mention of someone else.
+    links.extend(we_block(&other, "ad4m://not-me", "hello", 9));
+    links.push(signed_link(
+        &other,
+        "ad4m://not-me",
+        WE_MENTION,
+        &someone_else.did,
+        9,
+    ));
+    // Another predicate to the DID.
+    links.extend(we_block(&other, "ad4m://other-predicate", "hi", 10));
+    links.push(signed_link(
+        &other,
+        "ad4m://other-predicate",
+        "we://child",
         &me.did,
+        10,
+    ));
+
+    // A class with text and no mention relation still conforms, so its text
+    // is a mention; one that names no one is not.
+    links.extend(text_only_chat(
+        &other,
+        "ad4m://chat",
+        "Data, can you check the chat?",
+        11,
+    ));
+    links.extend(text_only_chat(&other, "ad4m://chat-quiet", "lunch?", 12));
+
+    let rows = mention_rows(&me.did, &["Data"], links).await;
+    assert_eq!(
+        rows,
         vec![
-            signed_link(&other, "ad4m://post", MENTION_PREDICATE, &me.did, 1),
-            signed_link(&other, "ad4m://line", MENTION_PREDICATE, &me.did, 3),
-            signed_link(&me, "ad4m://mine", MENTION_PREDICATE, &me.did, 4),
-            forged,
-            signed_link(
-                &other,
-                "ad4m://not-me",
-                MENTION_PREDICATE,
-                &someone_else.did,
-                6,
-            ),
-            signed_link(&other, "ad4m://other-predicate", "we://child", &me.did, 7),
-            signed_link(
-                &other,
-                "ad4m://text",
-                "we://text",
-                &format!("literal:string:{}", me.did),
-                8,
-            ),
+            "ad4m://chat",
+            "ad4m://metadata",
+            "ad4m://cc",
+            "ad4m://both",
+            "ad4m://did",
+            "ad4m://name",
+            "ad4m://link",
         ],
+        "newest first"
+    );
+}
+
+/// A class without a mention relation answers to TextContent's optional
+/// `mentions` with nothing: a `where` on it alone matches none of that
+/// class's rows (not all of them, and not an error), its negation matches
+/// all of them, reading it gives `[]`, and `links` lists no link for it,
+/// even when the record has a link to the DID on some other predicate. Its
+/// `text` reads and filters as before. A class that aliases its own relation
+/// to `mentions` is read through it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_class_without_a_mention_relation_mentions_no_one() {
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
+    use crate::types::PerspectiveDiff;
+    let me = TestSigner::generate();
+    let other = TestSigner::generate();
+    let (_handler, uuid, _guard) = setup_with(
+        &[("Note", MENTION_NOTE_SDNA), ("Chat", TEXT_ONLY_CHAT_SDNA)],
+        false,
     )
     .await;
-    assert_eq!(rows, vec!["ad4m://line", "ad4m://post"]);
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let mut links = app_note(&other, "ad4m://note", "fyi", 1);
+    links.push(signed_link(&other, "ad4m://note", "app://cc", &me.did, 1));
+    links.extend(text_only_chat(
+        &other,
+        "ad4m://chat",
+        "Data, can you look?",
+        2,
+    ));
+    // The Note's mention predicate, from a record that is not a Note.
+    links.push(signed_link(&other, "ad4m://chat", "app://cc", &me.did, 2));
+    perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(links))
+        .await
+        .expect("diff_from_link_language");
+
+    let query = |q: Value| {
+        let perspective = perspective.clone();
+        async move {
+            let found = parse(
+                &perspective
+                    .model_query(TEXT_CONTENT_URI, &q.to_string())
+                    .await
+                    .unwrap_or_else(|e| panic!("{q}: {e}")),
+            );
+            found
+        }
+    };
+    let ids = |found: &Value| -> Vec<String> {
+        found["instances"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{found}"))
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let by_mention = query(json!({ "where": { "mentions": me.did } })).await;
+    assert_eq!(ids(&by_mention), vec!["ad4m://note"], "{by_mention}");
+    let by_mention_of_another =
+        query(json!({ "where": { "mentions": { "eq": me.did, "author": { "not": me.did } } } }))
+            .await;
+    assert_eq!(
+        ids(&by_mention_of_another),
+        vec!["ad4m://note"],
+        "{by_mention_of_another}"
+    );
+    let not_mentioning = query(json!({ "where": { "NOT": { "mentions": me.did } } })).await;
+    assert_eq!(
+        ids(&not_mentioning),
+        vec!["ad4m://chat"],
+        "{not_mentioning}"
+    );
+    let by_text = query(json!({ "where": { "text": { "contains": "Data" } } })).await;
+    assert_eq!(ids(&by_text), vec!["ad4m://chat"], "{by_text}");
+
+    let read = query(json!({
+        "order": { "timestamp": "ASC" },
+        "properties": ["text", "mentions"],
+        "links": ["mentions"],
+    }))
+    .await;
+    assert_eq!(ids(&read), vec!["ad4m://note", "ad4m://chat"], "{read}");
+    let (note, chat) = (&read["instances"][0], &read["instances"][1]);
+    assert_eq!(note["mentions"], json!([me.did]), "{read}");
+    assert_eq!(
+        note["__links"]["mentions"].as_array().unwrap().len(),
+        1,
+        "{read}"
+    );
+    assert_eq!(chat["text"], "Data, can you look?", "{read}");
+    assert_eq!(chat["mentions"], json!([]), "{read}");
+    assert_eq!(chat["__links"]["mentions"], json!([]), "{read}");
 }
 
 /// The query holds the newest [`MENTION_WINDOW`] mentions, however many the
@@ -2785,22 +3044,17 @@ async fn the_mention_query_returns_we_mention_links_to_the_agent_by_others() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_mention_query_holds_the_newest_window() {
     use crate::agent::signatures::TestSigner;
-    use crate::mcp::tools::subscriptions::{MENTION_PREDICATE, MENTION_WINDOW};
+    use crate::mcp::tools::subscriptions::MENTION_WINDOW;
     let me = TestSigner::generate();
     let other = TestSigner::generate();
     let total = MENTION_WINDOW + 5;
-    let links = (0..total)
-        .map(|i| {
-            signed_link(
-                &other,
-                &format!("ad4m://m{i:03}"),
-                MENTION_PREDICATE,
-                &me.did,
-                i as i64,
-            )
-        })
-        .collect();
-    let rows = mention_rows(&me.did, links).await;
+    let mut links = Vec::new();
+    for i in 0..total {
+        let id = format!("ad4m://m{i:03}");
+        links.extend(we_block(&other, &id, "see", i as i64));
+        links.push(signed_link(&other, &id, WE_MENTION, &me.did, i as i64));
+    }
+    let rows = mention_rows(&me.did, &[], links).await;
     let newest: Vec<String> = (0..total)
         .rev()
         .take(MENTION_WINDOW)
@@ -2812,12 +3066,12 @@ async fn the_mention_query_holds_the_newest_window() {
 /// A typed WE message that @-mentions the agent, with the links WE wrote for
 /// it in a live space (2026-10-27): the chip's label "@Data" runs into the
 /// next word, so the text holds "@Datai" and no whole-word "Data", and the
-/// DID is only in the `marks` JSON and the `we://mention` link. A whole-word
-/// name match on the text did not wake the agent; the mention link does.
+/// DID is only in the `marks` JSON and the `we://mention` link. The waker's
+/// whole-word check on the text dropped it; through `mentions` the row comes
+/// with the mention link, which wakes the agent as it is.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_we_at_mention_whose_label_runs_into_the_next_word_is_a_mention() {
     use crate::agent::signatures::TestSigner;
-    use crate::mcp::tools::subscriptions::MENTION_PREDICATE;
     let me = TestSigner::generate();
     let other = TestSigner::generate();
     let block = "ad4m://obj/qxxtzxsmhyskwmatpzklxjmt";
@@ -2825,8 +3079,9 @@ async fn a_we_at_mention_whose_label_runs_into_the_next_word_is_a_mention() {
         r#"[{{"start":0,"end":5,"type":"mention","did":"{}"}}]"#,
         me.did
     );
-    let rows = mention_rows(
+    let rows = mention_query_rows(
         &me.did,
+        &["Data"],
         vec![
             signed_link(&other, block, "we://flag", "we://text_block", 0),
             signed_link(
@@ -2844,45 +3099,69 @@ async fn a_we_at_mention_whose_label_runs_into_the_next_word_is_a_mention() {
                 0,
             ),
             signed_link(&other, block, "we://text_source", "literal:string:typed", 0),
-            signed_link(&other, block, MENTION_PREDICATE, &me.did, 1),
-        ],
-    )
-    .await;
-    assert_eq!(rows, vec![block]);
-}
-
-/// Each row carries the mention link's provenance (#1563): the DID that
-/// signed it, its timestamp, and the proof verdict, so a woken agent knows
-/// who mentioned it and when without a second query. Taken from the mention
-/// link itself, not from the record's other links: an edit by someone else
-/// that adds the mention shows that editor.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_mention_row_carries_the_mention_links_author_timestamp_and_verdict() {
-    use crate::agent::signatures::TestSigner;
-    use crate::mcp::tools::subscriptions::MENTION_PREDICATE;
-    let me = TestSigner::generate();
-    let writer = TestSigner::generate();
-    let editor = TestSigner::generate();
-    let rows = mention_query_rows(
-        &me.did,
-        vec![
-            signed_link(
-                &writer,
-                "ad4m://post",
-                "we://text",
-                "literal:string:@Data hi",
-                0,
-            ),
-            signed_link(&editor, "ad4m://post", MENTION_PREDICATE, &me.did, 2),
+            signed_link(&other, block, WE_MENTION, &me.did, 1),
         ],
     )
     .await;
     assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["id"], block, "{}", rows[0]);
+    let mentions = rows[0]["__links"]["mentions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the mention links: {}", rows[0]));
+    assert_eq!(mentions.len(), 1, "{mentions:?}");
+    assert_eq!(mentions[0]["data"]["target"], me.did.as_str());
+}
+
+/// WE's own `TextBlock`, as the SDK writes it today, has `text` and a
+/// `mentions` relation over `we://mention`, so it conforms to TextContent by
+/// name: its mention links and its text both find a record.
+#[tokio::test(flavor = "multi_thread")]
+async fn we_text_blocks_take_part_by_their_own_names() {
+    use crate::agent::signatures::TestSigner;
+    let me = TestSigner::generate();
+    let other = TestSigner::generate();
+    let mut links = we_block(&other, "ad4m://chip", "@Datai have news", 1);
+    links.push(signed_link(&other, "ad4m://chip", WE_MENTION, &me.did, 1));
+    links.extend(we_block(&other, "ad4m://spoken", "Hey, data!", 2));
+    links.extend(we_block(&other, "ad4m://unrelated", "good morning", 3));
+    let rows = mention_query_rows_in(
+        &[("TextBlock", WE_TEXT_BLOCK_SDNA)],
+        &me.did,
+        &["Data"],
+        links,
+    )
+    .await;
+    let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["ad4m://spoken", "ad4m://chip"], "{rows:?}");
+}
+
+/// Each row carries its mention and text links with their own provenance
+/// (#1563): the DID that signed each, its timestamp and the proof verdict, so
+/// the waker hands a woken agent who mentioned it and when without a second
+/// query. An edit by someone else that adds the mention shows that editor on
+/// the mention link; the text link stays its writer's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mention_row_carries_its_mention_and_text_links_provenance() {
+    use crate::agent::signatures::TestSigner;
+    let me = TestSigner::generate();
+    let writer = TestSigner::generate();
+    let editor = TestSigner::generate();
+    let mut links = we_block(&writer, "ad4m://post", "@Data hi", 0);
+    links.push(signed_link(&editor, "ad4m://post", WE_MENTION, &me.did, 2));
+    let rows = mention_query_rows(&me.did, &["Data"], links).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
     let row = &rows[0];
-    assert_eq!(row["source"], "ad4m://post", "{row}");
-    assert_eq!(row["author"], editor.did.as_str(), "{row}");
-    assert_eq!(row["timestamp"], "2026-10-01T12:02:00.000Z", "{row}");
-    assert_eq!(row["proofValid"], "true", "{row}");
+    assert_eq!(row["id"], "ad4m://post", "{row}");
+    assert_eq!(row["text"], "@Data hi", "{row}");
+    let mention = &row["__links"]["mentions"][0];
+    assert_eq!(mention["author"], editor.did.as_str(), "{row}");
+    assert_eq!(mention["timestamp"], "2026-10-01T12:02:00.000Z", "{row}");
+    assert_eq!(mention["proof"]["valid"], true, "{row}");
+    assert_eq!(mention["data"]["target"], me.did.as_str(), "{row}");
+    let text = &row["__links"]["text"][0];
+    assert_eq!(text["author"], writer.did.as_str(), "{row}");
+    assert_eq!(text["timestamp"], "2026-10-01T12:00:00.000Z", "{row}");
+    assert_eq!(text["proof"]["valid"], true, "{row}");
 }
 
 /// The reifier the store keeps `source -predicate-> target`'s metadata on. Any
@@ -2917,26 +3196,28 @@ fn reifier_of(
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_links_cannot_write_or_erase_a_mentions_provenance() {
     use crate::agent::signatures::TestSigner;
-    use crate::mcp::tools::subscriptions::{build_mention_query, MENTION_PREDICATE};
+    use crate::mcp::tools::subscriptions::build_mention_query;
+    use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
     use crate::types::PerspectiveDiff;
     let me = TestSigner::generate();
     let writer = TestSigner::generate();
     let member = TestSigner::generate();
     let impostor = TestSigner::generate();
 
-    let (_handler, uuid, _guard) = setup_with(&[], false).await;
+    let (_handler, uuid, _guard) = setup_with(&[("TextBlock", ALIASED_WE_BLOCK_SDNA)], false).await;
     let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
-    let mut unverified = signed_link(&member, "ad4m://claimed", MENTION_PREDICATE, &me.did, 2);
+    let mut unverified = signed_link(&member, "ad4m://claimed", WE_MENTION, &me.did, 2);
     unverified.author = impostor.did.clone();
+    let mut first = we_block(&writer, "ad4m://post", "see", 1);
+    first.push(signed_link(&writer, "ad4m://post", WE_MENTION, &me.did, 1));
+    first.extend(we_block(&member, "ad4m://claimed", "see", 2));
+    first.push(unverified);
     perspective
-        .diff_from_link_language(PerspectiveDiff::from_additions(vec![
-            signed_link(&writer, "ad4m://post", MENTION_PREDICATE, &me.did, 1),
-            unverified,
-        ]))
+        .diff_from_link_language(PerspectiveDiff::from_additions(first))
         .await
         .expect("the mentions");
-    let genuine = reifier_of(&perspective, "ad4m://post", MENTION_PREDICATE, &me.did);
-    let claimed = reifier_of(&perspective, "ad4m://claimed", MENTION_PREDICATE, &me.did);
+    let genuine = reifier_of(&perspective, "ad4m://post", WE_MENTION, &me.did);
+    let claimed = reifier_of(&perspective, "ad4m://claimed", WE_MENTION, &me.did);
 
     let ontology = |name: &str| format!("ad4m://ontology/{name}");
     let as_string = |value: &str| format!("literal:string:{value}");
@@ -2989,31 +3270,40 @@ async fn peer_links_cannot_write_or_erase_a_mentions_provenance() {
         .await
         .expect("the member's removals");
 
-    let only_the_writers_mention = |stage: &str| {
-        let rows = parse(
-            &perspective
-                .sparql_query(build_mention_query(&me.did))
-                .unwrap(),
-        );
-        assert_eq!(
-            rows,
-            serde_json::json!([{
-                "source": "ad4m://post",
-                "author": writer.did,
-                "timestamp": "2026-10-01T12:01:00.000Z",
-                "proofValid": "true",
-            }]),
-            "{stage}"
-        );
+    let query = build_mention_query(&[], &me.did).to_string();
+    let only_the_writers_mention = |stage: &'static str| {
+        let query = query.clone();
+        let perspective = perspective.clone();
+        let (writer, me) = (writer.did.clone(), me.did.clone());
+        async move {
+            let found = parse(
+                &perspective
+                    .model_query(TEXT_CONTENT_URI, &query)
+                    .await
+                    .unwrap(),
+            );
+            let rows = found["instances"].as_array().unwrap();
+            let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+            assert_eq!(ids, vec!["ad4m://post"], "{stage}: {found}");
+            let mentions = rows[0]["__links"]["mentions"].as_array().unwrap();
+            assert_eq!(mentions.len(), 1, "{stage}: {found}");
+            assert_eq!(mentions[0]["author"], writer.as_str(), "{stage}");
+            assert_eq!(
+                mentions[0]["timestamp"], "2026-10-01T12:01:00.000Z",
+                "{stage}"
+            );
+            assert_eq!(mentions[0]["proof"]["valid"], true, "{stage}");
+            assert_eq!(mentions[0]["data"]["target"], me.as_str(), "{stage}");
+        }
     };
-    only_the_writers_mention("as the links arrived");
+    only_the_writers_mention("as the links arrived").await;
 
     let kept = perspective
         .get_links(&crate::types::LinkQuery::default())
         .await
         .unwrap();
     perspective.sync_existing_links_to_sparql(&kept).unwrap();
-    only_the_writers_mention("after a rebuild from the kept links");
+    only_the_writers_mention("after a rebuild from the kept links").await;
 }
 
 // ── Containers (#1446): We's shapes as We writes them ───────────────────────
