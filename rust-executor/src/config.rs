@@ -240,6 +240,14 @@ impl Ad4mConfig {
         }
     }
 
+    /// The data folder: `app_data_path`, else the default `prepare` fills in.
+    pub fn data_folder(&self) -> PathBuf {
+        self.app_data_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(utils::ad4m_data_directory)
+    }
+
     pub fn prepare(&mut self) {
         // An empty credential is no credential: an empty environment variable
         // (a compose `${VAR}` with `VAR` unset) must not become a credential
@@ -293,7 +301,7 @@ impl Ad4mConfig {
 
         if self.app_data_path.is_none() {
             self.app_data_path = Some(
-                utils::ad4m_data_directory()
+                self.data_folder()
                     .into_os_string()
                     .into_string()
                     .expect("Could not convert data path to string"),

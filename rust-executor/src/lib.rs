@@ -335,6 +335,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
     });
 
+    // One executor per data folder, before anything in it is opened, and before the log
+    // rotation: a refused start must not rename the running executor's log. It reports to
+    // stdout.
+    if let Err(e) = exit::hold_data_folder(&config.data_folder()) {
+        crate::logging::init_cli_logging(config.log_config.as_ref());
+        return refused_start(e);
+    }
+
     // Logging: to rotated files in `log_dir` when set, else to stdout. Respects RUST_LOG.
     match config.log_dir.as_deref() {
         Some(dir) => {
@@ -357,16 +365,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     if let Err(message) = config.check_admin_credential() {
         error!("{}", message);
         panic!("{}", message);
-    }
-
-    // One executor per data folder, before anything in it is opened.
-    if let Err(e) = exit::hold_data_folder(std::path::Path::new(
-        config
-            .app_data_path
-            .as_ref()
-            .expect("prepare() sets the app data path"),
-    )) {
-        return refused_start(e);
     }
 
     // The wallet's keys are in this process's memory once unlocked.

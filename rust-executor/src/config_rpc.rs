@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use ts_rs::TS;
 
-use crate::config_file::ExecutorConfigFile;
+use crate::config_file::{ExecutorConfigFile, ExecutorSecrets};
 
 /// Who may write a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -298,10 +298,14 @@ fn remove_at(values: &mut Map<String, Value>, key: &str) {
     object.remove(*last);
 }
 
-/// Whether the executor starts with `values` as its config file.
+/// Whether the executor starts with `values` as its config file: the parse and the mapping to
+/// `Ad4mConfig` the next start runs, with the secrets of this process's environment.
 fn starts_with(values: &Map<String, Value>) -> Result<(), String> {
     let text = serde_json::to_string(values).map_err(|e| e.to_string())?;
-    ExecutorConfigFile::parse(&text)
+    let file = ExecutorConfigFile::parse(&text).map_err(|e| e.to_string())?;
+    let secrets = ExecutorSecrets::from_env(|name| std::env::var(name).ok(), &file)
+        .map_err(|e| e.to_string())?;
+    file.to_ad4m_config(&secrets)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -641,6 +645,43 @@ mod tests {
         let values = read_values(&path).unwrap();
         assert_eq!(values.get("mcp_port"), Some(&json!(3001)));
         assert!(!values.contains_key("mcp_enabled"));
+    }
+
+    /// A value that parses but fails the mapping the next start runs is refused `invalid`:
+    /// with TLS on and no `tls_port`, the TLS port is `port + 1`, so port 65535 cannot start.
+    #[tokio::test]
+    async fn a_value_that_parses_but_cannot_start_is_invalid() {
+        let (_dir, path) = config_file(
+            r#"{"port": 12000, "multi_user_config": {"enabled": false, "tls_config":
+                {"enabled": true, "cert_file_path": "cert.pem", "key_file_path": "key.pem"}}}"#,
+        );
+        let result = set_config(
+            Some(&path),
+            &[],
+            true,
+            set(json!({ "port": 65535 })),
+            VALIDATOR_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reasons(&result),
+            vec![("port".to_string(), RefusalReason::Invalid)]
+        );
+        assert!(result.refused[0].detail.is_some());
+        assert_eq!(read_values(&path).unwrap().get("port"), Some(&json!(12000)));
+
+        let result = set_config(
+            Some(&path),
+            &[],
+            true,
+            set(json!({ "port": 12100 })),
+            VALIDATOR_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert!(result.refused.is_empty(), "{result:?}");
+        assert_eq!(read_values(&path).unwrap().get("port"), Some(&json!(12100)));
     }
 
     /// A key's validator runs before the write: a value it refuses is refused `invalid` with

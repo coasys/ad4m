@@ -286,18 +286,24 @@ fn closing_stdin_with_watch_stdin_stops_the_executor_with_0() {
 }
 
 /// One executor per data folder: a second on the same folder exits 79 and the first keeps
-/// serving.
+/// serving. With the same `--log-dir`, the second leaves the first's log in place: it reports
+/// to stdout and rotates nothing.
 #[test]
 fn a_second_executor_on_the_same_data_folder_exits_79_and_the_first_keeps_running() {
     let _serial = serial();
     let folder = DataFolder::new();
+    let logs = folder.file("logs");
+    let log_dir = ["--log-dir", logs.to_str().unwrap()];
     let first_port = free_port();
-    let args = run_args(&folder, first_port, &["--insecure-no-admin-credential"]);
+    let mut flags = vec!["--insecure-no-admin-credential"];
+    flags.extend(log_dir);
+    let args = run_args(&folder, first_port, &flags);
     let mut first = spawn(&folder, first_port, args, Stdio::null(), "first.log", &[]);
     first.ready();
+    let live = logs.join("executor-0.log");
 
     let second_port = free_port();
-    let args = run_args(&folder, second_port, &["--insecure-no-admin-credential"]);
+    let args = run_args(&folder, second_port, &flags);
     let mut second = spawn(&folder, second_port, args, Stdio::null(), "second.log", &[]);
     let status = second.exit_within(EXIT);
     assert_eq!(code(status), Some(79), "{}", second.output());
@@ -309,6 +315,13 @@ fn a_second_executor_on_the_same_data_folder_exits_79_and_the_first_keeps_runnin
 
     assert!(first.running(), "{}", first.output());
     assert!(health(first_port), "{}", first.output());
+    // The first run started on an empty log folder: an `executor-1.log` is a rotation.
+    assert!(
+        !logs.join("executor-1.log").exists(),
+        "the refused start rotated the log"
+    );
+    let first_log = std::fs::read_to_string(&live).unwrap();
+    assert!(!first_log.contains("another executor"), "{first_log}");
 }
 
 /// A start the executor refuses exits 78, whether the CLI refuses it (the custody channel with
