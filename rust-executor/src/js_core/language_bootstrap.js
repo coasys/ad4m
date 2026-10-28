@@ -313,6 +313,7 @@ async function initLanguage(contextJson) {
         createSignedExpression: (data) => AGENT.createSignedExpression(data),
         sign: (payload) => AGENT.sign(payload),
         signStringHex: (payload) => AGENT.signStringHex(payload),
+        openSealed: (sealed) => AGENT.openSealed(sealed),
         getAllLocalUserDIDs: () => AGENT.getAllLocalUserDIDs(),
         createSignedExpressionForUser: (userEmail, data) => AGENT.createSignedExpressionForUser(userEmail, data),
         didForUser: (userEmail) => AGENT.didForUser(userEmail),
