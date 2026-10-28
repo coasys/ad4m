@@ -21,6 +21,17 @@ import { e11Outsider } from "../helpers/sfu/e2e/scenarios/e11-outsider.js";
 import { e12Topology } from "../helpers/sfu/e2e/scenarios/e12-topology.js";
 import { e13Mesh } from "../helpers/sfu/e2e/scenarios/e13-mesh.js";
 import { e14AdvertisedAddress } from "../helpers/sfu/e2e/scenarios/e14-advertised-address.js";
+import { e19TabOpensSpace } from "../helpers/sfu/e2e/scenarios/e19-tab-opens-space.js";
+import { e20TabTakesOver } from "../helpers/sfu/e2e/scenarios/e20-tab-takes-over.js";
+import { e21TabGivesUp } from "../helpers/sfu/e2e/scenarios/e21-tab-gives-up.js";
+import { e22TwoDevices } from "../helpers/sfu/e2e/scenarios/e22-two-devices.js";
+import type { Scenario } from "../helpers/sfu/scenario.js";
+
+/** `E2E_ONLY=e19,e21` runs only those scenarios; unset, all of them. */
+const only = process.env.E2E_ONLY?.split(",").map((id) => id.trim()).filter(Boolean);
+const scenario = (s: Scenario, timeoutMs: number) => {
+  if (!only?.length || only.includes(s.id)) sfuScenario(s, timeoutMs);
+};
 
 /**
  * Calls end to end: managed users in real neighbourhoods, each calling
@@ -109,18 +120,22 @@ describe("SFU: end to end through the SDK", function () {
     }
   });
 
-  sfuScenario(e1TwoUsers, 600_000);
-  sfuScenario(e2ManyUsers, 1_200_000);
-  sfuScenario(e3TrackChanges, 900_000);
-  sfuScenario(e4JoinStorms, 1_200_000);
-  sfuScenario(e5AbruptLoss, 900_000);
-  sfuScenario(e6Network, 900_000);
-  sfuScenario(e7ExecutorRestart, 900_000);
-  sfuScenario(e8Capacity, 1_200_000);
-  sfuScenario(e9Simulcast, 600_000);
-  sfuScenario(e10Data, 600_000);
-  sfuScenario(e11Outsider, 600_000);
-  sfuScenario(e12Topology, 900_000);
-  sfuScenario(e13Mesh, 900_000);
-  sfuScenario(e14AdvertisedAddress, 600_000);
+  scenario(e1TwoUsers, 600_000);
+  scenario(e2ManyUsers, 1_200_000);
+  scenario(e3TrackChanges, 900_000);
+  scenario(e4JoinStorms, 1_200_000);
+  scenario(e5AbruptLoss, 900_000);
+  scenario(e6Network, 900_000);
+  scenario(e7ExecutorRestart, 900_000);
+  scenario(e8Capacity, 1_200_000);
+  scenario(e9Simulcast, 600_000);
+  scenario(e10Data, 600_000);
+  scenario(e11Outsider, 600_000);
+  scenario(e12Topology, 900_000);
+  scenario(e13Mesh, 900_000);
+  scenario(e14AdvertisedAddress, 600_000);
+  scenario(e19TabOpensSpace, 600_000);
+  scenario(e20TabTakesOver, 600_000);
+  scenario(e21TabGivesUp, 600_000);
+  scenario(e22TwoDevices, 600_000);
 });

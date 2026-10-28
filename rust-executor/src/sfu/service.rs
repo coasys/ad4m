@@ -33,8 +33,11 @@ pub const MAX_ROOMS_PER_NEIGHBOURHOOD: usize = 16;
 /// An empty room — one `startRoom` opened that nobody joined — closes after
 /// this long. A room whose last participant leaves closes at once.
 pub const EMPTY_ROOM_TTL: Duration = Duration::from_secs(600);
-/// Most calls one DID is in at once on this node.
+/// Most calls one DID is in at once on this node. Within one call, each
+/// device is a session of its own, up to `room::MAX_DEVICES_PER_DID`.
 pub const MAX_CALLS_PER_DID: usize = 4;
+/// Longest device id a join may name: an opaque id, not a description.
+const MAX_DEVICE_ID_LEN: usize = 128;
 /// Upper bound on `maxMeshParticipants`. A room's SFU capacity is four times
 /// this, so it also bounds every room.
 pub const MAX_MESH_PARTICIPANTS: u32 = 32;
@@ -132,7 +135,8 @@ pub struct SfuService {
     /// uniform and the redirect logic falls through to "no peers".
     gossip: Arc<dyn CascadeGossip>,
     /// Local subscriber quality preferences tracked for cascade
-    /// aggregation.  Maps `room_id_str → (subscriber_did → preference)`.
+    /// aggregation.  Maps `room_id_str → (participant_id → preference)`:
+    /// one per session, so two devices of one agent each count.
     /// When any subscriber changes preference, the aggregate (max) gets
     /// gossiped to pipe peers so the sender node forwards the correct
     /// simulcast layer.
@@ -780,7 +784,7 @@ impl SfuService {
     /// from media.
     async fn publish_roster(&self, room_id: &RoomId) {
         let _order = self.roster_order.lock().await;
-        let mut participants: Vec<String> = self
+        let mut participants: Vec<super::SfuRosterParticipant> = self
             .rooms
             .read()
             .await
@@ -788,12 +792,14 @@ impl SfuService {
             .map(|room| {
                 room.participants
                     .values()
-                    .map(|p| p.agent_did.clone())
+                    .map(|p| super::SfuRosterParticipant {
+                        agent_did: p.agent_did.clone(),
+                        participant_id: p.id.to_string(),
+                    })
                     .collect()
             })
             .unwrap_or_default();
         participants.sort();
-        participants.dedup();
         let roster = super::SfuRoomRoster {
             neighbourhood_url: room_id.neighbourhood_url.clone(),
             room_name: room_id.room_name.clone(),
@@ -937,18 +943,27 @@ impl SfuService {
     /// client reaches only its own executor and never sets it: it is served
     /// here or refused with `RoomFull`.
     ///
-    /// A DID already in the room is refused (`AlreadyJoined`): replacing its
-    /// session would let two windows of one agent evict each other. A
-    /// reconnecting client leaves first, and a session whose connection died
-    /// is freed by the dead-peer sweep.
+    /// One session per device: `device_id` names the device the caller joins
+    /// from. A session of the same DID from the same device (another browser
+    /// tab) is replaced — the newest join wins: its peer is dropped and it is
+    /// told so (`sfu-session-replaced`). A session from another device stays,
+    /// as another participant. A reconnecting client joins from its own
+    /// device, so it replaces its dead session rather than being refused.
     pub async fn call_join(
         &self,
         neighbourhood_url: &str,
         room_name: &str,
         agent_did: &str,
+        device_id: &str,
         sdp_offer_json: &str,
         accept_redirect: bool,
     ) -> Result<CallSessionInfo, String> {
+        if device_id.is_empty() || device_id.len() > MAX_DEVICE_ID_LEN {
+            return Err(format!(
+                "deviceId must be 1 to {} characters",
+                MAX_DEVICE_ID_LEN
+            ));
+        }
         let room_id = RoomId::new(neighbourhood_url, room_name);
         let pid = ParticipantId::next();
 
@@ -999,7 +1014,7 @@ impl SfuService {
         // SDP and RTC succeeded — create the room if needed and register
         // the participant in a single write-lock scope, so the capacity and
         // cap checks hold against concurrent joins.
-        let created = {
+        let (created, replaced) = {
             let mut rooms = self.rooms.write().await;
             let created = rooms.get_room(&room_id).is_none();
             if created {
@@ -1008,7 +1023,7 @@ impl SfuService {
             let other_calls = rooms
                 .list_rooms()
                 .iter()
-                .filter(|r| r.id != room_id && r.participant_id_for_did(agent_did).is_some())
+                .filter(|r| r.id != room_id && r.has_did(agent_did))
                 .count();
             if other_calls >= MAX_CALLS_PER_DID {
                 return Err(format!(
@@ -1022,13 +1037,37 @@ impl SfuService {
             let room = rooms
                 .get_room_mut(&room_id)
                 .ok_or_else(|| RoomError::NotFound.to_string())?;
-            room.add_participant(pid.clone(), agent_did.to_string())
+            let replaced = room
+                .add_participant(pid.clone(), agent_did.to_string(), device_id.to_string())
                 .map_err(|e| e.to_string())?;
             if accept_redirect {
                 room.mark_redirectable(&pid);
             }
-            created
+            (created, replaced)
         };
+
+        // The replaced session is out of the room: drop its peer and tell it.
+        if let Some(old) = &replaced {
+            info!(
+                "SFU: {} joined {} again from the same device; replacing {} with {}",
+                agent_did, room_id, old, pid
+            );
+            let _ = self
+                .server
+                .command_tx
+                .send(SfuCommand::RemovePeer(old.clone()))
+                .await;
+            self.forget_quality_preference(&room_id.to_string(), old)
+                .await;
+            crate::pubsub::get_global_pubsub().await.publish_event(
+                crate::events::Event::sfu_session_replaced(&super::SfuSessionReplaced {
+                    target_did: agent_did.to_string(),
+                    neighbourhood_url: neighbourhood_url.to_string(),
+                    room_name: room_name.to_string(),
+                    participant_id: old.to_string(),
+                }),
+            );
+        }
 
         // Create the SFU peer and send it to the event loop
         let peer = SfuPeer::new(
@@ -1064,7 +1103,7 @@ impl SfuService {
                     .participants
                     .values()
                     .filter(|p| p.id != pid)
-                    .map(|p| format!("{}:{}", p.id.0, p.agent_did))
+                    .map(|p| format!("{}:{}", p.id, p.agent_did))
                     .collect();
                 (mapping, room.participant_count() as u32)
             } else {
@@ -1085,21 +1124,25 @@ impl SfuService {
         })
     }
 
-    /// Leave a call. `false` when this agent is not in it (any more).
+    /// Leave the call session `participant_id`. `false` when it is not in
+    /// the call (any more) or is not `agent_did`'s: a leave never ends
+    /// another session, not even another of the same agent.
     pub async fn call_leave(
         &self,
         neighbourhood_url: &str,
         room_name: &str,
         agent_did: &str,
+        participant_id: &str,
     ) -> Result<bool, String> {
         let room_id = RoomId::new(neighbourhood_url, room_name);
         let (pid, local_count) = {
             let mut rooms = self.rooms.write().await;
-            // Already gone — the server dropped the connection first, or the
-            // room ended with it: there is nothing to leave.
+            // Already gone — the server dropped the connection first, the
+            // room ended with it, or a later join replaced it: there is
+            // nothing to leave.
             let Some(pid) = rooms
-                .get_room_mut(&room_id)
-                .and_then(|room| room.participant_id_for_did(agent_did))
+                .get_room(&room_id)
+                .and_then(|room| room.session_of(participant_id, agent_did))
             else {
                 return Ok(false);
             };
@@ -1113,10 +1156,10 @@ impl SfuService {
         let _ = self
             .server
             .command_tx
-            .send(SfuCommand::RemovePeer(pid))
+            .send(SfuCommand::RemovePeer(pid.clone()))
             .await;
 
-        self.after_participant_left(&room_id, agent_did, local_count)
+        self.after_participant_left(&room_id, &pid, local_count)
             .await;
         Ok(true)
     }
@@ -1139,7 +1182,7 @@ impl SfuService {
             "SFU: participant {} ({}) in {} died, freeing its slot",
             dead.participant_id, dead.agent_did, dead.room_id
         );
-        self.after_participant_left(&dead.room_id, &dead.agent_did, local_count)
+        self.after_participant_left(&dead.room_id, &dead.participant_id, local_count)
             .await;
     }
 
@@ -1159,7 +1202,12 @@ impl SfuService {
 
     /// Gossip and preference bookkeeping after a participant left, by
     /// leaving or by dying.
-    async fn after_participant_left(&self, room_id: &RoomId, agent_did: &str, local_count: u32) {
+    async fn after_participant_left(
+        &self,
+        room_id: &RoomId,
+        pid: &ParticipantId,
+        local_count: u32,
+    ) {
         // Always re-announce the fresh local count (lets healthy peers
         // refresh their view).  If the room is now empty on this node,
         // also send a directed Leave so peers prune their
@@ -1180,26 +1228,24 @@ impl SfuService {
             }
         }
 
-        // Clean up local quality preference tracking and re-propagate
-        // the aggregate to pipe peers (the max may have changed). Kept when
-        // the DID is back in the room already: a fast rejoin's preference
-        // is the new session's.
-        let rejoined = self
-            .rooms
-            .read()
-            .await
-            .get_room(room_id)
-            .is_some_and(|room| room.participant_id_for_did(agent_did).is_some());
-        if !rejoined {
+        // Clean up the session's quality preference and re-propagate the
+        // aggregate to pipe peers (the max may have changed).
+        self.forget_quality_preference(&room_key, pid).await;
+    }
+
+    /// Drop the quality preference of a session that left `room_key`, and
+    /// re-propagate the room's aggregate.
+    async fn forget_quality_preference(&self, room_key: &str, pid: &ParticipantId) {
+        {
             let mut prefs = self.local_quality_preferences.write().await;
-            if let Some(room_prefs) = prefs.get_mut(&room_key) {
-                room_prefs.remove(agent_did);
+            if let Some(room_prefs) = prefs.get_mut(room_key) {
+                room_prefs.remove(&pid.to_string());
                 if room_prefs.is_empty() {
-                    prefs.remove(&room_key);
+                    prefs.remove(room_key);
                 }
             }
         }
-        self.propagate_quality_preference(&room_key).await;
+        self.propagate_quality_preference(room_key).await;
     }
 
     /// Consume an SDP answer that the client produced in response to a
@@ -1211,16 +1257,12 @@ impl SfuService {
         neighbourhood_url: &str,
         room_name: &str,
         agent_did: &str,
+        participant_id: &str,
         sdp_answer_json: &str,
     ) -> Result<bool, String> {
-        let room_id = RoomId::new(neighbourhood_url, room_name);
-        let rooms = self.rooms.read().await;
-        let room = rooms
-            .get_room(&room_id)
-            .ok_or_else(|| RoomError::NotFound.to_string())?;
-        let pid = room
-            .participant_id_for_did(agent_did)
-            .ok_or_else(|| "Agent not in room".to_string())?;
+        let pid = self
+            .own_session(neighbourhood_url, room_name, agent_did, participant_id)
+            .await?;
         let _ = self
             .server
             .command_tx
@@ -1241,16 +1283,12 @@ impl SfuService {
         neighbourhood_url: &str,
         room_name: &str,
         agent_did: &str,
+        participant_id: &str,
         candidate_sdp: &str,
     ) -> Result<bool, String> {
-        let room_id = RoomId::new(neighbourhood_url, room_name);
-        let rooms = self.rooms.read().await;
-        let room = rooms
-            .get_room(&room_id)
-            .ok_or_else(|| RoomError::NotFound.to_string())?;
-        let pid = room
-            .participant_id_for_did(agent_did)
-            .ok_or_else(|| "Agent not in room".to_string())?;
+        let pid = self
+            .own_session(neighbourhood_url, room_name, agent_did, participant_id)
+            .await?;
         self.server
             .command_tx
             .send(SfuCommand::AddIceCandidate {
@@ -1266,23 +1304,20 @@ impl SfuService {
     /// The data is written to their matching data channel (by label) if
     /// one exists, and always published to the `sfu-data` events_ws
     /// topic so non-WebRTC subscribers can receive it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_data(
         &self,
         neighbourhood_url: &str,
         room_name: &str,
         agent_did: &str,
+        participant_id: &str,
         channel_label: &str,
         data: Vec<u8>,
         binary: bool,
     ) -> Result<bool, String> {
-        let room_id = RoomId::new(neighbourhood_url, room_name);
-        let rooms = self.rooms.read().await;
-        let room = rooms
-            .get_room(&room_id)
-            .ok_or_else(|| RoomError::NotFound.to_string())?;
-        let pid = room
-            .participant_id_for_did(agent_did)
-            .ok_or_else(|| "Agent not in room".to_string())?;
+        let pid = self
+            .own_session(neighbourhood_url, room_name, agent_did, participant_id)
+            .await?;
         self.server
             .command_tx
             .send(SfuCommand::RelayData {
@@ -1327,18 +1362,23 @@ impl SfuService {
         }
     }
 
-    /// Whether `agent_did` is in the call `room_name` of `neighbourhood_url`
-    /// on this node.
-    pub async fn is_participant(
+    /// The session `participant_id` of `agent_did` in the call, or why there
+    /// is none: the room is gone, or the session is not in it (any more) or
+    /// is another agent's. A call about a session never falls back to
+    /// another session of the same agent.
+    async fn own_session(
         &self,
         neighbourhood_url: &str,
         room_name: &str,
         agent_did: &str,
-    ) -> bool {
+        participant_id: &str,
+    ) -> Result<ParticipantId, String> {
         let rooms = self.rooms.read().await;
-        rooms
+        let room = rooms
             .get_room(&RoomId::new(neighbourhood_url, room_name))
-            .is_some_and(|room| room.participant_id_for_did(agent_did).is_some())
+            .ok_or_else(|| RoomError::NotFound.to_string())?;
+        room.session_of(participant_id, agent_did)
+            .ok_or_else(|| format!("Session {} is not in this call", participant_id))
     }
 
     /// The neighbourhood each local participant's room belongs to, keyed by
@@ -1379,6 +1419,7 @@ impl SfuService {
         neighbourhood_url: &str,
         room_name: &str,
         agent_did: &str,
+        participant_id: &str,
         preference: &str,
     ) -> Result<bool, String> {
         // Validate preference
@@ -1393,27 +1434,18 @@ impl SfuService {
         }
 
         let room_id = RoomId::new(neighbourhood_url, room_name);
-        let rooms = self.rooms.read().await;
-
-        let room = rooms
-            .get_room(&room_id)
-            .ok_or_else(|| RoomError::NotFound.to_string())?;
-
-        let pid = room
-            .participant_id_for_did(agent_did)
-            .ok_or_else(|| "Agent not in room".to_string())?;
+        let pid = self
+            .own_session(neighbourhood_url, room_name, agent_did, participant_id)
+            .await?;
 
         self.server
             .command_tx
             .send(SfuCommand::SetQualityPreference {
-                participant_id: pid,
+                participant_id: pid.clone(),
                 preference: preference.to_string(),
             })
             .await
             .map_err(|e| format!("Failed to send quality preference command: {}", e))?;
-
-        // Drop rooms lock before acquiring other locks.
-        drop(rooms);
 
         // Track this preference for cascade aggregation and propagate.
         let room_key = room_id.to_string();
@@ -1422,7 +1454,7 @@ impl SfuService {
             prefs
                 .entry(room_key.clone())
                 .or_default()
-                .insert(agent_did.to_string(), preference.to_string());
+                .insert(pid.to_string(), preference.to_string());
         }
 
         self.propagate_quality_preference(&room_key).await;
@@ -1564,6 +1596,7 @@ impl SfuService {
                 .participants
                 .values()
                 .map(|p| SfuParticipantInfo {
+                    participant_id: p.id.to_string(),
                     agent_did: p.agent_did.clone(),
                     has_audio: p.has_audio,
                     has_video: p.has_video,
@@ -1578,7 +1611,255 @@ impl SfuService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::Topic;
     use crate::sfu::IceServer;
+    use crate::sfu::NoopGossip;
+
+    /// A service of the test's own. Registering the global one would leave
+    /// later tests a server whose runtime has ended.
+    async fn test_service() -> SfuService {
+        let server = SfuServer::start(SfuServerConfig::default()).await.unwrap();
+        SfuService {
+            cascade_manager: Arc::new(RwLock::new(CascadeManager::new(
+                "did:node".into(),
+                server.local_addr,
+                8,
+            ))),
+            reachability: server.reachability.clone(),
+            server,
+            rooms: Arc::new(RwLock::new(RoomManager::new())),
+            gossip: Arc::new(NoopGossip::new("did:node".into(), 8)),
+            local_quality_preferences: RwLock::new(HashMap::new()),
+            preferred_node: None,
+            cascade_peer_dids: vec![],
+            roster_order: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// A browser's offer: one audio section, as a caller sends to join.
+    fn offer() -> String {
+        let mut caller = str0m::Rtc::builder().build(std::time::Instant::now());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            str0m::media::MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        serde_json::to_string(&change.apply().unwrap().0).unwrap()
+    }
+
+    async fn join(svc: &SfuService, url: &str, did: &str, device: &str) -> String {
+        svc.call_join(url, "r", did, device, &offer(), false)
+            .await
+            .unwrap()
+            .participant_id
+    }
+
+    /// The sessions in room `r` of `url`, as `(participant id, DID)`, sorted.
+    async fn sessions(svc: &SfuService, url: &str) -> Vec<(String, String)> {
+        let mut sessions: Vec<(String, String)> = svc
+            .list_rooms()
+            .await
+            .into_iter()
+            .filter(|r| r.neighbourhood_url == url)
+            .flat_map(|r| r.participants)
+            .map(|p| (p.participant_id, p.agent_did))
+            .collect();
+        sessions.sort();
+        sessions
+    }
+
+    /// The participant ids the SFU event loop holds a quality preference for.
+    async fn peers_with_preferences(svc: &SfuService) -> Vec<String> {
+        let mut pids: Vec<String> = svc
+            .get_quality_preferences()
+            .await
+            .into_iter()
+            .map(|(pid, _)| pid)
+            .collect();
+        pids.sort();
+        pids
+    }
+
+    /// Every event published so far on `events`.
+    fn drain(
+        events: &mut tokio::sync::broadcast::Receiver<Arc<crate::events::Event>>,
+    ) -> Vec<Arc<crate::events::Event>> {
+        std::iter::from_fn(|| events.try_recv().ok()).collect()
+    }
+
+    /// The payloads of the events of `topic` about `url` among `events`.
+    fn published(
+        events: &[Arc<crate::events::Event>],
+        topic: Topic,
+        url: &str,
+    ) -> Vec<serde_json::Value> {
+        events
+            .iter()
+            .filter(|e| e.topic == topic && e.payload["neighbourhoodUrl"] == url)
+            .map(|e| e.payload.clone())
+            .collect()
+    }
+
+    /// Another tab on the same device joins: the newest join wins. The old
+    /// session leaves the room, its peer leaves the SFU, and it is told.
+    #[tokio::test]
+    async fn a_join_from_the_same_device_replaces_the_session_and_tells_it() {
+        let svc = test_service().await;
+        let url = "neighbourhood://same-device";
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        let first = join(&svc, url, "did:a", "laptop").await;
+        svc.call_set_quality_preference(url, "r", "did:a", &first, "low")
+            .await
+            .unwrap();
+        assert_eq!(peers_with_preferences(&svc).await, vec![first.clone()]);
+
+        let second = join(&svc, url, "did:a", "laptop").await;
+
+        assert_ne!(first, second);
+        assert_eq!(
+            sessions(&svc, url).await,
+            vec![(second.clone(), "did:a".to_string())]
+        );
+        assert!(
+            peers_with_preferences(&svc).await.is_empty(),
+            "the replaced peer left the SFU"
+        );
+        assert!(
+            svc.local_quality_preferences.read().await.is_empty(),
+            "the replaced session's preference no longer counts towards the cascade's"
+        );
+        let seen = drain(&mut events);
+        let replaced = published(&seen, Topic::SfuSessionReplaced, url);
+        assert_eq!(replaced.len(), 1, "{replaced:?}");
+        assert_eq!(replaced[0]["participantId"], first.as_str());
+        assert_eq!(replaced[0]["targetDid"], "did:a");
+        let rosters = published(&seen, Topic::SfuRoomRoster, url);
+        assert_eq!(
+            rosters.last().unwrap()["participants"],
+            serde_json::json!([{ "agentDid": "did:a", "participantId": second }])
+        );
+        // The old id acts on nothing any more: a late leave from the old tab
+        // cannot end the new one.
+        assert!(!svc.call_leave(url, "r", "did:a", &first).await.unwrap());
+        assert_eq!(sessions(&svc, url).await.len(), 1);
+    }
+
+    /// A phone and a laptop: two participants, listed apart in the roster,
+    /// and leaving on one leaves the other in the call.
+    #[tokio::test]
+    async fn the_same_did_on_another_device_joins_beside_it() {
+        let svc = test_service().await;
+        let url = "neighbourhood://two-devices";
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        let laptop = join(&svc, url, "did:a", "laptop").await;
+        let phone = join(&svc, url, "did:a", "phone").await;
+
+        let mut both = vec![
+            (laptop.clone(), "did:a".to_string()),
+            (phone.clone(), "did:a".to_string()),
+        ];
+        both.sort();
+        assert_eq!(sessions(&svc, url).await, both);
+        let seen = drain(&mut events);
+        assert!(published(&seen, Topic::SfuSessionReplaced, url).is_empty());
+        let rosters = published(&seen, Topic::SfuRoomRoster, url);
+        let listed: Vec<&str> = rosters.last().unwrap()["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["participantId"].as_str().unwrap())
+            .collect();
+        assert_eq!(listed.len(), 2, "{rosters:?}");
+        assert!(listed.contains(&laptop.as_str()) && listed.contains(&phone.as_str()));
+
+        assert!(svc.call_leave(url, "r", "did:a", &phone).await.unwrap());
+        assert_eq!(
+            sessions(&svc, url).await,
+            vec![(laptop, "did:a".to_string())]
+        );
+    }
+
+    /// A call about a session acts on that session only: never on another
+    /// session of the same DID, never on another DID's.
+    #[tokio::test]
+    async fn per_session_calls_touch_only_the_session_they_name() {
+        let svc = test_service().await;
+        let url = "neighbourhood://per-session";
+        let laptop = join(&svc, url, "did:a", "laptop").await;
+        let phone = join(&svc, url, "did:a", "phone").await;
+        let bobs = join(&svc, url, "did:b", "laptop").await;
+        let everyone = sessions(&svc, url).await;
+
+        // Someone else's session, or one that does not exist.
+        for (did, pid) in [
+            ("did:a", bobs.as_str()),
+            ("did:b", laptop.as_str()),
+            ("did:a", "P0"),
+            ("did:a", ""),
+        ] {
+            assert!(
+                !svc.call_leave(url, "r", did, pid).await.unwrap(),
+                "{did} {pid}"
+            );
+            assert!(svc
+                .call_answer_server_offer(url, "r", did, pid, "{}")
+                .await
+                .is_err());
+            assert!(svc
+                .add_ice_candidate(
+                    url,
+                    "r",
+                    did,
+                    pid,
+                    "candidate:1 1 UDP 1 127.0.0.1 9 typ host"
+                )
+                .await
+                .is_err());
+            assert!(svc
+                .call_set_quality_preference(url, "r", did, pid, "low")
+                .await
+                .is_err());
+            assert!(svc
+                .send_data(url, "r", did, pid, "chat", b"hi".to_vec(), false)
+                .await
+                .is_err());
+        }
+        assert_eq!(sessions(&svc, url).await, everyone);
+        assert!(peers_with_preferences(&svc).await.is_empty());
+
+        // The phone's own call reaches the phone, not the laptop.
+        svc.call_set_quality_preference(url, "r", "did:a", &phone, "low")
+            .await
+            .unwrap();
+        assert_eq!(peers_with_preferences(&svc).await, vec![phone.clone()]);
+        assert!(svc.call_leave(url, "r", "did:a", &phone).await.unwrap());
+        let mut rest = vec![(laptop, "did:a".to_string()), (bobs, "did:b".to_string())];
+        rest.sort();
+        assert_eq!(sessions(&svc, url).await, rest);
+    }
+
+    #[tokio::test]
+    async fn a_join_names_its_device() {
+        let svc = test_service().await;
+        for device in [String::new(), "d".repeat(MAX_DEVICE_ID_LEN + 1)] {
+            let refused = svc
+                .call_join(
+                    "neighbourhood://device",
+                    "r",
+                    "did:a",
+                    &device,
+                    &offer(),
+                    false,
+                )
+                .await
+                .unwrap_err();
+            assert!(refused.contains("deviceId"), "{refused}");
+        }
+        assert!(sessions(&svc, "neighbourhood://device").await.is_empty());
+    }
 
     fn config(mode: &str) -> SfuConfig {
         SfuConfig {

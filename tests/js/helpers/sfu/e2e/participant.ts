@@ -16,36 +16,33 @@ export class Participant {
   private next = 1;
   private pending = new Map<number, { resolve(v: unknown): void; reject(e: Error): void }>();
 
-  private constructor(readonly user: WorldUser, private proc: ChildProcess) {
+  /** `name` is the user's name, or `user:client` for another client of the same user (a second tab, a phone). */
+  private constructor(readonly user: WorldUser, readonly name: string, private proc: ChildProcess) {
     proc.on("message", (message: any) => {
       const waiter = this.pending.get(message.id);
       if (!waiter) return;
       this.pending.delete(message.id);
       if (message.ok) waiter.resolve(message.result);
-      else waiter.reject(new Error(`${user.name}: ${message.error}`));
+      else waiter.reject(new Error(`${name}: ${message.error}`));
     });
     proc.on("exit", (code, signal) => {
       this.exit = { code, signal };
-      for (const waiter of this.pending.values()) waiter.reject(new Error(`${user.name}'s process ended (${signal ?? code})`));
+      for (const waiter of this.pending.values()) waiter.reject(new Error(`${name}'s process ended (${signal ?? code})`));
       this.pending.clear();
     });
   }
 
-  static async start(user: WorldUser): Promise<Participant> {
+  static async start(user: WorldUser, name = user.name): Promise<Participant> {
     const proc = fork(CHILD, [], {
       execArgv: process.execArgv,
-      env: { ...process.env, E2E_WHO: user.name },
+      env: { ...process.env, E2E_WHO: name },
       stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
     await new Promise<void>((resolve, reject) => {
       proc.once("message", (message: any) => (message?.ready ? resolve() : reject(new Error("unexpected first message"))));
-      proc.once("exit", (code, signal) => reject(new Error(`${user.name}'s process ended before it was ready (${signal ?? code})`)));
+      proc.once("exit", (code, signal) => reject(new Error(`${name}'s process ended before it was ready (${signal ?? code})`)));
     });
-    return new Participant(user, proc);
-  }
-
-  get name(): string {
-    return this.user.name;
+    return new Participant(user, name, proc);
   }
 
   get did(): string {
@@ -74,6 +71,7 @@ export class Participant {
   }
 
   join(options: JoinOptions): Promise<void> { return this.send({ kind: "join", options }); }
+  open(options: JoinOptions): Promise<void> { return this.send({ kind: "open", options }); }
   rejoin(): Promise<void> { return this.send({ kind: "rejoin" }); }
   leave(): Promise<void> { return this.send({ kind: "leave" }); }
   mute(media: "audio" | "video"): Promise<void> { return this.send({ kind: "mute", media }); }
