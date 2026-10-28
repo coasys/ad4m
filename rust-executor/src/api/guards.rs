@@ -197,6 +197,11 @@ impl Owner {
 /// (`anonymous_access_tests` pins it).
 pub const OPERATOR_ONLY: &str = "Admin credential required";
 
+/// What a method registered `.local_only()` answers every caller but the operator on this
+/// machine (`MethodFlags::local_only`), the code first as the other refusals carry theirs.
+pub const LOCAL_ONLY: &str = "local-only: only the operator on this machine may call this method \
+                              (the admin credential on a loopback listener)";
+
 /// The `uuid` field of the params: where most perspective methods name their perspective.
 pub const UUID_PARAM: IdParam = IdParam::Field(&["uuid"]);
 

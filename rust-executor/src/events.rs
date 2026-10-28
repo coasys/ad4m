@@ -42,11 +42,12 @@ pub enum Topic {
     SfuRoomRoster,
     FlowStateChanged,
     IdentityFork,
+    ConfigChanged,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 25] = [
+    pub const ALL: [Topic; 26] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -72,6 +73,7 @@ impl Topic {
         Topic::SfuRoomRoster,
         Topic::FlowStateChanged,
         Topic::IdentityFork,
+        Topic::ConfigChanged,
     ];
 
     /// The event type on the wire: the `type` field of the socket message and the key
@@ -103,6 +105,7 @@ impl Topic {
             Topic::SfuRoomRoster => "sfu-room-roster",
             Topic::FlowStateChanged => "flow-state-changed",
             Topic::IdentityFork => "identity-fork",
+            Topic::ConfigChanged => "config-changed",
         }
     }
 
@@ -123,6 +126,8 @@ impl Topic {
             Topic::AgentStatusChanged | Topic::AgentUpdated | Topic::IdentityFork => {
                 caps::AGENT_READ_CAPABILITY.clone()
             }
+            // `runtime.config`, which only the operator calls; the audience is the operator.
+            Topic::ConfigChanged => caps::ALL_CAPABILITY.clone(),
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).
             Topic::AppsChanged => caps::AGENT_PERMIT_CAPABILITY.clone(),
             // `hosting.info`; the main agent's copy needs RUNTIME_USER_MANAGEMENT_READ instead

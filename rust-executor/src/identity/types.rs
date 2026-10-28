@@ -268,6 +268,16 @@ pub struct ClaimOfferParams {
     pub hint: Option<String>,
 }
 
+/// An executor's device keys from its one wallet key: the `did:key` it signs with, and the
+/// X25519 multikey (`z6LS…`) a sender seals to. `identity.rekey` answers the new ones;
+/// `identity.custodyStatus` the current ones.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceKeys {
+    pub sign: String,
+    pub enc: String,
+}
+
 /// `identity.claimOffer`: the claim is made; the holder confirms with the same match code.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

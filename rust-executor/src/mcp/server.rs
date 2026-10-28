@@ -256,6 +256,21 @@ fn resolve_plain_host(
     }
 }
 
+/// The MCP address that follows the RPC listener's `localhost` (on by default): without TLS,
+/// `localhost` on keeps MCP on loopback whatever the credential, as it keeps the RPC listener.
+/// `None` leaves the choice to [`resolve_host`]: `localhost` off, TLS configured (wide TLS,
+/// local plain, [`resolve_plain_host`]), or an `MCP_HOST` the operator set.
+pub fn host_following_localhost(
+    localhost: bool,
+    tls_configured: bool,
+    mcp_host: Option<&str>,
+) -> Option<String> {
+    match mcp_host {
+        None if localhost && !tls_configured => Some("127.0.0.1".to_string()),
+        _ => None,
+    }
+}
+
 /// Whether this address reaches only the executor's own machine.
 ///
 /// Unparseable reads as *not* loopback: the warning is the fail-safe
@@ -527,6 +542,18 @@ mod tests {
         // Not an address at all. Reads as non-loopback so the warning fires;
         // the bind that follows fails on it regardless.
         assert!(!is_loopback("localhost"));
+    }
+
+    /// With `localhost` on and no TLS, MCP binds loopback even with a credential (which alone
+    /// widens it to `0.0.0.0`); `localhost` off, TLS or `MCP_HOST` leave the old rules.
+    #[test]
+    fn the_mcp_listener_follows_localhost() {
+        let host = host_following_localhost(true, false, None);
+        assert_eq!(host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(resolve_host(host.as_deref(), true), "127.0.0.1");
+        assert_eq!(host_following_localhost(false, false, None), None);
+        assert_eq!(host_following_localhost(true, true, None), None);
+        assert_eq!(host_following_localhost(true, false, Some("0.0.0.0")), None);
     }
 
     #[test]

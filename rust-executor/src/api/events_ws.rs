@@ -44,6 +44,7 @@
 //! | `sfu-room-roster`             | (inline)      | the participants it lists | Who is in a call room now         |
 //! | `flow-state-changed`          | (inline)      | `agentDid` if it reads the perspective; else the main agent's to `Operator` | A flow instance's state moved on that agent's replica (#1424) |
 //! | `identity-fork`               | (inline)      | the local agents that speak for the identity | The key-log cache found two logs (a different event at a held seq, or a shorter log) and kept its own (a shorter log never truncates a held one) |
+//! | `config-changed`              | (inline)      | the operator           | `runtime.setConfig` wrote keys to the config file; they take effect at the next start |
 //!
 //! Every session also needs the event's capability (`Event::capability`).
 
@@ -136,6 +137,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::sfu::SfuRoomRoster>(SfuRoomRoster, false),
         EventSpec::of::<FlowStateChangedEvent>(FlowStateChanged, true),
         EventSpec::of::<crate::identity::types::IdentityForkEvent>(IdentityFork, false),
+        EventSpec::of::<crate::config_rpc::ConfigChanged>(ConfigChanged, false),
     ]
 }
 
@@ -265,7 +267,8 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::SfuData
         | Topic::SfuRoomRoster
         | Topic::FlowStateChanged
-        | Topic::IdentityFork => None,
+        | Topic::IdentityFork
+        | Topic::ConfigChanged => None,
     }
 }
 
@@ -737,7 +740,11 @@ mod audience_matrix_tests {
             .acts_as_did()
             .expect("the main agent has a DID");
         let main = main.to_string();
-        assert_eq!(sessions[1].1.acts_as_did(), Some(main.as_str()), "app");
+        assert_eq!(
+            sessions[1].1.acts_as_did().as_deref(),
+            Some(main.as_str()),
+            "app"
+        );
 
         // The sessions that hold a user token's capabilities, or every capability.
         let readers = ["operator", "app", "permit app", "user A", "user B"];
@@ -2249,6 +2256,13 @@ mod event_spec_tests {
                     seq: 1,
                     ours: "QmA".into(),
                     theirs: "QmB".into(),
+                }),
+            ),
+            (
+                Topic::ConfigChanged,
+                serde_json::to_value(crate::config_rpc::ConfigChanged {
+                    keys: vec!["mcp_port".into()],
+                    restart_pending: true,
                 }),
             ),
         ];
