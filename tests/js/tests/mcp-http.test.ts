@@ -1530,6 +1530,13 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Create a dedicated Ad4mClient for subscriptions (REST + SSE transport)
             wakerClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
 
+            // The mention query matches the agent's profile names in text, so
+            // give it names (section 7 leaves the profile as "restored-user").
+            await callMcpTool(MCP_BASE_URL, 'set_agent_profile', {
+                username: "wakerbot",
+                given_name: "WakerTest",
+            }, mcpSessionId);
+
             // Create a fresh perspective for waker tests
             var result = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
                 name: "Waker Test Room",
@@ -2108,6 +2115,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 onWake: function() { wakeCount++; },
             });
 
+            // A complete mention subscription, as get_mention_waker_config
+            // returns it, for a perspective the executor does not have: the
+            // executor refuses it, not the manager's own shape check.
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: wakerPerspectiveUuid,
+            }, mcpSessionId);
             var bogusId = "00000000-0000-0000-0000-000000000000";
             var subscriptionId = "test-stale-" + Date.now();
             var error: any = null;
@@ -2117,7 +2130,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     type: "mention" as const,
                     perspective: bogusId,
                     channel: "",
-                    query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
+                    query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
                 });
             } catch (e) {
                 error = e;
@@ -2154,6 +2170,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 onWake: function() {},
             });
 
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: wakerPerspectiveUuid,
+            }, mcpSessionId);
             var bogusId = "00000000-0000-0000-0000-000000000000";
             try {
                 await manager.subscribe({
@@ -2161,7 +2180,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     type: "mention" as const,
                     perspective: bogusId,
                     channel: "",
-                    query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
+                    query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
                 });
             } catch {
                 // Expected — subscribe should throw for non-existent perspective
