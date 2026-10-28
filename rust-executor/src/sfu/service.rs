@@ -1011,10 +1011,22 @@ impl SfuService {
             self.server.advertised.map(|a| a.addr),
         )?;
 
-        // SDP and RTC succeeded — create the room if needed and register
-        // the participant in a single write-lock scope, so the capacity and
-        // cap checks hold against concurrent joins.
-        let (created, replaced) = {
+        let peer = SfuPeer::new(
+            pid.clone(),
+            room_id.clone(),
+            agent_did.to_string(),
+            rtc,
+            false,
+        );
+
+        // SDP and RTC succeeded — create the room if needed, register the
+        // participant and hand its peer to the event loop in a single
+        // write-lock scope. The capacity and cap checks hold against
+        // concurrent joins, and the event loop gets each room change in the
+        // order the room made it: a session's peer is always added before
+        // the removal of a later replacement, so the media loop holds the
+        // sessions the room holds.
+        let replaced = {
             let mut rooms = self.rooms.write().await;
             let created = rooms.get_room(&room_id).is_none();
             if created {
@@ -1043,20 +1055,36 @@ impl SfuService {
             if accept_redirect {
                 room.mark_redirectable(&pid);
             }
-            (created, replaced)
+
+            // The replaced session is out of the room: drop its peer.
+            if let Some(old) = &replaced {
+                let _ = self
+                    .server
+                    .command_tx
+                    .send(SfuCommand::RemovePeer(old.clone()))
+                    .await;
+            }
+            if let Err(e) = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await {
+                // AddPeer failed — roll back the participant, and the room
+                // only if this join created it and it is empty again. A room
+                // `start_room` opened stays.
+                if let Some(room) = rooms.get_room_mut(&room_id) {
+                    room.remove_participant(&pid);
+                    if created && room.participant_count() == 0 {
+                        let _ = rooms.destroy_room(&room_id);
+                    }
+                }
+                return Err(format!("Failed to add peer to SFU: {}", e));
+            }
+            replaced
         };
 
-        // The replaced session is out of the room: drop its peer and tell it.
+        // Tell the replaced session, and drop its preference.
         if let Some(old) = &replaced {
             info!(
-                "SFU: {} joined {} again from the same device; replacing {} with {}",
+                "SFU: {} joined {} again from the same device; replaced {} with {}",
                 agent_did, room_id, old, pid
             );
-            let _ = self
-                .server
-                .command_tx
-                .send(SfuCommand::RemovePeer(old.clone()))
-                .await;
             self.forget_quality_preference(&room_id.to_string(), old)
                 .await;
             crate::pubsub::get_global_pubsub().await.publish_event(
@@ -1067,29 +1095,6 @@ impl SfuService {
                     participant_id: old.to_string(),
                 }),
             );
-        }
-
-        // Create the SFU peer and send it to the event loop
-        let peer = SfuPeer::new(
-            pid.clone(),
-            room_id.clone(),
-            agent_did.to_string(),
-            rtc,
-            false,
-        );
-
-        if let Err(e) = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await {
-            // AddPeer failed — roll back the participant, and the room
-            // only if this join created it and it is empty again. A room
-            // `start_room` opened stays.
-            let mut rooms = self.rooms.write().await;
-            if let Some(room) = rooms.get_room_mut(&room_id) {
-                room.remove_participant(&pid);
-                if created && room.participant_count() == 0 {
-                    let _ = rooms.destroy_room(&room_id);
-                }
-            }
-            return Err(format!("Failed to add peer to SFU: {}", e));
         }
 
         // Build stream mapping from existing participants in the room.
@@ -1775,8 +1780,7 @@ mod tests {
                     .await
             }
         });
-        eventually(|| async { peers_with_preferences(&svc).await == vec![second.clone()] })
-            .await;
+        eventually(|| async { peers_with_preferences(&svc).await == vec![second.clone()] }).await;
         let b = tokio::spawn({
             let svc = svc.clone();
             async move { join(&svc, url, "did:a", "laptop").await }
