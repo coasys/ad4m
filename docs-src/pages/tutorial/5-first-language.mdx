@@ -1,0 +1,232 @@
+# Writing your first Language
+
+In AD4M, every way of storing or sharing data is a **Language**: a small
+JavaScript module that the executor loads by its content hash. Anyone can
+write one, publish it, and anyone who has the hash can install it and use the
+same protocol. Everything a Language stores through the agent is signed with
+the agent's DID.
+
+In this tutorial you write a Language that stores signed notes, publish it,
+install it, and create and read a note. It runs on your own machine, offline:
+the executor uses local bootstrap Languages, no Holochain and no public
+servers, so nothing you publish leaves your computer.
+
+It takes about 15 minutes.
+
+## What you need
+
+- Linux (x64) or macOS (Apple silicon), with `bash`, `git` and `curl`
+- Node.js 20 or newer, with `npm`
+- The AD4M **0.13.1** command-line binaries: `ad4m-executor` (the runtime) and
+  `ad4m` (the client)
+
+Download the two binaries from the
+[v0.13.1 release](https://github.com/coasys/ad4m/releases/tag/v0.13.1):
+
+```bash
+VERSION=0.13.1
+PLATFORM=linux-$VERSION-x64        # on a Mac: PLATFORM=macos-$VERSION-aarch64
+BASE=https://github.com/coasys/ad4m/releases/download/v$VERSION
+mkdir -p ~/ad4m-bin && cd ~/ad4m-bin
+curl -fLo ad4m-executor "$BASE/ad4m-cli-executor-$PLATFORM"
+curl -fLo ad4m "$BASE/ad4m-cli-client-$PLATFORM"
+chmod +x ad4m-executor ad4m
+export PATH="$HOME/ad4m-bin:$PATH"
+```
+
+On a Mac the binaries are not signed yet. If macOS refuses to run them, remove
+the quarantine flag: `xattr -d com.apple.quarantine ad4m-executor ad4m`.
+
+## 1. Get the example
+
+The example Language lives in the AD4M repository, next to the script that
+starts the offline executor:
+
+```bash
+git clone --depth 1 --branch v0.13.1 https://github.com/coasys/ad4m.git
+cd ad4m/ad4m-ldk/js/examples/note-store
+npm install
+```
+
+`npm install` fetches [`@coasys/ad4m-ldk`](https://www.npmjs.com/package/@coasys/ad4m-ldk),
+the Language Development Kit, and `esbuild`.
+
+## 2. Read the Language
+
+`src/index.ts` is the whole Language:
+
+```typescript
+import {
+    defineLanguage,
+    agentCreateSignedExpression,
+    hash,
+    storageGet,
+    storagePut,
+} from "@coasys/ad4m-ldk";
+
+export default defineLanguage({
+    name: "note-store",
+    version: "1.0.0",
+
+    async init() {},
+
+    expression: {
+        async create(content) {
+            const expression = agentCreateSignedExpression(content);
+            const serialized = JSON.stringify(expression);
+            const address = hash(serialized);
+            storagePut(address, serialized);
+            return address;
+        },
+
+        async get(address) {
+            const stored = storageGet(address);
+            return stored ? JSON.parse(stored) : null;
+        },
+    },
+});
+```
+
+- `defineLanguage` turns this grouped description into the exports the
+  executor looks for. Exporting `expression.create` and `expression.get` makes
+  this an *expression Language*: it stores and returns pieces of content.
+- `agentCreateSignedExpression` asks the executor to wrap the content with the
+  agent's DID, a timestamp and a signature. The Language never sees the
+  agent's keys.
+- `hash` is AD4M's content hash. The note's address is the hash of the signed
+  note.
+- `storagePut` and `storageGet` are a key-value store the executor keeps for
+  this Language only.
+
+These functions come from `ad4m:host`, a module the executor provides when it
+loads the Language. The LDK gives them types.
+
+## 3. Build it
+
+```bash
+npm run build
+```
+
+This bundles the Language into one file, `build/bundle.js`:
+
+```bash
+esbuild src/index.ts --bundle --format=esm --platform=neutral \
+    --external:ad4m:host --outfile=build/bundle.js
+```
+
+`--external:ad4m:host` keeps the import of the host module in the bundle.
+Without it esbuild fails with `Could not resolve "ad4m:host"`.
+
+## 4. Start an offline executor
+
+```bash
+./sandbox.sh init
+./sandbox.sh run
+```
+
+`init` creates `.sandbox/` next to the example: a network seed made from the
+local bootstrap Languages in `bootstrap-languages/local`, a data directory, and
+an admin credential (`.sandbox/admin-credential`) that only you can read.
+`run` starts the executor in the foreground on `127.0.0.1:12100`, without
+Holochain. Leave it running and open a second terminal in the same directory.
+
+`./sandbox.sh cli …` runs the `ad4m` client against this executor with the
+admin credential. Create your agent first:
+
+```bash
+./sandbox.sh cli agent generate --passphrase choose-a-passphrase
+./sandbox.sh cli agent me
+```
+
+`agent me` shows your agent's DID, a `did:key:…`. After restarting the
+executor, unlock the agent again with
+`./sandbox.sh cli agent unlock --passphrase choose-a-passphrase`.
+
+## 5. Publish and install
+
+```bash
+./sandbox.sh cli languages publish "$PWD/build/bundle.js" -n note-store -d "Signed notes"
+```
+
+```
+Language published with address: QmzSYwd…
+```
+
+The address is the hash of the bundle. The executor reads the file, so the
+path must be absolute. Publishing stores the bundle in the local
+language-language; it does not install it. Install it by looking it up by its
+address, the way another agent would:
+
+```bash
+LANGUAGE=QmzSYwd…    # the address printed above
+./sandbox.sh cli languages by-address $LANGUAGE
+```
+
+The executor fetches the bundle, checks that it hashes to the address and
+loads it.
+
+## 6. Use it
+
+```bash
+./sandbox.sh cli expression create $LANGUAGE '{"text": "Hello from my first Language"}'
+```
+
+```
+Expression created with url: QmzSYwd…://QmzSYwd…
+```
+
+An expression URL is `<language address>://<address in that Language>`. Any
+agent with the Language can resolve it. Read it back:
+
+```bash
+./sandbox.sh cli expression get "QmzSYwd…://QmzSYwd…"
+```
+
+```
+author: "did:key:z6Mk…"
+timestamp: "2026-11-03T17:00:00.000Z"
+data: "{\"text\":\"Hello from my first Language\"}"
+```
+
+The stored note also carries the signature. Look at what the Language stored:
+
+```bash
+cat .sandbox/data/ad4m/languages/$LANGUAGE/ad4m-language-kv.json
+```
+
+Each value is a signed expression: `author`, `timestamp`, `data` and
+`proof: { key, signature }`, where `key` is the DID's verification key. Anyone
+who receives the note can check that this DID wrote exactly this content.
+
+## 7. Change it
+
+Change the Language, for example add a field to every note in `create`, then
+build and publish again. The new bundle has a new hash, so it is a new
+Language at a new address. A Language's address names exactly one version of
+its code, and agents that use the old address keep the old behaviour.
+
+## Where to go next
+
+- [Languages](/languages) explains the Language interface, the other
+  capabilities (link Languages, telepresence, queries) and the Rust LDK.
+- The [LDK README](https://github.com/coasys/ad4m/tree/dev/ad4m-ldk/js) lists
+  every host function.
+- [Publishing a Neighbourhood](/tutorial/2-neighbourhood-publish) shows how agents share
+  a Perspective through a link Language.
+
+### Working from a checkout of `dev`
+
+To use an LDK newer than the last release, build it from the repository and
+install the tarball instead of the npm package:
+
+```bash
+# in the root of the ad4m checkout
+pnpm install --filter @coasys/ad4m-ldk
+pnpm --filter @coasys/ad4m-ldk build
+(cd ad4m-ldk/js && npm pack)
+cd ad4m-ldk/js/examples/note-store
+npm install ../../coasys-ad4m-ldk-*.tgz
+```
+
+A Language built this way also loads on an older executor. If it calls a host
+function that executor does not have, that call throws `HostFunctionMissing`.

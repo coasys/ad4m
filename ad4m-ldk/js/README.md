@@ -80,6 +80,9 @@ esbuild index.ts --bundle --format=esm --platform=neutral \
 
 The executor loads the bundle, introspects its exports to decide which
 capabilities it supports, and starts calling them.
+[`examples/note-store`](./examples/note-store) is this Language as a
+project, with a script that starts an offline executor to try it on; the
+[tutorial](https://docs.ad4m.dev/tutorial/5-first-language) walks through it.
 
 A Language built with this package loads on any executor with the v1
 Language loader, also on one older than the package: each host function
