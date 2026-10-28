@@ -4397,6 +4397,16 @@ describe("restoring saved subscriptions", () => {
     }
   });
 
+  it("is no longer parked once the executor answers, with no state file to persist to", async () => {
+    parkSubscription(withoutTerms, { [withoutTerms.id]: ["msg-old"] });
+    let waits = 0;
+    await retryParkedSubscriptions(vi.fn().mockResolvedValue("Subscribed"), makeMockLogger(), () => false, async () => {
+      if (++waits > 1) throw new Error("asked again after the executor answered");
+    });
+    expect(_parkedSubscriptionsForTests().size).toBe(0);
+    expect(stateToSave([], {})).toEqual({ subscriptions: [], seenMessages: {} });
+  });
+
   it("stops asking again for a parked subscription once the waker stops", async () => {
     parkSubscription(withoutTerms, {});
     const rederive = vi.fn().mockRejectedValue(new Error("Update the executor."));
