@@ -23,6 +23,10 @@ npm install @coasys/ad4m-ldk
 pnpm add @coasys/ad4m-ldk
 ```
 
+The package is published with each AD4M release from 0.13.1 on. To build it
+from a checkout instead: `pnpm install && pnpm --filter @coasys/ad4m-ldk build`
+in the repository, then `npm pack` in `ad4m-ldk/js` and install the tarball.
+
 ## Minimal example
 
 ```ts
@@ -65,9 +69,22 @@ export default lang;
 export const { name, version, init, expressionCreate, expressionGet } = lang;
 ```
 
-Bundle with esbuild (or any ES-module bundler) and you have a working
-Language. The executor loads the bundle, introspects its exports to
-decide which capabilities it supports, and starts calling them.
+Bundle it into one ES module, leaving `ad4m:host` as an import: the
+executor provides that module when it loads the Language, so a bundler
+must not try to resolve it.
+
+```sh
+esbuild index.ts --bundle --format=esm --platform=neutral \
+    --external:ad4m:host --outfile=build/bundle.js
+```
+
+The executor loads the bundle, introspects its exports to decide which
+capabilities it supports, and starts calling them.
+
+A Language built with this package loads on any executor with the v1
+Language loader, also on one older than the package: each host function
+is looked up when it is called. Calling one the executor does not have
+throws `HostFunctionMissing`, naming the function.
 
 ## What this package gives you
 
