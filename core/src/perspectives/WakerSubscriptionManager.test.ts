@@ -593,7 +593,13 @@ describe('WakerSubscriptionManager', () => {
   };
 
   /** `bothSub` opened, with a hand for each query's results and the wakes they produced. */
-  async function bothHarness(options: { debounceMs?: number; initial?: { link?: any; text?: any } } = {}) {
+  async function bothHarness(
+    options: {
+      debounceMs?: number;
+      initial?: { link?: any; text?: any };
+      modelQuery?: (uuid: string, className: string, queryJson: string) => Promise<any>;
+    } = {},
+  ) {
     const delivers: Record<string, (result: any) => Promise<void>> = {};
     const opened: any[][] = [];
     const ProxyClass = function (...args: any[]) {
@@ -611,7 +617,7 @@ describe('WakerSubscriptionManager', () => {
     const manager = new WakerSubscriptionManager({
       perspectiveClient: {
         querySparql: () => Promise.resolve([]),
-        modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }),
+        modelQuery: options.modelQuery ?? (() => Promise.resolve({ instances: [], totalCount: 0 })),
       },
       logger: noopLogger(),
       QuerySubscriptionProxy: ProxyClass,
@@ -719,6 +725,39 @@ describe('WakerSubscriptionManager', () => {
     await h.text([textRow('test://both', 'Data, look')]);
     await h.settle();
     expect(h.wakes).toEqual([[{ address: 'test://both', ...linked }]]);
+  });
+
+  /**
+   * Lal's review of #1570 at ddbb1984: one text result holds A and B. A's parents resolve, B's
+   * lookup is still out when the link query finds A. The wake must carry A's link provenance,
+   * not the text match read before the link arrived.
+   */
+  it("gives the mention link's provenance to a record of a text batch whose later record was still resolving", async () => {
+    let releaseB: () => void = () => {};
+    let bLookupStarted = false;
+    const empty = { instances: [], totalCount: 0 };
+    const h = await bothHarness({
+      debounceMs: 40,
+      modelQuery: (_uuid, _className, queryJson) => {
+        const ids: string[] = JSON.parse(queryJson).parent?.ids ?? [];
+        if (!ids.includes('test://B')) return Promise.resolve(empty);
+        bLookupStarted = true;
+        return new Promise((r) => { releaseB = () => r(empty); });
+      },
+    });
+    const textBatch = h.text([textRow('test://A', 'Data, look'), textRow('test://B', 'and Data, here')]);
+    await waitUntil(() => bLookupStarted, 1000);
+    expect(bLookupStarted).toBe(true);
+    await h.link([linkRow('test://A')]);
+    releaseB();
+    await textBatch;
+    await h.settle();
+    expect(h.wakes).toEqual([
+      [
+        { address: 'test://A', ...linked },
+        { address: 'test://B', ...byText },
+      ],
+    ]);
   });
 
   it('does not wake again when the link query finds a record its text already woke on', async () => {

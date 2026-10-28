@@ -613,7 +613,7 @@ export class WakerSubscriptionManager {
         );
 
         // Resolve parents, and the chain above them, per new message
-        const mentions: MentionMessage[] = [];
+        const mentions: Pick<MentionMessage, "address" | "parents" | "ancestors">[] = [];
         for (const msgAddr of newMessages) {
           this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
           const parents = await this.parentsOf(sub, [msgAddr]);
@@ -622,13 +622,14 @@ export class WakerSubscriptionManager {
             `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}` +
               (ancestors.length ? `; ancestors: ${ancestors.join(", ")}` : ""),
           );
-          // Read now: the link query may have found it while the parents resolved.
-          mentions.push({ address: msgAddr, parents, ancestors, ...provenance.get(msgAddr)! });
+          mentions.push({ address: msgAddr, parents, ancestors });
         }
 
         this.seenMessages.set(sub.id, currentSeen);
         const pending = this.undelivered.get(sub.id) ?? new Map<string, MentionMessage>();
-        for (const mention of mentions) pending.set(mention.address, mention);
+        // The provenance as it is now, not as it was read: the link query may have found a
+        // record of this batch while a later one's parents resolved.
+        for (const mention of mentions) pending.set(mention.address, { ...mention, ...provenance.get(mention.address)! });
         this.undelivered.set(sub.id, pending);
 
         this.scheduleMentionWake(sub, result, this.debounceMs);
