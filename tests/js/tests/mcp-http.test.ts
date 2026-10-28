@@ -2071,9 +2071,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: wakerPerspectiveUuid,
                 channel: wakerChannelAddr,
                 query: config.query,
-                className: config.class,
-                terms: config.terms,
-                linkQuery: config.link_query,
                 className: config.query_class,
             });
 
