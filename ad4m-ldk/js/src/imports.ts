@@ -1,3 +1,7 @@
+// Kept in the emitted lib/imports.d.ts, so a consumer of the published
+// package gets the `ad4m:host` declaration (shipped in src/) too.
+/// <reference path="./host.d.ts" preserve="true" />
+
 /**
  * Typed wrappers around the AD4M host import surface.
  *
