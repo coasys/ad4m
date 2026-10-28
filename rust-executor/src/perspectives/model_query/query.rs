@@ -7,7 +7,7 @@
 //! target-class shapes (themselves cached).
 
 use super::containment::{contains_patterns, has_child_only, ContainmentEdge};
-use super::cursor::{is_timestamp_order, KeysetCursor};
+use super::cursor::{include_sends_cursor, is_timestamp_order, KeysetCursor};
 use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
@@ -634,7 +634,14 @@ pub(super) async fn execute_model_query_inner(
     // non-zero `offset`; see `cursor.rs`. A containment walk with no order is
     // ordered by the walk, not by timestamp, so it takes no cursor either.
     // Anything else that sends `after` is refused: a missing `nextCursor`
-    // would read as the last page.
+    // would read as the last page. That includes a cursor in an `include`
+    // sub-query, which runs below depth 0 and would otherwise be dropped.
+    if depth == 0 && include_sends_cursor(query_input) {
+        return Err(Error::msg(
+            "`after` cursors page a top-level query only. An `include` sub-query \
+             takes `limit`/`offset`.",
+        ));
+    }
     let keyset: Option<Option<KeysetCursor>> = match query_input.after.as_deref() {
         Some(after) if depth == 0 => {
             let cursor = if after.is_empty() {

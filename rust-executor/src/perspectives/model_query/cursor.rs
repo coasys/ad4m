@@ -24,7 +24,7 @@ use base64::Engine;
 use deno_core::anyhow::{anyhow, Error};
 use serde::{Deserialize, Serialize};
 
-use super::types::OrderDirection;
+use super::types::{IncludeValue, ModelQueryInput, OrderDirection};
 
 /// Position after the last row of a page: its first-link timestamp and id,
 /// plus the direction the page was read in.
@@ -64,6 +64,18 @@ impl KeysetCursor {
             OrderDirection::ASC
         }
     }
+}
+
+/// Does an `include` sub-query, at any depth, send `after`? An include runs
+/// below depth 0, where a cursor has no keyset and no `nextCursor` to answer
+/// with, so it is refused up front rather than dropped.
+pub(super) fn include_sends_cursor(query: &ModelQueryInput) -> bool {
+    query.include.as_ref().is_some_and(|map| {
+        map.values().any(|v| match v {
+            IncludeValue::SubQuery(sub) => sub.after.is_some() || include_sends_cursor(sub),
+            IncludeValue::Bool(_) => false,
+        })
+    })
 }
 
 /// Is `order` one the cursor supports (the timestamp order)?
@@ -381,5 +393,92 @@ mod pipeline_tests {
         assert!(run(&store, json!({ "after": "garbage", "limit": 3 }))
             .await
             .is_err());
+    }
+
+    /// Every page size puts a page boundary on every row once, so the tie
+    /// (t03, t04) is split by a cursor in each direction. In DESC the id
+    /// comparison has to run downwards too, or the walk skips t03.
+    #[tokio::test]
+    async fn a_tie_split_by_a_page_boundary_pages_in_both_directions() {
+        let store = store();
+        for limit in 1..=10 {
+            for (dir, desc) in [("ASC", false), ("DESC", true)] {
+                let (paged, _) =
+                    walk(&store, json!({ "order": { "createdAt": dir } }), limit).await;
+                assert_eq!(paged, expected(desc), "limit {limit} {dir}");
+            }
+        }
+    }
+
+    /// The executor filters or slices these after the id page, so a `limit`
+    /// page in the store would not be the page the caller gets.
+    #[tokio::test]
+    async fn a_cursor_on_a_post_hydration_filter_or_a_sliced_scope_is_refused() {
+        let store = store();
+        let (resolver, shape) = StaticShapeResolver::from_json("Todo", SHAPE_JSON).unwrap();
+        let residual: ModelQueryInput =
+            serde_json::from_value(json!({ "where": { "nosuch": "x" } })).unwrap();
+        assert!(
+            !super::super::sparql_builder::all_where_pushable(&residual, &shape, Some(&resolver)),
+            "precondition: the store cannot evaluate this `where`"
+        );
+        for query in [
+            json!({ "after": "", "limit": 3, "where": { "nosuch": "x" } }),
+            json!({ "after": "", "limit": 3,
+                    "parent": { "ids": ["ns://a"], "predicate": "ns://child", "limitPerAnchor": 2 } }),
+            json!({ "after": "", "limit": 3,
+                    "parent": { "ids": ["ns://a"], "predicate": "ns://child", "levels": [2] } }),
+        ] {
+            let err = run(&store, query.clone())
+                .await
+                .expect_err(&format!("refused: {query}"));
+            assert!(err.to_string().contains("`after`"), "{query}: {err}");
+        }
+    }
+
+    /// An include runs below depth 0, where a cursor would be dropped: its
+    /// first page would come back without a `nextCursor` and read as the last.
+    /// Refused whether or not the relation holds anything.
+    #[tokio::test]
+    async fn a_cursor_in_an_include_sub_query_is_refused() {
+        const WITH_SUBTASKS: &str = r#"{
+            "className": "Todo",
+            "properties": {
+                "kind": { "predicate": "ns://kind", "required": true, "flag": true, "initial": "ns://todo" }
+            },
+            "relations": {
+                "subtasks": { "predicate": "ns://sub", "kind": "hasMany", "targetClassName": "Todo" }
+            }
+        }"#;
+        let store = store();
+        store
+            .add_link(&link(
+                "ns://t00",
+                "ns://sub",
+                "ns://t01",
+                "2026-01-01T00:00:20.000Z",
+            ))
+            .unwrap();
+        let (resolver, shape) = StaticShapeResolver::from_json("Todo", WITH_SUBTASKS).unwrap();
+        let shape: ModelShape = (*shape).clone();
+        for include in [
+            json!({ "subtasks": { "after": "", "limit": 1 } }),
+            json!({ "subtasks": { "include": { "subtasks": { "after": "" } } } }),
+        ] {
+            let mut input: ModelQueryInput =
+                serde_json::from_value(json!({ "include": include })).unwrap();
+            input.include_unverified = Some(true);
+            let err = execute_model_query(&store, &shape, &input, &resolver)
+                .await
+                .expect_err(&format!("refused: {include}"));
+            assert!(err.to_string().contains("`include`"), "{include}: {err}");
+        }
+        // Without `after` the same include reads.
+        let mut input: ModelQueryInput =
+            serde_json::from_value(json!({ "include": { "subtasks": { "limit": 1 } } })).unwrap();
+        input.include_unverified = Some(true);
+        execute_model_query(&store, &shape, &input, &resolver)
+            .await
+            .unwrap();
     }
 }
