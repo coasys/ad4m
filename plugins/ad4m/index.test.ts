@@ -1625,6 +1625,27 @@ describe("buildWakeMessage", () => {
     expect(msg.match(/Mentioned at:/g)).toHaveLength(1);
   });
 
+  /**
+   * A mention link names the agent on purpose; a whole-word name in the text may only use the
+   * word ("the data shows" for an agent named Data). The wake says which, so the agent can judge
+   * a text match before it answers.
+   */
+  it("says whether each item mentions the agent by a mention link or by its name in the text", () => {
+    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
+      { address: "msg-1", parents: ["channel-abc"], ancestors: [], verified: true, via: "mentions" },
+      { address: "msg-2", parents: ["channel-abc"], ancestors: [], verified: true, via: "text" },
+      { address: "msg-3", parents: ["channel-abc"], ancestors: [], verified: false },
+    ]);
+    expect(msg).toContain(
+      "  Item: msg-1\n  Mentioned by: (unknown) (signature verified)\n  Matched by: a mention link to you\n",
+    );
+    expect(msg).toContain(
+      "  Item: msg-2\n  Mentioned by: (unknown) (signature verified)\n" +
+        "  Matched by: your name or DID in the text, with no mention link (a name used as a word can be a false alarm)\n",
+    );
+    expect(msg.match(/Matched by:/g)).toHaveLength(2);
+  });
+
   it("shows (unknown) parents when empty", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
       { address: "msg-1", parents: [], ancestors: [], verified: false },

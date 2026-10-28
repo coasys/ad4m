@@ -37,6 +37,13 @@ export function buildWakeMessage(
         `  Mentioned by: ${m.author ?? "(unknown)"} (signature ${m.verified ? "verified" : "NOT verified"})`,
       );
       if (m.timestamp) lines.push(`  Mentioned at: ${m.timestamp}`);
+      // A mention link names the agent on purpose; a name in the text may only use the word.
+      if (m.via === "mentions") lines.push("  Matched by: a mention link to you");
+      if (m.via === "text") {
+        lines.push(
+          "  Matched by: your name or DID in the text, with no mention link (a name used as a word can be a false alarm)",
+        );
+      }
       if (m.parents.length > 0) {
         lines.push(`  Parents: ${m.parents.join(", ")}`);
       } else {

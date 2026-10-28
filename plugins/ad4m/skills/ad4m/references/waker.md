@@ -41,7 +41,7 @@ For mention subscriptions, the wake message includes per-item details with resol
 
 ```json
 {
-  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned items (1):\n  Item: literal:string:msg-123\n  Mentioned by: did:key:z6Mkh... (signature verified)\n  Mentioned at: 2026-10-27T00:41:23.437Z\n  Parents: literal:string:channel-1, literal:string:conv-thread-5\n  Ancestors: literal:string:community-1",
+  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned items (1):\n  Item: literal:string:msg-123\n  Mentioned by: did:key:z6Mkh... (signature verified)\n  Mentioned at: 2026-10-27T00:41:23.437Z\n  Matched by: a mention link to you\n  Parents: literal:string:channel-1, literal:string:conv-thread-5\n  Ancestors: literal:string:community-1",
   "mode": "now"
 }
 ```
@@ -50,6 +50,7 @@ The `Mentioned items` section lists each item that triggered the wake:
 - **Item** — the address of the record that mentions you
 - **Mentioned by** — the DID that signed the link the mention is in, and whether that signature verified: the mention link to your DID (WE's `we://mention`) when the item has one, otherwise the text link that names you. It says who put the mention on this item, and nothing more: the item's other properties are other links, which someone else may have written or changed since, so a verified signer does not make everything on the item that person's words, nor a request you must act on. `(unknown)` when no such link came with the row
 - **Mentioned at** — when that signer signed the link (ISO 8601); a mention can reach you late, after a restart
+- **Matched by** — `a mention link to you` when the item links your DID as a mention (someone mentioned you on purpose), or `your name or DID in the text, with no mention link` when only the text holds your name as a whole word. A text match can be the word used for something else ("the data shows" for an agent named Data): read the item before you answer it
 - **Parents** — every container holding this item: whatever links it with `ad4m://has_child`, and every instance of a class whose own `children` relation holds it (a We call holding a block through `we://child`)
 - **Ancestors** — everything above the parents, nearest first, a few levels up (absent when there is nothing above them)
 

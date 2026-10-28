@@ -313,7 +313,7 @@ describe('WakerSubscriptionManager', () => {
       [{ source: 'test://sparql-row' }],
       result(named('test://message'), { text: 'hi Data, no id' }),
     ]);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], ...byOther }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], ...byOther, via: 'text' }]]);
     expect(queries).toHaveLength(1);
   });
 
@@ -378,6 +378,7 @@ describe('WakerSubscriptionManager', () => {
           author: 'did:key:zEditor',
           timestamp: '2026-10-27T00:41:23.437Z',
           verified: true,
+          via: 'mentions',
         },
         {
           address: 'test://named',
@@ -386,6 +387,7 @@ describe('WakerSubscriptionManager', () => {
           author: 'did:key:zEditor',
           timestamp: '2026-10-27T00:40:30.000Z',
           verified: true,
+          via: 'text',
         },
       ],
     ]);
@@ -429,12 +431,12 @@ describe('WakerSubscriptionManager', () => {
       'ad4m://Container',
       { parent: { ids: ['test://message'], direction: 'in' }, properties: [] },
     ]);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'], ancestors: [], ...byOther }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'], ancestors: [], ...byOther, via: 'text' }]]);
   });
 
   it('reports no parents, without a warning, when the executor returns no instances', async () => {
     const { wakes, warnings } = await wakeWith(() => true);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], ...byOther }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], ...byOther, via: 'text' }]]);
     expect(warnings).toEqual([]);
   });
 
@@ -442,7 +444,7 @@ describe('WakerSubscriptionManager', () => {
     const { wakes, queries } = await wakeWith(() => [], undefined, 'addr://msg-1', [
       result(named('addr://msg-1'), named('addr://msg-1')),
     ]);
-    expect(wakes).toEqual([[{ address: 'addr://msg-1', parents: [], ancestors: [], ...byOther }]]);
+    expect(wakes).toEqual([[{ address: 'addr://msg-1', parents: [], ancestors: [], ...byOther, via: 'text' }]]);
     // The parent lookup runs once, not once per row.
     expect(queries).toHaveLength(1);
   });
@@ -603,6 +605,7 @@ describe('WakerSubscriptionManager', () => {
           parents: ['test://channel', 'test://block'],
           ancestors: ['test://call', 'test://space', 'ad4m://self'],
           ...byOther,
+          via: 'text',
         },
       ],
     ]);
@@ -637,7 +640,7 @@ describe('WakerSubscriptionManager', () => {
     const address = 'test://bad> . ?s ?p ?o . #';
     const { wakes, queries } = await wakeWith(() => [], 3, address);
     expect(queries[0][1].parent.ids).toEqual([address]);
-    expect(wakes[0][0]).toEqual({ address, parents: [], ancestors: [], ...byOther });
+    expect(wakes[0][0]).toEqual({ address, parents: [], ancestors: [], ...byOther, via: 'text' });
   });
 
   it('reads a model subscription by row id', async () => {
@@ -736,13 +739,14 @@ describe('mentionOf', () => {
       author: OTHER,
       timestamp: at,
       verified: true,
+      via: 'mentions',
     });
   });
 
   it('falls back to a whole-word text mention when the link is the agent\'s own, unverified or someone else\'s', () => {
     for (const mention of [link(ME, ME, at), link(ME, OTHER, at, false), link('did:key:zBob', OTHER, at)]) {
       expect(mentionOf(row('x', '@Datai', { mentions: [mention] }), sub)).toBeNull();
-      expect(mentionOf(row('x', 'hi Data', { mentions: [mention] }), sub)).toEqual(byOther);
+      expect(mentionOf(row('x', 'hi Data', { mentions: [mention] }), sub)).toEqual({ ...byOther, via: 'text' });
     }
   });
 
@@ -774,7 +778,7 @@ describe('mentionOf', () => {
           link(literal('Data, can you look? on it'), ME, t(3)),
         ],
       });
-      expect(mentionOf(line, sub)).toEqual({ author: OTHER, timestamp: t(1), verified: true });
+      expect(mentionOf(line, sub)).toEqual({ author: OTHER, timestamp: t(1), verified: true, via: 'text' });
     });
 
     it('counts only while the record\'s text, the newest link\'s, names it too', () => {
@@ -798,6 +802,7 @@ describe('mentionOf', () => {
           author: OTHER,
           timestamp: t(1),
           verified: true,
+          via: 'text',
         });
       }
       expect(mentionOf(row('x', 'hi Data', { text: [link('literal:string:%E0%A4%A', OTHER, t(1))] }), sub)).toBeNull();
