@@ -278,8 +278,8 @@ impl Liveness {
 }
 
 /// Send what `rx` carries to `sink`, and a ping every PING_INTERVAL, until `rx`
-/// closes or a send fails. Once the session is over, deliver what is already
-/// queued (the 401 reply), then close.
+/// closes or a send fails. Once the session is over, deliver what is queued (the
+/// 401 reply) and the replies of calls in flight for up to REPLY_GRACE, then close.
 async fn write_to<S>(
     mut sink: S,
     mut rx: mpsc::UnboundedReceiver<String>,
