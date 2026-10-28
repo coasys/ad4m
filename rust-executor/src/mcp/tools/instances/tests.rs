@@ -3164,6 +3164,48 @@ async fn a_mention_row_carries_its_mention_and_text_links_provenance() {
     assert_eq!(text["proof"]["valid"], true, "{row}");
 }
 
+/// A record with two text links answers the mention query when either one
+/// matches, but its `text` is the newest link's, whoever wrote it, and
+/// `__links.text` lists every link. So the row's `text` and any one of its
+/// text links need not be the same link: the waker reads each link's own
+/// target to find the one that names the agent (`mentionOf`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mention_rows_text_and_its_text_links_can_come_from_different_links() {
+    use crate::agent::signatures::TestSigner;
+    let me = TestSigner::generate();
+    let writer = TestSigner::generate();
+    let mut links = text_only_chat(&writer, "ad4m://line", "the metadata is stale", 1);
+    links.push(signed_link(
+        &me,
+        "ad4m://line",
+        "app://chat_text",
+        &as_text("Data"),
+        2,
+    ));
+    let rows = mention_query_rows(&me.did, &["Data"], links).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row["text"], "Data", "the newest link's text: {row}");
+    let text: Vec<(&str, &str)> = row["__links"]["text"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{row}"))
+        .iter()
+        .map(|l| {
+            (
+                l["author"].as_str().unwrap(),
+                l["data"]["target"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let metadata = as_text("the metadata is stale");
+    let data = as_text("Data");
+    assert!(
+        text.contains(&(writer.did.as_str(), metadata.as_str())),
+        "{row}"
+    );
+    assert!(text.contains(&(me.did.as_str(), data.as_str())), "{row}");
+}
+
 /// The reifier the store keeps `source -predicate-> target`'s metadata on. Any
 /// peer can name it: it is a hash of the link's public data.
 fn reifier_of(
