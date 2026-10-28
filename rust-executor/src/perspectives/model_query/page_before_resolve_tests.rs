@@ -213,11 +213,14 @@ async fn run(store: &SparqlStore, shape: &str, query: Value) -> (Vec<Value>, usi
     let mut query: ModelQueryInput = serde_json::from_value(query).unwrap();
     // Fixture proofs do not verify.
     query.include_unverified = Some(true);
+    // The tests assert the total, which a query gets only when it asks for one.
+    query.count = Some(true);
     let started = Instant::now();
     let result = execute_model_query_from_json(store, "Item", &query, shape)
         .await
         .unwrap();
-    (result.instances, result.total_count, started.elapsed())
+    let total = result.total_count.expect("the query asked for its total");
+    (result.instances, total, started.elapsed())
 }
 
 fn ids(instances: &[Value]) -> Vec<String> {
