@@ -88,7 +88,7 @@ instance_create(perspective_id, class_name="Message",
     base_uri is auto-generated when omitted. Returns the instance's id.
 
 instance_query(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
-  → instances that are ad4m://has_child children of parent, as raw property maps
+  → instances parent contains (see "Tree structure"), as raw property maps
     (id, author, timestamp, one key per property).
     There is NO order parameter: results come oldest-first, and limit keeps the
     OLDEST N — so this is not how you read "the latest messages"
@@ -130,8 +130,12 @@ time.
 
 ## Tree structure
 
-Instances below a parent are linked via `ad4m://has_child`. The root of a
-perspective's tree is `ad4m://self`.
+A node contains its children through the built-in class `Container`: its
+`ad4m://has_child` links count whatever the node is, and when the node is an
+instance of a class whose `children` relation is its own (a block over
+`we://child`), that relation's links count too. A child can sit in several
+containers. The root of a perspective's tree is `ad4m://self`. Every tool below
+answers from this one rule; none of them asks you for a predicate.
 
 Not every perspective has a tree at all — a flat perspective (all instances
 directly in the perspective, no channels) is valid and common for simple
@@ -145,8 +149,10 @@ Two class-agnostic tools work on this tree directly:
   `parent="ad4m://self"` gives the top-level channels. `limit` defaults to 100,
   capped at 500. The parameter is `parent` — there is no `id` parameter and no
   `parent_address`.
-- `add_child(perspective_id, parent, child)` links an existing node under a
-  parent — for re-parenting, or for parents that are not instances.
+- `add_child(perspective_id, parent, child)` puts an existing node under a
+  parent — for re-parenting, or for parents that are not instances. The parent
+  decides how: its class's own `children` relation when it has one, else an
+  `ad4m://has_child` link.
 
 New instances do not need `add_child`: `instance_create(parent=…)` already
 writes the child link. Bare strings passed as `parent` / `child` are wrapped as
@@ -194,7 +200,7 @@ is what you filter your own messages by.
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `tool not found` / "unknown tool" for `get_children_body_parsed`, `query_subjects`, `create_subject`, `get_subject_children`, `remove_from_collection`, `infer`, `get_models`, or any other `*_subject` tool | These were **removed** in the static-surface consolidation. They are not hidden or un-bridged, they are gone. | `instance_transcript` replaces `get_children_body_parsed`; the `instance_*` tools replace the `*_subject` family (`instance_remove_from_collection` for `remove_from_collection`); `describe_perspective` replaces `get_models`. `add_child` / `get_children` kept their names but take `parent` / `child`, never `parent_address` / `id`. |
-| `User key not found` on login, or `main key not found` on `generate_jwt` / `request_capability`, right after an executor restart | **Expected, not a bug.** The wallet keeps signing keys in memory only. Until the node's operator runs `agent.unlock(passphrase)`, the node is unusable by design: the database password check passes, then the key lookup fails — a misleading *message* for an intentional lockout. | You cannot work around this from an agent session. If you are the operator, unlock with the agent passphrase (`ad4m agent unlock` on the CLI, or the `agent.unlock` WS-RPC method). If it is someone else's node, tell whoever runs it. |
+| `User key not found` on login, or `main key not found` on `generate_jwt` / `request_capability`, right after an executor restart | **Expected, not a bug.** The wallet keeps signing keys in memory only. Until the executor's operator runs `agent.unlock(passphrase)`, the executor is unusable by design: the database password check passes, then the key lookup fails — a misleading *message* for an intentional lockout. | You cannot work around this from an agent session. If you are the operator, unlock with the agent passphrase (`ad4m agent unlock` on the CLI, or the `agent.unlock` WS-RPC method). If it is someone else's executor, tell whoever runs it. |
 | A query or `describe_perspective` comes back empty right after joining a neighbourhood | SHACL schema and Holochain data are still gossiping in. | Wait 3–5 minutes and retry. Nothing to fix. |
 | A write is rejected naming a property, a type or a cardinality | The class schema says otherwise. | Do not guess — the rejection is precise. Re-read `describe_perspective` and fix exactly what it named. |
 | An instance you created looks "uninitialized" to other agents | You called `instance_update` right after `instance_create` and the remove+re-add raced gossip. | Pass every property in the `instance_create` call. |

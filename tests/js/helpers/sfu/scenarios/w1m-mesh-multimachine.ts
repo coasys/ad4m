@@ -21,6 +21,12 @@ export const w1mMeshMultiMachine: Scenario = {
   name: "Mesh 2-peer across two machines",
   description: "Mesh 2-peer call with peers on two physical machines via peer-server",
 
+  unavailable() {
+    return (process.env.AD4M_REMOTE_PEER_URL ?? DEFAULT_REMOTE)
+      ? null
+      : "AD4M_REMOTE_PEER_URL not set — point at a peer-server";
+  },
+
   async run(ctx: ScenarioContext): Promise<ScenarioResult> {
     const { branch } = ctx;
     const remoteUrl = process.env.AD4M_REMOTE_PEER_URL ?? DEFAULT_REMOTE;
@@ -29,20 +35,8 @@ export const w1mMeshMultiMachine: Scenario = {
     const metrics: Record<string, unknown> = { remoteUrl };
 
     if (!remoteUrl) {
-      return {
-        scenario: "w1m-mesh-multimachine",
-        branch,
-        startTime,
-        endTime: Date.now(),
-        durationMs: Date.now() - startTime,
-        passed: true,
-        metrics: {
-          skipped: true,
-          skip_reason: "AD4M_REMOTE_PEER_URL not set — point at a peer-server",
-        },
-        samples,
-        summary: "W1M: SKIPPED — AD4M_REMOTE_PEER_URL unset",
-      };
+      // The harness skips the scenario first (see `unavailable`).
+      throw new Error("W1M: AD4M_REMOTE_PEER_URL not set — point at a peer-server");
     }
 
     let local: WebRtcPeer | null = null;

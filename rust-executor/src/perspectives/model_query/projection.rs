@@ -727,12 +727,17 @@ fn walk_guarded(
     proj: &ProjectionInput,
     guard: LinkGuard,
 ) -> Result<Vec<(String, String)>, deno_core::anyhow::Error> {
+    let edge = super::containment::ContainmentEdge {
+        predicate: safe_pred.to_string(),
+        holder: None,
+    };
     let mut pairs = super::query::guarded_reach(
         store,
         parent_ids,
-        safe_pred,
+        std::slice::from_ref(&edge),
         super::types::ScopeDirection::Out,
         guard,
+        None,
     )?;
 
     if !where_patterns.is_empty() && !pairs.is_empty() {

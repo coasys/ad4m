@@ -52,11 +52,11 @@ const link = (source: string) => ({
 });
 const handle = (uuid: string) => ({ uuid, name: 'test', neighbourhood: null, sharedUrl: null, state: PerspectiveState.Synced, owners: null });
 const linkAdded = (perspectiveUuid: string, source: string) =>
-  ({ type: 'link-added', perspectiveUuid, owner: 'did:test', link: link(source) });
+  ({ type: 'link-added', perspectiveUuid, link: link(source) });
 const linkRemoved = (perspectiveUuid: string, source: string) =>
-  ({ type: 'link-removed', perspectiveUuid, owner: 'did:test', link: link(source) });
+  ({ type: 'link-removed', perspectiveUuid, link: link(source) });
 const linkUpdated = (perspectiveUuid: string, oldSource: string, newSource: string) =>
-  ({ type: 'link-updated', perspectiveUuid, owner: 'did:test', oldLink: link(oldSource), newLink: link(newSource) });
+  ({ type: 'link-updated', perspectiveUuid, oldLink: link(oldSource), newLink: link(newSource) });
 const syncStateChange = (perspectiveUuid: string, state: PerspectiveState) =>
   ({ type: 'sync-state-change', perspectiveUuid, state, perspective: handle(perspectiveUuid) });
 const autoProcessorEvent = (perspectiveUuid: string) => ({

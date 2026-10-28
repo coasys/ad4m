@@ -25,7 +25,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "auth_status",
-    "description": "Check the current authentication status of the MCP session.",
+    "description": "Check the current authentication status of the MCP session: whether its token (the Authorization header, or the one a login tool set) works, who it acts as and which capabilities it holds.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "AuthStatusParams",
@@ -263,7 +263,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "add_link",
-    "description": "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit \u2014 all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal://string:Alice'. In shared neighbourhoods, links sync to all members.",
+    "description": "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit \u2014 all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal:string:Alice' \u2014 note the single colon: the legacy 'literal://string:\u2026' spelling is not a parseable IRI and breaks every query that inlines it. In shared neighbourhoods, links sync to all members.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "AddLinkParams",
@@ -297,7 +297,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "query_links",
-    "description": "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination \u2014 omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values.",
+    "description": "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination \u2014 omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values. A `literal://x:y` filter also matches the canonical `literal:x:y` spelling and vice versa, so a link written through add_link (which normalises) is found by the string it was written with.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "QueryLinksParams",
@@ -350,7 +350,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_create",
-    "description": "Create a new instance of a subject class. class_name is one of the class names from describe_perspective; properties is a JSON object of property values (single JSON value per scalar property, array of item URIs per collection). Required properties must be present; every value is validated against the class schema (property, expected type, cardinality are named on rejection). Optionally pass parent to also link the instance as an ad4m://has_child child of another instance (e.g. a Message into a Channel). Returns the new instance's base_uri (its id). Example: instance_create(perspective_id, class_name='Message', properties={\"body\": \"Hello\"}, parent='<channel uri>').",
+    "description": "Create a new instance of a subject class. class_name is one of the class names from describe_perspective; properties is a JSON object of property values (single JSON value per scalar property, array of item URIs per collection). Required properties must be present; every value is validated against the class schema (property, expected type, cardinality are named on rejection). Optionally pass parent to also put the instance under another node (e.g. a Message into a Channel): through the parent class's own children relation when it has one (a block's we://child), else with an ad4m://has_child link. Returns the new instance's base_uri (its id). Example: instance_create(perspective_id, class_name='Message', properties={\"body\": \"Hello\"}, parent='<channel uri>').",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceCreateParams",
@@ -377,7 +377,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "nullable": true
         },
         "parent": {
-          "description": "Optional parent URI. The new instance is additionally linked as an\n`ad4m://has_child` child of this node (e.g. a Message inside a Channel).",
+          "description": "Optional parent URI. The new instance is also put under this node (e.g.\na Message inside a Channel), the way the node holds children: its\nclass's own `children` relation when it has one (a block's\n`we://child`), else `ad4m://has_child`.",
           "type": "string",
           "nullable": true
         }
@@ -390,7 +390,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_query",
-    "description": "List instances of a subject class with their property values. class_name is one of the class names from describe_perspective. Optional filter is a where clause on property values: exact match {\"status\": \"open\"}, IN {\"status\": [\"open\", \"doing\"]}, operators {\"count\": {\"gt\": 5}} / {\"title\": {\"contains\": \"mcp\"}} / {\"owner\": {\"not\": \"\u2026\"}}, combinators \"OR\" / \"AND\" / \"NOT\"; \"id\" filters on the instance URI. Optional parent restricts to ad4m://has_child children of one instance (e.g. messages of a channel). Paginate with limit (default 100) and offset; total_count reports the full match count. Each instance has id (its base_uri), author, timestamp, and one key per property.",
+    "description": "List instances of a subject class with their property values. class_name is one of the class names from describe_perspective. Optional filter is a where clause on property values: exact match {\"status\": \"open\"}, IN {\"status\": [\"open\", \"doing\"]}, operators {\"count\": {\"gt\": 5}} / {\"title\": {\"contains\": \"mcp\"}} / {\"owner\": {\"not\": \"\u2026\"}}, combinators \"OR\" / \"AND\" / \"NOT\"; \"id\" filters on the instance URI. Optional parent restricts to what one node contains (e.g. messages of a channel): its ad4m://has_child children, plus the children of its class's own children relation (e.g. a block's we://child), whatever the node is. Paginate with limit (default 100) and offset; total_count reports the full match count. Each instance has id (its base_uri), author, timestamp, and one key per property.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceQueryParams",
@@ -412,7 +412,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "nullable": true
         },
         "parent": {
-          "description": "Optional parent URI: only return instances that are `ad4m://has_child`\nchildren of this node (e.g. the messages of one channel).",
+          "description": "Optional parent URI: only return instances contained in this node (e.g.\nthe messages of one channel): its `ad4m://has_child` children, and the\nchildren of its own `children` relation when its class has one (a\nblock over `we://child`).",
           "type": "string",
           "nullable": true
         },
@@ -503,7 +503,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_add_to_collection",
-    "description": "Add an item to a collection property of an instance (e.g. add a Message to a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the URI of the item (usually another instance's id). Adding the same item twice is a no-op. Undo with instance_remove_from_collection.",
+    "description": "Add an item to a collection property of an instance (e.g. add a Message to a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the URI of the item (usually another instance's id). Adding an item that is already in the collection is a no-op (links_added: 0). Undo with instance_remove_from_collection.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceAddToCollectionParams",
@@ -581,7 +581,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_remove",
-    "description": "Delete an instance of a subject class: removes all its property links, its type markers, and every inbound link from other instances (e.g. collection membership). Refuses if no instance of class_name exists at base_uri, so a wrong class or URI cannot delete something else. \u26a0\ufe0f Irreversible.",
+    "description": "Delete an instance of a subject class: removes all its property links, its type markers, and every inbound link from other instances (e.g. collection membership). Refuses if no instance of class_name exists at base_uri, so a wrong class or URI cannot delete something else. Through an abstract class, runs the destructor of each of the record's classes it reads instead. \u26a0\ufe0f Irreversible.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceRemoveParams",
@@ -610,7 +610,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_transcript",
-    "description": "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). It is one query on the built-in abstract class TextContent: it reads every child whose class has a `text` property or a property aliased to `text`, whatever the app calls the class; children of other classes are not shown. Ideal for reading a conversation-shaped container in one call (parent=<channel id>). limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for one specific class, for the full property maps, or for filters.",
+    "description": "Read the most recent children of a node that carry text (its ad4m://has_child children, plus those of its class's own children relation, e.g. a block's we://child), as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). It is one query on the built-in abstract class TextContent: it reads every child whose class has a `text` property or a property aliased to `text`, whatever the app calls the class; children of other classes are not shown. Ideal for reading a conversation-shaped container in one call (parent=<channel id>). limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for one specific class, for the full property maps, or for filters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceTranscriptParams",
@@ -622,7 +622,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "type": "string"
         },
         "parent": {
-          "description": "Parent node URI whose ad4m://has_child children are read (e.g. a\nChannel's id). A bare string is wrapped as a literal URI.",
+          "description": "Parent node URI whose children are read (e.g. a Channel's id): its\n`ad4m://has_child` children, and those of its class's own `children`\nrelation. A bare string is wrapped as a literal URI.",
           "type": "string"
         },
         "limit": {
@@ -641,7 +641,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "add_child",
-    "description": "Link a child node under a parent with ad4m://has_child \u2014 the generic containment tree apps build their structure on: items in a container, containers under ad4m://self, e.g. messages in a channel or tasks in a board. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=\u2026) when creating a new instance, and instance_add_to_collection when the parent's class declares the collection; use this for nodes that are not instances (e.g. parent='ad4m://self') or to re-parent an existing instance.",
+    "description": "Put a child node under a parent \u2014 the containment tree apps build their structure on: items in a container, containers under ad4m://self, e.g. messages in a channel, blocks in a document, tasks in a board. The parent decides how it holds the child: if it is an instance of a class whose children relation is its own (a block over we://child), that relation's adder runs; otherwise one ad4m://has_child link is written, which holds on any node. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=\u2026) when creating a new instance; use this for an existing node (e.g. to file a channel under parent='ad4m://self') or to re-parent one.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "AddChildParams",
@@ -670,7 +670,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "get_children",
-    "description": "List the children of a node linked via ad4m://has_child, regardless of their class: id, timestamp and author of each child link, oldest first. Class-agnostic \u2014 works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent); to read the ones that carry text as a transcript, instance_transcript.",
+    "description": "List the children of a node, regardless of their class: id, timestamp and author of each child's link, oldest first. A node's children are its ad4m://has_child targets, whatever the node is, plus, when it is an instance of a class whose children relation is its own (a block over we://child), that relation's targets. Works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent); to read the ones that carry text as a transcript, instance_transcript.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GetChildrenParams",
@@ -701,7 +701,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "get_documentation",
-    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the ad4m://has_child tree, and the common traps. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks, channel recipes), worth reading only for a space Flux created — for any other app, describe_perspective is the authority on its classes. topic='models' is authoring your own subject classes with add_model. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format in depth. Older executors serve only overview/usage/architecture; overview always lists what that node actually has. No authentication needed.",
+    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux \u2014 for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. topic='template' is the guide to editing a WE template with template_read and template_update, and names the topics under it (template/...) for its components and props.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GetDocumentationParams",
@@ -709,45 +709,163 @@ export const STATIC_TOOL_DEFS: McpTool[] =
       "type": "object",
       "properties": {
         "topic": {
-          "description": "Which document: \"overview\" (start here), \"usage\", \"flux\", \"models\", or \"architecture\"",
-          "$ref": "#/$defs/DocTopic"
+          "description": "Which document: \"overview\" (start here), \"usage\", \"flux\", \"models\" or \"architecture\";\n\"template\" for editing a WE template, and the topics under it that it names",
+          "type": "string"
         }
       },
       "required": [
         "topic"
-      ],
-      "$defs": {
-        "DocTopic": {
-          "description": "Which document to return.",
-          "oneOf": [
-            {
-              "description": "What AD4M is, the static tool surface, the workflow, and the rules\nthat keep data usable by humans and other agents. Start here.",
-              "type": "string",
-              "const": "overview"
-            },
-            {
-              "description": "Perspectives, links, languages, neighbourhoods, and the SHACL subject\nclass (social DNA) format in detail.",
-              "type": "string",
-              "const": "architecture"
-            },
-            {
-              "description": "How to actually use the tools: reading and writing instances, the tree,\nand the common traps. Does not cover app-specific data models (topic flux, for Flux spaces) or authoring classes (use models).",
-              "type": "string",
-              "const": "usage"
-            },
-            {
-              "description": "App-specific, kept for spaces the Flux app created: message HTML\nformatting, channels vs conversations, posts, tasks, and the essential\nchannel recipes. A space made by any other app is described by\ndescribe_perspective, not by this topic.",
-              "type": "string",
-              "const": "flux"
-            },
-            {
-              "description": "Authoring subject classes with add_model: what the executor derives from\na shape, a worked example, hints, dedup identity, and class change semantics.",
-              "type": "string",
-              "const": "models"
-            }
-          ]
+      ]
+    }
+  },
+  {
+    "name": "template_read",
+    "description": "Read the template being edited. With no arguments: its version, and the template \u2014 whole, or as an outline of every node with the parts `about` names in full when it is too large to send \u2014 plus the space's own data models. With `ids`, those nodes in full; with `find`, the nodes whose type or text matches. Read the `template` documentation topic before a first edit.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Node ids, e.g. \"n12\"."
+        },
+        "find": {
+          "type": "string",
+          "description": "Text or a type to look for, e.g. \"Load more\"."
+        },
+        "about": {
+          "type": "string",
+          "description": "What the edit is about, in words \u2014 chooses which nodes of a large template come back in full."
+        },
+        "perspective_id": {
+          "type": "string",
+          "description": "Perspective UUID"
+        },
+        "base_uri": {
+          "type": "string",
+          "description": "URI of the Template record"
         }
-      }
+      },
+      "required": [
+        "perspective_id",
+        "base_uri"
+      ]
+    }
+  },
+  {
+    "name": "template_update",
+    "description": "Apply patches to the template and SAVE them, as one change everybody sees. Put every patch an edit needs in one call. Pass the version template_read gave: a template that has changed since is refused. `dry_run` checks the patches without saving. Each patch targets a node by its id, with exactly one of node, insert, remove or split.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "description": "The version template_read answered with."
+        },
+        "patches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "targetId": {
+                "type": "string",
+                "description": "For node (update): the id of the node to merge into. For insert/remove: the id of the PARENT node whose children/routes array to modify. Use \"\" for root."
+              },
+              "node": {
+                "type": "object",
+                "description": "Partial node to merge (JSON Merge Patch). Absent keys preserved, null deletes a key. Mutually exclusive with insert/remove."
+              },
+              "insert": {
+                "type": "object",
+                "properties": {
+                  "children": {
+                    "type": "object",
+                    "properties": {
+                      "node": {
+                        "type": "object",
+                        "description": "The new node to insert."
+                      },
+                      "after": {
+                        "type": "string",
+                        "description": "ID of sibling to insert after. Omit to append."
+                      },
+                      "before": {
+                        "type": "string",
+                        "description": "ID of sibling to insert before."
+                      }
+                    },
+                    "required": [
+                      "node"
+                    ]
+                  },
+                  "routes": {
+                    "type": "object",
+                    "properties": {
+                      "node": {
+                        "type": "object",
+                        "description": "The new route node to insert."
+                      },
+                      "after": {
+                        "type": "string",
+                        "description": "ID of sibling route to insert after. Omit to append."
+                      },
+                      "before": {
+                        "type": "string",
+                        "description": "ID of sibling route to insert before."
+                      }
+                    },
+                    "required": [
+                      "node"
+                    ]
+                  }
+                },
+                "description": "Insert into children or routes array. Mutually exclusive with node/remove."
+              },
+              "remove": {
+                "type": "object",
+                "properties": {
+                  "children": {
+                    "type": "string",
+                    "description": "ID of child to remove."
+                  },
+                  "routes": {
+                    "type": "string",
+                    "description": "ID of route to remove."
+                  }
+                },
+                "description": "Remove from children or routes array by child ID. Mutually exclusive with node/insert."
+              },
+              "split": {
+                "type": "boolean",
+                "description": "targetId is a $ref: give THIS use of the shared shape a copy of its own, so a later patch to it changes nowhere else. Every other use keeps sharing the definition. Use it when a request means one of several places that currently look alike; patch the definition itself when it means all of them. The copy is returned with fresh ids, so patch it on the next turn. Mutually exclusive with node/insert/remove."
+              }
+            },
+            "required": [
+              "targetId"
+            ]
+          }
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Check the patches and save nothing."
+        },
+        "perspective_id": {
+          "type": "string",
+          "description": "Perspective UUID"
+        },
+        "base_uri": {
+          "type": "string",
+          "description": "URI of the Template record"
+        }
+      },
+      "required": [
+        "perspective_id",
+        "base_uri",
+        "version",
+        "patches"
+      ]
     }
   }
 ];

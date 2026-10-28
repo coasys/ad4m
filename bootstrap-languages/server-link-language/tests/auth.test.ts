@@ -39,12 +39,20 @@ class MockAgent implements AgentAdapter {
     did(): string {
         return this.didValue;
     }
+    signed: string[] = [];
     signStringHex(payload: string): string {
+        this.signed.push(payload);
         // Deterministic stand-in for EdDSA signing — auth.ts only relies on
         // determinism (same input -> same output), not on real Ed25519 math.
         return createHash("sha256").update(`${this.didValue}:${payload}`).digest("hex");
     }
+    openSealed(): string {
+        throw new Error("auth never opens");
+    }
 }
+
+/** A challenge in the link server's format: 32 bytes, hex. */
+const CHALLENGE = "c0".repeat(32);
 
 /** Builds an unsigned (alg: none) JWT — auth.ts never verifies the
  * signature, it only decodes the payload to read `exp`. */
@@ -54,14 +62,16 @@ function makeJwt(payload: Record<string, unknown>): string {
     return `${b64url(JSON.stringify({ alg: "none", typ: "JWT" }))}.${b64url(JSON.stringify(payload))}.`;
 }
 
-function setup(transport: Transport, did = "did:key:zTestAgent"): void {
+function setup(transport: Transport, did = "did:key:zTestAgent"): MockAgent {
     resetAdapters();
+    const agent = new MockAgent(did);
     initAdapters({
         transport,
-        agent: new MockAgent(did),
+        agent,
         config: { serverUrl: "https://server.example", roomId: "room-123" },
     });
     auth.resetAuth();
+    return agent;
 }
 
 /** Routes both auth steps (same endpoint) to a challenge-then-token flow. */
@@ -72,7 +82,7 @@ function authRoute(transport: MockTransport, tokenPayload: Record<string, unknow
         (body) => {
             const parsed = JSON.parse(body) as Record<string, unknown>;
             if (!("signature" in parsed)) {
-                return { status: 200, headers: {}, body: JSON.stringify({ challenge: "chal-abc" }) };
+                return { status: 200, headers: {}, body: JSON.stringify({ challenge: CHALLENGE }) };
             }
             authCalls++;
             return { status: 200, headers: {}, body: JSON.stringify({ token: makeJwt(tokenPayload) }) };
@@ -105,9 +115,9 @@ describe("auth: parseJwtExpiryMs", () => {
 // ---------------------------------------------------------------------------
 
 describe("auth: authenticate", () => {
-    it("performs the two-step DID challenge-response flow and includes the derived X25519 public key", async () => {
+    it("performs the two-step DID challenge-response flow, signing only the challenge", async () => {
         const transport = new MockTransport();
-        setup(transport);
+        const agent = setup(transport);
 
         transport.route(
             (url, method) => method === "POST" && url.endsWith("/rooms/room-123/auth"),
@@ -115,14 +125,15 @@ describe("auth: authenticate", () => {
                 const parsed = JSON.parse(body) as Record<string, unknown>;
                 if (!("signature" in parsed)) {
                     assert.equal(parsed.did, "did:key:zTestAgent");
-                    return { status: 200, headers: {}, body: JSON.stringify({ challenge: "chal-abc" }) };
+                    return { status: 200, headers: {}, body: JSON.stringify({ challenge: CHALLENGE }) };
                 }
-                assert.equal(parsed.challenge, "chal-abc");
-                assert.ok(typeof parsed.signature === "string" && parsed.signature.length > 0);
-                assert.ok(
-                    typeof parsed.x25519PublicKey === "string" && parsed.x25519PublicKey.length === 64,
-                    "expected a 32-byte hex-encoded X25519 public key on step 2",
+                assert.deepEqual(
+                    Object.keys(parsed).sort(),
+                    ["challenge", "did", "signature"],
+                    "step 2 carries the signed challenge and nothing else: members' keys come from their DIDs",
                 );
+                assert.equal(parsed.challenge, CHALLENGE);
+                assert.ok(typeof parsed.signature === "string" && parsed.signature.length > 0);
                 return {
                     status: 200,
                     headers: {},
@@ -135,11 +146,26 @@ describe("auth: authenticate", () => {
         assert.ok(session.token);
         assert.ok(session.expiresAt !== null && session.expiresAt > Date.now());
         assert.equal(transport.calls.length, 2);
+        assert.deepEqual(agent.signed, [CHALLENGE], "auth signs the challenge only");
         // Verify the session got cached — getValidToken should return the same
         // token without triggering another auth round-trip.
         const cached = await auth.getValidToken();
         assert.equal(cached, session.token);
         assert.equal(transport.calls.length, 2, "no extra auth call for cached token");
+    });
+
+    it("signs only a challenge in the link server's format", async () => {
+        for (const challenge of ["chal-abc", "c0".repeat(31), "C0".repeat(32), "c0".repeat(33), ` ${"c0".repeat(32)}`, 42]) {
+            const transport = new MockTransport();
+            const agent = setup(transport);
+            transport.route(
+                (url, method) => method === "POST" && url.endsWith("/rooms/room-123/auth"),
+                () => ({ status: 200, headers: {}, body: JSON.stringify({ challenge }) }),
+            );
+            await assert.rejects(() => auth.authenticate(), /not 32 bytes of hex/, `challenge ${JSON.stringify(challenge)}`);
+            assert.deepEqual(agent.signed, [], `signed ${JSON.stringify(challenge)}`);
+            assert.equal(transport.calls.length, 1, "no second auth step");
+        }
     });
 
     it("propagates a server error from the challenge step", async () => {
@@ -200,7 +226,7 @@ describe("auth: getValidToken", () => {
             (url, method) => method === "POST" && url.endsWith("/rooms/room-123/auth"),
             (body) => {
                 const parsed = JSON.parse(body) as Record<string, unknown>;
-                if (!("signature" in parsed)) return { status: 200, headers: {}, body: JSON.stringify({ challenge: "c" }) };
+                if (!("signature" in parsed)) return { status: 200, headers: {}, body: JSON.stringify({ challenge: CHALLENGE }) };
                 authCalls++;
                 return { status: 200, headers: {}, body: JSON.stringify({ token: "opaque-server-token" }) };
             },

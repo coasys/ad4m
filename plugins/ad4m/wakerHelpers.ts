@@ -52,7 +52,7 @@ export async function postWake(
   agentDid: string,
   logger: any,
   mentions?: MentionMessage[],
-): Promise<void> {
+): Promise<boolean> {
   logger.info(
     `[ad4m-waker] postWake: sub=${sub.id}, type=${sub.type}, mentions=${mentions?.length ?? 0}`,
   );
@@ -72,10 +72,12 @@ export async function postWake(
     });
     if (!resp.ok) {
       logger.error(`[ad4m-waker] wake POST failed: ${resp.status}`);
-    } else {
-      logger.info(`[ad4m-waker] wake POST sent successfully`);
+      return false;
     }
+    logger.info(`[ad4m-waker] wake POST sent successfully`);
+    return true;
   } catch (e: any) {
     logger.error(`[ad4m-waker] wake POST error: ${e.message}`);
+    return false;
   }
 }
