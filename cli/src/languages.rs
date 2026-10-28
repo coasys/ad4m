@@ -142,7 +142,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
                 .publish(
                     path,
                     Some(meta.name),
-                    meta.description,
+                    Some(meta.description),
                     meta.possible_template_params,
                     meta.source_code_link,
                 )
@@ -174,7 +174,8 @@ struct PublishMetaArgs {
 #[derive(Debug, PartialEq)]
 struct PublishMeta {
     name: String,
-    description: Option<String>,
+    /// Always sent: `language.publish` requires a description, empty or not.
+    description: String,
     possible_template_params: Option<Vec<String>>,
     source_code_link: Option<String>,
 }
@@ -206,7 +207,7 @@ fn publish_meta(
     let non_empty = |s: String| if s.is_empty() { None } else { Some(s) };
     Ok(PublishMeta {
         name,
-        description: non_empty(description),
+        description,
         possible_template_params: non_empty(possible_template_params)
             .map(|s| s.split(',').map(|p| p.trim().to_string()).collect()),
         source_code_link: non_empty(source_code_link),
@@ -236,7 +237,7 @@ mod tests {
             meta,
             PublishMeta {
                 name: "note-store".into(),
-                description: None,
+                description: String::new(),
                 possible_template_params: None,
                 source_code_link: None,
             }
@@ -271,7 +272,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(asked, ["Description: ", "Source code link: "]);
-        assert_eq!(meta.description.as_deref(), Some("Notes"));
+        assert_eq!(meta.description, "Notes");
         assert_eq!(
             meta.possible_template_params,
             Some(vec!["uid".to_string(), "name".to_string()])
