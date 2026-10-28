@@ -164,16 +164,15 @@ export interface MentionMessage {
   ancestors: string[];
   /**
    * The DID that signed the link the mention is in: the mention link to the agent's DID when
-   * the record mentions it through TextContent's `mentions`, else the text link that names it.
-   * Only that link is theirs; the record's other links may be someone else's. Absent when the
-   * row carries no such link.
+   * the record mentions it through TextContent's `mentions`, else the text link whose own text
+   * names it. Only that link is theirs; the record's other links may be someone else's.
    */
   author?: string;
-  /** That link's timestamp, ISO 8601. Absent as `author` is. */
+  /** That link's timestamp, ISO 8601. */
   timestamp?: string;
   /**
-   * Whether that link's signature verified for `author`. The executor's mention query reads
-   * verified links only, so a mention it found is `true`; a row without the link is `false`.
+   * Whether that link's signature verified for `author`. A mention is only taken from a link
+   * that verified, so a wake's mention is `true`.
    */
   verified: boolean;
   /**
@@ -212,6 +211,42 @@ function rowLinks(row: any, key: string): RowLink[] {
   return Array.isArray(links) ? links : [];
 }
 
+/** `uri` URI-decoded, or as it is when it is not valid percent-encoding. */
+function decoded(uri: string): string {
+  try {
+    return decodeURIComponent(uri);
+  } catch {
+    return uri;
+  }
+}
+
+/**
+ * The text a link's target holds, read as the executor reads a string property
+ * (`parse_literal_value`): `literal:string:` decoded, `literal:json:` parsed (a signed
+ * expression to its `data`), any other URI as it is. `undefined` when that is not a string.
+ */
+function textOf(target: unknown): string | undefined {
+  if (typeof target !== "string") return undefined;
+  if (!target.startsWith("literal:")) return target;
+  const body = target.slice("literal:".length);
+  if (body.startsWith("string:")) return decoded(body.slice("string:".length));
+  if (body.startsWith("json:")) {
+    const json = decoded(body.slice("json:".length));
+    let value: any;
+    try {
+      value = JSON.parse(json);
+    } catch {
+      return json;
+    }
+    if (value && typeof value === "object" && "data" in value && "author" in value && "proof" in value) {
+      value = value.data;
+    }
+    return typeof value === "string" ? value : undefined;
+  }
+  if (/^(?:number|boolean):/.test(body)) return undefined;
+  return target;
+}
+
 /**
  * Whether a row of the executor's mention query (a model query over TextContent, #1557)
  * mentions the subscription's agent, and the provenance of the link it does so in; `null`
@@ -221,8 +256,9 @@ function rowLinks(row: any, key: string): RowLink[] {
  *   row's `__links.mentions`. It wakes whatever the text says: WE's chip label may run into
  *   the next word ("@Datai have…"). Its provenance is that link's (the newest such).
  * - Through the text alone: the query matched a substring, so the text must hold a term as a
- *   whole word ({@link holdsAWholeWordTerm}). Its provenance is the newest text link another
- *   agent wrote, in `__links.text`.
+ *   whole word ({@link holdsAWholeWordTerm}), and so must the text of a verified link another
+ *   agent wrote, in `__links.text`. Its provenance is that link's (the newest such). The row's
+ *   `text` is the newest text link's, whoever wrote it, so it does not say whose words they are.
  *
  * A record that matches both is one row, so it wakes once, through `mentions`. `via` says
  * which path it was.
@@ -238,10 +274,14 @@ export function mentionOf(
   );
   if (did && linked.length) return provenanceOf(linked[linked.length - 1], "mentions");
 
+  const terms = sub.terms ?? [];
+  const names = (text: unknown) => typeof text === "string" && holdsAWholeWordTerm(text, terms);
   const text = Array.isArray(row?.text) ? row.text.join(" ") : row?.text;
-  if (typeof text !== "string" || !holdsAWholeWordTerm(text, sub.terms ?? [])) return null;
-  const written = byOthers(rowLinks(row, "text"));
-  return provenanceOf(written[written.length - 1], "text");
+  if (!names(text)) return null;
+  const naming = byOthers(rowLinks(row, "text")).filter(
+    (l) => l.proof?.valid === true && names(textOf(l.data?.target)),
+  );
+  return naming.length ? provenanceOf(naming[naming.length - 1], "text") : null;
 }
 
 export interface WakerLogger {
