@@ -3532,9 +3532,17 @@ const MENTION_CONFIG = {
   did: "did:key:zAgent",
 };
 
+/** A text link another agent signed that holds "hi Data", as `__links.text` lists it. */
+const HI_DATA = {
+  author: "did:key:zOther",
+  timestamp: "2026-10-27T00:30:00.000Z",
+  data: { target: "literal:string:hi%20Data" },
+  proof: { valid: true },
+};
+
 /** The mention query's result: records whose text names the agent as a whole word. */
 const named = (...ids: string[]) => ({
-  instances: ids.map((id) => ({ id, text: "hi Data", __links: { mentions: [], text: [] } })),
+  instances: ids.map((id) => ({ id, text: "hi Data", __links: { mentions: [], text: [HI_DATA] } })),
   totalCount: ids.length,
 });
 
@@ -3544,7 +3552,7 @@ const named = (...ids: string[]) => ({
  */
 const OLD_AND_LINK_ONLY = {
   instances: [
-    { id: "msg-old", text: "hi Data", __links: { mentions: [], text: [] } },
+    { id: "msg-old", text: "hi Data", __links: { mentions: [], text: [HI_DATA] } },
     {
       id: "msg-new",
       text: "@Datai have news",
