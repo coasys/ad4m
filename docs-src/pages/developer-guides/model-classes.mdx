@@ -826,7 +826,8 @@ if (first.nextCursor) {
 - a cursor taken from a page in the other direction, or a malformed cursor,
 - several classes (`Ad4mModel.queryOf`), or an abstract class (it reads every class that has its properties); page those with `limit`/`offset`,
 - a `where` the store cannot evaluate,
-- a `parent` scope with `limitPerAnchor` or `levels`.
+- a `parent` scope with `limitPerAnchor` or `levels`,
+- `after` inside an `include` sub-query (page a relation with `limit`/`offset`).
 
 Subscriptions refuse `after` too: a subscription re-runs one query, so it would re-read the same page forever. `subscribe()`, `countSubscribe()` and `paginateSubscribe()` leave it out.
 

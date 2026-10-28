@@ -527,15 +527,16 @@ export type LinksMap = Record<string, LinkRow[]>;
 /**
  * Sub-query options for a specific relation inside an `IncludeMap`.
  *
- * Equivalent to `Query` without top-level scoping (`parent`) or `count`,
- * since the result set is already constrained to the linked relation.
+ * Equivalent to `Query` without top-level scoping (`parent`), `count` or a
+ * cursor (`after`), since the result set is already constrained to the linked
+ * relation. Page a relation with `limit`/`offset`.
  *
  * @example
  * ```typescript
  * await post.get({ include: { comments: { order: { createdAt: 'DESC' }, limit: 5 } } });
  * ```
  */
-export type RelationSubQuery = Omit<Query, 'parent' | 'count'>;
+export type RelationSubQuery = Omit<Query, 'parent' | 'count' | 'after'>;
 
 // ---------------------------------------------------------------------------
 // Typed Query DSL — Phase 1 of PLAN_6_TYPED_QUERIES.md
