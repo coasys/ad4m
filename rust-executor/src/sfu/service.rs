@@ -1747,6 +1747,89 @@ mod tests {
         assert_eq!(sessions(&svc, url).await.len(), 1);
     }
 
+    /// Two joins from the same device overlap: the second replaces the
+    /// first's session before the first join has returned. The media loop
+    /// must end up holding the sessions the room holds, so each session's
+    /// peer reaches it before the removal that ends it.
+    #[tokio::test]
+    async fn overlapping_replacements_keep_the_media_loop_in_step_with_the_room() {
+        let svc = Arc::new(test_service().await);
+        let url = "neighbourhood://overlapping-replacements";
+        let first = join(&svc, url, "did:a", "laptop").await;
+
+        // A replacing join pauses on the preference bookkeeping while this
+        // guard is held, after the room has taken its session.
+        let barrier = svc.local_quality_preferences.write().await;
+        let a = tokio::spawn({
+            let svc = svc.clone();
+            async move { join(&svc, url, "did:a", "laptop").await }
+        });
+        let second = only_session_other_than(&svc, url, &first).await;
+        // The media loop keeps a preference per session until it removes
+        // that session's peer, so a preference left over means a removal
+        // came before the peer it was meant for.
+        let preference = tokio::spawn({
+            let (svc, second) = (svc.clone(), second.clone());
+            async move {
+                svc.call_set_quality_preference(url, "r", "did:a", &second, "low")
+                    .await
+            }
+        });
+        eventually(|| async { peers_with_preferences(&svc).await == vec![second.clone()] })
+            .await;
+        let b = tokio::spawn({
+            let svc = svc.clone();
+            async move { join(&svc, url, "did:a", "laptop").await }
+        });
+        let third = only_session_other_than(&svc, url, &second).await;
+        // A round trip: the media loop has handled every command sent so far.
+        svc.get_quality_preferences().await;
+        drop(barrier);
+
+        assert_eq!(a.await.unwrap(), second);
+        assert_eq!(b.await.unwrap(), third);
+        assert!(preference.await.unwrap().unwrap());
+        assert_eq!(
+            sessions(&svc, url).await,
+            vec![(third, "did:a".to_string())]
+        );
+        assert!(
+            peers_with_preferences(&svc).await.is_empty(),
+            "the media loop still holds the replaced session {second}"
+        );
+    }
+
+    /// The one session in room `r` of `url` once it is no longer `old`.
+    async fn only_session_other_than(svc: &SfuService, url: &str, old: &str) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let [(pid, _)] = sessions(svc, url).await.as_slice() {
+                    if pid != old {
+                        return pid.clone();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("no new session in time")
+    }
+
+    /// Wait until `check` holds, failing the test after five seconds.
+    async fn eventually<F, Fut>(mut check: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !check().await {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("condition not reached in time");
+    }
+
     /// A phone and a laptop: two participants, listed apart in the roster,
     /// and leaving on one leaves the other in the call.
     #[tokio::test]
