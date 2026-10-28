@@ -400,6 +400,79 @@ async fn a_sort_on_a_field_of_a_decoded_file_picks_the_page_from_decoded_values(
     files.stop().await;
 }
 
+/// A transform the `where` reads runs once: the page pass leaves the
+/// properties the filter already transformed as they are. A prefix shows a
+/// second run, where the file decode, which maps its own output to itself,
+/// would not.
+#[tokio::test]
+async fn a_transform_the_where_reads_runs_once() {
+    let n = 12;
+    let store = seed(n, None);
+    let shape = r#"{
+        "className": "Item",
+        "properties": {
+            "type": { "predicate": "ad4m://type", "required": true, "flag": true, "initial": "item://Item" },
+            "kind": { "predicate": "item://kind" },
+            "title": { "predicate": "item://title", "transform": { "type": "concat", "args": [
+                { "type": "literal", "value": "x-" }, { "type": "focus" }
+            ] } }
+        },
+        "relations": {}
+    }"#;
+
+    let (rows, total, _) = run(
+        &store,
+        shape,
+        json!({
+            "where": { "title": { "contains": "t1" }, "timestamp": { "gt": 0 } },
+            "limit": 10,
+        }),
+    )
+    .await;
+
+    let expected: Vec<usize> = vec![1, 10, 11];
+    assert_eq!(
+        ids(&rows),
+        expected.iter().map(|&i| id(i)).collect::<Vec<_>>()
+    );
+    assert_eq!(total, expected.len());
+    for (row, &i) in rows.iter().zip(&expected) {
+        assert_eq!(row["title"], json!(format!("x-t{i}")), "{row}");
+    }
+}
+
+/// A `NOT` that reads the file sees the decoded file too: `walk` descends
+/// into it like into `AND` and `OR`.
+#[tokio::test]
+async fn a_post_hydration_not_on_a_file_reads_the_decoded_file() {
+    let files = FileLanguage::serve(Duration::ZERO).await;
+    let n = 12;
+    let store = seed(n, Some(&files));
+    let shape = shape_json(Some(&files));
+
+    let (rows, total, _) = run(
+        &store,
+        &shape,
+        json!({
+            "where": {
+                "NOT": { "file": { "contains": "text/plain" } },
+                "timestamp": { "gt": 0 }
+            },
+            "limit": 10,
+        }),
+    )
+    .await;
+
+    // `timestamp` keeps every row and the filter out of the store; `NOT` keeps the PNGs.
+    let expected: Vec<usize> = (0..n).filter(|&i| i % 3 == 0).collect();
+    assert_eq!(
+        ids(&rows),
+        expected.iter().map(|&i| id(i)).collect::<Vec<_>>()
+    );
+    assert_eq!(total, expected.len());
+    files.stop().await;
+}
+
 // ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------
