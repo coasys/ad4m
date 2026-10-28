@@ -109,6 +109,15 @@ function readableParts(text: string): { visible: string; targets: string[] } {
 }
 
 /**
+ * How much of a record's text the word check reads. Dropping markup costs time
+ * quadratic in a run of unclosed `<script>`, `<style>` or `<!--` openers, so a
+ * very long text could hold the event loop for seconds, and a row that holds
+ * no term is checked again on every result while it is in the window. A term
+ * past this many characters does not wake.
+ */
+export const MENTION_TEXT_LIMIT = 16_384;
+
+/**
  * Whether `text` holds one of `terms` as a whole word, case-insensitively:
  * "Data" is in "hi Data!", "@data" and "Data's turn", not in "metadata" or
  * "database". A term is matched literally (regex characters, quotes) and must
@@ -124,9 +133,11 @@ function readableParts(text: string): { visible: string; targets: string[] } {
  * The mention query's `contains` matches substrings (model query has no word
  * match); this is the check that keeps "data" from waking on "metadata" when
  * a record is found through its text alone ({@link mentionOf}).
+ *
+ * It reads the first {@link MENTION_TEXT_LIMIT} characters only.
  */
 export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
-  const { visible, targets } = readableParts(text);
+  const { visible, targets } = readableParts(text.slice(0, MENTION_TEXT_LIMIT));
   return terms.some((term) => {
     if (!term) return false;
     if (term.startsWith("did:") && targets.includes(term)) return true;
