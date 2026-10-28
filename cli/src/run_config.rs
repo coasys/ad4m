@@ -512,6 +512,11 @@ impl RunArgs {
         }
 
         let mut config = file.to_ad4m_config(&secrets)?;
+        let merged = serde_json::to_value(&file)?;
+        config.config_overrides = pinned
+            .iter()
+            .filter_map(|key| Some((key.clone(), merged.get(key)?.clone())))
+            .collect();
         config.network_bootstrap_seed = self.network_bootstrap_seed;
         config.language_language_only = self.language_language_only;
         config.hc_use_bootstrap = self.hc_use_bootstrap;
@@ -641,7 +646,8 @@ pub(crate) mod tests {
     }
 
     /// The run contract's flags reach the executor: `--watch-stdin true`, `--custody-channel`,
-    /// `--log-dir`, the config file's path, and the keys a flag or variable pins.
+    /// `--log-dir`, the config file's path, and the keys a flag or variable pins, with the
+    /// values they pin.
     #[test]
     fn the_run_contract_flags_reach_the_executor() {
         let _env = lock_env();
@@ -672,6 +678,11 @@ pub(crate) mod tests {
         let mut pinned = resolved.pinned_config_keys.clone();
         pinned.sort();
         assert_eq!(pinned, vec!["log_dir", "mcp_port", "port"]);
+        // What they lay over the file, for `runtime.setConfig` to check a write with.
+        assert_eq!(
+            serde_json::Value::Object(resolved.config_overrides),
+            serde_json::json!({"log_dir": "/data/adam/logs", "mcp_port": 3002, "port": 12100})
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

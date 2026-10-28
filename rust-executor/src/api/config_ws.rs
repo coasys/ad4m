@@ -27,8 +27,7 @@ async fn set_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
     let config = crate::config::get_global_config();
     let result = crate::config_rpc::set_config(
-        config.config_file.as_deref(),
-        &config.pinned_config_keys,
+        &config,
         ctx.session.is_operator_on_this_machine(),
         params,
         VALIDATOR_LIMIT,
@@ -73,6 +72,7 @@ mod tests {
             .clone();
         crate::config::set_global_config(crate::Ad4mConfig {
             config_file: Some(file.clone()),
+            insecure_no_admin_credential: Some(true),
             ..Default::default()
         });
 

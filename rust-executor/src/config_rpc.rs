@@ -12,8 +12,10 @@
 //! temporary file in the same folder, `fsync`, rename), mode 0600, and keeps every key it does
 //! not touch. A key that a flag or an environment variable overrides at this start is refused
 //! `pinned-by-config`: the write would not take effect while the override stays. Each written
-//! key must leave a file the executor starts with (`ExecutorConfigFile::parse`), and passes
-//! the validator its owning module registered ([`register_config_key`]), within 10 seconds.
+//! key must leave a file the next start accepts ([`next_start_accepts`]: the shape, and the
+//! conversion and checks `ad4m-executor run` applies with this start's overrides and secrets),
+//! and passes the validator its owning module registered ([`register_config_key`]), within 10
+//! seconds.
 //! A write publishes `config-changed` to the operator.
 
 use std::collections::BTreeSet;
@@ -27,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use ts_rs::TS;
 
+use crate::config::Ad4mConfig;
 use crate::config_file::{ExecutorConfigFile, ExecutorSecrets};
 
 /// Who may write a key.
@@ -298,16 +301,29 @@ fn remove_at(values: &mut Map<String, Value>, key: &str) {
     object.remove(*last);
 }
 
-/// Whether the executor starts with `values` as its config file: the parse and the mapping to
-/// `Ad4mConfig` the next start runs, with the secrets of this process's environment.
-fn starts_with(values: &Map<String, Value>) -> Result<(), String> {
+/// Whether the next start accepts `values` as its config file, as `ad4m-executor run` reads it
+/// after `start`: the file parses; with the flags and variables of `start` laid over it and
+/// the secrets read from the environment, it converts to the executor's config, which refuses
+/// values the shape accepts (a default TLS port past 65535); and that config passes the checks
+/// the CLI applies before `run`.
+fn next_start_accepts(values: &Map<String, Value>, start: &Ad4mConfig) -> Result<(), String> {
     let text = serde_json::to_string(values).map_err(|e| e.to_string())?;
-    let file = ExecutorConfigFile::parse(&text).map_err(|e| e.to_string())?;
+    ExecutorConfigFile::parse(&text).map_err(|e| e.to_string())?;
+    let mut merged = values.clone();
+    merged.extend(start.config_overrides.clone());
+    let file: ExecutorConfigFile =
+        serde_json::from_value(Value::Object(merged)).map_err(|e| e.to_string())?;
     let secrets = ExecutorSecrets::from_env(|name| std::env::var(name).ok(), &file)
         .map_err(|e| e.to_string())?;
-    file.to_ad4m_config(&secrets)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    let mut next = file.to_ad4m_config(&secrets).map_err(|e| e.to_string())?;
+    crate::config::refuse_custody_channel_with_multi_user(
+        start.custody_channel == Some(true),
+        next.enable_multi_user == Some(true),
+    )?;
+    // The credential and the flag that allows none are not in the file: this start's.
+    next.admin_credential.clone_from(&start.admin_credential);
+    next.insecure_no_admin_credential = start.insecure_no_admin_credential;
+    next.check_admin_credential()
 }
 
 /// Writes `values` to `file`: a temporary file in the same folder, mode 0600, `fsync`, then a
@@ -352,17 +368,21 @@ fn write_atomically(file: &Path, values: &Map<String, Value>) -> Result<(), Stri
     })
 }
 
-/// `runtime.setConfig`: writes the keys of `params` that the caller may write to `file`, and
-/// answers the others with their refusals. `on_machine`: the caller is the operator on this
-/// machine. `limit`: how long each validator may run ([`VALIDATOR_LIMIT`]).
+/// `runtime.setConfig`: writes the keys of `params` that the caller may write to the file
+/// `start` began with, and answers the others with their refusals. `start`: this start's
+/// config (its file, pinned keys and overrides). `on_machine`: the caller is the operator on
+/// this machine. `limit`: how long each validator may run ([`VALIDATOR_LIMIT`]).
 pub async fn set_config(
-    file: Option<&Path>,
-    pinned: &[String],
+    start: &Ad4mConfig,
     on_machine: bool,
     params: SetConfigParams,
     limit: Duration,
 ) -> Result<SetConfigResult, SetConfigError> {
-    let file = file.ok_or(SetConfigError::NoConfigFile)?;
+    let file = start
+        .config_file
+        .as_deref()
+        .ok_or(SetConfigError::NoConfigFile)?;
+    let pinned = &start.pinned_config_keys;
     let _write = WRITE.lock().await;
     let mut values = read_values(file).map_err(SetConfigError::File)?;
 
@@ -405,7 +425,7 @@ pub async fn set_config(
             Some(value) => set_at(&mut candidate, &key, value.clone()),
             None => remove_at(&mut candidate, &key),
         }
-        if let Err(detail) = starts_with(&candidate) {
+        if let Err(detail) = next_start_accepts(&candidate, start) {
             refused.push(refuse(&key, RefusalReason::Invalid, Some(detail)));
             continue;
         }
@@ -452,6 +472,17 @@ mod tests {
         let path = dir.path().join("config.json");
         std::fs::write(&path, text).unwrap();
         (dir, path)
+    }
+
+    /// The config of a start from `file` that pinned `pinned`, and passed its checks (no
+    /// admin credential, which the flag allows).
+    fn started(file: Option<&Path>, pinned: &[&str]) -> Ad4mConfig {
+        Ad4mConfig {
+            config_file: file.map(Path::to_path_buf),
+            pinned_config_keys: pinned.iter().map(|key| key.to_string()).collect(),
+            insecure_no_admin_credential: Some(true),
+            ..Default::default()
+        }
     }
 
     fn set(pairs: Value) -> SetConfigParams {
@@ -524,8 +555,7 @@ mod tests {
     async fn a_restart_key_is_written_atomically_with_mode_0600_keeping_the_other_keys() {
         let (_dir, path) = config_file(r#"{"port": 12000, "mcp_port": 3001}"#);
         let result = set_config(
-            Some(&path),
-            &[],
+            &started(Some(&path), &[]),
             false,
             set(json!({
                 "auto_permit_cap_requests": false,
@@ -577,8 +607,7 @@ mod tests {
             "no_such_key": 1
         }));
         let remote = set_config(
-            Some(&path),
-            &["mcp_port".to_string()],
+            &started(Some(&path), &["mcp_port"]),
             false,
             params.clone(),
             VALIDATOR_LIMIT,
@@ -599,7 +628,7 @@ mod tests {
         assert_eq!(read_values(&path).unwrap().get("port"), Some(&json!(12000)));
 
         // The operator on this machine writes machine keys.
-        let local = set_config(Some(&path), &[], true, params, VALIDATOR_LIMIT)
+        let local = set_config(&started(Some(&path), &[]), true, params, VALIDATOR_LIMIT)
             .await
             .unwrap();
         assert_eq!(
@@ -612,8 +641,7 @@ mod tests {
     #[tokio::test]
     async fn without_a_config_file_nothing_is_written() {
         let result = set_config(
-            None,
-            &[],
+            &started(None, &[]),
             true,
             set(json!({"mcp_port": 1})),
             VALIDATOR_LIMIT,
@@ -626,8 +654,7 @@ mod tests {
     async fn a_value_the_executor_would_refuse_at_start_is_invalid_and_unset_removes_a_key() {
         let (_dir, path) = config_file(r#"{"mcp_port": 3001, "mcp_enabled": true}"#);
         let result = set_config(
-            Some(&path),
-            &[],
+            &started(Some(&path), &[]),
             true,
             SetConfigParams {
                 set: json!({ "mcp_port": "not a port" }).as_object().cloned(),
@@ -656,8 +683,7 @@ mod tests {
                 {"enabled": true, "cert_file_path": "cert.pem", "key_file_path": "key.pem"}}}"#,
         );
         let result = set_config(
-            Some(&path),
-            &[],
+            &started(Some(&path), &[]),
             true,
             set(json!({ "port": 65535 })),
             VALIDATOR_LIMIT,
@@ -672,8 +698,7 @@ mod tests {
         assert_eq!(read_values(&path).unwrap().get("port"), Some(&json!(12000)));
 
         let result = set_config(
-            Some(&path),
-            &[],
+            &started(Some(&path), &[]),
             true,
             set(json!({ "port": 12100 })),
             VALIDATOR_LIMIT,
@@ -682,6 +707,75 @@ mod tests {
         .unwrap();
         assert!(result.refused.is_empty(), "{result:?}");
         assert_eq!(read_values(&path).unwrap().get("port"), Some(&json!(12100)));
+    }
+
+    /// The check reads the file as the next start does, with this start's flags laid over it:
+    /// `--port 65535` and TLS on without `tls_port` leave no TLS port, though the file names
+    /// no port.
+    #[tokio::test]
+    async fn the_next_start_is_checked_with_the_flags_of_this_start() {
+        let (_dir, path) = config_file("{}");
+        let tls = json!({ "multi_user_config": { "enabled": false, "smtp_config": null,
+            "tls_config": { "enabled": true, "cert_file_path": "/tls/cert.pem",
+            "key_file_path": "/tls/key.pem" } } });
+        let mut start = started(Some(&path), &["port"]);
+        start.config_overrides = json!({ "port": 65535 }).as_object().cloned().unwrap();
+        let refused = set_config(&start, true, set(tls.clone()), VALIDATOR_LIMIT)
+            .await
+            .unwrap();
+        assert_eq!(
+            reasons(&refused),
+            vec![("multi_user_config".to_string(), RefusalReason::Invalid)]
+        );
+        assert!(read_values(&path).unwrap().is_empty());
+
+        start.config_overrides = json!({ "port": 12000 }).as_object().cloned().unwrap();
+        let written = set_config(&start, true, set(tls), VALIDATOR_LIMIT)
+            .await
+            .unwrap();
+        assert!(written.refused.is_empty(), "{written:?}");
+    }
+
+    /// The checks the CLI applies before `run`, with this start's flags: multi-user mode needs
+    /// an admin credential, and never runs with the custody channel.
+    #[tokio::test]
+    async fn multi_user_mode_is_invalid_where_the_next_start_refuses_it() {
+        let (_dir, path) = config_file("{}");
+        let multi_user = set(
+            json!({ "multi_user_config": { "enabled": true, "smtp_config": null,
+                "tls_config": null } }),
+        );
+        let without_credential = started(Some(&path), &[]);
+        let mut custody = started(Some(&path), &[]);
+        custody.admin_credential = Some("operator".to_string().into());
+        custody.custody_channel = Some(true);
+        let mut with_credential = custody.clone();
+        with_credential.custody_channel = None;
+
+        for (start, why) in [
+            (
+                &without_credential,
+                crate::config::MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR,
+            ),
+            (
+                &custody,
+                crate::config::CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR,
+            ),
+        ] {
+            let result = set_config(start, true, multi_user.clone(), VALIDATOR_LIMIT)
+                .await
+                .unwrap();
+            assert_eq!(
+                reasons(&result),
+                vec![("multi_user_config".to_string(), RefusalReason::Invalid)]
+            );
+            assert_eq!(result.refused[0].detail.as_deref(), Some(why));
+            assert!(read_values(&path).unwrap().is_empty());
+        }
+        let written = set_config(&with_credential, true, multi_user, VALIDATOR_LIMIT)
+            .await
+            .unwrap();
+        assert!(written.refused.is_empty(), "{written:?}");
     }
 
     /// A key's validator runs before the write: a value it refuses is refused `invalid` with
@@ -708,8 +802,7 @@ mod tests {
         });
         let (_dir, path) = config_file("{}");
         let passed = set_config(
-            Some(&path),
-            &[],
+            &started(Some(&path), &[]),
             true,
             set(json!({ "mcp_port": 4000 })),
             Duration::from_millis(100),
@@ -723,8 +816,7 @@ mod tests {
         );
 
         let refused = set_config(
-            Some(&path),
-            &[],
+            &started(Some(&path), &[]),
             true,
             set(json!({ "mcp_port": 80 })),
             Duration::from_millis(100),
@@ -766,8 +858,7 @@ mod tests {
         });
         let (_dir, path) = config_file("{}");
         let result = set_config(
-            Some(&path),
-            &[],
+            &started(Some(&path), &[]),
             true,
             set(json!({ "mcp_enabled": true })),
             Duration::from_millis(50),

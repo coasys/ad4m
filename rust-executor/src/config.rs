@@ -157,6 +157,11 @@ pub struct Ad4mConfig {
     /// a write to the file would not take effect while the override stays.
     #[serde(default)]
     pub pinned_config_keys: Vec<String>,
+    /// What the flags and environment variables of this start lay over the config file: the
+    /// value of each pinned key. `runtime.setConfig` checks a written file with them, as the
+    /// next start reads it. The file's shape, so no secret.
+    #[serde(default)]
+    pub config_overrides: serde_json::Map<String, serde_json::Value>,
     /// Local DID for this SFU node in a cascade cluster.  Required if
     /// any cascade options are set; otherwise the SFU runs single-node.
     pub sfu_local_did: Option<String>,
@@ -599,6 +604,7 @@ impl Ad4mConfig {
             log_dir: None,
             config_file: None,
             pinned_config_keys: Vec::new(),
+            config_overrides: serde_json::Map::new(),
             sfu_local_did: None,
             sfu_max_participants_per_node: None,
             sfu_cascade_listen: None,
