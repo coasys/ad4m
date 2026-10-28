@@ -176,7 +176,16 @@ export interface MentionMessage {
    * verified links only, so a mention it found is `true`; a row without the link is `false`.
    */
   verified: boolean;
+  /**
+   * How the record mentions the agent: `"mentions"`, a mention link to its DID; `"text"`, its
+   * name or DID as a whole word in the text, with no such link. A text match is the agent's
+   * name used as a word, which need not address it ("the data shows" for an agent named Data).
+   */
+  via?: "mentions" | "text";
 }
+
+/** What {@link mentionOf} finds about a mention: how it was made, and the provenance of its link. */
+type MentionProvenance = Pick<MentionMessage, "author" | "timestamp" | "verified" | "via">;
 
 /** A link as a model row's `__links` carries it (`DecoratedLinkExpression`). */
 interface RowLink {
@@ -187,9 +196,10 @@ interface RowLink {
 }
 
 /** The provenance {@link MentionMessage} carries, from one link. */
-function provenanceOf(link: RowLink | undefined): Pick<MentionMessage, "author" | "timestamp" | "verified"> {
-  const provenance: Pick<MentionMessage, "author" | "timestamp" | "verified"> = {
+function provenanceOf(link: RowLink | undefined, via: "mentions" | "text"): MentionProvenance {
+  const provenance: MentionProvenance = {
     verified: link?.proof?.valid === true,
+    via,
   };
   if (typeof link?.author === "string") provenance.author = link.author;
   if (typeof link?.timestamp === "string") provenance.timestamp = link.timestamp;
@@ -214,23 +224,24 @@ function rowLinks(row: any, key: string): RowLink[] {
  *   whole word ({@link holdsAWholeWordTerm}). Its provenance is the newest text link another
  *   agent wrote, in `__links.text`.
  *
- * A record that matches both is one row, so it wakes once, through `mentions`.
+ * A record that matches both is one row, so it wakes once, through `mentions`. `via` says
+ * which path it was.
  */
 export function mentionOf(
   row: any,
   sub: Pick<WakerSubscription, "did" | "terms">,
-): Pick<MentionMessage, "author" | "timestamp" | "verified"> | null {
+): MentionProvenance | null {
   const did = sub.did;
   const byOthers = (links: RowLink[]) => links.filter((l) => typeof l.author === "string" && l.author !== did);
   const linked = byOthers(rowLinks(row, "mentions")).filter(
     (l) => l.data?.target === did && l.proof?.valid === true,
   );
-  if (did && linked.length) return provenanceOf(linked[linked.length - 1]);
+  if (did && linked.length) return provenanceOf(linked[linked.length - 1], "mentions");
 
   const text = Array.isArray(row?.text) ? row.text.join(" ") : row?.text;
   if (typeof text !== "string" || !holdsAWholeWordTerm(text, sub.terms ?? [])) return null;
   const written = byOthers(rowLinks(row, "text"));
-  return provenanceOf(written[written.length - 1]);
+  return provenanceOf(written[written.length - 1], "text");
 }
 
 export interface WakerLogger {
@@ -530,7 +541,7 @@ export class WakerSubscriptionManager {
         // Only wake for records we haven't seen before.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
-        const provenance = new Map<string, Pick<MentionMessage, "author" | "timestamp" | "verified">>();
+        const provenance = new Map<string, MentionProvenance>();
 
         for (const item of rows as any[]) {
           const address = item?.id;
