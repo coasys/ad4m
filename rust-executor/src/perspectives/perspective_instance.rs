@@ -40,7 +40,7 @@ use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, PoisonError};
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::{sleep, Instant};
@@ -73,6 +73,9 @@ pub(crate) use subscriptions::result_json;
 mod subscription_triggers;
 // Registering this executor's owners with the link language.
 mod local_agents;
+// Committing a batch only if the links it expects still stand.
+mod expected_links;
+pub use expected_links::{ExpectedLinks, LinksChanged};
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -626,12 +629,20 @@ pub struct PerspectiveInstance {
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
+    /// Held by `commit` from its pending-queue check until the diff is sent or
+    /// queued, so a diff that fails after a slow language call is queued ahead
+    /// of every diff committed after it.
+    commit_order: Arc<Mutex<()>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
     batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
     pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
+    /// Held by every write to `sparql_store` ([`Self::persist_link_diff`]), and by
+    /// [`Self::commit_batch_if`] from checking what it expects through its write, so no other
+    /// write lands in between. A std mutex: held for store calls, never across an await.
+    persist_lock: Arc<std::sync::Mutex<()>>,
     /// In-memory cache of parsed `ModelShape` instances keyed by class name.
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
@@ -728,6 +739,7 @@ impl PerspectiveInstance {
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
+            commit_order: Arc::new(Mutex::new(())),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
@@ -736,6 +748,7 @@ impl PerspectiveInstance {
                 crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
+            persist_lock: Arc::new(std::sync::Mutex::new(())),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
             abstract_cache: Arc::new(std::sync::RwLock::new(Default::default())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -1625,6 +1638,14 @@ impl PerspectiveInstance {
             return Ok(());
         }
 
+        // One commit at a time decides "send now or queue". Without this, a
+        // diff committed while a slow language call is in flight is queued
+        // (or sent) first, and if that call then fails, its diff is queued
+        // behind the newer one: peers see the newer diff first. The
+        // immediate-commit counter has its own short lock, so
+        // set_immediate_commits never waits for a language call.
+        let _commit_order = self.commit_order.lock().await;
+
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
         let (_, pending_ids) =
             Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
@@ -1664,9 +1685,20 @@ impl PerspectiveInstance {
                 // error path below queues the diff. Legacy languages that
                 // implement perspective-sync still behave correctly because
                 // they throw from commit() when not synced.
-                let mut immediate_commits_remaining = self.immediate_commits_remaining.lock().await;
-                if *immediate_commits_remaining > 0 {
-                    *immediate_commits_remaining -= 1;
+                // Take the slot and release the counter lock before the
+                // language call: a slow commit must not hold up
+                // set_immediate_commits.
+                let immediate = {
+                    let mut immediate_commits_remaining =
+                        self.immediate_commits_remaining.lock().await;
+                    if *immediate_commits_remaining > 0 {
+                        *immediate_commits_remaining -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if immediate {
                     link_language.commit(diff.clone()).await
                 } else {
                     Err(anyhow!("Debouncing commit burst"))
@@ -4179,6 +4211,21 @@ impl PerspectiveInstance {
     }
 
     pub(crate) async fn persist_link_diff(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
+        // The store judges each link from the key map without I/O: fill it for the
+        // signers first (the key index and their logs, through the agent language).
+        crate::identity::prepare_link_signers(&diff.additions).await;
+        let _persisting = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.write_link_diff(diff);
+        Ok(())
+    }
+
+    /// The store write of [`Self::persist_link_diff`], for a caller that holds `persist_lock`
+    /// and has filled the key map for the signers of `diff`
+    /// ([`crate::identity::prepare_link_signers`]).
+    fn write_link_diff(&self, diff: &PerspectiveDiff) {
         // IMPORTANT: Process removals BEFORE additions!
         // The remove_link function matches by source/predicate/target (not unique ID).
         // If we add first and remove second, we'd delete the newly added links too.
@@ -4187,10 +4234,6 @@ impl PerspectiveInstance {
         // The verdict is a read view; the store writes from the signed expression
         // and computes the verdict itself. Callers decorate *after* persist for
         // pubsub/prolog, rather than decorating and converting back here.
-
-        // The store judges each link from the key map without I/O: fill it for the
-        // signers first (the key index and their logs, through the agent language).
-        crate::identity::prepare_link_signers(&diff.additions).await;
 
         // Removals first
         for removal in &diff.removals {
@@ -4220,8 +4263,6 @@ impl PerspectiveInstance {
         // is a real concern in production it should be addressed via
         // configuration (smaller write_buffer_size, more memtables) or a
         // throttled background flush, not a per-write fsync.
-
-        Ok(())
     }
 
     /// Judges the stored links of `scope` again from the key map (after filling it for their
@@ -6701,137 +6742,7 @@ impl PerspectiveInstance {
         batch_uuid: String,
         context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
-        //let commit_start = std::time::Instant::now();
-        //log::info!("🔄 BATCH COMMIT: Starting batch commit for batch_uuid: {}", batch_uuid);
-        //let batch_retrieval_start = std::time::Instant::now();
-
-        // Get the diff without holding lock during the entire operation
-        let diff = {
-            let mut batch_store = self.batch_store.write().await;
-
-            match batch_store.remove(&batch_uuid) {
-                Some(batch) => batch.diff,
-                None => return Err(anyhow!("No batch found with given UUID")),
-            }
-        };
-        #[cfg(test)]
-        if self.fail_next_commit.swap(false, Ordering::SeqCst) {
-            drop(diff);
-            return Err(anyhow!("injected fault (test seam): commit_batch failed"));
-        }
-
-        //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
-        //    batch_retrieval_start.elapsed(), diff.additions.len(), diff.removals.len());
-
-        //let processing_start = std::time::Instant::now();
-        let mut shared_diff = DecoratedPerspectiveDiff {
-            additions: Vec::new(),
-            removals: Vec::new(),
-        };
-        let mut local_diff = DecoratedPerspectiveDiff {
-            additions: Vec::new(),
-            removals: Vec::new(),
-        };
-
-        let mut persist_diff = PerspectiveDiff::empty();
-
-        // Process additions
-        let anchor = crate::identity::anchor_for(&did_for_context(context)?).await;
-        for link in diff.additions {
-            let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr =
-                create_signed_expression_anchored(link.data.normalize(), context, anchor)?;
-            let mut stored = LinkExpression::from(signed_expr);
-            stored.status = Some(status.clone());
-            persist_diff.additions.push(stored.clone());
-            let decorated = DecoratedLinkExpression::from((stored, status.clone()));
-
-            match status {
-                LinkStatus::Shared => shared_diff.additions.push(decorated),
-                LinkStatus::Local => local_diff.additions.push(decorated),
-            }
-        }
-
-        // Process removals
-        for link in diff.removals {
-            let status = link.status.clone().unwrap_or(LinkStatus::Shared);
-            persist_diff.removals.push(link.clone());
-            let decorated = DecoratedLinkExpression::from((link, status.clone()));
-            match status {
-                LinkStatus::Shared => shared_diff.removals.push(decorated),
-                LinkStatus::Local => local_diff.removals.push(decorated),
-            }
-        }
-
-        //log::info!("🔄 BATCH COMMIT: Link processing took {:?} - shared: {} add/{} rem, local: {} add/{} rem",
-        //    processing_start.elapsed(),
-        //    shared_diff.additions.len(), shared_diff.removals.len(),
-        //    local_diff.additions.len(), local_diff.removals.len());
-
-        // Apply shared changes
-        if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
-            //let db_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting DB operations for shared changes");
-
-            // Commit to link language (SPARQL store will be updated later via persist_link_diff)
-            if self.has_link_language().await {
-                //let link_lang_start = std::time::Instant::now();
-                //log::info!("🔄 BATCH COMMIT: Starting link language commit");
-
-                let perspective_diff = PerspectiveDiff {
-                    additions: shared_diff
-                        .additions
-                        .iter()
-                        .map(|l| l.clone().into())
-                        .collect(),
-                    removals: shared_diff
-                        .removals
-                        .iter()
-                        .map(|l| l.clone().into())
-                        .collect(),
-                };
-                self.spawn_commit_and_handle_error(&perspective_diff);
-
-                //log::info!("🔄 BATCH COMMIT: Link language commit spawned in {:?}", link_lang_start.elapsed());
-            }
-        }
-
-        // Create combined diff for prolog update, SPARQL store update, and return value
-        let combined_diff = DecoratedPerspectiveDiff {
-            additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
-            removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
-        };
-
-        // Only update storage / subscription engines when there are changes.
-        // The SPARQL store must be updated first so any subscription re-checks
-        // triggered by update_prolog_engines() see the committed batch state.
-        if !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty() {
-            //let prolog_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting DB + prolog updates - {} add, {} rem",
-            //    combined_diff.additions.len(), combined_diff.removals.len());
-
-            self.persist_link_diff(&persist_diff).await?;
-
-            // Queue the Prolog fact update and the notification + live-query checks
-            self.update_prolog_engines(combined_diff.clone()).await;
-
-            // Publish link-added/-removed/-updated to WS subscribers.
-            // The single-mutation paths (add_link / link_mutations /
-            // diff_from_link_language) publish their diff synchronously before
-            // spawning the prolog update, and spawn_prolog_facts_update
-            // deliberately skips publishing to avoid double-delivery on those
-            // paths. commit_batch never went through that publish step, so
-            // batched diffs were never reaching WS subscribers — that's what
-            // this call restores.
-            self.pubsub_publish_diff(&combined_diff).await;
-
-            //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
-        }
-
-        //log::info!("🔄 BATCH COMMIT: Total batch commit took {:?}", commit_start.elapsed());
-
-        // Return combined diff
-        Ok(combined_diff)
+        self.commit_batch_if(batch_uuid, context, &[]).await
     }
 }
 
@@ -8178,6 +8089,90 @@ mod tests {
 
         let links_after = perspective.get_links(&query).await.unwrap();
         assert_eq!(links_after.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn commit_batch_if_writes_nothing_once_an_expected_link_changed() {
+        let mut perspective = setup().await;
+        let ctx = AgentContext::main_agent();
+        let link = |predicate: &str, target: &str| Link {
+            source: "test://record".to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        };
+        let body = |perspective: &PerspectiveInstance| {
+            perspective
+                .sparql_store
+                .query_links(
+                    Some("test://record"),
+                    Some("test://body"),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .len()
+        };
+        perspective
+            .add_link(
+                link("test://version", "test://v1"),
+                LinkStatus::Shared,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        // Another write lands between taking the expectation and committing.
+        let expected = perspective
+            .expect_links("test://record", "test://version")
+            .unwrap();
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .add_link(
+                link("test://body", "test://from-batch"),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        perspective
+            .add_link(
+                link("test://version", "test://v2"),
+                LinkStatus::Shared,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let refused = perspective
+            .commit_batch_if(batch_id, &ctx, &[expected])
+            .await
+            .unwrap_err();
+        assert!(refused.is::<LinksChanged>(), "{refused:#}");
+        assert_eq!(body(&perspective), 0, "nothing of the batch is written");
+
+        // Taken again, the expectation holds and the batch commits.
+        let expected = perspective
+            .expect_links("test://record", "test://version")
+            .unwrap();
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .add_link(
+                link("test://body", "test://from-batch"),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        perspective
+            .commit_batch_if(batch_id, &ctx, &[expected])
+            .await
+            .unwrap();
+        assert_eq!(body(&perspective), 1);
     }
 
     #[tokio::test]

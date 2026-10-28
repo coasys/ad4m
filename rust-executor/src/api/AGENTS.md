@@ -15,7 +15,7 @@ REST/WS shim. Split plan: spec item 6.
 
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
-handlers), `runtime`, `users`. Each exposes `register_ws_handlers(&mut HandlerMap)`
+handlers), `runtime`, `users`, and `agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
@@ -144,7 +144,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-204 methods: Cap 79, Executor 33, Open 5, Operator 18, Owns 67, UserOrOperator 2.
+205 methods: Cap 79, Executor 33, Open 5, Operator 18, Owns 68, UserOrOperator 2.
 
 | Method | Guard |
 |---|---|
@@ -271,6 +271,7 @@ the guard checked:
 | `perspective.removeLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.removeSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.resyncSubscription` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.runAgent` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretationWithHarness` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
