@@ -122,12 +122,13 @@ impl Topic {
         let on_perspective = || vec![perspective.unwrap_or(caps::WILD_CARD).to_string()];
         // No `_` arm: a new topic does not compile until someone chooses its capability.
         match self {
-            // `agent.status`, `agent.get`; a fork shows in `identity.status`.
-            Topic::AgentStatusChanged | Topic::AgentUpdated | Topic::IdentityFork => {
-                caps::AGENT_READ_CAPABILITY.clone()
-            }
-            // `runtime.config`, which only the operator calls; the audience is the operator.
-            Topic::ConfigChanged => caps::ALL_CAPABILITY.clone(),
+            // `agent.status`, `agent.get`; a fork shows in `identity.status`. `runtime.config`
+            // has the operator guard and checks no capability: the operator audience of
+            // `config-changed` keeps it from every other session.
+            Topic::AgentStatusChanged
+            | Topic::AgentUpdated
+            | Topic::IdentityFork
+            | Topic::ConfigChanged => caps::AGENT_READ_CAPABILITY.clone(),
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).
             Topic::AppsChanged => caps::AGENT_PERMIT_CAPABILITY.clone(),
             // `hosting.info`; the main agent's copy needs RUNTIME_USER_MANAGEMENT_READ instead

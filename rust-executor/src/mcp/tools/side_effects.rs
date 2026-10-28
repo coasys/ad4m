@@ -90,6 +90,9 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // `execute_commands` runs SDNA-declared actions on an instance —
     // always a mutation.
     ("execute_commands", SideEffect::Write),
+    // WE's template tools: a read, and a patch saved to the record.
+    ("template_read", SideEffect::Read),
+    ("template_update", SideEffect::Write),
     // ── profiles.rs ─────────────────────────────────────────────────
     ("get_my_did", SideEffect::Read),
     ("get_agent_profile", SideEffect::Read),

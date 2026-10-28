@@ -479,7 +479,7 @@ async fn start_tls_listener(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -856,7 +856,7 @@ mod tests {
     }
 
     /// A plain MCP server on 127.0.0.1 and an initialized MCP session on it.
-    async fn local_server_session(admin_credential: Option<Secret>) -> (String, String) {
+    pub(crate) async fn local_server_session(admin_credential: Option<Secret>) -> (String, String) {
         crate::test_utils::ensure_test_db();
         let (port, _) = free_adjacent_ports();
         let config = McpServerConfig {
@@ -910,6 +910,23 @@ mod tests {
         tool: &str,
         headers: &[(&str, &str)],
     ) -> String {
+        let answer = call_with(url, session, id, tool, serde_json::json!({}), headers).await;
+        answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no text in {answer}"))
+            .to_string()
+    }
+
+    /// Calls `tool` over HTTP with `arguments` and `headers`, and returns the JSON-RPC answer:
+    /// the tool's result, or the error of a call the server refused before running the tool.
+    pub(crate) async fn call_with(
+        url: &str,
+        session: &str,
+        id: u64,
+        tool: &str,
+        arguments: serde_json::Value,
+        headers: &[(&str, &str)],
+    ) -> serde_json::Value {
         let mut request = reqwest::Client::new()
             .post(url)
             .header("accept", "application/json, text/event-stream")
@@ -922,16 +939,12 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": id,
                 "method": "tools/call",
-                "params": { "name": tool, "arguments": {} }
+                "params": { "name": tool, "arguments": arguments }
             }))
             .send()
             .await
             .expect("tools/call");
-        let answer = read_jsonrpc_response(resp, id).await;
-        answer["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap_or_else(|| panic!("no text in {answer}"))
-            .to_string()
+        read_jsonrpc_response(resp, id).await
     }
 
     fn json(text: &str) -> serde_json::Value {
@@ -980,5 +993,28 @@ mod tests {
         assert_eq!(proxied["authenticated"], false, "{proxied}");
         let refused = call(&url, &session, 4, "get_my_did", &forwarded).await;
         assert!(refused.contains("Authentication required."), "{refused}");
+    }
+
+    // Sessions live in memory, so a restart forgets every id a client holds. The MCP
+    // Streamable HTTP transport says an unknown session is a 404, which tells the client
+    // to initialize again; a 401 reads as an auth failure and the client drops the tools.
+    #[tokio::test]
+    async fn an_unknown_session_id_is_not_found() {
+        let (url, _session) = local_server_session(Some("http-admin".into())).await;
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("authorization", "Bearer http-admin")
+            .header("mcp-session-id", "a-session-this-executor-never-opened")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "auth_status", "arguments": {} }
+            }))
+            .send()
+            .await
+            .expect("tools/call");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
     }
 }

@@ -8,6 +8,7 @@ import type { Agent } from "./Agent";
 import type { AgentAddEntanglementProofsParams } from "./AgentAddEntanglementProofsParams";
 import type { AgentByDidParams } from "./AgentByDidParams";
 import type { AgentRemoveAppParams } from "./AgentRemoveAppParams";
+import type { AgentReply } from "./AgentReply";
 import type { AgentRevokeTokenParams } from "./AgentRevokeTokenParams";
 import type { AgentSignature } from "./AgentSignature";
 import type { AgentStatus } from "./AgentStatus";
@@ -149,6 +150,7 @@ import type { RequestCapabilityRequest } from "./RequestCapabilityRequest";
 import type { RequestPaymentRequest } from "./RequestPaymentRequest";
 import type { ResetLogParams } from "./ResetLogParams";
 import type { ResolveParams } from "./ResolveParams";
+import type { RunAgentRequest } from "./RunAgentRequest";
 import type { RunInterpretationRequest } from "./RunInterpretationRequest";
 import type { RunInterpretationWithHarnessRequest } from "./RunInterpretationWithHarnessRequest";
 import type { RuntimeComputeLogParams } from "./RuntimeComputeLogParams";
@@ -336,6 +338,7 @@ export interface RpcMethods {
   "perspective.removeLinks": { params: PerspectiveRemoveLinksParams; result: Array<DecoratedLinkExpression> };
   "perspective.removeSubject": { params: PerspectiveRemoveSubjectParams; result: boolean };
   "perspective.resyncSubscription": { params: PerspectiveSubscriptionParams; result: PerspectiveResynced };
+  "perspective.runAgent": { params: RunAgentRequest; result: AgentReply };
   "perspective.runInterpretation": { params: RunInterpretationRequest; result: Array<string> };
   "perspective.runInterpretationWithHarness": { params: RunInterpretationWithHarnessRequest; result: Array<string> };
   "perspective.snapshot": { params: PerspectiveUuidParams; result: DecoratedPerspective | null };
@@ -527,6 +530,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "language.publish",
   "neighbourhood.join",
   "neighbourhood.publish",
+  "perspective.runAgent",
   "perspective.runInterpretation",
   "perspective.runInterpretationWithHarness",
   "runtime.restartHolochain",

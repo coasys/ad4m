@@ -548,6 +548,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "perspective.runInterpretationWithHarness",
         || json!({ "transcript": [], "basePrefix": "test://", "maxToolCalls": 1 }),
     ),
+    ("perspective.runAgent", || json!({ "messages": [] })),
     ("perspective.addAutoProcessor", || {
         json!({
             "processorId": "p",
