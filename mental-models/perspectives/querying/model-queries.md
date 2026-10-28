@@ -13,7 +13,7 @@ A **model query** asks for instances of one or more subject classes: `perspectiv
 1. **Shape**: `get_shape(class)` returns a cached `Arc<ModelShape>` parsed from SHACL links. In a neighbourhood, `get_shape_or_wait` waits up to 20 s (`MODEL_QUERY_SHAPE_WAIT`) for SHACL that has not synced yet.
 2. **SPARQL build** (`sparql_builder`): conformance patterns (which triples make a URI an instance), pushed-down `where` filters, the link guard (status and signature), paging.
 3. **Store**: run on the `SparqlStore`.
-4. **Hydration**: group rows by instance, decode `literal:` values, collect relation arrays, apply collection ordering, add author and timestamp.
+4. **Hydration**: group rows by instance, decode `literal:` values, collect relation arrays, apply collection ordering, add author and timestamp. A property whose value needs a fetch from a language (`resolveLanguage`) or a transform is resolved for every row only when the `where` or `order` reads it (`read_before_window`); the others are resolved after paging, for the returned page only.
 5. **Filtering and sorting** for conditions SPARQL could not express.
 6. **Getters and relations**: SPARQL `ASK` / `SELECT` getters, reverse relations, recursive `include`.
 7. **Projections**: counts and lists over relation edges.

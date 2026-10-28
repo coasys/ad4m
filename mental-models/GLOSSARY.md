@@ -166,6 +166,8 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Language address** (`calculate_language_hash`, op `hash`): `"Qm"` followed by the base58btc multibase string of a CIDv1 (codec `0x00`) over the SHA-256 of the bundle text. [Language addresses](languages/expressions/addresses.md)
 
+**Language call deadline** (`LANGUAGE_CALL_DEADLINE`, 60 s): How long a language's running `Execute` may run before the calls queued behind it get an error instead of waiting; the running call itself is never interrupted. [Language isolates](languages/runtime/isolates.md)
+
 **Language capability** (`Capability` in `languages/capability.rs`): One function group that a language exports, detected once at load; the presence of the export is the capability. [Language interface](languages/runtime/interface.md) — not: capability (alone), which means the access capability
 
 **Language context** (`LanguageContext`): The data a language gets at load: main agent DID, signing key id, settings, storage directory and address. [Language runtime](languages/runtime/README.md)
