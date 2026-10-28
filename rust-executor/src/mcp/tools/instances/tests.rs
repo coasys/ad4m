@@ -3136,7 +3136,21 @@ fn template_params(uuid: &str, base_uri: &str, arguments: Value) -> Parameters<T
 async fn the_template_tools_are_listed_with_the_bundle_s_arguments() {
     let (handler, _uuid, _guard) = setup(false).await;
     let tools = handler.exposed_tools().await;
-    for declared in &crate::tool_bundles::builtin::declared().tools {
+    let declared_tools = &crate::tool_bundles::builtin::declared().tools;
+    for name in super::template_tools::NOT_OFFERED {
+        assert!(
+            declared_tools.iter().any(|t| t.name == *name),
+            "{name} is not in the bundle: take it out of NOT_OFFERED"
+        );
+        assert!(
+            !tools.iter().any(|t| t.name == *name),
+            "{name} is listed: take it out of NOT_OFFERED"
+        );
+    }
+    let offered = declared_tools
+        .iter()
+        .filter(|t| !super::template_tools::NOT_OFFERED.contains(&t.name.as_str()));
+    for declared in offered.clone() {
         let listed = tools
             .iter()
             .find(|t| t.name == declared.name)
@@ -3165,13 +3179,9 @@ async fn the_template_tools_are_listed_with_the_bundle_s_arguments() {
         }
     }
     assert_eq!(
-        crate::tool_bundles::builtin::declared()
-            .tools
-            .iter()
-            .map(|t| t.name.as_str())
-            .collect::<Vec<_>>(),
+        offered.map(|t| t.name.as_str()).collect::<Vec<_>>(),
         vec!["template_read", "template_update"],
-        "a tool the bundle adds or renames needs its #[tool] method here"
+        "a tool the bundle adds or renames needs its #[tool] method here, or a place in NOT_OFFERED"
     );
 }
 
