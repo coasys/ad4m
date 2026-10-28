@@ -73,10 +73,20 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   (atomic: temp file + rename). When it fails, `LanguageController::install_agent_language`
   does not load the agent language, so no profile or identity call goes to an older or the
   default store; identity calls answer `unavailable`.
-- An expression by a `did:scid` author verifies only under its `proof.key` (a bare `did:key`)
-  and only when its own signature holds under that key. Which seq of the log counts:
-  - With `proof.record` (`{version, anchor, sig}`, which the agent language adds to a
-    `did:scid` profile from its agent record): the record's anchor. `sig` must be the key's
+- **A `did:scid` author counts only on the agent language's profile.** An expression's author
+  is its signing device's `did:key`; the person is derived from the signer's log, never
+  written as author. The one exception is the profile the agent language serves with the
+  agent record its store admitted. So `LanguageController::verify_expression_proof` takes a
+  `did:scid`-authored expression as valid only when the agent language served it
+  (`LanguageController::honours_record`) and it carries a non-null `proof.record`; any other
+  (another language, a literal, the language language, or no record) is not valid, whatever
+  its signature. The store takes a `did:scid` record only with an anchor, and the agent
+  language answers a `did:scid` profile only with its `proof.record`, so no legitimate
+  profile lacks one.
+- Such a profile verifies only under its `proof.key` (a bare `did:key`) and only when its own
+  signature holds under that key, at the record's anchor (`verify_expression`):
+  - `proof.record` is `{version, anchor, sig}`, which the agent language adds to a
+    `did:scid` profile from its agent record. `sig` must be the key's
     `coasys:link` signature over `{profile, version, anchor}`, `profile` the expression without
     `proof.record` (and without `proof.valid`/`proof.invalid`), as `AgentRecord::signed_value`
     builds it; the anchor must be at or below the trusted seq (not merely the cached head);
@@ -84,13 +94,12 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
     (`key_valid_at_time`) and without the bot mark there. A profile signed before a revocation
     stays valid after it. A `proof.record` that does not hold (malformed, an unknown member, a
     bad signature, an anchor past the trusted seq, a key not valid there) makes the expression
-    invalid: the head rule is never tried instead. The anchor counts only through the record
-    signature.
-  - Without it: the trusted seq, by the clock now, without the bot mark.
-  - `proof.record` counts only on an expression the agent language served
-    (`LanguageController::honours_record`): its store refuses a record anchored before a
-    revocation of its key. From any other language, a literal or the language language, the
-    record is ignored and the head rule judges.
+    invalid. The anchor counts only through the record signature.
+  - The record counts only from the agent language: its store refuses a record anchored
+    before a revocation of its key, while anyone else can wrap a fresh signature by a revoked
+    key in a record naming an earlier anchor.
+  - `verify_expression` without a record judges the key at the trusted seq, by the clock now,
+    without the bot mark; the expression read path never calls it so.
 
   The expression's own timestamp never counts. When the cached log does not admit the key (no
   log or no store-signed head yet, a trusted seq below the anchor, or a device added since),
