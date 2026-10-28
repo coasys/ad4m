@@ -2,14 +2,14 @@
 
 ## Overview
 
-By default, every AD4M user runs their own local node. But not everyone wants to—or can—run their own infrastructure. **Multi-user mode** lets a single AD4M executor serve multiple users, each with their own identity (DID) and fully isolated data. This enables **federated network structures** where a host operates an AD4M node on behalf of others, much like an email provider hosts mailboxes for its users.
+By default, every AD4M user runs their own local executor. But not everyone wants to—or can—run their own infrastructure. **Multi-user mode** lets a single AD4M executor serve multiple users, each with their own identity (DID) and fully isolated data. This enables **federated network structures** where a host operates an AD4M executor on behalf of others, much like an email provider hosts mailboxes for its users.
 
 From the perspective of AD4M apps, nothing changes. Apps use `ad4m-connect` to establish a connection, and `ad4m-connect` handles whether the executor is local or remote. This means **existing AD4M apps work without any modification** in a multi-user setup.
 
 ### Why Multi-User?
 
-- **Lower barrier to entry**: Users who don't want to install or maintain software can simply connect to a hosted AD4M node.
-- **Federated topology**: Organizations, communities, or service providers can host AD4M nodes for their members—similar to how Matrix homeservers or email providers work.
+- **Lower barrier to entry**: Users who don't want to install or maintain software can simply connect to a hosted AD4M executor.
+- **Federated topology**: Organizations, communities, or service providers can host AD4M executors for their members—similar to how Matrix homeservers or email providers work.
 - **Same agent autonomy**: Each user still has their own DID, their own perspectives, and their own cryptographic identity. The host provides infrastructure, not control over data semantics.
 
 ## Setting Up a Multi-User Host
@@ -33,7 +33,7 @@ await ad4m.runtime.setMultiUserEnabled(true);
 const enabled = await ad4m.runtime.multiUserEnabled();
 ```
 
-### 2. Make the Node Publicly Reachable
+### 2. Make the Executor Publicly Reachable
 
 For remote users to connect, the AD4M executor must be reachable over the network:
 
@@ -320,7 +320,7 @@ const ui = Ad4mConnect({
 
 ui.connect().then((client) => {
   // This client works identically whether connected to
-  // a local single-user node or a remote multi-user host
+  // a local single-user executor or a remote multi-user host
 });
 ```
 
@@ -400,10 +400,10 @@ When `hosting: true` is set, the user sees the following screens:
      src="/images/ad4m-connect-remote-login.png"
    />
 
-> **For end users**: When you connect to a hosted AD4M node through an app, you will be
+> **For end users**: When you connect to a hosted AD4M executor through an app, you will be
 > asked for an email address and password to create your account. Your DID (decentralized
 > identity) and all your data belong to you — the host provides infrastructure only. You
-> can export your data and move to another host or your own node at any time.
+> can export your data and move to another host or your own executor at any time.
 
 ## Administration
 
@@ -429,7 +429,7 @@ const jwt = await ad4m.agent.generateJwtForUser(username, requestId, rand);
 
 | Aspect            | Single-User (Default) | Multi-User                                            |
 | ----------------- | --------------------- | ----------------------------------------------------- |
-| Who runs the node | Each user             | A host, for many users                                |
+| Who runs the executor | Each user             | A host, for many users                                |
 | Identity          | Own DID               | Own DID (unchanged)                                   |
 | Data isolation    | Only one user         | Per-user scoping                                      |
 | App compatibility | Standard              | Fully compatible, no changes                          |

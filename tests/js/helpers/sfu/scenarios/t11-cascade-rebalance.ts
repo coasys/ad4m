@@ -37,8 +37,6 @@ import { EventsClient, EventFrame } from "../events.js";
 
 const ROOM_NAME = "t11-rebalance";
 const NEIGHBOURHOOD = `windtunnel://t11`;
-const WS_BASE = 16300;
-const GOSSIP_BASE = 26300;
 const MAX_PER_NODE = 4;
 const PEER_COUNT = 4;
 const MIGRATE_TIMEOUT_MS = 15_000;
@@ -67,8 +65,7 @@ export const t11CascadeRebalance: Scenario = {
       executorBin: ctx.executorPath!,
       nodeCount: 2,
       maxParticipantsPerNode: MAX_PER_NODE,
-      wsBasePort: WS_BASE,
-      gossipBasePort: GOSSIP_BASE,
+      workDir: ctx.tmpDirBase,
     });
     metrics["nodeDids"] = cluster.nodes.map((n) => n.did);
 

@@ -10,7 +10,7 @@ ad4m_get_documentation(topic="architecture")
 ```
 
 It needs no authentication and is compiled into the executor binary, so it
-always describes the node you are connected to. `topic="overview"` is the
+always describes the executor you are connected to. `topic="overview"` is the
 shorter companion: the tool surface, the workflow, authentication over MCP,
 and the rules for writing data other agents and humans can use. When this
 skill and the executor disagree, the executor is describing what is actually

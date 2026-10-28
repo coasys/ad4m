@@ -98,7 +98,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
-                await testContext.makeAllNodesKnown()
+                await testContext.makeAllNodesKnown([alice, aliceP1.uuid], [bob, bobP1.uuid])
 
                 expect(bobP1!.name).not.to.be.undefined;
                 expect(bobP1!.sharedUrl).to.be.equal(neighbourhoodUrl)
@@ -117,8 +117,10 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
-                await testContext.makeAllNodesKnown()
-                expect(bobP1!.state).to.be.oneOf([PerspectiveState.LinkLanguageInstalledButNotSynced, PerspectiveState.Synced]);
+                await testContext.makeAllNodesKnown([alice, aliceP1.uuid], [bob, bobP1.uuid])
+                // The join returns before Bob's link language is installed:
+                // its state changes arrive as events from here on.
+                expect(bobP1!.state).to.be.equal(PerspectiveState.NeighbourhoodJoinInitiated);
 
                 // Wait for Alice's link language to be wired.
                 // publishFromPerspective sets state=NeighbourhoodCreationInitiated.
@@ -159,7 +161,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 console.log("neighbourhoodUrl", neighbourhoodUrl);
                 bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
-                await testContext.makeAllNodesKnown()
+                await testContext.makeAllNodesKnown([alice, aliceP1.uuid], [bob, bobP1!.uuid])
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'}, 'local')
 
@@ -193,7 +195,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 console.log("neighbourhoodUrl", neighbourhoodUrl);
                 bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
-                await testContext.makeAllNodesKnown()
+                await testContext.makeAllNodesKnown([alice, aliceP1.uuid], [bob, bobP1!.uuid])
 
                 // Wait for Alice's link language to be wired (see simple
                 // test comment for rationale).
@@ -376,7 +378,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                     const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                     const bobP1 = await bob.perspective.byUUID(bobP1Handle.uuid)
-                    await testContext.makeAllNodesKnown()
+                    await testContext.makeAllNodesKnown([alice, aliceP1.uuid], [bob, bobP1Handle.uuid])
 
                     aliceNH = aliceP1.getNeighbourhoodProxy()
                     bobNH = bobP1!.getNeighbourhoodProxy()

@@ -105,6 +105,8 @@ mod link_status_relation_tests;
 #[cfg(test)]
 mod link_status_tests;
 mod links;
+#[cfg(test)]
+mod page_before_resolve_tests;
 mod projection;
 #[cfg(test)]
 mod proof_valid_tests;

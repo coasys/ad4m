@@ -325,7 +325,7 @@ pub fn run() {
             // change, setup fails with the reason logged instead of a panic.
             let mut config = config_file
                 .to_ad4m_config(&ExecutorSecrets {
-                    admin_credential: Some(req_credential.to_string()),
+                    admin_credential: Some(req_credential.clone().into()),
                     smtp_password,
                     unlock_passphrase: None,
                 })

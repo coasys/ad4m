@@ -284,7 +284,7 @@ property-level flag covers both. `describe_perspective` surfaces it as
 `"local": true` on the property.
 
 Local means *executor*-private, not *user*-private: on a multi-user executor
-every user of that node shares the same local links (issue #1024).
+every user of that executor shares the same local links (issue #1024).
 
 ### Generated MCP Tools
 

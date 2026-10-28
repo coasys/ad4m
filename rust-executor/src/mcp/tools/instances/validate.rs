@@ -109,6 +109,12 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
         };
     }
 
+    // Stored through a language as an expression: the language takes the value as it is, and
+    // checks it itself when the setter creates the expression.
+    if info.stored_by_language().is_some() {
+        return Ok(value.clone());
+    }
+
     match info.type_name().as_str() {
         "boolean" => match value {
             Value::Bool(_) => Ok(value.clone()),

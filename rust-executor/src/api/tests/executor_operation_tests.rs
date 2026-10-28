@@ -1,7 +1,7 @@
-//! A multi-user user session acts for its user only. The calls below act on the node
-//! itself (its main key, wallet, host files, database or node-wide settings), and the
-//! default user capabilities cover the capabilities they check, so before these guards a
-//! user token reached all of them.
+//! A user session acts for its user's agent only: it signs, publishes and sets its profile as
+//! that agent, not the main agent. That user sessions cannot call the calls that act on the
+//! executor itself (`Guard::Executor`) is a row of the method matrix
+//! (`method_matrix_tests.rs`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,8 +12,9 @@ use crate::agent::capabilities::get_user_default_capabilities;
 use crate::agent::{signing_key_id, signing_key_id_for_context, AgentContext, AgentService};
 use crate::api::ws_handler::build_handler_map;
 use crate::db::Ad4mDb;
+use crate::events::{Audience, Event, Topic};
 use crate::languages::LanguageController;
-use crate::pubsub::{get_global_pubsub, AGENT_UPDATED_TOPIC};
+use crate::pubsub::get_global_pubsub;
 use crate::types::{Agent, ModelApiInput, ModelInput, ModelType, RequestContext};
 
 /// A user session on the managed agent `did`, with the default user capabilities.
@@ -72,119 +73,7 @@ impl Drop for TestUser {
 }
 
 #[tokio::test]
-async fn user_sessions_cannot_call_node_operations() {
-    let dir = tempfile::tempdir().unwrap();
-    let export_path = dir.path().join("dump.json");
-    // Every call carries params its contract accepts, so the dispatcher's params check
-    // passes and the guard is what refuses.
-    let model = json!({ "name": "m", "type": "LLM" });
-    let proof = json!({
-        "deviceKey": "k",
-        "deviceKeySignedByDid": "s",
-        "deviceKeyType": "t",
-        "did": "did:key:z6Mk",
-        "didSignedByDeviceKey": "s",
-        "didSigningKeyId": "i",
-    });
-    let calls = [
-        ("agent.generate", json!({ "passphrase": "p" })),
-        ("agent.lock", json!({ "passphrase": "p" })),
-        (
-            "agent.unlock",
-            json!({ "passphrase": "p", "holochain": false }),
-        ),
-        (
-            "runtime.exportData",
-            json!({ "type": "db", "filePath": export_path.to_str().unwrap() }),
-        ),
-        (
-            "runtime.importData",
-            json!({ "type": "db", "filePath": export_path.to_str().unwrap() }),
-        ),
-        (
-            "ai.discoverModels",
-            json!({ "baseUrl": "https://api.example.org/v1" }),
-        ),
-        ("ai.addModel", json!({ "model": model })),
-        ("ai.updateModel", json!({ "id": "m1", "model": model })),
-        ("ai.removeModel", json!({ "id": "m1" })),
-        (
-            "ai.setDefaultModel",
-            json!({ "id": "m1", "modelType": "LLM" }),
-        ),
-        ("agent.addEntanglementProofs", json!({ "proofs": [proof] })),
-        (
-            "agent.deleteEntanglementProofs",
-            json!({ "proofs": [proof] }),
-        ),
-        (
-            "agent.entanglementProofPreflight",
-            json!({ "deviceKey": "k", "deviceKeyType": "t" }),
-        ),
-        ("agent.getEntanglementProofs", json!({})),
-        (
-            "agent.addTrustedAgents",
-            json!({ "agents": ["did:key:z6Mk"] }),
-        ),
-        (
-            "agent.deleteTrustedAgents",
-            json!({ "agents": ["did:key:z6Mk"] }),
-        ),
-        (
-            "language.publish",
-            json!({
-                "languagePath": dir.path().join("bundle.js").to_str().unwrap(),
-                "languageMeta": { "name": "n", "description": "d" },
-            }),
-        ),
-        ("language.remove", json!({ "address": "QmLang" })),
-        (
-            "language.writeSettings",
-            json!({ "address": "QmLang", "settings": {} }),
-        ),
-        ("runtime.addHcAgentInfos", json!({ "agentInfos": [] })),
-        (
-            "runtime.addLinkLanguageTemplates",
-            json!({ "addresses": [] }),
-        ),
-        (
-            "runtime.removeLinkLanguageTemplates",
-            json!({ "addresses": [] }),
-        ),
-        ("runtime.friends", json!({})),
-        ("runtime.addFriends", json!({ "dids": [] })),
-        ("runtime.removeFriends", json!({ "dids": [] })),
-        (
-            "runtime.sendFriendMessage",
-            json!({ "did": "did:key:z6Mk", "message": { "links": [] } }),
-        ),
-        ("runtime.outbox", json!({})),
-        ("hosting.wallet", json!({})),
-        ("hosting.walletHistory", json!({})),
-    ];
-    let mut not_refused = Vec::new();
-    for (op, params) in calls {
-        // Spawned, so a handler that panics is reported with the rest instead of ending
-        // the loop.
-        let result = tokio::spawn(call(op, params, user_session("did:key:test:guard-user"))).await;
-        match result {
-            Ok(Err((403, message))) if message.contains(op) => {}
-            other => not_refused.push(format!("{op}: {other:?}")),
-        }
-    }
-    assert!(
-        not_refused.is_empty(),
-        "these calls must refuse a user session:\n{}",
-        not_refused.join("\n")
-    );
-    assert!(
-        !export_path.exists(),
-        "a refused export must not write the file"
-    );
-}
-
-#[tokio::test]
-async fn a_user_session_signs_as_the_user_not_the_node() {
+async fn a_user_session_signs_as_the_user_not_the_main_agent() {
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
     let email = "signing.user@example.org";
@@ -211,7 +100,7 @@ async fn a_user_session_signs_as_the_user_not_the_node() {
 }
 
 #[tokio::test]
-async fn the_operator_still_signs_as_the_node() {
+async fn the_operator_still_signs_as_the_main_agent() {
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
     let result = call(
@@ -220,16 +109,16 @@ async fn the_operator_still_signs_as_the_node() {
         operator_session(),
     )
     .await
-    .expect("the operator signs as the node");
+    .expect("the operator signs as the main agent");
     assert_eq!(result["publicKey"], json!(signing_key_id()));
 }
 
 #[tokio::test]
-async fn a_user_sets_their_own_dm_language_not_the_nodes() {
+async fn a_user_sets_their_own_dm_language_not_the_main_agents() {
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
     let user = TestUser::new("dm.user");
-    let node_dm_before = AgentService::with_global_instance(|a| {
+    let main_agent_dm_before = AgentService::with_global_instance(|a| {
         a.agent
             .as_ref()
             .and_then(|agent| agent.direct_message_language.clone())
@@ -245,17 +134,17 @@ async fn a_user_sets_their_own_dm_language_not_the_nodes() {
     assert_eq!(
         returned["did"],
         json!(user.did()),
-        "the call must return the user's own profile, not the node's"
+        "the call must return the user's own profile, not the main agent's"
     );
 
-    let node_dm_after = AgentService::with_global_instance(|a| {
+    let main_agent_dm_after = AgentService::with_global_instance(|a| {
         a.agent
             .as_ref()
             .and_then(|agent| agent.direct_message_language.clone())
     });
     assert_eq!(
-        node_dm_before, node_dm_after,
-        "a user session changed the node's DM language"
+        main_agent_dm_before, main_agent_dm_after,
+        "a user session changed the main agent's DM language"
     );
     assert_eq!(
         user.stored_profile().direct_message_language.as_deref(),
@@ -277,12 +166,16 @@ async fn a_user_sets_their_own_dm_language_not_the_nodes() {
 }
 
 /// Every `agent-updated` event received so far that names `did`.
-fn announced_for(events: &mut tokio::sync::broadcast::Receiver<String>, did: &str) -> Vec<Value> {
+/// Each goes to that agent only.
+fn announced_for(
+    events: &mut tokio::sync::broadcast::Receiver<Arc<Event>>,
+    did: &str,
+) -> Vec<Value> {
     let mut announced = Vec::new();
-    while let Ok(message) = events.try_recv() {
-        let event: Value = serde_json::from_str(&message).unwrap();
-        if event["did"] == json!(did) {
-            announced.push(event);
+    while let Ok(event) = events.try_recv() {
+        if event.topic == Topic::AgentUpdated && event.payload["did"] == json!(did) {
+            assert_eq!(event.audience, Audience::Dids(vec![did.to_string()]));
+            announced.push(event.payload.clone());
         }
     }
     announced
@@ -293,10 +186,7 @@ async fn one_profile_update_with_both_fields_stores_and_announces_once() {
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
     let user = TestUser::new("both.fields");
-    let mut events = get_global_pubsub()
-        .await
-        .subscribe(&AGENT_UPDATED_TOPIC)
-        .await;
+    let mut events = get_global_pubsub().await.subscribe_events();
 
     let returned = call(
         "agent.updateProfile",
@@ -463,17 +353,27 @@ async fn a_user_reads_only_their_own_compute_log() {
     .await
     .expect("the operator reads an empty log for an unknown email");
     assert!(owners(nobodys).is_empty());
+
+    // An app on the main agent is not the operator: AGENT_READ, the most common app
+    // capability, reads no user's log.
+    let app = Arc::new(RequestContext::app_for_test(vec![
+        crate::agent::capabilities::AGENT_READ_CAPABILITY.clone(),
+    ]));
+    match call("runtime.computeLog", json!({ "userEmail": bob }), app).await {
+        Err((403, _)) => {}
+        other => panic!("a main-agent app read a user's compute log: {other:?}"),
+    }
 }
 
 #[tokio::test]
-async fn the_default_model_hides_its_key_from_users_only() {
+async fn the_default_model_never_shows_its_key() {
     Ad4mDb::init_global_instance(":memory:").unwrap();
     let id = Ad4mDb::with_global_instance(|db| {
         let id = db.add_model(&ModelInput {
             name: "Remote".to_string(),
             api: Some(ModelApiInput {
                 base_url: "https://api.example.org/v1".to_string(),
-                api_key: "sk-provider-secret".to_string(),
+                api_key: Some("sk-provider-secret".into()),
                 model: "gpt".to_string(),
                 api_type: "OpenAi".to_string(),
                 max_num_ctx: None,
@@ -494,24 +394,25 @@ async fn the_default_model_hides_its_key_from_users_only() {
     )
     .await
     .expect("a user may read the default model");
-    assert_eq!(as_user["id"], json!(id));
-    assert_eq!(as_user["api"]["model"], json!("gpt"));
-    assert_eq!(
-        as_user["api"]["apiKey"],
-        json!(""),
-        "a user session must not see the operator's provider key"
-    );
-
     let as_operator = call("ai.getDefaultModel", params, operator_session())
         .await
         .expect("the operator reads the default model");
-    assert_eq!(as_operator["api"]["apiKey"], json!("sk-provider-secret"));
+
+    for model in [as_user, as_operator] {
+        assert_eq!(model["id"], json!(id));
+        assert_eq!(model["api"]["model"], json!("gpt"));
+        assert_eq!(model["api"]["hasApiKey"], json!(true));
+        assert!(
+            !model.to_string().contains("sk-provider-secret"),
+            "no session reads the provider key back: {model}"
+        );
+    }
 }
 
 /// The template the test languages are cloned from.
 const TEMPLATE_SOURCE: &str = r#"//!@ad4m-template-variable
 const uid = "template";
-export const name = "node-operation-template";
+export const name = "executor-operation-template";
 export async function init() {}
 "#;
 
@@ -524,10 +425,10 @@ fn in_memory_language_language(template_address: &str) -> String {
     format!(
         r#"import {{ agentCreateSignedExpression }} from "ad4m:host";
 
-const metas = new Map([[{address}, {{ data: {{ address: {address}, name: "node-operation-template" }} }}]]);
+const metas = new Map([[{address}, {{ data: {{ address: {address}, name: "executor-operation-template" }} }}]]);
 const sources = new Map([[{address}, {source}]]);
 
-export const name = "node-operation-languages";
+export const name = "executor-operation-languages";
 export async function init() {{}}
 export async function expressionCreate(language) {{
     metas.set(language.meta.address, agentCreateSignedExpression(language.meta));
@@ -544,7 +445,7 @@ export async function languageGetSource(address) {{
     )
 }
 
-/// The in-memory language language, installed as the node's language language for one
+/// The in-memory language language, installed as the executor's language language for one
 /// test. The languages directory is process-wide and set once, so every test that installs
 /// this shares one temp dir, set before anything saves a bundle; no bundle lands under the
 /// home directory. Bundles save under their hash, so the tests do not collide.
@@ -558,17 +459,7 @@ struct TestLanguageLanguage {
 impl TestLanguageLanguage {
     async fn install() -> Self {
         crate::test_utils::init_v8_platform();
-        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-        let dir = DIR.get_or_init(|| {
-            let dir = tempfile::tempdir().unwrap();
-            crate::utils::set_languages_directory(dir.path().to_str().unwrap());
-            dir
-        });
-        assert!(
-            crate::utils::languages_directory().starts_with(dir.path()),
-            "the languages directory was set before this test, to {:?}",
-            crate::utils::languages_directory()
-        );
+        crate::test_utils::test_languages_directory();
 
         let controller = LanguageController::global_instance();
         let (template_address, _) = controller
@@ -668,7 +559,7 @@ async fn apply_template_publishes_as_the_calling_session() {
     assert_eq!(
         operators_meta["author"],
         json!(crate::agent::did()),
-        "the operator publishes as the node's main agent"
+        "the operator publishes as the executor's main agent"
     );
 
     languages
