@@ -39,7 +39,7 @@ test("first agent to auth becomes room admin and receives a JWT", async () => {
     assert.equal(typeof verifyRes.body.token, "string");
     assert.equal(typeof verifyRes.body.expiresAt, "string");
 
-    const acl = await getJson<{ admin: string; members: Array<{ did: string; x25519PublicKey: string | null }> }>(
+    const acl = await getJson<{ admin: string; members: Array<{ did: string }> }>(
       `${server.url}/rooms/${roomId}/acl`,
       verifyRes.body.token
     );

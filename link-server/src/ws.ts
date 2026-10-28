@@ -220,10 +220,13 @@ export class WsManager {
   }
 
   private routeSignal(roomId: string, fromDid: string, toDid: string, payload: unknown): void {
-    const targets = this.rooms.get(roomId)?.get(toDid);
-    if (!targets) return;
-    for (const conn of targets) {
-      this.sendTo(conn, { type: "telepresence-signal", fromDid, payload });
+    this.sendToDid(roomId, toDid, { type: "telepresence-signal", fromDid, payload });
+  }
+
+  /** Sends to every connection one DID has open in a room. */
+  sendToDid(roomId: string, did: string, msg: ServerWsMessage): void {
+    for (const conn of this.rooms.get(roomId)?.get(did) ?? []) {
+      this.sendTo(conn, msg);
     }
   }
 
