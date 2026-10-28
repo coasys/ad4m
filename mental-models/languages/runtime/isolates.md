@@ -21,7 +21,7 @@ Sandbox (`JsCore::new_for_language`):
 
 | Area | Exports |
 |---|---|
-| agent | `agentDid`, `agentSigningKeyId`, `agentSign`, `agentSignStringHex`, `agentCreateSignedExpression`, `agentGetAllLocalUserDids`, `agentCreateSignedExpressionForUser`, `agentDidForUser` |
+| agent | `agentDid`, `agentSigningKeyId`, `agentSign`, `agentSignStringHex`, `agentOpenSealed`, `agentCreateSignedExpression`, `agentGetAllLocalUserDids`, `agentCreateSignedExpressionForUser`, `agentDidForUser` |
 | Holochain | `holochainRegisterDnas`, `holochainCall`, `holochainCallAsync` |
 | HTTP, hash | `httpFetch` (10 s timeout, URL secrets redacted in errors), `hash` |
 | language context | `languageStorageDirectory`, `languageAddress`, `languageSettings` |

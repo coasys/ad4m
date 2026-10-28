@@ -10,12 +10,12 @@ The **link server** is a self-hosted Node.js process, separate from the executor
 
 | Route | Does |
 |---|---|
-| `POST /rooms/:id/auth` | step 1: challenge; step 2: verify the Ed25519 signature over `sha256(challenge)`, store the X25519 key if the client sends a well-formed one (a bad signature over it answers 400), issue a JWT |
+| `POST /rooms/:id/auth` | step 1: challenge; step 2: verify the Ed25519 signature over `sha256(challenge)`, issue a JWT |
 | `POST /rooms/:id/commit` | apply additions and removals in one transaction; push to WebSocket peers |
 | `GET /rooms/:id/sync`, `/render`, `/revision` | catch-up since a sequence number; full state; current revision |
 | `GET /rooms/:id/peers` | online agents |
 | `GET` / `POST /rooms/:id/acl` | room members and admin |
-| `/rooms/:id/keys`, `/keys/rotate`, `/keys/missing`, `/keys/grant` | sealed room keys |
+| `/rooms/:id/keys`, `/keys/rotate`, `/keys/missing`, `/keys/grant`, `DELETE /keys/:version` | room keys as sealed boxes, one per member and version: the admin rotates; any member grants only versions it holds, the first box stored wins, and the grantee's sockets get `keys-granted`; a member drops its own box |
 | `POST /rooms/:id/admin/transfer` | hand over the admin role |
 
 1. The first DID that authenticates to an unknown room id creates the room and becomes its admin.

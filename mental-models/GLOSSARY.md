@@ -130,6 +130,8 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Harness** (`ai_service/harness/`, `run_with_tools`): The tool-calling LLM loop that interpretation can use instead of a single prompt, and that agent sessions run. [Interpretation](perspectives/social-dna/interpretation/README.md)
 
+**Held link** (`held/<link_hash>` in `bootstrap-languages/server-link-language/src/store.ts`, `openOrHold`, `retryHeld`): An inbound link that the server link language cannot open yet, kept with its operation until a room key opens it. [Server link language](languages/link-languages/server-link-language.md)
+
 **Holochain service** (`HolochainService`, `HolochainServiceInterface`): The executor service that runs the conductor behind one actor channel. [Holochain service](agents/executor/services/holochain.md)
 
 **Host rates** (`host_rates` table, `bill_ai_operation`): The prices in HOT per billed operation or model name. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
@@ -153,6 +155,8 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 **Interpretation run** (`InterpretationRun`): The record of one run of interpretation: model, prompt version, time and sources. [Interpretation](perspectives/social-dna/interpretation/README.md)
 
 **JWT signing key** (`signing_key_name()`): The wallet key whose secret signs and checks JWTs: `main` on a local wallet, `platform` in hosted mode. [Wallet and keys](agents/identity/wallet-and-keys.md)
+
+**Key ring** (`KeyRing`, `buildKeyRing` in `bootstrap-languages/server-link-language/src/encryption.ts`): The room key versions that one agent's server link language has opened, by version number. [Server link language](languages/link-languages/server-link-language.md)
 
 **Keystore** (`AgentStore.keystore`, `KeystoreEnvelope`): The encrypted form of all wallet keys inside `agent.json`. [Wallet and keys](agents/identity/wallet-and-keys.md)
 
@@ -280,13 +284,15 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Role gate** (`ConsensusRule.from_role`, `flow_instance/roles/`): A model query that a voter must match, as of the vote's time, for the vote to count. [Flow consensus](perspectives/social-dna/flows/consensus.md)
 
-**Room key** (`bootstrap-languages/server-link-language/src/encryption.ts`): The AES-256-GCM key that encrypts links in a link-server room, sealed to each member's X25519 key. [Server link language](languages/link-languages/server-link-language.md)
+**Room key** (`bootstrap-languages/server-link-language/src/encryption.ts`): The AES-256-GCM key that encrypts links in a link-server room, sealed to each member's DID as a sealed box. [Server link language](languages/link-languages/server-link-language.md)
 
 **RPC API** (`rust-executor/src/api/ws_rpc.rs`, `HandlerMap`): The executor's WebSocket at `/api/v1/ws` that carries method calls, events and live-query updates. [RPC API](agents/interfaces/rpc-api.md) — not: GraphQL API (removed)
 
 **Runtime service** (`RuntimeService`, `rust-executor/src/runtime_service/`, `runtime.*` RPC): The executor service that holds the bootstrap seed and the trusted-agent, known-link-language and friend lists; its `runtime.*` calls also cover notifications, export and import, and quitting. [Executor services](agents/executor/services/README.md)
 
 **Scribe** (`gossip()` in `bootstrap-languages/p-diff-sync/index.ts`): In p-diff-sync, the one agent (lowest DID among known peers) that may make merge commits. [Perspective diff sync](languages/link-languages/perspective-diff-sync.md)
+
+**Sealed box** (`SealedBox`, `rust-executor/src/agent/sealed_box.rs`, `agentOpenSealed`): Data encrypted to an agent from its DID alone (X25519 = the Montgomery form of the Ed25519 key in the `did:key`), as hex `{ephemeralPublicKey, nonce, ciphertext}`; only the executor holding the agent's key opens it. [Signing and verification](agents/identity/signing-and-verification.md)
 
 **Server link language** (`bootstrap-languages/server-link-language/`): The link language that syncs through a link server, with end-to-end encryption. [Server link language](languages/link-languages/server-link-language.md)
 

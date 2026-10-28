@@ -22,7 +22,7 @@ The executor signs an **expression** as an agent. It hashes the data and the tim
 2. `sign_string_hex_for_context(text, ctx)` hashes the text with SHA-256, then signs. `agent.sign` uses it (`AgentSignature`), and so do entanglement proofs.
 3. `verify(expr)` rebuilds the hash, parses the DID as a key (`PatchedKeyPair::try_from`) and checks the signature. `verify_or_false` logs a malformed proof and answers `false`.
 4. RPC `agent.sign` signs as `ctx.acts_as()`. A user session signs as its managed agent, never as the main agent.
-5. Language code signs through the ops in `agent_extension.rs` ([Language isolates](../../languages/runtime/isolates.md)), as `get_runtime_agent_context()`. `agent_create_signed_expression_for_user(email, data)` refuses unless the runtime runs for that user.
+5. Language code signs through the ops in `agent_extension.rs` ([Language isolates](../../languages/runtime/isolates.md)), as `get_runtime_agent_context()`. `agent_create_signed_expression_for_user(email, data)` refuses unless the runtime runs for that user. `agent_open_sealed` opens a sealed box sealed to that agent with the X25519 form of its Ed25519 secret, inside the executor, and returns only the plaintext.
 
 Entanglement proofs (`EntanglementProof`) are for the main agent only. The handlers refuse user sessions, and `sign_device_key` signs with the main key (`sign_string_hex`):
 
@@ -36,7 +36,8 @@ Entanglement proofs (`EntanglementProof`) are for the main agent only. The handl
 
 - [rust-executor/src/agent/mod.rs](../../../rust-executor/src/agent/mod.rs): `create_signed_expression`, `sign_for_context`, `sign_string_hex_for_context`, `AgentSignature`.
 - [rust-executor/src/agent/signatures.rs](../../../rust-executor/src/agent/signatures.rs): `hash_data_and_timestamp`, `hash_message`, `verify`, `verify_or_false`, `verify_string_signed_by_did`.
-- [rust-executor/src/js_core/agent_extension.rs](../../../rust-executor/src/js_core/agent_extension.rs): `agent_sign`, `agent_create_signed_expression`, `agent_create_signed_expression_for_user`.
+- [rust-executor/src/js_core/agent_extension.rs](../../../rust-executor/src/js_core/agent_extension.rs): `agent_sign`, `agent_open_sealed`, `agent_create_signed_expression`, `agent_create_signed_expression_for_user`.
+- [rust-executor/src/agent/sealed_box.rs](../../../rust-executor/src/agent/sealed_box.rs): `SealedBox`, `open_sealed_for_context`.
 - [rust-executor/src/languages/language_runtime.rs](../../../rust-executor/src/languages/language_runtime.rs): `set_runtime_agent_context`, `get_runtime_agent_context`.
 - [rust-executor/src/entanglement_service/mod.rs](../../../rust-executor/src/entanglement_service/mod.rs): `sign_device_key`, `generate_holochain_proof`.
 - [rust-executor/src/api/agent_ws.rs](../../../rust-executor/src/api/agent_ws.rs): `agent.sign`, `agent.*EntanglementProofs`, `link_expression_input_to_decorated`.
