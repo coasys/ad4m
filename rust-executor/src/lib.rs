@@ -36,6 +36,7 @@ pub mod languages;
 pub mod logging;
 mod neighbourhoods;
 mod pubsub;
+pub mod tool_bundles;
 use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
 mod test_utils;
