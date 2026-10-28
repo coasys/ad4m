@@ -66,12 +66,8 @@ import {
 import ad4mPlugin, {
   _resetModuleState,
   _setSubscriptionManagerForTests,
-  _parkedSubscriptionsForTests,
   stateToSave,
-  parkSubscription,
   restoreSavedSubscriptions,
-  retryParkedSubscriptions,
-  readsMentionText,
 } from "./index";
 import { STATIC_TOOL_DEFS } from "./staticToolDefs";
 import { WakerSubscriptionManager, hintFor } from "./wakerSubscriptionManager";
@@ -1625,6 +1621,30 @@ describe("buildWakeMessage", () => {
     expect(msg.match(/Mention link time:/g)).toHaveLength(1);
   });
 
+  // A record whose text names the agent, with no mention link: the wake says it matched the
+  // text and names the record's author, not a mention-link signer.
+  it("says a text match is your name in the text, and who wrote the item", () => {
+    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
+      {
+        address: "msg-1",
+        parents: ["channel-abc"],
+        ancestors: [],
+        author: "did:key:zNico",
+        timestamp: "2026-10-28T00:41:23.437Z",
+        verified: true,
+        byText: true,
+      },
+      { address: "msg-2", parents: ["channel-abc"], ancestors: [], author: "did:key:zJosh", verified: true },
+    ]);
+    expect(msg).toContain(
+      "  Item: msg-1\n  Matched by: your name in the text (no we://mention link; a name match can be a false alarm)\n" +
+        "  Author: did:key:zNico (the item's first link's signer, signature verified)\n  Item time: 2026-10-28T00:41:23.437Z",
+    );
+    expect(msg).toContain("  Item: msg-2\n  Mention link signed by: did:key:zJosh (signature verified)");
+    expect(msg.match(/Matched by:/g)).toHaveLength(1);
+    expect(msg).not.toContain("Mention link signed by: did:key:zNico");
+  });
+
   it("shows (unknown) parents when empty", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
       { address: "msg-1", parents: [], ancestors: [], verified: false },
@@ -1984,8 +2004,12 @@ describe("ad4mPlugin", () => {
               {
                 type: "text",
                 text: JSON.stringify({
-                  query: "SELECT ?source ?timestamp WHERE { ... }",
+                  class: "ad4m://TextContent",
+                  query: "SELECT * FROM link WHERE ...",
+                  terms: ["TestAgent", "did:key:zTest"],
+                  names: ["TestAgent"],
                   predicate: "we://mention",
+                  link_query: "SELECT ?source ?timestamp WHERE { ... }",
                   did: "did:key:zTest",
                 }),
               },
@@ -2060,8 +2084,12 @@ describe("ad4mPlugin", () => {
               {
                 type: "text",
                 text: JSON.stringify({
-                  query: "SELECT ?source ?timestamp WHERE { ... }",
+                  class: "ad4m://TextContent",
+                  query: "SELECT * FROM link WHERE ...",
+                  terms: ["TestAgent", "did:key:zTest"],
+                  names: ["TestAgent"],
                   predicate: "we://mention",
+                  link_query: "SELECT ?source ?timestamp WHERE { ... }",
                   did: "did:key:zTest",
                 }),
               },
@@ -2199,28 +2227,59 @@ describe("ad4mPlugin", () => {
     }
   }
 
-  it("ad4m_subscribe_to_mentions opens the executor's mention query as SPARQL over the we://mention link", async () => {
-    const query = "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }";
+  it("ad4m_subscribe_to_mentions opens the executor's mention link query and its text query as a model query on its class", async () => {
+    const query = JSON.stringify({ where: { OR: [{ text: { contains: "TestAgent" } }] } });
+    const linkQuery = "SELECT ?source ?author ?timestamp ?proofValid WHERE { ?source <we://mention> ?mentioned . }";
     const { result, opened, active } = await subscribeToMentions({
+      class: "ad4m://TextContent",
       query,
-      predicate: "we://mention",
+      terms: ["TestAgent", "did:key:zTest"],
+      names: ["TestAgent"],
       did: "did:key:zTest",
-      subscription: { id: "mention-persp-uuid-1", perspective: "persp-uuid-1", query },
+      predicate: "we://mention",
+      link_query: linkQuery,
     });
-    // Three arguments: no class, so the proxy subscribes with SPARQL.
-    expect(opened.map((args) => [args[0], args[1], args.length])).toEqual([["persp-uuid-1", query, 3]]);
-    expect(active.map((sub) => [sub.id, sub.query, sub.className])).toEqual([
-      ["mention-persp-uuid-1", query, undefined],
+    // The link query as SPARQL (three arguments), the text query on its class.
+    expect(opened.map((args) => [args[0], args[1], args[3]])).toEqual([
+      ["persp-uuid-1", linkQuery, undefined],
+      ["persp-uuid-1", query, "ad4m://TextContent"],
     ]);
-    expect(JSON.stringify(result)).toContain("we://mention links to did:key:zTest");
+    expect(active.map((sub) => [sub.className, sub.linkQuery])).toEqual([["ad4m://TextContent", linkQuery]]);
+    // The waker's whole-word check reads them.
+    expect(active.map((sub) => sub.terms)).toEqual([["TestAgent", "did:key:zTest"]]);
+    expect(JSON.stringify(result)).toContain("we://mention links to did:key:zTest, and for TestAgent and DID did:key:zTest in text");
   });
 
-  it("ad4m_subscribe_to_mentions refuses an executor that still reads mentions from message text", async () => {
+  it("ad4m_subscribe_to_mentions opens the text query alone for an executor without the link query", async () => {
+    const query = JSON.stringify({ where: { OR: [{ text: { contains: "TestAgent" } }] } });
+    const { opened, active } = await subscribeToMentions({
+      class: "ad4m://TextContent",
+      query,
+      terms: ["TestAgent", "did:key:zTest"],
+      names: ["TestAgent"],
+      did: "did:key:zTest",
+    });
+    expect(opened.map((args) => [args[1], args[3]])).toEqual([[query, "ad4m://TextContent"]]);
+    expect(active.map((sub) => sub.linkQuery)).toEqual([undefined]);
+  });
+
+  it("ad4m_subscribe_to_mentions refuses a mention query without its terms", async () => {
     const { result, opened, active } = await subscribeToMentions({
       class: "ad4m://TextContent",
       query: JSON.stringify({ where: { OR: [{ text: { contains: "TestAgent" } }] } }),
-      terms: ["TestAgent", "did:key:zTest"],
       names: ["TestAgent"],
+      did: "did:key:zTest",
+      link_query: "SELECT ?source WHERE { ?source <we://mention> ?mentioned . }",
+    });
+    expect(JSON.stringify(result)).toContain("without its terms");
+    expect(opened).toEqual([]);
+    expect(active).toEqual([]);
+  });
+
+  it("ad4m_subscribe_to_mentions refuses an executor that answers with SPARQL alone", async () => {
+    const { result, opened, active } = await subscribeToMentions({
+      query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
+      predicate: "we://mention",
       did: "did:key:zTest",
     });
     expect(JSON.stringify(result)).toContain("Update the executor");
@@ -4180,10 +4239,10 @@ describe("restoreSavedSubscription", () => {
   });
 });
 
-describe("a saved mention subscription that reads message text", () => {
-  // What get_mention_waker_config returned before mentions were we://mention
-  // links (#1446): a model query over TextContent, matching substrings, with
-  // the terms the waker used to check for a whole word. #1505's shape has none.
+describe("restoring saved subscriptions", () => {
+  // What get_mention_waker_config returned before the we://mention link query
+  // (#1446): a model query over TextContent, matching substrings, with the
+  // terms the waker checks for a whole word. #1505's shape has none.
   const textQuery: WakerSubscription = {
     id: "mention-persp-text",
     type: "mention",
@@ -4191,9 +4250,8 @@ describe("a saved mention subscription that reads message text", () => {
     channel: "",
     className: "ad4m://TextContent",
     query: JSON.stringify({ where: { OR: [{ text: { contains: "bot" } }] }, properties: ["text"] }),
-    // Not a field any more; saved files still carry it.
     terms: ["bot"],
-  } as WakerSubscription & { terms?: string[] };
+  };
   const withoutTerms = { ...textQuery, terms: undefined };
   const children: WakerSubscription = {
     id: "children-p",
@@ -4210,10 +4268,12 @@ describe("a saved mention subscription that reads message text", () => {
   function managerSavingTo(
     persisted: { subs: WakerSubscription[]; seen?: Record<string, string[]> },
     previousSeenMessages: Record<string, string[]> = {},
+    opening?: unknown,
+    woken: string[][] = [],
   ) {
     const constructed: any[][] = [];
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn() },
+      perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) },
       logger: makeMockLogger(),
       QuerySubscriptionProxy: vi.fn(function (...args: any[]) {
         constructed.push(args);
@@ -4222,10 +4282,14 @@ describe("a saved mention subscription that reads message text", () => {
           subscribe: vi.fn(() => Promise.resolve()),
           dispose: vi.fn(),
           onResult: vi.fn(),
+          result: opening,
         };
       }),
       debounceMs: 10,
-      onWake: () => {},
+      onWake: (_sub, _result, mentions) => {
+        woken.push((mentions ?? []).map((m) => m.address));
+        return true;
+      },
       previousSeenMessages,
       // The plugin's onPersist.
       onPersist: (subs: WakerSubscription[], seen: Record<string, string[]>) => {
@@ -4236,310 +4300,70 @@ describe("a saved mention subscription that reads message text", () => {
     });
     return { manager, constructed };
   }
-  const park = (sub: WakerSubscription) => parkSubscription(sub, {});
 
-  it("is told apart from a link query", () => {
-    expect(readsMentionText(textQuery)).toBe(true);
-    expect(readsMentionText(withoutTerms)).toBe(true);
-    expect(readsMentionText({ ...textQuery, className: undefined, query: "SELECT ?source WHERE {}" })).toBe(false);
-    expect(readsMentionText(children)).toBe(false);
-  });
-
-  for (const [label, saved] of [["with its terms", textQuery], ["without terms (#1505)", withoutTerms]] as const) {
-    it(`is not opened when the executor cannot re-derive it, and stays saved, ${label}`, async () => {
-      const persisted: { subs: WakerSubscription[]; seen?: Record<string, string[]> } = { subs: [] };
-      const savedSeen = { [saved.id]: ["msg-old"] };
-      const { manager, constructed } = managerSavingTo(persisted, savedSeen);
-      const warn = vi.fn();
-      try {
-        for (const sub of [saved, children]) {
-          await restoreSavedSubscription(
-            sub,
-            () => Promise.reject(new Error("MCP tool returned a mention query that reads message text; Update the executor.")),
-            (s) => manager.subscribe(s),
-            { warn },
-            (s) => parkSubscription(s, savedSeen),
-          );
-        }
-        // Nothing reads the text query: its rows would wake with no mention check.
-        expect(constructed.map((args) => args[3])).toEqual(["ad4m://Container"]);
-        expect(manager.getActive().map((s) => s.id)).toEqual(["children-p"]);
-        expect(manager.getPending()).toEqual([]);
-        // The children subscription's persist keeps the text one on disk.
-        expect(persisted.subs.map((s) => s.id)).toEqual(["children-p", "mention-persp-text"]);
-        expect(persisted.subs[1]).toEqual(saved);
-        // So is what it woke on: the next start must not take what came meanwhile as history.
-        expect(persisted.seen?.[saved.id]).toEqual(["msg-old"]);
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining("not opening it"));
-      } finally {
-        manager.disposeAll();
-      }
-    });
-  }
-
-  it("is replaced once a re-derived subscription with its id is live", async () => {
-    const persisted: { subs: WakerSubscription[] } = { subs: [] };
-    const { manager } = managerSavingTo(persisted);
-    try {
-      park(textQuery);
-      const current: WakerSubscription = {
-        id: textQuery.id,
-        type: "mention",
-        perspective: textQuery.perspective,
-        channel: "",
-        query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
-      };
-      await manager.subscribe(current);
-      expect(persisted.subs).toEqual([current]);
-      expect(_parkedSubscriptionsForTests().size).toBe(0);
-    } finally {
-      manager.disposeAll();
-    }
-  });
-
-  it("keeps its seen set while parked, so the next start wakes on what came meanwhile", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "ad4m-parked-"));
-    // The plugin's onPersist.
-    const persist = (subs: WakerSubscription[], seen: Record<string, string[]>) => {
-      const state = stateToSave(subs, seen);
-      saveWakerState(stateDir, state.subscriptions, state.seenMessages);
-    };
-    const proxyOpeningOn = (result: unknown) =>
-      vi.fn(function () {
-        return {
-          initialized: Promise.resolve(),
-          subscribe: vi.fn(() => Promise.resolve()),
-          dispose: vi.fn(),
-          onResult: vi.fn(),
-          result,
-        };
-      });
-    const perspectiveClient = { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) };
-    saveWakerState(stateDir, [textQuery, children], { [textQuery.id]: ["msg-old"] });
-
-    // Start 1: the executor cannot re-derive it, so it is parked. The children
-    // subscription opens and persists.
-    let state = loadWakerState(stateDir);
-    const first = new WakerSubscriptionManager({
-      perspectiveClient,
-      logger: makeMockLogger(),
-      QuerySubscriptionProxy: proxyOpeningOn([]),
-      debounceMs: 10,
-      onWake: () => {},
-      previousSeenMessages: state.seenMessages,
-      onPersist: persist,
-    });
-    try {
-      for (const sub of state.subscriptions) {
-        await restoreSavedSubscription(
-          sub,
-          () => Promise.reject(new Error("Update the executor.")),
-          (s) => first.subscribe(s),
-          { warn: vi.fn() },
-          (s) => parkSubscription(s, state.seenMessages),
-        );
-      }
-    } finally {
-      first.disposeAll();
-    }
-    _resetModuleState(); // the process ends
-
-    state = loadWakerState(stateDir);
-    expect(state.subscriptions.map((s) => s.id)).toContain(textQuery.id);
-    expect(state.seenMessages[textQuery.id]).toEqual(["msg-old"]);
-
-    // Start 2: the executor re-derives it under the same id. msg-new was
-    // written while it was parked.
+  // #1560 kept such a subscription closed, because #1557's waker no longer
+  // checked its rows for a whole word. The check is back, so it runs as saved:
+  // "the robots are stale" does not wake a bot named "bot".
+  it("runs a saved text query as saved when the executor cannot re-derive it, waking on whole words only", async () => {
+    const persisted: { subs: WakerSubscription[]; seen?: Record<string, string[]> } = { subs: [] };
     const woken: string[][] = [];
-    const current: WakerSubscription = {
-      id: textQuery.id,
-      type: "mention",
-      perspective: textQuery.perspective,
-      channel: "",
-      query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
-    };
-    const second = new WakerSubscriptionManager({
-      perspectiveClient,
-      logger: makeMockLogger(),
-      QuerySubscriptionProxy: proxyOpeningOn([{ source: "msg-old" }, { source: "msg-new" }]),
-      debounceMs: 10,
-      onWake: (_sub, _result, mentions) => {
-        woken.push((mentions ?? []).map((m) => m.address));
-        return true;
+    const { manager, constructed } = managerSavingTo(
+      persisted,
+      { [textQuery.id]: ["msg-old"] },
+      {
+        instances: [
+          { id: "msg-old", text: "hi bot" },
+          { id: "msg-robots", text: "the robots are stale" },
+          { id: "msg-new", text: "hi bot, look" },
+        ],
       },
-      previousSeenMessages: state.seenMessages,
-      onPersist: persist,
-    });
-    try {
-      await second.subscribe(current);
-      await vi.waitFor(() => expect(woken).toEqual([["msg-new"]]));
-    } finally {
-      second.disposeAll();
-      fs.rmSync(stateDir, { recursive: true, force: true });
-    }
-  });
-
-  it("survives cold starts in saved order until the executor can re-derive it", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "ad4m-parked-"));
-    const current: WakerSubscription = {
-      id: textQuery.id,
-      type: "mention",
-      perspective: textQuery.perspective,
-      channel: "",
-      query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
-    };
-    // One process start: load the file, restore what it holds in its order,
-    // and stop without anything else happening.
-    async function coldStart(executorAnswers: boolean, opening: unknown[]): Promise<string[][]> {
-      _resetModuleState();
-      const state = loadWakerState(stateDir);
-      const woken: string[][] = [];
-      const manager = new WakerSubscriptionManager({
-        perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) },
-        logger: makeMockLogger(),
-        QuerySubscriptionProxy: vi.fn(function () {
-          return {
-            initialized: Promise.resolve(),
-            subscribe: vi.fn(() => Promise.resolve()),
-            dispose: vi.fn(),
-            onResult: vi.fn(),
-            result: opening,
-          };
-        }),
-        debounceMs: 10,
-        onWake: (_sub, _result, mentions) => {
-          woken.push((mentions ?? []).map((m) => m.address));
-          return true;
-        },
-        previousSeenMessages: state.seenMessages,
-        // The plugin's onPersist.
-        onPersist: (subs, seen) => {
-          const next = stateToSave(subs, seen);
-          saveWakerState(stateDir, next.subscriptions, next.seenMessages);
-        },
-      });
-      try {
-        await restoreSavedSubscriptions(
-          state.subscriptions,
-          state.seenMessages,
-          executorAnswers
-            ? () => manager.subscribe(current)
-            : () => Promise.reject(new Error("Update the executor.")),
-          (s) => manager.subscribe(s),
-          makeMockLogger(),
-        );
-        if (executorAnswers) await vi.waitFor(() => expect(woken).not.toEqual([]));
-      } finally {
-        manager.disposeAll();
-      }
-      return woken;
-    }
-
-    try {
-      saveWakerState(stateDir, [textQuery, children], { [textQuery.id]: ["msg-old"] });
-      for (const start of [1, 2]) {
-        expect(await coldStart(false, []), `start ${start}`).toEqual([]);
-        const state = loadWakerState(stateDir);
-        expect(state.subscriptions.map((s) => s.id).sort(), `start ${start}`).toEqual(
-          ["children-p", textQuery.id],
-        );
-        expect(state.seenMessages[textQuery.id], `start ${start}`).toEqual(["msg-old"]);
-      }
-      // The executor is updated; msg-new was written while it was parked.
-      const woken = await coldStart(true, [{ source: "msg-old" }, { source: "msg-new" }]);
-      expect(woken).toEqual([["msg-new"]]);
-    } finally {
-      fs.rmSync(stateDir, { recursive: true, force: true });
-    }
-  });
-
-  it("is asked again while the waker runs, and wakes on a link-only mention once the executor answers", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "ad4m-parked-retry-"));
-    const current: WakerSubscription = {
-      id: textQuery.id,
-      type: "mention",
-      perspective: textQuery.perspective,
-      channel: "",
-      query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
-    };
-    const woken: string[][] = [];
-    saveWakerState(stateDir, [textQuery, children], { [textQuery.id]: ["msg-old"] });
-    const state = loadWakerState(stateDir);
-    const manager = new WakerSubscriptionManager({
-      perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) },
-      logger: makeMockLogger(),
-      QuerySubscriptionProxy: vi.fn(function () {
-        return {
-          initialized: Promise.resolve(),
-          subscribe: vi.fn(() => Promise.resolve()),
-          dispose: vi.fn(),
-          onResult: vi.fn(),
-          // msg-new holds no name, only the we://mention link to the DID.
-          result: [{ source: "msg-old" }, { source: "msg-new" }],
-        };
-      }),
-      debounceMs: 10,
-      onWake: (_sub, _result, mentions) => {
-        woken.push((mentions ?? []).map((m) => m.address));
-        return true;
-      },
-      previousSeenMessages: state.seenMessages,
-      onPersist: (subs, seen) => {
-        const next = stateToSave(subs, seen);
-        saveWakerState(stateDir, next.subscriptions, next.seenMessages);
-      },
-    });
-    // The first ask fails (MCP not up yet), the next one answers.
-    const rederive = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("MCP HTTP 503"))
-      .mockImplementation(() => manager.subscribe(current));
-    let waits = 0;
+      woken,
+    );
+    const warn = vi.fn();
     try {
       await restoreSavedSubscriptions(
-        state.subscriptions,
-        state.seenMessages,
-        rederive,
+        [children, textQuery],
+        { [textQuery.id]: ["msg-old"] },
+        () => Promise.reject(new Error("MCP HTTP 503")),
         (s) => manager.subscribe(s),
-        makeMockLogger(),
+        { ...makeMockLogger(), warn },
       );
-      expect(_parkedSubscriptionsForTests().has(textQuery.id)).toBe(true);
-
-      await retryParkedSubscriptions(rederive, makeMockLogger(), () => false, async () => {
-        waits++;
-      });
-
-      expect(waits).toBe(1);
-      expect(rederive).toHaveBeenCalledTimes(2);
-      expect(_parkedSubscriptionsForTests().size).toBe(0);
+      expect(constructed.map((args) => args[3])).toEqual(["ad4m://Container", "ad4m://TextContent"]);
+      expect(manager.getActive().map((s) => s.id)).toEqual(["children-p", textQuery.id]);
+      expect(persisted.subs.map((s) => s.id)).toEqual(["children-p", textQuery.id]);
       await vi.waitFor(() => expect(woken).toEqual([["msg-new"]]));
-      const saved = loadWakerState(stateDir);
-      expect(saved.subscriptions.find((s) => s.id === textQuery.id)).toEqual(current);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("restoring it as saved"));
     } finally {
       manager.disposeAll();
-      fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
 
-  it("is no longer parked once the executor answers, with no state file to persist to", async () => {
-    parkSubscription(textQuery, { [textQuery.id]: ["msg-old"] });
-    let waits = 0;
-    await retryParkedSubscriptions(vi.fn().mockResolvedValue("Subscribed"), makeMockLogger(), () => false, async () => {
-      if (++waits > 1) throw new Error("asked again after the executor answered");
-    });
-    expect(_parkedSubscriptionsForTests().size).toBe(0);
-    expect(stateToSave([], {})).toEqual({ subscriptions: [], seenMessages: {} });
+  it("does not open a saved text query without terms (#1505) when the executor cannot re-derive it", async () => {
+    const persisted: { subs: WakerSubscription[]; seen?: Record<string, string[]> } = { subs: [] };
+    const { manager, constructed } = managerSavingTo(persisted);
+    const error = vi.fn();
+    try {
+      await restoreSavedSubscriptions(
+        [withoutTerms, children],
+        {},
+        () => Promise.reject(new Error("MCP HTTP 503")),
+        (s) => manager.subscribe(s),
+        { ...makeMockLogger(), error },
+      );
+      expect(constructed.map((args) => args[3])).toEqual(["ad4m://Container"]);
+      expect(manager.getActive().map((s) => s.id)).toEqual(["children-p"]);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("needs its terms"));
+    } finally {
+      manager.disposeAll();
+    }
   });
 
-  it("stops asking again once the waker stops", async () => {
-    parkSubscription(textQuery, {});
-    const rederive = vi.fn().mockRejectedValue(new Error("Update the executor."));
-    let stopped = false;
-    await retryParkedSubscriptions(rederive, makeMockLogger(), () => stopped, async () => {
-      if (rederive.mock.calls.length === 2) stopped = true;
-    });
-    expect(rederive).toHaveBeenCalledTimes(2);
-    expect(_parkedSubscriptionsForTests().has(textQuery.id)).toBe(true);
+  it("is re-derived when the executor answers", async () => {
+    const rederive = vi.fn().mockResolvedValue("Subscribed");
+    const createLive = vi.fn();
+    await restoreSavedSubscription(textQuery, rederive, createLive, { warn: vi.fn() });
+    expect(rederive).toHaveBeenCalledWith("persp-text");
+    expect(createLive).not.toHaveBeenCalled();
   });
 
   it("lets go of a saved subscription that fails to restore, once the loop is done with it", async () => {
@@ -4556,6 +4380,33 @@ describe("a saved mention subscription that reads message text", () => {
       );
       expect(persisted.subs.map((s) => s.id)).toEqual(["children-p"]);
       expect(persisted.seen).not.toHaveProperty(broken.id);
+    } finally {
+      manager.disposeAll();
+    }
+  });
+
+  // Lal's re-review of #1560: on a cold start with the saved order
+  // [children, mention], the children subscription persisted before the
+  // mention was reached, and the file lost the mention and its seen set.
+  it("keeps what it has not reached yet, with its seen set, in a persist from one opened earlier", async () => {
+    const persisted: { subs: WakerSubscription[]; seen?: Record<string, string[]> } = { subs: [] };
+    const { manager } = managerSavingTo(persisted);
+    let seenDuringChildren: { subs: string[]; seen?: Record<string, string[]> } | undefined;
+    try {
+      await restoreSavedSubscriptions(
+        [children, textQuery],
+        { [textQuery.id]: ["msg-old"] },
+        vi.fn().mockResolvedValue("Subscribed"),
+        async (s) => {
+          await manager.subscribe(s);
+          seenDuringChildren = { subs: persisted.subs.map((x) => x.id), seen: persisted.seen };
+        },
+        makeMockLogger(),
+      );
+      expect(seenDuringChildren).toEqual({
+        subs: ["children-p", textQuery.id],
+        seen: { [textQuery.id]: ["msg-old"], "children-p": [] },
+      });
     } finally {
       manager.disposeAll();
     }
@@ -4583,48 +4434,6 @@ describe("a saved mention subscription that reads message text", () => {
     createLive.mockClear();
     await restoreSavedSubscriptions([children], {}, vi.fn(), createLive, makeMockLogger(), () => true);
     expect(createLive).not.toHaveBeenCalled();
-  });
-
-  it("is re-derived, not parked, when the executor answers", async () => {
-    const rederive = vi.fn().mockResolvedValue("Subscribed");
-    const createLive = vi.fn();
-    await restoreSavedSubscription(textQuery, rederive, createLive, { warn: vi.fn() }, park);
-    expect(rederive).toHaveBeenCalledWith("persp-text");
-    expect(createLive).not.toHaveBeenCalled();
-    expect(_parkedSubscriptionsForTests().size).toBe(0);
-  });
-
-  it("is listed as not listening, and unsubscribing forgets it", async () => {
-    const registeredTools: Array<{ name: string; execute: Function }> = [];
-    ad4mPlugin({
-      pluginConfig: {},
-      logger: makeMockLogger(),
-      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
-      registerService: vi.fn(),
-      registerCli: vi.fn(),
-    });
-    const persisted: { subs: WakerSubscription[]; seen?: Record<string, string[]> } = { subs: [] };
-    const { manager } = managerSavingTo(persisted);
-    _setSubscriptionManagerForTests(manager);
-    try {
-      parkSubscription(textQuery, { [textQuery.id]: ["msg-old"] });
-      const tool = (name: string) => registeredTools.find((t) => t.name === name)!;
-      const listed: string = (await tool("ad4m_list_waker_subscriptions").execute("c1", {})).content[0].text;
-      expect(listed).toContain("Not opened");
-      expect(listed).toContain("mention-persp-text");
-      expect(listed).toContain("NOT listening");
-
-      const res = await tool("ad4m_unsubscribe_from_mentions").execute("c2", { perspective_id: "persp-text" });
-      expect(res.content[0].text).toContain("Unsubscribed from mentions in perspective persp-text");
-      expect(_parkedSubscriptionsForTests().size).toBe(0);
-      expect(persisted.subs).toEqual([]);
-      expect(persisted.seen).toEqual({});
-      const after: string = (await tool("ad4m_list_waker_subscriptions").execute("c3", {})).content[0].text;
-      expect(after).not.toContain("mention-persp-text");
-    } finally {
-      manager.disposeAll();
-      _setSubscriptionManagerForTests(null);
-    }
   });
 });
 

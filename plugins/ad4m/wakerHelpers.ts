@@ -30,12 +30,23 @@ export function buildWakeMessage(
     lines.push(`Mentioned items (${mentions.length}):`);
     for (const m of mentions) {
       lines.push(`  Item: ${m.address}`);
-      // Who put the mention on the item, and when: the mention link's signer,
-      // not necessarily whoever wrote the item's text.
-      lines.push(
-        `  Mention link signed by: ${m.author ?? "(unknown)"} (signature ${m.verified ? "verified" : "NOT verified"})`,
-      );
-      if (m.timestamp) lines.push(`  Mention link time: ${m.timestamp}`);
+      if (m.byText) {
+        // No mention link: the item's text holds your name or DID as a whole word.
+        lines.push(
+          "  Matched by: your name in the text (no we://mention link; a name match can be a false alarm)",
+        );
+        lines.push(
+          `  Author: ${m.author ?? "(unknown)"} (the item's first link's signer, signature ${m.verified ? "verified" : "NOT verified"})`,
+        );
+        if (m.timestamp) lines.push(`  Item time: ${m.timestamp}`);
+      } else {
+        // Who put the mention on the item, and when: the mention link's signer,
+        // not necessarily whoever wrote the item's text.
+        lines.push(
+          `  Mention link signed by: ${m.author ?? "(unknown)"} (signature ${m.verified ? "verified" : "NOT verified"})`,
+        );
+        if (m.timestamp) lines.push(`  Mention link time: ${m.timestamp}`);
+      }
       if (m.parents.length > 0) {
         lines.push(`  Parents: ${m.parents.join(", ")}`);
       } else {
