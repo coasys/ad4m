@@ -7,6 +7,7 @@ use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 
@@ -68,7 +69,13 @@ pub(crate) struct LanguageRuntimeRequest {
     pub response_tx: oneshot::Sender<Result<String, String>>,
     /// When the handle sent it; the runtime logs the time in queue on dequeue (#1133).
     pub queued_at: Instant,
+    /// Names the request in `RunningRequest`.
+    pub id: u64,
 }
+
+/// The request a runtime is running, if any: its id and when it started. The runtime writes
+/// it; the handle reads it to tell a caller whose call runs from one queued behind another.
+pub(crate) type RunningRequest = Arc<Mutex<Option<(u64, Instant)>>>;
 
 /// Operations that can be sent to a LanguageRuntime
 #[derive(Debug)]
@@ -391,7 +398,11 @@ impl LanguageRuntime {
     /// receive requests, mirroring the pattern in `JsCore::start()`.
     /// Without event loop polling, JS async operations (timers, promises,
     /// pending ops) would stall between requests.
-    pub(crate) async fn process_requests(self, mut rx: UnboundedReceiver<LanguageRuntimeRequest>) {
+    pub(crate) async fn process_requests(
+        self,
+        mut rx: UnboundedReceiver<LanguageRuntimeRequest>,
+        running: RunningRequest,
+    ) {
         let local_set = tokio::task::LocalSet::new();
         let js_core = self.js_core.clone();
         let addr = self.language_address.clone();
@@ -416,11 +427,22 @@ impl LanguageRuntime {
                                     debug!("📚 [lang:{}] {} waited {} ms in queue", addr, request.operation.name(), waited.as_millis());
                                 }
 
+                                // An `Execute` whose caller has gone (the call deadline, or a
+                                // dropped future) is not run: nobody would get the result, and
+                                // the caller may have queued the work again (a commit goes to
+                                // the pending diffs). The caller gives up under the same lock,
+                                // so a call either runs with its caller waiting or not at all.
+                                let skip = {
+                                    let mut running = running.lock().unwrap();
+                                    let skip = matches!(request.operation, LanguageOperation::Execute(..))
+                                        && request.response_tx.is_closed();
+                                    if !skip {
+                                        *running = Some((request.id, Instant::now()));
+                                    }
+                                    skip
+                                };
                                 let result = match request.operation {
-                                    // Its caller stopped waiting (the call deadline). Nobody
-                                    // would get the result, and the caller may have queued the
-                                    // work again: a commit goes to the pending diffs.
-                                    LanguageOperation::Execute(..) if request.response_tx.is_closed() => {
+                                    LanguageOperation::Execute(..) if skip => {
                                         Err(format!("Call to language {} not started: its caller stopped waiting", addr))
                                     }
                                     LanguageOperation::Execute(script, ref agent_ctx) => {
@@ -471,6 +493,7 @@ impl LanguageRuntime {
                                     debug!("[lang:{}] Operation completed successfully", addr);
                                 }
 
+                                *running.lock().unwrap() = None;
                                 let _ = request.response_tx.send(result);
 
                                 if is_teardown {

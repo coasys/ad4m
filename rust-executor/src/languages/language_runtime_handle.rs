@@ -2,7 +2,8 @@ use log::{debug, error, info};
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::runtime::Builder;
 use tokio::sync::{
     mpsc::{self, UnboundedSender},
@@ -13,17 +14,26 @@ use crate::agent::AgentContext;
 use crate::languages::capability::{parse_capability_list, Capability};
 use crate::languages::LanguageContext;
 
-use super::language_runtime::{LanguageOperation, LanguageRuntime, LanguageRuntimeRequest};
+use super::language_runtime::{
+    LanguageOperation, LanguageRuntime, LanguageRuntimeRequest, RunningRequest,
+};
 
-/// How long a caller waits for a script call into a language (`Execute`), from send to result.
+/// How long a script call into a language (`Execute`) may run before the calls behind it stop
+/// waiting for it.
 ///
 /// A language serves its calls one at a time, and nothing interrupts a call once it runs: a
-/// call that never returns blocks every later call to it. The deadline does not end such a
-/// call. It ends the wait of its caller and of the callers queued behind it, who get an error
-/// instead of waiting for ever, and the runtime does not start a call whose caller has gone.
-/// It is for hangs, not slow calls: a large encrypted commit can take over 30 s. It is twice
-/// the SDK's 30 s call timeout and six of host.js's 10 s HTTP fetch timeouts.
+/// call that never returns blocks every later call to it. Once the running call has run for
+/// the deadline, a caller whose call is still queued gets an error, and a new call fails at
+/// once instead of being queued. The runtime never starts a call whose caller has gone, so a
+/// caller that got the error can retry without doing the work twice. The running call's own
+/// caller waits until it ends: a call that keeps making progress (a file upload with one zome
+/// call per chunk) has no total bound, and each of its waits has its own (a zome call 90 s, an
+/// HTTP fetch 10 s). The deadline is for hangs, not slow calls: a large encrypted commit can
+/// take over 30 s.
 pub(crate) const LANGUAGE_CALL_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Ids for `LanguageRuntimeRequest::id`.
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Handle to a per-language runtime running in its own thread.
 /// Thin communication layer that sends requests to a LanguageRuntime
@@ -33,8 +43,10 @@ pub struct LanguageRuntimeHandle {
     pub language_address: String,
     pub language_name: Option<String>,
     tx: UnboundedSender<LanguageRuntimeRequest>,
-    /// How long a caller waits for a script call: `LANGUAGE_CALL_DEADLINE`.
+    /// `LANGUAGE_CALL_DEADLINE`.
     call_deadline: Duration,
+    /// The request the runtime is running.
+    running: RunningRequest,
 }
 
 impl LanguageRuntimeHandle {
@@ -54,6 +66,8 @@ impl LanguageRuntimeHandle {
         let (tx, rx) = mpsc::unbounded_channel::<LanguageRuntimeRequest>();
         let addr = language_address.clone();
         let prefix_len = 8.min(addr.len());
+        let running = RunningRequest::default();
+        let runtime_running = running.clone();
 
         std::thread::Builder::new()
             .name(format!("lang-{}", &addr[..prefix_len]))
@@ -73,7 +87,7 @@ impl LanguageRuntimeHandle {
                         return;
                     }
 
-                    runtime.process_requests(rx).await;
+                    runtime.process_requests(rx, runtime_running).await;
                 });
             })
             .map_err(|e| format!("Failed to spawn language thread: {}", e))?;
@@ -84,6 +98,7 @@ impl LanguageRuntimeHandle {
             language_name: None,
             tx,
             call_deadline: LANGUAGE_CALL_DEADLINE,
+            running,
         })
     }
 
@@ -99,6 +114,7 @@ impl LanguageRuntimeHandle {
             language_name: None,
             tx,
             call_deadline: LANGUAGE_CALL_DEADLINE,
+            running: RunningRequest::default(),
         }
     }
 
@@ -107,6 +123,52 @@ impl LanguageRuntimeHandle {
     pub(crate) fn with_call_deadline(mut self, deadline: Duration) -> Self {
         self.call_deadline = deadline;
         self
+    }
+
+    /// Test-only: the running request a `from_channel` test plays the runtime for.
+    #[cfg(test)]
+    pub(crate) fn running_request(&self) -> RunningRequest {
+        self.running.clone()
+    }
+
+    /// The error for a call that will not run because the language's running call has run for
+    /// the deadline.
+    fn busy_error(&self, running_since: Instant) -> String {
+        format!(
+            "Language {} is busy: its running call has run for {:?}, past the call deadline of {:?}",
+            self.language_address,
+            running_since.elapsed(),
+            self.call_deadline
+        )
+    }
+
+    /// Waits for the result of call `id`. While the call is queued, its caller gets an error as
+    /// soon as the call the runtime is running has run for the deadline. Once the call runs,
+    /// its caller waits until it ends.
+    async fn wait_for_call(
+        &self,
+        id: u64,
+        mut response_rx: oneshot::Receiver<Result<String, String>>,
+    ) -> Result<Result<String, String>, oneshot::error::RecvError> {
+        loop {
+            let check_at = match *self.running.lock().unwrap() {
+                Some((running_id, _)) if running_id == id => break,
+                Some((_, since)) if since.elapsed() >= self.call_deadline => {
+                    // Dropped under the lock the runtime starts a call under, so the runtime
+                    // either has started this call (and the arm above matched) or will skip it.
+                    drop(response_rx);
+                    return Ok(Err(self.busy_error(since)));
+                }
+                Some((_, since)) => since + self.call_deadline,
+                None => Instant::now() + self.call_deadline,
+            };
+            tokio::select! {
+                biased;
+                response = &mut response_rx => return response,
+                _ = tokio::time::sleep_until(check_at.into()) => {}
+            }
+        }
+        response_rx.await
     }
 
     /// Send an operation and wait for the result.
@@ -120,26 +182,29 @@ impl LanguageRuntimeHandle {
             &op_name[..op_name.len().min(100)]
         );
 
-        // Load, init and teardown have no deadline: init may install a Holochain app for
-        // minutes.
+        // Only script calls give up: loading a language and its teardown wait for it.
         let is_call = matches!(operation, LanguageOperation::Execute(..));
+        if is_call {
+            // Not queued behind a call that has run past the deadline: retries during a hang
+            // would pile up in the channel.
+            if let Some((_, since)) = *self.running.lock().unwrap() {
+                if since.elapsed() >= self.call_deadline {
+                    return Err(self.busy_error(since));
+                }
+            }
+        }
+        let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         self.tx
             .send(LanguageRuntimeRequest {
                 operation,
                 response_tx,
-                queued_at: std::time::Instant::now(),
+                queued_at: Instant::now(),
+                id,
             })
             .map_err(|e| format!("Language runtime channel closed: {}", e))?;
 
         let response = if is_call {
-            tokio::time::timeout(self.call_deadline, response_rx)
-                .await
-                .unwrap_or_else(|_| {
-                    Ok(Err(format!(
-                        "Call to language {} passed its deadline of {:?}",
-                        self.language_address, self.call_deadline
-                    )))
-                })
+            self.wait_for_call(id, response_rx).await
         } else {
             response_rx.await
         };

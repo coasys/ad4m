@@ -1,7 +1,8 @@
 //! Calls into one language runtime: their deadline, their order and the agent each runs as.
 //!
 //! Everything here runs JS through a real `LanguageRuntimeHandle` (its own thread, Deno
-//! isolate and request loop), the path every language call takes.
+//! isolate and request loop), the path every language call takes, except the test that a
+//! refused call is not queued: it reads the channel, so it plays the runtime itself.
 //!
 //! The `#[ignore]` tests are the benchmarks behind the deadline change. Run them with
 //! `cargo test --release -p ad4m-executor --lib call_deadline_bench -- --ignored --nocapture --test-threads=1`,
@@ -85,21 +86,22 @@ fn two_users() -> (String, String) {
     (user("alice"), user("bob"))
 }
 
-/// The deadline in the identity scenario; Alice's call awaits past it, Bob's call is sent at
-/// it and awaits across the moment Alice's call resumes.
-const DEADLINE_F: Duration = Duration::from_millis(1000);
+/// When Alice's caller drops its call in the identity scenario: before the call ends, as an
+/// outer timeout or a dropped request handler does.
+const ALICE_GIVES_UP: Duration = Duration::from_millis(1000);
 
 struct SignerOutcome {
-    alice: Result<String, String>,
+    /// `None`: her caller dropped the call before it ended.
+    alice: Option<Result<String, String>>,
     bob: Result<String, String>,
     /// The author of the expression Alice's call signed after its await.
     signer: String,
 }
 
-/// Alice's call awaits 1.2 s (past `DEADLINE_F`), then signs an expression. Bob's call is
-/// sent when Alice's caller gets its answer and awaits 0.4 s. Returns both outcomes and the
+/// Alice's call awaits 1.2 s, then signs an expression; her caller drops the call at
+/// `ALICE_GIVES_UP`. Bob's call is sent then and awaits 0.4 s. Returns both outcomes and the
 /// agent Alice's call signed as.
-async fn signer_of_a_call_past_its_deadline(
+async fn signer_of_a_call_whose_caller_has_gone(
     handle: &LanguageRuntimeHandle,
     alice: &str,
     bob: &str,
@@ -108,8 +110,9 @@ async fn signer_of_a_call_past_its_deadline(
         .execute("(globalThis.__signer = null, 0)".into())
         .await
         .unwrap();
-    let alice_outcome = handle
-        .execute_with_context(
+    let alice_outcome = tokio::time::timeout(
+        ALICE_GIVES_UP,
+        handle.execute_with_context(
             format!(
                 r#"(async () => {{
                     {};
@@ -119,8 +122,10 @@ async fn signer_of_a_call_past_its_deadline(
                 sleep_js(1200)
             ),
             AgentContext::managed(alice.to_string()),
-        )
-        .await;
+        ),
+    )
+    .await
+    .ok();
     let bob_outcome = handle
         .execute_with_context(
             format!("({}, AGENT.did())", sleep_js(400)),
@@ -140,8 +145,10 @@ async fn signer_of_a_call_past_its_deadline(
     }
 }
 
+/// The hung call keeps its language and its own caller: nothing can tell it from a slow call.
+/// The call queued behind it gets an error once the hung call has run for the deadline.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_call_that_never_resolves_fails_at_its_deadline_and_so_does_the_call_behind_it() {
+async fn a_call_queued_behind_a_hung_call_gets_an_error_at_the_deadline() {
     let (handle, _dir) = spawn_runtime("QmDeadlineHung");
     let handle = handle.with_call_deadline(Duration::from_millis(500));
 
@@ -150,23 +157,32 @@ async fn a_call_that_never_resolves_fails_at_its_deadline_and_so_does_the_call_b
         tokio::spawn(async move { handle.execute("await new Promise(() => {})".into()).await })
     };
     tokio::time::sleep(Duration::from_millis(50)).await;
+    let t = Instant::now();
     let behind = within(
         Duration::from_secs(10),
         "the call queued behind it",
         async { handle.execute("1 + 1".into()).await },
     )
     .await;
-    let hung = within(Duration::from_secs(10), "the hung call", hung)
-        .await
-        .unwrap();
+    let waited = t.elapsed();
 
-    let error = hung.expect_err("a call that never resolves returns an error");
-    assert!(error.contains("deadline"), "unexpected error: {error}");
-    // The hung call still holds the language: the call behind it never starts.
     let error = behind.expect_err("the call behind a hung call returns an error");
     assert!(error.contains("deadline"), "unexpected error: {error}");
+    assert!(
+        waited < Duration::from_millis(1500),
+        "the call behind waited {waited:?}, past the hung call's deadline"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !hung.is_finished(),
+        "the hung call's own caller got an answer: {:?}",
+        hung.await
+    );
+    hung.abort();
 }
 
+/// A call that runs past the deadline answers its caller. The call queued behind it gets an
+/// error and is never run, so its caller can retry without doing the work twice.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_still_queued_at_its_deadline_is_not_run() {
     let (handle, _dir) = spawn_runtime("QmDeadlineQueued");
@@ -187,29 +203,27 @@ async fn a_call_still_queued_at_its_deadline_is_not_run() {
         })
     };
     tokio::time::sleep(Duration::from_millis(50)).await;
+    let t = Instant::now();
     let queued = within(Duration::from_secs(10), "the queued call", async {
         handle
             .execute("(globalThis.__queuedRan = true)".into())
             .await
     })
     .await;
+    let queued_after = t.elapsed();
     let (busy_after, busy) = within(Duration::from_secs(10), "the busy call", busy)
         .await
         .unwrap();
 
-    assert!(busy
-        .expect_err("the busy call outlives its deadline")
+    assert_eq!(busy.expect("the busy call answers its caller").trim(), "1");
+    assert!(busy_after >= Duration::from_millis(2000), "{busy_after:?}");
+    assert!(queued
+        .expect_err("the call ahead ran past the deadline")
         .contains("deadline"));
     assert!(
-        busy_after < Duration::from_millis(1500),
-        "its caller waited {busy_after:?}, past the deadline"
+        queued_after < Duration::from_millis(1500),
+        "the queued caller waited {queued_after:?}, past the deadline"
     );
-    assert!(queued
-        .expect_err("its caller has gone")
-        .contains("deadline"));
-    // Wait until the isolate is free (the loop ends 2 s after it started), then ask whether
-    // the queued call ran.
-    tokio::time::sleep(Duration::from_millis(2000)).await;
     let ran = within(Duration::from_secs(10), "the check", async {
         handle
             .execute("String(globalThis.__queuedRan === true)".into())
@@ -218,6 +232,70 @@ async fn a_call_still_queued_at_its_deadline_is_not_run() {
     .await
     .unwrap();
     assert_eq!(ran.trim(), "false", "a call ran after its caller gave up");
+}
+
+/// A file-storage upload makes one zome call per chunk inside one call: its total time is not
+/// bounded, and its caller must get the address.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_that_keeps_making_progress_past_the_deadline_returns_its_result() {
+    let (handle, _dir) = spawn_runtime("QmDeadlineLong");
+    let handle = handle.with_call_deadline(Duration::from_millis(1000));
+
+    let t = Instant::now();
+    let upload = within(Duration::from_secs(10), "the upload", async {
+        handle
+            .execute(format!(
+                r#"(async () => {{
+                    for (let i = 0; i < 10; i++) {{ {}; }}
+                    return "address";
+                }})()"#,
+                sleep_js(200)
+            ))
+            .await
+    })
+    .await;
+
+    assert_eq!(
+        upload.expect("the upload answers its caller").trim(),
+        "address"
+    );
+    assert!(
+        t.elapsed() >= Duration::from_millis(2000),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
+/// While the running call is past the deadline, a new call fails at once and is not queued:
+/// retries during a hang do not pile up in the channel.
+#[tokio::test]
+async fn a_call_sent_while_the_running_call_is_past_the_deadline_is_not_queued() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = LanguageRuntimeHandle::from_channel("QmDeadlinePileUp".into(), tx)
+        .with_call_deadline(Duration::from_millis(500));
+    let running = handle.running_request();
+
+    // A call that has run for 100 ms: the next call is queued behind it.
+    *running.lock().unwrap() = Some((u64::MAX, Instant::now() - Duration::from_millis(100)));
+    let queued = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.execute("1 + 1".into()).await }
+    });
+    within(Duration::from_secs(1), "the queued request", rx.recv())
+        .await
+        .expect("the call is queued");
+
+    // The same call, 1 s on.
+    *running.lock().unwrap() = Some((u64::MAX, Instant::now() - Duration::from_secs(1)));
+    let refused = within(Duration::from_secs(1), "the refused call", async {
+        handle.execute("1 + 1".into()).await
+    })
+    .await;
+    assert!(refused
+        .expect_err("the running call is past the deadline")
+        .contains("deadline"));
+    assert!(rx.try_recv().is_err(), "the refused call was queued");
+    queued.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -232,27 +310,25 @@ async fn calls_to_one_language_start_and_finish_in_send_order() {
     assert_eq!(ended, sent, "a later call finished before an earlier one");
 }
 
-/// A commit whose caller gave up at the deadline is queued again with the diffs made since.
+/// A commit whose caller has gone (an outer timeout) is queued again with the diffs made since.
 /// The call still running must land before that retry, not after it.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_call_past_its_deadline_ends_before_the_next_call_starts() {
+async fn a_started_call_whose_caller_has_gone_ends_before_the_next_call_starts() {
     let (handle, _dir) = spawn_runtime("QmDeadlineLateCommit");
-    let handle = handle.with_call_deadline(Duration::from_millis(500));
     handle
         .execute("(globalThis.__log = [], 0)".into())
         .await
         .unwrap();
 
-    let late = within(Duration::from_secs(10), "the late commit", async {
-        handle
-            .execute(format!(
-                "({}, globalThis.__log.push('+x landed'), 0)",
-                sleep_js(800)
-            ))
-            .await
-    })
+    let late = tokio::time::timeout(
+        Duration::from_millis(500),
+        handle.execute(format!(
+            "({}, globalThis.__log.push('+x landed'), 0)",
+            sleep_js(800)
+        )),
+    )
     .await;
-    assert!(late.expect_err("its caller gave up").contains("deadline"));
+    assert!(late.is_err(), "the caller gave up before the commit ended");
     within(Duration::from_secs(10), "the retry", async {
         handle
             .execute("(globalThis.__log.push('+x -x landed'), 0)".into())
@@ -269,26 +345,22 @@ async fn a_call_past_its_deadline_ends_before_the_next_call_starts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_call_past_its_deadline_signs_as_its_own_agent_while_the_next_call_runs() {
+async fn a_started_call_whose_caller_has_gone_signs_as_its_own_agent() {
     let (alice, bob) = two_users();
     let (handle, _dir) = spawn_runtime("QmDeadlineAgent");
-    let handle = handle.with_call_deadline(DEADLINE_F);
 
     let outcome = within(
         Duration::from_secs(10),
         "the two calls",
-        signer_of_a_call_past_its_deadline(&handle, &alice, &bob),
+        signer_of_a_call_whose_caller_has_gone(&handle, &alice, &bob),
     )
     .await;
 
-    assert!(outcome
-        .alice
-        .expect_err("alice's caller stops waiting at the deadline")
-        .contains("deadline"));
+    assert!(outcome.alice.is_none(), "alice's caller gave up first");
     assert_eq!(outcome.bob.expect("bob's call runs").trim(), bob);
     assert_eq!(
         outcome.signer, alice,
-        "alice's call signed as another agent after its deadline"
+        "alice's call signed as another agent after her caller had gone"
     );
 }
 
@@ -362,6 +434,8 @@ async fn call_deadline_bench_b_head_of_line() {
     const CAP: Duration = Duration::from_secs(70);
     let mut fast = Vec::new();
     let mut hung = Vec::new();
+    let mut retry_answered = Vec::new();
+    let mut retry_wall = Vec::new();
     for run in 0..RUNS {
         let (handle, _dir) = spawn_runtime(&format!("QmBenchB{run}"));
         let start = Instant::now();
@@ -376,6 +450,18 @@ async fn call_deadline_bench_b_head_of_line() {
         let t = Instant::now();
         let fast_outcome = tokio::time::timeout(CAP, handle.execute("1 + 1".into())).await;
         let fast_latency = t.elapsed();
+        // Then 100 more calls, as retries arrive while the call still hangs: how many get an
+        // answer within 1 s.
+        let t = Instant::now();
+        let retries =
+            futures::future::join_all((0..100).map(|_| {
+                tokio::time::timeout(Duration::from_secs(1), handle.execute("1 + 1".into()))
+            }))
+            .await;
+        let answered = retries.iter().filter(|r| r.is_ok()).count();
+        retry_answered.push(answered);
+        retry_wall.push(t.elapsed());
+        println!("B run {run}: {answered}/100 later calls answered within 1 s");
         let hung_outcome =
             tokio::time::timeout(CAP.saturating_sub(start.elapsed()), hung_call).await;
         println!(
@@ -397,6 +483,8 @@ async fn call_deadline_bench_b_head_of_line() {
         }
     }
     report("B", "fast call latency behind a hung call", fast);
+    report("B", "100 later calls, wall time (1 s cap)", retry_wall);
+    println!("BENCH B | later calls answered within 1 s per run | {retry_answered:?}");
     if hung.is_empty() {
         println!("BENCH B | hung call | never returned within {CAP:?} in any run");
     } else {
@@ -454,6 +542,48 @@ async fn call_deadline_bench_d_two_languages() {
         "fast call on language 2 while language 1 is busy 5 s",
         fast,
     );
+}
+
+/// G: one healthy call whose total work passes the 60 s deadline: 70 sequential awaits of
+/// 1 s, as a file-storage upload makes one zome call per chunk. Then a read of how many
+/// "chunks" were stored.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn call_deadline_bench_g_long_healthy_call() {
+    const CHUNKS: usize = 70;
+    let mut latency = Vec::new();
+    let mut ok = 0;
+    for run in 0..RUNS {
+        let (handle, _dir) = spawn_runtime(&format!("QmBenchG{run}"));
+        handle
+            .execute("(globalThis.__chunks = 0, 0)".into())
+            .await
+            .unwrap();
+        let t = Instant::now();
+        let upload = handle
+            .execute(format!(
+                r#"(async () => {{
+                    for (let i = 0; i < {CHUNKS}; i++) {{ {}; globalThis.__chunks++; }}
+                    return "address";
+                }})()"#,
+                sleep_js(1000)
+            ))
+            .await;
+        latency.push(t.elapsed());
+        let stored = handle.execute("globalThis.__chunks".into()).await;
+        println!(
+            "G run {run}: caller got {:?} after {:.3} s; chunks stored {:?}",
+            upload.as_ref().map(|s| s.trim().to_string()),
+            t.elapsed().as_secs_f64(),
+            stored.as_ref().map(|s| s.trim().to_string())
+        );
+        if upload.is_ok() {
+            ok += 1;
+        }
+        let _ = handle.teardown().await;
+    }
+    report("G", "caller of a 70 x 1 s healthy call", latency);
+    println!("BENCH G | caller got Ok in {ok}/{RUNS} runs");
 }
 
 /// E: a call that keeps the isolate's CPU busy for 3 s, then a fast call to the same
@@ -515,8 +645,8 @@ async fn call_deadline_bench_e2_endless_cpu_loop() {
     report("E2", "fast call behind an endless CPU loop", fast);
 }
 
-/// F: Alice's call awaits past its deadline, then signs while Bob's call runs. Counts the
-/// agent it signed as.
+/// F: Alice's caller drops her call while it awaits; Bob's call is sent then. Counts the agent
+/// Alice's call signed as when it resumed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn call_deadline_bench_f_identity() {
@@ -524,8 +654,7 @@ async fn call_deadline_bench_f_identity() {
     let (mut as_alice, mut as_bob, mut other) = (0, 0, 0);
     for run in 0..RUNS {
         let (handle, _dir) = spawn_runtime(&format!("QmBenchF{run}"));
-        let handle = handle.with_call_deadline(DEADLINE_F);
-        let o = signer_of_a_call_past_its_deadline(&handle, &alice, &bob).await;
+        let o = signer_of_a_call_whose_caller_has_gone(&handle, &alice, &bob).await;
         println!(
             "F run {run}: alice's caller got {:?}; bob's call {:?}; alice's call signed as {}",
             o.alice,
