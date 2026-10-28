@@ -239,10 +239,11 @@ impl std::fmt::Display for AtomRejection {
 // Identity primitives (pure)
 // ---------------------------------------------------------------------------
 
-/// The one identity check in the flow engine: this link was authored by
-/// `did` **and** its stored signature verdict is valid.
+/// The one identity check in the flow engine: the link counts (its stored verdict is
+/// valid) **and** `did` names who signed it: the signer's device key (a `did:key`, one
+/// device) or the person that key speaks for (a `did:scid`, any of the person's devices).
 pub fn signed_by(link: &DecoratedLinkExpression, did: &str) -> bool {
-    link.author == did && link.proof.valid == Some(true)
+    link.proof.valid == Some(true) && (link.author == did || link.person.as_deref() == Some(did))
 }
 
 /// The value a link carries, `literal:string:` decoded. URI targets (DIDs,
@@ -582,6 +583,26 @@ mod tests {
                 at: T1.into()
             }],
             "neither shape may add a voter"
+        );
+    }
+
+    /// A flow that names a person (a `did:scid`) matches a counted link by any of that
+    /// person's devices; a flow that names a device (a `did:key`) matches that device only.
+    #[test]
+    fn signed_by_reads_the_signer_or_its_person() {
+        let person = "did:scid:coasys:1:zPerson";
+        let mut by_device = link(PROPOSER_PREDICATE, ALICE, ALICE, true, T1);
+        by_device.person = Some(person.into());
+        assert!(signed_by(&by_device, ALICE), "the device");
+        assert!(signed_by(&by_device, person), "the person");
+        assert!(!signed_by(&by_device, "did:scid:coasys:1:zOther"));
+        assert!(!signed_by(&by_device, BOB));
+
+        let mut not_counted = link(PROPOSER_PREDICATE, ALICE, ALICE, false, T1);
+        not_counted.person = Some(person.into());
+        assert!(
+            !signed_by(&not_counted, person),
+            "a link that does not count speaks for no one"
         );
     }
 

@@ -73,6 +73,7 @@ pub fn build_expression_rendered(
                 .to_string(),
             valid: p.get("valid").and_then(|v| v.as_bool()),
             invalid: p.get("invalid").and_then(|v| v.as_bool()),
+            anchor: p.get("anchor").and_then(|v| v.as_u64()),
         }
     } else {
         DecoratedExpressionProof::default()

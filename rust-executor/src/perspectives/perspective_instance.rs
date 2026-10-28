@@ -6,9 +6,10 @@ use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
 use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
-use crate::agent::{create_signed_expression, did_for_context};
+use crate::agent::{create_signed_expression_anchored, create_signed_link, did_for_context};
 use crate::agent::{AgentContext, AgentService};
 use crate::events::{Audience, Event, Topic};
+use crate::identity::verdict::LinkVerdict;
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
@@ -89,6 +90,8 @@ mod join_tests;
 #[path = "perspective_instance_pending_diffs_tests.rs"]
 mod pending_diffs_tests;
 
+/// The most links one re-check of verdicts judges in one perspective.
+const RECHECK_BATCH: usize = 10_000;
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
@@ -195,8 +198,11 @@ mod inbound_touches_shacl_tests {
                 signature: String::new(),
                 valid: Some(true),
                 invalid: Some(false),
+                anchor: None,
             },
             status: Some(LinkStatus::Shared),
+            verdict: None,
+            person: None,
         }
     }
 
@@ -1842,7 +1848,7 @@ impl PerspectiveInstance {
             crate::billing::check_compute_credits(agent_did)?;
         }
         link.validate()?;
-        let link_expr: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
+        let link_expr: LinkExpression = create_signed_link(link.normalize(), context).await?.into();
         let result = self
             .add_link_expression(link_expr, status, batch_id)
             .await?;
@@ -2052,9 +2058,13 @@ impl PerspectiveInstance {
             link.validate()?;
         }
         check_consensus_rule_links(&links)?;
+        let anchor = crate::identity::anchor_for(&did_for_context(context)?).await;
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
-            .map(|l| create_signed_expression(l.normalize(), context).map(LinkExpression::from))
+            .map(|l| {
+                create_signed_expression_anchored(l.normalize(), context, anchor)
+                    .map(LinkExpression::from)
+            })
             .collect();
         let link_expressions = link_expressions?;
 
@@ -2141,9 +2151,10 @@ impl PerspectiveInstance {
             link.validate()?;
         }
         check_consensus_rule_links(&addition_links)?;
+        let anchor = crate::identity::anchor_for(&did_for_context(context)?).await;
         let additions = addition_links
             .into_iter()
-            .map(|l| create_signed_expression(l.normalize(), context))
+            .map(|l| create_signed_expression_anchored(l.normalize(), context, anchor))
             .map(|r| r.map(LinkExpression::from))
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
         // `status` applies to the additions. A removal keeps the status of the
@@ -2284,7 +2295,7 @@ impl PerspectiveInstance {
 
         check_consensus_rule_links([&new_link])?;
         let new_link_expression =
-            LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
+            LinkExpression::from(create_signed_link(new_link.normalize(), context).await?);
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
@@ -2585,10 +2596,7 @@ impl PerspectiveInstance {
                     author: decorated.author,
                     timestamp: decorated.timestamp,
                     data: decorated.data,
-                    proof: ExpressionProof {
-                        key: decorated.proof.key,
-                        signature: decorated.proof.signature,
-                    },
+                    proof: decorated.proof.plain(),
                     status: Some(status.clone()),
                 };
                 (link_expr, status)
@@ -2596,7 +2604,27 @@ impl PerspectiveInstance {
             .collect())
     }
 
+    /// Every stored link that matches `q`, whatever its verdict, each with its verdict.
+    /// Readers inside the executor use it and test `proof.valid` where a link must count.
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        self.links(q, false).await
+    }
+
+    /// The display read behind `perspective.queryLinks` and `perspective.snapshot`: as
+    /// [`Self::get_links`], without the links whose verdict is `invalid` (`cantCheck` and
+    /// `flagged` links are returned, with their verdict).
+    pub async fn get_links_shown(
+        &self,
+        q: &LinkQuery,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        self.links(q, true).await
+    }
+
+    async fn links(
+        &self,
+        q: &LinkQuery,
+        shown_only: bool,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let mut reverse = false;
         let mut query = q.clone();
 
@@ -2631,7 +2659,14 @@ impl PerspectiveInstance {
                 let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
                 dt.to_rfc3339()
             });
-            return Ok(self.sparql_store.query_links_top_n_by_timestamp(
+            use super::sparql_store::SparqlStore;
+            let page = if shown_only {
+                SparqlStore::query_shown_links_top_n_by_timestamp
+            } else {
+                SparqlStore::query_links_top_n_by_timestamp
+            };
+            return page(
+                &self.sparql_store,
                 query.source.as_deref(),
                 query.predicate.as_deref(),
                 query.target.as_deref(),
@@ -2639,7 +2674,7 @@ impl PerspectiveInstance {
                 until_date.as_deref(),
                 limit as usize,
                 reverse,
-            )?);
+            );
         }
 
         // No limit: pull the already-decorated form from the SPARQL store and
@@ -2653,6 +2688,9 @@ impl PerspectiveInstance {
         // The wind-tunnel S9 query path was the dominant remaining source of
         // RSS growth; this collapses it to a single Vec.
         let mut links = self.get_links_local_decorated(&query)?;
+        if shown_only {
+            links.retain(super::sparql_store::shown);
+        }
 
         links.sort_by(|a, b| {
             let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap_or_default();
@@ -4146,9 +4184,13 @@ impl PerspectiveInstance {
         // If we add first and remove second, we'd delete the newly added links too.
         //
         // Takes `PerspectiveDiff` (`LinkExpression`), not the decorated form.
-        // `proof.valid` is a read view; the store writes from the signed expression
+        // The verdict is a read view; the store writes from the signed expression
         // and computes the verdict itself. Callers decorate *after* persist for
         // pubsub/prolog, rather than decorating and converting back here.
+
+        // The store judges each link from the key map without I/O: fill it for the
+        // signers first (the key index and their logs, through the agent language).
+        crate::identity::prepare_link_signers(&diff.additions).await;
 
         // Removals first
         for removal in &diff.removals {
@@ -4180,6 +4222,40 @@ impl PerspectiveInstance {
         // throttled background flush, not a per-write fsync.
 
         Ok(())
+    }
+
+    /// Judges the stored links of `scope` again from the key map (after filling it for their
+    /// signers) and rewrites each link whose verdict or person changed. At most
+    /// [`RECHECK_BATCH`] links per call; answers how many changed.
+    pub async fn recheck_links(&self, scope: &super::Recheck) -> Result<usize, AnyError> {
+        let stored = match scope {
+            super::Recheck::Signers(signers) => {
+                let signers: Vec<String> = signers.iter().cloned().collect();
+                self.sparql_store
+                    .links_by_authors(&signers, RECHECK_BATCH)?
+            }
+            super::Recheck::CantCheck => self
+                .sparql_store
+                .links_with_verdict(&LinkVerdict::CantCheck, RECHECK_BATCH)?,
+        };
+        if stored.is_empty() {
+            return Ok(0);
+        }
+        let links: Vec<LinkExpression> = stored.iter().cloned().map(LinkExpression::from).collect();
+        crate::identity::prepare_link_signers(&links).await;
+        let mut changed = 0;
+        for (before, link) in stored.iter().zip(&links) {
+            let now = link.check();
+            if before.verdict.as_ref() == Some(&now.verdict) && before.person == now.person {
+                continue;
+            }
+            self.sparql_store.add_link(link)?;
+            changed += 1;
+        }
+        if changed > 0 {
+            self.clear_shape_cache();
+        }
+        Ok(changed)
     }
 
     /// Record the links of a diff into `changed_predicates`. A link without a
@@ -6660,9 +6736,11 @@ impl PerspectiveInstance {
         let mut persist_diff = PerspectiveDiff::empty();
 
         // Process additions
+        let anchor = crate::identity::anchor_for(&did_for_context(context)?).await;
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr = create_signed_expression(link.data.normalize(), context)?;
+            let signed_expr =
+                create_signed_expression_anchored(link.data.normalize(), context, anchor)?;
             let mut stored = LinkExpression::from(signed_expr);
             stored.status = Some(status.clone());
             persist_diff.additions.push(stored.clone());
@@ -6776,6 +6854,7 @@ pub fn prolog_result(result: String) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::create_signed_expression;
     use crate::agent::signatures::TestSigner;
     use crate::agent::AgentService;
     use crate::db::Ad4mDb;
@@ -7730,6 +7809,115 @@ mod tests {
         // Ensure the link is no longer present
         let links_after_removal = perspective.get_links(&query).await.unwrap();
         assert!(!links_after_removal.contains(&expression));
+    }
+
+    /// A link that could not be checked takes its verdict once the signer's log reaches its
+    /// anchor, and a display read drops it when that verdict is `invalid`.
+    #[tokio::test]
+    async fn a_recheck_rewrites_the_verdict_once_the_log_reaches_the_anchor() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::verdict::InvalidReason;
+        use ad4m_identity_core::build::Signer;
+
+        let perspective = setup().await;
+        let mut log = TestLog::new(91);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+
+        // The device signs anchored at seq 1, which the cached log does not reach yet.
+        let key = log.device.key();
+        let data = create_link().normalize();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 1).unwrap();
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp,
+            data,
+            proof: ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(log.device.sign(&bytes)),
+                anchor: Some(1),
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        perspective.sparql_store.add_link(&link).unwrap();
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::CantCheck));
+        assert_eq!(
+            perspective
+                .get_links_shown(&LinkQuery::default())
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a display read shows a link that cannot be checked"
+        );
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::CantCheck)
+                .await
+                .unwrap(),
+            0,
+            "nothing changed yet"
+        );
+
+        // The log reaches seq 1 with a revocation of that device.
+        log.revoke_d1();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 1,
+            },
+        );
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::CantCheck)
+                .await
+                .unwrap(),
+            1
+        );
+        let stored = perspective.sparql_store.get_all_links().unwrap();
+        assert_eq!(
+            stored[0].verdict,
+            Some(LinkVerdict::Invalid(InvalidReason::Revoked))
+        );
+        assert!(perspective
+            .get_links_shown(&LinkQuery::default())
+            .await
+            .unwrap()
+            .is_empty());
+        let limited = LinkQuery {
+            limit: Some(10),
+            ..Default::default()
+        };
+        assert!(perspective
+            .get_links_shown(&limited)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            perspective.get_links(&limited).await.unwrap().len(),
+            1,
+            "the link stays stored"
+        );
+        let signers = std::collections::BTreeSet::from([link.author.clone()]);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                .await
+                .unwrap(),
+            0,
+            "a re-check is idempotent"
+        );
+        map.forget(&log.scid());
     }
 
     #[tokio::test]

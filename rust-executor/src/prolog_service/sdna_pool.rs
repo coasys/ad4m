@@ -418,8 +418,11 @@ mod tests {
                 signature: "test_signature".to_string(),
                 valid: Some(true),
                 invalid: Some(false),
+                anchor: None,
             },
             status: None,
+            verdict: None,
+            person: None,
         }];
 
         // Set up test data in the complete pool first

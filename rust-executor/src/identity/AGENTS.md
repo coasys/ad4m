@@ -7,10 +7,11 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | File | What |
 |---|---|
 | `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`, `identity.allowPrivateSrc`), `write_agent_language_settings`, the `identity-fork` publisher; re-exports `verify_expression` |
-| `resolver.rs` | The one place that decides what a log says. `key_speaks_for`, `key_valid_at_anchor` and `verify_expression` (all up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author, for `LanguageController::verify_expression_proof`; `proof.record` anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Later checks (link anchors, verdicts, key login) belong here |
+| `resolver.rs` | The one place that decides what a log says. `key_speaks_for`, `key_valid_at_anchor` and `verify_expression` (all up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author, for `LanguageController::verify_expression_proof`; `proof.record` anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Links: `check_signed_with` (the verdict and person of a signed link from the key map, no I/O), `Resolver::author_of` / `lookup_signer` (key map, then the key index confirmed against the log), `Resolver::prepare` (fills the key map before links are stored). Key login belongs here too |
+| `verdict.rs` | `LinkVerdict` (`Valid`, `Invalid(reason)`, `CantCheck`, `Flagged`) and `judge`, a pure function of the signature, the anchor, the signer's log and the space order; `KeyVerdict`, `VerdictChange`, `key_verdict` |
 | `src_fetch.rs` | `SrcFetch`: the executor's reader of a foreign `src` over the did:scid host profile (`GET /v1/logs/{scid}?from=`), for `Resolver` only. `PublicOnly` (the client's DNS resolver: public addresses only), `refuse_private_host` (IP literals, `localhost`), no redirects, no proxy, HTTPS only, timeouts, body cap |
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
-| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh` (at most `MAX_PAGES` pages), `ingest`, `accept`, `trusted` (the log and its accepted head's seq), forks, `reset` (`identity.resetLog`), `refreshed_within` (the in-memory time of each log's last refresh) |
+| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh` (at most `MAX_PAGES` pages), `ingest`, `accept`, `trusted` (the log and its accepted head's seq), forks, `reset` (`identity.resetLog`), `refreshed_within` (the in-memory time of each log's last refresh); `KeyMap` (every trusted log by signing key, and the store's "no log" answers for 15 minutes; `global_key_map`), `subscribe` (a `VerdictChange` when an accepted head changes a key's verdict) |
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner` |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
@@ -106,6 +107,44 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   `agent.get` carry it as `identity`, `did` stays the device `did:key` (and
   `agent.status().didDocument` the device's did:key document; `identity.resolve` serves the
   person's).
+
+## Links: anchor, verdict, person
+
+- **The anchor.** A link that a bound agent signs (`agent::create_signed_link`,
+  `identity::anchor_for`) carries `proof.anchor`: the trusted seq of its identity's log, when
+  that log lists the agent's key as a device key. Its signature covers
+  `coasys:link` `{data, timestamp, anchor}` (`signatures::anchored_signing_bytes`), the
+  timestamp as the link carries it. A link without an anchor signs the old bytes. The anchor
+  is in the proof on the wire and in the link store (`ad4m://ontology/proofAnchor`).
+- **One check.** `signatures::verify`, `LinkExpression::check` and
+  `DecoratedLinkExpression::check` all go to `identity::check_signed`: the signature over the
+  bytes the proof names, then `verdict::judge` on what the key map holds. The check does no
+  I/O, so it runs the same in the store, in flows and in every recompute.
+  `identity::prepare_link_signers` fills the key map first (`persist_link_diff`, the
+  re-check).
+- **The rules** (`judge`). A bad signature: `invalid`. No anchor and no log that lists the
+  key: `valid`, as before key logs. No anchor and a log lists the key: judged as anchored at
+  the seq that added the key. With an anchor: no log lists the key, `invalid`; nothing known
+  or the anchor past the trusted seq, `cantCheck`; a master key, `invalid`; the key added
+  after the anchor or revoked at or before it, `invalid`; an `Until` key or bot scope past its
+  `expires` by the clock now, `invalid`. A key revoked after the anchor: `flagged` when the
+  link entered the space's ordered history after the `revoke`, else `valid`. No link language
+  gives that order today, so `check_signed` passes none.
+- **Unknown is not "no log".** A failed key-index call answers `Unavailable` and is never
+  kept; the index is not asked again for 30 s (`BREAKER`). An unanchored link by an unknown
+  key stays `valid` with no person; an anchored one is `cantCheck`.
+- **The person** is derived, never on the wire: the `did:scid` of the signer's log (a bot
+  key: its owner), only for a `valid` link. The link store keeps it beside the verdict
+  (`ad4m://ontology/person`, `ad4m://ontology/linkVerdict`) for SPARQL; `proofValid` is `true`
+  exactly for `valid`. A found person stays for good; "no log" holds for 15 minutes.
+- **The re-check** (`run_recheck`, started by `init`): on each `VerdictChange` the links of
+  that key, and every 60 s the `cantCheck` links, are judged again and rewritten when the
+  verdict or person changed (`PerspectiveInstance::recheck_links`, at most 10 000 links per
+  perspective per pass).
+- **Reads.** Logic reads (model queries, flows, SHACL, SDNA facts) count only links with
+  `proofValid` `true`. The display reads `perspective.queryLinks` and `perspective.snapshot`
+  (`get_links_shown`) leave out `invalid` links and return `cantCheck` and `flagged` ones with
+  `verdict`. `PerspectiveInstance::get_links` returns every stored link with its verdict.
 
 ## DID resolution (`identity.resolve`)
 

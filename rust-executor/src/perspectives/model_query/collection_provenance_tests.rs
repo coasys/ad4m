@@ -169,6 +169,7 @@ async fn each_collection_member_carries_its_own_author_timestamp_and_verdict() {
             proof: crate::types::ExpressionProof {
                 key: decorated.proof.key.clone(),
                 signature: decorated.proof.signature.clone(),
+                anchor: None,
             },
             status: Some(LinkStatus::Shared),
         };

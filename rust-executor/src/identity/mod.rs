@@ -17,16 +17,20 @@ pub mod resolver;
 pub mod service;
 pub mod src_fetch;
 pub mod types;
+pub mod verdict;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use crate::api::ws_handler::WsRpcError;
 use crate::events::{Audience, Event, Topic};
+use crate::types::{Expression, LinkExpression};
 use backend::AgentLanguageBackend;
-use cache::{CacheError, KelCache};
+use cache::{CacheError, KelCache, KeyLookup};
 pub use resolver::verify_expression;
-use resolver::Resolver;
+use resolver::{CheckedLink, Resolver};
 use service::IdentityService;
 use types::IdentityForkEvent;
 
@@ -74,10 +78,115 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         store_url: settings.store_url.clone(),
         resolver: Arc::new(resolver),
     };
-    if SERVICE.set(Arc::new(service)).is_err() {
+    let service = Arc::new(service);
+    if SERVICE.set(service.clone()).is_err() {
         log::warn!("identity: the module was started twice; keeping the first");
+        return Ok(());
+    }
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(run_recheck(service));
+        }
+        Err(_) => log::error!("identity: no runtime for the re-check of links"),
     }
     Ok(())
+}
+
+/// How often links whose signer's log could not be read are checked again.
+pub const RECHECK_EVERY: Duration = Duration::from_secs(60);
+
+/// The re-check of stored links: the links of each key whose verdict the cache changed (a
+/// revocation, a key a log lists for the first time), and every [`RECHECK_EVERY`] the links
+/// that could not be checked. Each re-check judges a link again from the key map and rewrites
+/// it only when its verdict or person changed, so it is idempotent.
+async fn run_recheck(service: Arc<IdentityService>) {
+    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+    let mut changes = service.cache.subscribe();
+    let mut tick = tokio::time::interval(RECHECK_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            change = changes.recv() => {
+                let mut signers = BTreeSet::new();
+                match change {
+                    Ok(change) => {
+                        signers.insert(format!("did:key:{}", change.key));
+                        loop {
+                            match changes.try_recv() {
+                                Ok(change) => {
+                                    signers.insert(format!("did:key:{}", change.key));
+                                }
+                                Err(TryRecvError::Lagged(_)) => {
+                                    signers.extend(listed_signers(&service));
+                                }
+                                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+                            }
+                        }
+                    }
+                    // Changes were missed: every key the map lists.
+                    Err(RecvError::Lagged(_)) => signers.extend(listed_signers(&service)),
+                    Err(RecvError::Closed) => return,
+                }
+                crate::perspectives::recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                    .await;
+            }
+            _ = tick.tick() => {
+                crate::perspectives::recheck_links(&crate::perspectives::Recheck::CantCheck).await;
+            }
+        }
+    }
+}
+
+fn listed_signers(service: &IdentityService) -> Vec<String> {
+    service
+        .cache
+        .key_map()
+        .listed_keys()
+        .into_iter()
+        .map(|key| format!("did:key:{key}"))
+        .collect()
+}
+
+/// The verdict of a signed expression (a link) and its person, from the executor's key map,
+/// with no I/O ([`resolver::check_signed_with`]). No space order is known here: a link signed
+/// before its key's revocation counts.
+pub fn check_signed<T: serde::Serialize>(expr: &Expression<T>) -> CheckedLink {
+    resolver::check_signed_with(expr, &cache::global_key_map(), None, service::now())
+}
+
+/// Fills the key map for the signers of `links` before they are checked and stored: the key
+/// index and the logs it names, through the agent language. Does nothing before [`init`].
+pub async fn prepare_link_signers(links: &[LinkExpression]) {
+    let Some(service) = SERVICE.get() else {
+        return;
+    };
+    let signers: Vec<(String, Option<u64>)> = links
+        .iter()
+        .map(|l| (l.author.clone(), l.proof.anchor))
+        .collect();
+    service.resolver.prepare(&signers).await;
+}
+
+/// The anchor of a link that the local agent `agent_did` signs now: the trusted seq of its
+/// identity's log, when the agent is bound to an identity (`identity_agents`) and that log
+/// lists its key as a device key up to that seq. `None` otherwise: the link carries no anchor.
+pub async fn anchor_for(agent_did: &str) -> Option<u64> {
+    let service = SERVICE.get()?;
+    let scid = {
+        let db = crate::db::Ad4mDb::global_instance();
+        let db = db.lock().ok()?;
+        db.as_ref()?.agent_identity(agent_did).ok().flatten()?
+    };
+    let (_, trusted) = service.cache.trusted(&scid).await.ok()??;
+    let key = resolver::multikey_of(agent_did)?;
+    match service.cache.key_map().lookup(key) {
+        KeyLookup::Listed { log, .. } if log.trusted == trusted => log
+            .state
+            .device_key_id_of(&key.to_string())
+            .is_some()
+            .then_some(trusted),
+        _ => None,
+    }
 }
 
 /// The module, once [`init`] ran.

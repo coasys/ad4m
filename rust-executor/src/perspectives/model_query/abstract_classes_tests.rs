@@ -101,6 +101,7 @@ fn link_expression(link: Link, ts: &str) -> LinkExpression {
         proof: ExpressionProof {
             key: "key".to_string(),
             signature: "sig".to_string(),
+            anchor: None,
         },
         status: Some(LinkStatus::Shared),
     }
