@@ -7,7 +7,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | File | What |
 |---|---|
 | `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`, `identity.allowPrivateSrc`), `write_agent_language_settings`, the `identity-fork` publisher; re-exports `verify_expression` |
-| `resolver.rs` | The one place that decides what a log says. `key_speaks_for`, `key_valid_at_anchor` and `verify_expression` (all up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author, for `LanguageController::verify_expression_proof`; `proof.record` anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Links: `check_signed_with` (the verdict and person of a signed link from the key map, no I/O), `Resolver::author_of` / `lookup_signer` (key map, then the key index confirmed against the log), `Resolver::prepare` (fills the key map before links are stored). Key login belongs here too |
+| `resolver.rs` | The one place that decides what a log says. `key_valid_at_anchor` and `verify_expression` (both up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author with its `proof.record`, for `LanguageController::verify_expression_proof`; the record anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Links: `check_signed_with` (the verdict and person of a signed link from the key map, no I/O), `Resolver::author_of` / `lookup_signer` (key map, then the key index confirmed against the log), `Resolver::prepare` (fills the key map before links are stored). Key login belongs here too |
 | `verdict.rs` | `LinkVerdict` (`Valid`, `Invalid(reason)`, `CantCheck`, `Flagged`) and `judge`, a pure function of the signature, the anchor, the signer's log and the space order; `KeyVerdict`, `VerdictChange`, `key_verdict` |
 | `src_fetch.rs` | `SrcFetch`: the executor's reader of a foreign `src` over the did:scid host profile (`GET /v1/logs/{scid}?from=`), for `Resolver` only. `PublicOnly` (the client's DNS resolver: public addresses only), `refuse_private_host` (IP literals, `localhost`), no redirects, no proxy, HTTPS only, timeouts, body cap |
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
@@ -49,8 +49,8 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   the person): the seq of the accepted head, while it still verifies under the current
   `identity.storeKeys` and the cached event at that seq has its hash. No such head: no key
   speaks for that person. The state counts at that seq: a key added past it does not speak yet, a revocation past it does not
-  count yet. The readers: `key_speaks_for` and `key_valid_at_anchor` (so `verify_expression`,
-  with and without `proof.record`), the `did:key` confirmation in `resolve_key`,
+  count yet. The readers: `key_valid_at_anchor` (so `verify_expression`), the `did:key`
+  confirmation in `resolve_key`,
   `record_agent_if_listed` (binding a local agent to an identity) and `main_is_linked`
   (`already-linked`). Events past the trusted seq, and every event a foreign `src` served, are
   for resolution display only (`identity.resolve` shows them, `coasys:headTrusted: false`).
@@ -98,8 +98,8 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   - The record counts only from the agent language: its store refuses a record anchored
     before a revocation of its key, while anyone else can wrap a fresh signature by a revoked
     key in a record naming an earlier anchor.
-  - `verify_expression` without a record judges the key at the trusted seq, by the clock now,
-    without the bot mark; the expression read path never calls it so.
+  - `verify_expression` takes the record: there is no rule for a `did:scid` expression
+    without one.
 
   The expression's own timestamp never counts. When the cached log does not admit the key (no
   log or no store-signed head yet, a trusted seq below the anchor, or a device added since),
@@ -108,7 +108,9 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
 - **A positive verdict is fresh for `resolver::ADMIT_FRESHNESS` (60 s).** When the cached log
   admits the key but last refreshed from the configured store longer ago than that (the time is
   kept in memory only, so after a restart every log is stale), the read refreshes it once and
-  checks again, so a revocation at the store reaches every reader within the window. Offline
+  checks again, so the cached log follows the store within the window. The anchor fixes a
+  profile's verdict: a revocation the refresh brings in does not touch a profile anchored
+  before it. Offline
   policy: when that refresh fails (the store unreachable, or a fork) the cached trusted head
   answers, and the failed attempt counts as the window's read, so an unreachable store is tried
   once per window per log, not on every read.

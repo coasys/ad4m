@@ -721,7 +721,8 @@ mod tests {
     #[tokio::test]
     async fn a_reset_log_takes_the_stores_branch_after_a_fork() {
         use crate::identity::cache::tests::{trusting, FakeStore};
-        use crate::identity::resolver::{key_speaks_for, test_profiles::signed_profile};
+        use crate::identity::resolver::key_valid_at_anchor;
+        use crate::identity::resolver::test_profiles::{signed_profile, with_record};
         use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
         // Ours: seq 1 adds a second device key. The store's branch: seq 1 revokes d1.
         let mut ours = TestLog::new(71);
@@ -758,14 +759,15 @@ mod tests {
         let did = did_of(&scid);
         let d1 = ours.device.key();
         service.log(&did, 0, true).await.unwrap();
-        assert!(key_speaks_for(&service.cache, &did, &d1, now()).await);
+        // Both branches hold seq 1; theirs revokes d1 there.
+        assert!(key_valid_at_anchor(&service.cache, &did, &d1, 1, now()).await);
 
         // The store now serves the other branch: the cache records the fork, keeps its own.
         *store.events.lock().unwrap() = theirs.events.clone();
         service.log(&did, 0, true).await.unwrap();
         assert_eq!(service.cache.forks(&scid).await.unwrap().len(), 1);
         assert!(
-            key_speaks_for(&service.cache, &did, &d1, now()).await,
+            key_valid_at_anchor(&service.cache, &did, &d1, 1, now()).await,
             "the cache keeps its branch"
         );
 
@@ -775,14 +777,20 @@ mod tests {
         assert!(service.cache.forks(&scid).await.unwrap().is_empty());
 
         // An ordinary verification reads the log again and takes the store's branch.
+        let anchored = with_record(&signed_profile(&did, &ours.device), &ours.device, 1, 1);
         let expr: crate::types::Expression<Value> =
-            serde_json::from_value(signed_profile(&did, &ours.device)).unwrap();
+            serde_json::from_value(anchored.clone()).unwrap();
         let reader: &dyn IdentityBackend = store.as_ref();
         assert!(
-            !crate::identity::verify_expression(&service.cache, Some(reader), &expr, None)
-                .await
-                .unwrap(),
-            "d1 is revoked on the store's branch"
+            !crate::identity::verify_expression(
+                &service.cache,
+                Some(reader),
+                &expr,
+                &anchored["proof"]["record"]
+            )
+            .await
+            .unwrap(),
+            "d1 is revoked at seq 1 on the store's branch"
         );
         let log = service.log(&did, 0, false).await.unwrap();
         assert_eq!(log.head.unwrap().hash, theirs.chain().head().hash);

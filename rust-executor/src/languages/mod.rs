@@ -2628,8 +2628,7 @@ impl LanguageController {
                         .filter(|record| record_admitted && !record.is_null());
                     match (cache, record) {
                         (Some(cache), Some(record)) => {
-                            crate::identity::verify_expression(cache, backend, &expr, Some(record))
-                                .await
+                            crate::identity::verify_expression(cache, backend, &expr, record).await
                         }
                         _ => Ok(false),
                     }
