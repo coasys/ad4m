@@ -50,7 +50,7 @@ jobs:
             fi
           fi
 
-          for dir in core ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
+          for dir in core ad4m-ldk/js ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
             NAME="$(node -p "require('./$dir/package.json').name")"
             if [ -n "$(npm view "$NAME@$VERSION" version 2>/dev/null)" ]; then
               PUBLISHED_FROM="$(npm view "$NAME@$VERSION" gitHead 2>/dev/null)"
@@ -755,7 +755,7 @@ jobs:
           REPO_URL: https://github.com/${{ github.repository }}
         run: |
           GIT_HEAD="$(git rev-parse HEAD)"
-          for dir in core ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
+          for dir in core ad4m-ldk/js ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
             GIT_HEAD="$GIT_HEAD" node -e "
               const fs = require('fs');
               const file = '$dir/package.json';
@@ -787,7 +787,7 @@ jobs:
           VERSION: ${{ steps.extract_version.outputs.version }}
         run: |
           COMMIT="$(git rev-parse HEAD)"
-          for dir in core ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
+          for dir in core ad4m-ldk/js ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
             NAME="$(node -p "require('./$dir/package.json').name")"
             if [ -n "$(npm view "$NAME@$VERSION" version 2>/dev/null)" ]; then
               PUBLISHED_FROM="$(npm view "$NAME@$VERSION" gitHead 2>/dev/null)"
