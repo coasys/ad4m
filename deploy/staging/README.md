@@ -32,7 +32,7 @@ from there.
 
 | File | Installed to | What it does |
 |---|---|---|
-| `ad4m-staging.service` | `~/.config/systemd/user/` | Runs `current/ad4m-executor run --config …`; secrets through `LoadCredential=` |
+| `ad4m-staging.service` | `~/.config/systemd/user/` | Runs `current/ad4m-executor run --config …`; secrets through `LoadCredential=`; `LimitNOFILE=65536` |
 | `ad4m-staging-update.service` | `~/.config/systemd/user/` | Runs `update.sh` once, at the lowest CPU and IO priority |
 | `ad4m-staging-update.timer` | `~/.config/systemd/user/` | Starts the update 10 minutes after the last one finished |
 | `update.sh` | `~/.local/share/ad4m-staging/bin/` | Fetch, build, snapshot, swap, gate, roll back; writes `status.json`. `update.sh rollback` goes back one build by hand |
@@ -570,13 +570,13 @@ Expected: no output.
 
 > **Not done. Needs a window approved by Nico.** The team node serves the
 > team; this is the plan for that window, not something to run ahead of it.
-> Nothing here touches the node until step 5 of the guide's "Moving a node
+> Nothing here touches the node until step 5 of the guide's "Moving an executor
 > off the launcher".
 
 The team node runs today inside the ADAM Launcher on the same box: TLS on
 `0.0.0.0:12100`, MCP on `0.0.0.0:3001`, RPC on `127.0.0.1:12000`, the dapp
 server on `127.0.0.1:8080`, multi-user on, SMTP set. Follow the guide's
-"Moving a node off the launcher" with these values:
+"Moving an executor off the launcher" with these values:
 
 - Config: `~/.config/ad4m-team/executor-config.json` with `port: 12000`,
   `tls_config` (certificate and key paths, `tls_port: 12100`),

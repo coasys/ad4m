@@ -37,6 +37,7 @@ use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
 use crate::agent::capabilities::AI_TRANSCRIBE_CAPABILITY;
+use crate::agent::session::{AuthError, Session};
 use crate::ai_service::AIService;
 use crate::api::errors::ApiError;
 use crate::types::{ModelType, RequestContext};
@@ -70,6 +71,12 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
         return;
     }
     let session = caller.session.clone();
+    // Completes when the grant ends or the token expires: the socket closes at once, not at
+    // the next message.
+    let over = session.over();
+    tokio::pin!(over);
+    // Set when the token stopped working: the socket then closes with 1008.
+    let mut token_ended = false;
 
     let mut stream_id: Option<String> = None;
     let mut delta_rx: Option<broadcast::Receiver<String>> = None;
@@ -81,29 +88,40 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
         let mut rx_taken = delta_rx.take();
 
         enum Ev {
+            Over,
             Ws(Option<Result<Message, axum::Error>>),
             Delta(Result<String, broadcast::error::RecvError>),
         }
 
-        let ev = if let Some(ref mut rx) = rx_taken {
-            tokio::select! {
-                msg = socket.recv() => Ev::Ws(msg),
-                text = rx.recv() => Ev::Delta(text),
-            }
-        } else {
-            Ev::Ws(socket.recv().await)
+        let ev = tokio::select! {
+            _ = &mut over => Ev::Over,
+            msg = socket.recv() => Ev::Ws(msg),
+            text = async {
+                match rx_taken.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => Ev::Delta(text),
         };
 
         delta_rx = rx_taken;
 
         let msg = match ev {
+            Ev::Over => {
+                token_ended = true;
+                break;
+            }
             Ev::Delta(Ok(text)) => {
-                if !text.is_empty() {
-                    let delta = json!({
-                        "type": "conversation.item.input_audio_transcription.delta",
-                        "delta": text,
-                    });
-                    let _ = socket.send(Message::Text(delta.to_string().into())).await;
+                match delta_frame(&session, &text) {
+                    Ok(Some(frame)) => {
+                        let _ = socket.send(Message::Text(frame.into())).await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        let _ = send_error(&mut socket, "unauthorized", &e.to_string()).await;
+                        token_ended = true;
+                        break;
+                    }
                 }
                 continue;
             }
@@ -120,6 +138,7 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
         // session, as they do on the RPC socket.
         if let Err(e) = session.check() {
             let _ = send_error(&mut socket, "unauthorized", &e.to_string()).await;
+            token_ended = true;
             break;
         }
 
@@ -302,7 +321,25 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
             let _ = service.close_transcription_stream(sid, &caller).await;
         }
     }
-    let _ = socket.close().await;
+    if token_ended {
+        crate::api::ws_rpc::close_token_ended(&mut socket).await;
+    } else {
+        let _ = socket.close().await;
+    }
+}
+
+/// The frame that forwards the transcription delta `text` (`None` for an empty one), or the
+/// error of a session whose token stopped holding: a transcript goes out only while it holds.
+pub(super) fn delta_frame(session: &Session, text: &str) -> Result<Option<String>, AuthError> {
+    session.check()?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let delta = json!({
+        "type": "conversation.item.input_audio_transcription.delta",
+        "delta": text,
+    });
+    Ok(Some(delta.to_string()))
 }
 
 async fn send_error(socket: &mut WebSocket, code: &str, message: &str) -> Result<(), ()> {

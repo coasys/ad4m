@@ -157,7 +157,7 @@ async fn subscribe(p: &PerspectiveInstance, class: &str, query: Value) -> (Strin
     let mut query = query;
     query["includeUnverified"] = json!(true);
     let (id, _revision, result) = p
-        .model_subscribe_and_query(class.into(), query.to_string(), "c".into())
+        .model_subscribe_and_query(class.into(), query.to_string(), "c".into(), None)
         .await
         .expect("model subscribe");
     (id, serde_json::from_str(&result).expect("result JSON"))
@@ -213,7 +213,8 @@ async fn an_included_records_edit_reruns_the_including_subscription() {
 /// trigger: the edit re-runs nothing and no update arrives.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_edit_to_a_record_in_the_first_result_sends_update_revision_1() {
-    use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+    use crate::events::Topic;
+    use crate::pubsub::get_global_pubsub;
     let mut p = blog().await;
     record(&mut p, "ns://p1", "Post", &[]).await;
     record(&mut p, "ns://c1", "Comment", &[]).await;
@@ -222,18 +223,18 @@ async fn an_edit_to_a_record_in_the_first_result_sends_update_revision_1() {
 
     let (id, first) = subscribe(&p, "Post", json!({ "include": { "comments": true } })).await;
     assert!(first.to_string().contains("ns://c1"), "{first}");
-    let mut rx = get_global_pubsub()
-        .await
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
+    let mut rx = get_global_pubsub().await.subscribe_events();
 
     add(&mut p, "ns://c1", "ns://text", "literal:string:edited").await;
     check(&p).await;
 
     let update = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let msg = rx.recv().await.expect("pubsub receiver closed");
-            let update: Value = serde_json::from_str(&msg).expect("update JSON");
+            let event = rx.recv().await.expect("pubsub receiver closed");
+            if event.topic != Topic::PerspectiveQuerySubscription {
+                continue;
+            }
+            let update = event.payload.clone();
             if update["perspectiveUuid"] == json!(p.uuid) && update["subscriptionId"] == json!(id) {
                 return update;
             }

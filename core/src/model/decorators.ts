@@ -597,8 +597,9 @@ export interface ModelConfig {
 
     /**
      * Abstract classes this class is meant to be read through: checked at
-     * declaration (every name of each must be a name or alias here). The
-     * executor matches by structure, listed or not.
+     * declaration (every name each requires must be a name or alias here;
+     * see `checkImplements`). The executor matches by structure, listed or
+     * not.
      */
     implements?: Ad4mModelLike[];
 
@@ -612,8 +613,13 @@ export interface ModelConfig {
 }
 
 /**
- * `@Model({ implements })`: every property and relation name of
- * `abstractClass` must be a name or an alias (for it) on `target`.
+ * `@Model({ implements })`: every name `abstractClass` requires must be a
+ * name or an alias (for it) on `target`, a property for a property and a
+ * relation for a relation. An abstract class that marks some properties
+ * `required` requires only those, and its other names are optional (the
+ * built-in `TextContent` requires `text`; `mentions` is optional). One that
+ * marks none requires every name. The executor applies the same rule
+ * (`abstract_classes::required_names`).
  */
 function checkImplements(name: string, target: any, abstractClass: any) {
     const abstractName: string | undefined = abstractClass?.className ?? abstractClass?.prototype?.className;
@@ -631,7 +637,12 @@ function checkImplements(name: string, target: any, abstractClass: any) {
     const answersTo = (entries: Record<string, { alias?: Record<string, string> }>, keys: string[]) =>
         new Set(keys.map(k => entries[k]?.alias?.[abstractName] ?? k));
 
-    const wanted = names(abstractClass);
+    const all = names(abstractClass);
+    const abstractProperties = getPropertiesMetadata(abstractClass);
+    const marksSome = all.properties.some(p => abstractProperties[p]?.required);
+    const wanted = marksSome
+        ? { properties: all.properties.filter(p => abstractProperties[p]?.required), relations: [] as string[] }
+        : all;
     const own = names(target);
     const ownProperties = answersTo(getPropertiesMetadata(target), own.properties);
     const ownRelations = answersTo(getRelationsMetadata(target), own.relations);

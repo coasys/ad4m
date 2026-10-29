@@ -12,6 +12,8 @@ use crate::types::{Expression, ExpressionProof};
 use crate::wallet::wallet_backend;
 
 pub mod capabilities;
+pub mod grants;
+pub mod sealed_box;
 pub mod session;
 pub mod signatures;
 
@@ -52,31 +54,6 @@ impl AgentContext {
         match self {
             AgentContext::Main => None,
             AgentContext::Managed { did } => Some(did),
-        }
-    }
-
-    /// The agent a token acts as.
-    ///
-    /// The empty token, the admin credential and operator tokens act as the main agent. A user
-    /// token acts as its user, whatever the multi-user setting says. Any other token, such as
-    /// an expired, revoked or unreadable one, acts as nobody: this returns an error, never the
-    /// main agent. The caller says whether the token is the admin credential, because only the
-    /// caller knows it. Only MCP uses it: every other caller asks its request's `acts_as()`.
-    pub fn from_auth_token(
-        auth_token: String,
-        is_admin_credential: bool,
-    ) -> Result<Self, AnyError> {
-        if is_admin_credential || auth_token.is_empty() {
-            return Ok(Self::main_agent());
-        }
-        capabilities::check_token_revoked(&auth_token).map_err(|e| anyhow!(e))?;
-        let claims = capabilities::decode_jwt(auth_token)?;
-        match claims.sub {
-            Some(sub) => AgentService::managed_agent_for_subject(
-                &sub,
-                claims.capabilities.user_email.as_deref(),
-            ),
-            None => Ok(Self::main_agent()),
         }
     }
 
@@ -692,6 +669,25 @@ impl AgentService {
             return Err(anyhow!("The user {} has no agent", user_email));
         }
         Ok(did)
+    }
+
+    /// The DID of the managed agent of the user `user_email` in this executor's `users` table,
+    /// without importing from a shared database: for publishers, which must not create users.
+    pub fn local_did_for_email(user_email: &str) -> Option<String> {
+        Ad4mDb::with_global_instance(|db| db.get_user(user_email).ok())
+            .map(|user| user.did)
+            .filter(|did| !did.is_empty())
+    }
+
+    /// The DID of the managed agent of the user `user_email`, writing nothing: the `users`
+    /// table, else, on an executor with a shared database, the shared record read without
+    /// importing the user. For lookups that anonymous callers trigger (D15), where
+    /// [`Self::did_for_email`] would import, and so write, a user.
+    pub fn did_for_email_read_only(user_email: &str) -> Option<String> {
+        match Ad4mDb::with_global_instance(|db| db.get_user(user_email).ok()) {
+            Some(user) => Some(user.did).filter(|did| !did.is_empty()),
+            None => crate::user_management::shared_did_for_email(user_email),
+        }
     }
 
     /// The email of the user who owns the managed agent `did`: the address to write to, and
@@ -2311,11 +2307,27 @@ mod tests {
 #[cfg(test)]
 mod agent_context_tests {
     use super::{capabilities, AgentContext};
+    use crate::agent::session::{AuthError, Session};
     use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
+
+    const ADMIN: &str = "the-admin-credential";
 
     fn setup() {
         setup_wallet();
         setup_agent();
+    }
+
+    /// The agent a caller presenting `token` acts as, on an executor with an admin credential.
+    fn acts_as(token: &str) -> Result<AgentContext, AuthError> {
+        let admin = Some(crate::secret::Secret::from(ADMIN));
+        Session::open(token, &admin, capabilities::ListenerReach::Network).map(|s| s.acts_as())
+    }
+
+    /// A login of `email`, whose agent gets a key and a `users` row first: a login's grant
+    /// names its DID.
+    fn login(email: &str) -> String {
+        crate::test_utils::create_test_user(email);
+        crate::user_management::generate_user_jwt(email, "test").unwrap()
     }
 
     // A token that no longer decoded used to act as the main agent.
@@ -2324,14 +2336,14 @@ mod agent_context_tests {
         setup();
         let _multi_user = MultiUserMode::on();
         let token = expired_user_token("expired@example.org");
-        assert!(AgentContext::from_auth_token(token, false).is_err());
+        assert!(acts_as(&token).is_err());
     }
 
     #[test]
     fn an_unreadable_token_acts_as_nobody() {
         setup();
         let _multi_user = MultiUserMode::on();
-        assert!(AgentContext::from_auth_token("not-a-jwt".to_string(), false).is_err());
+        assert!(acts_as("not-a-jwt").is_err());
     }
 
     #[test]
@@ -2339,8 +2351,7 @@ mod agent_context_tests {
         setup();
         let _multi_user = MultiUserMode::on();
         let did = crate::test_utils::create_test_user("alice@example.org");
-        let token = crate::user_management::generate_user_jwt("alice@example.org", "test").unwrap();
-        let context = AgentContext::from_auth_token(token, false).unwrap();
+        let context = acts_as(&login("alice@example.org")).unwrap();
         assert!(!context.is_main_agent());
         assert_eq!(context, AgentContext::managed(did));
     }
@@ -2349,10 +2360,8 @@ mod agent_context_tests {
     fn the_admin_credential_and_the_empty_token_act_as_the_main_agent() {
         setup();
         let _multi_user = MultiUserMode::on();
-        let admin = AgentContext::from_auth_token("the-admin-credential".to_string(), true);
-        assert!(admin.unwrap().is_main_agent());
-        let empty = AgentContext::from_auth_token(String::new(), false);
-        assert!(empty.unwrap().is_main_agent());
+        assert!(acts_as(ADMIN).unwrap().is_main_agent());
+        assert!(acts_as("").unwrap().is_main_agent());
     }
 
     // A user token used to act as the main agent once multi-user mode read as off
@@ -2362,8 +2371,7 @@ mod agent_context_tests {
         setup();
         let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
         let did = crate::test_utils::create_test_user("alice@example.org");
-        let token = crate::user_management::generate_user_jwt("alice@example.org", "test").unwrap();
-        let context = AgentContext::from_auth_token(token, false).unwrap();
+        let context = acts_as(&login("alice@example.org")).unwrap();
         assert!(!context.is_main_agent());
         assert_eq!(context, AgentContext::managed(did));
     }
@@ -2371,19 +2379,11 @@ mod agent_context_tests {
     #[test]
     fn a_revoked_token_acts_as_nobody() {
         setup();
-        crate::test_utils::use_test_apps_file();
-        crate::test_utils::create_test_user("revoked@example.org");
-        let token =
-            crate::user_management::generate_user_jwt("revoked@example.org", "test").unwrap();
-        let request_key = format!("key-{}", uuid::Uuid::new_v4());
-        let app = capabilities::AuthInfoExtended {
-            request_id: request_key.clone(),
-            auth: capabilities::AuthInfo::default(),
-        };
-        capabilities::apps_map::insert_app(request_key.clone(), app, token.clone()).unwrap();
-        capabilities::apps_map::revoke_app(&request_key).unwrap();
-        assert!(AgentContext::from_auth_token(token, false).is_err());
-        capabilities::apps_map::remove_app(&request_key).unwrap();
+        let token = login("revoked@example.org");
+        assert!(acts_as(&token).is_ok());
+        let grants = super::grants::Grants::global();
+        grants.revoke(&grants.find(&token)).unwrap();
+        assert_eq!(acts_as(&token).unwrap_err(), AuthError::Revoked);
     }
 
     #[test]

@@ -1,4 +1,44 @@
-import { MENTION_TEXT_LIMIT, WakerSubscriptionManager, hintFor, holdsAWholeWordTerm } from './WakerSubscriptionManager';
+import { MENTION_TEXT_LIMIT, WakerSubscriptionManager, hintFor, holdsAWholeWordTerm, mentionOf } from './WakerSubscriptionManager';
+
+/** The agent the mention subscriptions below are for, and another one. */
+const ME = 'did:key:zAgent';
+const OTHER = 'did:key:zOther';
+
+/** When the text links of the rows below were written, unless a test gives its own. */
+const WRITTEN = '2026-10-27T00:30:00.000Z';
+
+/** The provenance of a mention in a text link {@link OTHER} wrote at {@link WRITTEN}. */
+const byOther = { author: OTHER, timestamp: WRITTEN, verified: true };
+
+/**
+ * A row of the executor's mention query (a model query over TextContent): its `text`, and its
+ * mention and text links with their provenance under `__links`, as `links: ["mentions", "text"]`
+ * returns them. Without `links.text`, the text is in one link {@link OTHER} wrote at
+ * {@link WRITTEN}.
+ */
+function row(id: string, text: string, links: { mentions?: any[]; text?: any[] } = {}) {
+  return {
+    id,
+    text,
+    __links: { mentions: links.mentions ?? [], text: links.text ?? [link(literal(text), OTHER, WRITTEN)] },
+  };
+}
+
+/** A link as `__links` carries it. */
+function link(target: string, author: string, timestamp: string, valid = true) {
+  return { author, timestamp, data: { target }, proof: { key: '', signature: '', valid, invalid: !valid } };
+}
+
+/** `text` as a string property's link targets it. */
+function literal(text: string) {
+  return `literal:string:${encodeURIComponent(text)}`;
+}
+
+/** A record found through its text alone, which names the agent as a whole word. */
+const named = (id: string) => row(id, 'hi Data!');
+
+/** A model subscription's result. */
+const result = (...rows: any[]) => ({ instances: rows, totalCount: rows.length });
 
 /**
  * Regression guard for the fork that used to exist between this file and
@@ -25,9 +65,11 @@ describe('WakerSubscriptionManager', () => {
     type: 'mention' as const,
     perspective: 'fake-uuid',
     channel: '',
+    // What `get_mention_waker_config` returns: a model query over TextContent, its terms and DID.
     className: 'ad4m://TextContent',
-    query: '{"properties":["text"]}',
-    terms: ['bot'],
+    query: JSON.stringify({ where: { OR: [{ mentions: { eq: ME, author: { not: ME } } }] }, links: ['mentions', 'text'] }),
+    terms: ['Data', ME],
+    did: ME,
   };
 
   /** A QuerySubscriptionProxy stand-in whose registration the executor rejects. */
@@ -195,7 +237,7 @@ describe('WakerSubscriptionManager', () => {
     answer: (scope: any) => unknown,
     ancestorDepth?: number,
     address = 'test://message',
-    deliveries: any[] = [{ instances: [{ id: address, text: 'hi bot' }] }],
+    deliveries: any[] = [result(named(address))],
   ) {
     let deliver: ((result: any) => Promise<void>) | undefined;
     const opened: any[][] = [];
@@ -242,20 +284,126 @@ describe('WakerSubscriptionManager', () => {
     return { wakes, queries, warnings, opened };
   }
 
-  it('opens a mention subscription as a TextContent model query', async () => {
+  it('opens a mention subscription as a model query over TextContent', async () => {
     const { opened } = await wakeWith(() => []);
     expect(opened).toEqual([[sub.perspective, sub.query, expect.anything(), 'ad4m://TextContent']]);
   });
 
-  it('does not mark substring candidates as seen before a later whole-word edit', async () => {
+  it('refuses a mention subscription without its TextContent class, terms or DID', async () => {
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: function () { throw new Error('never opened'); },
+      onWake: () => {},
+    });
+    // What an older executor saved: SPARQL over `we://mention` links, or a TextContent query
+    // over the text alone.
+    const sparql = { ...sub, className: undefined, terms: undefined, did: undefined, query: 'SELECT ?source WHERE { }' };
+    const textOnly = { ...sub, did: undefined };
+    const noTerms = { ...sub, terms: [] };
+    for (const old of [sparql, textOnly, noTerms]) {
+      await expect(manager.subscribe(old)).rejects.toThrow('needs its TextContent class, terms and DID');
+    }
+    expect(manager.getActive()).toEqual([]);
+    expect(manager.getPending()).toEqual([]);
+  });
+
+  it('ignores a result that is not instances, and a row without an id', async () => {
     const { wakes, queries } = await wakeWith(() => [], 0, 'test://message', [
-      { instances: [{ id: 'test://message', text: 'robots' }] },
-      { instances: [{ id: 'test://message', text: 'hi bot' }] },
-      { instances: [{ id: 'test://message', text: 'hi bot again' }] },
-      [{ source: 'test://not-model' }],
+      [{ source: 'test://sparql-row' }],
+      result(named('test://message'), { text: 'hi Data, no id' }),
     ]);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [] }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], ...byOther, via: 'text' }]]);
     expect(queries).toHaveLength(1);
+  });
+
+  /**
+   * #1557: one query, two paths. A row whose mention link names the agent, in a verified link
+   * another agent wrote, wakes as it is: WE's chip label ran into the next word ("@Datai") and
+   * the whole-word check dropped it. A row found only through its text wakes on a whole word
+   * only. A link the agent wrote, one that did not verify, or one to someone else does not
+   * count as a mention; such a row falls back to its text.
+   */
+  it('wakes through the mention link whatever the text, and through the text on a whole word only', async () => {
+    const at = '2026-10-27T00:41:23.437Z';
+    const { wakes } = await wakeWith(() => [], 0, 'unused', [
+      result(
+        row('test://chip', '@Datai have taken a dump of prod', { mentions: [link(ME, OTHER, at)] }),
+        row('test://spoken', 'Hey, data!', { text: [link(literal('Hey, data!'), OTHER, at)] }),
+        row('test://metadata', 'the metadata is stale'),
+        row('test://own-link', '@Datai', { mentions: [link(ME, ME, at)] }),
+        row('test://forged', '@Datai', { mentions: [link(ME, OTHER, at, false)] }),
+        row('test://someone-else', '@Bobi', { mentions: [link('did:key:zBob', OTHER, at)] }),
+        row('test://html-chip', `<p>hey <span class="we-mention" data-did="${ME}">@someone</span></p>`),
+        row('test://html-attr', '<p data-type="mention">for someone else</p>'),
+      ),
+    ]);
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0].map((m: any) => m.address)).toEqual(['test://chip', 'test://spoken', 'test://html-chip']);
+  });
+
+  /**
+   * #1563: a mention wake says who wrote the link the mention is in, when, and whether its proof
+   * verified: the mention link's (the newest of the agent's) on the relation path, the newest text
+   * link another agent wrote that names it on the text path. A record that matches both wakes
+   * once, with the mention link's.
+   */
+  it('carries the provenance of the link the mention is in, once per record', async () => {
+    const { wakes } = await wakeWith(() => [], 0, 'unused', [
+      result(
+        row('test://both', 'hey Data', {
+          mentions: [
+            link(ME, 'did:key:zWriter', '2026-10-27T00:41:22.242Z'),
+            link(ME, 'did:key:zEditor', '2026-10-27T00:41:23.437Z'),
+            link('did:key:zBob', 'did:key:zLater', '2026-10-27T00:42:00.000Z'),
+          ],
+          text: [link('literal:string:hey', 'did:key:zWriter', '2026-10-27T00:41:22.242Z')],
+        }),
+        row('test://named', 'Data, can you look?', {
+          text: [
+            link(literal('Data, can you look'), 'did:key:zWriter', '2026-10-27T00:40:00.000Z'),
+            link(literal('Data, can you look?'), 'did:key:zEditor', '2026-10-27T00:40:30.000Z'),
+            link(literal('Data, can you look? On it.'), ME, '2026-10-27T00:40:40.000Z'),
+          ],
+        }),
+        row('test://both', 'hey Data', { mentions: [link(ME, 'did:key:zWriter', '2026-10-27T00:41:22.242Z')] }),
+      ),
+    ]);
+    expect(wakes).toEqual([
+      [
+        {
+          address: 'test://both',
+          parents: [],
+          ancestors: [],
+          author: 'did:key:zEditor',
+          timestamp: '2026-10-27T00:41:23.437Z',
+          verified: true,
+          via: 'mentions',
+        },
+        {
+          address: 'test://named',
+          parents: [],
+          ancestors: [],
+          author: 'did:key:zEditor',
+          timestamp: '2026-10-27T00:40:30.000Z',
+          verified: true,
+          via: 'text',
+        },
+      ],
+    ]);
+  });
+
+  it('wakes on a record once its mention link arrives, after its text alone did not', async () => {
+    const h = await mentionHarness(10);
+    await h.deliver(result(row('test://late-link', '@Datai have news')));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(h.wakes).toEqual([]);
+    await h.deliver(
+      result(row('test://late-link', '@Datai have news', { mentions: [link(ME, OTHER, '2026-10-27T00:41:23.437Z')] })),
+    );
+    await waitUntil(() => h.wakes.length > 0, 1000);
+    h.manager.disposeAll();
+    expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://late-link']]);
   });
 
   /**
@@ -283,25 +431,20 @@ describe('WakerSubscriptionManager', () => {
       'ad4m://Container',
       { parent: { ids: ['test://message'], direction: 'in' }, properties: [] },
     ]);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'], ancestors: [] }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'], ancestors: [], ...byOther, via: 'text' }]]);
   });
 
   it('reports no parents, without a warning, when the executor returns no instances', async () => {
     const { wakes, warnings } = await wakeWith(() => true);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [] }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], ...byOther, via: 'text' }]]);
     expect(warnings).toEqual([]);
   });
 
-  it('deduplicates two result rows for the same source in one mention pass', async () => {
+  it('deduplicates two result rows for the same record in one mention pass', async () => {
     const { wakes, queries } = await wakeWith(() => [], undefined, 'addr://msg-1', [
-      {
-        instances: [
-          { id: 'addr://msg-1', text: 'hi bot' },
-          { id: 'addr://msg-1', text: 'hi bot' },
-        ],
-      },
+      result(named('addr://msg-1'), named('addr://msg-1')),
     ]);
-    expect(wakes).toEqual([[{ address: 'addr://msg-1', parents: [], ancestors: [] }]]);
+    expect(wakes).toEqual([[{ address: 'addr://msg-1', parents: [], ancestors: [], ...byOther, via: 'text' }]]);
     // The parent lookup runs once, not once per row.
     expect(queries).toHaveLength(1);
   });
@@ -347,7 +490,7 @@ describe('WakerSubscriptionManager', () => {
       previousSeenMessages: opening?.previousSeen,
     } as any);
     await manager.subscribe({ ...sub, id: 'mention-harness' });
-    const msg = (...ids: string[]) => ({ instances: ids.map((id) => ({ id, text: 'hi bot' })) });
+    const msg = (...ids: string[]) => result(...ids.map(named));
     return { manager, deliver: (r: any) => deliver!(r), msg, wakes, persistedSeen };
   }
 
@@ -356,7 +499,7 @@ describe('WakerSubscriptionManager', () => {
    * opened after the restart already holds it, but the waker only listened for later changes.
    */
   it('wakes on a mention the restored subscription already holds when it opens', async () => {
-    const msg = (...ids: string[]) => ({ instances: ids.map((id) => ({ id, text: 'hi bot' })) });
+    const msg = (...ids: string[]) => result(...ids.map(named));
     const h = await mentionHarness(10, undefined, {
       initial: msg('test://during-downtime', 'test://old'),
       previousSeen: { 'mention-harness': ['test://old'] },
@@ -368,20 +511,13 @@ describe('WakerSubscriptionManager', () => {
 
   it('takes the mentions a new subscription opens on as history, and wakes only on later ones', async () => {
     const h = await mentionHarness(10, undefined, {
-      initial: { instances: [{ id: 'test://old', text: 'hi bot' }, { id: 'test://robots', text: 'robots' }] },
+      initial: result(named('test://old')),
     });
-    await h.deliver({
-      instances: [
-        { id: 'test://new', text: 'hi bot' },
-        { id: 'test://old', text: 'hi bot' },
-        // Not a mention when the subscription opened, so a later edit that adds one still wakes.
-        { id: 'test://robots', text: 'robots, bot' },
-      ],
-    });
+    await h.deliver(h.msg('test://new', 'test://old'));
     await waitUntil(() => h.wakes.length > 0, 1000);
     await new Promise((r) => setTimeout(r, 30));
     h.manager.disposeAll();
-    expect(h.wakes.map((w: any) => w.map((m: any) => m.address).sort())).toEqual([['test://new', 'test://robots']]);
+    expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://new']]);
   });
 
   /** Review of #1512 (Lal): B was persisted as seen while its parents were still resolving. */
@@ -468,6 +604,8 @@ describe('WakerSubscriptionManager', () => {
           address: 'test://message',
           parents: ['test://channel', 'test://block'],
           ancestors: ['test://call', 'test://space', 'ad4m://self'],
+          ...byOther,
+          via: 'text',
         },
       ],
     ]);
@@ -502,7 +640,7 @@ describe('WakerSubscriptionManager', () => {
     const address = 'test://bad> . ?s ?p ?o . #';
     const { wakes, queries } = await wakeWith(() => [], 3, address);
     expect(queries[0][1].parent.ids).toEqual([address]);
-    expect(wakes[0][0]).toEqual({ address, parents: [], ancestors: [] });
+    expect(wakes[0][0]).toEqual({ address, parents: [], ancestors: [], ...byOther, via: 'text' });
   });
 
   it('reads a model subscription by row id', async () => {
@@ -543,67 +681,35 @@ describe('WakerSubscriptionManager', () => {
     manager.disposeAll();
   });
 
-  // #1459's table (`mention_query_matches_the_name_as_a_whole_word_only` and the regex-characters
-  // case), now the waker's check: the query returns these as substring candidates
-  // (`the_mention_query_returns_substring_candidates_with_their_text` in Rust).
-  it('holds a term only as a whole word, case-insensitively and literally', () => {
-    const holds = (text: string, terms = ['Data']) => holdsAWholeWordTerm(text, terms);
-    expect(['hi Data!', 'DATA, look', '@data', 'data', "Data's turn"].filter((t) => !holds(t))).toEqual([]);
-    expect(['the metadata is stale', 'a database row', 'datas', '_data', 'dataé'].filter((t) => holds(t))).toEqual([]);
-    expect(holds('ask J.R. (bot) please', ['J.R. (bot)'])).toBe(true);
-    expect(holds('ask JxRx (bot) please', ['J.R. (bot)'])).toBe(false);
-    expect(holds('hi a"b\\c!', ['a"b\\c'])).toBe(true);
-    expect(holds('hi a"bc!', ['a"b\\c'])).toBe(false);
-    // The DID, inside a mention's HTML as apps write it.
-    expect(holds('<span data-id="did:key:zBot">@bot</span>', ['did:key:zBot'])).toBe(true);
-    expect(holds('did:key:zBotX', ['did:key:zBot'])).toBe(false);
-    expect(holds('hi Data', ['', 'Bob'])).toBe(false);
+  it('names the operator as the fix for a locked executor, on both message shapes', () => {
+    // Current executor message (post-#973) and the older internal error must
+    // both map to the same hint, and the hint must point at the executor's operator —
+    // a remote agent cannot unlock someone else's executor.
+    const current = hintFor('RPC error 403: Executor is locked: the wallet has not been unlocked since the last restart.');
+    const legacy = hintFor('RPC error 403: main key not found');
+    for (const hint of [current, legacy]) {
+      expect(hint).toContain('executor is locked');
+      expect(hint).toContain('operator');
+    }
+    expect(hintFor('connection refused')).toBe('');
   });
+});
 
-  it('reads HTML as its visible text, and a mention by the DID in its target attribute', () => {
-    const bot = ['Data', 'did:key:zBot'];
-    const holds = (text: string) => holdsAWholeWordTerm(text, bot);
-    // Markup is not words: attribute names and values never wake "Data".
-    expect(holds('<div data-x="1">hi</div>')).toBe(false);
-    expect(holds('<p class="data">see the <a href="https://x.dev/data">notes</a></p>')).toBe(false);
-    // Another user's mention, in each app's markup.
-    expect(holds('<p>hi <a data-type="mention" href="did:key:zOther" data-label="Marvin">@Marvin</a> </p>')).toBe(false);
-    expect(holds('<span data-id="did:key:zOther">@Marvin</span> can you look?')).toBe(false);
-    expect(holds('<span class="we-mention" data-did="did:key:zOther">@Marvin</span> can you look?')).toBe(false);
-    // Visible words still count, inside and between elements.
-    expect(holds('<p>hey Data</p>')).toBe(true);
-    expect(holds('<p>hi</p><p>Data, look</p>')).toBe(true);
-    expect(holds('<p>hey <strong>@Data</strong>&nbsp;&amp; Bob</p>')).toBe(true);
-    expect(holds('meta<b>data</b>')).toBe(false);
-    // Flux's mention (tiptap `mention` node), by name and by DID alone.
-    expect(holds('<p>hi <a data-type="mention" href="did:key:zBot" data-label="Data">@Data</a> </p>')).toBe(true);
-    expect(holds('<p>hi <a data-type="mention" href="did:key:zBot" data-label="Bot">@Bot</a> </p>')).toBe(true);
-    expect(holds('<span data-id="did:key:zBot">@bot</span>')).toBe(true);
-    expect(holds('<a href="did:key:zBotExtra">@Other</a>')).toBe(false);
-    expect(holds('<a href="did:key:zbot">@Other</a>')).toBe(false);
-    expect(holds('<a href="Data">@Other</a>')).toBe(false);
-    expect(holds("<a title=' href=\"did:key:zBot\"'>@Other</a>")).toBe(false);
-    expect(holds('<a href=did:key:zBot>@Other</a>')).toBe(true);
-    // We stores a block as plain `text` with the DID in `marks`, so the name is what is read;
-    // its editor's chip carries the DID in `data-did`.
-    expect(holds('hey @Data can you look?')).toBe(true);
-    expect(holds('<span class="we-mention" data-did="did:key:zBot">@Bot</span> can you look?')).toBe(true);
-    // Plain text with a bare "<" is not markup.
-    expect(holds('a < b and Data > c')).toBe(true);
-    // Nor is "<" before a known element name without a valid attribute list, or before an unknown name.
-    expect(holds('if a <b then ask Data, else c -> d')).toBe(true);
-    expect(holds('<hey Data> can you look')).toBe(true);
-    // A real tag glued to a word is still markup, and inline tags glue as a reader sees them:
-    // "a<b>Data</b>" reads "aData", like "meta<b>data</b>" above.
-    expect(holds('a<b>Data</b>')).toBe(false);
-    expect(holds('a <b class=x>Data</b>!')).toBe(true);
-    // A quoted attribute value may hold ">": the tag ends at the real ">".
-    expect(holds('<span title="a > b" data-x="Data">hi</span>')).toBe(false);
-    expect(holds('<a title="x>y" href="did:key:zBot">@Bot</a>')).toBe(true);
-    // Script and style contents are not visible text; comments are not either.
-    expect(holds('<style>.Data { color: red }</style><p>hi</p>')).toBe(false);
-    expect(holds('<script>let Data = 1</script>hi')).toBe(false);
-    expect(holds('hi <!-- Data --> there')).toBe(false);
+/** Ported from #1459 through dev's whole-word check, which the text path keeps. */
+describe('holdsAWholeWordTerm', () => {
+  it.each([
+    ['hi Data!', true],
+    ['the metadata is stale', false],
+    ['DATA, look', true],
+    ['a database row', false],
+    ['@data', true],
+    ["Data's turn", true],
+    ['@Datai have taken a dump', false],
+    ['<p>ask <b>Data</b></p>', true],
+    ['<p data-type="mention">someone</p>', false],
+    [`<a data-type="mention" href="${ME}">@x</a>`, true],
+  ])('%s -> %s', (text, expected) => {
+    expect(holdsAWholeWordTerm(text, ['Data', ME])).toBe(expected);
   });
 
   it('reads a bounded prefix, so a long run of unclosed openers cannot stall the waker', () => {
@@ -622,31 +728,84 @@ describe('WakerSubscriptionManager', () => {
     // Past it, it does not.
     expect(holdsAWholeWordTerm('x'.repeat(MENTION_TEXT_LIMIT) + ' Data', bot)).toBe(false);
   });
+});
 
-  it('refuses a mention subscription without its terms', async () => {
-    const manager = new WakerSubscriptionManager({
-      perspectiveClient,
-      logger: noopLogger(),
-      QuerySubscriptionProxy: function () { throw new Error('must not open'); },
-      onWake: () => {},
+describe('mentionOf', () => {
+  const at = '2026-10-27T00:41:23.437Z';
+  const sub = { did: ME, terms: ['Data', ME] };
+
+  it('takes a verified mention link to the agent by someone else, whatever the text', () => {
+    expect(mentionOf(row('x', 'nothing', { mentions: [link(ME, OTHER, at)] }), sub)).toEqual({
+      author: OTHER,
+      timestamp: at,
+      verified: true,
+      via: 'mentions',
     });
-    const { terms: _terms, ...withoutTerms } = sub;
-    await expect(manager.subscribe(withoutTerms)).rejects.toThrow(/needs its terms/);
-    await expect(manager.subscribe({ ...sub, terms: [] })).rejects.toThrow(/needs its terms/);
-    expect(manager.getActive()).toEqual([]);
-    expect(manager.getPending()).toEqual([]);
   });
 
-  it('names the operator as the fix for a locked executor, on both message shapes', () => {
-    // Current executor message (post-#973) and the older internal error must
-    // both map to the same hint, and the hint must point at the node operator —
-    // a remote agent cannot unlock someone else's node.
-    const current = hintFor('RPC error 403: Executor is locked: the wallet has not been unlocked since the last restart.');
-    const legacy = hintFor('RPC error 403: main key not found');
-    for (const hint of [current, legacy]) {
-      expect(hint).toContain('executor is locked');
-      expect(hint).toContain('operator');
+  it('falls back to a whole-word text mention when the link is the agent\'s own, unverified or someone else\'s', () => {
+    for (const mention of [link(ME, ME, at), link(ME, OTHER, at, false), link('did:key:zBob', OTHER, at)]) {
+      expect(mentionOf(row('x', '@Datai', { mentions: [mention] }), sub)).toBeNull();
+      expect(mentionOf(row('x', 'hi Data', { mentions: [mention] }), sub)).toEqual({ ...byOther, via: 'text' });
     }
-    expect(hintFor('connection refused')).toBe('');
+  });
+
+  it('needs the DID for the link path', () => {
+    expect(mentionOf(row('x', 'nothing', { mentions: [link(ME, OTHER, at)] }), { terms: ['Data'] })).toBeNull();
+  });
+
+  /**
+   * The executor answers with the record when any of its text links matches, hydrates `text`
+   * from the newest one whoever wrote it, and lists every text link (Rust
+   * `a_mention_rows_text_and_its_text_links_can_come_from_different_links`). The text path
+   * reads each link's own text, so the link it reports is one whose text names the agent.
+   */
+  describe('through the text, the link that names the agent', () => {
+    const t = (minute: number) => `2026-10-27T00:4${minute}:00.000Z`;
+
+    it('is not one whose text only holds a term as a substring', () => {
+      const line = row('x', 'Data', {
+        text: [link(literal('the metadata is stale'), OTHER, t(1)), link(literal('Data'), ME, t(2))],
+      });
+      expect(mentionOf(line, sub)).toBeNull();
+    });
+
+    it('is the newest one another agent wrote that names it, not the newest one another agent wrote', () => {
+      const line = row('x', 'Data, can you look? on it', {
+        text: [
+          link(literal('Data, can you look?'), OTHER, t(1)),
+          link(literal('lunch?'), 'did:key:zLater', t(2)),
+          link(literal('Data, can you look? on it'), ME, t(3)),
+        ],
+      });
+      expect(mentionOf(line, sub)).toEqual({ author: OTHER, timestamp: t(1), verified: true, via: 'text' });
+    });
+
+    it('counts only while the record\'s text, the newest link\'s, names it too', () => {
+      const line = row('x', 'lunch?', {
+        text: [link(literal('hi Data'), OTHER, t(1)), link(literal('lunch?'), 'did:key:zLater', t(2))],
+      });
+      expect(mentionOf(line, sub)).toBeNull();
+    });
+
+    it('is a verified one, and without one the record is no mention', () => {
+      expect(mentionOf(row('x', 'hi Data', { text: [] }), sub)).toBeNull();
+      expect(mentionOf(row('x', 'hi Data', { text: [link(literal('hi Data'), OTHER, t(1), false)] }), sub)).toBeNull();
+    });
+
+    it('reads the text a link holds as the executor does', () => {
+      const expression = `literal:json:${encodeURIComponent(
+        JSON.stringify({ author: OTHER, timestamp: t(1), data: 'hi Data', proof: {} }),
+      )}`;
+      for (const target of [literal('hi Data'), expression, 'hi Data']) {
+        expect(mentionOf(row('x', 'hi Data', { text: [link(target, OTHER, t(1))] }), sub)).toEqual({
+          author: OTHER,
+          timestamp: t(1),
+          verified: true,
+          via: 'text',
+        });
+      }
+      expect(mentionOf(row('x', 'hi Data', { text: [link('literal:string:%E0%A4%A', OTHER, t(1))] }), sub)).toBeNull();
+    });
   });
 });

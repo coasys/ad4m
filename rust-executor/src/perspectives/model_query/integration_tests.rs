@@ -820,6 +820,7 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
     ModelShape {
         target_class: class.to_string(),
         shape_uri: format!("{class}Shape"),
+        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: rel_name.to_string(),
             predicate: predicate.to_string(),
@@ -1460,6 +1461,7 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     let shape = ModelShape {
         target_class: "TaskBoard".to_string(),
         shape_uri: String::new(),
+        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "activeTasks".to_string(),
             predicate: "board://has_task".to_string(),
@@ -2032,6 +2034,7 @@ async fn test_where_filter_signed_expression_string() {
     let shape = ModelShape {
         target_class: "Board".to_string(),
         shape_uri: String::new(),
+        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "activeTasks".to_string(),
             predicate: "board://has_task".to_string(),
@@ -2111,6 +2114,7 @@ async fn test_where_filter_signed_expression_no_matches() {
     let shape = ModelShape {
         target_class: "Parent".to_string(),
         shape_uri: String::new(),
+        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "activeChildren".to_string(),
             predicate: "ns://has_child".to_string(),
@@ -2238,6 +2242,7 @@ async fn test_where_filter_multiple_conditions() {
     let shape = ModelShape {
         target_class: "Board".to_string(),
         shape_uri: String::new(),
+        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "highPriActive".to_string(),
             predicate: "ns://has".to_string(),
@@ -2310,6 +2315,7 @@ async fn test_where_filter_missing_property_on_target() {
     let shape = ModelShape {
         target_class: "Parent".to_string(),
         shape_uri: String::new(),
+        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "active".to_string(),
             predicate: "ns://has".to_string(),
@@ -2380,6 +2386,7 @@ async fn test_where_filter_plain_literal_string() {
     let shape = ModelShape {
         target_class: "Parent".to_string(),
         shape_uri: String::new(),
+        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "redChildren".to_string(),
             predicate: "ns://has".to_string(),
@@ -2473,6 +2480,7 @@ async fn test_where_filter_on_multiple_instances() {
     let shape = ModelShape {
         target_class: "Board".to_string(),
         shape_uri: String::new(),
+        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "activeTasks".to_string(),
             predicate: "ns://has".to_string(),
@@ -2917,6 +2925,7 @@ fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
     ModelShape {
         target_class: "TestModel".to_string(),
         shape_uri: String::new(),
+        absent: Vec::new(),
         properties: props,
         include_relations: vec![],
         interpretation_hint: None,
@@ -4424,6 +4433,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     let signal_shape = ModelShape {
         target_class: "Signal".to_string(),
         shape_uri: "SignalShape".to_string(),
+        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "signalTypeId".to_string(),
             predicate: "test://signal_type_id".to_string(),
