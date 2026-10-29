@@ -641,11 +641,16 @@ pub struct PerspectiveInstance {
     /// Held by every write to `sparql_store` ([`Self::persist_link_diff`]), and by
     /// [`Self::commit_batch_if`] from checking what it expects through its write, so no other
     /// write lands in between. A std mutex: held for store calls, never across an await.
-    persist_lock: Arc<std::sync::Mutex<()>>,
+    pub(super) persist_lock: Arc<std::sync::Mutex<()>>,
     /// In-memory cache of parsed `ModelShape` instances keyed by class name.
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// Receipt verdicts this perspective has already taken, keyed by
+    /// `(receipt URI, flow DNA hash)` so a DNA change can never be served a
+    /// stale answer — see `flow_instance::verify::memo` (#1177).
+    pub(crate) receipt_verdict_memo:
+        Arc<crate::perspectives::flow_instance::verify::memo::VerdictMemo>,
     /// The abstract classes and aliases installed here, and the classes each
     /// abstract class reads (#1435). Derived from every class's shape, so
     /// dropped whenever any shape is (see `forget_derived_shapes`).
@@ -674,6 +679,11 @@ pub struct PerspectiveInstance {
     /// nothing behind.
     #[cfg(test)]
     fail_add_link_after: Arc<AtomicI64>,
+    /// Test-only hook run once by [`Self::diff_from_link_language`] after
+    /// its ingest filter and before the store write, so a test can land a
+    /// concurrent local write in that gap deterministically (#1146).
+    #[cfg(test)]
+    pub(crate) ingest_gap_hook: Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
     /// Test-only: makes the next [`Self::commit_batch`] fail, dropping the
     /// batch as a real failure does. Compiled out in non-test builds — see
     /// [`Self::fail_next_commit_batch`].
@@ -749,11 +759,14 @@ impl PerspectiveInstance {
             ),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            receipt_verdict_memo: Arc::new(Default::default()),
             abstract_cache: Arc::new(std::sync::RwLock::new(Default::default())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             flow_pass_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
+            #[cfg(test)]
+            ingest_gap_hook: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             fail_next_commit: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
@@ -1803,6 +1816,13 @@ impl PerspectiveInstance {
             }
         }
 
+        super::ingest::retain_ingestible(&mut unique_additions);
+
+        #[cfg(test)]
+        if let Some(hook) = self.ingest_gap_hook.lock().unwrap().take() {
+            hook();
+        }
+
         // Links arriving from the link language are shared by definition, but
         // the wire form usually carries `status: None`. Assign it explicitly
         // here — the store refuses status-less inserts rather than defaulting.
@@ -1815,23 +1835,26 @@ impl PerspectiveInstance {
                     l
                 })
                 .collect(),
-            removals: unique_removals.clone(),
-        };
-        let mut decorated_diff = DecoratedPerspectiveDiff {
-            additions: unique_additions
-                .iter()
-                .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
-                .collect(),
-            removals: unique_removals
-                .iter()
-                .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
-                .collect(),
+            removals: unique_removals,
         };
 
-        // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&store_diff)
-            .await?
-            .fold_into(&mut decorated_diff);
+        // Write to SPARQL store (primary storage for links). Only what was
+        // applied is decorated and published, with what the diff's
+        // tombstones did folded in.
+        let (applied, effects) = self.persist_remote_diff(store_diff)?;
+        let mut decorated_diff = DecoratedPerspectiveDiff {
+            additions: applied
+                .additions
+                .into_iter()
+                .map(|link| DecoratedLinkExpression::from((link, LinkStatus::Shared)))
+                .collect(),
+            removals: applied
+                .removals
+                .into_iter()
+                .map(|link| DecoratedLinkExpression::from((link, LinkStatus::Shared)))
+                .collect(),
+        };
+        effects.fold_into(&mut decorated_diff);
 
         // If any of the inbound links change a class's SHACL definition,
         // drop that entry from the in-memory shape cache so the next
