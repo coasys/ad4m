@@ -2,7 +2,7 @@ use lazy_static::lazy_static;
 
 lazy_static! {
     /// The current version of AD4M
-    pub static ref AD4M_VERSION: String = String::from("0.13.1-staging.4");
+    pub static ref AD4M_VERSION: String = String::from("0.13.1-staging.5");
     /// The commit this executor was built from, embedded by `build.rs`. None when the build had no
     /// git checkout to read it from, such as a source tarball.
     pub static ref AD4M_COMMIT: Option<String> =

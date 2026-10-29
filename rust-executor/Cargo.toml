@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-executor"
-version = "0.13.1-staging.4"
+version = "0.13.1-staging.5"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
 description = "Runtime implementation of AD4M as library - https://ad4m.dev"
@@ -198,7 +198,7 @@ sodoken = "=0.1.0"
 scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client", version="0.13.1-staging.4" }
+ad4m-client = { path = "../rust-client", version="0.13.1-staging.5" }
 reqwest = { version = "0.11.20", features = ["json", "native-tls", "blocking", "stream"] }
 # reqwest 0.11's DNS `Name` (the identity resolver's public-address-only `dns_resolver`).
 hyper_014 = { package = "hyper", version = "0.14.21", default-features = false, features = ["tcp", "client"] }
