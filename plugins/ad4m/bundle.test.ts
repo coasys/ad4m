@@ -75,6 +75,7 @@ describe("shipped bundle", () => {
         query: "{}",
         terms: ["Data", "did:key:zAgent"],
         did: "did:key:zAgent",
+        linkQuery: "SELECT ?source WHERE { }",
       }),
     ).rejects.toThrow(/main key not found/);
 
@@ -121,6 +122,7 @@ describe("shipped bundle", () => {
         query: "{}",
         terms: ["Data", "did:key:zAgent"],
         did: "did:key:zAgent",
+        linkQuery: "SELECT ?source WHERE { }",
       }),
     ).rejects.toThrow(/timed out after 50ms/);
 

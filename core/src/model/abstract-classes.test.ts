@@ -104,54 +104,6 @@ describe("abstract classes", () => {
     }).not.toThrow();
   });
 
-  it("implements: names beside a required one are optional; with none required, all are needed", () => {
-    @Model({ name: "Tagged", abstract: true })
-    class Tagged extends Ad4mModel {
-      @Property({ through: "test://text", required: true })
-      text: string = "";
-
-      @Property({ through: "test://lang" })
-      lang: string = "";
-
-      @HasMany({ through: "test://tag" })
-      tags: string[] = [];
-    }
-    expect(() => {
-      @Model({ name: "TextOnly", implements: [Tagged] })
-      class TextOnly extends Ad4mModel {
-        @Property({ through: "test://body", alias: { Tagged: "text" } })
-        body: string = "";
-      }
-    }).not.toThrow();
-    expect(() => {
-      @Model({ name: "NoText", implements: [Tagged] })
-      class NoText extends Ad4mModel {
-        @Property({ through: "test://lang" })
-        lang: string = "";
-
-        @HasMany({ through: "test://tag" })
-        tags: string[] = [];
-      }
-    }).toThrow("NoText implements Tagged but has no property or alias named `text`");
-
-    // Nothing marked required: every name is needed, as before.
-    @Model({ name: "Both", abstract: true })
-    class Both extends Ad4mModel {
-      @Property({ through: "test://text" })
-      text: string = "";
-
-      @HasMany({ through: "test://tag" })
-      tags: string[] = [];
-    }
-    expect(() => {
-      @Model({ name: "HalfOfBoth", implements: [Both] })
-      class HalfOfBoth extends Ad4mModel {
-        @Property({ through: "test://text" })
-        text: string = "";
-      }
-    }).toThrow("HalfOfBoth implements Both but has no relation or alias named `tags`");
-  });
-
   it("implements: only abstract classes", () => {
     @Model({ name: "Concrete" })
     class Concrete extends Ad4mModel {

@@ -262,19 +262,20 @@ export function withWakerTarget(message: string, executorUrl: string): string {
 
 /**
  * Whether `sub` is a mention subscription saved by an older executor, which
- * this waker cannot open as saved: one without the TextContent class, terms and
- * DID that `get_mention_waker_config` returns now (a SPARQL query over
- * `we://mention` links, or a TextContent query over the text alone). The
- * manager refuses it, so it is only ever re-derived.
+ * this waker cannot open as saved: one without the TextContent class, terms,
+ * DID and link query that `get_mention_waker_config` returns now (a SPARQL
+ * query over `we://mention` links, a TextContent query over the text alone, or
+ * one over TextContent's `mentions` and text). The manager refuses it, so it is
+ * only ever re-derived.
  */
 export function savedByAnOlderExecutor(sub: WakerSubscription): boolean {
-  return sub.type === "mention" && !(sub.className && sub.terms?.length && sub.did);
+  return sub.type === "mention" && !(sub.className && sub.terms?.length && sub.did && sub.linkQuery);
 }
 
 /**
  * Restore one saved subscription at waker start. A saved mention subscription
  * is asked of the executor again, so it follows the executor's current mention
- * query (TextContent's `mentions` or its text, #1557). Its id is the same, so
+ * queries (mention links, and names in TextContent text). Its id is the same, so
  * what it already woke on stays seen. If that fails, one saved by this version
  * runs as saved: dropped, it would be in neither the active nor the pending
  * set, and the next persist would delete it from disk. One saved by an older
@@ -300,7 +301,7 @@ export async function restoreSavedSubscription(
     if (savedByAnOlderExecutor(sub)) {
       logger.warn(
         `[ad4m-waker] Could not re-derive ${sub.id} (${err?.message ?? err}); not opening it: ` +
-          "it was saved by an older executor, without the TextContent class, terms and DID this waker reads mentions with. " +
+          "it was saved by an older executor, without the TextContent class, terms, DID and link query this waker reads mentions with. " +
           "It stays saved and is asked of the executor again every " +
           `${WAKER_RETRY_MS / 1000}s.`,
       );
@@ -985,13 +986,14 @@ Notes:
       type: "mention",
       perspective: perspectiveId,
       channel: "",
-      // One model query over the built-in TextContent: its `mentions` or its text (#1557).
+      // A model query over the built-in TextContent for names in text.
       className: data.class ?? data.subscription?.class,
       query: data.query ?? data.subscription?.query,
       // The query matches text by substring; the waker keeps whole-word mentions of these.
       terms: data.terms ?? data.subscription?.terms,
-      // A mention link to this DID wakes whatever the text says.
       did: data.did ?? data.subscription?.did,
+      // SPARQL over mention links to the DID: they wake whatever the record's text says.
+      linkQuery: data.link_query ?? data.subscription?.linkQuery,
       neighbourhood: data.neighbourhood,
     };
 
@@ -1002,7 +1004,7 @@ Notes:
     }
     if (savedByAnOlderExecutor(subscription)) {
       throw new Error(
-        "MCP tool returned a mention query without the TextContent class, terms and DID this waker reads mentions with. Update the executor.",
+        "MCP tool returned a mention query without the TextContent class, terms, DID and link query this waker reads mentions with. Update the executor.",
       );
     }
 
@@ -1011,7 +1013,7 @@ Notes:
     return (
       `Subscribed to mentions in perspective ${perspectiveId}. ` +
       `Subscription ID: ${subscription.id}. ` +
-      `Watching for mention links to ${subscription.did} and for ${(data.names ?? []).join(", ") || "the DID"} in text.`
+      `Watching for ${data.predicate ?? "mention"} links to ${subscription.did} and for ${(data.names ?? []).join(", ") || "the DID"} in text.`
     );
   }
 
@@ -1041,8 +1043,8 @@ Notes:
     description:
       "Subscribe to mentions of this agent in a neighbourhood. " +
       "Creates a live waker subscription that watches for any item that mentions you " +
-      "(its TextContent `mentions` relation links your DID, as WE's we://mention does, " +
-      "or its text names you or your DID as a whole word, written by someone else) — a post, " +
+      "(a mention link to your DID, WE's we://mention, whether or not the item has text, " +
+      "or text naming you or your DID as a whole word, written by someone else) — a post, " +
       "a feed line, or an instance of whatever class this space defines — " +
       "and wakes you when detected. " +
       "Note: this is called automatically when you join or publish a neighbourhood.",

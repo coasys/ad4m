@@ -1632,7 +1632,7 @@ describe("buildWakeMessage", () => {
    */
   it("says whether each item mentions the agent by a mention link or by its name in the text", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: ["channel-abc"], ancestors: [], verified: true, via: "mentions" },
+      { address: "msg-1", parents: ["channel-abc"], ancestors: [], verified: true, via: "link" },
       { address: "msg-2", parents: ["channel-abc"], ancestors: [], verified: true, via: "text" },
       { address: "msg-3", parents: ["channel-abc"], ancestors: [], verified: false },
     ]);
@@ -2006,7 +2006,8 @@ describe("ad4mPlugin", () => {
                 type: "text",
                 text: JSON.stringify({
                   class: "ad4m://TextContent",
-                  query: JSON.stringify({ where: { OR: [] }, links: ["mentions", "text"] }),
+                  query: JSON.stringify({ where: { OR: [] }, links: ["text"] }),
+                  link_query: "SELECT ?source ?author ?timestamp ?proofValid WHERE { }",
                   terms: ["TestAgent", "did:key:zTest"],
                   names: ["TestAgent"],
                   did: "did:key:zTest",
@@ -2084,7 +2085,8 @@ describe("ad4mPlugin", () => {
                 type: "text",
                 text: JSON.stringify({
                   class: "ad4m://TextContent",
-                  query: JSON.stringify({ where: { OR: [] }, links: ["mentions", "text"] }),
+                  query: JSON.stringify({ where: { OR: [] }, links: ["text"] }),
+                  link_query: "SELECT ?source ?author ?timestamp ?proofValid WHERE { }",
                   terms: ["TestAgent", "did:key:zTest"],
                   names: ["TestAgent"],
                   did: "did:key:zTest",
@@ -2224,11 +2226,14 @@ describe("ad4mPlugin", () => {
     }
   }
 
-  it("ad4m_subscribe_to_mentions opens the executor's mention query over TextContent, with its terms and DID", async () => {
-    const query = JSON.stringify({ where: { OR: [] }, links: ["mentions", "text"] });
+  it("ad4m_subscribe_to_mentions opens the executor's text query over TextContent and its link query, under one id", async () => {
+    const query = JSON.stringify({ where: { OR: [] }, links: ["text"] });
+    const linkQuery = "SELECT ?source ?author ?timestamp ?proofValid WHERE { }";
     const { result, opened, active } = await subscribeToMentions({
       class: "ad4m://TextContent",
       query,
+      link_query: linkQuery,
+      predicate: "we://mention",
       terms: ["TestAgent", "did:key:zTest"],
       names: ["TestAgent"],
       did: "did:key:zTest",
@@ -2236,19 +2241,22 @@ describe("ad4mPlugin", () => {
     });
     expect(opened.map((args) => [args[0], args[1], args[3]])).toEqual([
       ["persp-uuid-1", query, "ad4m://TextContent"],
+      ["persp-uuid-1", linkQuery, undefined],
     ]);
-    expect(active.map((sub) => [sub.id, sub.className, sub.terms, sub.did])).toEqual([
-      ["mention-persp-uuid-1", "ad4m://TextContent", ["TestAgent", "did:key:zTest"], "did:key:zTest"],
+    expect(active.map((sub) => [sub.id, sub.className, sub.terms, sub.did, sub.linkQuery])).toEqual([
+      ["mention-persp-uuid-1", "ad4m://TextContent", ["TestAgent", "did:key:zTest"], "did:key:zTest", linkQuery],
     ]);
-    expect(JSON.stringify(result)).toContain("mention links to did:key:zTest and for TestAgent in text");
+    expect(JSON.stringify(result)).toContain("we://mention links to did:key:zTest and for TestAgent in text");
   });
 
   it("ad4m_subscribe_to_mentions refuses an older executor's mention query", async () => {
     const older = [
-      // #1557 before TextContent had `mentions`: SPARQL over we://mention links.
+      // An early #1557: SPARQL over we://mention links.
       { query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }", did: "did:key:zTest" },
-      // A TextContent query without the DID a mention link is checked against.
+      // A TextContent query without the DID a text link is checked against.
       { class: "ad4m://TextContent", query: "{}", terms: ["TestAgent"], names: ["TestAgent"] },
+      // #1557 as merged: one query over TextContent's `mentions` and text, no link query.
+      { class: "ad4m://TextContent", query: "{}", terms: ["TestAgent"], names: ["TestAgent"], did: "did:key:zTest" },
     ];
     for (const data of older) {
       const { result, opened, active } = await subscribeToMentions(data);
@@ -3544,13 +3552,15 @@ describe("ad4mPlugin", () => {
 
 /**
  * What `get_mention_waker_config` returns for a mention subscription: a model
- * query over TextContent, with the terms and DID the waker checks rows against.
+ * query over TextContent, with the terms and DID the waker checks rows against,
+ * and a SPARQL query over mention links.
  */
 const MENTION_CONFIG = {
   className: "ad4m://TextContent",
-  query: JSON.stringify({ where: { OR: [] }, links: ["mentions", "text"] }),
+  query: JSON.stringify({ where: { OR: [] }, links: ["text"] }),
   terms: ["Data", "did:key:zAgent"],
   did: "did:key:zAgent",
+  linkQuery: "SELECT ?source ?author ?timestamp ?proofValid WHERE { }",
 };
 
 /** A text link another agent signed that holds "hi Data", as `__links.text` lists it. */
@@ -3563,38 +3573,46 @@ const HI_DATA = {
 
 /** The mention query's result: records whose text names the agent as a whole word. */
 const named = (...ids: string[]) => ({
-  instances: ids.map((id) => ({ id, text: "hi Data", __links: { mentions: [], text: [HI_DATA] } })),
+  instances: ids.map((id) => ({ id, text: "hi Data", __links: { text: [HI_DATA] } })),
   totalCount: ids.length,
 });
 
 /**
- * The mention query's result with msg-old, which names the agent, and msg-new, which mentions it
- * only through its mention link: WE's chip label runs into the next word.
+ * The mention queries' results with msg-old, whose text names the agent, and msg-new, which
+ * mentions it only through its mention link: WE's chip label runs into the next word.
  */
 const OLD_AND_LINK_ONLY = {
-  instances: [
-    { id: "msg-old", text: "hi Data", __links: { mentions: [], text: [HI_DATA] } },
-    {
-      id: "msg-new",
-      text: "@Datai have news",
-      __links: {
-        mentions: [
-          {
-            author: "did:key:zOther",
-            timestamp: "2026-10-27T00:41:23.437Z",
-            data: { target: MENTION_CONFIG.did },
-            proof: { valid: true },
-          },
-        ],
-        text: [],
-      },
-    },
-  ],
-  totalCount: 2,
+  text: {
+    instances: [
+      { id: "msg-old", text: "hi Data", __links: { text: [HI_DATA] } },
+      { id: "msg-new", text: "@Datai have news", __links: { text: [] } },
+    ],
+    totalCount: 2,
+  },
+  link: [{ source: "msg-new", author: "did:key:zOther", timestamp: "2026-10-27T00:41:23.437Z", proofValid: "true" }],
 };
 
+/**
+ * A QuerySubscriptionProxy stand-in that opens on `opening`: the text query (a model query, it
+ * has a class) on `opening.text`, the link query on `opening.link`.
+ */
+const proxyOpeningOn = (opening: { text?: unknown; link?: unknown }) =>
+  vi.fn(function (...args: unknown[]) {
+    return {
+      initialized: Promise.resolve(),
+      subscribe: vi.fn(() => Promise.resolve()),
+      dispose: vi.fn(),
+      onResult: vi.fn(),
+      result: args.length > 3 ? opening.text : opening.link,
+    };
+  });
+
 describe("WakerSubscriptionManager", () => {
-  /** Create a mock QuerySubscriptionProxy that lets tests control onResult delivery. */
+  /**
+   * Create a mock QuerySubscriptionProxy that lets tests control onResult delivery: `deliver`
+   * reaches the subscription's query. A mention subscription's link query gets a proxy of its
+   * own, which delivers nothing.
+   */
   function makeMockProxy() {
     let resultCallback: ((result: any) => void) | null = null;
     const proxy = {
@@ -3605,8 +3623,9 @@ describe("WakerSubscriptionManager", () => {
         resultCallback = cb;
       }),
     };
+    const linkProxy = { ...proxy, onResult: vi.fn() };
     return {
-      ProxyClass: vi.fn(function () { return proxy; }),
+      ProxyClass: vi.fn(function (...args: unknown[]) { return args[1] === MENTION_CONFIG.linkQuery ? linkProxy : proxy; }),
       proxy,
       /** Simulate the subscription delivering a result */
       deliver: (result: any) => {
@@ -4275,13 +4294,15 @@ describe("a mention subscription saved by an older executor", () => {
     terms: ["bot"],
   };
   const withoutTerms = { ...textQuery, terms: undefined };
-  // And what #1557 returned before this change: SPARQL over we://mention links.
+  // What an early #1557 returned: SPARQL over we://mention links.
   const linkQuery: WakerSubscription = {
     ...textQuery,
     className: undefined,
     terms: undefined,
     query: "SELECT ?source ?timestamp WHERE { ?source <we://mention> ?mentioned . }",
   };
+  // And #1557 as merged: one query over TextContent's `mentions` and text, with its DID.
+  const oneQuery: WakerSubscription = { ...textQuery, did: "did:key:zAgent" };
   // What this version saves.
   const current: WakerSubscription = { ...textQuery, ...MENTION_CONFIG };
   const children: WakerSubscription = {
@@ -4331,6 +4352,7 @@ describe("a mention subscription saved by an older executor", () => {
     expect(savedByAnOlderExecutor(textQuery)).toBe(true);
     expect(savedByAnOlderExecutor(withoutTerms)).toBe(true);
     expect(savedByAnOlderExecutor(linkQuery)).toBe(true);
+    expect(savedByAnOlderExecutor(oneQuery)).toBe(true);
     expect(savedByAnOlderExecutor(current)).toBe(false);
     expect(savedByAnOlderExecutor(children)).toBe(false);
   });
@@ -4347,7 +4369,11 @@ describe("a mention subscription saved by an older executor", () => {
         { warn },
         park,
       );
-      expect(constructed.map((args) => args[3])).toEqual(["ad4m://TextContent"]);
+      // The text query over TextContent, and the link query.
+      expect(constructed.map((args) => [args[1], args[3]])).toEqual([
+        [current.query, "ad4m://TextContent"],
+        [current.linkQuery, undefined],
+      ]);
       expect(manager.getActive()).toEqual([current]);
       expect(_parkedSubscriptionsForTests().size).toBe(0);
       expect(persisted.subs).toEqual([current]);
@@ -4360,7 +4386,8 @@ describe("a mention subscription saved by an older executor", () => {
   for (const [label, saved] of [
     ["over the text, with its terms (#1499)", textQuery],
     ["over the text, without terms (#1505)", withoutTerms],
-    ["over we://mention links (#1557)", linkQuery],
+    ["over we://mention links (an early #1557)", linkQuery],
+    ["over TextContent's mentions and text (#1557)", oneQuery],
   ] as const) {
     it(`is not opened when the executor cannot re-derive it, and stays saved, ${label}`, async () => {
       const persisted: { subs: WakerSubscription[]; seen?: Record<string, string[]> } = { subs: [] };
@@ -4420,16 +4447,6 @@ describe("a mention subscription saved by an older executor", () => {
       const state = stateToSave(subs, seen);
       saveWakerState(stateDir, state.subscriptions, state.seenMessages);
     };
-    const proxyOpeningOn = (result: unknown) =>
-      vi.fn(function () {
-        return {
-          initialized: Promise.resolve(),
-          subscribe: vi.fn(() => Promise.resolve()),
-          dispose: vi.fn(),
-          onResult: vi.fn(),
-          result,
-        };
-      });
     const perspectiveClient = { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) };
     saveWakerState(stateDir, [textQuery, children], { [textQuery.id]: ["msg-old"] });
 
@@ -4439,7 +4456,7 @@ describe("a mention subscription saved by an older executor", () => {
     const first = new WakerSubscriptionManager({
       perspectiveClient,
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: proxyOpeningOn([]),
+      QuerySubscriptionProxy: proxyOpeningOn({}),
       debounceMs: 10,
       onWake: () => {},
       previousSeenMessages: state.seenMessages,
@@ -4506,22 +4523,14 @@ describe("a mention subscription saved by an older executor", () => {
     };
     // One process start: load the file, restore what it holds in its order,
     // and stop without anything else happening.
-    async function coldStart(executorAnswers: boolean, opening: unknown): Promise<string[][]> {
+    async function coldStart(executorAnswers: boolean, opening: { text?: unknown; link?: unknown }): Promise<string[][]> {
       _resetModuleState();
       const state = loadWakerState(stateDir);
       const woken: string[][] = [];
       const manager = new WakerSubscriptionManager({
         perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) },
         logger: makeMockLogger(),
-        QuerySubscriptionProxy: vi.fn(function () {
-          return {
-            initialized: Promise.resolve(),
-            subscribe: vi.fn(() => Promise.resolve()),
-            dispose: vi.fn(),
-            onResult: vi.fn(),
-            result: opening,
-          };
-        }),
+        QuerySubscriptionProxy: proxyOpeningOn(opening),
         debounceMs: 10,
         onWake: (_sub, _result, mentions) => {
           woken.push((mentions ?? []).map((m) => m.address));
@@ -4554,7 +4563,7 @@ describe("a mention subscription saved by an older executor", () => {
     try {
       saveWakerState(stateDir, [textQuery, children], { [textQuery.id]: ["msg-old"] });
       for (const start of [1, 2]) {
-        expect(await coldStart(false, []), `start ${start}`).toEqual([]);
+        expect(await coldStart(false, {}), `start ${start}`).toEqual([]);
         const state = loadWakerState(stateDir);
         expect(state.subscriptions.map((s) => s.id).sort(), `start ${start}`).toEqual(
           ["children-p", textQuery.id],
@@ -4584,16 +4593,8 @@ describe("a mention subscription saved by an older executor", () => {
     const manager = new WakerSubscriptionManager({
       perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) },
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: vi.fn(function () {
-        return {
-          initialized: Promise.resolve(),
-          subscribe: vi.fn(() => Promise.resolve()),
-          dispose: vi.fn(),
-          onResult: vi.fn(),
-          // msg-new holds no name, only the we://mention link to the DID.
-          result: OLD_AND_LINK_ONLY,
-        };
-      }),
+      // msg-new holds no name, only the we://mention link to the DID.
+      QuerySubscriptionProxy: proxyOpeningOn(OLD_AND_LINK_ONLY),
       debounceMs: 10,
       onWake: (_sub, _result, mentions) => {
         woken.push((mentions ?? []).map((m) => m.address));

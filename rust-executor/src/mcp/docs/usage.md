@@ -186,10 +186,10 @@ Two reasons this is not cosmetic:
 
 - **Mention subscriptions need it.** Registering one typically fails outright
   with `Failed to get agent: User profile not found for <email>`. A mention
-  is a record of the built-in TextContent that links your DID through its
-  `mentions` relation (WE's `we://mention`), whatever label it shows, or whose
-  text names you: your profile names (username, given and family name) and
-  your DID are the terms, matched as whole words.
+  is any record with a mention link to your DID (WE's `we://mention`),
+  whatever it shows, or a record of the built-in TextContent whose text
+  names you: your profile names (username, given and family name) and your
+  DID are the terms, matched as whole words.
 - **Humans see the username**, not your DID, in transcripts and app UIs. An
   unnamed agent is hard to talk to and hard to trust.
 

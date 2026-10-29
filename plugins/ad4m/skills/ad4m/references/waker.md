@@ -5,7 +5,7 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 ## How It Works
 
 1. The plugin's `ad4m-waker` service connects to the AD4M executor's WebSocket event endpoint
-2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin creates a `QuerySubscriptionProxy` with a live model query (over the built-in TextContent for mentions, the built-in Container for children)
+2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin creates a `QuerySubscriptionProxy` with a live query (for mentions, a SPARQL query over mention links and a model query over the built-in TextContent; for children, a model query over the built-in Container)
 3. When query results change, the plugin debounces and POSTs to OpenClaw's `/hooks/wake` endpoint
 4. Your agent wakes up with context about what changed and processes the new data via MCP tools
 
@@ -23,7 +23,7 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 
 | Tool                                                                 | Description                                                         |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `ad4m_subscribe_to_mentions(perspective_id)`                         | Watch for any item that mentions you (its `mentions` link to your DID, or its text naming you) |
+| `ad4m_subscribe_to_mentions(perspective_id)`                         | Watch for any item that mentions you (a mention link to your DID, or its text naming you) |
 | `ad4m_subscribe_to_children(perspective_id, expression_address)`     | Watch for new children under a parent, of any class (messages in a channel, blocks in a call, …) |
 | `ad4m_unsubscribe_from_mentions(perspective_id)`                     | Stop watching mentions in a neighbourhood                           |
 | `ad4m_unsubscribe_from_children(perspective_id, expression_address)` | Stop watching that parent                                           |
@@ -54,7 +54,7 @@ The `Mentioned items` section lists each item that triggered the wake:
 - **Parents** — every container holding this item: whatever links it with `ad4m://has_child`, and every instance of a class whose own `children` relation holds it (a We call holding a block through `we://child`)
 - **Ancestors** — everything above the parents, nearest first, a few levels up (absent when there is nothing above them)
 
-**The item is not necessarily a message.** The subscription is one model query over the built-in abstract class TextContent `{ text, mentions? }`, so every class that takes part (declares a text property, named or aliased `text`, and optionally a mention relation, named or aliased `mentions`) is read, whatever the space calls it. An item wakes you in either of two ways. Through `mentions`: it links your DID, as WE stores a mention (a post's root or a feed line links to each person it mentions with `we://mention`); the name the text shows plays no part, so you are woken whatever label the writer's app gave you, even "@Datai" where the label runs into the next word. Or through its text alone: it names one of your profile names or your DID as a whole word ("data" in "hi Data!", not in "metadata"; HTML markup is ignored, and a mention chip's DID attribute counts), which covers spoken lines and apps that write no mention link. An item that does both wakes you once. Links you authored yourself never match, so your own reply naming or mentioning you does not wake you, and neither does a mention link whose signature does not verify. So the address you are handed is a post, a line in a feed, or a record of a class this space invented. Treat "message" as one possible answer, never the assumption.
+**The item is not necessarily a message.** The subscription holds two queries, and an item wakes you through either. A mention link: any record that links your DID with `we://mention`, as WE stores a mention (a post's root, a text block); the record's shape and text play no part, so you are woken whatever label the writer's app gave you, even "@Datai" where the label runs into the next word, and for a WE post whose root has no text at all. Or its text: a record of the built-in abstract class TextContent (any class with a text property, named or aliased `text`) whose text names one of your profile names or your DID as a whole word ("data" in "hi Data!", not in "metadata"; HTML markup is ignored, and a mention chip's DID attribute counts), which covers spoken lines and apps that write no mention link. An item both find wakes you once, as a mention link. Links you authored yourself never match, so your own reply naming or mentioning you does not wake you, and neither does a mention link whose signature does not verify. So the address you are handed is a post, a line in a feed, or a record of a class this space invented. Treat "message" as one possible answer, never the assumption.
 
 An item can have multiple parents when an app derives further containers from it (auto-generated summary threads, for example).
 

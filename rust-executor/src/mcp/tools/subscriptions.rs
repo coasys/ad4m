@@ -44,6 +44,10 @@ pub struct SubscribeToModelParams {
 pub struct MentionWakerConfigParams {
     /// Perspective UUID of the neighbourhood to watch for mentions.
     pub perspective_id: String,
+    /// The predicate of a mention link, from the record that mentions the
+    /// agent to its DID. Defaults to WE's `we://mention`.
+    #[serde(default)]
+    pub mention_predicate: Option<String>,
 }
 
 // ============================================================================
@@ -185,7 +189,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent in a neighbourhood. It is one model query over the built-in abstract class TextContent (class ad4m://TextContent, `{ text, mentions? }`: `text` required, `mentions` optional), whatever the app calls its class or properties: every record whose `mentions` relation links the agent's DID, or whose `text` contains one of the agent's profile names or its DID case-insensitively, in a link another agent wrote, newest first. Every class with a text property (named or aliased `text`) takes part; one with a mention relation (named or aliased `mentions`, WE: `we://mention`) also wakes the agent through it, and one without is matched by its text alone. Links the agent authored itself never match, so its own reply naming it does not wake it. A record found through `mentions` wakes the agent whatever its text says. One found only through its text wakes it only when the text holds a returned term as a whole word (\"data\" matches \"hi Data!\", not \"metadata\"); HTML markup is ignored, and a mention chip's DID attribute counts. The rows carry each mention link's and text link's author, timestamp and signature verdict (`__links`), which the waker hands the woken agent. The waker opens it with perspective.modelSubscribe and, when it fires, resolves the parent channels of each mentioned record in a second query. Returns one subscription ORing the mention relation, all profile names (username, given_name, family_name) and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent in a neighbourhood. It carries two queries, which the waker opens under one id, so a record both find wakes it once, through its link. `linkQuery` is SPARQL over mention links: every link with the mention predicate (`mention_predicate`, default WE's `we://mention`) from a record to the agent's DID that another agent wrote and whose signature verifies, whatever the record is (a WE post's root, a message, with text or without). `query` is a model query over the built-in TextContent (class ad4m://TextContent): every record whose text, in a link another agent wrote, contains one of the agent's profile names (username, given_name, family_name) or its DID, case-insensitively, whatever the app calls its class or text property. Both are newest first. Links the agent authored itself never match, so its own reply naming it does not wake it. A mention link wakes the agent whatever the text says. The text query matches substrings: the waker keeps a record found through its text only when the text holds a returned term as a whole word (\"data\" matches \"hi Data!\", not \"metadata\"); HTML markup is ignored, and a mention chip's DID attribute counts. The waker opens them with perspective.subscribeQuery and perspective.modelSubscribe and, when one fires, resolves the parent channels of each mentioned record in a second query. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -230,8 +234,18 @@ impl Ad4mMcpHandler {
             }
         }
 
+        let predicate = params
+            .0
+            .mention_predicate
+            .as_deref()
+            .unwrap_or(MENTION_PREDICATE);
+        if !is_iri_ref(predicate) {
+            return json!({ "error": format!("mention_predicate must be an IRI: {predicate}") })
+                .to_string();
+        }
         let perspective_id = &params.0.perspective_id;
         let query = build_mention_query(&names, &did).to_string();
+        let link_query = build_link_mention_query(&did, predicate);
         let terms = mention_terms(&names, &did);
         let sub_id = build_mention_sub_id(perspective_id);
 
@@ -242,25 +256,28 @@ impl Ad4mMcpHandler {
             "query": query,
             "terms": terms,
             "did": did,
+            "linkQuery": link_query,
         });
 
         json!({
             "did": did,
             "names": names,
             "perspective_id": perspective_id,
+            "predicate": predicate,
             "class": TEXT_CONTENT_URI,
             "query": query,
+            "link_query": link_query,
             "terms": terms,
             "subscription": subscription,
             "message": format!(
                 "Add the subscription entry to your waker config and restart the waker. \
-                 This single query watches for TextContent records that mention {} through \
-                 their `mentions` relation or by {} in their text, in perspective {}.",
+                 It watches for {} links to {} and for {} in TextContent text, in perspective {}.",
+                predicate,
                 did,
                 if names.is_empty() {
-                    "DID".to_string()
+                    "the DID".to_string()
                 } else {
-                    format!("name(s) [{}] or DID", names.join(", "))
+                    format!("name(s) [{}] or the DID", names.join(", "))
                 },
                 perspective_id
             ),
@@ -291,57 +308,82 @@ pub fn mention_terms(names: &[String], did: &str) -> Vec<String> {
     terms
 }
 
-/// The model query that finds mentions of `did` over the built-in
-/// `TextContent { text, mentions? }` (#1446): every record whose `mentions`
-/// relation links `did`, or whose `text` contains a profile name or the DID,
-/// in a link another agent wrote, newest first, at most [`MENTION_WINDOW`].
-///
-/// One query over the abstract class, so every class that conforms takes
-/// part, under whatever names it aliases to `text` and `mentions` (WE's
-/// `we://mention`, #1557): the executor reads each through that class's own
-/// predicate. `mentions` is optional: a class with text and no mention
-/// relation conforms, its `mentions` branch matches none of its rows, and its
-/// text branches still do, so an app that writes no mention link is woken
-/// through its text.
+/// The model query that finds the agent named in text: every record whose
+/// `text` contains a profile name or the DID, in a link another agent wrote,
+/// newest first, at most [`MENTION_WINDOW`], over the built-in
+/// `TextContent { text }` (#1446), so every class with a text property takes
+/// part under whatever name it aliases to `text`. Mention links are the other
+/// query's ([`build_link_mention_query`]).
 ///
 /// Each branch carries `author: { not: did }`, a per-link author: a record
-/// matches only through a link someone else wrote. A reply that names or
-/// mentions its own author is not a mention of that author, and waking on it
-/// loops the bot (#1459). The model query reads only links whose signature
-/// verified (`includeUnverified` is off), so a forged mention link, which may
-/// claim any author, matches nothing.
+/// matches only through a link someone else wrote. A reply that names its own
+/// author is not a mention of that author, and waking on it loops the bot
+/// (#1459).
 ///
-/// `contains` on `text` compiles to a case-insensitive `CONTAINS` and matches
+/// `contains` compiles to a case-insensitive `CONTAINS` and matches
 /// substrings ("data" is in "metadata"); model query has no word match. So
-/// the rows carry `text`, and the waker checks a row found only through its
-/// text for a whole-word term (`WakerSubscriptionManager`). A row whose
-/// mention link names `did` wakes as it is: the chip label may run into the
-/// next word ("@Datai have…").
-///
-/// `links: ["mentions", "text"]` returns each row's mention and text links
-/// with their own author, timestamp and signature verdict (`__links`, from the
-/// links' reifiers, which no peer link can write, #1564). That is how the
-/// waker tells the two paths apart, and what it hands the woken agent as the
-/// mention's provenance (#1563): the mention link's on the relation path, the
-/// text link's on the text path.
+/// the rows carry `text`, and the waker keeps one only when its text holds a
+/// term as a whole word (`WakerSubscriptionManager`). `links: ["text"]`
+/// returns each row's text links with their author, timestamp and signature
+/// verdict (`__links`): the waker takes the mention's provenance from the
+/// newest verified one by another agent whose own text names the agent
+/// (#1576).
 ///
 /// Pure over its inputs, so it unit-tests without an agent or perspective.
 pub fn build_mention_query(names: &[String], did: &str) -> serde_json::Value {
-    let not_me = json!({ "not": did });
-    let mut any: Vec<serde_json::Value> =
-        vec![json!({ "mentions": { "eq": did, "author": not_me } })];
-    any.extend(
-        mention_terms(names, did)
-            .iter()
-            .map(|term| json!({ "text": { "contains": term, "author": not_me } })),
-    );
+    let any_term: Vec<serde_json::Value> = mention_terms(names, did)
+        .iter()
+        .map(|term| json!({ "text": { "contains": term, "author": { "not": did } } }))
+        .collect();
     json!({
-        "where": { "OR": any },
+        "where": { "OR": any_term },
         "order": { "timestamp": "DESC" },
         "limit": MENTION_WINDOW,
         "properties": ["text"],
-        "links": ["mentions", "text"],
+        "links": ["text"],
     })
+}
+
+/// WE's mention link: a record that mentions someone (a post's root, a text
+/// block) links to their DID with this predicate. The default of
+/// `get_mention_waker_config`'s `mention_predicate`.
+pub const MENTION_PREDICATE: &str = "we://mention";
+
+/// Whether `s` can stand in a SPARQL `<IRI>`: it has a scheme and none of the
+/// characters IRIREF excludes, so a caller's predicate cannot end the IRI.
+fn is_iri_ref(s: &str) -> bool {
+    s.contains(':') && !s.chars().any(|c| c <= ' ' || "<>\"{}|^`\\".contains(c))
+}
+
+/// The SPARQL query that finds mention links to `did`: the source of every
+/// `predicate` link to `did` that another agent wrote and whose signature
+/// verifies, newest first, at most [`MENTION_WINDOW`]. Any record with such a
+/// link wakes the agent, with text or without: WE puts a post's mention on
+/// the post's root, which has no text (#1557).
+///
+/// The link is joined to its reifier for its author, timestamp and proof
+/// verdict, the `rdf:reifies` + `ad4m://ontology/*` facts only the store
+/// writes: it refuses any link in that vocabulary
+/// (`sparql_store::is_link_metadata`, #1564), so no peer can add an author or
+/// a verdict to someone else's mention. A link the agent wrote itself is not
+/// a mention of it (#1459); an unverified link may claim any author. The DID
+/// is compared as an escaped string literal. Rows carry `source`, the
+/// mentioned record, and the link's `author`, `timestamp` and `proofValid`,
+/// which the waker hands the woken agent (#1563). `predicate` must pass
+/// [`is_iri_ref`].
+pub fn build_link_mention_query(did: &str, predicate: &str) -> String {
+    let did = escape_sparql_literal(did);
+    format!(
+        "SELECT ?source ?author ?timestamp ?proofValid WHERE {{ \
+         ?source <{predicate}> ?mentioned . \
+         FILTER(STR(?mentioned) = \"{did}\") \
+         ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <{predicate}> ?mentioned )>> . \
+         ?reifier <ad4m://ontology/author> ?author . \
+         ?reifier <ad4m://ontology/timestamp> ?timestamp . \
+         ?reifier <ad4m://ontology/proofValid> ?proofValid . \
+         FILTER(STR(?proofValid) = \"true\" && STR(?author) != \"{did}\") \
+         }} ORDER BY DESC(?timestamp) LIMIT {MENTION_WINDOW}"
+    )
 }
 
 /// Build a mention-subscription id keyed on the perspective.
@@ -378,16 +420,14 @@ mod tests {
         assert_eq!(current.parent.as_deref(), Some("chan://2"));
     }
 
-    /// One query over TextContent: `mentions` linking the DID, or `text`
-    /// containing a term, one `contains` per distinct term (names first, the
-    /// DID last), each branch through a link the agent did not write; newest
-    /// first, bounded, with `text` for the waker's word check and the mention
-    /// and text links for its provenance. Terms go in as they are: the store
+    /// The text query over TextContent: one `contains` per distinct term
+    /// (names first, the DID last), each through a link the agent did not
+    /// write; newest first, bounded, with `text` for the waker's word check and
+    /// the text links for its provenance. Terms go in as they are: the store
     /// compares case-insensitively, and a JSON value needs no escaping. The
-    /// store-backed behaviour (which records match) is in
-    /// `instances/tests.rs`.
+    /// store-backed behaviour (which records match) is in `instances/tests.rs`.
     #[test]
-    fn mention_query_ors_the_mention_relation_and_a_text_contains_per_term() {
+    fn mention_query_ors_a_text_contains_per_term() {
         let q = build_mention_query(
             &["Alice".into(), "a\"b".into(), "Alice".into(), "".into()],
             "did:key:zAgent",
@@ -397,7 +437,6 @@ mod tests {
             q,
             json!({
                 "where": { "OR": [
-                    { "mentions": { "eq": "did:key:zAgent", "author": not_me } },
                     { "text": { "contains": "Alice", "author": not_me } },
                     { "text": { "contains": "a\"b", "author": not_me } },
                     { "text": { "contains": "did:key:zAgent", "author": not_me } },
@@ -405,7 +444,7 @@ mod tests {
                 "order": { "timestamp": "DESC" },
                 "limit": MENTION_WINDOW,
                 "properties": ["text"],
-                "links": ["mentions", "text"],
+                "links": ["text"],
             })
         );
         // It is a query the model query engine accepts.
@@ -419,6 +458,46 @@ mod tests {
             ),
             vec!["Alice".to_string(), "did:key:zAgent".to_string()]
         );
+    }
+
+    /// The link query is SPARQL the waker subscribes to as is: `predicate`
+    /// links to the DID, through the link's reifier, by another author with a
+    /// verified proof, newest first and bounded, naming the mentioned record
+    /// `source`. A quote in the DID stays inside its string literal; a
+    /// predicate that could end the IRI is refused. The store-backed behaviour
+    /// is in `instances/tests.rs`.
+    #[test]
+    fn link_mention_query_reads_verified_links_to_the_did_by_others() {
+        let q = build_link_mention_query("did:key:zAgent", MENTION_PREDICATE);
+        assert!(
+            crate::perspectives::perspective_instance::is_sparql_query(&q),
+            "{q}"
+        );
+        for part in [
+            "?source <we://mention> ?mentioned .",
+            r#"STR(?mentioned) = "did:key:zAgent""#,
+            "<<( ?source <we://mention> ?mentioned )>>",
+            r#"FILTER(STR(?proofValid) = "true" && STR(?author) != "did:key:zAgent")"#,
+        ] {
+            assert!(q.contains(part), "{part} in {q}");
+        }
+        assert!(
+            q.ends_with(&format!("ORDER BY DESC(?timestamp) LIMIT {MENTION_WINDOW}")),
+            "{q}"
+        );
+        let hostile = build_link_mention_query(r#"did:x" || true || ""#, "app://cc");
+        assert!(
+            hostile.contains(r#"STR(?mentioned) = "did:x\" || true || \"""#),
+            "{hostile}"
+        );
+        assert!(
+            hostile.contains("?source <app://cc> ?mentioned ."),
+            "{hostile}"
+        );
+        assert!(is_iri_ref("we://mention") && is_iri_ref("app://cc"));
+        for bad in ["mention", "we://x> ?p ?o . <a:b", "we://a b", "we://\"x"] {
+            assert!(!is_iri_ref(bad), "{bad}");
+        }
     }
 
     #[test]

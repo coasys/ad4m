@@ -1,17 +1,14 @@
-import { Ad4mClient, Ad4mModel, HasMany, Link, LinkQuery, Literal, MentionMessage, Model, PerspectiveProxy, PerspectiveState, Property, QuerySubscriptionProxy, TextContent, WakerSubscriptionManager } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, Link, LinkQuery, Literal, MentionMessage, Model, PerspectiveProxy, PerspectiveState, Property, QuerySubscriptionProxy, TextContent, WakerSubscriptionManager } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { expect } from "chai";
 import * as sinon from "sinon";
 import { pollUntil } from "../utils/utils";
 
-/** A note that takes part in TextContent, as an app's message would (#1557). */
+/** A note that takes part in TextContent, as an app's message would. */
 @Model({ name: "WakerNote", implements: [TextContent] })
 class WakerNote extends Ad4mModel {
     @Property({ through: "test://note_text", required: true, alias: { TextContent: "text" } })
     body: string = ""
-
-    @HasMany({ through: "test://mentions", alias: { TextContent: "mentions" } })
-    mentioned: string[] = []
 }
 
 export default function perspectiveTests(testContext: TestContext) {
@@ -293,15 +290,22 @@ export default function perspectiveTests(testContext: TestContext) {
                         type: 'mention',
                         perspective: p.uuid,
                         channel: '',
-                        // The shape of get_mention_waker_config's query, over TextContent.
+                        // The shape of get_mention_waker_config's queries: names in
+                        // TextContent text, and mention links (here `test://mentions`).
                         className: TextContent.builtinUri,
                         query: JSON.stringify({
-                            where: { OR: [{ mentions: { eq: me, author: { not: me } } }] },
+                            where: { OR: [{ text: { contains: 'Mia', author: { not: me } } }] },
                             properties: ['text'],
-                            links: ['mentions', 'text'],
+                            links: ['text'],
                         }),
                         terms: ['Mia', me],
                         did: me,
+                        linkQuery: 'SELECT ?source ?author ?timestamp ?proofValid WHERE { ' +
+                            '?source <test://mentions> ?mentioned . FILTER(STR(?mentioned) = "did:test:me") ' +
+                            '?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <test://mentions> ?mentioned )>> . ' +
+                            '?reifier <ad4m://ontology/author> ?author . ?reifier <ad4m://ontology/timestamp> ?timestamp . ' +
+                            '?reifier <ad4m://ontology/proofValid> ?proofValid . ' +
+                            'FILTER(STR(?proofValid) = "true" && STR(?author) != "did:test:me") } ORDER BY DESC(?timestamp) LIMIT 50',
                     })
                     await p.add(new Link({ source: 'test://channel', predicate: 'ad4m://has_child', target: 'test://msg1' }))
                     await p.add(new Link({ source: 'test://msg1', predicate: 'test://note_text', target: Literal.from('@Miai have news').toUrl() }))
@@ -316,9 +320,11 @@ export default function perspectiveTests(testContext: TestContext) {
                         address: 'test://msg1',
                         parents: ['test://channel'],
                         ancestors: [],
-                        // The mention link's provenance: who wrote it, verified.
+                        // The mention link's provenance: who wrote it, verified. Its
+                        // text holds "Mia" only as a substring, so the link woke it.
                         author: executorAgent,
                         verified: true,
+                        via: 'link',
                     })
                     expect(mention.timestamp).to.be.a('string')
                 } finally {

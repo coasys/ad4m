@@ -1034,6 +1034,7 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
             Box::pin(async move {
                 h.get_mention_waker_config(Parameters(subscriptions::MentionWakerConfigParams {
                     perspective_id: uuid,
+                    mention_predicate: None,
                 }))
                 .await
             })

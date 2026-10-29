@@ -24,16 +24,23 @@ export interface WakerSubscription {
   /**
    * A mention subscription's terms (profile names and the DID), from
    * `get_mention_waker_config`. The query matches text by substring, so a
-   * record found only through its text wakes only when the text holds one of
+   * record found through its text wakes only when the text holds one of
    * these as a whole word ({@link holdsAWholeWordTerm}).
    */
   terms?: string[];
   /**
-   * A mention subscription's agent DID, from `get_mention_waker_config`. A
-   * record whose TextContent `mentions` links it, in a verified link another
-   * agent wrote, wakes whatever its text says ({@link mentionOf}).
+   * A mention subscription's agent DID, from `get_mention_waker_config`: a text
+   * mention counts only in a text link another agent wrote ({@link mentionOf}).
    */
   did?: string;
+  /**
+   * A mention subscription's second query, SPARQL, from `get_mention_waker_config`:
+   * the source of every verified mention link (`we://mention` by default) to the
+   * agent's DID that another agent wrote, whatever the record's shape. It runs
+   * beside `query` under the same id, so a record both find wakes once
+   * ({@link linkMentionOf}).
+   */
+  linkQuery?: string;
   neighbourhood?: string;
 }
 
@@ -163,9 +170,9 @@ export interface MentionMessage {
    */
   ancestors: string[];
   /**
-   * The DID that signed the link the mention is in: the mention link to the agent's DID when
-   * the record mentions it through TextContent's `mentions`, else the text link whose own text
-   * names it. Only that link is theirs; the record's other links may be someone else's.
+   * The DID that signed the link the mention is in: the mention link to the agent's DID, else
+   * the text link whose own text names it. Only that link is theirs; the record's other links
+   * may be someone else's.
    */
   author?: string;
   /** That link's timestamp, ISO 8601. */
@@ -176,14 +183,14 @@ export interface MentionMessage {
    */
   verified: boolean;
   /**
-   * How the record mentions the agent: `"mentions"`, a mention link to its DID; `"text"`, its
+   * How the record mentions the agent: `"link"`, a mention link to its DID; `"text"`, its
    * name or DID as a whole word in the text, with no such link. A text match is the agent's
    * name used as a word, which need not address it ("the data shows" for an agent named Data).
    */
-  via?: "mentions" | "text";
+  via?: "link" | "text";
 }
 
-/** What {@link mentionOf} finds about a mention: how it was made, and the provenance of its link. */
+/** What {@link mentionOf} or {@link linkMentionOf} finds: how it was made, and its link's provenance. */
 type MentionProvenance = Pick<MentionMessage, "author" | "timestamp" | "verified" | "via">;
 
 /** A link as a model row's `__links` carries it (`DecoratedLinkExpression`). */
@@ -194,21 +201,12 @@ interface RowLink {
   proof?: { valid?: unknown };
 }
 
-/** The provenance {@link MentionMessage} carries, from one link. */
-function provenanceOf(link: RowLink | undefined, via: "mentions" | "text"): MentionProvenance {
-  const provenance: MentionProvenance = {
-    verified: link?.proof?.valid === true,
-    via,
-  };
-  if (typeof link?.author === "string") provenance.author = link.author;
-  if (typeof link?.timestamp === "string") provenance.timestamp = link.timestamp;
+/** The provenance {@link MentionMessage} carries, from one link's author, timestamp and verdict. */
+function provenanceOf(author: unknown, timestamp: unknown, verified: boolean, via: "link" | "text"): MentionProvenance {
+  const provenance: MentionProvenance = { verified, via };
+  if (typeof author === "string") provenance.author = author;
+  if (typeof timestamp === "string") provenance.timestamp = timestamp;
   return provenance;
-}
-
-/** The links a model row carries for `key` under `__links`, oldest first. */
-function rowLinks(row: any, key: string): RowLink[] {
-  const links: unknown = row?.__links?.[key];
-  return Array.isArray(links) ? links : [];
 }
 
 /** `uri` URI-decoded, or as it is when it is not valid percent-encoding. */
@@ -248,40 +246,36 @@ function textOf(target: unknown): string | undefined {
 }
 
 /**
- * Whether a row of the executor's mention query (a model query over TextContent, #1557)
- * mentions the subscription's agent, and the provenance of the link it does so in; `null`
- * when it does not.
- *
- * - Through `mentions`: a verified link to the agent's DID that another agent wrote, in the
- *   row's `__links.mentions`. It wakes whatever the text says: WE's chip label may run into
- *   the next word ("@Datai have…"). Its provenance is that link's (the newest such).
- * - Through the text alone: the query matched a substring, so the text must hold a term as a
- *   whole word ({@link holdsAWholeWordTerm}), and so must the text of a verified link another
- *   agent wrote, in `__links.text`. Its provenance is that link's (the newest such). The row's
- *   `text` is the newest text link's, whoever wrote it, so it does not say whose words they are.
- *
- * A record that matches both is one row, so it wakes once, through `mentions`. `via` says
- * which path it was.
+ * Whether a row of the mention subscription's text query (a model query over TextContent)
+ * names the subscription's agent, and the provenance of the link it does so in; `null` when
+ * it does not. The query matched a substring, so the text must hold a term as a whole word
+ * ({@link holdsAWholeWordTerm}), and so must the text of a verified link another agent wrote,
+ * in `__links.text`. Its provenance is that link's (the newest such): the row's `text` is the
+ * newest text link's, whoever wrote it, so it does not say whose words they are.
  */
-export function mentionOf(
-  row: any,
-  sub: Pick<WakerSubscription, "did" | "terms">,
-): MentionProvenance | null {
-  const did = sub.did;
-  const byOthers = (links: RowLink[]) => links.filter((l) => typeof l.author === "string" && l.author !== did);
-  const linked = byOthers(rowLinks(row, "mentions")).filter(
-    (l) => l.data?.target === did && l.proof?.valid === true,
-  );
-  if (did && linked.length) return provenanceOf(linked[linked.length - 1], "mentions");
-
+export function mentionOf(row: any, sub: Pick<WakerSubscription, "did" | "terms">): MentionProvenance | null {
   const terms = sub.terms ?? [];
   const names = (text: unknown) => typeof text === "string" && holdsAWholeWordTerm(text, terms);
   const text = Array.isArray(row?.text) ? row.text.join(" ") : row?.text;
   if (!names(text)) return null;
-  const naming = byOthers(rowLinks(row, "text")).filter(
-    (l) => l.proof?.valid === true && names(textOf(l.data?.target)),
+  const links: RowLink[] = Array.isArray(row?.__links?.text) ? row.__links.text : [];
+  const naming = links.filter(
+    (l) =>
+      typeof l.author === "string" && l.author !== sub.did && l.proof?.valid === true && names(textOf(l.data?.target)),
   );
-  return naming.length ? provenanceOf(naming[naming.length - 1], "text") : null;
+  const newest = naming[naming.length - 1];
+  return newest ? provenanceOf(newest.author, newest.timestamp, true, "text") : null;
+}
+
+/**
+ * The provenance of a row of the mention subscription's link query (SPARQL: `source`,
+ * `author`, `timestamp`, `proofValid`), `null` for one whose proof did not verify. The
+ * executor's query returns verified links by other agents only; a link wakes whatever the
+ * record's text says, or whether it has any (a WE post's root, "@Datai have…").
+ */
+export function linkMentionOf(row: any): MentionProvenance | null {
+  const verified = row?.proofValid === "true" || row?.proofValid === true;
+  return verified ? provenanceOf(row?.author, row?.timestamp, true, "link") : null;
 }
 
 export interface WakerLogger {
@@ -394,7 +388,8 @@ export class WakerSubscriptionManager {
   private subscribeTimeoutMs: number;
   private retryWakeMs: number;
 
-  private proxies = new Map<string, any>();
+  /** Per subscription its proxies: one, or a mention subscription's text and link queries. */
+  private proxies = new Map<string, any[]>();
   private activeSubscriptions = new Map<string, WakerSubscription>();
   /** Subscriptions the executor rejected, waiting to be re-attempted. */
   private pendingSubscriptions = new Map<string, WakerSubscription>();
@@ -469,12 +464,13 @@ export class WakerSubscriptionManager {
       throw new Error("WakerSubscriptionManager: QuerySubscriptionProxy must be provided via constructor options");
     }
     const QuerySubscriptionProxy = this.QuerySubscriptionProxyCtor;
-    if (sub.type === "mention" && (!sub.className || !sub.terms?.length || !sub.did)) {
-      // The rows are TextContent's: without terms the whole-word check cannot
-      // run, so every substring ("metadata" for "data") would wake the agent;
-      // without the DID no mention link can be told to be the agent's.
+    if (sub.type === "mention" && (!sub.className || !sub.terms?.length || !sub.did || !sub.linkQuery)) {
+      // Without terms the whole-word check cannot run, so every substring
+      // ("metadata" for "data") would wake the agent; without the DID no text
+      // link can be told to be someone else's; without the link query a
+      // mention link on a record with no text (a WE post) never wakes it.
       throw new Error(
-        `Waker subscription ${sub.id}: a mention subscription needs its TextContent class, terms and DID (get_mention_waker_config returns them)`,
+        `Waker subscription ${sub.id}: a mention subscription needs its TextContent class, terms, DID and link query (get_mention_waker_config returns them)`,
       );
     }
 
@@ -482,15 +478,25 @@ export class WakerSubscriptionManager {
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
     );
     this.logger.info(`[waker] ${sub.id}: ${sub.className ? `model query over ${sub.className}` : "SPARQL query"}:\n${sub.query}`);
+    if (sub.linkQuery) this.logger.info(`[waker] ${sub.id}: link query:\n${sub.linkQuery}`);
 
     const proxy = sub.className
       ? new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient, sub.className)
       : new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient);
+    const linkProxy = sub.linkQuery
+      ? new QuerySubscriptionProxy(sub.perspective, sub.linkQuery, this.perspectiveClient)
+      : undefined;
+    const proxies = linkProxy ? [proxy, linkProxy] : [proxy];
+    const disposeProxies = () => {
+      for (const p of proxies) {
+        try { p.dispose(); } catch {}
+      }
+    };
     // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
     // rejects this promise internally when subscribe() fails, and if nobody catches
     // it before the next microtask it crashes the process.
-    if (proxy.initialized && typeof proxy.initialized.catch === "function") {
-      proxy.initialized.catch(() => {});
+    for (const p of proxies) {
+      if (p.initialized && typeof p.initialized.catch === "function") p.initialized.catch(() => {});
     }
     // One deadline for the whole handshake: `proxy.subscribe()` and the
     // `initialized` promise it resolves share the budget, so a hang in either
@@ -506,18 +512,18 @@ export class WakerSubscriptionManager {
           )
         : step;
     try {
-      await bounded(proxy.subscribe(), "subscribe handshake");
+      await bounded(Promise.all(proxies.map((p) => p.subscribe())), "subscribe handshake");
       if (this.isStale(sub.id, token)) {
-        try { proxy.dispose(); } catch {}
+        disposeProxies();
         return;
       }
-      await bounded(proxy.initialized, "subscription initialization");
+      await bounded(Promise.all(proxies.map((p) => p.initialized)), "subscription initialization");
     } catch (err: any) {
       const msg = err?.message ?? String(err);
       this.logger.warn(
         `[waker] ${sub.id}: subscription failed — ${msg}`,
       );
-      try { proxy.dispose(); } catch {}
+      disposeProxies();
       // A dispose that landed mid-attempt wins: don't re-queue something the
       // caller has since asked us to forget.
       if (this.isStale(sub.id, token)) return;
@@ -543,7 +549,7 @@ export class WakerSubscriptionManager {
       );
     }
     if (this.isStale(sub.id, token)) {
-      try { proxy.dispose(); } catch {}
+      disposeProxies();
       return;
     }
     this.pendingSubscriptions.delete(sub.id);
@@ -560,36 +566,46 @@ export class WakerSubscriptionManager {
 
     // `opening` is the result the subscription holds when it opens (`proxy.result`): `onResult`
     // only reports later changes, so this is the one chance to see what was written meanwhile.
-    const handleResult = async (result: any, opening = false) => {
+    // `fromLink`: the result is the mention subscription's link query's (SPARQL rows named by `source`).
+    const handleResult = async (result: any, opening = false, fromLink = false) => {
       this.logger.info(
-        `[waker] ${sub.id}: ${opening ? "opening result" : "onResult fired"} — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
+        `[waker] ${sub.id}: ${opening ? "opening result" : "onResult fired"}${fromLink ? " (link query)" : ""} — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
       );
 
       // A model subscription delivers `{ instances }`, SPARQL an array of
       // rows. Anything else (e.g. `false` on a disconnect/reconnect) is
       // ignored.
-      const rows: unknown = sub.className ? result?.instances : result;
+      const model = sub.className && !fromLink;
+      const rows: unknown = model ? result?.instances : result;
       if (!Array.isArray(rows)) {
         this.logger.warn(
-          `[waker] ${sub.id}: ignoring result without ${sub.className ? "instances" : "rows"}: ${JSON.stringify(result)}`,
+          `[waker] ${sub.id}: ignoring result without ${model ? "instances" : "rows"}: ${JSON.stringify(result)}`,
         );
         return;
       }
 
       if (sub.type === "mention") {
-        // For mention subscriptions: track seen record ids.
-        // Only wake for records we haven't seen before.
+        // For mention subscriptions: track seen record ids, across both queries, and wake only
+        // for records not seen before, so a record both find wakes once.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
+        const waiting = this.undelivered.get(sub.id);
         const newMessages: string[] = [];
         const provenance = new Map<string, MentionProvenance>();
 
         for (const item of rows as any[]) {
-          const address = item?.id;
-          if (typeof address !== "string" || !address || currentSeen.has(address)) continue;
-          // Through `mentions` as it is; through the text alone, a whole word only.
-          const mention = mentionOf(item, sub);
+          const address = fromLink ? item?.source : item?.id;
+          if (typeof address !== "string" || !address) continue;
+          // A text mention still in the debounce window takes the link's provenance instead.
+          const upgrade = fromLink ? waiting?.get(address) : undefined;
+          if (currentSeen.has(address) && upgrade?.via !== "text") continue;
+          // A link as it is; the text, a whole word only.
+          const mention = fromLink ? linkMentionOf(item) : mentionOf(item, sub);
           if (!mention) {
-            this.logger.debug(`[waker] ${sub.id}: ${address} has no mention link and no term as a whole word, skipping`);
+            this.logger.debug(`[waker] ${sub.id}: ${address} has no verified mention link or no term as a whole word, skipping`);
+            continue;
+          }
+          if (upgrade) {
+            waiting!.set(address, { ...upgrade, ...mention });
             continue;
           }
           currentSeen.add(address);
@@ -661,18 +677,21 @@ export class WakerSubscriptionManager {
       }
     };
     proxy.onResult((result: any) => handleResult(result));
+    linkProxy?.onResult((result: any) => handleResult(result, false, true));
 
     if (this.isStale(sub.id, token)) {
-      try { proxy.dispose(); } catch {}
+      disposeProxies();
       return;
     }
-    this.proxies.set(sub.id, proxy);
+    this.proxies.set(sub.id, proxies);
     this.activeSubscriptions.set(sub.id, sub);
     // After a restart this wakes on mentions written while the waker was down; on a new
-    // subscription it records the existing ones as history.
-    if (proxy.result !== undefined) {
+    // subscription it records the existing ones as history. The link query's first, so a
+    // record both hold wakes through its link.
+    for (const [p, fromLink] of [[linkProxy, true], [proxy, false]] as const) {
+      if (p?.result === undefined) continue;
       try {
-        await handleResult(proxy.result, true);
+        await handleResult(p.result, true, fromLink);
       } catch (e: any) {
         this.logger.warn(`[waker] ${sub.id}: reading the opening result failed: ${e?.message ?? e}`);
       }
@@ -738,15 +757,14 @@ export class WakerSubscriptionManager {
   dispose(id: string, persist = true): void {
     // Invalidate any subscribe() for this id that is still awaiting.
     this.generations.set(id, (this.generations.get(id) ?? 0) + 1);
-    const proxy = this.proxies.get(id);
-    if (proxy) {
+    for (const proxy of this.proxies.get(id) ?? []) {
       try {
         proxy.dispose();
       } catch {
         /* ignore */
       }
-      this.proxies.delete(id);
     }
+    this.proxies.delete(id);
     const timer = this.debounceTimers.get(id);
     if (timer) {
       clearTimeout(timer);
