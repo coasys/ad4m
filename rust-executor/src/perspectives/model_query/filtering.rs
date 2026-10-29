@@ -78,12 +78,6 @@ pub(super) fn matches_where(
             continue;
         }
 
-        // A name the view answers to with nothing matches nothing, as in
-        // the store (`compile_leaf_condition`).
-        if shape.absent(prop_name).is_some() {
-            return false;
-        }
-
         if prop_name == "base" || prop_name == "id" {
             // Total over every condition shape, including the String and
             // StringArray ones the compiler usually does push to SPARQL.
@@ -1236,7 +1230,6 @@ mod tests {
         ModelShape {
             target_class: "Test".to_string(),
             shape_uri: "".to_string(),
-            absent: Vec::new(),
             properties: vec![],
             include_relations: vec![],
             interpretation_hint: None,
