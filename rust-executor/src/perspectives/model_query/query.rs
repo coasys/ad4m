@@ -10,7 +10,9 @@ use super::containment::{contains_patterns, has_child_only, ContainmentEdge};
 use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
-use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
+use super::hydration::{
+    filter_properties, group_results_by_source, hydrate_instances, ALWAYS_KEPT,
+};
 use super::link_author::refuse_unanswerable_link_author;
 use super::links::{attach_links, resolve_link_keys};
 use super::projection::resolve_projections;
@@ -822,9 +824,13 @@ pub(super) async fn execute_model_query_inner(
     }
 
     // Apply transform expressions for resolveLanguage properties. A language-backed value is a
-    // fetch per row, so only what the filter and sort below read is resolved for every row; the
-    // rest waits for the page.
+    // fetch per row, so it is resolved only where it is needed, each once:
+    //   - what the filter and sort below read (`read_before_window`), for every row, here;
+    //   - what the query hands back (`returned`: every property when it names no `properties`)
+    //     and the filter and sort did not read, for the page only, after the window.
+    // A property in neither is never resolved: it keeps its hydrated value and is stripped.
     let read_before_window = read_before_window(query_input);
+    let returned_keys = returned(query_input);
     resolve_language_transforms(shape, &mut instances, |name| {
         read_before_window.contains(name)
     })
@@ -845,6 +851,22 @@ pub(super) async fn execute_model_query_inner(
             query_input.link_status.as_ref(),
             query_input.include_unverified,
         )?;
+    }
+
+    // A name the view answers to with nothing reads as empty.
+    if !shape.absent.is_empty() {
+        for inst in instances.iter_mut() {
+            if let Value::Object(obj) = inst {
+                for p in &shape.absent {
+                    let empty = if p.is_collection {
+                        Value::Array(Vec::new())
+                    } else {
+                        Value::Null
+                    };
+                    obj.entry(p.name.clone()).or_insert(empty);
+                }
+            }
+        }
     }
 
     // Apply post-hydration where-clause filters
@@ -942,9 +964,13 @@ pub(super) async fn execute_model_query_inner(
         }
     };
 
-    // The language-backed values the filter and sort did not read, for the page only.
+    // The language-backed values the filter and sort did not read, for the page only, and of
+    // those only what the query hands back: the strip below drops the rest.
     resolve_language_transforms(shape, &mut paginated, |name| {
         !read_before_window.contains(name)
+            && returned_keys
+                .as_ref()
+                .is_none_or(|keep| keep.iter().any(|k| k == name))
     })
     .await?;
 
@@ -980,15 +1006,7 @@ pub(super) async fn execute_model_query_inner(
     }
 
     // Strip unrequested properties if specified
-    let mut final_instances: Vec<Value> = if let Some(ref requested) = query_input.properties {
-        let mut keep = requested.clone();
-        if let Some(ref inc) = query_input.include {
-            for rel_name in inc.keys() {
-                if !keep.contains(rel_name) {
-                    keep.push(rel_name.clone());
-                }
-            }
-        }
+    let mut final_instances: Vec<Value> = if let Some(keep) = returned_keys {
         paginated
             .into_iter()
             .map(|inst| filter_properties(inst, &keep))
@@ -1027,6 +1045,21 @@ pub(super) async fn execute_model_query_inner(
         instances: final_instances,
         total_count,
     })
+}
+
+/// The keys a query hands back of each instance, or `None` when it names no `properties` and so
+/// returns every one: the named properties, the `include` keys beside them, and [`ALWAYS_KEPT`] —
+/// exactly what [`filter_properties`] keeps.
+pub(super) fn returned(query: &ModelQueryInput) -> Option<Vec<String>> {
+    let requested = query.properties.as_ref()?;
+    let mut keep: Vec<String> = ALWAYS_KEPT.iter().map(|k| k.to_string()).collect();
+    let include_keys = query.include.iter().flat_map(|include| include.keys());
+    for name in requested.iter().chain(include_keys) {
+        if !keep.contains(name) {
+            keep.push(name.clone());
+        }
+    }
+    Some(keep)
 }
 
 /// Every property the `where` and the `order` name, read as [`matches_where`] and
@@ -1078,8 +1111,9 @@ fn read_before_window(query: &ModelQueryInput) -> HashSet<String> {
 /// None`) are left untouched by the per-value check below.
 ///
 /// Only the properties whose name `resolve` accepts are touched, so a pipeline
-/// can resolve some before its filter and the rest after its page, each once.
-async fn resolve_language_transforms(
+/// can resolve what its filter reads before the filter and what it returns after
+/// its page, each once (see `execute_model_query_inner`).
+pub(super) async fn resolve_language_transforms(
     shape: &ModelShape,
     instances: &mut [Value],
     resolve: impl Fn(&str) -> bool,
