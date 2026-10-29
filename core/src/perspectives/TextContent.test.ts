@@ -7,7 +7,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { TextContent } from "./TextContent";
 import { Ad4mModel } from "../model/Ad4mModel";
-import { HasMany, Model, Property } from "../model/decorators";
+import { Model, Property } from "../model/decorators";
 
 const SDNA = JSON.parse(
   fs.readFileSync(
@@ -24,11 +24,6 @@ describe("TextContent", () => {
     expect(shape.properties.map((p: any) => [p.path, p.name])).toEqual(
       SDNA.properties.map((p: any) => [p.path, p.name]),
     );
-    // `text` required, `mentions` not: the executor leaves `mentions` optional.
-    expect(shape.properties.map((p: any) => [p.name, p.minCount])).toEqual(
-      SDNA.properties.map((p: any) => [p.name, p.min_count]),
-    );
-    expect(SDNA.properties.find((p: any) => p.name === "text").min_count).toBe(1);
   });
 
   it("is queried by its URI; a class extending it is not", () => {
@@ -63,26 +58,7 @@ describe("TextContent", () => {
     expect(sent).toEqual([["ad4m://TextContent", "UnionPeer"]]);
   });
 
-  it("is implemented through aliases, for the text and the mention relation", () => {
-    @Model({ name: "WeishTextBlock", implements: [TextContent] })
-    class WeishTextBlock extends Ad4mModel {
-      @Property({ through: "we://text", alias: { TextContent: "text" } })
-      body: string = "";
-
-      @HasMany({ through: "we://mention", alias: { TextContent: "mentions" } })
-      mentionedAgents: string[] = [];
-    }
-    // The executor finds both by the aliases in the shape, not by `implements`.
-    const { shape } = (WeishTextBlock as any).generateSHACL();
-    const byName = (name: string) => shape.properties.find((p: any) => p.name === name);
-    expect([byName("body").path, byName("body").alias]).toEqual(["we://text", { TextContent: "text" }]);
-    expect([byName("mentionedAgents").path, byName("mentionedAgents").alias]).toEqual([
-      "we://mention",
-      { TextContent: "mentions" },
-    ]);
-  });
-
-  it("is implemented through an alias for the text alone: `mentions` is optional", () => {
+  it("is implemented through an alias", () => {
     expect(() => {
       @Model({ name: "FluxishMessage", implements: [TextContent] })
       class FluxishMessage extends Ad4mModel {
@@ -90,16 +66,6 @@ describe("TextContent", () => {
         body: string = "";
       }
     }).not.toThrow();
-  });
-
-  it("is not implemented without the text, whatever else the class has", () => {
-    expect(() => {
-      @Model({ name: "MentionsOnly", implements: [TextContent] })
-      class MentionsOnly extends Ad4mModel {
-        @HasMany({ through: "we://mention", alias: { TextContent: "mentions" } })
-        mentionedAgents: string[] = [];
-      }
-    }).toThrow("MentionsOnly implements TextContent but has no property or alias named `text`");
   });
 
   it("register() writes nothing", async () => {

@@ -103,7 +103,6 @@ pub fn shape(class: &str, properties: Vec<ShapeProperty>) -> ModelShape {
     ModelShape {
         target_class: class.to_string(),
         shape_uri: format!("{class}Shape"),
-        absent: Vec::new(),
         properties,
         include_relations: Vec::new(),
         interpretation_hint: None,
