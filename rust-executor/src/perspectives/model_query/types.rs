@@ -1024,22 +1024,9 @@ pub struct ModelShape {
     /// LLM extractor toward what instances of this class represent.  `None`
     /// when the SDNA declared no class hint.
     pub(crate) interpretation_hint: Option<String>,
-    /// An abstract class's optional names this shape lacks, as the abstract
-    /// class declares them. Only a view has any
-    /// (`abstract_classes::view_through`): the class conforms without them
-    /// and answers to them with nothing. A `where` on one matches no row, a
-    /// read of one is empty (`[]` for a collection, `null` otherwise), and
-    /// `links` lists no link for it. Empty for every stored shape.
-    pub(crate) absent: Vec<ShapeProperty>,
 }
 
 impl ModelShape {
-    /// The abstract class's declaration of `name` when this shape lacks it
-    /// (see [`Self::absent`]).
-    pub(crate) fn absent(&self, name: &str) -> Option<&ShapeProperty> {
-        self.absent.iter().find(|p| p.name == name)
-    }
-
     /// Returns all predicate IRIs declared in this shape (properties + relations + flags).
     pub fn predicates(&self) -> Vec<String> {
         let mut preds: Vec<String> = self
