@@ -89,6 +89,7 @@ pub fn evaluate_getters_batch(
     let filtered_shape = ModelShape {
         target_class: shape.target_class.clone(),
         shape_uri: shape.shape_uri.clone(),
+        absent: shape.absent.clone(),
         properties: filtered_props,
         include_relations: shape.include_relations.clone(),
         interpretation_hint: shape.interpretation_hint.clone(),

@@ -77,6 +77,12 @@ pub(super) fn resolve_link_keys(
         if out.iter().any(|(k, _)| k == key) {
             continue;
         }
+        // A name the view answers to with nothing has no link to list: no
+        // predicate, and an empty array on every row.
+        if shape.absent(key).is_some() {
+            out.push((key.clone(), String::new()));
+            continue;
+        }
         // (predicate, is_reverse)
         let by_name = shape
             .properties
@@ -185,13 +191,17 @@ pub(super) async fn attach_links(
         .filter_map(|i| i["id"].as_str().map(str::to_string))
         .collect();
 
-    let mut predicates: Vec<&str> = keys.iter().map(|(_, p)| p.as_str()).collect();
+    let mut predicates: Vec<&str> = keys
+        .iter()
+        .map(|(_, p)| p.as_str())
+        .filter(|p| !p.is_empty())
+        .collect();
     predicates.sort();
     predicates.dedup();
 
     // source -> predicate -> rows
     let mut found: BTreeMap<String, BTreeMap<String, Vec<Value>>> = BTreeMap::new();
-    if !ids.is_empty() {
+    if !ids.is_empty() && !predicates.is_empty() {
         let source_constraint = values_or_str_filter("source", &ids);
         let predicate_values = predicates
             .iter()

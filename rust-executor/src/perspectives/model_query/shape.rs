@@ -378,6 +378,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     Ok(ModelShape {
         target_class,
         shape_uri,
+        absent: Vec::new(),
         properties,
         include_relations,
         interpretation_hint: class_hint,
@@ -722,6 +723,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
     Ok(ModelShape {
         target_class,
         shape_uri,
+        absent: Vec::new(),
         properties,
         include_relations,
         interpretation_hint: None,
