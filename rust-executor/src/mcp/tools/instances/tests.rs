@@ -3253,11 +3253,18 @@ async fn peer_links_cannot_write_or_erase_a_mentions_provenance() {
     let mut first = we_block(&writer, "ad4m://post", "see", 1);
     first.push(signed_link(&writer, "ad4m://post", WE_MENTION, &me.did, 1));
     first.extend(we_block(&member, "ad4m://claimed", "see", 2));
-    first.push(unverified);
     perspective
         .diff_from_link_language(PerspectiveDiff::from_additions(first))
         .await
         .expect("the mentions");
+    // A link language's diff no longer stores a link whose signature fails
+    // (#1146), so the unverified mention is one the store already holds:
+    // kept from before that, or written through `addLinkExpression`.
+    unverified.status = Some(crate::types::LinkStatus::Shared);
+    perspective
+        .sparql_store
+        .add_link(&unverified)
+        .expect("the unverified mention");
     let genuine = reifier_of(&perspective, "ad4m://post", WE_MENTION, &me.did);
     let claimed = reifier_of(&perspective, "ad4m://claimed", WE_MENTION, &me.did);
 
