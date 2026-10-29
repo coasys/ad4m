@@ -264,8 +264,8 @@ export function withWakerTarget(message: string, executorUrl: string): string {
  * Whether `sub` is a mention subscription saved by an older executor, which
  * this waker cannot open as saved: one without the TextContent class, terms,
  * DID and Mentioning query that `get_mention_waker_config` returns now (a
- * SPARQL query over `we://mention` links, a TextContent query over the text
- * alone, or one over TextContent's `mentions` and text). The manager refuses
+ * TextContent query over the text alone, or one over TextContent's `mentions`
+ * and text). The manager refuses
  * it, so it is only ever re-derived.
  */
 export function savedByAnOlderExecutor(sub: WakerSubscription): boolean {
@@ -1048,7 +1048,7 @@ Notes:
     description:
       "Subscribe to mentions of this agent in a neighbourhood. " +
       "Creates a live waker subscription that watches for any item that mentions you " +
-      "(its `mentions` relation links your DID, as WE's we://mention does, whether or not the item has text, " +
+      "(its `mentions` relation links your DID, whether or not the item has text, " +
       "or its text names you or your DID as a whole word, written by someone else) — a post, " +
       "a feed line, or an instance of whatever class this space defines — " +
       "and wakes you when detected. " +

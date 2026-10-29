@@ -7,9 +7,8 @@ import { HasMany, Model } from "../model/decorators";
  * a relation to their DIDs.
  *
  * Querying it reads every class that has a relation named `mentions`, or one
- * aliased to `mentions`, whether or not the class has text. WE's blocks name
- * theirs `mentions` (over `we://mention`) and conform as they are, a post's
- * root included:
+ * aliased to `mentions`, under any predicate, whether or not the class has
+ * text. A class whose relation has another name aliases it:
  *
  * ```typescript
  * @Model({ name: "Note", implements: [Mentioning] })

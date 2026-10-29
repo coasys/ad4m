@@ -214,7 +214,7 @@ Call `ad4m_set_agent_profile(username: "...")` before `ad4m_subscribe_to_mention
 ad4m_subscribe_to_mentions(perspective_id: "<your-local-uuid>")
 ```
 
-The plugin creates a live subscription of two model queries and wakes you via `/hooks/wake` when someone else mentions you: a record of the built-in Mentioning whose `mentions` relation links your DID (WE's `we://mention`), whatever its text shows or whether it has any, or a record of the built-in TextContent whose text names you (a profile name or your DID) as a whole word. If the executor isn't ready yet, this now tells you so and keeps retrying — see Rule 11.
+The plugin creates a live subscription of two model queries and wakes you via `/hooks/wake` when someone else mentions you: a record of the built-in Mentioning whose `mentions` relation links your DID, whatever its text shows or whether it has any, or a record of the built-in TextContent whose text names you (a profile name or your DID) as a whole word. If the executor isn't ready yet, this now tells you so and keeps retrying — see Rule 11.
 
 For monitoring an entire channel (not just mentions):
 

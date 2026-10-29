@@ -26,8 +26,8 @@ pub(crate) const TEXT_CONTENT_SDNA: &str = include_str!("../hardwired_sdna/text_
 
 /// `Mentioning { mentions }`: a record that mentions agents, a relation to
 /// their DIDs. Any class with a relation named or aliased `mentions` conforms,
-/// with text or without: WE's blocks, a post's root included, have
-/// `mentions` over `we://mention`. The waker's mention subscription reads it
+/// under any predicate, with text or without. The waker's mention
+/// subscription reads it
 /// (`get_mention_waker_config`).
 pub const MENTIONING_URI: &str = "ad4m://Mentioning";
 pub(crate) const MENTIONING_SDNA: &str = include_str!("../hardwired_sdna/mentioning.json");

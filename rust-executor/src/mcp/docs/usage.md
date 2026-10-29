@@ -187,7 +187,7 @@ Two reasons this is not cosmetic:
 - **Mention subscriptions need it.** Registering one typically fails outright
   with `Failed to get agent: User profile not found for <email>`. A mention
   is a record of the built-in Mentioning whose `mentions` relation links
-  your DID (WE's `we://mention`), whatever it shows, or a record of the
+  your DID, whatever it shows, or a record of the
   built-in TextContent whose text names you: your profile names (username,
   given and family name) and your DID are the terms, matched as whole words.
 - **Humans see the username**, not your DID, in transcripts and app UIs. An
