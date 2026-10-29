@@ -1,14 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import { Ad4mClient } from "@coasys/ad4m";
+import { Ad4mClient, EventMap, PerspectiveProxy } from "@coasys/ad4m";
 
 type UUID = string;
-
-interface PerspectiveProxy {
-    uuid: UUID;
-    sharedUrl: string;
-    addListener(event: string, callback: Function): void;
-    removeListener(event: string, callback: Function): void;
-}
 
 export function usePerspectives(client: Ad4mClient) {
     const [perspectives, setPerspectives] = useState<{ [x: UUID]: PerspectiveProxy }>({});
@@ -34,20 +27,20 @@ export function usePerspectives(client: Ad4mClient) {
         };
 
         const addListeners = (p: PerspectiveProxy) => {
-            p.addListener("link-added", (link: any) => {
+            p.on("link-added", ({ link }) => {
                 onAddedLinkCbs.current.forEach((cb) => {
                     cb(p, link);
                 });
             });
 
-            p.addListener("link-removed", (link: any) => {
+            p.on("link-removed", ({ link }) => {
                 onRemovedLinkCbs.current.forEach((cb) => {
                     cb(p, link);
                 });
             });
         };
 
-        const perspectiveUpdatedListener = async (handle: any) => {
+        const perspectiveUpdatedListener = async ({ perspective: handle }: EventMap["perspective-updated"]) => {
             const perspective = await client.perspective.byUUID(handle.uuid);
             if (perspective) {
                 setPerspectives((prevPerspectives) => ({
@@ -57,7 +50,7 @@ export function usePerspectives(client: Ad4mClient) {
             }
         };
 
-        const perspectiveAddedListener = async (handle: any) => {
+        const perspectiveAddedListener = async ({ perspective: handle }: EventMap["perspective-added"]) => {
             const perspective = await client.perspective.byUUID(handle.uuid);
             if (perspective) {
                 setPerspectives((prevPerspectives) => ({
@@ -68,7 +61,7 @@ export function usePerspectives(client: Ad4mClient) {
             }
         };
 
-        const perspectiveRemovedListener = (uuid: UUID) => {
+        const perspectiveRemovedListener = ({ perspectiveUuid: uuid }: EventMap["perspective-removed"]) => {
             setPerspectives((prevPerspectives) => {
                 const newPerspectives = { ...prevPerspectives };
                 delete newPerspectives[uuid];
@@ -79,9 +72,9 @@ export function usePerspectives(client: Ad4mClient) {
         fetchPerspectives();
 
         const releases = [
-            client.perspective.addPerspectiveUpdatedListener(perspectiveUpdatedListener),
-            client.perspective.addPerspectiveAddedListener(perspectiveAddedListener),
-            client.perspective.addPerspectiveRemovedListener(perspectiveRemovedListener),
+            client.on("perspective-updated", perspectiveUpdatedListener),
+            client.on("perspective-added", perspectiveAddedListener),
+            client.on("perspective-removed", perspectiveRemovedListener),
         ];
 
         return () => releases.forEach((release) => release());

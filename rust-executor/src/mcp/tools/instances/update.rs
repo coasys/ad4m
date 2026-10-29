@@ -60,7 +60,16 @@ impl Ad4mMcpHandler {
             Ok(v) => v,
             Err(errors) => return validation_failure(&class_name, &errors),
         };
-        let setter_errors = check_setters(&perspective, &shape, &validated.scalars).await;
+        // Through an abstract class (#1435) the record's own classes' setters
+        // write; `update_subject` checks those.
+        let is_abstract = match perspective.is_abstract_class(&class_name) {
+            Ok(is_abstract) => is_abstract,
+            Err(e) => return error_json(format!("Error reading {class_name}'s shape: {e:#}")),
+        };
+        let setter_errors = match is_abstract {
+            true => vec![],
+            false => check_setters(&perspective, &shape, &validated.scalars).await,
+        };
         if !setter_errors.is_empty() {
             return validation_failure(&class_name, &setter_errors);
         }
@@ -108,11 +117,11 @@ impl Ad4mMcpHandler {
 
     /// Remove an instance and every link touching it.
     #[tool(
-        description = "Delete an instance of a subject class: removes all its property links, its type markers, and every inbound link from other instances (e.g. collection membership). Refuses if no instance of class_name exists at base_uri, so a wrong class or URI cannot delete something else. ⚠️ Irreversible."
+        description = "Delete an instance of a subject class: removes all its property links, its type markers, and every inbound link from other instances (e.g. collection membership). Refuses if no instance of class_name exists at base_uri, so a wrong class or URI cannot delete something else. Through an abstract class, runs the destructor of each of the record's classes it reads instead. ⚠️ Irreversible."
     )]
     pub async fn instance_remove(&self, params: Parameters<InstanceRemoveParams>) -> String {
         let p = &params.0;
-        let (mut perspective, _agent_context) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(&p.perspective_id).await {
                 Ok(v) => v,
                 Err(e) => return e,
@@ -129,6 +138,31 @@ impl Ad4mMcpHandler {
             Ok(Some(_)) => {}
             Ok(None) => return not_found(&class_name, &base_uri),
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
+        }
+
+        // Through an abstract class (#1435), the destructors of the record's
+        // classes it reads: the cascade below would delete its other classes.
+        let is_abstract = match perspective.is_abstract_class(&class_name) {
+            Ok(is_abstract) => is_abstract,
+            Err(e) => return error_json(format!("Error reading {class_name}'s shape: {e:#}")),
+        };
+        if is_abstract {
+            return match perspective
+                .remove_subject(
+                    subject_class(&class_name),
+                    base_uri.clone(),
+                    None,
+                    &agent_context,
+                )
+                .await
+            {
+                Ok(()) => pretty(&json!({
+                    "success": true,
+                    "class_name": class_name,
+                    "deleted": base_uri,
+                })),
+                Err(e) => error_json(format!("Error removing {class_name} instance: {e:#}")),
+            };
         }
 
         // Success only when both link queries and every removal succeeded.

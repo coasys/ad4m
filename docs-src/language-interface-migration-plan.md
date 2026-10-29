@@ -338,11 +338,11 @@ background work), use the primary local agent.
 
 **Checkpoint:** multi-user test still green. Add a new test asserting that
 a call from Alice's client causes the Language's `agentDid()` to return
-Alice's DID even if Bob's DID also exists on the node.
+Alice's DID even if Bob's DID also exists on the executor.
 
 ### Step B.3 — `peers.setLocal` push
 
-On agent join/leave the node (login, logout, new user added), the runtime
+On agent join/leave the executor (login, logout, new user added), the runtime
 iterates over every loaded Language instance with an exported
 `peersSetLocal` and pushes the updated local-agent set. Also called once
 at instance creation.
@@ -365,7 +365,7 @@ In `rust-executor/src/languages/wasm_delegate.rs` (or equivalent):
   distinct map entries.
 
 **Checkpoint:** p-diff-sync signal delivery still green. Add a new test
-where two Languages register different DNAs on the same node and each
+where two Languages register different DNAs on the same executor and each
 receives only its own signals.
 
 ### Step B.5 — Storage key/value implementation

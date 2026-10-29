@@ -1,0 +1,592 @@
+//! The RPC socket's per-connection loop (`ws_rpc::serve`), driven through
+//! channels in place of a WebSocket: client messages in, replies and events
+//! out, with the real event stream on the global pubsub.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
+
+use crate::agent::capabilities::{get_user_default_capabilities, ALL_CAPABILITY};
+use crate::agent::session::{Principal, Session};
+use crate::agent::AgentContext;
+use crate::api::events_ws::build_event_stream;
+use crate::api::tests::support::{admin_ctx, registered_perspective};
+use crate::api::ws_handler::{build_handler_map, HandlerMap};
+use crate::api::ws_rpc::{serve, Connection};
+use crate::events::{Audience, Event, Topic};
+use crate::pubsub::get_global_pubsub;
+use crate::types::RequestContext;
+
+const DID: &str = "did:key:alice";
+const QUERY: &str = "SELECT ?s WHERE { ?s ?p ?o }";
+
+/// The event stream's session: the user `did`, whose token nobody revokes and which never
+/// expires.
+fn listener(did: &str) -> Arc<Session> {
+    let user = Principal::Agent(AgentContext::managed(did.to_string()));
+    Arc::new(
+        Session::for_test(user)
+            .with_caps(get_user_default_capabilities())
+            .with_did(did),
+    )
+}
+
+struct Socket {
+    connection_id: String,
+    input: Option<mpsc::UnboundedSender<String>>,
+    out: mpsc::UnboundedReceiver<String>,
+    served: tokio::task::JoinHandle<()>,
+}
+
+impl Socket {
+    async fn open() -> Self {
+        Self::open_as(DID).await
+    }
+
+    async fn open_as(did: &str) -> Self {
+        Self::open_with(did, admin_ctx()).await
+    }
+
+    /// A socket whose requests run in `ctx` (on a new connection) and check its session; its
+    /// event stream never ends.
+    async fn open_with(did: &str, ctx: Arc<RequestContext>) -> Self {
+        Self::open_full(build_handler_map(), did, ctx).await
+    }
+
+    async fn open_with_handlers(handlers: HandlerMap) -> Self {
+        Self::open_full(handlers, DID, admin_ctx()).await
+    }
+
+    async fn open_full(handlers: HandlerMap, did: &str, ctx: Arc<RequestContext>) -> Self {
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let ctx = Arc::new((*ctx).clone().on_connection(&connection_id));
+        let (tx, out) = mpsc::unbounded_channel();
+        let (input, incoming) = mpsc::unbounded_channel();
+        let conn = Connection::new(Arc::new(handlers), ctx, tx);
+        let connection = Some(connection_id.clone());
+        let events = build_event_stream(listener(did), conn.interest(), connection).await;
+        let served = tokio::spawn(serve(conn, UnboundedReceiverStream::new(incoming), events));
+        Self {
+            connection_id,
+            input: Some(input),
+            out,
+            served,
+        }
+    }
+
+    fn send(&self, msg: Value) {
+        self.input.as_ref().unwrap().send(msg.to_string()).unwrap();
+    }
+
+    /// Next message sent to the client.
+    async fn next(&mut self) -> Value {
+        let msg = tokio::time::timeout(Duration::from_secs(10), self.out.recv())
+            .await
+            .expect("a message within 10 s")
+            .expect("the connection is open");
+        serde_json::from_str(&msg).unwrap()
+    }
+
+    /// Next message that is not an unrelated event from a parallel test.
+    async fn next_of(&mut self, keep: impl Fn(&Value) -> bool) -> Value {
+        loop {
+            let msg = self.next().await;
+            if keep(&msg) {
+                return msg;
+            }
+        }
+    }
+
+    async fn reply(&mut self, id: &str) -> Value {
+        self.next_of(|m| m["id"] == id).await
+    }
+
+    /// Perspectives of this run's link events received within 300 ms.
+    async fn link_events(&mut self, run: &str) -> Vec<String> {
+        let mut seen = vec![];
+        let _ = tokio::time::timeout(Duration::from_millis(300), async {
+            while let Some(msg) = self.out.recv().await {
+                let v: Value = serde_json::from_str(&msg).unwrap();
+                if v["type"] == "link-added" && v["link"]["data"]["source"] == run {
+                    seen.push(v["perspectiveUuid"].as_str().unwrap().to_string());
+                }
+            }
+        })
+        .await;
+        seen.sort();
+        seen
+    }
+
+    /// Close the client side of the socket and wait until it is served.
+    async fn close(&mut self) {
+        self.input = None;
+        tokio::time::timeout(Duration::from_secs(5), &mut self.served)
+            .await
+            .expect("serve returns once the socket closes")
+            .unwrap();
+    }
+
+    /// Open a live query on `perspective`; returns its subscription id.
+    async fn subscribe(&mut self, perspective: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.send(json!({ "id": id, "type": "perspective.subscribeQuery",
+            "params": { "uuid": perspective, "query": QUERY } }));
+        let reply = self.reply(&id).await;
+        reply["result"]["subscriptionId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+}
+
+/// `DID`'s copy of a link-added event of `perspective`, which `DID` owns.
+async fn publish_link(perspective: &str, run: &str) {
+    let payload = json!({
+        "perspectiveUuid": perspective,
+        "owner": DID,
+        "link": { "author": DID, "timestamp": run,
+                  "data": { "source": run, "predicate": null, "target": "t" } }
+    });
+    let event = Event::new(Topic::LinkAdded, Audience::Dids(vec![DID.into()]), payload);
+    get_global_pubsub().await.publish_event(event);
+}
+
+async fn publish_both(a: &str, b: &str, run: &str) {
+    publish_link(a, run).await;
+    publish_link(b, run).await;
+}
+
+#[tokio::test]
+async fn a_socket_gets_only_the_events_it_watches() {
+    let run = uuid::Uuid::new_v4().to_string();
+    let (a, b) = (format!("A-{run}"), format!("B-{run}"));
+    let mut socket = Socket::open().await;
+
+    publish_both(&a, &b, &run).await;
+    assert!(
+        socket.link_events(&run).await.is_empty(),
+        "no watch: no events"
+    );
+
+    socket.send(json!({ "id": "w", "type": "events.watch", "params": { "link-added": [a] } }));
+    assert_eq!(
+        socket.reply("w").await,
+        json!({ "id": "w", "result": true })
+    );
+    publish_both(&a, &b, &run).await;
+    assert_eq!(socket.link_events(&run).await, vec![a.clone()]);
+
+    socket.send(json!({ "id": "u", "type": "events.unwatch" }));
+    socket.reply("u").await;
+    publish_both(&a, &b, &run).await;
+    assert!(socket.link_events(&run).await.is_empty(), "unwatched");
+}
+
+#[tokio::test]
+async fn closing_the_socket_ends_the_event_task() {
+    let mut socket = Socket::open().await;
+    socket.send(json!({ "type": "ping" }));
+    assert_eq!(
+        socket.next_of(|m| m["type"] == "pong").await,
+        json!({ "type": "pong" })
+    );
+
+    socket.close().await;
+    // Every sender is gone, the event task's included: the channel closes
+    // even though the event stream itself never ends.
+    let rest = tokio::time::timeout(Duration::from_secs(5), async {
+        while socket.out.recv().await.is_some() {}
+    })
+    .await;
+    assert!(
+        rest.is_ok(),
+        "the event task still holds the socket's sender"
+    );
+}
+
+/// Perspective `uuid`, now owned by `DID`.
+async fn owned_by_alice(
+    uuid: &str,
+) -> crate::perspectives::perspective_instance::PerspectiveInstance {
+    let inst = crate::perspectives::get_perspective(uuid).unwrap();
+    inst.persisted.lock().await.owners = Some(vec![DID.to_string()]);
+    inst
+}
+
+#[tokio::test]
+async fn closing_the_socket_ends_its_subscriptions_only() {
+    let p = registered_perspective(&[]).await;
+    let (mut a, mut b) = (Socket::open().await, Socket::open().await);
+    let sub_a = a.subscribe(&p.0).await;
+    let sub_b = b.subscribe(&p.0).await;
+
+    a.close().await;
+    let perspective = crate::perspectives::get_perspective(&p.0).unwrap();
+    assert!(perspective
+        .subscription_state(&sub_a, &a.connection_id)
+        .await
+        .is_none());
+    assert!(
+        perspective
+            .subscription_state(&sub_b, &b.connection_id)
+            .await
+            .is_some(),
+        "the other connection keeps its subscription"
+    );
+}
+
+#[tokio::test]
+async fn a_prolog_live_query_gets_400() {
+    let p = registered_perspective(&[]).await;
+    let mut socket = Socket::open().await;
+    socket.send(
+        json!({ "id": "prolog", "type": "perspective.subscribeQuery",
+        "params": { "uuid": p.0, "query": "triple(X, _, \"todo-ontology://is-todo\")." } }),
+    );
+    let reply = socket.reply("prolog").await;
+    assert_eq!(reply["error"]["code"], 400, "{reply}");
+    assert_eq!(
+        reply["error"]["message"],
+        crate::perspectives::perspective_instance::PROLOG_LIVE_QUERY_UNSUPPORTED
+    );
+}
+
+/// Poll until `subscription` of `connection` is gone, for up to 2 s.
+async fn ended(perspective: &str, subscription: &str, connection: &str) -> bool {
+    let perspective = crate::perspectives::get_perspective(perspective).unwrap();
+    for _ in 0..40 {
+        if perspective
+            .subscription_state(subscription, connection)
+            .await
+            .is_none()
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
+    let p = registered_perspective(&[]).await;
+    let (block, late) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let late_id = Arc::new(std::sync::Mutex::new(None::<String>));
+    let mut handlers = build_handler_map();
+    let b = block.clone();
+    // Every method needs a guard, or the dispatcher refuses it before the handler runs.
+    handlers
+        .method::<Value, bool>("test.block", move |_, _| {
+            let b = b.clone();
+            async move {
+                b.notified().await;
+                Ok(json!(true))
+            }
+        })
+        .guard(crate::api::guards::Guard::Open);
+    let (l, slot, uuid) = (late.clone(), late_id.clone(), p.0.clone());
+    handlers
+        .method::<Value, bool>(
+            "test.subscribeLate",
+            move |_, ctx: Arc<crate::types::RequestContext>| {
+                let (l, slot, uuid) = (l.clone(), slot.clone(), uuid.clone());
+                async move {
+                    l.notified().await;
+                    let (id, _, _) = crate::perspectives::get_perspective(&uuid)
+                        .unwrap()
+                        .subscribe_and_query(QUERY.into(), ctx.connection_id.clone().unwrap(), None)
+                        .await
+                        .unwrap();
+                    *slot.lock().unwrap() = Some(id);
+                    Ok(json!(true))
+                }
+            },
+        )
+        .guard(crate::api::guards::Guard::Open);
+
+    let mut socket = Socket::open_with_handlers(handlers).await;
+    let early = socket.subscribe(&p.0).await;
+    socket.send(json!({ "id": "b", "type": "test.block" }));
+    socket.send(json!({ "id": "l", "type": "test.subscribeLate" }));
+    socket.input = None;
+
+    assert!(
+        ended(&p.0, &early, &socket.connection_id).await,
+        "a live query outlived its socket while a call was in flight"
+    );
+    late.notify_one();
+    // Bounded, so a late call that never runs fails the test instead of hanging it.
+    let late_sub = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(id) = late_id.lock().unwrap().clone() {
+                break id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("test.subscribeLate never subscribed");
+    assert!(
+        ended(&p.0, &late_sub, &socket.connection_id).await,
+        "a subscribe that completed after the close kept its live query"
+    );
+
+    block.notify_one();
+    socket.close().await;
+}
+
+#[tokio::test]
+async fn query_updates_reach_only_their_connection() {
+    // Both sockets are Alice's, who owns the perspective: only the connection tells them
+    // apart.
+    let p = registered_perspective(&[]).await;
+    let perspective = owned_by_alice(&p.0).await;
+    let (mut a, mut b) = (Socket::open().await, Socket::open().await);
+    let sub = uuid::Uuid::new_v4().to_string();
+    let delta =
+        serde_json::Map::from_iter([("added".into(), json!([])), ("removed".into(), json!([]))]);
+    perspective
+        .send_delta_update(
+            sub.clone(),
+            a.connection_id.clone(),
+            Some(DID.into()),
+            1,
+            delta,
+        )
+        .await;
+
+    let got = a.next_of(|m| m["subscriptionId"] == sub).await;
+    assert_eq!(got["type"], json!("query-subscription-update"));
+    assert!(
+        got.get("connectionId").is_none(),
+        "no routing key on the wire"
+    );
+    assert_eq!(got["perspectiveUuid"], json!(p.0));
+    assert_eq!(got["revision"], json!(1));
+    let leaked = tokio::time::timeout(
+        Duration::from_millis(300),
+        b.next_of(|m| m["subscriptionId"] == sub),
+    )
+    .await;
+    assert!(leaked.is_err(), "another connection got the update");
+}
+
+#[tokio::test]
+async fn a_watch_cannot_reach_another_users_link_events() {
+    // A watch only narrows what the owner filter lets through: naming
+    // another user's perspective, or watching every link, gets Bob nothing.
+    let run = uuid::Uuid::new_v4().to_string();
+    let a = format!("A-{run}");
+    let mut bob = Socket::open_as("did:key:bob").await;
+    bob.send(
+        json!({ "id": "w1", "type": "events.watch", "params": { "link-added": [a.clone()] } }),
+    );
+    bob.reply("w1").await;
+    publish_link(&a, &run).await;
+    assert!(
+        bob.link_events(&run).await.is_empty(),
+        "Bob named Alice's perspective"
+    );
+
+    bob.send(json!({ "id": "w2", "type": "events.watch", "params": { "link-added": null } }));
+    bob.reply("w2").await;
+    publish_link(&a, &run).await;
+    assert!(
+        bob.link_events(&run).await.is_empty(),
+        "Bob watched every link-added"
+    );
+
+    let mut alice = Socket::open().await;
+    alice.send(json!({ "id": "w3", "type": "events.watch", "params": { "link-added": null } }));
+    alice.reply("w3").await;
+    publish_link(&a, &run).await;
+    assert_eq!(alice.link_events(&run).await, vec![a], "the owner gets it");
+}
+
+#[tokio::test]
+async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
+    // An update needs both: its own connection, and a session in its audience (the
+    // subscriber among the perspective's owners, read when it is published). Bob's socket
+    // owns the connection of the second and third updates, and gets neither: Alice
+    // subscribed to the second, and Bob, who subscribed to the third, owns nothing.
+    let p = registered_perspective(&[]).await;
+    let perspective = owned_by_alice(&p.0).await;
+    let mut bob = Socket::open_as("did:key:bob").await;
+    let mut alice = Socket::open().await;
+
+    let send = |connection: &str, subscriber: &str| {
+        let sub = uuid::Uuid::new_v4().to_string();
+        let (perspective, connection) = (perspective.clone(), connection.to_string());
+        let subscriber = Some(subscriber.to_string());
+        async move {
+            perspective
+                .send_delta_update(sub.clone(), connection, subscriber, 1, Default::default())
+                .await;
+            sub
+        }
+    };
+    let sub = send(&alice.connection_id, DID).await;
+    let got = alice.next_of(|m| m["subscriptionId"] == sub).await;
+    assert_eq!(got["perspectiveUuid"], p.0, "the owner gets it");
+
+    let alices_on_bobs_connection = send(&bob.connection_id, DID).await;
+    let bobs_own = send(&bob.connection_id, "did:key:bob").await;
+    let leaked = tokio::time::timeout(
+        Duration::from_millis(500),
+        bob.next_of(|m| {
+            m["subscriptionId"] == alices_on_bobs_connection || m["subscriptionId"] == bobs_own
+        }),
+    )
+    .await;
+    assert!(
+        leaked.is_err(),
+        "Bob's connection got an update outside its audience: {leaked:?}"
+    );
+}
+
+#[tokio::test]
+async fn query_updates_of_a_co_owned_perspective_reach_only_the_subscriber() {
+    // A live query runs as its subscriber (the SDNA is filtered by owner), so its results are
+    // the subscriber's: they went to every owner, and co-owner Bob got Alice's. Each update
+    // goes to both connections; only the subscriber's session is in its audience.
+    let bob_did = "did:key:bob";
+    let p = registered_perspective(&[]).await;
+    let perspective = crate::perspectives::get_perspective(&p.0).unwrap();
+    perspective.persisted.lock().await.owners = Some(vec![DID.into(), bob_did.into()]);
+    let mut sockets = [Socket::open().await, Socket::open_as(bob_did).await];
+
+    for (subscriber, first) in [(DID, true), (bob_did, false)] {
+        let [alice, bob] = &mut sockets;
+        let (receiver, other) = if first { (alice, bob) } else { (bob, alice) };
+        let sub = uuid::Uuid::new_v4().to_string();
+        for connection in [&receiver.connection_id, &other.connection_id] {
+            perspective
+                .send_delta_update(
+                    sub.clone(),
+                    connection.clone(),
+                    Some(subscriber.into()),
+                    1,
+                    Default::default(),
+                )
+                .await;
+        }
+        let got = receiver.next_of(|m| m["subscriptionId"] == sub).await;
+        assert_eq!(got["perspectiveUuid"], p.0, "{subscriber} subscribed");
+        let leaked = tokio::time::timeout(
+            Duration::from_millis(500),
+            other.next_of(|m| m["subscriptionId"] == sub),
+        )
+        .await;
+        assert!(
+            leaked.is_err(),
+            "a co-owner got {subscriber}'s live-query update: {leaked:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_event_stream_that_ends_ends_the_session() {
+    // `build_event_stream` ends its stream when the token expires or gets
+    // revoked. `serve` must then stop reading, so the socket closes instead
+    // of staying open without events while the client keeps it.
+    let (tx, _out) = mpsc::unbounded_channel();
+    let (_input, incoming) = mpsc::unbounded_channel::<String>();
+    let conn = Connection::new(Arc::new(build_handler_map()), admin_ctx(), tx);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        serve(
+            conn,
+            UnboundedReceiverStream::new(incoming),
+            Box::pin(futures::stream::empty()),
+        ),
+    )
+    .await
+    .expect("serve returns once the event stream ends");
+}
+
+// A call in flight used to run on after its token was revoked: its cancel token did not
+// follow the session's end.
+#[tokio::test]
+async fn a_revocation_cancels_the_calls_in_flight() {
+    use crate::api::guards::Guard;
+    use crate::api::ws_handler::{HandlerMap, NoParams, WsRpcError};
+    let (started, mut cancel_tokens) = mpsc::unbounded_channel();
+    let mut map = HandlerMap::new();
+    // Every method needs a guard, or the dispatcher refuses it before the handler runs.
+    map.method::<NoParams, bool>("test.wait", move |_, ctx: Arc<RequestContext>| {
+        let started = started.clone();
+        async move {
+            started.send(ctx.cancel_token.clone().unwrap()).unwrap();
+            std::future::pending::<Result<Value, WsRpcError>>().await
+        }
+    })
+    .guard(Guard::Open);
+    let session = Session::for_test(Principal::Agent(AgentContext::main_agent()))
+        .with_caps(vec![ALL_CAPABILITY.clone()]);
+    let grant = session.grant().unwrap().clone();
+    let (tx, mut out) = mpsc::unbounded_channel();
+    let (input, incoming) = mpsc::unbounded_channel::<String>();
+    let conn = Connection::new(
+        Arc::new(map),
+        Arc::new(RequestContext::for_session(session)),
+        tx,
+    );
+    let served = tokio::spawn(serve(
+        conn,
+        UnboundedReceiverStream::new(incoming),
+        Box::pin(futures::stream::pending()),
+    ));
+    input
+        .send(json!({ "id": "1", "type": "test.wait" }).to_string())
+        .unwrap();
+    let call = tokio::time::timeout(Duration::from_secs(5), cancel_tokens.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    grant.ended.cancel();
+    tokio::time::timeout(Duration::from_secs(2), call.cancelled())
+        .await
+        .expect("the revocation cancels the call");
+    let reply: Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(2), out.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reply["id"], "1");
+    assert_eq!(reply["error"]["code"], 401, "{reply}");
+    tokio::time::timeout(Duration::from_secs(5), served)
+        .await
+        .expect("serve returns at the revocation")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_token_that_expired_gets_401_and_ends_the_connection() {
+    // The client keeps its side open: only the failed token check may end `serve`.
+    let an_hour_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 3600;
+    let expired = RequestContext::for_session(
+        Session::for_test(Principal::Agent(AgentContext::main_agent()))
+            .with_caps(vec![ALL_CAPABILITY.clone()])
+            .expiring_at(an_hour_ago),
+    );
+    let mut socket = Socket::open_with(DID, Arc::new(expired)).await;
+    socket.send(json!({ "id": "1", "type": "agent.status" }));
+    assert_eq!(socket.reply("1").await["error"]["code"], 401);
+    tokio::time::timeout(Duration::from_secs(5), &mut socket.served)
+        .await
+        .expect("serve returns once the token stops working")
+        .unwrap();
+}

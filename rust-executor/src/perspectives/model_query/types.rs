@@ -321,7 +321,14 @@ pub enum Scope {
         /// subscription) rather than one per parent.
         #[serde(deserialize_with = "deserialize_ids_flex")]
         ids: Vec<String>,
-        predicate: String,
+        /// The predicate to follow. `None` follows containment through
+        /// `Container` instead (see [`super::containment`]): every edge of the
+        /// edge set, each with its holder check, so `direction: "in"` from a
+        /// record reaches whatever holds it. A containment walk's
+        /// intermediate nodes are any container, not instances of the queried
+        /// class; only the rows are.
+        #[serde(default)]
+        predicate: Option<String>,
         /// Follow the predicate as far as it goes, rather than one step.
         ///
         /// Note the path reports only its endpoints: SPARQL property paths bind
@@ -372,7 +379,32 @@ pub enum Scope {
         /// wrong answer wearing the shape of a right one.
         #[serde(default)]
         levels: Option<Vec<usize>>,
+        /// With `transitive`, stop the walk after this many hops (`1` is the
+        /// direct neighbours). The walk is made in the executor one depth at
+        /// a time, so the bound holds over a union too. Refused without
+        /// `transitive` and beside `levels`.
+        #[serde(default, alias = "max_depth")]
+        max_depth: Option<usize>,
     },
+    /// `{ id }`: everything contained in `id`, through `Container` (see
+    /// [`super::containment`]): its `has_child` targets, and the targets of
+    /// the `children` predicate of each conforming class `id` is an
+    /// instance of. The caller never names `id`'s class.
+    ///
+    /// **Last**, and its struct refuses unknown fields: an untagged enum
+    /// takes the first variant that deserializes, and `{ id }` is a subset
+    /// of the variants above. Placed earlier it would read `{ id, predicate }`
+    /// as containment; without `deny_unknown_fields` a typo such as
+    /// `{ id, predicat }` would silently become a containment read instead of
+    /// an error.
+    Contained(ContainedScope),
+}
+
+/// The fields of [`Scope::Contained`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainedScope {
+    pub id: String,
 }
 
 /// Which way a traversal follows its predicate.
@@ -576,6 +608,13 @@ pub struct ModelQueryInput {
     /// Never on the wire.
     #[serde(skip)]
     pub(super) walked: Option<Vec<(String, String)>>,
+    /// The containment edge set a containment scope reads (`{ id }`, or a
+    /// `Traverse` naming no predicate), resolved by the perspective from the
+    /// installed classes and set before the query runs, on this query and on
+    /// every `include` sub-query (see [`super::containment::set_containment`]).
+    /// Unset, a containment scope reads `has_child` alone. Never on the wire.
+    #[serde(skip)]
+    pub(crate) containment: Option<super::containment::ContainmentEdges>,
 }
 
 /// Result returned by the model query endpoint.
@@ -985,9 +1024,22 @@ pub struct ModelShape {
     /// LLM extractor toward what instances of this class represent.  `None`
     /// when the SDNA declared no class hint.
     pub(crate) interpretation_hint: Option<String>,
+    /// An abstract class's optional names this shape lacks, as the abstract
+    /// class declares them. Only a view has any
+    /// (`abstract_classes::view_through`): the class conforms without them
+    /// and answers to them with nothing. A `where` on one matches no row, a
+    /// read of one is empty (`[]` for a collection, `null` otherwise), and
+    /// `links` lists no link for it. Empty for every stored shape.
+    pub(crate) absent: Vec<ShapeProperty>,
 }
 
 impl ModelShape {
+    /// The abstract class's declaration of `name` when this shape lacks it
+    /// (see [`Self::absent`]).
+    pub(crate) fn absent(&self, name: &str) -> Option<&ShapeProperty> {
+        self.absent.iter().find(|p| p.name == name)
+    }
+
     /// Returns all predicate IRIs declared in this shape (properties + relations + flags).
     pub fn predicates(&self) -> Vec<String> {
         let mut preds: Vec<String> = self

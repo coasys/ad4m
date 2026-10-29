@@ -30,8 +30,9 @@ cargo install --path .
 ```
 (Or install from Crates.io once we have published all dependencies: `cargo install ad4m`.)
 
-Run the Executor: Start the full runtime with:
+Run the Executor: Start the full runtime with an admin credential (required; see [Authentication](/auth)):
 ```bash
+export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"
 ad4m-executor run
 ```
 Use ad4m init first to generate an agent if needed. It runs on localhost:12000.

@@ -13,17 +13,17 @@ use super::errors::OpenAIJson;
 use super::errors::{OpenAIError, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::types::{EmbeddingItem, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage};
-use crate::agent::capabilities::{check_capability, AI_PROMPT_CAPABILITY};
+use crate::agent::capabilities::AI_PROMPT_CAPABILITY;
 use crate::ai_service::AIService;
-use crate::api::auth::AuthContext;
 use crate::billing::check_compute_credits;
-use crate::types::ModelType;
+use crate::types::{ModelType, RequestContext};
 
 pub async fn embeddings(
-    auth: AuthContext,
+    auth: RequestContext,
     OpenAIJson(req): OpenAIJson<EmbeddingRequest>,
 ) -> OpenAIResult<Json<EmbeddingResponse>> {
-    check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
+    auth.require(&AI_PROMPT_CAPABILITY)
+        .map_err(OpenAIError::forbidden)?;
 
     if let Some(ref fmt) = req.encoding_format {
         if fmt != "float" {
@@ -37,9 +37,8 @@ pub async fn embeddings(
     let model_id_response = req.model.clone();
     let inputs = req.input.into_vec();
 
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        check_compute_credits(&email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -54,7 +53,7 @@ pub async fn embeddings(
 
     for (index, text) in inputs.into_iter().enumerate() {
         let result = service
-            .embed(model_id.clone(), text, Some(auth.auth_token.clone()))
+            .embed(model_id.clone(), text, auth.user_did().map(str::to_string))
             .await
             .map_err(|e| OpenAIError::internal(e.to_string()))?;
         total_tokens += result.token_count as u64;

@@ -3,7 +3,6 @@ import { InteractionCall, InteractionMeta } from "../language/Language";
 import { ExpressionRendered } from "./Expression";
 import { Literal } from "../Literal";
 import { PersistentCache, createPersistentCache } from "../cache/PersistentCache";
-import type { CreateExpressionRequest, ExpressionManyRequest } from "../generated/api";
 
 interface CachedExpression {
     data: ExpressionRendered;
@@ -66,7 +65,7 @@ export class ExpressionClient {
             }
 
             // L3: network fetch
-            const result = await this.#apiClient.call<ExpressionRendered>('expression.get', { url });
+            const result = await this.#apiClient.call('expression.get', { url });
             this.#memCacheResult(url, result);
             this.#persistent.put(url, result); // fire-and-forget write to L2
             return result;
@@ -111,7 +110,7 @@ export class ExpressionClient {
 
         // L3: fetch only truly uncached URLs
         const uncachedUrls = stillMissing.map(i => urls[i]);
-        const fetched = await this.#apiClient.call<ExpressionRendered[]>(
+        const fetched = await this.#apiClient.call(
             'expression.getMany', { urls: uncachedUrls }
         );
 
@@ -160,20 +159,20 @@ export class ExpressionClient {
     }
 
     async getRaw(url: string): Promise<string> {
-        return this.#apiClient.call<string>('expression.get', { url, raw: true })
+        return this.#apiClient.call('expression.getRaw', { url })
     }
 
     async create(content: unknown, languageAddress: string): Promise<string> {
         const serialized = JSON.stringify(content)
-        return this.#apiClient.call<string>('expression.create', { content: serialized, languageAddress })
+        return this.#apiClient.call('expression.create', { content: serialized, languageAddress })
     }
 
     async interactions(url: string): Promise<InteractionMeta[]> {
-        return this.#apiClient.call<InteractionMeta[]>('expression.interactions', { url })
+        return this.#apiClient.call('expression.interactions', { url })
     }
 
     async interact(url: string, interactionCall: InteractionCall): Promise<string|null> {
-        const result = await this.#apiClient.call<string|null>('expression.interact', { url, interactionCall });
+        const result = await this.#apiClient.call('expression.interact', { url, interactionCall });
         // Interactions can mutate the expression — invalidate cache so next get() fetches fresh
         this.#memCache.delete(url);
         this.#inflight.delete(url);

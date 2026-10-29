@@ -5,10 +5,10 @@ use chrono::DateTime as ChronoDateTime;
 use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
-use oxigraph::store::Store;
+use oxigraph::store::{Store, StoreOptions, Transaction};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const ONT_AUTHOR: &str = "ad4m://ontology/author";
 const ONT_TIMESTAMP: &str = "ad4m://ontology/timestamp";
@@ -21,6 +21,42 @@ const ONT_STATUS: &str = "ad4m://ontology/status";
 /// [`signed_target_annotation`].
 const ONT_WIRE_TARGET: &str = "ad4m://ontology/wireTarget";
 const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+/// The vocabulary of the facts the store writes about each link on its
+/// reifier: author, timestamp, proof, verdict, status, signed target.
+const ONT_PREFIX: &str = "ad4m://ontology/";
+/// The vocabulary of the store's own bookkeeping.
+const SYSTEM_PREFIX: &str = "ad4m://system/";
+/// Where the store keeps its own bookkeeping, apart from any link.
+const MIGRATION_SUBJECT: &str = "ad4m://system/migration";
+
+/// Whether a link with `predicate` would state one of the store's own facts:
+/// an `rdf:reifies`, a fact about a link in the [`ONT_PREFIX`] vocabulary, or
+/// bookkeeping in the [`SYSTEM_PREFIX`] vocabulary.
+///
+/// The store writes those facts in the same default graph as the link
+/// triples, on reifier IRIs any peer can compute, so an application link in
+/// that vocabulary would add an author, a time or a "true" verdict to someone
+/// else's link, and its removal would delete one (#1564). The store refuses
+/// such links, and reads skip such triples as metadata.
+pub(crate) fn is_link_metadata(predicate: &str) -> bool {
+    predicate == RDF_REIFIES
+        || predicate.starts_with(ONT_PREFIX)
+        || predicate.starts_with(SYSTEM_PREFIX)
+}
+
+/// Refuse a link [`is_link_metadata`] marks.
+fn refuse_link_metadata(link: &LinkExpression) -> Result<(), Error> {
+    let predicate = link.data.predicate.as_deref().unwrap_or("");
+    if is_link_metadata(predicate) {
+        return Err(anyhow!(
+            "Refusing link in the store's own metadata vocabulary: {} -[{}]-> {}",
+            link.data.source,
+            predicate,
+            link.data.target
+        ));
+    }
+    Ok(())
+}
 
 /// Datatype IRI for AD4M JSON literals — used when a property holds a JSON
 /// payload (objects/arrays) that should round-trip through the store without
@@ -91,6 +127,22 @@ fn target_to_storage_term(target: &str) -> Term {
     }
 
     Term::NamedNode(NamedNode::new_unchecked(target))
+}
+
+/// The spelling a link target reads back with after a store round trip. A
+/// `literal:` target is stored as an RDF literal and re-encoded on the way
+/// out, so `literal:string:a b` reads back as `literal:string:a%20b`. For
+/// comparing a written target with one read from the store.
+pub(crate) fn canonical_target(target: &str) -> String {
+    storage_term_to_target_string(&target_to_storage_term(target))
+}
+
+/// Whether a link target is stored as an RDF literal (`literal:string:`,
+/// `:number:`, `:boolean:`, `:json:`), not as a node. A link source is always
+/// stored as a node, so a triple whose object is such a literal never links
+/// into a record: it is a value on its source.
+pub(crate) fn stored_as_literal(target: &str) -> bool {
+    matches!(target_to_storage_term(target), Term::Literal(_))
 }
 
 /// Inverse of [`target_to_storage_term`]: render a stored [`Term`] back into
@@ -413,6 +465,310 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
     (source_iri, predicate_iri, target_term)
 }
 
+/// Which proof annotations an insert may write on `reifier` (#1146), as `tx`
+/// reads the store.
+///
+/// The proof (key, signature, verdict and `wireTarget`) is one unit.
+/// The reifier does not hash it, so anyone who has seen a link can
+/// re-assert its five fields with another proof and land here. The unit
+/// is written only when nothing is stored yet, or as an upgrade: the
+/// stored verdict is not `"true"` and the incoming one is. Verified to
+/// verified is not an upgrade, because verification never reads the key:
+/// a replay of the author's signature with another key would rewrite it.
+///
+/// One partial write heals rows stored before #1141, which kept no
+/// `wireTarget`: a verified row without one, re-inserted with the same
+/// signature (the same statement), gets the signed target bytes back.
+fn proof_write(
+    tx: &Transaction<'_>,
+    reifier: &NamedNode,
+    incoming_valid: bool,
+    incoming_signature: &str,
+) -> Result<ProofWrite, Error> {
+    let key = annotation_values(tx, reifier, ONT_PROOF_KEY)?;
+    let signature = annotation_values(tx, reifier, ONT_PROOF_SIG)?;
+    let verdict = annotation_values(tx, reifier, ONT_PROOF_VALID)?;
+    if key.is_empty() && signature.is_empty() && verdict.is_empty() {
+        return Ok(ProofWrite::Whole);
+    }
+    let stored_valid = verdict.iter().any(|v| v == "true");
+    if !stored_valid {
+        return Ok(if incoming_valid {
+            ProofWrite::Whole
+        } else {
+            ProofWrite::Nothing
+        });
+    }
+    let same_statement = incoming_valid && signature == [incoming_signature];
+    let no_wire_target = annotation_values(tx, reifier, ONT_WIRE_TARGET)?.is_empty();
+    Ok(if same_statement && no_wire_target {
+        ProofWrite::WireTargetOnly
+    } else {
+        ProofWrite::Nothing
+    })
+}
+
+/// The literal values stored under `predicate` on `reifier`, as `tx` reads them.
+fn annotation_values(
+    tx: &Transaction<'_>,
+    reifier: &NamedNode,
+    predicate: &str,
+) -> Result<Vec<String>, Error> {
+    tx.quads_for_pattern(
+        Some(reifier.as_ref().into()),
+        Some(NamedNodeRef::new_unchecked(predicate)),
+        None,
+        Some(GraphNameRef::DefaultGraph),
+    )
+    .map(|q| {
+        q.map(|quad| match quad.object {
+            Term::Literal(l) => l.value().to_string(),
+            other => other.to_string(),
+        })
+        .map_err(Error::from)
+    })
+    .collect()
+}
+
+/// Whether the store, as `tx` reads it, holds `link` (by its reifier) with
+/// `Local` status. A link language's diff must not add to or remove such a
+/// link (#1146).
+fn is_stored_local(tx: &Transaction<'_>, link: &LinkExpression) -> Result<bool, Error> {
+    let local = status_str(&LinkStatus::Local);
+    Ok(annotation_values(tx, &make_reifier_iri(link), ONT_STATUS)?
+        .iter()
+        .any(|s| s == local))
+}
+
+/// Write all quads of `link` with `status` in `tx`: the direct triple, its
+/// reifier, and the reifier's annotations, each replacing what the reifier
+/// held for it.
+fn write_link_quads(
+    tx: &mut Transaction<'_>,
+    link: &LinkExpression,
+    status: &LinkStatus,
+) -> Result<(), Error> {
+    let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
+    let reifier_iri = make_reifier_iri(link);
+
+    // 1. Direct triple in default graph. `target_term` may be a typed
+    //    literal (for `literal:*` wire values) or a NamedNode.
+    let target_ref: TermRef = match &target_term {
+        Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
+        Term::Literal(l) => TermRef::Literal(l.as_ref()),
+        Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
+        Term::Triple(_) => {
+            return Err(anyhow!(
+                "Triple-shaped target is not supported in link storage"
+            ));
+        }
+    };
+    tx.insert(QuadRef::new(
+        source_iri.as_ref(),
+        predicate_iri.as_ref(),
+        target_ref,
+        GraphNameRef::DefaultGraph,
+    ));
+
+    // 2. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>>
+    //    Triple's object position accepts any Term, so a typed literal
+    //    target reifies the same way a NamedNode target does.
+    let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+    let triple_term = Triple::new(
+        source_iri.clone(),
+        predicate_iri.clone(),
+        target_term.clone(),
+    );
+    tx.insert(QuadRef::new(
+        reifier_iri.as_ref(),
+        rdf_reifies,
+        TermRef::Triple(&triple_term),
+        GraphNameRef::DefaultGraph,
+    ));
+
+    // 3. Metadata on the reifier node (all default graph)
+    let proof = &link.proof;
+
+    // `proof.valid` is a read view over the signature: always compute it from
+    // the key and signature, never trust the caller's field. This means no
+    // test helper, migration, or external caller can slip a fabricated or
+    // stale verdict onto disk. The caller's `proof.valid` is intentionally
+    // ignored here â tests that want `Some(true)` must carry a real signature.
+    let incoming_valid = link.compute_proof_valid();
+    let valid_str = incoming_valid.to_string();
+
+    let wire_target = signed_target_annotation(link, &target_term);
+
+    // `None` writes nothing, after clearing a stale value: a proof written
+    // with a canonical target must not keep the wire target of an earlier
+    // encoding.
+    let mut annotations: Vec<(&str, Option<&str>)> = vec![
+        (ONT_AUTHOR, Some(&link.author)),
+        (ONT_TIMESTAMP, Some(&link.timestamp)),
+        (ONT_STATUS, Some(status_str(status))),
+    ];
+    match proof_write(tx, &reifier_iri, incoming_valid, &proof.signature)? {
+        ProofWrite::Whole => annotations.extend([
+            (ONT_PROOF_KEY, Some(proof.key.as_str())),
+            (ONT_PROOF_SIG, Some(proof.signature.as_str())),
+            (ONT_PROOF_VALID, Some(valid_str.as_str())),
+            (ONT_WIRE_TARGET, wire_target.as_deref()),
+        ]),
+        ProofWrite::WireTargetOnly => annotations.push((ONT_WIRE_TARGET, wire_target.as_deref())),
+        ProofWrite::Nothing => {}
+    }
+
+    for (pred_uri, value) in &annotations {
+        let pred = NamedNodeRef::new_unchecked(pred_uri);
+
+        // Delete before insert. `make_reifier_iri` hashes author, source,
+        // predicate, target and timestamp — not the proof — so an upgraded
+        // proof lands on the same reifier as the one it replaces. Without
+        // the delete the old annotation stays alongside the new one, and
+        // the `OPTIONAL { ?reifier <proofValid> ?proofValid }` in
+        // `query_links` matches both quads and returns the link twice.
+        let stale: Vec<_> = tx
+            .quads_for_pattern(
+                Some(reifier_iri.as_ref().into()),
+                Some(pred),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        for quad in &stale {
+            tx.remove(quad);
+        }
+
+        let Some(value) = value else { continue };
+        let lit = literal(value);
+        tx.insert(QuadRef::new(
+            reifier_iri.as_ref(),
+            pred,
+            TermRef::Literal(lit.as_ref()),
+            GraphNameRef::DefaultGraph,
+        ));
+    }
+    Ok(())
+}
+
+/// The link `reifier` stands for, from the facts on it that are the link's own
+/// (see [`SparqlStore::purge_link_metadata_links`]), with its status. `None`
+/// when `reifier` is no link's, or no author and timestamp on it hash to it.
+fn signed_link_of(
+    tx: &Transaction<'_>,
+    reifier: &NamedNode,
+) -> Result<Option<(LinkExpression, LinkStatus)>, Error> {
+    let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+    let mut triple = None;
+    for quad in tx.quads_for_pattern(
+        Some(reifier.as_ref().into()),
+        Some(rdf_reifies),
+        None,
+        Some(GraphNameRef::DefaultGraph),
+    ) {
+        if let Term::Triple(t) = quad?.object {
+            if !is_link_metadata(t.predicate.as_str()) {
+                triple = Some(*t);
+            }
+        }
+    }
+    let Some(triple) = triple else {
+        return Ok(None);
+    };
+    let NamedOrBlankNode::NamedNode(source) = &triple.subject else {
+        return Ok(None);
+    };
+    let values = |predicate: &str| -> Result<Vec<String>, Error> {
+        let mut found = Vec::new();
+        for quad in tx.quads_for_pattern(
+            Some(reifier.as_ref().into()),
+            Some(NamedNodeRef::new_unchecked(predicate)),
+            None,
+            Some(GraphNameRef::DefaultGraph),
+        ) {
+            if let Term::Literal(l) = quad?.object {
+                found.push(l.value().to_string());
+            }
+        }
+        Ok(found)
+    };
+    let canonical = storage_term_to_target_string(&triple.object);
+    let link_with =
+        |author: &str, timestamp: &str, target: &str, key: &str, sig: &str| LinkExpression {
+            author: author.to_string(),
+            timestamp: timestamp.to_string(),
+            data: Link {
+                source: source.as_str().to_string(),
+                predicate: Some(triple.predicate.as_str().to_string()),
+                target: target.to_string(),
+            },
+            proof: crate::types::ExpressionProof {
+                key: key.to_string(),
+                signature: sig.to_string(),
+            },
+            status: None,
+        };
+
+    let (authors, timestamps) = (values(ONT_AUTHOR)?, values(ONT_TIMESTAMP)?);
+    let Some((author, timestamp)) = authors
+        .iter()
+        .flat_map(|a| timestamps.iter().map(move |t| (a, t)))
+        .find(|(a, t)| &make_reifier_iri(&link_with(a, t, &canonical, "", "")) == reifier)
+    else {
+        return Ok(None);
+    };
+
+    let mut targets = values(ONT_WIRE_TARGET)?;
+    targets.push(canonical.clone());
+    let (mut keys, sigs) = (values(ONT_PROOF_KEY)?, values(ONT_PROOF_SIG)?);
+    // A signature verifies against the author's DID whatever key it names,
+    // so the key the link was stored with is the one naming the author.
+    keys.sort_by_key(|key| !key.starts_with(author.as_str()));
+    let verified = targets.iter().find_map(|target| {
+        keys.iter().find_map(|key| {
+            sigs.iter()
+                .map(|sig| link_with(author, timestamp, target, key, sig))
+                .find(|link| link.compute_proof_valid())
+        })
+    });
+    let link = verified.unwrap_or_else(|| {
+        let first = |v: &[String]| v.first().cloned().unwrap_or_default();
+        link_with(author, timestamp, &targets[0], &first(&keys), &first(&sigs))
+    });
+    // A link's status is the executor's own bookkeeping, not signed; with
+    // more than one stated, a peer's link is Shared.
+    let statuses = values(ONT_STATUS)?;
+    let status = match statuses.as_slice() {
+        [only] if only == status_str(&LinkStatus::Local) => LinkStatus::Local,
+        _ => LinkStatus::Shared,
+    };
+    Ok(Some((link, status)))
+}
+
+/// RocksDB `max_open_files` for every persistent store.
+///
+/// Oxigraph's default derives it from the process fd limit (limit minus 48),
+/// so each of an executor's stores (one per perspective) may claim nearly the
+/// whole limit, and raising the limit at startup raises every store's share.
+///
+/// RocksDB gives `max_open_files - 10` to its table cache (open SSTs), split
+/// into 64 shards (`table_cache_numshardbits = 6`, which oxigraph does not
+/// expose). 266 gives 256 entries, four per shard. With one per shard (74),
+/// two SSTs in one shard evict each other and every eviction reopens a file
+/// and rereads its index: lookups ran up to 8× slower well below 64 SSTs.
+pub const SPARQL_STORE_MAX_OPEN_FILES: u32 = 266;
+
+/// Most descriptors one persistent store holds: the 256 SSTs of a full table
+/// cache plus its fixed files (LOCK, LOG, MANIFEST, the WAL, and one directory
+/// handle per column family: 17 on a fresh store), with room for an SST being
+/// written by a flush or compaction. RocksDB compacts L0 long before a store
+/// fills its cache, so a typical store holds about 70.
+///
+/// N perspectives may need N × this, so the executor's soft `RLIMIT_NOFILE`
+/// must sit well above the 1024 default: `fd_limit::raise_fd_limit_at_startup`
+/// (#1462) raises it.
+pub const SPARQL_STORE_FD_BUDGET: usize = 274;
+
 /// Oxigraph-backed SPARQL store for AD4M link data.
 /// Uses RDF 1.2 reifiers: direct triples in default graph with metadata
 /// attached via `rdf:reifies` triple terms.
@@ -430,13 +786,14 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 /// hands back those signed bytes.
 ///
 /// # Thread Safety
-/// Oxigraph's `Store` is `Send + Sync` and uses internal locking for concurrent access.
+/// Reads use Oxigraph snapshots. Clones share a writer lock held across each
+/// link transaction: RocksDB repeatable-read transactions do not validate
+/// reference-check conflicts when committing their write batches.
 #[derive(Clone)]
 pub struct SparqlStore {
     store: Arc<Store>,
-    /// Serialises link writes, so a remote change's `Local` check and its
-    /// write are one operation that no local write lands between (#1146).
-    write_lock: Arc<std::sync::Mutex<()>>,
+    /// Serializes link mutations and clear across every clone of this store.
+    writer: Arc<Mutex<()>>,
 }
 
 /// The SELECT behind [`SparqlStore::get_all_links`] and other link reads that
@@ -482,7 +839,11 @@ impl SparqlStore {
                     )
                 })?;
                 log::info!("Opening persistent SPARQL store at {:?}", store_path);
-                Store::open(&store_path).map_err(|e| {
+                Store::open_with_options(
+                    &store_path,
+                    StoreOptions::default().with_max_open_files(SPARQL_STORE_MAX_OPEN_FILES),
+                )
+                .map_err(|e| {
                     anyhow!(
                         "Failed to open persistent SPARQL store at {:?}: {}",
                         store_path,
@@ -494,7 +855,7 @@ impl SparqlStore {
         };
         Ok(SparqlStore {
             store: Arc::new(store),
-            write_lock: Arc::new(std::sync::Mutex::new(())),
+            writer: Arc::new(Mutex::new(())),
         })
     }
 
@@ -505,7 +866,7 @@ impl SparqlStore {
 
     /// Returns true if the store contains any quads beyond the migration marker.
     pub fn has_data(&self) -> bool {
-        let migration_subj = NamedNodeRef::new_unchecked("ad4m://system/migration");
+        let migration_subj = NamedNodeRef::new_unchecked(MIGRATION_SUBJECT);
         self.store
             .quads_for_pattern(None, None, None, None)
             .any(|q| {
@@ -515,56 +876,20 @@ impl SparqlStore {
             })
     }
 
+    /// Write all quads of one link in a single transaction: a failure, or a
+    /// crash before the commit, leaves none of them, and readers never see a
+    /// direct triple without its reifier and annotations. Every link the
+    /// store holds comes through here, so this is where a link in the store's
+    /// own metadata vocabulary is refused ([`is_link_metadata`]).
     fn insert_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
-        let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
-        let reifier_iri = make_reifier_iri(link);
+        self.write_link(link, false).map(|_| ())
+    }
 
-        // 1. Direct triple in default graph. `target_term` may be a typed
-        //    literal (for `literal:*` wire values) or a NamedNode.
-        let target_ref: TermRef = match &target_term {
-            Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
-            Term::Literal(l) => TermRef::Literal(l.as_ref()),
-            Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-            Term::Triple(_) => {
-                return Err(anyhow!(
-                    "Triple-shaped target is not supported in link storage"
-                ));
-            }
-        };
-        self.store.insert(QuadRef::new(
-            source_iri.as_ref(),
-            predicate_iri.as_ref(),
-            target_ref,
-            GraphNameRef::DefaultGraph,
-        ))?;
-
-        // 2. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>>
-        //    Triple's object position accepts any Term, so a typed literal
-        //    target reifies the same way a NamedNode target does.
-        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-        let triple_term = Triple::new(
-            source_iri.clone(),
-            predicate_iri.clone(),
-            target_term.clone(),
-        );
-        self.store.insert(QuadRef::new(
-            reifier_iri.as_ref(),
-            rdf_reifies,
-            TermRef::Triple(&triple_term),
-            GraphNameRef::DefaultGraph,
-        ))?;
-
-        // 3. Metadata on the reifier node (all default graph)
-        let proof = &link.proof;
-
-        // `proof.valid` is a read view over the signature: always compute it from
-        // the key and signature, never trust the caller's field. This means no
-        // test helper, migration, or external caller can slip a fabricated or
-        // stale verdict onto disk. The caller's `proof.valid` is intentionally
-        // ignored here â tests that want `Some(true)` must carry a real signature.
-        let incoming_valid = link.compute_proof_valid();
-        let valid_str = incoming_valid.to_string();
-
+    /// [`Self::insert_link_triples`]; with `skip_local`, a link this store
+    /// holds as `Local` is left alone and `false` returned (#1146). The
+    /// check and the write are one transaction under the writer lock, so no
+    /// other write lands between them.
+    fn write_link(&self, link: &LinkExpression, skip_local: bool) -> Result<bool, Error> {
         // Status must be decided by the caller, not defaulted here. A silent
         // `None => Shared` fallback would let any write path that forgot to
         // set it mislabel a local link as shared — the kind of quiet
@@ -580,172 +905,35 @@ impl SparqlStore {
                 link.data.target
             )
         })?;
-
-        let wire_target = signed_target_annotation(link, &target_term);
-
-        // `None` writes nothing, after clearing a stale value: a proof written
-        // with a canonical target must not keep the wire target of an earlier
-        // encoding.
-        let mut annotations: Vec<(&str, Option<&str>)> = vec![
-            (ONT_AUTHOR, Some(&link.author)),
-            (ONT_TIMESTAMP, Some(&link.timestamp)),
-            (ONT_STATUS, Some(status_str(status))),
-        ];
-        match self.proof_write(&reifier_iri, incoming_valid, &proof.signature)? {
-            ProofWrite::Whole => annotations.extend([
-                (ONT_PROOF_KEY, Some(proof.key.as_str())),
-                (ONT_PROOF_SIG, Some(proof.signature.as_str())),
-                (ONT_PROOF_VALID, Some(valid_str.as_str())),
-                (ONT_WIRE_TARGET, wire_target.as_deref()),
-            ]),
-            ProofWrite::WireTargetOnly => {
-                annotations.push((ONT_WIRE_TARGET, wire_target.as_deref()))
-            }
-            ProofWrite::Nothing => {}
+        refuse_link_metadata(link)?;
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let mut tx = self.store.start_transaction()?;
+        if skip_local && is_stored_local(&tx, link)? {
+            return Ok(false);
         }
-
-        for (pred_uri, value) in &annotations {
-            let pred = NamedNodeRef::new_unchecked(pred_uri);
-
-            // Delete before insert. `make_reifier_iri` hashes author, source,
-            // predicate, target and timestamp — not the proof — so an upgraded
-            // proof lands on the same reifier as the one it replaces. Without
-            // the delete the old annotation stays alongside the new one, and
-            // the `OPTIONAL { ?reifier <proofValid> ?proofValid }` in
-            // `query_links` matches both quads and returns the link twice.
-            let stale: Vec<_> = self
-                .store
-                .quads_for_pattern(
-                    Some(reifier_iri.as_ref().into()),
-                    Some(pred),
-                    None,
-                    Some(GraphNameRef::DefaultGraph),
-                )
-                .collect::<Result<Vec<_>, _>>()?;
-            for quad in &stale {
-                self.store.remove(quad)?;
-            }
-
-            let Some(value) = value else { continue };
-            let lit = literal(value);
-            self.store.insert(QuadRef::new(
-                reifier_iri.as_ref(),
-                pred,
-                TermRef::Literal(lit.as_ref()),
-                GraphNameRef::DefaultGraph,
-            ))?;
-        }
-
-        Ok(())
-    }
-
-    /// Which proof annotations an insert may write on `reifier` (#1146).
-    ///
-    /// The proof (key, signature, verdict and `wireTarget`) is one unit.
-    /// The reifier does not hash it, so anyone who has seen a link can
-    /// re-assert its five fields with another proof and land here. The unit
-    /// is written only when nothing is stored yet, or as an upgrade: the
-    /// stored verdict is not `"true"` and the incoming one is. Verified to
-    /// verified is not an upgrade, because verification never reads the key:
-    /// a replay of the author's signature with another key would rewrite it.
-    ///
-    /// One partial write heals rows stored before #1141, which kept no
-    /// `wireTarget`: a verified row without one, re-inserted with the same
-    /// signature (the same statement), gets the signed target bytes back.
-    fn proof_write(
-        &self,
-        reifier: &NamedNode,
-        incoming_valid: bool,
-        incoming_signature: &str,
-    ) -> Result<ProofWrite, Error> {
-        let key = self.annotation_values(reifier, ONT_PROOF_KEY)?;
-        let signature = self.annotation_values(reifier, ONT_PROOF_SIG)?;
-        let verdict = self.annotation_values(reifier, ONT_PROOF_VALID)?;
-        if key.is_empty() && signature.is_empty() && verdict.is_empty() {
-            return Ok(ProofWrite::Whole);
-        }
-        let stored_valid = verdict.iter().any(|v| v == "true");
-        if !stored_valid {
-            return Ok(if incoming_valid {
-                ProofWrite::Whole
-            } else {
-                ProofWrite::Nothing
-            });
-        }
-        let same_statement = incoming_valid && signature == [incoming_signature];
-        let no_wire_target = self.annotation_values(reifier, ONT_WIRE_TARGET)?.is_empty();
-        Ok(if same_statement && no_wire_target {
-            ProofWrite::WireTargetOnly
-        } else {
-            ProofWrite::Nothing
-        })
-    }
-
-    /// The literal values stored under `predicate` on `reifier`.
-    fn annotation_values(
-        &self,
-        reifier: &NamedNode,
-        predicate: &str,
-    ) -> Result<Vec<String>, Error> {
-        self.store
-            .quads_for_pattern(
-                Some(reifier.as_ref().into()),
-                Some(NamedNodeRef::new_unchecked(predicate)),
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .map(|q| {
-                q.map(|quad| match quad.object {
-                    Term::Literal(l) => l.value().to_string(),
-                    other => other.to_string(),
-                })
-                .map_err(Error::from)
-            })
-            .collect()
-    }
-
-    fn write_guard(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.write_lock.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Whether this store holds `link` (by its reifier) with `Local` status.
-    /// A link language's diff must not add to or remove such a link (#1146).
-    fn is_stored_local(&self, link: &LinkExpression) -> Result<bool, Error> {
-        let local = status_str(&LinkStatus::Local);
-        Ok(self
-            .annotation_values(&make_reifier_iri(link), ONT_STATUS)?
-            .iter()
-            .any(|s| s == local))
+        write_link_quads(&mut tx, link, status)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Insert triples for a link into the store.
     pub fn add_link(&self, link: &LinkExpression) -> Result<(), Error> {
-        let _write = self.write_guard();
         self.insert_link_triples(link)
     }
 
     /// A link language's addition: insert `link` unless this store holds it
-    /// as `Local` (#1146). Returns whether it was inserted. The check and the
-    /// insert hold the write lock together.
+    /// as `Local` (#1146). Returns whether it was inserted.
     pub(crate) fn add_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
-        let _write = self.write_guard();
-        if self.is_stored_local(link)? {
-            return Ok(false);
-        }
-        self.insert_link_triples(link)?;
-        Ok(true)
+        self.write_link(link, true)
     }
 
     /// A link language's removal: remove `link` unless this store holds it
-    /// as `Local` (#1146). Returns whether it was applied. The check and the
-    /// removal hold the write lock together.
+    /// as `Local` (#1146). Returns whether it was applied.
     pub(crate) fn remove_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
-        let _write = self.write_guard();
-        if self.is_stored_local(link)? {
-            return Ok(false);
-        }
-        self.remove_link_triples(link)?;
-        Ok(true)
+        self.delete_link(link, true)
     }
 
     /// Test-only: drop the `proofValid` annotation from a stored link's
@@ -792,16 +980,30 @@ impl SparqlStore {
 
     /// Remove all triples for a link from the store.
     pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
-        let _write = self.write_guard();
-        self.remove_link_triples(link)
+        self.delete_link(link, false).map(|_| ())
     }
 
-    fn remove_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
+    /// [`Self::remove_link`]; with `skip_local`, a link this store holds as
+    /// `Local` is left alone and `false` returned (#1146), checked in the
+    /// same transaction as the removal.
+    fn delete_link(&self, link: &LinkExpression, skip_local: bool) -> Result<bool, Error> {
+        // No link in the metadata vocabulary was stored, and removing one
+        // would delete the annotation it names on another link's reifier.
+        refuse_link_metadata(link)?;
+        // One transaction, as in `insert_link_triples`: the reifier, its
+        // annotations and the direct triple go together or not at all.
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let mut tx = self.store.start_transaction()?;
+        if skip_local && is_stored_local(&tx, link)? {
+            return Ok(false);
+        }
         let reifier_iri = make_reifier_iri(link);
 
         // 1. Remove all quads where reifier is subject (metadata + rdf:reifies)
-        let quads: Vec<_> = self
-            .store
+        let quads: Vec<_> = tx
             .quads_for_pattern(
                 Some(reifier_iri.as_ref().into()),
                 None,
@@ -810,16 +1012,16 @@ impl SparqlStore {
             )
             .collect::<Result<Vec<_>, _>>()?;
         for quad in &quads {
-            self.store.remove(quad)?;
+            tx.remove(quad);
         }
 
-        // 2. Remove the direct triple IF no other reifier references it
+        // 2. Remove the direct triple IF no other reifier references it. The
+        //    transaction reads its own removals, so this reifier no longer counts.
         let (source, predicate, target_term) = make_direct_triple(link);
         let triple_term = Triple::new(source.clone(), predicate.clone(), target_term.clone());
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
 
-        let still_referenced = self
-            .store
+        let still_referenced = tx
             .quads_for_pattern(
                 None,
                 Some(rdf_reifies),
@@ -834,17 +1036,21 @@ impl SparqlStore {
                 Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
                 Term::Literal(l) => TermRef::Literal(l.as_ref()),
                 Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-                Term::Triple(_) => return Ok(()),
+                Term::Triple(_) => {
+                    tx.commit()?;
+                    return Ok(true);
+                }
             };
-            self.store.remove(QuadRef::new(
+            tx.remove(QuadRef::new(
                 source.as_ref(),
                 predicate.as_ref(),
                 target_ref,
                 GraphNameRef::DefaultGraph,
-            ))?;
+            ));
         }
 
-        Ok(())
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Return all links in the store using a SPARQL 1.2 reifier query.
@@ -1033,7 +1239,7 @@ impl SparqlStore {
 
             // Skip reifier and metadata predicates — only process data triples
             let pred_str = quad.predicate.as_str();
-            if pred_str == RDF_REIFIES || pred_str.starts_with("ad4m://ontology/") {
+            if is_link_metadata(pred_str) {
                 continue;
             }
 
@@ -1215,6 +1421,79 @@ impl SparqlStore {
     /// Get all links with the given target.
     pub fn get_links_by_target(&self, target: &str) -> Result<Vec<DecoratedLinkExpression>, Error> {
         self.query_links(None, None, Some(target), None, None, None)
+    }
+
+    /// Whether the link triple `source predicate target` is stored, whoever
+    /// wrote it. One index lookup on the direct triple, without reading the
+    /// link's annotations.
+    pub(crate) fn has_triple(
+        &self,
+        source: &str,
+        predicate: &str,
+        target: &str,
+    ) -> Result<bool, Error> {
+        let target = target_to_storage_term(target);
+        Ok(self.store.contains(QuadRef::new(
+            NamedNodeRef::new_unchecked(source),
+            NamedNodeRef::new_unchecked(predicate),
+            target.as_ref(),
+            GraphNameRef::DefaultGraph,
+        ))?)
+    }
+
+    /// `(predicate, other end)` of every link triple with `node` at either
+    /// end, and with `predicate` when one is given, other ends in wire
+    /// spelling. `None` when there are more than `limit`: the caller asked to
+    /// stop there.
+    pub(crate) fn neighbours(
+        &self,
+        node: &str,
+        predicate: Option<&str>,
+        limit: usize,
+    ) -> Result<Option<Vec<(String, String)>>, Error> {
+        let mut out = Vec::new();
+        let as_subject = NamedNodeRef::new_unchecked(node);
+        let predicate = predicate.map(NamedNodeRef::new_unchecked);
+        for quad in self.store.quads_for_pattern(
+            Some(as_subject.into()),
+            predicate,
+            None,
+            Some(GraphNameRef::DefaultGraph),
+        ) {
+            let quad = quad?;
+            out.push((
+                quad.predicate.as_str().to_string(),
+                storage_term_to_target_string(&quad.object),
+            ));
+            if out.len() > limit {
+                return Ok(None);
+            }
+        }
+        let as_object = target_to_storage_term(node);
+        for quad in self.store.quads_for_pattern(
+            None,
+            predicate,
+            Some(as_object.as_ref()),
+            Some(GraphNameRef::DefaultGraph),
+        ) {
+            let quad = quad?;
+            let NamedOrBlankNode::NamedNode(source) = &quad.subject else {
+                continue;
+            };
+            // A reifier's annotations can carry the same literal; they are
+            // not links.
+            if source.as_str().starts_with("link:") {
+                continue;
+            }
+            out.push((
+                quad.predicate.as_str().to_string(),
+                source.as_str().to_string(),
+            ));
+            if out.len() > limit {
+                return Ok(None);
+            }
+        }
+        Ok(Some(out))
     }
 
     /// Get all links with the given predicate.
@@ -1509,7 +1788,10 @@ impl SparqlStore {
 
     /// Remove all triples from the store.
     pub fn clear(&self) -> Result<(), Error> {
-        let _write = self.write_guard();
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         self.store.clear()?;
         Ok(())
     }
@@ -1523,14 +1805,133 @@ impl SparqlStore {
             .map_err(|e| anyhow!("SPARQL store flush failed: {}", e))
     }
 
-    /// Clear the store and bulk-insert all provided links.
+    /// Write a consistent point-in-time copy of this store to `target`, which
+    /// must not exist yet: a RocksDB checkpoint, with the data files
+    /// hard-linked when `target` is on the same filesystem. Copying the live
+    /// store directory instead can capture files that do not belong together,
+    /// because writes and compaction keep changing it.
+    pub fn backup(&self, target: &std::path::Path) -> Result<(), Error> {
+        self.store
+            .backup(target)
+            .map_err(|e| anyhow!("SPARQL store backup to {:?} failed: {}", target, e))
+    }
+
+    /// Clear the store and bulk-insert all provided links, except those in
+    /// the store's own metadata vocabulary, which no store keeps.
     pub fn reload(&self, links: Vec<LinkExpression>) -> Result<(), Error> {
-        let _write = self.write_guard();
-        self.store.clear()?;
+        self.clear()?;
         for link in &links {
+            if refuse_link_metadata(link).is_err() {
+                log::warn!(
+                    "SPARQL reload: skipping a link in the metadata vocabulary: {} -[{}]-> {}",
+                    link.data.source,
+                    link.data.predicate.as_deref().unwrap_or(""),
+                    link.data.target
+                );
+                continue;
+            }
             self.insert_link_triples(link)?;
         }
         self.flush()?;
+        Ok(())
+    }
+
+    /// Remove every link in the store's metadata vocabulary that a store
+    /// written before [`is_link_metadata`] was refused still holds, and give
+    /// each link one of them targeted back the facts it was signed with
+    /// (#1564). Returns how many links it removed.
+    ///
+    /// It runs each time a perspective opens and keeps no record that it ran:
+    /// a record in the store could be one more such link, and one outside it
+    /// would not follow the store when a snapshot is restored. On a store
+    /// with none of these links it only reads.
+    ///
+    /// A link in that vocabulary is the only reified triple with such a
+    /// predicate: the store never reifies its own annotations. Each goes with
+    /// its reifier, its annotations and its direct triple. The direct triple
+    /// may equal an annotation the store wrote on the targeted reifier, so
+    /// each targeted link is rewritten afterwards from the facts the
+    /// targeted reifier holds that are its own: the author and timestamp
+    /// whose [`make_reifier_iri`] is that reifier, and the key, signature and
+    /// signed target that verify, if any do; its verdict is computed again.
+    pub fn purge_link_metadata_links(&self) -> Result<usize, Error> {
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let mut tx = self.store.start_transaction()?;
+        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+        let mut metadata_links: Vec<(NamedOrBlankNode, Triple)> = Vec::new();
+        for quad in tx.quads_for_pattern(
+            None,
+            Some(rdf_reifies),
+            None,
+            Some(GraphNameRef::DefaultGraph),
+        ) {
+            let quad = quad?;
+            if let Term::Triple(triple) = quad.object {
+                if is_link_metadata(triple.predicate.as_str()) {
+                    metadata_links.push((quad.subject, *triple));
+                }
+            }
+        }
+        if metadata_links.is_empty() {
+            return Ok(0);
+        }
+
+        let mut targeted: Vec<NamedNode> = metadata_links
+            .iter()
+            .filter_map(|(_, triple)| match &triple.subject {
+                NamedOrBlankNode::NamedNode(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
+        targeted.sort();
+        targeted.dedup();
+        let mut restored = Vec::new();
+        for reifier in &targeted {
+            if let Some(link) = signed_link_of(&tx, reifier)? {
+                restored.push(link);
+            }
+        }
+
+        for (reifier, triple) in &metadata_links {
+            let own: Vec<_> = tx
+                .quads_for_pattern(
+                    Some(reifier.as_ref()),
+                    None,
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                )
+                .collect::<Result<Vec<_>, _>>()?;
+            for quad in &own {
+                tx.remove(quad);
+            }
+            tx.remove(QuadRef::new(
+                triple.subject.as_ref(),
+                triple.predicate.as_ref(),
+                triple.object.as_ref(),
+                GraphNameRef::DefaultGraph,
+            ));
+        }
+        for (link, status) in &restored {
+            write_link_quads(&mut tx, link, status)?;
+        }
+        tx.commit()?;
+        Ok(metadata_links.len())
+    }
+
+    /// Store `link` without refusing a link in the metadata vocabulary: the
+    /// state of a store written before the store refused them.
+    #[cfg(test)]
+    pub(crate) fn add_link_unguarded(&self, link: &LinkExpression) -> Result<(), Error> {
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let mut tx = self.store.start_transaction()?;
+        write_link_quads(&mut tx, link, link.status.as_ref().unwrap())?;
+        tx.commit()?;
         Ok(())
     }
 }
@@ -1694,6 +2095,148 @@ mod tests {
             .find(|r| r["p"].as_str() == Some("ad4m://ontology/author"))
             .unwrap();
         assert_eq!(author_row["v"].as_str().unwrap(), signer.did.as_str());
+    }
+
+    /// A link the store refuses leaves no quad behind. The status check used
+    /// to run after the direct triple and the reifier were already stored.
+    #[test]
+    fn a_refused_link_leaves_no_quads() {
+        assert_refused_link_leaves_no_quads(new_service());
+    }
+
+    #[test]
+    fn a_refused_link_leaves_no_quads_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_refused_link_leaves_no_quads(
+            SparqlStore::new(Some(dir.path().to_str().unwrap())).unwrap(),
+        );
+    }
+
+    fn assert_refused_link_leaves_no_quads(svc: SparqlStore) {
+        let signer = TestSigner::generate();
+        let mut link = make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t");
+        link.status = None;
+
+        assert!(svc.add_link(&link).is_err());
+        assert_eq!(svc.quad_count(), 0);
+    }
+
+    /// A concurrent reader sees each link whole or not at all: never a direct
+    /// triple without its complete reifier, while links are added and removed.
+    #[test]
+    fn a_reader_never_sees_a_half_written_link() {
+        assert_reader_never_sees_a_half_written_link(new_service());
+    }
+
+    #[test]
+    fn a_reader_never_sees_a_half_written_link_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_reader_never_sees_a_half_written_link(
+            SparqlStore::new(Some(dir.path().to_str().unwrap())).unwrap(),
+        );
+    }
+
+    fn assert_reader_never_sees_a_half_written_link(svc: SparqlStore) {
+        let signer = TestSigner::generate();
+        let links: Vec<_> = (0..300)
+            .map(|i| make_link(&signer, &format!("ad4m://s/{i}"), "ad4m://p", "ad4m://t"))
+            .collect();
+        let half_written = format!(
+            "SELECT ?s WHERE {{ ?s <ad4m://p> ?t . FILTER NOT EXISTS {{ \
+               ?r <{RDF_REIFIES}> <<( ?s <ad4m://p> ?t )>> ; \
+                  <{ONT_AUTHOR}> ?a ; <{ONT_PROOF_VALID}> ?v }} }}"
+        );
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (svc, done) = (svc.clone(), done.clone());
+            std::thread::spawn(move || {
+                for link in &links {
+                    svc.add_link(link).unwrap();
+                }
+                for link in &links {
+                    svc.remove_link(link).unwrap();
+                }
+                done.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+
+        let mut reads = 0;
+        while !done.load(std::sync::atomic::Ordering::SeqCst) {
+            let rows: Vec<serde_json::Value> =
+                serde_json::from_str(&svc.query(&half_written).unwrap()).unwrap();
+            assert!(
+                rows.is_empty(),
+                "read {reads} saw half-written links: {rows:?}"
+            );
+            reads += 1;
+        }
+        writer.join().unwrap();
+        assert_eq!(svc.quad_count(), 0);
+    }
+
+    /// Two signed links can share one direct triple. Their removals must not
+    /// each retain the triple because a transaction snapshot still sees the
+    /// other reifier. Exercise cloned stores on RocksDB, not the serializing
+    /// in-memory transaction implementation.
+    #[test]
+    fn concurrent_removals_of_shared_triples_leave_no_ghosts_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let svc = SparqlStore::new(Some(path)).unwrap();
+        let signer = TestSigner::generate();
+        for i in 0..64 {
+            let source = format!("ad4m://shared/{i}");
+            let first = make_link_with_ts(
+                &signer,
+                &source,
+                "ad4m://p",
+                "ad4m://t",
+                "2024-01-01T00:00:00Z",
+            );
+            let second = make_link_with_ts(
+                &signer,
+                &source,
+                "ad4m://p",
+                "ad4m://t",
+                "2024-01-02T00:00:00Z",
+            );
+            svc.add_link(&first).unwrap();
+            svc.add_link(&second).unwrap();
+            let start = Arc::new(std::sync::Barrier::new(2));
+            let removals: Vec<_> = [first, second]
+                .into_iter()
+                .map(|link| {
+                    let (svc, start) = (svc.clone(), start.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        svc.remove_link(&link).unwrap();
+                    })
+                })
+                .collect();
+            for removal in removals {
+                removal.join().unwrap();
+            }
+            let rows: Vec<Value> = serde_json::from_str(
+                &svc.query("SELECT ?s WHERE { ?s <ad4m://p> <ad4m://t> }")
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                rows.is_empty(),
+                "round {i}: direct triples outlived their links: {rows:?}"
+            );
+            assert!(svc.get_all_links().unwrap().is_empty());
+            assert_eq!(
+                svc.quad_count(),
+                0,
+                "round {i}: stale reifier or annotation"
+            );
+        }
+        svc.flush().unwrap();
+        drop(svc);
+        let reopened = SparqlStore::new(Some(path)).unwrap();
+        assert_eq!(reopened.quad_count(), 0, "no ghost survives reopening");
     }
 
     #[test]
@@ -2402,6 +2945,313 @@ mod tests {
         svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t"))
             .unwrap();
         assert!(svc.has_data());
+    }
+
+    // ── Links in the store's metadata vocabulary (#1564) ──
+
+    const T1: &str = "2026-10-01T12:01:00.000Z";
+    const T2: &str = "2026-10-01T12:02:00.000Z";
+
+    /// `name` in the store's annotation vocabulary.
+    fn ontology(name: &str) -> String {
+        format!("{ONT_PREFIX}{name}")
+    }
+
+    /// A genuine mention, a mention claiming an author whose signature fails,
+    /// and their reifiers.
+    fn two_mentions(
+        writer: &TestSigner,
+        member: &TestSigner,
+        impostor: &TestSigner,
+        me: &str,
+    ) -> (LinkExpression, LinkExpression, String, String) {
+        let genuine = make_link_with_ts(writer, "ad4m://post", "we://mention", me, T1);
+        let mut claimed = make_link_with_ts(member, "ad4m://claimed", "we://mention", me, T2);
+        claimed.author = impostor.did.clone();
+        let (g, c) = (
+            make_reifier_iri(&genuine).as_str().to_string(),
+            make_reifier_iri(&claimed).as_str().to_string(),
+        );
+        (genuine, claimed, g, c)
+    }
+
+    /// Every `we://mention` link to `me` that another agent wrote and whose
+    /// signature verified, with the provenance its reifier holds: the facts
+    /// a model query's `__links` reads for a mention relation.
+    fn mention_rows(svc: &SparqlStore, me: &str) -> Value {
+        let query = format!(
+            "SELECT ?source ?author ?timestamp ?proofValid WHERE {{ \
+             ?source <we://mention> ?mentioned . \
+             FILTER(STR(?mentioned) = \"{me}\") \
+             ?reifier <{RDF_REIFIES}> <<( ?source <we://mention> ?mentioned )>> . \
+             ?reifier <{ONT_PREFIX}author> ?author . \
+             ?reifier <{ONT_PREFIX}timestamp> ?timestamp . \
+             ?reifier <{ONT_PREFIX}proofValid> ?proofValid . \
+             FILTER(STR(?proofValid) = \"true\" && STR(?author) != \"{me}\") \
+             }} ORDER BY DESC(?timestamp)"
+        );
+        serde_json::from_str(&svc.query(&query).unwrap()).unwrap()
+    }
+
+    fn only_the_writers_mention(writer: &TestSigner) -> Value {
+        serde_json::json!([{
+            "source": "ad4m://post",
+            "author": writer.did,
+            "timestamp": T1,
+            "proofValid": "true",
+        }])
+    }
+
+    /// Every write and delete of a link refuses one that would state a fact
+    /// in the store's own vocabulary, so none reaches another link's
+    /// reifier; a rebuild skips one.
+    #[test]
+    fn the_store_refuses_links_in_its_metadata_vocabulary() {
+        let (me, writer, member, impostor) = (
+            TestSigner::generate(),
+            TestSigner::generate(),
+            TestSigner::generate(),
+            TestSigner::generate(),
+        );
+        let svc = new_service();
+        let (genuine, claimed, g, c) = two_mentions(&writer, &member, &impostor, &me.did);
+        svc.add_link(&genuine).unwrap();
+        svc.add_link(&claimed).unwrap();
+
+        let forged_author = make_link(
+            &member,
+            &g,
+            &ontology("author"),
+            &format!("literal:string:{}", impostor.did),
+        );
+        let forged_verdict = make_link(&member, &c, &ontology("proofValid"), "literal:string:true");
+        let forged_reifies = make_link(&member, &g, RDF_REIFIES, "ad4m://elsewhere");
+        let forged_bookkeeping = swept_flag(&member);
+        for forged in [
+            &forged_author,
+            &forged_verdict,
+            &forged_reifies,
+            &forged_bookkeeping,
+        ] {
+            let refused = svc.add_link(forged).unwrap_err().to_string();
+            assert!(refused.contains("metadata vocabulary"), "{refused}");
+        }
+        let erase = make_link(
+            &member,
+            &g,
+            &ontology("author"),
+            &format!("literal:string:{}", writer.did),
+        );
+        assert!(svc.remove_link(&erase).is_err());
+        assert!(svc.remove_link(&forged_bookkeeping).is_err());
+        assert_eq!(
+            mention_rows(&svc, &me.did),
+            only_the_writers_mention(&writer)
+        );
+
+        svc.reload(vec![genuine, claimed, forged_author, forged_verdict])
+            .unwrap();
+        assert_eq!(
+            mention_rows(&svc, &me.did),
+            only_the_writers_mention(&writer)
+        );
+        assert_eq!(svc.get_all_links().unwrap().len(), 2);
+    }
+
+    /// A store written before it refused those links keeps what they stated
+    /// until the sweep: it removes them, and gives the link they targeted
+    /// back its own author, time and verdict, including an annotation a
+    /// forged link happened to equal. A swept store is swept again: nothing
+    /// in it says it was.
+    #[test]
+    fn the_sweep_removes_metadata_links_a_store_already_holds() {
+        let (me, writer, member, impostor) = (
+            TestSigner::generate(),
+            TestSigner::generate(),
+            TestSigner::generate(),
+            TestSigner::generate(),
+        );
+        let svc = new_service();
+        let (genuine, claimed, g, c) = two_mentions(&writer, &member, &impostor, &me.did);
+        svc.add_link(&genuine).unwrap();
+        svc.add_link(&claimed).unwrap();
+        let as_string = |v: &str| format!("literal:string:{v}");
+        let forged = [
+            make_link(&member, &g, &ontology("author"), &as_string(&impostor.did)),
+            make_link(&member, &g, &ontology("author"), &as_string(&writer.did)),
+            make_link(
+                &member,
+                &g,
+                &ontology("timestamp"),
+                &as_string("2099-01-01T00:00:00.000Z"),
+            ),
+            make_link(&member, &g, &ontology("proofKey"), &as_string(&member.did)),
+            make_link(&member, &c, &ontology("proofValid"), &as_string("true")),
+        ];
+        for link in &forged {
+            svc.add_link_unguarded(link).unwrap();
+        }
+        assert_ne!(
+            mention_rows(&svc, &me.did),
+            only_the_writers_mention(&writer)
+        );
+
+        assert_eq!(svc.purge_link_metadata_links().unwrap(), forged.len());
+        assert_eq!(
+            mention_rows(&svc, &me.did),
+            only_the_writers_mention(&writer)
+        );
+        let mut links = svc.get_all_links().unwrap();
+        links.sort_by(|a, b| a.data.source.cmp(&b.data.source));
+        assert_eq!(links.len(), 2, "{links:?}");
+        assert_eq!(links[0].data.source, "ad4m://claimed");
+        assert_eq!(links[0].proof.valid, Some(false));
+        assert_eq!(links[1].data.source, "ad4m://post");
+        assert_eq!(links[1].author, writer.did);
+        assert_eq!(links[1].timestamp, T1);
+        assert_eq!(links[1].proof.key, genuine.proof.key);
+        assert_eq!(links[1].proof.valid, Some(true));
+
+        svc.add_link_unguarded(&forged[4]).unwrap();
+        assert_eq!(svc.purge_link_metadata_links().unwrap(), 1, "swept again");
+        assert_eq!(
+            mention_rows(&svc, &me.did),
+            only_the_writers_mention(&writer)
+        );
+    }
+
+    /// A link stating, in the store's bookkeeping vocabulary, that the store
+    /// was swept: what a member could sign before the store refused it.
+    fn swept_flag(member: &TestSigner) -> LinkExpression {
+        make_link(
+            member,
+            "ad4m://system/migration",
+            "ad4m://system/linkMetadataSwept",
+            "literal:string:true",
+        )
+    }
+
+    /// A perspective in the executor's database whose store, at
+    /// `<data path>/perspectives/<uuid>`, an older executor wrote: a genuine
+    /// mention, a claimed one, and links in the metadata vocabulary on both.
+    /// When dropped, it forgets the perspective and restores the data path.
+    struct OldStore {
+        _dir: tempfile::TempDir,
+        previous_path: Option<String>,
+        uuid: String,
+        me: TestSigner,
+        writer: TestSigner,
+    }
+
+    impl OldStore {
+        fn new(extra: impl Fn(&TestSigner) -> Vec<LinkExpression>) -> Self {
+            crate::test_utils::setup_wallet();
+            crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+            crate::agent::AgentService::init_global_test_instance();
+            let dir = tempfile::tempdir().unwrap();
+            let previous_path = crate::perspectives::get_app_data_path();
+            crate::perspectives::set_app_data_path(dir.path().to_str().unwrap().to_string());
+            let handle = crate::types::PerspectiveHandle::new_from_name("old store".to_string());
+            crate::db::Ad4mDb::with_global_instance(|db| db.add_perspective(&handle)).unwrap();
+
+            let (me, writer, member, impostor) = (
+                TestSigner::generate(),
+                TestSigner::generate(),
+                TestSigner::generate(),
+                TestSigner::generate(),
+            );
+            let store_path = dir.path().join("perspectives").join(&handle.uuid);
+            let svc = SparqlStore::new(Some(store_path.to_str().unwrap())).unwrap();
+            let (genuine, claimed, g, c) = two_mentions(&writer, &member, &impostor, &me.did);
+            svc.add_link(&genuine).unwrap();
+            svc.add_link(&claimed).unwrap();
+            let as_string = |v: &str| format!("literal:string:{v}");
+            let mut old_links = vec![
+                make_link(&member, &g, &ontology("author"), &as_string(&impostor.did)),
+                make_link(&member, &c, &ontology("proofValid"), &as_string("true")),
+            ];
+            old_links.extend(extra(&member));
+            for link in &old_links {
+                svc.add_link_unguarded(link).unwrap();
+            }
+            assert_ne!(
+                mention_rows(&svc, &me.did),
+                only_the_writers_mention(&writer)
+            );
+            drop(svc);
+
+            OldStore {
+                _dir: dir,
+                previous_path,
+                uuid: handle.uuid,
+                me,
+                writer,
+            }
+        }
+
+        /// Start the executor's perspectives, wait for them, and return this
+        /// one if it opened.
+        async fn start(
+            &self,
+        ) -> Option<crate::perspectives::perspective_instance::PerspectiveInstance> {
+            for task in crate::perspectives::initialize_from_db() {
+                task.await.unwrap();
+            }
+            crate::perspectives::get_perspective(&self.uuid)
+        }
+
+        fn forget(&self) {
+            crate::perspectives::PERSPECTIVES
+                .write()
+                .unwrap()
+                .remove(&self.uuid);
+        }
+    }
+
+    impl Drop for OldStore {
+        fn drop(&mut self) {
+            self.forget();
+            crate::perspectives::FAIL_METADATA_SWEEP
+                .lock()
+                .unwrap()
+                .retain(|uuid| uuid != &self.uuid);
+            *crate::perspectives::APP_DATA_PATH.write().unwrap() = self.previous_path.take();
+        }
+    }
+
+    /// An old store may also hold a member's link saying the store was
+    /// swept. Startup does not take the store's word for it: it opens the
+    /// perspective with the mention's own provenance.
+    #[tokio::test]
+    async fn startup_sweeps_an_old_store_that_says_it_was_swept() {
+        let old = OldStore::new(|member| vec![swept_flag(member)]);
+        let p = old.start().await.expect("the perspective opens");
+        assert_eq!(
+            mention_rows(&p.sparql_store, &old.me.did),
+            only_the_writers_mention(&old.writer)
+        );
+    }
+
+    /// When the sweep fails, the perspective does not open over a store that
+    /// may still hold forged provenance. The next start opens it swept.
+    #[tokio::test]
+    async fn startup_does_not_open_a_perspective_whose_sweep_failed() {
+        let old = OldStore::new(|_| vec![]);
+        crate::perspectives::FAIL_METADATA_SWEEP
+            .lock()
+            .unwrap()
+            .push(old.uuid.clone());
+        assert!(old.start().await.is_none(), "opened unswept");
+
+        crate::perspectives::FAIL_METADATA_SWEEP
+            .lock()
+            .unwrap()
+            .retain(|uuid| uuid != &old.uuid);
+        let p = old.start().await.expect("the perspective opens");
+        assert_eq!(
+            mention_rows(&p.sparql_store, &old.me.did),
+            only_the_writers_mention(&old.writer)
+        );
     }
 
     // ── Error messages ──
@@ -4300,7 +5150,7 @@ mod tests {
         svc.add_link(&make_link(
             &signer,
             "ad4m://msg1",
-            "ad4m://ontology/author",
+            "flux://author",
             "did:key:zAlice",
         ))
         .unwrap();
@@ -4339,7 +5189,40 @@ mod tests {
             internal_result
         );
     }
+
+    // ── Source literal round-trip (no normalization) ─────────────────────
+
+    #[test]
+    fn test_literal_string_source_remove_round_trip() {
+        let signer = TestSigner::generate();
+        let store = new_service();
+        let link = make_link(&signer, "literal:string:hello", "test://pred", "test://obj");
+        store.add_link(&link).expect("add");
+
+        // Verify it was added
+        let all = store.get_all_links().expect("get_all");
+        assert!(
+            all.iter().any(|l| l.data.source == "literal:string:hello"),
+            "link should appear in get_all_links"
+        );
+
+        // Remove it
+        store.remove_link(&link).expect("remove");
+
+        // Verify removal
+        let all_after = store.get_all_links().expect("get_all_after");
+        assert!(
+            !all_after
+                .iter()
+                .any(|l| l.data.source == "literal:string:hello"),
+            "link should no longer appear after removal"
+        );
+    }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "sparql_store_fd_tests.rs"]
+mod fd_tests;
 
 #[cfg(test)]
 mod parse_literal_tests {

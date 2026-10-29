@@ -27,6 +27,10 @@ extern "C" {
     pub fn agent_sign(payload: &[u8]) -> Result<Vec<u8>, JsValue>;
     #[wasm_bindgen(js_name = "agentSignStringHex", catch)]
     pub fn agent_sign_string_hex(payload: &str) -> Result<String, JsValue>;
+    /// Opens a box sealed to the calling agent; returns the plaintext as hex.
+    /// Fails for a box sealed to any other DID.
+    #[wasm_bindgen(js_name = "agentOpenSealed", catch)]
+    pub fn agent_open_sealed(sealed: JsValue) -> Result<String, JsValue>;
     #[wasm_bindgen(js_name = "agentCreateSignedExpression", catch)]
     pub fn agent_create_signed_expression(data: JsValue) -> Result<JsValue, JsValue>;
 
@@ -64,7 +68,8 @@ extern "C" {
     // headers), `body` is a raw request body string (empty for GET/HEAD).
     // Returns `{ status: number, body: string }` — the caller decides
     // how to handle non-2xx status codes. Only rejects on network-level
-    // failures (DNS, connection refused, etc.).
+    // failures (DNS, connection refused, etc.) and when the call, body
+    // included, takes longer than 10 s (the error names the URL).
     #[wasm_bindgen(js_name = "httpFetch", catch)]
     pub async fn http_fetch(
         url: &str,
@@ -214,7 +219,8 @@ impl HttpFetchResponse {
 }
 
 /// Typed wrapper around `http_fetch` — extracts `{ status, body }` from
-/// the JS response object. Only returns `Err` on network-level failures;
+/// the JS response object. Only returns `Err` on network-level failures
+/// and the host's 10 s timeout;
 /// HTTP error codes (4xx, 5xx) appear in the `Ok` variant's `status` field.
 pub async fn http_fetch_typed(
     url: &str,

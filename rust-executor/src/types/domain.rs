@@ -1,27 +1,20 @@
 use super::core::{
     AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
-    ExpressionProof, Link, ModelType, Notification, TriggeredNotification,
+    ExpressionProof, Link, ModelType,
 };
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify_or_false;
+use crate::secret::Secret;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// Who is calling, for one request: the caller's session and the request's cancel token.
+/// The RPC socket builds one per connection; REST and the OpenAI-compatible API extract one
+/// per request (`api::auth`).
 #[derive(Clone)]
 pub struct RequestContext {
-    pub capabilities: Result<Vec<Capability>, String>,
-    pub auto_permit_cap_requests: bool,
-    pub auth_token: String,
-    /// True when the request was authenticated with the launcher's admin_credential token.
-    /// Only the launcher (or legacy single-user empty-token) qualifies.
-    /// Regular app tokens (JWT) never have this set, regardless of which capabilities they hold.
-    pub is_admin_credential: bool,
-    /// Cached user email resolved once at connection time (multi-user mode).
-    pub user_email: Option<String>,
-    /// Cached user DID resolved once at connection time (multi-user mode).
-    pub user_did: Option<String>,
     /// Per-request cancellation token, populated by the WS RPC dispatcher
     /// when the client may send `request.cancel`.  Handlers that want to
     /// support mid-flight cancellation can clone this and pass it to
@@ -32,9 +25,109 @@ pub struct RequestContext {
     /// — handlers should treat the absence of a token as "no cancellation
     /// signalling available" and proceed normally.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// The caller's session. Handlers take their identity from it.
+    pub session: std::sync::Arc<crate::agent::session::Session>,
+    /// Id of the WS RPC connection the request arrived on, generated once
+    /// per socket. Live queries belong to it and end when it closes. `None`
+    /// outside the WS RPC socket (REST, `/api/v1/ws/events`, internal code).
+    pub connection_id: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+impl RequestContext {
+    /// The context of a caller that presents `token` on a listener with this reach.
+    ///
+    /// Fails for a token that opens no session: invalid, expired, revoked, a user whose DID
+    /// does not load, or any token while the wallet is locked. The caller refuses such a
+    /// token where it arrives. An empty token opens a session (the operator or an anonymous
+    /// caller).
+    pub fn open(
+        token: &str,
+        admin_credential: &Option<crate::secret::Secret>,
+        reach: crate::agent::capabilities::ListenerReach,
+    ) -> Result<Self, crate::agent::session::AuthError> {
+        let session = crate::agent::session::Session::open(token, admin_credential, reach)?;
+        Ok(RequestContext {
+            cancel_token: None,
+            session: std::sync::Arc::new(session),
+            connection_id: None,
+        })
+    }
+
+    /// `Ok` if the session may do `expected`; otherwise the error a refused call reports
+    /// (403 at every surface).
+    pub fn require(&self, expected: &Capability) -> Result<(), String> {
+        self.session.require(expected)
+    }
+
+    /// The agent a request acts as: a grant's agent, else the executor's main agent.
+    pub fn acts_as(&self) -> crate::agent::AgentContext {
+        self.session.acts_as()
+    }
+
+    /// The DID of the managed agent the session acts as, if it acts as one: the session of
+    /// a user. `None` for the main agent, the operator and anonymous callers.
+    pub fn user_did(&self) -> Option<&str> {
+        self.session.managed_did()
+    }
+
+    /// Whether the caller is the executor's operator: the admin credential, or no token on a
+    /// loopback listener of an executor without one. A grant never is, whatever its
+    /// capabilities.
+    pub fn is_operator(&self) -> bool {
+        self.session.is_operator()
+    }
+}
+
+#[cfg(test)]
+impl RequestContext {
+    /// A context for `session`, with no token.
+    pub(crate) fn for_session(session: crate::agent::session::Session) -> RequestContext {
+        RequestContext {
+            cancel_token: None,
+            session: std::sync::Arc::new(session),
+            connection_id: None,
+        }
+    }
+
+    /// A context for `principal` (see `Session::for_test`), with no token.
+    pub(crate) fn for_test(principal: crate::agent::session::Principal) -> RequestContext {
+        Self::for_session(crate::agent::session::Session::for_test(principal))
+    }
+
+    /// The operator's context.
+    pub(crate) fn operator_for_test() -> RequestContext {
+        Self::for_test(crate::agent::session::Principal::Operator)
+    }
+
+    /// A grant on the main agent, limited to `caps`.
+    pub(crate) fn app_for_test(caps: Vec<Capability>) -> RequestContext {
+        Self::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
+                crate::agent::AgentContext::main_agent(),
+            ))
+            .with_caps(caps),
+        )
+    }
+
+    /// A grant on the managed agent `did`, limited to `caps`.
+    pub(crate) fn user_for_test(did: &str, caps: Vec<Capability>) -> RequestContext {
+        Self::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
+                crate::agent::AgentContext::managed(did.to_string()),
+            ))
+            .with_caps(caps)
+            .with_did(did),
+        )
+    }
+
+    /// The same context, arriving on the RPC connection `id`.
+    pub(crate) fn on_connection(mut self, id: &str) -> RequestContext {
+        self.connection_id = Some(id.to_string());
+        self
+    }
+}
+
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
     pub did: String,
@@ -42,14 +135,14 @@ pub struct Agent {
     pub perspective: Option<Perspective>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSignature {
     pub public_key: String,
     pub signature: String,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
     pub did: Option<String>,
@@ -59,18 +152,21 @@ pub struct AgentStatus {
     pub is_unlocked: bool,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Apps {
     pub auth: AuthInfo,
     pub request_id: String,
     pub revoked: Option<bool>,
+    /// Always empty: the executor does not keep app tokens, and an app receives its token
+    /// once, from `agent.generateJwt`. The field stays for clients that require it.
     pub token: String,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+#[ts(optional_fields)]
 pub struct AuthInfoInput {
     pub app_desc: String,
     pub app_domain: String,
@@ -89,7 +185,7 @@ pub struct CapabilityInput {
     pub with: ResourceInput,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 // The javascript `Date` as string. pub struct represents date and time as the ISO Date string.
 pub struct DateTime(chrono::DateTime<chrono::Utc>);
@@ -106,7 +202,7 @@ impl From<chrono::DateTime<chrono::Utc>> for DateTime {
     }
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct EntanglementProof {
     pub device_key: String,
@@ -117,7 +213,7 @@ pub struct EntanglementProof {
     pub did_signing_key_id: String,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct EntanglementProofInput {
     pub device_key: String,
@@ -128,7 +224,7 @@ pub struct EntanglementProofInput {
     pub did_signing_key_id: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ExceptionInfo {
     pub addon: Option<String>,
@@ -137,7 +233,7 @@ pub struct ExceptionInfo {
     pub r#type: ExceptionType,
 }
 
-#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ExceptionType {
     #[serde(alias = "LANGUAGE_IS_NOT_LOADED")]
@@ -169,6 +265,7 @@ mod tests {
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+#[ts(optional_fields)]
 pub struct ExpressionProofInput {
     pub invalid: Option<bool>,
     pub key: Option<String>,
@@ -176,7 +273,7 @@ pub struct ExpressionProofInput {
     pub valid: Option<bool>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpressionRendered {
     pub author: String,
@@ -187,20 +284,20 @@ pub struct ExpressionRendered {
     pub timestamp: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Icon {
     pub code: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionCall {
     pub name: String,
     pub parameters_stringified: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionMeta {
     pub label: String,
@@ -208,14 +305,14 @@ pub struct InteractionMeta {
     pub parameters: Vec<InteractionParameter>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionParameter {
     pub name: String,
     pub type_: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageHandle {
     pub address: String,
@@ -226,7 +323,7 @@ pub struct LanguageHandle {
     pub settings_icon: Option<Icon>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LanguageMeta {
     pub address: String,
@@ -250,6 +347,7 @@ pub struct LanguageMeta {
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+#[ts(optional_fields)]
 pub struct LanguageMetaInput {
     pub description: String,
     pub name: String,
@@ -257,21 +355,21 @@ pub struct LanguageMetaInput {
     pub source_code_link: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageLanguageInput {
     pub bundle: String,
     pub meta: LanguageMeta,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageRef {
     pub address: String,
     pub name: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, TS)]
 pub struct Language {
     pub name: String,
 }
@@ -300,6 +398,7 @@ impl std::fmt::Display for LinkStatus {
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+#[ts(optional_fields)]
 pub struct LinkExpressionInput {
     pub author: String,
     pub data: LinkInput,
@@ -308,7 +407,7 @@ pub struct LinkExpressionInput {
     pub status: Option<LinkStatus>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkExpressionUpdated {
     pub new_link: DecoratedLinkExpression,
@@ -318,13 +417,14 @@ pub struct LinkExpressionUpdated {
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+#[ts(optional_fields)]
 pub struct LinkInput {
     pub predicate: Option<String>,
     pub source: String,
     pub target: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkQuery {
     pub from_date: Option<DateTime>,
@@ -343,7 +443,7 @@ pub struct LinkMutations {
     pub removals: Vec<LinkExpressionInput>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DecoratedPerspectiveDiff {
     pub additions: Vec<DecoratedLinkExpression>,
@@ -376,14 +476,14 @@ impl DecoratedPerspectiveDiff {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DecoratedNeighbourhoodExpression {
     pub author: String,
@@ -392,15 +492,27 @@ pub struct DecoratedNeighbourhoodExpression {
     pub timestamp: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct OnlineAgent {
     pub did: String,
+    /// Empty when the agent has not set a status: the link language reports
+    /// such an agent with a `null` status.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub status: PerspectiveExpression,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "DecoratedPerspective")]
 pub struct Perspective {
     pub links: Vec<DecoratedLinkExpression>,
 }
@@ -448,7 +560,7 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveExpression {
     pub author: String,
@@ -497,7 +609,7 @@ impl PerspectiveExpression {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PerspectiveState {
     #[default]
@@ -515,7 +627,7 @@ pub enum PerspectiveState {
     Synced,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveHandle {
     pub uuid: String,
@@ -610,20 +722,21 @@ impl PerspectiveHandle {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveInput {
     pub links: Vec<LinkExpressionInput>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveUnsignedInput {
     pub links: Vec<LinkInput>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+/// A notification to store. Built from the RPC's `NotificationInput`; never serialised,
+/// because it holds the webhook credential.
+#[derive(Debug, Clone)]
 pub struct NotificationInput {
     pub description: String,
     pub app_name: String,
@@ -632,10 +745,10 @@ pub struct NotificationInput {
     pub trigger: String,
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
-    pub webhook_auth: String,
+    pub webhook_auth: Secret,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub domain: String,
@@ -650,10 +763,13 @@ pub struct ResourceInput {
     pub pointers: Vec<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {
     pub ad4m_executor_version: String,
+    /// The commit the executor was built from, or nothing when the build could not tell (no git
+    /// checkout). Every build between two releases reports one version; this names the build.
+    pub ad4m_executor_commit: Option<String>,
     pub is_initialized: bool,
     pub is_unlocked: bool,
 }
@@ -661,7 +777,7 @@ pub struct RuntimeInfo {
 /// Readiness status returned by the `runtimeReadiness` query.
 /// Each field indicates whether a subsystem has completed initialization.
 /// Test harnesses should poll this instead of using `sleep()`.
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadinessStatus {
     /// REST server is accepting requests (always true if you can call this query)
@@ -674,7 +790,7 @@ pub struct ReadinessStatus {
     pub languages_loaded: bool,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SentMessage {
     pub message: PerspectiveExpression,
@@ -684,7 +800,7 @@ pub struct SentMessage {
 // Public UserInfo struct for REST API - only contains non-sensitive fields
 // Note: last_seen uses f64 for JSON compatibility
 // f64 can safely represent integer timestamps up to 2^53 without precision loss
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
     pub username: String,
@@ -712,7 +828,7 @@ impl From<crate::types::UserInfo> for UserInfo {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UserCreationResult {
     pub did: String,
@@ -720,7 +836,7 @@ pub struct UserCreationResult {
     pub error: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UserStatistics {
     pub email: String,
@@ -732,7 +848,7 @@ pub struct UserStatistics {
     pub hot_wallet_address: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationRequestResult {
     pub success: bool,
@@ -741,7 +857,7 @@ pub struct VerificationRequestResult {
     pub is_existing_user: bool,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct HostingUserInfo {
     pub email: String,
@@ -750,14 +866,14 @@ pub struct HostingUserInfo {
     pub free_access: bool,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PaymentRequestResult {
     pub success: bool,
     pub message: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputeLogEntry {
     pub id: i32,
@@ -769,51 +885,59 @@ pub struct ComputeLogEntry {
     pub credits_after: f64,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct NeighbourhoodSignalFilter {
+    pub perspective_uuid: String,
     pub perspective: PerspectiveHandle,
     pub signal: PerspectiveExpression,
     pub recipient: Option<String>, // DID of the recipient agent for this signal
 }
 
-// Wrapper for link events with owner filtering (for multi-user isolation)
-#[derive(Default, Debug, Deserialize, Serialize)]
+/// `link-added` / `link-removed`: one event to all of the perspective's owners.
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveLinkWithOwner {
+pub struct PerspectiveLinkEvent {
     pub perspective_uuid: String,
     pub link: DecoratedLinkExpression,
-    pub owner: String, // DID of the owner
 }
 
-// Wrapper for link updated events with owner filtering (for multi-user isolation)
-#[derive(Default, Debug, Deserialize, Serialize)]
+/// `link-updated`: one event to all of the perspective's owners.
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveLinkUpdatedWithOwner {
+pub struct PerspectiveLinkUpdatedEvent {
     pub perspective_uuid: String,
     pub new_link: DecoratedLinkExpression,
     pub old_link: DecoratedLinkExpression,
-    pub owner: String, // DID of the owner
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkUpdated {
     pub new_link: DecoratedLinkExpression,
     pub old_link: DecoratedLinkExpression,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveStateFilter {
-    pub state: String,
+    pub perspective_uuid: String,
+    pub state: PerspectiveState,
     pub perspective: PerspectiveHandle,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct ModelApiInput {
     pub base_url: String,
-    pub api_key: String,
+    /// The provider key. An empty key stores no key, and so does `ai.addModel` without
+    /// one. `ai.updateModel` without one keeps the stored key; it refuses the update if
+    /// `baseUrl` changes too, because a key goes only to the endpoint it was set for.
+    /// Never serialised back out.
+    #[serde(default, skip_serializing)]
+    #[ts(as = "Option<String>")]
+    pub api_key: Option<Secret>,
     pub model: String,
     pub api_type: String,
     /// Optional ceiling for the provider's context window, in tokens.
@@ -821,7 +945,7 @@ pub struct ModelApiInput {
     pub max_num_ctx: Option<u32>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AIPromptExamplesInput {
     pub input: String,
@@ -846,8 +970,9 @@ impl From<AIPromptExamples> for AIPromptExamplesInput {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct LocalModelInput {
     pub file_name: String,
     pub tokenizer_source: Option<TokenizerSourceInput>,
@@ -855,7 +980,7 @@ pub struct LocalModelInput {
     pub revision: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenizerSourceInput {
     pub repo: String,
@@ -863,8 +988,9 @@ pub struct TokenizerSourceInput {
     pub file_name: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct ModelInput {
     pub name: String,
     pub api: Option<ModelApiInput>,
@@ -873,8 +999,9 @@ pub struct ModelInput {
     pub model_type: ModelType,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct AITaskInput {
     pub name: String,
     pub model_id: String,
@@ -905,13 +1032,13 @@ impl From<AITaskInput> for AITask {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptOutput {
     pub result: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionTextFilter {
     pub stream_id: String,
@@ -941,289 +1068,23 @@ where
     }
 }
 
-// Define the trait with a generic associated type `Value`
-pub trait GetValue {
-    type Value: Clone + DeserializeOwned + Send + 'static + std::fmt::Debug;
-    fn get_value(&self) -> Self::Value;
-}
-
-pub trait GetFilter {
-    fn get_filter(&self) -> Option<String>;
-}
-
-// Implement the trait for the `TranscriptionTextFilter` struct
-impl GetValue for TranscriptionTextFilter {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.text.clone()
-    }
-}
-
-// Implement the trait for the `TranscriptionTextFilter` struct
-impl GetFilter for TranscriptionTextFilter {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.stream_id.clone())
-    }
-}
-
-impl GetValue for Option<Apps> {
-    type Value = Option<Apps>;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-impl GetFilter for Option<Apps> {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-// Implement the trait for the `NeighbourhoodSignalFilter` struct
-impl GetValue for NeighbourhoodSignalFilter {
-    type Value = PerspectiveExpression;
-
-    fn get_value(&self) -> Self::Value {
-        self.signal.clone()
-    }
-}
-
-// Implement the trait for the `NeighbourhoodSignalFilter` struct
-impl GetFilter for NeighbourhoodSignalFilter {
-    fn get_filter(&self) -> Option<String> {
-        // Create a composite filter: perspective_uuid|recipient_did
-        // If recipient is None, just use perspective_uuid for backwards compatibility
-        match &self.recipient {
-            Some(recipient_did) => Some(format!("{}|{}", self.perspective.uuid, recipient_did)),
-            None => Some(self.perspective.uuid.clone()),
-        }
-    }
-}
-
-// Implement GetValue and GetFilter for PerspectiveLinkWithOwner
-impl GetValue for PerspectiveLinkWithOwner {
-    type Value = DecoratedLinkExpression;
-
-    fn get_value(&self) -> Self::Value {
-        self.link.clone()
-    }
-}
-
-impl GetFilter for PerspectiveLinkWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-// Implement GetValue and GetFilter for PerspectiveLinkUpdatedWithOwner
-impl GetValue for PerspectiveLinkUpdatedWithOwner {
-    type Value = LinkUpdated;
-
-    fn get_value(&self) -> Self::Value {
-        LinkUpdated {
-            new_link: self.new_link.clone(),
-            old_link: self.old_link.clone(),
-        }
-    }
-}
-
-impl GetFilter for PerspectiveLinkUpdatedWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-// Implement the trait for the `PerspectiveStateFilter` struct
-impl GetValue for PerspectiveStateFilter {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.state.clone()
-    }
-}
-
-// Implement the trait for the `PerspectiveStateFilter` struct
-impl GetFilter for PerspectiveStateFilter {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.perspective.uuid.clone())
-    }
-}
-
-// Implement the trait for the `AgentStatus` struct
-impl GetValue for AgentStatus {
-    type Value = AgentStatus;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-// Implement the trait for the `AgentStatus` struct
-impl GetFilter for AgentStatus {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-// Implement the trait for `Agent` struct
-impl GetValue for Agent {
-    type Value = Agent;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-// Implement the trait for `Agent` struct
-impl GetFilter for Agent {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `ExceptionInfo` struct
-impl GetValue for ExceptionInfo {
-    type Value = ExceptionInfo;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `ExceptionInfo` struct
-impl GetFilter for ExceptionInfo {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `PerspectiveHandle` struct
-impl GetValue for PerspectiveHandle {
-    type Value = PerspectiveHandle;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `PerspectiveHandle` struct
-impl GetFilter for PerspectiveHandle {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-// Wrapper type for perspective subscriptions that includes owner for filtering
-#[derive(Default, Debug, Deserialize, Serialize)]
+/// `perspective-added` / `perspective-updated`: one event to all of the perspective's owners.
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveWithOwner {
+pub struct PerspectiveEvent {
+    pub perspective_uuid: String,
     pub perspective: PerspectiveHandle,
-    pub owner: String,
 }
 
-impl GetValue for PerspectiveWithOwner {
-    type Value = PerspectiveHandle;
-
-    fn get_value(&self) -> Self::Value {
-        self.perspective.clone()
-    }
-}
-
-impl GetFilter for PerspectiveWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-// Wrapper type for perspective removed subscriptions that includes owner for filtering
-#[derive(Default, Debug, Deserialize, Serialize)]
+/// `perspective-removed`: one event to all of the perspective's owners.
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveRemovedWithOwner {
+pub struct PerspectiveRemovedEvent {
+    pub perspective_uuid: String,
     pub uuid: String,
-    pub owner: String,
 }
 
-impl GetValue for PerspectiveRemovedWithOwner {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.uuid.clone()
-    }
-}
-
-impl GetFilter for PerspectiveRemovedWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-//Implement the trait for `String`
-impl GetValue for String {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `String`
-impl GetFilter for String {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `PerspectiveExpression`
-impl GetValue for PerspectiveExpression {
-    type Value = PerspectiveExpression;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `PerspectiveExpression`
-impl GetFilter for PerspectiveExpression {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetValue for Notification {
-    type Value = Notification;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetFilter for Notification {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetValue for TriggeredNotification {
-    type Value = TriggeredNotification;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetFilter for TriggeredNotification {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-#[derive(Serialize, Deserialize, Default, Debug, Clone)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AIModelLoadingStatus {
     pub model: String,
@@ -1233,52 +1094,9 @@ pub struct AIModelLoadingStatus {
     pub loaded: bool,
 }
 
-//Implement the trait for `AIModelLoadingStatus` struct
-impl GetValue for AIModelLoadingStatus {
-    type Value = AIModelLoadingStatus;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `AIModelLoadingStatus` struct
-impl GetFilter for AIModelLoadingStatus {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-impl GetValue for HostingUserInfo {
-    type Value = HostingUserInfo;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-impl GetFilter for HostingUserInfo {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.email.clone())
-    }
-}
-
-impl GetValue for ComputeLogEntry {
-    type Value = ComputeLogEntry;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-impl GetFilter for ComputeLogEntry {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.user_email.clone())
-    }
-}
-
-#[derive(Serialize, Deserialize, Default, Debug, Clone)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct VoiceActivityParamsInput {
     pub start_threshold: Option<f64>,
     pub start_window: Option<i32>,
@@ -1299,7 +1117,7 @@ impl From<VoiceActivityParamsInput> for crate::ai_service::VoiceActivityParams {
     }
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, TS)]
 pub struct ImportStats {
     pub total: i32,
     pub imported: i32,
@@ -1308,7 +1126,7 @@ pub struct ImportStats {
     pub errors: Vec<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportResult {
     pub perspectives: ImportStats,
@@ -1368,30 +1186,58 @@ impl ImportResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct QuerySubscription {
     pub subscription_id: String,
     pub result: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+/// `query-subscription-update`: one change to a live query, delivered only
+/// to the connection that opened it, or [`QueryUpdatesLagged`].
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+#[serde(untagged)]
+pub enum QuerySubscriptionUpdateEvent {
+    Update(QuerySubscriptionUpdate),
+    Lagged(QueryUpdatesLagged),
+}
+
+/// The change from revision `revision - 1` to `revision` (see
+/// `perspective_instance::subscriptions::result_delta`): model results
+/// carry `ids`, `upsert` and `totalCount`; query results carry `added` and
+/// `removed` rows; a result that could not be diffed comes whole as
+/// `result`.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveQuerySubscriptionFilter {
+pub struct QuerySubscriptionUpdate {
+    pub perspective_uuid: String,
     pub uuid: String,
     pub subscription_id: String,
-    pub result: String,
+    #[ts(type = "number")]
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Array<any>")]
+    pub upsert: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub total_count: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Array<any>")]
+    pub added: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Array<any>")]
+    pub removed: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "any")]
+    pub result: Option<serde_json::Value>,
 }
 
-impl GetValue for PerspectiveQuerySubscriptionFilter {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.result.clone()
-    }
-}
-
-impl GetFilter for PerspectiveQuerySubscriptionFilter {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.subscription_id.clone())
-    }
+/// The socket dropped updates, maybe for any of its live queries: every
+/// live query on it must resync.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+pub struct QueryUpdatesLagged {
+    #[ts(type = "true")]
+    pub lagged: bool,
 }

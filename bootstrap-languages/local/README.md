@@ -3,7 +3,8 @@
 Plain-JS system languages that need no Holochain: agent, file-storage,
 language, link, neighbourhood and perspective languages. They store data
 through the `ad4m:host` KV (`storageGet` / `storagePut`), which belongs to one
-executor. Use them with `ad4m-executor run --run-holochain false` for local,
+executor. Use them with `ad4m-executor run --run-holochain false` (plus an
+admin credential, or `--insecure-no-admin-credential` in tests) for local,
 standalone, Docker and test setups.
 
 `node generate-seed.mjs . dist` writes a bootstrap seed that uses them

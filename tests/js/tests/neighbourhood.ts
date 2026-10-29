@@ -1,4 +1,4 @@
-import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
+import { PerspectiveExpression, Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { assertStaysFalse, pollUntil, sleep } from "../utils/utils";
 import { LinkLangConfig, publishLinkLanguage } from "../utils/linkLangConfig";
@@ -44,11 +44,13 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 expect(perspective?.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
                 expect(perspective?.neighbourhood!.data.meta.links.length).to.be.equal(1);
                 
-                // The perspective should have left Private state. It may still be in
-                // NeighbourhoodCreationInitiated, or may have already reached Synced if
-                // the link-language startup completed before this poll returned — both are valid.
+                // The perspective should have left Private state. A publish wakes the
+                // attach at once, so this poll can see any step on the way to Synced:
+                // NeighbourhoodCreationInitiated, the link language installed but not
+                // yet synced, or Synced.
                 expect([
                     PerspectiveState.NeighboudhoodCreationInitiated,
+                    PerspectiveState.LinkLanguageInstalledButNotSynced,
                     PerspectiveState.Synced,
                 ]).to.include(perspective?.state);
                 
@@ -63,6 +65,28 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 }, { timeoutMs: 60000, intervalMs: 1000, label: "locally published perspective reaches Synced" });
             })
 
+            it('a sync-state-change listener fires for its own perspective only @alice', async () => {
+                const alice = testContext.alice!;
+                const shared = await alice.perspective.add("sync-state-shared");
+                const other = await alice.perspective.add("sync-state-other");
+                const sharedStates: PerspectiveState[] = [];
+                const otherStates: PerspectiveState[] = [];
+                shared.on('sync-state-change', ({ state }) => { sharedStates.push(state); });
+                other.on('sync-state-change', ({ state }) => { otherStates.push(state); });
+                try {
+                    const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's sync-state listener test");
+                    await alice.neighbourhood.publishFromPerspective(shared.uuid, socialContext.address, new Perspective());
+
+                    await pollUntil(() => sharedStates.length > 0, { timeoutMs: 30000, intervalMs: 500, label: "sync-state-change for the shared perspective" });
+                    // Each state is a PerspectiveState value, not a JSON-encoded string.
+                    for (const state of sharedStates) expect(Object.values(PerspectiveState)).to.include(state);
+                    expect(otherStates).to.be.empty;
+                } finally {
+                    shared.dispose();
+                    other.dispose();
+                }
+            })
+
             it('can be created by Alice and joined by Bob', async () => {
                 const alice = testContext.alice
                 const bob = testContext.bob
@@ -74,7 +98,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
-                await testContext.makeAllNodesKnown()
+                await testContext.makeAllNodesKnown([alice, aliceP1.uuid], [bob, bobP1.uuid])
 
                 expect(bobP1!.name).not.to.be.undefined;
                 expect(bobP1!.sharedUrl).to.be.equal(neighbourhoodUrl)
@@ -93,8 +117,10 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
-                await testContext.makeAllNodesKnown()
-                expect(bobP1!.state).to.be.oneOf([PerspectiveState.LinkLanguageInstalledButNotSynced, PerspectiveState.Synced]);
+                await testContext.makeAllNodesKnown([alice, aliceP1.uuid], [bob, bobP1.uuid])
+                // The join returns before Bob's link language is installed:
+                // its state changes arrive as events from here on.
+                expect(bobP1!.state).to.be.equal(PerspectiveState.NeighbourhoodJoinInitiated);
 
                 // Wait for Alice's link language to be wired.
                 // publishFromPerspective sets state=NeighbourhoodCreationInitiated.
@@ -125,6 +151,56 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
             })
 
 
+            // #1176: under the flow vocabulary a Shared link ends only by its
+            // author's signed retraction. Bob's executor refuses his removal of
+            // Alice's vote, so it never reaches the link language and Alice keeps
+            // it. (A removal that does arrive by sync is dropped on ingest; the
+            // Rust test t1_remote_removal_of_a_monotonic_link_is_dropped covers that.)
+            it("Bob's removal of Alice's acceptedBy link is refused and Alice keeps it", async () => {
+                const alice = testContext.alice
+                const bob = testContext.bob
+
+                const aliceP = await alice.perspective.add("monotonic")
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test monotonic links");
+                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP.uuid, socialContext.address, new Perspective())
+                const bobP = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+
+                await testContext.makeAllNodesKnown()
+                await pollUntil(async () => {
+                    const p = await alice.perspective.byUUID(aliceP.uuid);
+                    const s = p?.state;
+                    return s !== PerspectiveState.Private
+                        && s !== PerspectiveState.NeighboudhoodCreationInitiated;
+                }, { timeoutMs: 30000, intervalMs: 500, label: "Alice link language wired (monotonic)" });
+
+                const aliceDid = (await alice.agent.me()).did
+                const query = new LinkQuery({source: 'ad4m://proposal-1176', predicate: 'ad4m://acceptedBy'})
+                await alice.perspective.addLink(aliceP.uuid, {source: 'ad4m://proposal-1176', predicate: 'ad4m://acceptedBy', target: aliceDid})
+
+                let bobLinks = await bob.perspective.queryLinks(bobP.uuid, query)
+                for (let tries = 0; bobLinks.length < 1 && tries < 60; tries++) {
+                    await sleep(1000)
+                    bobLinks = await bob.perspective.queryLinks(bobP.uuid, query)
+                }
+                expect(bobLinks.length, "Bob received Alice's vote").to.be.equal(1)
+
+                let refusal: any = null
+                try {
+                    await bob.perspective.removeLink(bobP.uuid, bobLinks[0])
+                } catch (e) {
+                    refusal = e
+                }
+                expect(refusal, "Bob's removeLink must fail").to.not.be.null
+                expect(String(refusal?.message ?? refusal)).to.contain("is monotonic")
+
+                // Give a removal that did get committed time to reach Alice.
+                await sleep(10000)
+                const aliceLinks = await alice.perspective.queryLinks(aliceP.uuid, query)
+                expect(aliceLinks.length, "Alice still holds her vote").to.be.equal(1)
+                const bobAfter = await bob.perspective.queryLinks(bobP.uuid, query)
+                expect(bobAfter.length, "and so does Bob's replica").to.be.equal(1)
+            })
+
             it('local link created by Alice NOT received by Bob', async () => {
                 const alice = testContext.alice
                 const bob = testContext.bob
@@ -135,7 +211,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 console.log("neighbourhoodUrl", neighbourhoodUrl);
                 bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
-                await testContext.makeAllNodesKnown()
+                await testContext.makeAllNodesKnown([alice, aliceP1.uuid], [bob, bobP1!.uuid])
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'}, 'local')
 
@@ -220,12 +296,12 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 console.log("neighbourhoodUrl", neighbourhoodUrl);
                 bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
-                await testContext.makeAllNodesKnown()
+                await testContext.makeAllNodesKnown([alice, aliceP1.uuid], [bob, bobP1!.uuid])
 
                 // Wait for Alice's link language to be wired (see simple
                 // test comment for rationale).
                 await pollUntil(async () => {
-                    const p = await alice.perspective.byUUID(aliceP1.uuid);
+                    const p = await alice.perspective.byUUID(aliceP1!.uuid);
                     const s = p?.state;
                     return s !== PerspectiveState.Private
                         && s !== PerspectiveState.NeighboudhoodCreationInitiated;
@@ -271,7 +347,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 // Wait for Bob to receive Alice's post-burst links
                 await pollUntil(async () => {
-                    const links = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'ad4m://alice'}));
+                    const links = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://alice'}));
                     console.log(`Bob has ${links.length}/3 of Alice's post-burst links`);
                     return links.length >= 3;
                 }, { timeoutMs: 40000, intervalMs: 2000, label: "bob receives alice's post-burst links" });
@@ -292,7 +368,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 // Wait for Alice to receive Bob's links
                 await pollUntil(async () => {
-                    const links = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'ad4m://bob'}));
+                    const links = await testContext.alice.perspective.queryLinks(aliceP1!.uuid, new LinkQuery({source: 'ad4m://bob'}));
                     console.log(`Alice has ${links.length}/3 of Bob's links`);
                     return links.length >= 3;
                 }, { timeoutMs: 40000, intervalMs: 2000, label: "alice receives bob's links" });
@@ -337,7 +413,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
             //         return null;
             //     };
 
-            //     aliceP1.addSyncStateChangeListener(aliceSyncChangeHandler);
+            //     aliceP1.on('sync-state-change', ({ state }) => aliceSyncChangeHandler(state));
 
             //     await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
@@ -355,7 +431,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
             //     let bobP1 = await testContext.bob.perspective.byUUID(bobHandler.uuid);
             //     expect(bobP1?.state).to.be.equal(PerspectiveState.LinkLanguageInstalledButNotSynced);
 
-            //     bobP1!.addSyncStateChangeListener(bobSyncChangeHandler);
+            //     bobP1!.on('sync-state-change', ({ state }) => bobSyncChangeHandler(state));
 
             //     //These next assertions are flaky since they depend on holochain not syncing right away, which most of the time is the case
 
@@ -403,7 +479,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                     const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                     const bobP1 = await bob.perspective.byUUID(bobP1Handle.uuid)
-                    await testContext.makeAllNodesKnown()
+                    await testContext.makeAllNodesKnown([alice, aliceP1.uuid], [bob, bobP1Handle.uuid])
 
                     aliceNH = aliceP1.getNeighbourhoodProxy()
                     bobNH = bobP1!.getNeighbourhoodProxy()
@@ -500,7 +576,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 it('they can send signals via `sendSignal` and receive callbacks via `addSignalHandler`', async () => {
                     let aliceCalls = 0;
                     let aliceData = null;
-                    const aliceHandler = async (payload: Perspective) => {
+                    const aliceHandler = async (payload: PerspectiveExpression) => {
                         aliceCalls += 1;
                         //@ts-ignore
                         aliceData = payload;
@@ -509,7 +585,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                     let bobCalls = 0;
                     let bobData = null;
-                    const bobHandler = async (payload: Perspective) => {
+                    const bobHandler = async (payload: PerspectiveExpression) => {
                         bobCalls += 1;
                         //@ts-ignore
                         bobData = payload;
@@ -517,7 +593,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     bobNH!.addSignalHandler(bobHandler)
 
                     let link = new LinkExpression()
-                    link.author = aliceDID;
+                    link.author = aliceDID!;
                     link.timestamp = new Date().toISOString();
                     link.data = new Link({source: "alice", target: "bob", predicate: "signal"});
                     link.proof = new ExpressionProof("sig", "key");
@@ -552,7 +628,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 it('supports loopback functionality for broadcasts', async () => {
                     let aliceCalls = 0;
                     let aliceData = null;
-                    const aliceHandler = async (payload: Perspective) => {
+                    const aliceHandler = async (payload: PerspectiveExpression) => {
                         aliceCalls += 1;
                         //@ts-ignore
                         aliceData = payload;
@@ -561,7 +637,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                     let bobCalls = 0;
                     let bobData = null;
-                    const bobHandler = async (payload: Perspective) => {
+                    const bobHandler = async (payload: PerspectiveExpression) => {
                         bobCalls += 1;
                         //@ts-ignore
                         bobData = payload;

@@ -1,19 +1,20 @@
 //! Language WS-native handlers.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::languages::LanguageController;
+use crate::logging::span;
 use crate::types::*;
 
+use super::guards::Guard;
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
-async fn list_languages(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn list_languages(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let filter = params.opt_str("filter");
     let controller = LanguageController::global_instance();
     let refs = controller.get_installed_languages(filter.as_deref()).await;
@@ -39,10 +40,7 @@ async fn list_languages(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(serde_json::to_value(handles)?)
 }
 
-async fn get_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_language(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let address = params.require_str("address")?;
     let controller = LanguageController::global_instance();
 
@@ -91,10 +89,7 @@ async fn get_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     )))
 }
 
-async fn get_language_meta(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_language_meta(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let address = params.require_str("address")?;
     let controller = LanguageController::global_instance();
     let meta = controller
@@ -110,10 +105,10 @@ async fn get_language_meta(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     Ok(serde_json::to_value(meta)?)
 }
 
-async fn get_language_source(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_language_source(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let address = params.require_str("address")?;
     let controller = LanguageController::global_instance();
     let source = controller
@@ -129,10 +124,7 @@ async fn get_language_source(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(Value::String(source))
 }
 
-async fn publish_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn publish_language(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: PublishLanguageRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -194,9 +186,7 @@ async fn publish_language(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+    let _total = span("applyTemplate");
     let body: ApplyTemplateRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -224,11 +214,13 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     let input_name = input.meta.name.clone();
 
+    let saving = span("applyTemplate.saveBundle");
     let (hash, _bundle_path) = controller
         .save_language_bundle(&input.bundle, None)
         .map_err(|e| {
             WsRpcError::internal(format!("Failed to save templated language bundle: {}", e))
         })?;
+    drop(saving);
 
     let language_language_address = {
         let sys = controller.system_addresses.lock().await;
@@ -240,22 +232,26 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let content = serde_json::to_value(&input)
         .map_err(|e| WsRpcError::internal(format!("Failed to serialize language input: {}", e)))?;
 
-    let agent_context = crate::agent::AgentContext::main_agent();
+    // Users template link languages to create neighbourhoods, so this call stays open to
+    // them. A user session publishes as the user, never as the main agent.
+    let publishing = span("applyTemplate.publish");
     controller
-        .expression_create(&language_language_address, content, &agent_context)
+        .expression_create(&language_language_address, content, &ctx.acts_as())
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
+    drop(publishing);
 
-    let bundle_on_disk = crate::utils::languages_directory()
-        .join(&hash)
-        .join("bundle.js");
-    if bundle_on_disk.exists() {
-        if let Err(e) = controller.load_language(bundle_on_disk, false).await {
+    // Loading it starts a runtime and, for a Holochain link language, installs
+    // and joins its app. Nothing here needs it loaded, so the caller gets the
+    // address now; whatever uses the language next (a publish attaching it, a
+    // `language.get`) waits for this install rather than starting another.
+    controller.set_language_name(&hash, &input_name).await;
+    let address = hash.clone();
+    tokio::spawn(async move {
+        if let Err(e) = LanguageController::install_language(address).await {
             log::warn!("Failed to load templated language into runtime: {}", e);
         }
-    }
-
-    controller.set_language_name(&hash, &input_name).await;
+    });
 
     Ok(serde_json::to_value(LanguageRef {
         address: hash,
@@ -263,10 +259,7 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     })?)
 }
 
-async fn remove_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_DELETE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn remove_language(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let address = params.require_str("address")?;
     let mut controller = LanguageController::global_instance();
     controller
@@ -277,10 +270,7 @@ async fn remove_language(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     Ok(Value::Bool(true))
 }
 
-async fn write_settings(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn write_settings(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let address = params.require_str("address")?;
     let body: LanguageSettingsWrapper = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -309,12 +299,57 @@ async fn write_settings(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("language.all", list_languages);
-    map.register("language.get", get_language);
-    map.register("language.meta", get_language_meta);
-    map.register("language.source", get_language_source);
-    map.register("language.publish", publish_language);
-    map.register("language.applyTemplate", apply_template);
-    map.register("language.remove", remove_language);
-    map.register("language.writeSettings", write_settings);
+    // The executor's installed languages, which users read too.
+    map.method::<LanguageListParams, Vec<LanguageHandle>>("language.all", list_languages)
+        .read()
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
+    map.method::<LanguageAddressParams, LanguageHandle>("language.get", get_language)
+        .read()
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
+    map.method::<LanguageAddressParams, LanguageMeta>("language.meta", get_language_meta)
+        .read()
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
+    map.method::<LanguageAddressParams, String>("language.source", get_language_source)
+        .read()
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
+    // Reads `languagePath` from any path on the host and publishes the file signed by the
+    // executor's main agent.
+    map.method::<PublishLanguageRequest, LanguageMeta>("language.publish", publish_language)
+        .long()
+        .guard(Guard::Executor(LANGUAGE_CREATE_CAPABILITY.clone()));
+    map.method::<ApplyTemplateRequest, LanguageRef>("language.applyTemplate", apply_template)
+        .long()
+        .guard(Guard::Cap(LANGUAGE_CREATE_CAPABILITY.clone()));
+    // Installed languages and their settings are shared by every user of the executor.
+    map.method::<LanguageAddressParams, bool>("language.remove", remove_language)
+        .guard(Guard::Executor(LANGUAGE_DELETE_CAPABILITY.clone()));
+    map.method::<LanguageWriteSettingsParams, bool>("language.writeSettings", write_settings)
+        .guard(Guard::Executor(LANGUAGE_UPDATE_CAPABILITY.clone()));
+}
+
+// ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LanguageListParams {
+    #[ts(optional)]
+    pub filter: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LanguageAddressParams {
+    pub address: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LanguageWriteSettingsParams {
+    pub address: String,
+    // Settings schema belongs to each language, so it stays open JSON.
+    #[ts(type = "any")]
+    pub settings: serde_json::Value,
 }

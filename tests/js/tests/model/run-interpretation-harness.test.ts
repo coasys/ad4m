@@ -478,7 +478,7 @@ describeIfLLM("perspective.runInterpretationWithHarness — relation interpretat
  *     → per dispatched tool_call, `emit_tool_event(ToolCall)` +
  *       `emit_tool_event(ToolResult)` publish on the pubsub topic
  *     → GraphQL subscription forwards to the TS client
- *     → `addAutoProcessorEventListener` fires our callback
+ *     → `on("auto-processor-event")` fires our callback
  *     → assertions verify each event's shape.
  *
  * Gated on the same Marvin LLM availability probe as the sibling
@@ -523,7 +523,7 @@ describeIfLLM("perspective.runInterpretationWithHarness — tool-call events", f
     // test's observationId is unique to it.
     const observationId = `tool-events-test-${Date.now()}`;
     const collected: AutoProcessorEvent[] = [];
-    p.addAutoProcessorEventListener((event) => {
+    p.on("auto-processor-event", (event) => {
       if (event.processorId === observationId) {
         collected.push(event);
       }
@@ -624,7 +624,7 @@ describeIfLLM("perspective.runInterpretationWithHarness — tool-call events", f
     const observationId = `tool-events-fastpath-${Date.now()}`;
     const collected: AutoProcessorEvent[] = [];
     let anyGlobalToolEvent = false;
-    p.addAutoProcessorEventListener((event) => {
+    p.on("auto-processor-event", (event) => {
       if (event.processorId === observationId) {
         collected.push(event);
       }

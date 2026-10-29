@@ -80,6 +80,7 @@ ad4m-executor init
 
 2. Run the executor:
 ```bash
+export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"   # required
 ad4m-executor run
 ```
 

@@ -157,25 +157,19 @@ const stats = await perspective.querySparql(`
 
 For comprehensive examples and graph traversal patterns, see the [SPARQL Queries Guide](/developer-guides/sparql-queries).
 
-### Prolog Integration (Legacy)
+### Live Queries
 
-Perspectives also include a Prolog engine for backward compatibility and advanced logic programming:
+A live query is a SPARQL query (or a model query, see [Model Classes](/developer-guides/model-classes)) whose result follows the perspective's links:
 
 ```typescript
-// Basic Prolog query
-const results = await perspective.queryProlog(
-  'triple(Post, "sioc://likes", Agent), triple(Agent, "foaf://knows", "did:key:z6Mk...")'
+const subscription = await perspective.subscribeQuery(
+  'SELECT ?post ?agent WHERE { ?post <sioc://likes> ?agent . }'
 );
-// Finds posts liked by agents who know a specific person
-
-// Real-time query subscription
-const subscription = await perspective.subscribeInfer(
-  'triple(Post, "sioc://status", "active"), triple(Post, "sioc://author", Author)'
-);
+console.log(subscription.result);
 
 // Set up callback for updates
 subscription.onResult(results => {
-    console.log("Active posts and their authors:", results);
+    console.log("Posts and the agents who like them:", results);
 });
 
 // Important: Clean up subscription when done
@@ -185,22 +179,31 @@ subscription.dispose();
 Query subscriptions provide real-time updates but require proper cleanup:
 
 1. **Initialization**: When you create a subscription, it waits for the first result before becoming active
-2. **Keepalive**: The subscription stays active through periodic keepalive signals
-3. **Updates**: Receive real-time updates through your callback as the data changes
-4. **Cleanup**: Call `dispose()` when done to:
-   - Stop keepalive signals
+2. **Updates**: Receive real-time updates through your callback as the data changes
+3. **Cleanup**: Call `dispose()` when done to:
    - Unsubscribe from updates
-   - Release this subscriber's hold on the backend subscription
+   - End the backend subscription
    - Prevent memory leaks
 
-The backend keeps one subscription per distinct query and agent and shares it
-between all subscribers of that query. Disposing one of them does not
-interrupt the others; the backend removes the subscription when the last
-subscriber disposes or when nobody has sent a keepalive for a while. Calling
-`dispose()` again on the same subscription does nothing, so it cannot release
-another subscriber's hold.
+Every subscriber gets its own backend subscription, tied to the connection that
+opened it. Disposing one never interrupts another subscriber of the same query.
+The backend also ends every subscription of a connection when that connection
+closes, so a page closed without disposing leaves nothing behind.
 
 Always remember to call `dispose()` when you're done with a subscription.
+
+### Prolog Integration (Legacy)
+
+Perspectives also include a Prolog engine for backward compatibility and advanced logic programming:
+
+```typescript
+const results = await perspective.queryProlog(
+  'triple(Post, "sioc://likes", Agent), triple(Agent, "foaf://knows", "did:key:z6Mk...")'
+);
+// Finds posts liked by agents who know a specific person
+```
+
+Prolog queries are one-shot: there are no Prolog live queries. `subscribeQuery()` refuses a Prolog query with a 400 error; use a SPARQL or model query for live results.
 
 **Recommendation**: Use SPARQL for most queries, and reserve Prolog for complex logic programming or custom SDNA rules.
 

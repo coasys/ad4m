@@ -1,0 +1,19 @@
+# Builds and deploys origin/staging when it has moved (deploy/staging/update.sh).
+# Started by ad4m-staging-update.timer, or by hand:
+#   systemctl --user start ad4m-staging-update.service
+[Unit]
+Description=Deploy origin/staging to the AD4M staging executor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# PATH with cargo, pnpm, node and deno; written at install time (README.md).
+EnvironmentFile=%h/.config/ad4m-staging/update.env
+ExecStart=%h/.local/share/ad4m-staging/bin/update.sh
+# The build shares the box with production and CI: lowest CPU and IO priority.
+Nice=19
+CPUSchedulingPolicy=batch
+IOSchedulingClass=idle
+# update.sh stops a build after 3 h; this is only the backstop.
+TimeoutStartSec=4h

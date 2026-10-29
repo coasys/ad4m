@@ -25,7 +25,7 @@ export default function agentTests(testContext: TestContext) {
                 const ad4mClient = testContext.ad4mClient!
 
                 const agentUpdated = sinon.fake()
-                ad4mClient.agent.addAgentStatusChangedListener(agentUpdated)
+                ad4mClient.on('agent-status-changed', ({ agent }) => agentUpdated(agent))
                 
                 const generate = await ad4mClient.agent.generate("passphrase")
                 expect(generate.isInitialized).to.be.true;
@@ -56,6 +56,17 @@ export default function agentTests(testContext: TestContext) {
                 const agentDump = await ad4mClient.agent.status();
                 expect(agentDump.isInitialized).to.be.true;
                 expect(agentDump.isUnlocked).to.be.true;
+
+                // #1229: the DID document is public — no reply or event carries a private key.
+                const replies = {
+                    generate, lock: lockAgent, unlock: unlockAgent, status: agentDump,
+                    ...Object.fromEntries(agentUpdated.getCalls().map((call, i) => [`agent-status-changed #${i + 1}`, call.args[0]])),
+                };
+                for (const [what, reply] of Object.entries(replies)) {
+                    const serialized = JSON.stringify(reply);
+                    expect(serialized, what).to.include('publicKeyBase58');
+                    expect(serialized, what).not.to.include('privateKey');
+                }
             }),
             it('can get and create agent expression profile', async () => {
                 const ad4mClient = testContext.ad4mClient!
@@ -63,7 +74,7 @@ export default function agentTests(testContext: TestContext) {
                 await ensureAgentIsReady(testContext)
 
                 const agentUpdated = sinon.fake()
-                ad4mClient.agent.addUpdatedListener(agentUpdated)
+                ad4mClient.on('agent-updated', ({ agent }) => agentUpdated(agent))
 
                 const currentAgent = await ad4mClient.agent.me();
                 expect(currentAgent.perspective).not.to.be.undefined;

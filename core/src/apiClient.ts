@@ -1,4 +1,7 @@
 import { callSafely } from './notifyListeners'
+import { LONG_METHODS, READ_METHODS } from './generated/api/RpcMethods'
+import type { RpcMethod, RpcMethods } from './generated/api/RpcMethods'
+import type { EventMap, EventName } from './generated/api/Events'
 
 /** Shape of event data pushed via WebSocket. Callers can narrow via generics. */
 export interface WsEvent {
@@ -28,8 +31,19 @@ export interface CallOptions {
      * `AbortError`. The executor drops the reply; it cannot always stop the work.
      */
     signal?: AbortSignal
-    /** Timeout in ms, from the call to the reply. Defaults to 30 s. */
+    /** Timeout in ms, from the call to the reply. Defaults to 30 s, or
+     *  {@link LONG_TIMEOUT_MS} for a method the executor marks long. */
     timeoutMs?: number
+}
+
+/** Narrows an {@link ApiClient.on} handler to one perspective's events. */
+export interface EventFilter {
+    perspective?: string
+}
+
+interface Registration {
+    handler: (event: never) => void
+    perspective?: string
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -37,35 +51,19 @@ const DEFAULT_TIMEOUT_MS = 30_000
 /** Default timeout for calls that can run for minutes: LLM work, Holochain, publishing. */
 export const LONG_TIMEOUT_MS = 20 * 60 * 1000
 
-/** `options` with {@link LONG_TIMEOUT_MS} unless the caller set a timeout. */
-export function longCall(options?: CallOptions): CallOptions {
-    return { ...options, timeoutMs: options?.timeoutMs ?? LONG_TIMEOUT_MS }
-}
-
 const INITIAL_RECONNECT_DELAY_MS = 500
 const MAX_RECONNECT_DELAY_MS = 30_000
+
+/** A failed `events.watch` is sent again after this delay, at most
+ *  MAX_WATCH_RETRIES times in a row. */
+const WATCH_RETRY_DELAY_MS = 1_000
+const MAX_WATCH_RETRIES = 5
 
 let _idCounter = 0
 function nextId(): string {
     return String(++_idCounter)
 }
 
-/**
- * Idempotent reads. One of these that was sent when the socket dropped goes
- * out again, once, on the next socket. Other calls reject with 503: the
- * executor may already have applied them.
- */
-const RETRYABLE_READS = new Set([
-    'agent.get',
-    'agent.status',
-    'expression.get',
-    'language.get',
-    'perspective.all',
-    'perspective.get',
-    'perspective.queryLinks',
-    'perspective.snapshot',
-    'runtime.info',
-])
 
 /** Sockets that may close before a call goes out before the call fails with
  *  503. A call that never went out never reached the executor, so waiting
@@ -81,11 +79,20 @@ interface PendingCall {
     failedConnects: number
     /** True while a retryable read has its one retry left. */
     retry: boolean
+    /** An `events.watch`: it serves the subscribers, so it does not keep the socket open. */
+    watch: boolean
     resolve: (value: unknown) => void
     reject: (reason: unknown) => void
 }
 
-const closedError = () => new RpcError(503, 'WebSocket connection closed')
+const closedError = (reason?: string) => new RpcError(503, reason || 'WebSocket connection closed')
+
+/** Close code for "try again later": the executor's wallet is locked, so it cannot check the
+ *  token yet. The token may be good: reconnect as for any close, and pass the reason on. */
+const CLOSE_TRY_AGAIN_LATER = 1013
+
+/** Close code the executor uses when the socket's token opens no session, expired or was revoked. */
+const CLOSE_AUTH_FAILED = 1008
 
 export class ApiClient {
     private baseUrl: string
@@ -113,13 +120,28 @@ export class ApiClient {
     /** The connecting or open socket; null otherwise. */
     private _ws: WebSocket | null = null
     /** Settles when `_ws` opens (resolve) or closes first (reject). */
-    private _wsCallbacks = new Set<(data: unknown) => void>()
+    private _wsOpen: Promise<void> | null = null
+    /** `on()` handlers by event type; a type with none has no entry. */
+    private _handlers = new Map<string, Set<Registration>>()
     private _reconnectCallbacks = new Set<() => void>()
+    private _authFailedCallbacks = new Set<(reason: string) => void>()
+    /** Set once the executor refused the token: the reason. The client then
+     *  never connects again; a new token needs a new client. */
+    private _authFailed: string | null = null
     private _hasConnectedOnce = false
     private _pendingCalls = new Map<string, PendingCall>()
     private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
     private _wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
+    // The executor sends a socket only the events it asked for (`events.watch`).
+    // What the executor has for the open socket, as sent; a new socket has `{}`.
+    private _watching: string | null = '{}'
+    private _watchScheduled = false
+    private _watchDone: Promise<void> = Promise.resolve()
+    // The last `events.watch` sent, settled once the executor replied.
+    private _watchSent: Promise<void> = Promise.resolve()
+    private _watchRetries = 0
+    private _watchRetryTimer: ReturnType<typeof setTimeout> | null = null
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -131,11 +153,29 @@ export class ApiClient {
 
     private _ensureWs(): void {
         if (this._ws) return
+        if (this._authFailed !== null) throw new RpcError(401, this._authFailed)
         const WsImpl = this._webSocketImpl ?? globalThis.WebSocket
         const ws = new WsImpl(this._getWsUrl())
         this._ws = ws
-        ws.onopen = () => this._onOpen(ws)
-        ws.onclose = () => this._onClose(ws)
+        this._wsOpen = new Promise<void>((resolve, reject) => {
+            ws.onopen = () => {
+                resolve()
+                this._onOpen(ws)
+            }
+            ws.onclose = (event?: CloseEvent) => {
+                // Classify the close for watchApplied() as for every other waiting call.
+                reject(event?.code === CLOSE_AUTH_FAILED
+                    ? new RpcError(401, event.reason || 'token expired or revoked')
+                    : closedError(event?.code === CLOSE_TRY_AGAIN_LATER ? event.reason : undefined))
+                if (event?.code === CLOSE_AUTH_FAILED && this._ws === ws) {
+                    this._failAuth(event.reason || 'Unauthorized access: the token expired or was revoked')
+                } else {
+                    this._onClose(ws, event?.code === CLOSE_TRY_AGAIN_LATER ? event.reason : undefined)
+                }
+            }
+        })
+        // Only watchApplied() awaits this; a close before open is not an error otherwise.
+        this._wsOpen.catch(() => {})
 
         ws.onmessage = (event) => {
             let parsed: Record<string, unknown>
@@ -148,13 +188,25 @@ export class ApiClient {
                 const pending = this._pendingCalls.get(parsed.id as string)
                 if (!pending) return // late reply to a timed-out or aborted call, or a cancel ack
                 const error = parsed.error as { code?: number; message?: string } | undefined
-                if (error) pending.reject(new RpcError(error.code ?? 500, error.message ?? 'Unknown error'))
-                else pending.resolve(parsed.result)
+                if (!error) {
+                    pending.resolve(parsed.result)
+                    return
+                }
+                const rpcError = new RpcError(error.code ?? 500, error.message ?? 'Unknown error')
+                pending.reject(rpcError)
+                // The executor answers 401 only when the token stopped working, then closes the socket.
+                if (rpcError.status === 401) this._failAuth(rpcError.body)
                 return
             }
             if (parsed.type === 'pong') return
-            for (const cb of this._wsCallbacks) {
-                callSafely(cb, 'Error in WebSocket event callback:', parsed)
+            const perspective = parsed.perspectiveUuid
+            const regs = this._handlers.get(parsed.type as string)
+            // Like DOM events: a handler added during dispatch waits for the
+            // next event, and a handler removed during dispatch gets no more.
+            for (const reg of [...regs ?? []]) {
+                if (!regs!.has(reg)) continue
+                if (reg.perspective !== undefined && reg.perspective !== perspective) continue
+                callSafely(reg.handler as (event: unknown) => void, `Error in '${parsed.type}' handler:`, parsed)
             }
         }
 
@@ -168,6 +220,10 @@ export class ApiClient {
         if (this._ws !== ws) return
         this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
         this._startPing()
+        // The watch goes out before the queued calls, so the events they cause reach listeners.
+        this._watching = '{}'
+        this._watchRetries = 0
+        this._flushWatch()
         for (const pending of this._pendingCalls.values()) {
             if (!pending.sent) {
                 ws.send(pending.message)
@@ -184,21 +240,34 @@ export class ApiClient {
         this._hasConnectedOnce = true
     }
 
-    private _onClose(ws: WebSocket): void {
+    /** `reason` is set when the executor asked to try again later; calls that fail carry it. */
+    private _onClose(ws: WebSocket, reason?: string): void {
         // A socket closed by _closeWs() can report after a new one exists.
         if (this._ws !== ws) return
         this._stopPing()
         this._ws = null
+        this._wsOpen = null
         for (const pending of this._pendingCalls.values()) {
             if (!pending.sent && ++pending.failedConnects < MAX_CONNECT_ATTEMPTS) continue
             if (pending.sent && pending.retry) {
                 pending.sent = false
                 pending.retry = false
             } else {
-                pending.reject(closedError())
+                pending.reject(closedError(reason))
             }
         }
-        if (this._wsCallbacks.size > 0 || this._pendingCalls.size > 0) this._scheduleReconnect()
+        if (this._handlers.size > 0 || this._pendingCalls.size > 0) this._scheduleReconnect()
+    }
+
+    /** The executor refused the token: fail every call with 401, stop
+     *  reconnecting and tell the `onAuthFailed` callbacks, once. */
+    private _failAuth(reason: string): void {
+        if (this._authFailed !== null) return
+        this._authFailed = reason
+        const error = new RpcError(401, reason)
+        for (const pending of this._pendingCalls.values()) pending.reject(error)
+        this._closeWs()
+        for (const cb of [...this._authFailedCallbacks]) callSafely(cb, 'Error in auth-failed callback:', reason)
     }
 
     private _startPing(): void {
@@ -218,7 +287,7 @@ export class ApiClient {
     }
 
     private _scheduleReconnect(): void {
-        if (this._wsReconnectTimer) return
+        if (this._wsReconnectTimer || this._authFailed !== null) return
         const delay = this._wsReconnectDelay
         this._wsReconnectDelay = Math.min(this._wsReconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
         this._wsReconnectTimer = setTimeout(() => {
@@ -230,23 +299,31 @@ export class ApiClient {
     // ── RPC call method ─────────────────────────────────────────────────────
 
     /**
-     * Send an RPC call over the WebSocket, connecting first if needed.
-     * @param type - The operation type (e.g. 'agent.get', 'perspective.all')
-     * @param params - Optional parameters to include in the message
+     * Call an executor method over the WebSocket, connecting first if needed.
+     * Params and result are typed by the executor's method table
+     * (`generated/api/RpcMethods.ts`).
      * @param options - `signal` to cancel, `timeoutMs` to override the
      *   default timeout. The timeout covers connecting and the reply.
      */
-    call<T>(type: string, params?: Record<string, unknown>, options?: CallOptions): Promise<T> {
+    call<M extends RpcMethod>(method: M, params: RpcMethods[M]['params'], options?: CallOptions): Promise<RpcMethods[M]['result']> {
+        // A listener added before this call needs its `events.watch` on the
+        // wire first. The executor applies a watch as it reads it, so the
+        // event this call causes reaches the listener.
+        this._flushWatch()
+        return this._request(method, params, options) as Promise<RpcMethods[M]['result']>
+    }
+
+    private _request(type: string, params?: unknown, options?: CallOptions): Promise<unknown> {
         const signal = options?.signal
         if (signal?.aborted) {
             return Promise.reject(new DOMException('Aborted', 'AbortError'))
         }
-        const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS
+        const timeoutMs = options?.timeoutMs ?? ((LONG_METHODS as ReadonlySet<string>).has(type) ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)
         const id = nextId()
         // Params go under "params" so they cannot clash with "id" and "type".
         const message = JSON.stringify({ id, type, params: params || {} })
 
-        return new Promise<T>((resolve, reject) => {
+        return new Promise<unknown>((resolve, reject) => {
             const settle = (fn: () => void) => {
                 if (!this._pendingCalls.delete(id)) return
                 clearTimeout(timer)
@@ -259,7 +336,7 @@ export class ApiClient {
                 // call. Drop it once no call waits on it, so the next call dials again.
                 if (this._ws?.readyState === 0 /* CONNECTING */ && this._pendingCalls.size === 0) {
                     this._closeWs()
-                    if (this._wsCallbacks.size > 0) this._ensureWs()
+                    if (this._handlers.size > 0) this._ensureWs()
                 }
             }, timeoutMs)
             const onAbort = () => {
@@ -272,8 +349,9 @@ export class ApiClient {
                 message,
                 sent: false,
                 failedConnects: 0,
-                retry: RETRYABLE_READS.has(type),
-                resolve: (value) => settle(() => resolve(value as T)),
+                retry: (READ_METHODS as ReadonlySet<string>).has(type),
+                watch: type === 'events.watch',
+                resolve: (value) => settle(() => resolve(value)),
                 reject: (reason) => settle(() => reject(reason)),
             }
             this._pendingCalls.set(id, pending)
@@ -294,26 +372,120 @@ export class ApiClient {
 
     // ── Event subscriptions ─────────────────────────────────────────────────
 
-    subscribe<T = WsEvent>(callback: (data: T) => void): () => void {
-        this._wsCallbacks.add(callback as (data: unknown) => void)
-        this._ensureWs()
+    /**
+     * Call `handler` with every `type` event the executor pushes, or only those
+     * about `filter.perspective`. The client asks the executor for the events
+     * its handlers need (`events.watch`). Returns a function that removes this
+     * handler. Like `addEventListener`, registering the same handler for the
+     * same type and perspective again changes nothing.
+     */
+    on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
+        const perspective = filter?.perspective
+        let regs = this._handlers.get(type)
+        if (!regs) this._handlers.set(type, regs = new Set())
+        let reg = [...regs].find(r => r.handler === handler && r.perspective === perspective)
+        if (!reg) {
+            reg = { handler: handler as (event: never) => void, perspective }
+            regs.add(reg)
+            this._scheduleWatch()
+        }
+        // A client whose token was refused keeps the handler but opens no socket.
+        if (this._authFailed === null) this._ensureWs()
 
         return () => {
-            this._wsCallbacks.delete(callback as (data: unknown) => void)
-            if (this._wsCallbacks.size === 0 && this._pendingCalls.size === 0) {
+            const regs = this._handlers.get(type)
+            if (!regs?.delete(reg)) return
+            if (regs.size === 0) this._handlers.delete(type)
+            this._scheduleWatch()
+            if (this._handlers.size === 0 && [...this._pendingCalls.values()].every(p => p.watch)) {
+                for (const pending of this._pendingCalls.values()) pending.reject(closedError())
                 this._closeWs()
             }
         }
     }
 
+    /**
+     * Resolves once the socket is open and the executor has applied this
+     * client's current `events.watch`. After it, every event the registered
+     * handlers need reaches them. Only events other peers cause (signals)
+     * need this: a call already sends the watch ahead of itself.
+     */
+    async watchApplied(): Promise<void> {
+        this._ensureWs()
+        if (this._ws!.readyState !== 1 /* OPEN */) await this._wsOpen
+        await this._watchDone
+        await this._watchSent
+    }
+
+    /** Event type → perspectives wanted (`null`: all), from every handler. */
+    watchedEvents(): Partial<Record<EventName, string[] | null>> {
+        const events: Partial<Record<EventName, string[] | null>> = {}
+        for (const type of [...this._handlers.keys()].sort() as EventName[]) {
+            const perspectives = new Set<string>()
+            let all = false
+            for (const reg of this._handlers.get(type)!) {
+                if (reg.perspective === undefined) all = true
+                else perspectives.add(reg.perspective)
+            }
+            events[type] = all ? null : [...perspectives].sort()
+        }
+        return events
+    }
+
+    /** Flush the watch once per microtask, after a subscriber came or went. */
+    private _scheduleWatch(): void {
+        if (this._watchScheduled) return
+        this._watchScheduled = true
+        this._watchDone = new Promise<void>(resolve => queueMicrotask(() => {
+            this._watchScheduled = false
+            this._flushWatch()
+            resolve()
+        }))
+    }
+
+    /** Send `events.watch` now if the socket is open and the executor lacks
+     *  the current interest; a socket still connecting gets it on open.
+     *  `_watchSent` settles with its reply. */
+    private _flushWatch(): void {
+        // With no handlers left this sends `{}`, so the executor stops sending events.
+        if (this._ws?.readyState !== 1 /* OPEN */) return
+        const events = this.watchedEvents()
+        const key = JSON.stringify(events)
+        if (key === this._watching) return
+        this._watching = key
+        const sent = this._request('events.watch', events).then(() => { this._watchRetries = 0 }, (e) => {
+            if (this._watching !== key) return
+            this._watching = null
+            // A refused token (401) gets no next socket: watchApplied() must not resolve.
+            if (e instanceof RpcError && e.status === 401) throw e
+            // A closed socket (503) gets the watch again when the next one opens.
+            if (e instanceof RpcError && e.status === 503) return
+            console.error('events.watch failed:', e)
+            if (!this._watchRetryTimer && this._watchRetries++ < MAX_WATCH_RETRIES) {
+                this._watchRetryTimer = setTimeout(() => {
+                    this._watchRetryTimer = null
+                    this._scheduleWatch()
+                }, WATCH_RETRY_DELAY_MS)
+            }
+        })
+        // Only watchApplied() awaits this; a refused watch is not an unhandled rejection otherwise.
+        sent.catch(() => {})
+        this._watchSent = sent
+    }
+
     private _closeWs(): void {
         this._stopPing()
+        if (this._watchRetryTimer) {
+            clearTimeout(this._watchRetryTimer)
+            this._watchRetryTimer = null
+        }
         if (this._wsReconnectTimer) {
             clearTimeout(this._wsReconnectTimer)
             this._wsReconnectTimer = null
         }
         const ws = this._ws
         this._ws = null
+        this._wsOpen = null
         ws?.close()
     }
 
@@ -325,14 +497,24 @@ export class ApiClient {
         return () => { this._reconnectCallbacks.delete(callback) }
     }
 
+    /** Register a callback that fires once when the executor refuses this
+     *  client's token: a 401 reply, or a socket closed with code 1008. Every
+     *  call then fails with a 401 `RpcError` and the client does not reconnect;
+     *  build a new client to use another token. Returns an unsubscribe function. */
+    onAuthFailed(callback: (reason: string) => void): () => void {
+        this._authFailedCallbacks.add(callback)
+        return () => { this._authFailedCallbacks.delete(callback) }
+    }
+
     /** Close the WebSocket and reject pending calls. */
     closeAll(): void {
         for (const pending of this._pendingCalls.values()) {
             pending.reject(new RpcError(503, 'Client closed'))
         }
         this._closeWs()
-        this._wsCallbacks.clear()
+        this._handlers.clear()
         this._reconnectCallbacks.clear()
+        this._authFailedCallbacks.clear()
         // A reused client must not fire onReconnect on its next first open.
         this._hasConnectedOnce = false
     }

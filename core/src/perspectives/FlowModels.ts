@@ -23,6 +23,25 @@ import { Ad4mModel } from "../model/Ad4mModel";
 import { HasMany, Optional, Property } from "../model/decorators";
 import { Model } from "../model/decorators";
 
+/**
+ * The engine's proposer rule (`self_authored_proposer`: a `proposer` link
+ * signed by the DID it names) as a getter. Must match the `proposer` getter in
+ * `hardwired_sdna/flow_transition_proposal.json` byte for byte, as
+ * `ACCEPTED_BY_GETTER` must.
+ */
+export const PROPOSER_GETTER =
+  'SELECT ?target WHERE { ?source <ad4m://flow/proposer> ?target . FILTER EXISTS { ?_claim <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <ad4m://flow/proposer> ?target )>> ; <ad4m://ontology/author> ?_author ; <ad4m://ontology/proofValid> ?_valid . FILTER(STR(?_author) = STR(?target) && STR(?_valid) = "true") } }';
+
+/**
+ * The engine's vote rule (`signed_by`: the link's author is the DID it names,
+ * and its signature verified) as a getter over the link's reifier. Must match
+ * the `acceptedBy` getter in `hardwired_sdna/flow_transition_proposal.json`
+ * byte for byte: whichever side registers the class first decides the stored
+ * shape.
+ */
+export const ACCEPTED_BY_GETTER =
+  'SELECT ?target WHERE { ?source <ad4m://acceptedBy> ?target . FILTER EXISTS { ?_vote <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <ad4m://acceptedBy> ?target )>> ; <ad4m://ontology/author> ?_author ; <ad4m://ontology/proofValid> ?_valid . FILTER(STR(?_author) = STR(?target) && STR(?_valid) = "true") } }';
+
 // ── FlowTransitionProposal ──────────────────────────────────────────────────
 // Mirrors the Rust hardwired `flow_transition_proposal.json` SDNA (once wired
 // on the engine side; see file header). One node per proposed transition; the
@@ -53,8 +72,13 @@ export class FlowTransitionProposal extends Ad4mModel {
   @Property({ through: "ad4m://flow/to_state", required: true })
   toState: string = "";
 
-  /** DID of the agent that issued the proposal. */
-  @Property({ through: "ad4m://flow/proposer", required: true })
+  /**
+   * DID of the agent that issued the proposal, read the way the engine reads
+   * it: only from a `proposer` link signed by the DID it names. Any member
+   * can write a `proposer` link naming someone else, and an unchecked read
+   * would show that DID instead (and drop the real proposer from the voters).
+   */
+  @Property({ through: "ad4m://flow/proposer", required: true, getter: PROPOSER_GETTER, datatype: "xsd:string" })
   proposer: string = "";
 
   /**
@@ -124,6 +148,22 @@ export class FlowTransitionProposal extends Ad4mModel {
   @Optional({ through: "ad4m://flow/rationale" })
   rationale?: string;
 
+  /**
+   * DIDs that accepted this proposal, as the consensus engine counts them:
+   * an `ad4m://acceptedBy` link counts only when it is signed by the DID it
+   * names, since anyone can write one naming someone else, and each DID once.
+   * The proposer's vote is implicit and the proposer may also accept, so the
+   * voters are the *set* `{ proposer } ∪ acceptedBy`, not its sum.
+   * Read-only: vote with `acceptProposal`, withdraw with `rejectProposal`.
+   */
+  @HasMany({ through: "ad4m://acceptedBy", getter: ACCEPTED_BY_GETTER, readOnly: true })
+  acceptedBy: string[] = [];
+
+  // Whether this proposal settled an edge is not on the record: the
+  // executor keeps that per agent, outside the graph (#1424). Ask
+  // `PerspectiveProxy.flowFired(instance)` for the proposals your replica
+  // recorded as fired, or listen with `onFlowStateChanged`.
+
   // "When was this proposal written?" is answered by `Ad4mModel`'s built-in
   // `createdAt`, synthesized on hydration from the earliest link timestamp
   // of the proposal's own links (all written together during create_subject).
@@ -181,15 +221,10 @@ export class FlowInstanceRecord extends Ad4mModel {
   @Property({ through: "ad4m://flow/base", required: true })
   subject: string = "";
 
-  /**
-   * The state name this replica's executor last derived for the flow — a
-   * per-replica cache written as a `local` link, never the authority (the
-   * fold over the signed proposals is). Optional on the shape: a row that
-   * synced in from a peer carries no value until the local consensus pass
-   * has run, so an empty string means "not yet derived here".
-   */
-  @Property({ through: "ad4m://flow/current_state", local: true })
-  currentState: string = "";
+  // The flow's state is not on the record. It is derived from the signed
+  // proposals, and each agent's executor keeps what it last derived outside
+  // the graph (#1424): read it with `PerspectiveProxy.flowStates`, or use
+  // the `FlowInstance` wrapper, whose `currentStateName` is filled from it.
 
   // "When was this flow started?" is answered by `Ad4mModel`'s built-in
   // `createdAt`, synthesized on hydration from the earliest link timestamp

@@ -52,6 +52,8 @@ export function buildSHACL(
      * an `ad4m://interpretation_hint` link by `SHACLShape.toLinks()`.
      */
     interpretationHint?: string,
+    /** `@Model({ abstract: true })`: emitted as one `ad4m://abstract` link. */
+    isAbstract?: boolean,
 ): { shape: SHACLShape; name: string } {
     const obj = target.prototype;
 
@@ -85,6 +87,9 @@ export function buildSHACL(
     const shape = new SHACLShape(shapeUri, targetClass);
     if (interpretationHint) {
         shape.interpretationHint = interpretationHint;
+    }
+    if (isAbstract) {
+        shape.isAbstract = true;
     }
 
     // ── Seed the memoisation cache while we keep building ──────────────
@@ -238,6 +243,11 @@ export function buildSHACL(
             propShape.identity = true;
         }
 
+        // Names for abstract classes (emitted as `ad4m://alias`).
+        if (propMeta.alias) {
+            propShape.alias = propMeta.alias;
+        }
+
         // ── Setter actions ──────────────────────────────────────────────
         if (propMeta.prologSetter) {
             console.warn(
@@ -350,10 +360,17 @@ export function buildSHACL(
         if (relMeta.interpretationHint) {
             relShape.interpretationHint = relMeta.interpretationHint;
         }
+        if (relMeta.alias) {
+            relShape.alias = relMeta.alias;
+        }
 
         // Adder / Remover actions — only meaningful for relations backed
-        // by a real link predicate.  Getter-only relations are read-only.
-        if (relMeta.predicate) {
+        // by a real link predicate.  Getter-only relations are read-only,
+        // and so is one declared `readOnly`, which keeps its predicate as
+        // the shape's path but must offer no way to write it.
+        if (relMeta.readOnly) {
+            relShape.writable = false;
+        } else if (relMeta.predicate) {
             relShape.adder = [{
                 action: "addLink",
                 source: "this",

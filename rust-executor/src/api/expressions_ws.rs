@@ -4,20 +4,26 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agent::capabilities::*;
-use crate::agent::AgentContext;
 use crate::helpers::build_expression_rendered;
 use crate::languages::LanguageController;
 use crate::types::*;
 
+use super::guards::Guard;
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
-async fn get_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &EXPRESSION_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
+/// `expression.get`: the rendered expression, or `null` when unknown.
+async fn get_expression(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    read_expression(params, false).await
+}
 
+/// `expression.getRaw`: the stored expression as a JSON string, or `null` when unknown.
+async fn get_raw_expression(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    read_expression(params, true).await
+}
+
+async fn read_expression(params: Value, raw: bool) -> Result<Value, WsRpcError> {
     let url = params.require_str("url")?;
-    let raw = params.get("raw").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let decoded_url = urlencoding::decode(&url)
         .map(|s| s.into_owned())
@@ -60,11 +66,8 @@ async fn get_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
 async fn get_many_expressions(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &EXPRESSION_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: ExpressionManyRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -99,16 +102,13 @@ async fn get_many_expressions(
 }
 
 async fn create_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &EXPRESSION_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: CreateExpressionRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let controller = LanguageController::global_instance();
     let content_json: serde_json::Value =
         serde_json::from_str(&body.content).unwrap_or(Value::String(body.content));
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = ctx.acts_as();
 
     let url = controller
         .expression_create(&body.language_address, content_json, &agent_context)
@@ -123,10 +123,7 @@ async fn create_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     Ok(Value::String(url))
 }
 
-async fn get_interactions(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &EXPRESSION_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_interactions(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let url = params.require_str("url")?;
     let decoded_url = urlencoding::decode(&url)
         .map(|s| s.into_owned())
@@ -151,10 +148,10 @@ async fn get_interactions(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     Ok(serde_json::to_value(Vec::<InteractionMeta>::new())?)
 }
 
-async fn interact_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &EXPRESSION_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn interact_expression(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let url = params.require_str("url")?;
     let body: InteractionCallWrapper = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -189,9 +186,32 @@ async fn interact_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("expression.get", get_expression);
-    map.register("expression.getMany", get_many_expressions);
-    map.register("expression.create", create_expression);
-    map.register("expression.interactions", get_interactions);
-    map.register("expression.interact", interact_expression);
+    let read = || Guard::Cap(EXPRESSION_READ_CAPABILITY.clone());
+    map.method::<ExpressionUrlRequest, Option<ExpressionRendered>>(
+        "expression.get",
+        get_expression,
+    )
+    .read()
+    .guard(read());
+    map.method::<ExpressionUrlRequest, Option<String>>("expression.getRaw", get_raw_expression)
+        .read()
+        .guard(read());
+    map.method::<ExpressionManyRequest, Vec<Option<ExpressionRendered>>>(
+        "expression.getMany",
+        get_many_expressions,
+    )
+    .read()
+    .guard(read());
+    // The caller signs the new expression as itself (`ctx.acts_as()`).
+    map.method::<CreateExpressionRequest, String>("expression.create", create_expression)
+        .guard(Guard::Cap(EXPRESSION_CREATE_CAPABILITY.clone()));
+    map.method::<ExpressionUrlRequest, Vec<InteractionMeta>>(
+        "expression.interactions",
+        get_interactions,
+    )
+    .read()
+    .guard(read());
+    // The interaction's result, JSON-encoded (`"null"` when it returns nothing).
+    map.method::<ExpressionInteractRequest, String>("expression.interact", interact_expression)
+        .guard(Guard::Cap(EXPRESSION_UPDATE_CAPABILITY.clone()));
 }

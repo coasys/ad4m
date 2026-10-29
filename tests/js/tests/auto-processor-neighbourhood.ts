@@ -104,7 +104,7 @@ export default function autoProcessorNeighbourhoodTests(
         );
 
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
-        await testContext.makeAllNodesKnown();
+        await testContext.makeAllNodesKnown([alice, aliceHandle.uuid], [bob, bobHandle.uuid]);
         await sleep(2000); // K2 space initialization after join + agent info exchange
 
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
@@ -114,18 +114,42 @@ export default function autoProcessorNeighbourhoodTests(
         // watchers start firing. Fresh neighbourhood, cold gossip peers —
         // without this, later cross-peer expectations time out on cold-start
         // sync rather than reporting the actual state.
-        const marker = `warmup://${uuidv4()}`;
-        await aliceP.add(
-          new Link({ source: marker, predicate: "ns://ping", target: "literal:string:ok" }),
-        );
-        await waitUntil(
-          async () => {
-            const links = await bobP.get(new LinkQuery({ source: marker }));
-            return links.length > 0;
-          },
-          180_000,
-          "gossip warm-up: Alice's marker link to reach Bob",
-        );
+        //
+        // One publish is not enough. On a cold neighbourhood the other
+        // executor's `latest_revision` stays null, so the first marker is
+        // never pulled. Publish a new marker every 30s, and exchange agent
+        // infos again before each publish, until any published marker
+        // arrives or 180s is up. Earlier markers stay in the check set: a
+        // link that reaches Bob after its own 30s slice still counts.
+        const warmupMs = 180_000;
+        const started = Date.now();
+        const deadline = started + warmupMs;
+        let synced = false;
+        const markers: string[] = [];
+        while (!synced && Date.now() < deadline) {
+          await testContext.makeAllNodesKnown();
+          const marker = `warmup://${uuidv4()}`;
+          await aliceP.add(
+            new Link({ source: marker, predicate: "ns://ping", target: "literal:string:ok" }),
+          );
+          markers.push(marker);
+          const sliceEnd = Math.min(Date.now() + 30_000, deadline);
+          while (Date.now() < sliceEnd) {
+            for (const m of markers) {
+              if ((await bobP.get(new LinkQuery({ source: m }))).length > 0) {
+                synced = true;
+                break;
+              }
+            }
+            if (synced) break;
+            await sleep(500);
+          }
+        }
+        if (!synced) {
+          throw new Error(
+            `waitUntil timed out after ${Date.now() - started}ms waiting for: gossip warm-up: Alice's marker link to reach Bob`,
+          );
+        }
 
         await ConversationSubgroup.register(aliceP);
         await ConversationSubgroup.register(bobP);
@@ -133,8 +157,8 @@ export default function autoProcessorNeighbourhoodTests(
         // One merged stream: each executor reports its own passes, tagged with
         // the DID that ran them, so "who did what" is readable from one list.
         const events: AutoProcessorEvent[] = [];
-        aliceP.addAutoProcessorEventListener((e) => events.push(e));
-        bobP.addAutoProcessorEventListener((e) => events.push(e));
+        aliceP.on("auto-processor-event", (e) => events.push(e));
+        bobP.on("auto-processor-event", (e) => events.push(e));
 
         await aliceP.addAutoProcessor({
           processorId,

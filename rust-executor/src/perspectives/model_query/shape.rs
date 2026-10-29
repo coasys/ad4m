@@ -21,6 +21,26 @@ use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
+/// No SHACL is stored for `class_name`. Typed so a caller holding the error
+/// can tell which class to wait for: on a shared perspective it may still be
+/// syncing (see `PerspectiveInstance::model_query`).
+#[derive(Debug)]
+pub(crate) struct MissingShape {
+    pub(crate) class_name: String,
+}
+
+impl std::fmt::Display for MissingShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "No SHACL shape stored for class '{}'. Call ensureSubjectClasses / addSdna first.",
+            self.class_name
+        )
+    }
+}
+
+impl std::error::Error for MissingShape {}
+
 /// Public (crate-level) entry point for loading a shape from the SHACL store.
 ///
 /// Delegates to [`load_shape`].
@@ -62,10 +82,10 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     let results: Vec<Value> = serde_json::from_str(&result_json)?;
 
     if results.is_empty() {
-        return Err(anyhow!(
-            "No SHACL shape stored for class '{}'. Call ensureSubjectClasses / addSdna first.",
-            class_name
-        ));
+        return Err(MissingShape {
+            class_name: class_name.to_string(),
+        }
+        .into());
     }
 
     let shape_uri = results[0]["shapeUri"]
@@ -214,6 +234,17 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         // multi-valued cardinality, not link-typed semantics.
         let is_relation =
             relation_kind.is_some() || target_class_uri.is_some() || target_class_name.is_some();
+        // `parse_shacl_to_links` refuses this pair at registration (#908),
+        // but a shape can also arrive by sync, raw link writes or import.
+        // Such a stored shape still loads (kept as a relation with its
+        // `datatype`, as before), so legacy classes keep working; this only
+        // makes it visible.
+        if datatype.is_some() && (target_class_uri.is_some() || target_class_name.is_some()) {
+            log::warn!(
+                "SHACL shape for class '{class_name}': property '{prop_uri}' sets both \
+                 `datatype` and a target class; treating it as a relation (#908)"
+            );
+        }
         // All relations are marked `is_collection` so the query pipeline
         // hydrates them as arrays during link grouping; the
         // `is_scalar_relation` flag then tells the renderer to unwrap
@@ -347,6 +378,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     Ok(ModelShape {
         target_class,
         shape_uri,
+        absent: Vec::new(),
         properties,
         include_relations,
         interpretation_hint: class_hint,
@@ -434,7 +466,7 @@ fn parse_bool_literal_target(raw: Option<&str>) -> Option<bool> {
 }
 
 /// Decode the target of a `literal:string:<urlencoded>` link.
-fn decode_literal_string_target(raw: &str) -> String {
+pub(crate) fn decode_literal_string_target(raw: &str) -> String {
     let trimmed = raw
         .strip_prefix("literal://string:")
         .or_else(|| raw.strip_prefix("literal:string:"))
@@ -691,6 +723,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
     Ok(ModelShape {
         target_class,
         shape_uri,
+        absent: Vec::new(),
         properties,
         include_relations,
         interpretation_hint: None,

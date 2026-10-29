@@ -295,7 +295,7 @@ pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
 /// naming `[Post, ImagePost]` reads an `ImagePost` as a `Post`. That is the
 /// point: a relation declared to hold `Post`s wants posts, not whatever more
 /// specific thing each one happens to be.
-fn choose<'a>(matched: &'a [String], preferred: &[String]) -> Option<&'a String> {
+pub(super) fn choose<'a>(matched: &'a [String], preferred: &[String]) -> Option<&'a String> {
     preferred
         .iter()
         .find_map(|want| matched.iter().find(|have| *have == want))

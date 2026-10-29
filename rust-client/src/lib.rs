@@ -52,9 +52,12 @@ impl Ad4mClient {
         })
     }
 
-    /// Subscribe to server-push events (link changes, agent status, etc.).
-    /// Returns a broadcast receiver yielding raw event JSON values.
-    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<serde_json::Value> {
-        self.ws.subscribe_events()
+    /// Receive the server-push events named in `events` (event type →
+    /// perspective uuids, or `null` for all). See `WsRpcClient::watch_events`.
+    pub async fn watch_events(
+        &self,
+        events: serde_json::Value,
+    ) -> Result<tokio::sync::broadcast::Receiver<serde_json::Value>> {
+        self.ws.watch_events(events).await
     }
 }

@@ -283,10 +283,11 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
             // Collapse duplicate targets.
             //
             // A link is stored as a direct triple plus a reifier keyed on
-            // `sha256(source, predicate, target, timestamp)`, so two links
-            // carrying the same triple at different timestamps — two peers
-            // asserting the same membership, or a re-add racing a remote write —
-            // share one triple but produce two reifiers. The instance query joins
+            // `sha256(author, source, predicate, target, timestamp)`, so two
+            // links carrying the same triple from different authors or at
+            // different timestamps — two peers asserting the same membership,
+            // or a re-add racing a remote write — share one triple but produce
+            // two reifiers. The instance query joins
             // through the reifier to recover author and timestamp, so it returns a
             // row per reifier and the target lands here twice.
             //
@@ -358,16 +359,18 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
     Some(Value::Object(obj))
 }
 
+/// The keys a `properties` selection never strips.
+pub(super) const ALWAYS_KEPT: [&str; 2] = ["id", "baseExpression"];
+
 /// Strip an instance down to only the requested properties.
 ///
-/// `id` and `baseExpression` are always preserved.  Included relation
+/// [`ALWAYS_KEPT`] is always preserved.  Included relation
 /// names are added to the keep-list by the caller.
 pub(super) fn filter_properties(instance: Value, requested: &[String]) -> Value {
     if let Value::Object(mut obj) = instance {
-        let always_keep = ["id", "baseExpression"];
         let keys: Vec<String> = obj.keys().cloned().collect();
         for key in keys {
-            if always_keep.contains(&key.as_str()) {
+            if ALWAYS_KEPT.contains(&key.as_str()) {
                 continue;
             }
             if !requested.iter().any(|r| r == &key) {
@@ -662,8 +665,8 @@ mod tests {
     // ---- duplicate collapsing --------------------------------------------
     //
     // A link is a direct triple plus a reifier keyed on
-    // `sha256(source, predicate, target, timestamp)`. Two peers asserting the
-    // same membership share the triple but mint two reifiers, and the instance
+    // `sha256(author, source, predicate, target, timestamp)`. Two peers
+    // asserting the same membership share the triple but mint two reifiers, and the instance
     // query joins through the reifier to recover author/timestamp — so the same
     // target arrives twice. These fixtures reproduce that by repeating a
     // `(predicate, target)` pair at two timestamps.

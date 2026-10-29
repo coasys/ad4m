@@ -17,11 +17,13 @@
 //!
 //! Removals of Shared links are not checked for authority here.
 
+use super::monotonic::RetractionEffects;
 use super::perspective_instance::PerspectiveInstance;
 #[cfg(doc)]
 use super::sparql_store::SparqlStore;
 use crate::types::{LinkExpression, PerspectiveDiff};
 use deno_core::error::AnyError;
+use std::sync::PoisonError;
 
 /// Drop from a remote diff every addition whose proof does not verify
 /// against its own `author`.
@@ -43,11 +45,22 @@ pub(crate) fn retain_ingestible(additions: &mut Vec<LinkExpression>) {
 
 impl PerspectiveInstance {
     /// Write a link language's diff, removals first like
-    /// [`Self::persist_link_diff`], skipping every link this store holds as
-    /// `Local` (#1146). Returns what was applied. A link whose write fails,
-    /// or whose stored status cannot be read, is dropped rather than applied
+    /// [`Self::persist_link_diff`] and under the same `persist_lock`,
+    /// skipping every link this store holds as `Local` (#1146). Returns what
+    /// was applied, and what the diff's `ad4m://retracted` tombstones did
+    /// (`monotonic::RetractionEffects`): the links they end are removed, and
+    /// additions they cover are not written. A link whose write fails, or
+    /// whose stored status cannot be read, is dropped rather than applied
     /// blind.
-    pub(super) fn persist_remote_diff(&self, diff: PerspectiveDiff) -> PerspectiveDiff {
+    pub(super) fn persist_remote_diff(
+        &self,
+        diff: PerspectiveDiff,
+    ) -> Result<(PerspectiveDiff, RetractionEffects), AnyError> {
+        let _persisting = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let effects = self.retraction_effects(&diff.additions)?;
         let applied = |kind: &str, link: &LinkExpression, result: Result<bool, AnyError>| {
             result.unwrap_or_else(|e| {
                 log::warn!(
@@ -59,6 +72,16 @@ impl PerspectiveInstance {
                 false
             })
         };
+        // A tombstone ends only a Shared link (`monotonic::ends`), so its
+        // removals need no Local check; `fold_into` publishes them.
+        for retracted in &effects.retracted {
+            if let Err(e) = self
+                .sparql_store
+                .remove_link(&LinkExpression::from(retracted.clone()))
+            {
+                log::warn!("Failed to remove retracted link from SPARQL store: {:?}", e);
+            }
+        }
         let removals = diff
             .removals
             .into_iter()
@@ -67,11 +90,15 @@ impl PerspectiveInstance {
         let additions = diff
             .additions
             .into_iter()
+            .filter(|l| !effects.covers(l))
             .filter(|l| applied("addition", l, self.sparql_store.add_remote_link(l)))
             .collect();
-        PerspectiveDiff {
-            additions,
-            removals,
-        }
+        Ok((
+            PerspectiveDiff {
+                additions,
+                removals,
+            },
+            effects,
+        ))
     }
 }

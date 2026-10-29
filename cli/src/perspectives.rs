@@ -149,8 +149,8 @@ pub struct LinkWatchEvent {
 ///
 /// Returns `Some` only for a link change on the watched perspective. The executor
 /// serialises the perspective id as `perspectiveUuid` and an updated link as
-/// `newLink`/`oldLink` (camelCase — see `PerspectiveLinkWithOwner` and
-/// `PerspectiveLinkUpdatedWithOwner`), so this reads those keys. Reading `uuid`
+/// `newLink`/`oldLink` (camelCase — see `PerspectiveLinkEvent` and
+/// `PerspectiveLinkUpdatedEvent`), so this reads those keys. Reading `uuid`
 /// or `link` for updates silently matches nothing. A matched event always yields
 /// a payload (falling back to the whole event) so a change is never dropped.
 ///
@@ -239,7 +239,11 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
         PerspectiveFunctions::Watch { id } => {
             println!("Watching perspective {} for link changes...", id);
             println!("(Press Ctrl+C to stop)\n");
-            let mut rx = ad4m_client.subscribe_events();
+            let mut rx = ad4m_client
+                .watch_events(serde_json::json!({
+                    "link-added": [id], "link-removed": [id], "link-updated": [id]
+                }))
+                .await?;
             loop {
                 match rx.recv().await {
                     Ok(event) => {
@@ -558,14 +562,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // Wire shapes match the executor's `PerspectiveLinkWithOwner` (added/removed)
-    // and `PerspectiveLinkUpdatedWithOwner` (updated), both `rename_all=camelCase`.
+    // Wire shapes match the executor's `PerspectiveLinkEvent` (added/removed)
+    // and `PerspectiveLinkUpdatedEvent` (updated), both `rename_all=camelCase`.
     fn added_event(uuid: &str) -> serde_json::Value {
         json!({
             "type": "link-added",
             "perspectiveUuid": uuid,
-            "link": { "author": "did:key:z6Mkxyz", "timestamp": "t", "data": { "source": "s", "predicate": "p", "target": "tgt" } },
-            "owner": "did:key:z6Mkxyz"
+            "link": { "author": "did:key:z6Mkxyz", "timestamp": "t", "data": { "source": "s", "predicate": "p", "target": "tgt" } }
         })
     }
 

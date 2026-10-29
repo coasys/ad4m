@@ -270,7 +270,7 @@ describe("InterpretationModels @Model shapes match Rust hardwired SDNA", () => {
 });
 
 // ── Request-type field parity — AddAutoProcessorConfig (TS) vs
-//    AddAutoProcessorRequest (Rust) ─────────────────────────────────────────
+//    PerspectiveAddAutoProcessorParams (Rust) ─────────────────────────────────────────
 //
 // `PerspectiveClient.addAutoProcessor` builds the wire payload as
 // `{ uuid, ...config }` (`PerspectiveClient.ts`) — there is no per-field
@@ -286,7 +286,7 @@ describe("InterpretationModels @Model shapes match Rust hardwired SDNA", () => {
 // #1320: `max_tool_calls` was added to the Rust request without a matching
 // TS field — this is the check that would have caught it, and would have
 // caught `flows` the same way (#1318).
-describe("AddAutoProcessorConfig / AddAutoProcessorRequest field parity", () => {
+describe("AddAutoProcessorConfig / PerspectiveAddAutoProcessorParams field parity", () => {
   function snakeToCamel(name: string): string {
     return name.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
   }
@@ -305,10 +305,10 @@ describe("AddAutoProcessorConfig / AddAutoProcessorRequest field parity", () => 
 
   function rustAutoProcessorRequestFields(): Set<string> {
     const src = fs.readFileSync(
-      path.resolve(__dirname, "../../../../rust-executor/src/api/types.rs"),
+      path.resolve(__dirname, "../../../../rust-executor/src/api/perspectives_ws.rs"),
       "utf-8",
     );
-    const body = extractBraceBody(src, "pub struct AddAutoProcessorRequest");
+    const body = extractBraceBody(src, "pub struct PerspectiveAddAutoProcessorParams");
     const fields = new Set<string>();
     for (const m of body.matchAll(/^\s*pub\s+(\w+)\s*:/gm)) {
       if (m[1] !== "uuid") fields.add(snakeToCamel(m[1]));
@@ -331,14 +331,14 @@ describe("AddAutoProcessorConfig / AddAutoProcessorRequest field parity", () => 
     return fields;
   }
 
-  it("every Rust AddAutoProcessorRequest field (minus uuid) has a TS AddAutoProcessorConfig counterpart", () => {
+  it("every Rust PerspectiveAddAutoProcessorParams field (minus uuid) has a TS AddAutoProcessorConfig counterpart", () => {
     const rustFields = [...rustAutoProcessorRequestFields()].sort();
     const tsFields = [...tsAutoProcessorConfigFields()].sort();
 
     expect(
       tsFields,
       "AddAutoProcessorConfig (TS) must have exactly the camelCase of every " +
-        "AddAutoProcessorRequest (Rust) field other than uuid — add the " +
+        "PerspectiveAddAutoProcessorParams (Rust) field other than uuid — add the " +
         "missing field(s) to core/src/perspectives/AutoProcessor.ts",
     ).to.deep.equal(rustFields);
   });
