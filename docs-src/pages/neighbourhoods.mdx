@@ -162,7 +162,7 @@ const createNeighbourhood = async () => {
     // 1. Create unique LinkLanguage from template
     const template = (await ad4m.runtime.knownLinkLanguageTemplates())[0];
     const linkLang = await ad4m.languages.applyTemplateAndPublish(
-        template,
+        template.address,
         {
             uuid: crypto.randomUUID(),
             name: "My Space Sync"
@@ -192,12 +192,13 @@ const createNeighbourhood = async () => {
 First, choose or create a LinkLanguage for your sync needs:
 
 ```typescript
-// List available LinkLanguage templates
+// List available LinkLanguage templates, each with its meta
+// (name, description, possibleTemplateParams)
 const templates = await ad4m.runtime.knownLinkLanguageTemplates();
 
 // Create a unique instance of a LinkLanguage
 const linkLanguage = await ad4m.languages.applyTemplateAndPublish(
-    templates[0],  // e.g., Perspective Diff Sync
+    templates[0].address,  // e.g., Perspective Diff Sync
     JSON.stringify({
         uuid: "unique-id-123",  // Unique network identifier
         name: "My Team Sync"

@@ -8,6 +8,8 @@ export class SentMessage {
 
 export class RuntimeInfo {
     ad4mExecutorVersion: string;
+    /** The commit the executor was built from, or null when the build could not tell. */
+    ad4mExecutorCommit: string | null;
     isInitialized: Boolean;
     isUnlocked: Boolean;
 }
@@ -41,6 +43,11 @@ export class NotificationInput {
     webhookAuth: string;
 }
 
+// What `updateNotification` takes. Without `webhookAuth` the executor keeps the stored
+// credential, and refuses the update if `webhookUrl` changes too: the credential goes only
+// to the webhook it was set for. An empty `webhookAuth` clears it.
+export type NotificationUpdate = Omit<NotificationInput, 'webhookAuth'> & { webhookAuth?: string };
+
 export class Notification {
     id: string;    
     granted: boolean;
@@ -51,7 +58,9 @@ export class Notification {
     trigger: string;
     perspectiveIds: string[];
     webhookUrl: string;
-    webhookAuth: string;
+    // Whether a webhook credential is set. The executor never returns the credential.
+    hasWebhookAuth: boolean;
+    ownerDid: string;
 }
 
 export class TriggeredNotification {

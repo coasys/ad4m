@@ -19,9 +19,12 @@ fn verify_internal_token(headers: &HeaderMap) -> Result<(), ApiError> {
         .unwrap_or("");
 
     let config = crate::config::get_global_config();
-    let expected = config.internal_api_token.as_deref().unwrap_or("");
+    let matches = config
+        .internal_api_token
+        .as_ref()
+        .is_some_and(|expected| !expected.is_empty() && expected.expose_for_compare(token));
 
-    if token.is_empty() || expected.is_empty() || token != expected {
+    if token.is_empty() || !matches {
         return Err(ApiError::Unauthorized(
             "Invalid internal API token".to_string(),
         ));

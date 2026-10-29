@@ -1,0 +1,72 @@
+name: Publish snapshot packages
+
+# Every push to `dev` and every pull request publishes `@coasys/ad4m` and `@coasys/ad4m-connect`
+# to pkg.pr.new, as a snapshot installable by URL:
+#
+#   pnpm add https://pkg.pr.new/@coasys/ad4m@<commit>
+#
+# A snapshot is not an npm release. Nothing reaches the npm registry, no version or tag moves, and
+# `npm install @coasys/ad4m` is unchanged. Releases stay with `publish_staging.yml` and
+# `publish.yml`. Snapshots let an app test and adopt a change to these packages minutes after it
+# merges, without waiting for the next staging release, and without building ad4m from source.
+#
+# Needs the pkg.pr.new GitHub App installed on this repository. Until it is, the publish step fails.
+
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+
+# On a pull request, a newer commit supersedes a run still in progress. Each push to `dev` gets a
+# group of its own, so every `dev` commit gets a snapshot: with one group per ref, a merge landing
+# while the previous one publishes cancels it, and without `cancel-in-progress` a group still holds
+# only one pending run, so a third merge would drop the queued second.
+concurrency:
+  group: publish-snapshot-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    # Only branches of this repository. A pull request from a fork would publish its code under
+    # this repository's name. This skips ordinary fork runs but does not enforce anything: a pull
+    # request runs its own copy of this file, so a fork can change the condition. What gates fork
+    # code is the repository's approval setting for fork pull request workflows.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    # pkg.pr.new authenticates the run through its GitHub App, not this token.
+    permissions:
+      contents: read
+    steps:
+      # On a pull request, `github.sha` is GitHub's merge of the PR into its base, but pkg.pr.new
+      # files the snapshot under the PR's head commit. Building the head commit makes
+      # `@coasys/ad4m@<sha>` the build of `<sha>`, whatever the base held when the job ran.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: 'pnpm'
+
+      - name: Install deps
+        run: pnpm install --no-frozen-lockfile
+
+      # The same build as the npm release in `publish_staging.yml`: core, then connect.
+      - name: Build modules
+        run: pnpm run build-npm-packages
+
+      # Both packages in one call, so the PR comment lists them together. Connect's snapshot matches
+      # core's because connect's build bundles core from this checkout; core is only a
+      # devDependency of connect, which an app installing connect does not get. An app installs
+      # both snapshots from the same commit. `--pnpm` packs with `pnpm pack`, which, unlike
+      # `npm pack`, resolves `workspace:` specifiers (#1217).
+      # `--commentWithSha` makes the PR comment link the commit's snapshot, which never changes,
+      # rather than the PR's, which moves with every push.
+      - name: Publish to pkg.pr.new
+        run: pnpm dlx pkg-pr-new@0.0.88 publish --pnpm --commentWithSha ./core ./connect

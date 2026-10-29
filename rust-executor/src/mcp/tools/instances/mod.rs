@@ -36,11 +36,13 @@
 //! - [`update`] — `instance_update` + `instance_remove`
 //! - [`collections`] — `instance_add_to_collection` + `instance_remove_from_collection`
 //! - [`children`] — class-agnostic `add_child` / `get_children` on the
-//!   `ad4m://has_child` tree
+//!   containment tree (the built-in `Container`)
 //! - [`transcript`] — `instance_transcript`, a compact chronological reading
 //!   of the children under a node that carry text, through the built-in
 //!   TextContent
 //! - [`commands`] — `execute_commands`, raw SDNA actions on an instance
+//! - [`template_tools`] — `template_read` + `template_update`: a WE template, edited by WE's
+//!   own rules (`tool_bundles::builtin`)
 //! - [`validate`] — SHACL-derived property validation shared by every write
 //! - this file — the borrowed [`PropView`] over a class shape, class
 //!   resolution, instance URI minting and the other helpers the tools share
@@ -51,6 +53,7 @@ pub mod commands;
 pub mod create;
 pub mod describe;
 pub mod query;
+pub mod template_tools;
 pub mod transcript;
 pub mod update;
 pub(crate) mod validate;
@@ -92,11 +95,6 @@ pub(crate) const MAX_QUERY_LIMIT: usize = 500;
 /// How long class resolution waits for a class's SHACL to arrive over
 /// p-diff-sync on a freshly joined neighbourhood before reporting it as
 pub(super) const CLASS_SYNC_WAIT: Duration = Duration::from_secs(5);
-
-/// Predicate used for the optional `parent` argument on `instance_create` /
-/// `instance_query` — the same child link the per-class `{class}_create` /
-/// `{class}_list` tools use.
-pub(super) const HAS_CHILD: &str = "ad4m://has_child";
 
 // ============================================================================
 // Schema projection — SHACL shape → data an agent can read
@@ -140,6 +138,16 @@ impl<'a> PropView<'a> {
 
     pub(crate) fn required(&self) -> bool {
         self.prop.is_required
+    }
+
+    /// The language the value is stored through as an expression, when it is not a literal — a
+    /// file property's file-storage language, say. Such a value is what the language takes, which
+    /// need not be the declared datatype: a file is an object of its bytes and type.
+    pub(crate) fn stored_by_language(&self) -> Option<&'a str> {
+        self.prop
+            .resolve_language
+            .as_deref()
+            .filter(|language| *language != "literal")
     }
 
     /// Multi-valued (collection or `*Many` relation).

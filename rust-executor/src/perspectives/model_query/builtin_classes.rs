@@ -19,13 +19,27 @@ use crate::types::{ExpressionProof, LinkExpression, LinkStatus};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-/// `TextContent { text }`: text a view or an LLM can read. `text` may contain
-/// HTML or Markdown.
+/// `TextContent { text, mentions? }`: text a view or an LLM can read, and the
+/// agents it mentions. `text` may contain HTML or Markdown and is required
+/// (`min_count: 1`); `mentions` is an optional relation to agent DIDs (WE's
+/// `we://mention`, aliased to it). A class with text and no mention relation
+/// conforms, and reads as mentioning no one.
 pub const TEXT_CONTENT_URI: &str = "ad4m://TextContent";
 pub(crate) const TEXT_CONTENT_SDNA: &str = include_str!("../hardwired_sdna/text_content.json");
 
-/// URI, name aliases use, SHACL JSON.
-const BUILTINS: &[(&str, &str, &str)] = &[(TEXT_CONTENT_URI, "TextContent", TEXT_CONTENT_SDNA)];
+/// `Container { children }`: what holds other records. A record is contained
+/// in P when `P ad4m://has_child X` exists, whatever P is, or when P is an
+/// instance of a class that conforms to `Container` and links X through that
+/// class's `children` relation (see [`super::containment`]).
+pub const CONTAINER_URI: &str = "ad4m://Container";
+pub(crate) const CONTAINER_SDNA: &str = include_str!("../hardwired_sdna/container.json");
+
+/// URI, name aliases use, SHACL JSON, whether it reads its own rows (see
+/// [`Builtin::member`]).
+const BUILTINS: &[(&str, &str, &str, bool)] = &[
+    (TEXT_CONTENT_URI, "TextContent", TEXT_CONTENT_SDNA, false),
+    (CONTAINER_URI, "Container", CONTAINER_SDNA, true),
+];
 
 /// A built-in abstract class.
 #[derive(Debug)]
@@ -33,6 +47,15 @@ pub struct Builtin {
     /// The name aliases key it by.
     pub name: &'static str,
     pub shape: Arc<ModelShape>,
+    /// The shape a query over the built-in reads beside its conforming
+    /// classes, under the built-in's URI: `Container`'s holders that no class
+    /// describes (`ad4m://self`, a neighbourhood root, a plain-string id).
+    /// Its relation is required, so a row is a node with at least one link
+    /// on its predicate; required rather than structural, because the
+    /// structural tier is skipped under a parent scope, where every node in
+    /// scope would then be a row. `None` for a built-in that has no rows of
+    /// its own.
+    pub member: Option<Arc<ModelShape>>,
 }
 
 /// The built-in abstract class with this URI, or `None` for any other name.
@@ -42,12 +65,21 @@ pub fn builtin(uri: &str) -> Option<&'static Builtin> {
         .get_or_init(|| {
             BUILTINS
                 .iter()
-                .map(|(uri, name, sdna)| {
+                .map(|(uri, name, sdna, reads_itself)| {
+                    let shape = read_back(name, sdna);
+                    let member = reads_itself.then(|| {
+                        let mut member = shape.clone();
+                        for p in &mut member.properties {
+                            p.is_required = true;
+                        }
+                        Arc::new(member)
+                    });
                     (
                         *uri,
                         Builtin {
                             name,
-                            shape: Arc::new(read_back(name, sdna)),
+                            shape: Arc::new(shape),
+                            member,
                         },
                     )
                 })
@@ -87,24 +119,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_content_is_an_abstract_class_with_text() {
+    fn text_content_is_an_abstract_class_with_text_and_mentions() {
         let text_content = builtin(TEXT_CONTENT_URI).expect("TextContent is built in");
         assert_eq!(text_content.name, "TextContent");
         assert_eq!(text_content.shape.target_class, TEXT_CONTENT_URI);
-        let names: Vec<&str> = text_content
+        let mut names: Vec<&str> = text_content
             .shape
             .properties
             .iter()
             .map(|p| p.name.as_str())
             .collect();
-        assert_eq!(names, vec!["text"]);
+        names.sort();
+        assert_eq!(names, vec!["mentions", "text"]);
+        // `mentions` is a relation to the agents (DIDs) the text mentions.
+        let relations = &text_content.shape.include_relations;
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].name, "mentions");
+        assert_eq!(relations[0].predicate, "ad4m://mentions");
+        assert_eq!(relations[0].direction, "forward");
+        // `text` is required, so `mentions` is optional (see
+        // `abstract_classes::required_names`).
+        let required: Vec<(&str, bool)> = text_content
+            .shape
+            .properties
+            .iter()
+            .map(|p| (p.name.as_str(), p.is_required))
+            .collect();
+        assert!(required.contains(&("text", true)), "{required:?}");
+        assert!(required.contains(&("mentions", false)), "{required:?}");
         let sdna: serde_json::Value = serde_json::from_str(TEXT_CONTENT_SDNA).unwrap();
         assert_eq!(sdna["abstract"], true);
+    }
+
+    #[test]
+    fn container_is_an_abstract_class_with_children_over_has_child() {
+        let container = builtin(CONTAINER_URI).expect("Container is built in");
+        assert_eq!(container.name, "Container");
+        assert_eq!(container.shape.target_class, CONTAINER_URI);
+        let children = &container.shape.include_relations;
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "children");
+        assert_eq!(children[0].predicate, "ad4m://has_child");
+        assert_eq!(children[0].direction, "forward");
+        // Its own rows: a node with a has_child link, whatever its class.
+        let member = container
+            .member
+            .as_ref()
+            .expect("Container reads its own rows");
+        assert!(member.properties.iter().all(|p| p.is_required));
+        assert!(builtin(TEXT_CONTENT_URI).unwrap().member.is_none());
     }
 
     #[test]
     fn only_the_uri_names_a_builtin() {
         assert!(builtin("TextContent").is_none());
         assert!(builtin("app://TextContent").is_none());
+        assert!(builtin("Container").is_none());
     }
 }

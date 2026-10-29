@@ -11,8 +11,8 @@
  */
 
 import { Ad4mClient, type Session } from "@coasys/ad4m";
-import { Receiver, SCREEN, Source, toneSource, videoSource, wrtc } from "./media.js";
-import type { Command, JoinOptions, Snapshot, Remote } from "./protocol.js";
+import { Hearing, SCREEN, Source, toneSource, videoSource, wrtc } from "./media.js";
+import type { Command, JoinOptions, Snapshot } from "./protocol.js";
 import { installWebRtc, selectedRemoteAddresses } from "./webrtc.js";
 
 installWebRtc();
@@ -33,9 +33,7 @@ const state = {
   left: new Set<string>(),
   /** `participant-left` events so far; a rebuilt connection fires one per participant. */
   departures: 0,
-  receivers: new Map<string, Receiver>(),
-  /** Which participant each received track arrived for, by track id. */
-  trackOwner: new Map<string, string>(),
+  hearing: new Hearing(),
   /** The stream each participant's latest event handed over: what an app has on screen. */
   bound: new Map<string, MediaStream>(),
   data: [] as { from: string; label: string; data: string; binary: boolean }[],
@@ -48,64 +46,24 @@ function didOf(participant: any): string {
   return participant?.did ?? participant?.agentDid;
 }
 
-function receiverFor(track: MediaStreamTrack): Receiver {
-  let receiver = state.receivers.get(track.id);
-  if (!receiver) state.receivers.set(track.id, (receiver = new Receiver(track)));
-  return receiver;
-}
-
 /** Attach a receiver to every track of every participant that has none yet. */
 function receiveAll(): void {
-  if (!session) return;
-  for (const participant of session.participants) {
-    const did = participant.agentDid;
-    for (const track of participant.stream.getTracks()) {
-      receiverFor(track);
-      state.trackOwner.set(track.id, did);
-    }
-  }
+  if (session) state.hearing.attach(session.participants);
 }
-
-/** Add what `receiver` hears or sees to `remote`. */
-function measure(remote: Remote, receiver: Receiver): void {
-  if (receiver.track.kind === "audio") {
-    remote.audioFrames += receiver.frames;
-    remote.audioRecent += receiver.recentFrames;
-    remote.tone = remote.tone ?? receiver.dominantTone(options?.tones ?? []);
-  } else {
-    // The resolution of the track receiving most now: a replaced track keeps its last frame size.
-    if (receiver.recentFrames > remote.videoRecent) {
-      remote.width = receiver.width;
-      remote.height = receiver.height;
-    }
-    remote.videoFrames += receiver.frames;
-    remote.videoRecent = Math.max(remote.videoRecent, receiver.recentFrames);
-  }
-}
-
-const silent = (): Remote => ({ audioFrames: 0, audioRecent: 0, tone: null, videoFrames: 0, videoRecent: 0, width: 0, height: 0 });
 
 async function snapshot(): Promise<Snapshot> {
-  // What the bound streams hold now, before `receiveAll` reads the participants again.
-  const shown: Record<string, Remote> = {};
-  for (const [did, stream] of state.bound) {
-    const remote = (shown[did] = silent());
-    for (const track of stream.getTracks()) measure(remote, receiverFor(track));
-  }
-  receiveAll();
-  const remotes: Record<string, Remote> = {};
-  const live = new Set(session?.participants.map((p) => p.agentDid) ?? []);
-  for (const [trackId, receiver] of state.receivers) {
-    const did = state.trackOwner.get(trackId);
-    if (!did || !live.has(did)) continue;
-    measure((remotes[did] ??= silent()), receiver);
-  }
+  const participants = session?.participants ?? [];
+  const tones = options?.tones ?? [];
+  const bound = [...state.bound].map(([agentDid, stream]) => ({ agentDid, stream }));
+  // What the bound streams hold, before the participants' tracks are read again.
+  const shown = state.hearing.remotes(bound, tones, participants);
+  const remotes = state.hearing.remotes(participants, tones, bound);
   return {
     joined: session?.getState() === "active",
     state: session?.getState() ?? "none",
     topology: state.topology,
     roster: [...state.roster],
-    participants: [...live],
+    participants: participants.map((p) => p.agentDid),
     left: [...state.left],
     departures: state.departures,
     remotes,
@@ -126,11 +84,13 @@ async function open(opts: JoinOptions, topology?: "mesh" | "sfu"): Promise<Sessi
   const proxy = perspective.getNeighbourhoodProxy();
 
   // As an app does (WE's call adapter): the space's stored policy decides the topology.
-  const sfuConfig = await proxy.sfuConfig(opts.neighbourhoodUrl).catch(() => undefined);
+  // The executor always has a config, so an error here is a failure to report,
+  // not a reason to join in mesh.
+  const sfuConfig = await proxy.sfuConfig(opts.neighbourhoodUrl);
   const s = await proxy.createSession(opts.room, {
     neighbourhoodUrl: opts.neighbourhoodUrl,
-    topology: topology ?? (sfuConfig?.mode === "mesh" ? "mesh" : "auto"),
-    ...(sfuConfig ? { sfuConfig } : {}),
+    topology: topology ?? (sfuConfig.mode === "mesh" ? "mesh" : "auto"),
+    sfuConfig,
   });
   // A replaced session's last events (its leave) are not this participant's call any more.
   const on = (event: Parameters<Session["on"]>[0], handler: (...args: any[]) => void) =>
@@ -189,9 +149,7 @@ async function switchTo(topology: "mesh" | "sfu"): Promise<void> {
   const stream = localStream;
   if (!previous || !options || !stream) throw new Error("not in a call");
   session = null;
-  for (const receiver of state.receivers.values()) receiver.stop();
-  state.receivers.clear();
-  state.trackOwner.clear();
+  state.hearing.stop();
   state.bound.clear();
   state.roster.clear();
   state.left.clear();
@@ -231,7 +189,7 @@ async function run(command: Command): Promise<unknown> {
     case "switch":
       return switchTo(command.topology);
     case "close":
-      for (const receiver of state.receivers.values()) receiver.stop();
+      state.hearing.stop();
       await session?.destroy().catch(() => {});
       for (const source of [tone, camera, screen]) source?.stop();
       setTimeout(() => process.exit(0), 50);

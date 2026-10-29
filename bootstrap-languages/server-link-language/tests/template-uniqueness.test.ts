@@ -5,7 +5,8 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { initAdapters, getConfig, resetAdapters } from "../src/adapters.js";
-import { commitNeedsKeyRetry } from "../src/key-ring-policy.js";
+import { adminRotates, afterFailedKeyRead } from "../src/room-keys.js";
+import { generateRoomKey } from "../src/encryption.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const bundlePath = resolve(__dirname, "..", "build", "bundle.js");
@@ -87,30 +88,35 @@ describe("template uniqueness", () => {
     });
 });
 
-describe("commitNeedsKeyRetry", () => {
-    it("retries when status is error", () => {
-        assert.strictEqual(commitNeedsKeyRetry("error"), true);
+describe("adminRotates", () => {
+    it("rotates when the admin holds no room key it can open", () => {
+        assert.strictEqual(adminRotates("none", false), true);
+        assert.strictEqual(adminRotates("pending", false), true);
     });
 
-    it("retries when status is pending", () => {
-        assert.strictEqual(commitNeedsKeyRetry("pending"), true);
+    it("rotates at most once a run: if its own new box did not open, another version would not either", () => {
+        assert.strictEqual(adminRotates("pending", true), false);
+        assert.strictEqual(adminRotates("none", true), false);
     });
 
-    it("does not retry when status is ready", () => {
-        assert.strictEqual(commitNeedsKeyRetry("ready"), false);
+    it("does not rotate while it holds a key, or when the key ring errored", () => {
+        assert.strictEqual(adminRotates("ready", false), false);
+        assert.strictEqual(adminRotates("error", false), false);
+    });
+});
+
+describe("afterFailedKeyRead", () => {
+    it("keeps a loaded key ring when a refresh fails: commits still encrypt, inbound links still open", () => {
+        const ring = new Map([[1, generateRoomKey()]]);
+        const after = afterFailedKeyRead("ready", ring);
+        assert.strictEqual(after.status, "ready");
+        assert.strictEqual(after.ring, ring);
     });
 
-    it("does not retry when status is none", () => {
-        assert.strictEqual(commitNeedsKeyRetry("none"), false);
-    });
-
-    it("decides on status alone — no cooldown or timestamp input", () => {
-        // The original bug had the commit path consulting a shared
-        // lastKeyRingRetry timestamp, causing commits within 10s of a
-        // background sync to skip their retry and throw. This test pins
-        // the fix: commitNeedsKeyRetry takes only status, so a background
-        // retry that just happened cannot suppress a user-initiated commit.
-        assert.strictEqual(commitNeedsKeyRetry.length, 1);
-        assert.strictEqual(commitNeedsKeyRetry("error"), true);
+    it("is an error when no ring was loaded: commits refuse plaintext", () => {
+        for (const status of ["none", "pending", "error"] as const) {
+            assert.deepStrictEqual(afterFailedKeyRead(status, null), { status: "error", ring: null });
+        }
+        assert.deepStrictEqual(afterFailedKeyRead("ready", new Map()), { status: "error", ring: null });
     });
 });

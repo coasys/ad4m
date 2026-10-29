@@ -197,6 +197,7 @@ check "status.json is published" cmp -s "$T/state/status.json" "$T/www/status.js
 first=$(commit "PR1" "AD4M_UNLOCK_PASSPHRASE_FILE")
 run
 check "first deploy succeeds" [ "$(status last_result)" = deployed ]
+check "staging build enables cuda" grep -q -- '--features cuda' "$T/calls"
 check "deployed_sha is the staging head" [ "$(status deployed_sha)" = "$first" ]
 check "subject is recorded" [ "$(status subject)" = PR1 ]
 check "first deploy has no previous_sha" [ -z "$(status previous_sha)" ]

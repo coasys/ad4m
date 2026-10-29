@@ -486,3 +486,15 @@ async fn op_passes_its_deadline_to_the_loop() {
         "a call whose op already timed out must never reach the dispatcher: {events:?}"
     );
 }
+
+/// The dispatcher used to drop an install after 10 s while the op waited 45 s for it, so a
+/// slow cold install was cancelled before the app existed and the language constructor
+/// failed with "Conductor unavailable or install failed". The dispatcher must outlast the op.
+#[test]
+fn the_dispatcher_never_cancels_an_install_the_op_still_waits_for() {
+    use crate::holochain_service::holochain_service_extension::APP_INSTALL_TIMEOUT_DURATION;
+    assert!(
+        INSTALL_APP_TIMEOUT > APP_INSTALL_TIMEOUT_DURATION,
+        "dispatcher install timeout {INSTALL_APP_TIMEOUT:?} must exceed the op's {APP_INSTALL_TIMEOUT_DURATION:?}"
+    );
+}

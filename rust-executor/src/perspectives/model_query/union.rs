@@ -40,7 +40,7 @@
 
 use super::filtering::{compare_values, extract_sort_value};
 use super::projection::resolve_projections;
-use super::query::execute_model_query_inner;
+use super::query::{execute_model_query_inner, walk_order, with_walk};
 use super::relations::{choose, SUBJECT_CLASSES_KEY, SUBJECT_CLASS_KEY};
 use super::types::{
     ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope, ShapeResolver,
@@ -210,6 +210,11 @@ pub async fn execute_union_query_with_views(
     views: &HashMap<String, Arc<ModelShape>>,
 ) -> Result<ModelQueryResult, Error> {
     refuse_unanswerable(classes, query)?;
+    // A walk is made once for the union, not once per class: every class
+    // reads the same reached nodes, and their order is the walk's.
+    let walked_query = with_walk(store, query)?;
+    let query = walked_query.as_ref().unwrap_or(query);
+    let walk_order = walk_order(query);
     let shape_of = |class: &str| match views.get(class) {
         Some(view) => Ok(view.clone()),
         None => resolver.get_shape(class),
@@ -342,8 +347,18 @@ pub async fn execute_union_query_with_views(
         union.push(row);
     }
 
-    // 3. Order, count and cut the page once, over the union.
-    sort_union(&mut union, &order);
+    // 3. Order, count and cut the page once, over the union. A containment
+    //    walk with no order keeps the walk's: nearest first.
+    match &walk_order {
+        Some(positions) => union.sort_by_key(|row| {
+            row["id"]
+                .as_str()
+                .and_then(|id| positions.get(id))
+                .copied()
+                .unwrap_or(usize::MAX)
+        }),
+        None => sort_union(&mut union, &order),
+    }
     let total_count = union.len();
     if query.limit == Some(0) {
         return Ok(ModelQueryResult {
