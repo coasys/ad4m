@@ -48,6 +48,16 @@
         "has_value": "very happy (it's ok)!*"
       },
       {
+        "path": "zoo://owner!'()*",
+        "name": "owner",
+        "monotonic": true
+      },
+      {
+        "path": "zoo://member",
+        "name": "member",
+        "monotonic": "roleGrant"
+      },
+      {
         "path": "zoo://toy",
         "name": "toys",
         "collection": true,
@@ -110,6 +120,14 @@
     {"source": "zoo://Dog.mood", "predicate": "rdf://type", "target": "sh://PropertyShape"},
     {"source": "zoo://Dog.mood", "predicate": "sh://path", "target": "zoo://mood"},
     {"source": "zoo://Dog.mood", "predicate": "sh://hasValue", "target": "literal:string:very%20happy%20%28it%27s%20ok%29%21%2A"},
+    {"source": "zoo://DogShape", "predicate": "sh://property", "target": "zoo://Dog.owner"},
+    {"source": "zoo://Dog.owner", "predicate": "rdf://type", "target": "sh://PropertyShape"},
+    {"source": "zoo://Dog.owner", "predicate": "sh://path", "target": "zoo://owner!'()*"},
+    {"source": "zoo://Dog.owner", "predicate": "ad4m://monotonic", "target": "literal:string:zoo%3A%2F%2Fowner%21%27%28%29%2A"},
+    {"source": "zoo://DogShape", "predicate": "sh://property", "target": "zoo://Dog.member"},
+    {"source": "zoo://Dog.member", "predicate": "rdf://type", "target": "sh://PropertyShape"},
+    {"source": "zoo://Dog.member", "predicate": "sh://path", "target": "zoo://member"},
+    {"source": "zoo://Dog.member", "predicate": "ad4m://monotonic_role_grant", "target": "literal:string:zoo%3A%2F%2Fmember"},
     {"source": "zoo://DogShape", "predicate": "sh://property", "target": "zoo://Dog.toys"},
     {"source": "zoo://Dog.toys", "predicate": "rdf://type", "target": "ad4m://CollectionShape"},
     {"source": "zoo://Dog.toys", "predicate": "sh://path", "target": "zoo://toy"},
