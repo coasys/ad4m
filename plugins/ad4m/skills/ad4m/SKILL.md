@@ -214,7 +214,7 @@ Call `ad4m_set_agent_profile(username: "...")` before `ad4m_subscribe_to_mention
 ad4m_subscribe_to_mentions(perspective_id: "<your-local-uuid>")
 ```
 
-The plugin creates a live SPARQL subscription and wakes you via `/hooks/wake` when someone mentions your name or DID. If the executor isn't ready yet, this now tells you so and keeps retrying — see Rule 11.
+The plugin creates a live model subscription over the built-in TextContent and wakes you via `/hooks/wake` when someone else mentions you: a record whose `mentions` relation links your DID (WE's `we://mention`), whatever its text shows, or whose text names you (a profile name or your DID) as a whole word. If the executor isn't ready yet, this now tells you so and keeps retrying — see Rule 11.
 
 For monitoring an entire channel (not just mentions):
 
@@ -244,7 +244,7 @@ The waker POSTs to your `/hooks/wake` endpoint. Parse `Agent DID`, `Perspective`
 
 ### The wake event hands you addresses, not types
 
-`Item` is the address of whatever instance carried your name — the mention query matches links, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under, and `Ancestors` everything above them, nearest first — the thread, the conversation, the space the item sits in, a few levels up. Nothing in the event tells you what any of them are; the space's own ontology does.
+`Item` is the address of whatever mentions you (a record whose `mentions` link to your DID, or whose text names you) — the mention query reads the abstract TextContent, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under, and `Ancestors` everything above them, nearest first — the thread, the conversation, the space the item sits in, a few levels up. Nothing in the event tells you what any of them are; the space's own ontology does.
 
 ### Step 1: work out what you are looking at
 

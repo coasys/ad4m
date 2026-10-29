@@ -7,7 +7,11 @@
 //!
 //! **Conformance** is checked on shapes and names only: a concrete class
 //! conforms when it has a property answering to each of the abstract class's
-//! property names, and a relation for each relation name. Predicates,
+//! required property names, and a relation for each required relation name.
+//! An abstract class that marks some names required (`sh:minCount 1`) leaves
+//! the rest optional; one that marks none requires them all. A class without
+//! an optional name answers to it with nothing (`ModelShape::absent`): a
+//! `where` on it matches none of that class's rows, a read of it is empty. Predicates,
 //! datatypes and directions are not compared. A property answers to its own
 //! name, or to its alias for this abstract class (one [`ALIAS_PREDICATE`]
 //! link, `@Property({ alias: { TextContent: "text" } })`). An abstract shape
@@ -148,8 +152,34 @@ pub struct Resolution {
     pub views: HashMap<String, Arc<ModelShape>>,
 }
 
+/// The names a class must have to conform to `abstract_shape`.
+///
+/// An abstract class that marks some of its names required
+/// (`sh:minCount 1`, `@Property({ required: true })`) asks only for those; the
+/// rest are optional. One that marks none asks for every name, which is what
+/// an abstract class meant before any name could be optional: the built-in
+/// `TextContent` requires `text` and leaves `mentions` optional, so a class
+/// with text and no mention relation still reads through it.
+fn required_names(abstract_shape: &ModelShape) -> BTreeSet<&str> {
+    let marks_some = abstract_shape.properties.iter().any(|p| p.is_required);
+    let relations = abstract_shape
+        .include_relations
+        .iter()
+        .filter(|_| !marks_some)
+        .map(|r| r.name.as_str());
+    abstract_shape
+        .properties
+        .iter()
+        .filter(|p| p.is_required || !marks_some)
+        .map(|p| p.name.as_str())
+        .chain(relations)
+        .collect()
+}
+
 /// `concrete` read through `abstract_shape` (named `abstract_class`), or
-/// `None` when it does not have every name the abstract class asks for.
+/// `None` when it lacks a name the abstract class requires
+/// ([`required_names`]). The optional names it lacks are the view's
+/// [`ModelShape::absent`].
 pub fn view_through(
     index: &AbstractIndex,
     abstract_class: &str,
@@ -203,15 +233,28 @@ pub fn view_through(
             .zip(&concrete.properties)
             .any(|(v, c)| v.name == name && !concrete_relations.contains(&c.name))
     };
-    let conforms = abstract_shape
+    let answers = |name: &str| {
+        if abstract_relations.contains(name) {
+            view_relations.contains(name)
+        } else {
+            has_property(name)
+        }
+    };
+    let wanted = required_names(abstract_shape);
+    if !wanted.iter().all(|name| answers(name)) {
+        return None;
+    }
+    // The optional names the class does not have at all: it answers to them
+    // with nothing. One it has, of either kind, is read as it is.
+    view.absent = abstract_shape
         .properties
         .iter()
-        .filter(|p| !abstract_relations.contains(&p.name))
-        .all(|p| has_property(&p.name))
-        && abstract_relations
-            .iter()
-            .all(|name| view_relations.contains(name));
-    conforms.then_some(view)
+        .filter(|p| !wanted.contains(&p.name.as_str()))
+        .filter(|p| !view.properties.iter().any(|v| v.name == p.name))
+        .filter(|p| !view_relations.contains(&p.name))
+        .cloned()
+        .collect();
+    Some(view)
 }
 
 /// Every installed concrete class that conforms to `abstract_shape`, with its
