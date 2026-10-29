@@ -820,7 +820,6 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
     ModelShape {
         target_class: class.to_string(),
         shape_uri: format!("{class}Shape"),
-        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: rel_name.to_string(),
             predicate: predicate.to_string(),
@@ -1461,7 +1460,6 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     let shape = ModelShape {
         target_class: "TaskBoard".to_string(),
         shape_uri: String::new(),
-        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "activeTasks".to_string(),
             predicate: "board://has_task".to_string(),
@@ -2034,7 +2032,6 @@ async fn test_where_filter_signed_expression_string() {
     let shape = ModelShape {
         target_class: "Board".to_string(),
         shape_uri: String::new(),
-        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "activeTasks".to_string(),
             predicate: "board://has_task".to_string(),
@@ -2114,7 +2111,6 @@ async fn test_where_filter_signed_expression_no_matches() {
     let shape = ModelShape {
         target_class: "Parent".to_string(),
         shape_uri: String::new(),
-        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "activeChildren".to_string(),
             predicate: "ns://has_child".to_string(),
@@ -2242,7 +2238,6 @@ async fn test_where_filter_multiple_conditions() {
     let shape = ModelShape {
         target_class: "Board".to_string(),
         shape_uri: String::new(),
-        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "highPriActive".to_string(),
             predicate: "ns://has".to_string(),
@@ -2315,7 +2310,6 @@ async fn test_where_filter_missing_property_on_target() {
     let shape = ModelShape {
         target_class: "Parent".to_string(),
         shape_uri: String::new(),
-        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "active".to_string(),
             predicate: "ns://has".to_string(),
@@ -2386,7 +2380,6 @@ async fn test_where_filter_plain_literal_string() {
     let shape = ModelShape {
         target_class: "Parent".to_string(),
         shape_uri: String::new(),
-        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "redChildren".to_string(),
             predicate: "ns://has".to_string(),
@@ -2480,7 +2473,6 @@ async fn test_where_filter_on_multiple_instances() {
     let shape = ModelShape {
         target_class: "Board".to_string(),
         shape_uri: String::new(),
-        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "activeTasks".to_string(),
             predicate: "ns://has".to_string(),
@@ -2925,7 +2917,6 @@ fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
     ModelShape {
         target_class: "TestModel".to_string(),
         shape_uri: String::new(),
-        absent: Vec::new(),
         properties: props,
         include_relations: vec![],
         interpretation_hint: None,
@@ -4433,7 +4424,6 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     let signal_shape = ModelShape {
         target_class: "Signal".to_string(),
         shape_uri: "SignalShape".to_string(),
-        absent: Vec::new(),
         properties: vec![ShapeProperty {
             name: "signalTypeId".to_string(),
             predicate: "test://signal_type_id".to_string(),
@@ -9201,9 +9191,48 @@ async fn a_revocation_tombstone_is_reachable_through_links() {
     // deserialize it and check the signature, which is what the flow engine's
     // revocation rule does.
     let parsed: LinkExpression = serde_json::from_value(rows[0].clone()).expect("LinkExpression");
-    let mut expected = link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2);
-    expected.status = None;
-    assert_eq!(parsed, expected);
+    assert_eq!(parsed, link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2));
+}
+
+/// A `__links` row carries the link's status, spelled as `perspective.get`
+/// spells it, so a row is the whole `LinkExpression` (`LinkRow.status`) and
+/// not one missing a field (#1103).
+#[tokio::test]
+async fn a_links_row_carries_the_status_of_its_link() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    let member = "did:key:zMember";
+    let local_member = "did:key:zLocalMember";
+    seed_role(&store, role, member, true);
+    let mut local = link_by(ROLE_ADMIN, role, REVOKED, local_member, ROLE_T2);
+    local.status = Some(crate::types::LinkStatus::Local);
+    store.add_link(&local).unwrap();
+
+    let result = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&[REVOKED]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let rows = result.instances[0]["__links"][REVOKED]
+        .as_array()
+        .expect("rows");
+    let status_of = |target: &str| {
+        rows.iter()
+            .find(|r| r["data"]["target"] == target)
+            .unwrap_or_else(|| panic!("no row for {target}: {rows:?}"))["status"]
+            .clone()
+    };
+    assert_eq!(status_of(member), json!("SHARED"), "{rows:?}");
+    assert_eq!(status_of(local_member), json!("LOCAL"), "{rows:?}");
+
+    let parsed: Vec<crate::types::DecoratedLinkExpression> =
+        serde_json::from_value(Value::Array(rows.clone())).expect("DecoratedLinkExpression");
+    assert!(parsed.iter().any(
+        |l| l.data.target == local_member && l.status == Some(crate::types::LinkStatus::Local)
+    ));
 }
 
 /// The additive half of #1111: asking for `links` adds `__links` and changes

@@ -75,6 +75,8 @@ describe("shipped bundle", () => {
         query: "{}",
         terms: ["Data", "did:key:zAgent"],
         did: "did:key:zAgent",
+        mentionClass: "ad4m://Mentioning",
+        mentionQuery: "{}",
       }),
     ).rejects.toThrow(/main key not found/);
 
@@ -121,6 +123,8 @@ describe("shipped bundle", () => {
         query: "{}",
         terms: ["Data", "did:key:zAgent"],
         did: "did:key:zAgent",
+        mentionClass: "ad4m://Mentioning",
+        mentionQuery: "{}",
       }),
     ).rejects.toThrow(/timed out after 50ms/);
 
