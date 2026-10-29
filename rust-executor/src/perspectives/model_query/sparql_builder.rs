@@ -1353,15 +1353,6 @@ fn compile_leaf_condition(
     let leaf_id = *seq;
     *seq += 1;
 
-    // A name the view answers to with nothing (an abstract class's optional
-    // name this class lacks): no link of it exists, so the condition holds
-    // for none of the class's rows, whatever it asks, its `author` included.
-    // An empty `VALUES` binds `?source` to nothing, so inside an `OR` the arm
-    // is an empty arm, not a dropped one.
-    if shape.absent(prop_name).is_some() {
-        return Some(vec!["    VALUES ?source { }".to_string()]);
-    }
-
     // `value` is `None` for `{ author: A }` alone: some link, any value.
     let (value, nested_author) = match split_leaf(condition) {
         Ok(parts) => parts,

@@ -642,6 +642,11 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// Receipt verdicts this perspective has already taken, keyed by
+    /// `(receipt URI, flow DNA hash)` so a DNA change can never be served a
+    /// stale answer — see `flow_instance::verify::memo` (#1177).
+    pub(crate) receipt_verdict_memo:
+        Arc<crate::perspectives::flow_instance::verify::memo::VerdictMemo>,
     /// The abstract classes and aliases installed here, and the classes each
     /// abstract class reads (#1435). Derived from every class's shape, so
     /// dropped whenever any shape is (see `forget_derived_shapes`).
@@ -750,6 +755,7 @@ impl PerspectiveInstance {
             ),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            receipt_verdict_memo: Arc::new(Default::default()),
             abstract_cache: Arc::new(std::sync::RwLock::new(Default::default())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             flow_pass_lock: Arc::new(Mutex::new(())),
