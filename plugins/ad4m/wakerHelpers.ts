@@ -41,7 +41,7 @@ export function buildWakeMessage(
       if (m.via === "link") lines.push("  Matched by: a mention link to you");
       if (m.via === "text") {
         lines.push(
-          "  Matched by: your name or DID in the text, with no mention link (a name used as a word can be a false alarm)",
+          "  Matched by: your name or DID in the text; a mention link may also exist (a name used as a word can be a false alarm)",
         );
       }
       if (m.parents.length > 0) {

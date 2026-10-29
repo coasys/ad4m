@@ -170,9 +170,9 @@ export interface MentionMessage {
    */
   ancestors: string[];
   /**
-   * The DID that signed the link the mention is in: the mention link to the agent's DID, else
-   * the text link whose own text names it. Only that link is theirs; the record's other links
-   * may be someone else's.
+   * The DID that signed the link of the path that woke the agent (`via`): the mention link to its
+   * DID, or the text link whose own text names it. Only that link is theirs; the record's other
+   * links may be someone else's.
    */
   author?: string;
   /** That link's timestamp, ISO 8601. */
@@ -183,8 +183,8 @@ export interface MentionMessage {
    */
   verified: boolean;
   /**
-   * How the record mentions the agent: `"link"`, a mention link to its DID; `"text"`, its
-   * name or DID as a whole word in the text, with no such link. A text match is the agent's
+   * The path that reported the record first: `"link"`, a mention link to its DID; `"text"`, its
+   * name or DID as a whole word in the text (a mention link may also exist). A text match is the agent's
    * name used as a word, which need not address it ("the data shows" for an agent named Data).
    */
   via?: "link" | "text";

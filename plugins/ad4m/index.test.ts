@@ -1641,7 +1641,7 @@ describe("buildWakeMessage", () => {
     );
     expect(msg).toContain(
       "  Item: msg-2\n  Mentioned by: (unknown) (signature verified)\n" +
-        "  Matched by: your name or DID in the text, with no mention link (a name used as a word can be a false alarm)\n",
+        "  Matched by: your name or DID in the text; a mention link may also exist (a name used as a word can be a false alarm)\n",
     );
     expect(msg.match(/Matched by:/g)).toHaveLength(2);
   });
