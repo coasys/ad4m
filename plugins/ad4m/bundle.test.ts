@@ -70,7 +70,11 @@ describe("shipped bundle", () => {
         type: "mention",
         perspective: "fake-uuid",
         channel: "",
-        query: "SELECT * FROM link",
+        // What get_mention_waker_config returns.
+        className: "ad4m://TextContent",
+        query: "{}",
+        terms: ["Data", "did:key:zAgent"],
+        did: "did:key:zAgent",
       }),
     ).rejects.toThrow(/main key not found/);
 
@@ -112,7 +116,11 @@ describe("shipped bundle", () => {
         type: "mention",
         perspective: "fake-uuid",
         channel: "",
-        query: "SELECT * FROM link",
+        // What get_mention_waker_config returns.
+        className: "ad4m://TextContent",
+        query: "{}",
+        terms: ["Data", "did:key:zAgent"],
+        did: "did:key:zAgent",
       }),
     ).rejects.toThrow(/timed out after 50ms/);
 
