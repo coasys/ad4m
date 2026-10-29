@@ -385,7 +385,7 @@ describe('WakerSubscriptionManager', () => {
   /**
    * #1563: a mention wake says who wrote the link the mention is in, when, and whether its proof verified: the link
    * query's row on the link path, the newest text link another agent wrote that names it on the text path. A record
-   * both queries return wakes once, through its link, whichever result arrives first.
+   * both queries return wakes once, through the query whose result arrives first.
    */
   it('carries the provenance of the link the mention is in, and wakes once for a record both paths find', async () => {
     const editor = { author: 'did:key:zEditor', timestamp: '2026-10-27T00:41:23.437Z', verified: true };
@@ -402,7 +402,11 @@ describe('WakerSubscriptionManager', () => {
         }),
       ),
     ];
-    for (const order of [deliveries, [...deliveries].reverse()]) {
+    const writersText = { author: 'did:key:zWriter', timestamp: '2026-10-27T00:41:22.242Z', verified: true, via: 'text' };
+    for (const [order, both] of [
+      [deliveries, { ...editor, via: 'link' }],
+      [[...deliveries].reverse(), writersText],
+    ] as const) {
       const h = await mentionHarness(100);
       for (const delivery of order) await h.deliverTo(delivery);
       await waitUntil(() => h.wakes.length > 0, 1000);
@@ -411,11 +415,22 @@ describe('WakerSubscriptionManager', () => {
       const editorsText = { ...editor, timestamp: '2026-10-27T00:40:30.000Z' };
       expect(h.wakes).toEqual([
         [
-          { address: 'test://both', parents: [], ancestors: [], ...editor, via: 'link' },
+          { address: 'test://both', parents: [], ancestors: [], ...both },
           { address: 'test://named', parents: [], ancestors: [], ...editorsText, via: 'text' },
         ],
       ]);
     }
+  });
+
+  it('wakes once for a record both queries report while the first is still resolving its parents', async () => {
+    // Parent resolution is slow, so the link result runs while the text result is mid-way.
+    const slow = () => new Promise((r) => setTimeout(() => r({ instances: [], totalCount: 0 }), 30));
+    const h = await mentionHarness(10, undefined, { modelQuery: slow });
+    await Promise.all([h.deliver(result(row('test://both', 'hey Data'))), h.deliverLink([linkRow('test://both')])]);
+    await waitUntil(() => h.wakes.length > 0, 1000);
+    await new Promise((r) => setTimeout(r, 50));
+    h.manager.disposeAll();
+    expect(h.wakes.map((w: any) => w.map((m: any) => [m.address, m.via]))).toEqual([[['test://both', 'text']]]);
   });
 
   it('wakes on a record once its mention link arrives, after its text alone did not, and only once', async () => {

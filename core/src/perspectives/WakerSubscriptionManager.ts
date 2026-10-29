@@ -586,26 +586,19 @@ export class WakerSubscriptionManager {
 
       if (sub.type === "mention") {
         // For mention subscriptions: track seen record ids, across both queries, and wake only
-        // for records not seen before, so a record both find wakes once.
+        // for records not seen before, so a record both find wakes once, through the query that
+        // reports it first.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
-        const waiting = this.undelivered.get(sub.id);
         const newMessages: string[] = [];
         const provenance = new Map<string, MentionProvenance>();
 
         for (const item of rows as any[]) {
           const address = fromLink ? item?.source : item?.id;
-          if (typeof address !== "string" || !address) continue;
-          // A text mention still in the debounce window takes the link's provenance instead.
-          const upgrade = fromLink ? waiting?.get(address) : undefined;
-          if (currentSeen.has(address) && upgrade?.via !== "text") continue;
+          if (typeof address !== "string" || !address || currentSeen.has(address)) continue;
           // A link as it is; the text, a whole word only.
           const mention = fromLink ? linkMentionOf(item) : mentionOf(item, sub);
           if (!mention) {
             this.logger.debug(`[waker] ${sub.id}: ${address} has no verified mention link or no term as a whole word, skipping`);
-            continue;
-          }
-          if (upgrade) {
-            waiting!.set(address, { ...upgrade, ...mention });
             continue;
           }
           currentSeen.add(address);
