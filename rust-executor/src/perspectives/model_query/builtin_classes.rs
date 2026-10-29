@@ -145,7 +145,11 @@ mod tests {
         let mentioning = builtin(MENTIONING_URI).expect("Mentioning is built in");
         assert_eq!(mentioning.name, "Mentioning");
         assert_eq!(mentioning.shape.target_class, MENTIONING_URI);
-        assert!(mentioning.shape.properties.iter().all(|p| p.name == "mentions"));
+        assert!(mentioning
+            .shape
+            .properties
+            .iter()
+            .all(|p| p.name == "mentions"));
         // `mentions` is a relation to the agents (DIDs) the record mentions.
         let relations = &mentioning.shape.include_relations;
         assert_eq!(relations.len(), 1);

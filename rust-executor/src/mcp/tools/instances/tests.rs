@@ -2942,7 +2942,12 @@ async fn the_mentioning_query_finds_verified_mention_links_by_others() {
     let mut links = Vec::new();
 
     // The chip's label runs into the next word: no whole-word name.
-    links.extend(we_block(&other, "ad4m://chip", "@Datai have taken a dump", 1));
+    links.extend(we_block(
+        &other,
+        "ad4m://chip",
+        "@Datai have taken a dump",
+        1,
+    ));
     links.push(signed_link(&other, "ad4m://chip", WE_MENTION, &me.did, 1));
     // A second class whose own predicate is aliased to `mentions`.
     links.extend(app_note(&other, "ad4m://cc", "fyi", 2));
