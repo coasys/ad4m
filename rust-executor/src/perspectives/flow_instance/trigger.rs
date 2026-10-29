@@ -289,9 +289,32 @@ impl PerspectiveInstance {
     /// waiting and debounces like one. A DID is all a pass needs: it reads
     /// the local store and writes executor tables, and signs nothing.
     pub(crate) async fn flow_pass_at_load(&self) {
+        if !self.agent_did_ready().await {
+            return;
+        }
+        self.enqueue_flow_pass(FlowTouch {
+            every_instance: true,
+            ..FlowTouch::default()
+        });
+    }
+
+    /// Queue the same all-instance sweep [`Self::flow_pass_at_load`] queues,
+    /// without waiting for a DID. A restore that writes links straight into
+    /// the store calls this: that write does not go through a diff, so nothing
+    /// else queues the pass that must re-read the restored grant.
+    pub(crate) fn schedule_every_instance_flow_pass(&self) {
+        self.enqueue_flow_pass(FlowTouch {
+            every_instance: true,
+            ..FlowTouch::default()
+        });
+    }
+
+    /// Waits until the agent has a DID; `false` if the perspective is torn
+    /// down first.
+    pub(crate) async fn agent_did_ready(&self) -> bool {
         loop {
             if self.is_teardown.load(Ordering::Acquire) {
-                return;
+                return false;
             }
             let has_did = crate::agent::AgentService::global_instance()
                 .lock()
@@ -299,14 +322,10 @@ impl PerspectiveInstance {
                 .and_then(|agent| agent.as_ref().map(|a| a.did.is_some()))
                 .unwrap_or(false);
             if has_did {
-                break;
+                return true;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        self.enqueue_flow_pass(FlowTouch {
-            every_instance: true,
-            ..FlowTouch::default()
-        });
     }
 
     fn enqueue_flow_pass(&self, touch: FlowTouch) {

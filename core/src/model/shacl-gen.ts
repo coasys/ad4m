@@ -211,6 +211,10 @@ export function buildSHACL(
             propShape.local = propMeta.local;
         }
 
+        if (propMeta.monotonic) {
+            propShape.monotonic = propMeta.monotonic;
+        }
+
         if (propMeta.writable !== undefined) {
             propShape.writable = propMeta.writable;
         }

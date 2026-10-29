@@ -89,13 +89,32 @@ impl PerspectiveInstance {
             drop(diff);
             return Err(anyhow!("injected fault (test seam): commit_batch failed"));
         }
+        // Sign the additions first: a flag queued in this batch counts for its
+        // removals, as it will on every peer that receives both in one diff,
+        // and a flag counts only once its signature verifies.
+        let signed_additions = diff
+            .additions
+            .into_iter()
+            .map(|link| {
+                let status = link.status.unwrap_or(LinkStatus::Shared);
+                let signed_expr = create_signed_expression(link.data.normalize(), context)?;
+                let mut stored = LinkExpression::from(signed_expr);
+                stored.status = Some(status);
+                Ok(stored)
+            })
+            .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
+        let shared_additions: Vec<LinkExpression> = signed_additions
+            .iter()
+            .filter(|l| l.status == Some(LinkStatus::Shared))
+            .cloned()
+            .collect();
         // Backstop for a removal queued past the refusing entry points; the
         // batch is dropped whole, as on any other commit error.
+        let stored_declared = self.monotonic_declared().await?;
+        let declared = stored_declared.with_incoming(&shared_additions);
         for link in &diff.removals {
-            crate::perspectives::monotonic::refuse_monotonic_removal(
-                link,
-                link.status.as_ref().unwrap_or(&LinkStatus::Shared),
-            )?;
+            let status = link.status.as_ref().unwrap_or(&LinkStatus::Shared);
+            crate::perspectives::monotonic::refuse_monotonic_removal(link, status, &declared)?;
         }
 
         //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
@@ -114,11 +133,8 @@ impl PerspectiveInstance {
         let mut persist_diff = PerspectiveDiff::empty();
 
         // Process additions
-        for link in diff.additions {
-            let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr = create_signed_expression(link.data.normalize(), context)?;
-            let mut stored = LinkExpression::from(signed_expr);
-            stored.status = Some(status.clone());
+        for stored in signed_additions {
+            let status = stored.status.clone().unwrap_or(LinkStatus::Shared);
             persist_diff.additions.push(stored.clone());
             let decorated = DecoratedLinkExpression::from((stored, status.clone()));
 
@@ -189,7 +205,7 @@ impl PerspectiveInstance {
             // The SPARQL store must be updated first so any subscription re-checks
             // triggered by update_prolog_engines() see the committed batch state.
             if changed {
-                self.write_link_diff(&persist_diff)?
+                self.write_link_diff(&persist_diff, &stored_declared)?
                     .fold_into(&mut combined_diff);
             }
         }
