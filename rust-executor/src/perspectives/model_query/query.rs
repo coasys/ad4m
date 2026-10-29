@@ -853,6 +853,22 @@ pub(super) async fn execute_model_query_inner(
         )?;
     }
 
+    // A name the view answers to with nothing reads as empty.
+    if !shape.absent.is_empty() {
+        for inst in instances.iter_mut() {
+            if let Value::Object(obj) = inst {
+                for p in &shape.absent {
+                    let empty = if p.is_collection {
+                        Value::Array(Vec::new())
+                    } else {
+                        Value::Null
+                    };
+                    obj.entry(p.name.clone()).or_insert(empty);
+                }
+            }
+        }
+    }
+
     // Apply post-hydration where-clause filters
     if let Some(ref where_clause) = query_input.where_clause {
         if !all_where_pushable(query_input, shape, Some(resolver)) {

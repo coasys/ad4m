@@ -1,8 +1,18 @@
-import { Ad4mClient, Link, LinkQuery, MentionMessage, PerspectiveProxy, PerspectiveState, QuerySubscriptionProxy, WakerSubscriptionManager } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, HasMany, Link, LinkQuery, Literal, MentionMessage, Model, PerspectiveProxy, PerspectiveState, Property, QuerySubscriptionProxy, TextContent, WakerSubscriptionManager } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { expect } from "chai";
 import * as sinon from "sinon";
 import { pollUntil } from "../utils/utils";
+
+/** A note that takes part in TextContent, as an app's message would (#1557). */
+@Model({ name: "WakerNote", implements: [TextContent] })
+class WakerNote extends Ad4mModel {
+    @Property({ through: "test://note_text", required: true, alias: { TextContent: "text" } })
+    body: string = ""
+
+    @HasMany({ through: "test://mentions", alias: { TextContent: "mentions" } })
+    mentioned: string[] = []
+}
 
 export default function perspectiveTests(testContext: TestContext) {
     return  () => {
@@ -273,19 +283,44 @@ export default function perspectiveTests(testContext: TestContext) {
                     debounceMs: 50,
                     onWake: (_sub, _result, mentions) => { wakes.push(mentions) },
                 })
+                // The agent a mention is for: not the executor's agent, which writes
+                // the links here, since the agent's own links never mention it.
+                const me = 'did:test:me'
                 try {
+                    await p.ensureSubjectClass(WakerNote)
                     await manager.subscribe({
                         id: 'waker-mention-parents',
                         type: 'mention',
                         perspective: p.uuid,
                         channel: '',
-                        query: 'SELECT ?source WHERE { ?source <test://mentions> <test://me> . }',
+                        // The shape of get_mention_waker_config's query, over TextContent.
+                        className: TextContent.builtinUri,
+                        query: JSON.stringify({
+                            where: { OR: [{ mentions: { eq: me, author: { not: me } } }] },
+                            properties: ['text'],
+                            links: ['mentions', 'text'],
+                        }),
+                        terms: ['Mia', me],
+                        did: me,
                     })
                     await p.add(new Link({ source: 'test://channel', predicate: 'ad4m://has_child', target: 'test://msg1' }))
-                    await p.add(new Link({ source: 'test://msg1', predicate: 'test://mentions', target: 'test://me' }))
+                    await p.add(new Link({ source: 'test://msg1', predicate: 'test://note_text', target: Literal.from('@Miai have news').toUrl() }))
+                    await p.add(new Link({ source: 'test://msg1', predicate: 'test://mentions', target: me }))
 
                     await pollUntil(() => wakes.length > 0, { label: 'waker wake for test://msg1' })
-                    expect(wakes).to.deep.equal([[{ address: 'test://msg1', parents: ['test://channel'], ancestors: [] }]])
+                    const executorAgent = (await ad4mClient.agent.me()).did
+                    expect(wakes).to.have.length(1)
+                    expect(wakes[0]).to.have.length(1)
+                    const [mention] = wakes[0]!
+                    expect(mention).to.deep.include({
+                        address: 'test://msg1',
+                        parents: ['test://channel'],
+                        ancestors: [],
+                        // The mention link's provenance: who wrote it, verified.
+                        author: executorAgent,
+                        verified: true,
+                    })
+                    expect(mention.timestamp).to.be.a('string')
                 } finally {
                     manager.disposeAll()
                     await ad4mClient.perspective.remove(p.uuid)
