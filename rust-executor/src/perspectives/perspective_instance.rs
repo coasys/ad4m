@@ -637,10 +637,11 @@ pub struct PerspectiveInstance {
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
     pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
-    /// Held by every write to `sparql_store` ([`Self::persist_link_diff`]), and by
-    /// [`Self::commit_batch_if`] from checking what it expects through its write, so no other
-    /// write lands in between. A std mutex: held for store calls, never across an await.
-    persist_lock: Arc<std::sync::Mutex<()>>,
+    /// Held by every write to `sparql_store` ([`Self::persist_link_diff`], the monotonic
+    /// restore at load), and by [`Self::commit_batch_if`] from checking what it expects
+    /// through its write, so no other write lands in between. A std mutex: held for store
+    /// calls, never across an await.
+    pub(crate) persist_lock: Arc<std::sync::Mutex<()>>,
     /// In-memory cache of parsed `ModelShape` instances keyed by class name.
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.

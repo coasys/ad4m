@@ -1133,6 +1133,54 @@ async fn t6_restoring_a_grant_at_load_schedules_a_flow_pass() {
     );
 }
 
+/// The restore at load writes under `persist_lock`, as every store write does,
+/// so it cannot land between a conditional batch's check of what it expects
+/// and its write (`commit_batch_if`). While the lock is held the grant stays
+/// out; once released it goes back.
+#[tokio::test(flavor = "multi_thread")]
+async fn t6_restoring_a_grant_at_load_waits_for_persist_lock() {
+    let (replica, _, g) = stored_declaration_without_its_restoration().await;
+
+    let handle = replica.persisted.lock().await.clone();
+    let mut reopened = PerspectiveInstance::new(handle, None);
+    reopened.sparql_store = replica.sparql_store.clone();
+    drop(replica);
+
+    // A std mutex guard is not held across an await: a thread holds it.
+    let lock = reopened.persist_lock.clone();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _persisting = lock.lock().expect("persist_lock");
+        held_tx.send(()).expect("signal held");
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().expect("persist_lock held");
+
+    let recovering = reopened.clone();
+    let mut recovery = tokio::spawn(async move { recovering.monotonic_restore_at_load().await });
+    let early = tokio::time::timeout(std::time::Duration::from_secs(3), &mut recovery).await;
+    assert!(
+        early.is_err(),
+        "the restore finished while persist_lock was held"
+    );
+    assert!(
+        !present(&reopened, &g),
+        "nothing is restored while persist_lock is held"
+    );
+
+    release_tx.send(()).expect("release persist_lock");
+    holder.join().expect("lock holder");
+    tokio::time::timeout(std::time::Duration::from_secs(30), recovery)
+        .await
+        .expect("restore at load after release")
+        .expect("restore task");
+    assert!(
+        present(&reopened, &g),
+        "the grant is restored once released"
+    );
+}
+
 /// The same declaration arriving again restores what it did not.
 #[tokio::test(flavor = "multi_thread")]
 async fn t6_a_stored_role_grant_declaration_arriving_again_restores_the_grant() {

@@ -125,7 +125,7 @@ use crate::types::{
 use ad4m_client::literal::Literal;
 use deno_core::error::AnyError;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
 // ---------------------------------------------------------------------------
 // Vocabulary. Defined here, not in the code that writes it, so this module
@@ -747,8 +747,17 @@ impl PerspectiveInstance {
     /// Restore the kept links of every predicate that now ends only by
     /// revocation and is missing from the store: a restoration the stored
     /// flag started but did not finish. Returns how many went back.
+    ///
+    /// Checks and writes under `persist_lock`, as every store write does, so
+    /// the restore cannot land between a conditional batch's check and its
+    /// write (`commit_batch_if`).
     pub(crate) async fn restore_monotonic_ended(&self) -> Result<usize, AnyError> {
+        // Read before taking `persist_lock`: it is a std mutex, not held across an await.
         let declared = self.monotonic_declared().await?;
+        let _persisting = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut restored = 0;
         for predicate in declared.revocation_only() {
             for link in self.restorable(predicate, &[])? {
