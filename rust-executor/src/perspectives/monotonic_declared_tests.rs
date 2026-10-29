@@ -1133,6 +1133,65 @@ async fn t6_restoring_a_grant_at_load_schedules_a_flow_pass() {
     );
 }
 
+/// A grant restored at load reaches pubsub and the subscription check as any
+/// written link does: a subscriber or live query opened before the restore
+/// would otherwise miss the grant until some later write.
+#[tokio::test(flavor = "multi_thread")]
+async fn t6_restoring_a_grant_at_load_publishes_it() {
+    let (replica, _, g) = stored_declaration_without_its_restoration().await;
+
+    let handle = replica.persisted.lock().await.clone();
+    let mut reopened = PerspectiveInstance::new(handle, None);
+    reopened.sparql_store = replica.sparql_store.clone();
+    drop(replica);
+
+    // Subscribed before the restore: the broadcast channel only carries later events.
+    let pubsub = crate::pubsub::get_global_pubsub().await;
+    let mut events = pubsub.subscribe_events();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        reopened.monotonic_restore_at_load(),
+    )
+    .await
+    .expect("restore at load");
+    assert!(present(&reopened, &g), "the grant is restored on reopen");
+
+    // The channel is global: drain until this perspective's event for the grant.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, events.recv())
+            .await
+            .expect("no link-added event for the restored grant")
+            .expect("event channel open");
+        let payload = event.payload.to_string();
+        if event.topic == Topic::LinkAdded
+            && event.perspective.as_deref() == Some(reopened.uuid.as_str())
+            && payload.contains(&g.data.source)
+            && payload.contains(&g.data.target)
+        {
+            break;
+        }
+    }
+
+    // The Prolog update runs in a spawned task; it queues the subscription check.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !reopened.trigger_subscription_check.load(Ordering::Acquire) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the restore did not queue a subscription check"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        !matches!(
+            *reopened.changed_predicates.lock().await,
+            ChangedPredicates::NoneRecorded
+        ),
+        "the restored grant is recorded as a change for the subscription check"
+    );
+}
+
 /// The restore at load writes under `persist_lock`, as every store write does,
 /// so it cannot land between a conditional batch's check of what it expects
 /// and its write (`commit_batch_if`). While the lock is held the grant stays

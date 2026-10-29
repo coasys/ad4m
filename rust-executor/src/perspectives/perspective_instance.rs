@@ -1992,7 +1992,7 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn pubsub_publish_diff(&self, decorated_diff: &DecoratedPerspectiveDiff) {
+    pub(super) async fn pubsub_publish_diff(&self, decorated_diff: &DecoratedPerspectiveDiff) {
         // Every write reaches here, local or synced, so this is where a local
         // change to a flow definition queues the re-derivation that a synced
         // one gets from `diff_from_link_language`. A no-op for anything else.
@@ -3357,7 +3357,7 @@ impl PerspectiveInstance {
 
     /// Combined helper: spawns Prolog facts update AND marks query engine as dirty
     /// This is the common pattern throughout the codebase
-    async fn update_prolog_engines(&self, diff: DecoratedPerspectiveDiff) {
+    pub(super) async fn update_prolog_engines(&self, diff: DecoratedPerspectiveDiff) {
         // Pooled-mode facts update, then notification and live-query checks
         // (spawned task)
         self.spawn_prolog_facts_update(diff, None);

@@ -750,28 +750,44 @@ impl PerspectiveInstance {
     ///
     /// Checks and writes under `persist_lock`, as every store write does, so
     /// the restore cannot land between a conditional batch's check and its
-    /// write (`commit_batch_if`).
+    /// write (`commit_batch_if`). The restored links then go to Prolog and
+    /// pubsub as any other write's do, so a live query or subscriber opened
+    /// before the restore sees them.
     pub(crate) async fn restore_monotonic_ended(&self) -> Result<usize, AnyError> {
         // Read before taking `persist_lock`: it is a std mutex, not held across an await.
         let declared = self.monotonic_declared().await?;
-        let _persisting = self
-            .persist_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let mut restored = 0;
-        for predicate in declared.revocation_only() {
-            for link in self.restorable(predicate, &[])? {
-                self.sparql_store.add_link(&link)?;
-                restored += 1;
+        let restored = {
+            let _persisting = self
+                .persist_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let mut restored = Vec::new();
+            for predicate in declared.revocation_only() {
+                for link in self.restorable(predicate, &[])? {
+                    self.sparql_store.add_link(&link)?;
+                    restored.push(link);
+                }
             }
+            restored
+        };
+        if !restored.is_empty() {
+            let diff = DecoratedPerspectiveDiff::from_additions(
+                restored
+                    .iter()
+                    .map(|l| DecoratedLinkExpression::from((l.clone(), LinkStatus::Shared)))
+                    .collect(),
+            );
+            self.update_prolog_engines(diff.clone()).await;
+            self.pubsub_publish_diff(&diff).await;
         }
-        Ok(restored)
+        Ok(restored.len())
     }
 
     /// [`Self::restore_monotonic_ended`] once the perspective is loaded and
     /// its authority known. A non-empty restore queues an all-instance flow
-    /// pass: the links go in through the store, not a diff, and a sweep that
-    /// already recorded the missing grant would otherwise keep that record.
+    /// pass: publishing the restore queues one only for a definition change,
+    /// and a sweep that already recorded the missing grant would otherwise
+    /// keep that record.
     pub(crate) async fn monotonic_restore_at_load(&self) {
         if !self.agent_did_ready().await {
             return;
