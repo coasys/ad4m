@@ -70,7 +70,13 @@ describe("shipped bundle", () => {
         type: "mention",
         perspective: "fake-uuid",
         channel: "",
-        query: "SELECT * FROM link",
+        // What get_mention_waker_config returns.
+        className: "ad4m://TextContent",
+        query: "{}",
+        terms: ["Data", "did:key:zAgent"],
+        did: "did:key:zAgent",
+        mentionClass: "ad4m://Mentioning",
+        mentionQuery: "{}",
       }),
     ).rejects.toThrow(/main key not found/);
 
@@ -112,13 +118,57 @@ describe("shipped bundle", () => {
         type: "mention",
         perspective: "fake-uuid",
         channel: "",
-        query: "SELECT * FROM link",
+        // What get_mention_waker_config returns.
+        className: "ad4m://TextContent",
+        query: "{}",
+        terms: ["Data", "did:key:zAgent"],
+        did: "did:key:zAgent",
+        mentionClass: "ad4m://Mentioning",
+        mentionQuery: "{}",
       }),
     ).rejects.toThrow(/timed out after 50ms/);
 
     expect(manager.getActive()).toHaveLength(0);
     expect(manager.getPending().map((s: any) => s.id)).toEqual(["bundle-hang"]);
     manager.disposeAll();
+  });
+
+  it("ships a QuerySubscriptionProxy that opens a class's model query with modelSubscribe", async () => {
+    // Mention and children subscriptions are model queries over a class
+    // (#1446). The released client's proxy took (uuid, query, client) only,
+    // dropped the class, and sent the JSON to subscribeQuery, which the
+    // executor rejects as "Prolog live queries are no longer supported".
+    const { QuerySubscriptionProxy } = bundle.loadWakerClientModule();
+    const client = {
+      onQueryUpdate: vi.fn(() => () => {}),
+      onReconnect: vi.fn(() => () => {}),
+      disposeQuerySubscription: vi.fn(() => Promise.resolve(true)),
+      subscribeQuery: vi.fn(() => Promise.reject(new Error("SPARQL path"))),
+      modelSubscribe: vi.fn(() =>
+        Promise.resolve({
+          subscriptionId: "sub-1",
+          revision: 0,
+          result: { instances: [], totalCount: 0 },
+        }),
+      ),
+    };
+
+    const proxy = new QuerySubscriptionProxy(
+      "perspective-uuid",
+      '{"limit":50}',
+      client,
+      "ad4m://TextContent",
+    );
+    await proxy.subscribe();
+
+    expect(client.modelSubscribe).toHaveBeenCalledWith(
+      "perspective-uuid",
+      "ad4m://TextContent",
+      '{"limit":50}',
+    );
+    expect(client.subscribeQuery).not.toHaveBeenCalled();
+    expect(proxy.id).toBe("sub-1");
+    proxy.dispose();
   });
 
   it("resolves @coasys/ad4m at build time, not from the installing host", () => {

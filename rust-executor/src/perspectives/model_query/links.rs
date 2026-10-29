@@ -20,7 +20,7 @@
 //! predicate IRI. The result gains one key, [`LINKS_KEY`], mapping each
 //! requested entry — spelled as requested — to every link on that predicate,
 //! shaped as a [`DecoratedLinkExpression`](crate::types::DecoratedLinkExpression)
-//! (author, timestamp, data, proof with the stored signature verdict) so a
+//! (author, timestamp, data, proof with the stored signature verdict, status) so a
 //! consumer can deserialize it directly, gate on the verdict, or verify the
 //! signature itself.
 //!
@@ -45,19 +45,41 @@
 //! the window.
 
 use deno_core::anyhow::{anyhow, Error};
+use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
 use super::sparql_builder::{link_status_filter, local_status_filter, proof_valid_filter};
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
 use super::utils::{emittable_iri, values_or_str_filter};
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{status_from_str, SparqlStore};
 use crate::types::LinkStatus;
 
 /// Instance key carrying the requested per-link rows. Reserved as a property
 /// name in `shacl_parser`, so a class cannot declare a property it would
 /// overwrite.
 pub(crate) const LINKS_KEY: &str = "__links";
+
+/// The rows of one requested `links` key on one result instance, each read as
+/// a `T`. A key missing from [`LINKS_KEY`], or a row that is not a `T`, is an
+/// `Err`, never an empty list: read as "no links", a missing `acceptedBy` or
+/// grant key would silently drop every vote or grant.
+pub(crate) fn links_rows<T: DeserializeOwned>(
+    instance: &Value,
+    key: &str,
+) -> Result<Vec<T>, Error> {
+    instance
+        .get(LINKS_KEY)
+        .and_then(|links| links.get(key))
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("no `{LINKS_KEY}.{key}` rows"))?
+        .iter()
+        .map(|row| {
+            serde_json::from_value(row.clone())
+                .map_err(|e| anyhow!("a `{key}` row is not a link ({e}): {row}"))
+        })
+        .collect()
+}
 
 /// Resolve each requested entry to the predicate it reads, as
 /// `(requested spelling, predicate)`.
@@ -160,6 +182,12 @@ pub(super) fn resolve_link_keys(
 /// "invalid": true}`: `LinkExpression::compute_proof_valid` returns `false`
 /// for it.
 ///
+/// Each row carries the link's `status` (`"SHARED"` / `"LOCAL"`), so a row is
+/// the whole [`LinkExpression`](crate::types::LinkExpression) that
+/// `perspective.get` returns (`LinkRow.status` in the SDK), not one missing a
+/// field. It is not signed: it says where this executor holds the link, not who
+/// wrote it.
+///
 /// `data.target` is the target the link was signed over (the store's
 /// `wireTarget` annotation when a literal was written in another encoding
 /// than the store's canonical one), and the verdict was computed over those
@@ -202,7 +230,7 @@ pub(super) async fn attach_links(
         let link_status = link_status_filter(link_status);
         let proof_valid = proof_valid_filter(include_unverified);
         let sparql = format!(
-            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid WHERE {{
+            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?rowStatus WHERE {{
     {source_constraint}
     VALUES ?predicate {{ {predicate_values} }}
     ?source ?predicate ?target .
@@ -213,39 +241,22 @@ pub(super) async fn attach_links(
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?rowStatus . }}
 {link_status}{proof_valid}{local_status}}}"#
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
-        let s = |row: &Value, var: &str| row[var].as_str().unwrap_or("").to_string();
         for row in &rows {
-            let source = s(row, "source");
-            let predicate = s(row, "predicate");
-            // Same decoding as `sparql_store::decode_proof_valid`: only a
-            // stored "true" is valid; an absent annotation is not. As in
-            // `VerifiedExpression::from`, `invalid` is `!valid`, so it covers
-            // a failed signature, a missing verdict and a missing proof alike;
-            // an empty `signature` is what tells an unsigned link apart.
-            let valid = s(row, "proofValid") == "true";
-            let link = json!({
-                "author": s(row, "author"),
-                "timestamp": s(row, "timestamp"),
-                "data": {
-                    "source": source,
-                    "predicate": predicate,
-                    // The signed bytes when the store keeps them apart
-                    // from its canonical literal rendering.
-                    "target": match s(row, "wireTarget") {
-                        w if w.is_empty() => s(row, "target"),
-                        w => w,
-                    },
-                },
-                "proof": {
-                    "key": s(row, "proofKey"),
-                    "signature": s(row, "proofSig"),
-                    "valid": valid,
-                    "invalid": !valid,
-                },
-            });
+            let s = |var: &str| row[var].as_str().unwrap_or("").to_string();
+            let source = s("source");
+            let predicate = s("predicate");
+            let mut link = decorated_link(row);
+            // Spelled as `perspective.get` spells it (`"SHARED"` / `"LOCAL"`),
+            // and absent when the store recorded none, like `status` there.
+            // `decorated_link` does not set it: this query is the one that
+            // selects `rowStatus`.
+            if let Some(status) = status_from_str(&s("rowStatus")) {
+                link["status"] = serde_json::to_value(status)?;
+            }
             found
                 .entry(source)
                 .or_default()
@@ -278,13 +289,46 @@ pub(super) async fn attach_links(
     Ok(())
 }
 
+/// One `__links` row from a result row binding `source`, `predicate`,
+/// `target`, `wireTarget`, `author`, `timestamp`, `proofKey`, `proofSig` and
+/// `proofValid`, shaped as a `DecoratedLinkExpression`.
+pub(super) fn decorated_link(row: &Value) -> Value {
+    let s = |var: &str| row[var].as_str().unwrap_or("").to_string();
+    // Same decoding as `sparql_store::decode_proof_valid`: only a
+    // stored "true" is valid; an absent annotation is not. As in
+    // `VerifiedExpression::from`, `invalid` is `!valid`, so it covers
+    // a failed signature, a missing verdict and a missing proof alike;
+    // an empty `signature` is what tells an unsigned link apart.
+    let valid = s("proofValid") == "true";
+    json!({
+        "author": s("author"),
+        "timestamp": s("timestamp"),
+        "data": {
+            "source": s("source"),
+            "predicate": s("predicate"),
+            // The signed bytes when the store keeps them apart
+            // from its canonical literal rendering.
+            "target": match s("wireTarget") {
+                w if w.is_empty() => s("target"),
+                w => w,
+            },
+        },
+        "proof": {
+            "key": s("proofKey"),
+            "signature": s("proofSig"),
+            "valid": valid,
+            "invalid": !valid,
+        },
+    })
+}
+
 /// Order one predicate's rows by timestamp, then target, author and
 /// signature. The last two make the order total: two agents can write the same
 /// triple in the same millisecond, and the store returns those rows in no fixed
 /// order. Anything hashing `__links` (an evidence seal, a receipt) needs every
 /// replica to produce the same array, and `canonical_json` sorts keys, not
 /// arrays.
-fn sort_link_rows(rows: &mut [Value]) {
+pub(super) fn sort_link_rows(rows: &mut [Value]) {
     rows.sort_by_cached_key(|v| {
         let s = |x: &Value| x.as_str().unwrap_or("").to_string();
         (

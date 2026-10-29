@@ -1,27 +1,20 @@
 use super::core::{
     AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
-    ExpressionProof, Link, ModelType, Notification, TriggeredNotification,
+    ExpressionProof, Link, ModelType,
 };
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify_or_false;
+use crate::secret::Secret;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// Who is calling, for one request: the caller's session and the request's cancel token.
+/// The RPC socket builds one per connection; REST and the OpenAI-compatible API extract one
+/// per request (`api::auth`).
 #[derive(Clone)]
 pub struct RequestContext {
-    pub capabilities: Result<Vec<Capability>, String>,
-    pub auto_permit_cap_requests: bool,
-    pub auth_token: String,
-    /// True when the request was authenticated with the launcher's admin_credential token.
-    /// Only the launcher (or legacy single-user empty-token) qualifies.
-    /// Regular app tokens (JWT) never have this set, regardless of which capabilities they hold.
-    pub is_admin_credential: bool,
-    /// Cached user email resolved once at connection time (multi-user mode).
-    pub user_email: Option<String>,
-    /// Cached user DID resolved once at connection time (multi-user mode).
-    pub user_did: Option<String>,
     /// Per-request cancellation token, populated by the WS RPC dispatcher
     /// when the client may send `request.cancel`.  Handlers that want to
     /// support mid-flight cancellation can clone this and pass it to
@@ -32,6 +25,106 @@ pub struct RequestContext {
     /// — handlers should treat the absence of a token as "no cancellation
     /// signalling available" and proceed normally.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// The caller's session. Handlers take their identity from it.
+    pub session: std::sync::Arc<crate::agent::session::Session>,
+    /// Id of the WS RPC connection the request arrived on, generated once
+    /// per socket. Live queries belong to it and end when it closes. `None`
+    /// outside the WS RPC socket (REST, `/api/v1/ws/events`, internal code).
+    pub connection_id: Option<String>,
+}
+
+impl RequestContext {
+    /// The context of a caller that presents `token` on a listener with this reach.
+    ///
+    /// Fails for a token that opens no session: invalid, expired, revoked, a user whose DID
+    /// does not load, or any token while the wallet is locked. The caller refuses such a
+    /// token where it arrives. An empty token opens a session (the operator or an anonymous
+    /// caller).
+    pub fn open(
+        token: &str,
+        admin_credential: &Option<crate::secret::Secret>,
+        reach: crate::agent::capabilities::ListenerReach,
+    ) -> Result<Self, crate::agent::session::AuthError> {
+        let session = crate::agent::session::Session::open(token, admin_credential, reach)?;
+        Ok(RequestContext {
+            cancel_token: None,
+            session: std::sync::Arc::new(session),
+            connection_id: None,
+        })
+    }
+
+    /// `Ok` if the session may do `expected`; otherwise the error a refused call reports
+    /// (403 at every surface).
+    pub fn require(&self, expected: &Capability) -> Result<(), String> {
+        self.session.require(expected)
+    }
+
+    /// The agent a request acts as: a grant's agent, else the executor's main agent.
+    pub fn acts_as(&self) -> crate::agent::AgentContext {
+        self.session.acts_as()
+    }
+
+    /// The DID of the managed agent the session acts as, if it acts as one: the session of
+    /// a user. `None` for the main agent, the operator and anonymous callers.
+    pub fn user_did(&self) -> Option<&str> {
+        self.session.managed_did()
+    }
+
+    /// Whether the caller is the executor's operator: the admin credential, or no token on a
+    /// loopback listener of an executor without one. A grant never is, whatever its
+    /// capabilities.
+    pub fn is_operator(&self) -> bool {
+        self.session.is_operator()
+    }
+}
+
+#[cfg(test)]
+impl RequestContext {
+    /// A context for `session`, with no token.
+    pub(crate) fn for_session(session: crate::agent::session::Session) -> RequestContext {
+        RequestContext {
+            cancel_token: None,
+            session: std::sync::Arc::new(session),
+            connection_id: None,
+        }
+    }
+
+    /// A context for `principal` (see `Session::for_test`), with no token.
+    pub(crate) fn for_test(principal: crate::agent::session::Principal) -> RequestContext {
+        Self::for_session(crate::agent::session::Session::for_test(principal))
+    }
+
+    /// The operator's context.
+    pub(crate) fn operator_for_test() -> RequestContext {
+        Self::for_test(crate::agent::session::Principal::Operator)
+    }
+
+    /// A grant on the main agent, limited to `caps`.
+    pub(crate) fn app_for_test(caps: Vec<Capability>) -> RequestContext {
+        Self::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
+                crate::agent::AgentContext::main_agent(),
+            ))
+            .with_caps(caps),
+        )
+    }
+
+    /// A grant on the managed agent `did`, limited to `caps`.
+    pub(crate) fn user_for_test(did: &str, caps: Vec<Capability>) -> RequestContext {
+        Self::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
+                crate::agent::AgentContext::managed(did.to_string()),
+            ))
+            .with_caps(caps)
+            .with_did(did),
+        )
+    }
+
+    /// The same context, arriving on the RPC connection `id`.
+    pub(crate) fn on_connection(mut self, id: &str) -> RequestContext {
+        self.connection_id = Some(id.to_string());
+        self
+    }
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -65,6 +158,8 @@ pub struct Apps {
     pub auth: AuthInfo,
     pub request_id: String,
     pub revoked: Option<bool>,
+    /// Always empty: the executor does not keep app tokens, and an app receives its token
+    /// once, from `agent.generateJwt`. The field stays for clients that require it.
     pub token: String,
 }
 
@@ -401,7 +496,18 @@ pub struct DecoratedNeighbourhoodExpression {
 #[serde(rename_all = "camelCase")]
 pub struct OnlineAgent {
     pub did: String,
+    /// Empty when the agent has not set a status: the link language reports
+    /// such an agent with a `null` status.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub status: PerspectiveExpression,
+}
+
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -628,8 +734,9 @@ pub struct PerspectiveUnsignedInput {
     pub links: Vec<LinkInput>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[serde(rename_all = "camelCase")]
+/// A notification to store. Built from the RPC's `NotificationInput`; never serialised,
+/// because it holds the webhook credential.
+#[derive(Debug, Clone)]
 pub struct NotificationInput {
     pub description: String,
     pub app_name: String,
@@ -638,7 +745,7 @@ pub struct NotificationInput {
     pub trigger: String,
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
-    pub webhook_auth: String,
+    pub webhook_auth: Secret,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -660,6 +767,9 @@ pub struct ResourceInput {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {
     pub ad4m_executor_version: String,
+    /// The commit the executor was built from, or nothing when the build could not tell (no git
+    /// checkout). Every build between two releases reports one version; this names the build.
+    pub ad4m_executor_commit: Option<String>,
     pub is_initialized: bool,
     pub is_unlocked: bool,
 }
@@ -784,23 +894,21 @@ pub struct NeighbourhoodSignalFilter {
     pub recipient: Option<String>, // DID of the recipient agent for this signal
 }
 
-// Wrapper for link events with owner filtering (for multi-user isolation)
+/// `link-added` / `link-removed`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveLinkWithOwner {
+pub struct PerspectiveLinkEvent {
     pub perspective_uuid: String,
     pub link: DecoratedLinkExpression,
-    pub owner: String, // DID of the owner
 }
 
-// Wrapper for link updated events with owner filtering (for multi-user isolation)
+/// `link-updated`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveLinkUpdatedWithOwner {
+pub struct PerspectiveLinkUpdatedEvent {
     pub perspective_uuid: String,
     pub new_link: DecoratedLinkExpression,
     pub old_link: DecoratedLinkExpression,
-    pub owner: String, // DID of the owner
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -823,7 +931,13 @@ pub struct PerspectiveStateFilter {
 #[ts(optional_fields)]
 pub struct ModelApiInput {
     pub base_url: String,
-    pub api_key: String,
+    /// The provider key. An empty key stores no key, and so does `ai.addModel` without
+    /// one. `ai.updateModel` without one keeps the stored key; it refuses the update if
+    /// `baseUrl` changes too, because a key goes only to the endpoint it was set for.
+    /// Never serialised back out.
+    #[serde(default, skip_serializing)]
+    #[ts(as = "Option<String>")]
+    pub api_key: Option<Secret>,
     pub model: String,
     pub api_type: String,
     /// Optional ceiling for the provider's context window, in tokens.
@@ -954,288 +1068,20 @@ where
     }
 }
 
-// Define the trait with a generic associated type `Value`
-pub trait GetValue {
-    type Value: Clone + DeserializeOwned + Send + 'static + std::fmt::Debug;
-    fn get_value(&self) -> Self::Value;
-}
-
-pub trait GetFilter {
-    fn get_filter(&self) -> Option<String>;
-}
-
-// Implement the trait for the `TranscriptionTextFilter` struct
-impl GetValue for TranscriptionTextFilter {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.text.clone()
-    }
-}
-
-// Implement the trait for the `TranscriptionTextFilter` struct
-impl GetFilter for TranscriptionTextFilter {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.stream_id.clone())
-    }
-}
-
-impl GetValue for Option<Apps> {
-    type Value = Option<Apps>;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-impl GetFilter for Option<Apps> {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-// Implement the trait for the `NeighbourhoodSignalFilter` struct
-impl GetValue for NeighbourhoodSignalFilter {
-    type Value = PerspectiveExpression;
-
-    fn get_value(&self) -> Self::Value {
-        self.signal.clone()
-    }
-}
-
-// Implement the trait for the `NeighbourhoodSignalFilter` struct
-impl GetFilter for NeighbourhoodSignalFilter {
-    fn get_filter(&self) -> Option<String> {
-        // Create a composite filter: perspective_uuid|recipient_did
-        // If recipient is None, just use perspective_uuid for backwards compatibility
-        match &self.recipient {
-            Some(recipient_did) => Some(format!("{}|{}", self.perspective.uuid, recipient_did)),
-            None => Some(self.perspective.uuid.clone()),
-        }
-    }
-}
-
-// Implement GetValue and GetFilter for PerspectiveLinkWithOwner
-impl GetValue for PerspectiveLinkWithOwner {
-    type Value = DecoratedLinkExpression;
-
-    fn get_value(&self) -> Self::Value {
-        self.link.clone()
-    }
-}
-
-impl GetFilter for PerspectiveLinkWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-// Implement GetValue and GetFilter for PerspectiveLinkUpdatedWithOwner
-impl GetValue for PerspectiveLinkUpdatedWithOwner {
-    type Value = LinkUpdated;
-
-    fn get_value(&self) -> Self::Value {
-        LinkUpdated {
-            new_link: self.new_link.clone(),
-            old_link: self.old_link.clone(),
-        }
-    }
-}
-
-impl GetFilter for PerspectiveLinkUpdatedWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-// Implement the trait for the `PerspectiveStateFilter` struct
-impl GetValue for PerspectiveStateFilter {
-    type Value = PerspectiveState;
-
-    fn get_value(&self) -> Self::Value {
-        self.state.clone()
-    }
-}
-
-// Implement the trait for the `PerspectiveStateFilter` struct
-impl GetFilter for PerspectiveStateFilter {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.perspective.uuid.clone())
-    }
-}
-
-// Implement the trait for the `AgentStatus` struct
-impl GetValue for AgentStatus {
-    type Value = AgentStatus;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-// Implement the trait for the `AgentStatus` struct
-impl GetFilter for AgentStatus {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-// Implement the trait for `Agent` struct
-impl GetValue for Agent {
-    type Value = Agent;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-// Implement the trait for `Agent` struct
-impl GetFilter for Agent {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `ExceptionInfo` struct
-impl GetValue for ExceptionInfo {
-    type Value = ExceptionInfo;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `ExceptionInfo` struct
-impl GetFilter for ExceptionInfo {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `PerspectiveHandle` struct
-impl GetValue for PerspectiveHandle {
-    type Value = PerspectiveHandle;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `PerspectiveHandle` struct
-impl GetFilter for PerspectiveHandle {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-// Wrapper type for perspective subscriptions that includes owner for filtering
+/// `perspective-added` / `perspective-updated`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveWithOwner {
+pub struct PerspectiveEvent {
     pub perspective_uuid: String,
     pub perspective: PerspectiveHandle,
-    pub owner: String,
 }
 
-impl GetValue for PerspectiveWithOwner {
-    type Value = PerspectiveHandle;
-
-    fn get_value(&self) -> Self::Value {
-        self.perspective.clone()
-    }
-}
-
-impl GetFilter for PerspectiveWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-// Wrapper type for perspective removed subscriptions that includes owner for filtering
+/// `perspective-removed`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveRemovedWithOwner {
+pub struct PerspectiveRemovedEvent {
     pub perspective_uuid: String,
     pub uuid: String,
-    pub owner: String,
-}
-
-impl GetValue for PerspectiveRemovedWithOwner {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.uuid.clone()
-    }
-}
-
-impl GetFilter for PerspectiveRemovedWithOwner {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.owner.clone())
-    }
-}
-
-//Implement the trait for `String`
-impl GetValue for String {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `String`
-impl GetFilter for String {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `PerspectiveExpression`
-impl GetValue for PerspectiveExpression {
-    type Value = PerspectiveExpression;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `PerspectiveExpression`
-impl GetFilter for PerspectiveExpression {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetValue for Notification {
-    type Value = Notification;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetFilter for Notification {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetValue for TriggeredNotification {
-    type Value = TriggeredNotification;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `Notification`
-impl GetFilter for TriggeredNotification {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
@@ -1246,50 +1092,6 @@ pub struct AIModelLoadingStatus {
     pub status: String,
     pub downloaded: bool,
     pub loaded: bool,
-}
-
-//Implement the trait for `AIModelLoadingStatus` struct
-impl GetValue for AIModelLoadingStatus {
-    type Value = AIModelLoadingStatus;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-//Implement the trait for `AIModelLoadingStatus` struct
-impl GetFilter for AIModelLoadingStatus {
-    fn get_filter(&self) -> Option<String> {
-        None
-    }
-}
-
-impl GetValue for HostingUserInfo {
-    type Value = HostingUserInfo;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-impl GetFilter for HostingUserInfo {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.email.clone())
-    }
-}
-
-impl GetValue for ComputeLogEntry {
-    type Value = ComputeLogEntry;
-
-    fn get_value(&self) -> Self::Value {
-        self.clone()
-    }
-}
-
-impl GetFilter for ComputeLogEntry {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.user_email.clone())
-    }
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
@@ -1390,25 +1192,52 @@ pub struct QuerySubscription {
     pub result: String,
 }
 
+/// `query-subscription-update`: one change to a live query, delivered only
+/// to the connection that opened it, or [`QueryUpdatesLagged`].
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+#[serde(untagged)]
+pub enum QuerySubscriptionUpdateEvent {
+    Update(QuerySubscriptionUpdate),
+    Lagged(QueryUpdatesLagged),
+}
+
+/// The change from revision `revision - 1` to `revision` (see
+/// `perspective_instance::subscriptions::result_delta`): model results
+/// carry `ids`, `upsert` and `totalCount`; query results carry `added` and
+/// `removed` rows; a result that could not be diffed comes whole as
+/// `result`.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveQuerySubscriptionFilter {
+pub struct QuerySubscriptionUpdate {
     pub perspective_uuid: String,
     pub uuid: String,
     pub subscription_id: String,
-    pub result: String,
+    #[ts(type = "number")]
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Array<any>")]
+    pub upsert: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub total_count: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Array<any>")]
+    pub added: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Array<any>")]
+    pub removed: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "any")]
+    pub result: Option<serde_json::Value>,
 }
 
-impl GetValue for PerspectiveQuerySubscriptionFilter {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.result.clone()
-    }
-}
-
-impl GetFilter for PerspectiveQuerySubscriptionFilter {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.subscription_id.clone())
-    }
+/// The socket dropped updates, maybe for any of its live queries: every
+/// live query on it must resync.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+pub struct QueryUpdatesLagged {
+    #[ts(type = "true")]
+    pub lagged: bool,
 }

@@ -34,7 +34,9 @@ use super::atom::{
     check_outputs_commitment, signed_by, OutputRef, TransitionAtom, ACCEPTED_BY_PREDICATE,
     FLOW_INSTANCE_PREDICATE,
 };
-use super::pass::{run_flow_consensus_pass, FireOutcome};
+use super::pass::{
+    catch_up_before_own_vote, run_flow_consensus_pass, run_flow_pass_for_co_owners, FireOutcome,
+};
 use super::receipt::is_terminal_state;
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -57,7 +59,21 @@ use std::collections::HashMap;
 /// (each failure names its own `OutputsRefusal`). Returns whatever
 /// settled as a result, which may be nothing: a vote that does not yet reach
 /// quorum is a landed vote, not a failure.
+///
+/// Holds the perspective's `flow_pass_lock` throughout, so no background
+/// pass records this vote's settle before this call's own pass reports it.
 pub async fn accept_flow_proposal(
+    perspective: &mut PerspectiveInstance,
+    proposal_uri: &str,
+    context: &AgentContext,
+) -> anyhow::Result<Vec<FireOutcome>> {
+    let lock = perspective.flow_pass_lock.clone();
+    let _passes = lock.lock().await;
+    accept_flow_proposal_locked(perspective, proposal_uri, context).await
+}
+
+/// [`accept_flow_proposal`] for a caller that already holds `flow_pass_lock`.
+pub(crate) async fn accept_flow_proposal_locked(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
     context: &AgentContext,
@@ -152,6 +168,9 @@ pub async fn accept_flow_proposal(
     if already {
         log::debug!("accept_flow_proposal: {proposal_uri} already accepted by {did}");
     } else {
+        // So the pass below reports what this vote settles, even when it is
+        // this agent's first contact with the instance.
+        catch_up_before_own_vote(perspective, context, &instance_uri).await;
         perspective
             .add_link(
                 Link {
@@ -166,26 +185,29 @@ pub async fn accept_flow_proposal(
             .await
             .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;
     }
-    Ok(run_flow_consensus_pass(
-        perspective,
-        None,
-        context,
-        None,
-        Some(std::slice::from_ref(&instance_uri)),
-    )
-    .await)
+    let only = std::slice::from_ref(&instance_uri);
+    let outcomes = run_flow_consensus_pass(perspective, None, context, None, Some(only)).await;
+    run_flow_pass_for_co_owners(perspective, context, None, Some(only)).await;
+    Ok(outcomes)
 }
 
 /// Reject a proposal: retract the links on it that this replica signed.
 ///
-/// Invariant: a replica only ever refuses its own action. So we delete only
+/// Invariant: a replica only ever refuses its own action. So we retract only
 /// the links this DID actually signed — another agent's links are theirs to
 /// retract, and a link that merely *claims* our authorship without a valid
 /// signature is not our action either, so it is left alone.
 ///
-/// There is deliberately no "already fired, refuse" guard. A `resolved_as →
-/// "fired"` mark is an index any member may write, not authority, and this
-/// engine reads no mark to decide anything. Retracting a vote that helped
+/// A proposal's links are monotonic (#1176): each one ends by a signed
+/// `ad4m://retracted` tombstone naming its signature
+/// ([`crate::perspectives::monotonic`]), never by a removal. The tombstones
+/// take the links out of this store at once and out of every peer's when
+/// they sync; readers see the links gone, as after a removal. Our earlier
+/// tombstones on the proposal are not counted again.
+///
+/// There is deliberately no "already fired, refuse" guard. A fired mark is
+/// this replica's own index (`replica_state`), not authority, and this engine
+/// reads no mark to decide anything. Retracting a vote that helped
 /// settle an edge therefore does move the flow back — that is the semantics
 /// stated in this module's parent doc, not a hole in this function: state is
 /// a function of the links present now.
@@ -194,6 +216,7 @@ pub async fn reject_flow_proposal(
     proposal_uri: &str,
     context: &AgentContext,
 ) -> anyhow::Result<usize> {
+    use crate::perspectives::monotonic::{is_retractable, retraction_for};
     use crate::types::LinkExpression;
 
     let links = proposal_links(perspective, proposal_uri).await?;
@@ -201,13 +224,22 @@ pub async fn reject_flow_proposal(
     let did = crate::agent::did_for_context(context)
         .map_err(|e| anyhow::anyhow!("reject_flow_proposal: no acting DID: {e:#}"))?;
 
-    let to_remove: Vec<LinkExpression> = links
+    // Shared links end by tombstone; our Local ones (a `resolved_as` mark
+    // written before the marks moved to `replica_state`) are this replica's
+    // own and are removed as before.
+    let (shared, local): (Vec<_>, Vec<_>) = links
         .into_iter()
         .filter(|l| signed_by(l, &did))
-        .map(LinkExpression::from)
-        .collect();
+        .partition(|l| l.status != Some(LinkStatus::Local));
+    let tombstones = shared
+        .into_iter()
+        .filter(|l| is_retractable(l.data.predicate.as_deref()))
+        .map(|l| retraction_for(&LinkExpression::from(l)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("reject_flow_proposal: {e:#}"))?;
+    let local: Vec<LinkExpression> = local.into_iter().map(LinkExpression::from).collect();
 
-    if to_remove.is_empty() {
+    if tombstones.is_empty() && local.is_empty() {
         return Err(anyhow::anyhow!(
             "proposal {proposal_uri} carries no link signed by {did} — cannot reject another agent's proposal"
         ));
@@ -216,9 +248,17 @@ pub async fn reject_flow_proposal(
     // Callers report this rather than a bare "deleted": retracting one vote
     // and retracting a whole proposal are different events, and the count is
     // the only thing that distinguishes them at the wire.
-    let retracted = to_remove.len();
+    let retracted = tombstones.len() + local.len();
+    if !tombstones.is_empty() {
+        perspective
+            .add_links(tombstones, LinkStatus::Shared, None, context)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("reject_flow_proposal: writing retractions failed: {e:#}")
+            })?;
+    }
     perspective
-        .remove_links(to_remove, None)
+        .remove_links(local, None)
         .await
         .map_err(|e| anyhow::anyhow!("reject_flow_proposal: remove_links failed: {e:#}"))?;
     Ok(retracted)

@@ -24,11 +24,11 @@
 //!
 //! Auth: the WS extractor reads the bearer JWT from the
 //! `Authorization` header *or* a `?token=` query param (per
-//! `AuthContext`).  Capabilities checked: `AI_TRANSCRIBE`.
+//! `RequestContext`).  Capabilities checked: `AI_TRANSCRIBE`.
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use base64::Engine;
 use futures::SinkExt;
@@ -36,22 +36,47 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
-use crate::agent::capabilities::{check_capability, TokenCheck, AI_TRANSCRIBE_CAPABILITY};
+use crate::agent::capabilities::AI_TRANSCRIBE_CAPABILITY;
+use crate::agent::session::{AuthError, Session};
 use crate::ai_service::AIService;
-use crate::api::auth::AuthContext;
-use crate::types::ModelType;
+use crate::api::errors::ApiError;
+use crate::types::{ModelType, RequestContext};
 
-pub async fn realtime_ws(auth: AuthContext, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(auth, socket))
+/// A token that opens no session gets the upgrade, an `unauthorized` error event and a close
+/// with 1008, before any work: a browser cannot read the HTTP status of a refused upgrade.
+pub async fn realtime_ws(
+    caller: Result<RequestContext, ApiError>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    match caller {
+        Ok(caller) => ws.on_upgrade(move |socket| handle_socket(caller, socket)),
+        Err(ApiError::Unauthorized(reason)) => ws.on_upgrade(move |mut socket| async move {
+            let _ = send_error(&mut socket, "unauthorized", &reason).await;
+            let code = crate::api::ws_rpc::CLOSE_TOKEN_ENDED;
+            crate::api::ws_rpc::close_refused(socket, code, reason).await;
+        }),
+        Err(ApiError::Unavailable(reason)) => ws.on_upgrade(move |mut socket| async move {
+            let _ = send_error(&mut socket, "unavailable", &reason).await;
+            let code = crate::api::ws_rpc::CLOSE_TRY_AGAIN_LATER;
+            crate::api::ws_rpc::close_refused(socket, code, reason).await;
+        }),
+        Err(e) => e.into_response(),
+    }
 }
 
-async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
-    if let Err(e) = check_capability(&auth.capabilities, &AI_TRANSCRIBE_CAPABILITY) {
+async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
+    if let Err(e) = caller.require(&AI_TRANSCRIBE_CAPABILITY) {
         let _ = send_error(&mut socket, "forbidden", &e).await;
         let _ = socket.close().await;
         return;
     }
-    let token_check = TokenCheck::new(&auth.auth_token, auth.is_admin_credential);
+    let session = caller.session.clone();
+    // Completes when the grant ends or the token expires: the socket closes at once, not at
+    // the next message.
+    let over = session.over();
+    tokio::pin!(over);
+    // Set when the token stopped working: the socket then closes with 1008.
+    let mut token_ended = false;
 
     let mut stream_id: Option<String> = None;
     let mut delta_rx: Option<broadcast::Receiver<String>> = None;
@@ -63,29 +88,40 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
         let mut rx_taken = delta_rx.take();
 
         enum Ev {
+            Over,
             Ws(Option<Result<Message, axum::Error>>),
             Delta(Result<String, broadcast::error::RecvError>),
         }
 
-        let ev = if let Some(ref mut rx) = rx_taken {
-            tokio::select! {
-                msg = socket.recv() => Ev::Ws(msg),
-                text = rx.recv() => Ev::Delta(text),
-            }
-        } else {
-            Ev::Ws(socket.recv().await)
+        let ev = tokio::select! {
+            _ = &mut over => Ev::Over,
+            msg = socket.recv() => Ev::Ws(msg),
+            text = async {
+                match rx_taken.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => Ev::Delta(text),
         };
 
         delta_rx = rx_taken;
 
         let msg = match ev {
+            Ev::Over => {
+                token_ended = true;
+                break;
+            }
             Ev::Delta(Ok(text)) => {
-                if !text.is_empty() {
-                    let delta = json!({
-                        "type": "conversation.item.input_audio_transcription.delta",
-                        "delta": text,
-                    });
-                    let _ = socket.send(Message::Text(delta.to_string().into())).await;
+                match delta_frame(&session, &text) {
+                    Ok(Some(frame)) => {
+                        let _ = socket.send(Message::Text(frame.into())).await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        let _ = send_error(&mut socket, "unauthorized", &e.to_string()).await;
+                        token_ended = true;
+                        break;
+                    }
                 }
                 continue;
             }
@@ -100,8 +136,9 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
 
         // Check the token again on every client message: expiry and revokeToken() end the
         // session, as they do on the RPC socket.
-        if let Err(e) = token_check.check() {
-            let _ = send_error(&mut socket, "unauthorized", &e).await;
+        if let Err(e) = session.check() {
+            let _ = send_error(&mut socket, "unauthorized", &e.to_string()).await;
+            token_ended = true;
             break;
         }
 
@@ -177,19 +214,12 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
 
                 // Tear down any prior session before opening a new one.
                 if let Some(old_sid) = stream_id.take() {
-                    let _ = service
-                        .close_transcription_stream(&old_sid, &auth.auth_token)
-                        .await;
+                    let _ = service.close_transcription_stream(&old_sid, &caller).await;
                 }
                 delta_rx = None;
 
                 let sid = match service
-                    .open_transcription_stream(
-                        model_id.clone(),
-                        None,
-                        auth.auth_token.clone(),
-                        auth.is_admin_credential,
-                    )
+                    .open_transcription_stream(model_id.clone(), None, &caller)
                     .await
                 {
                     Ok(id) => id,
@@ -249,7 +279,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                 };
                 if delta_rx.is_none() {
                     match service
-                        .feed_transcription_stream_with_broadcast(sid, samples, &auth.auth_token)
+                        .feed_transcription_stream_with_broadcast(sid, samples, &caller)
                         .await
                     {
                         Ok(rx) => delta_rx = Some(rx),
@@ -259,7 +289,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                     }
                 } else {
                     if let Err(e) = service
-                        .feed_transcription_stream(sid, samples, &auth.auth_token)
+                        .feed_transcription_stream(sid, samples, &caller)
                         .await
                     {
                         let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
@@ -288,12 +318,28 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
 
     if let Some(ref sid) = stream_id {
         if let Ok(service) = AIService::global_instance().await {
-            let _ = service
-                .close_transcription_stream(sid, &auth.auth_token)
-                .await;
+            let _ = service.close_transcription_stream(sid, &caller).await;
         }
     }
-    let _ = socket.close().await;
+    if token_ended {
+        crate::api::ws_rpc::close_token_ended(&mut socket).await;
+    } else {
+        let _ = socket.close().await;
+    }
+}
+
+/// The frame that forwards the transcription delta `text` (`None` for an empty one), or the
+/// error of a session whose token stopped holding: a transcript goes out only while it holds.
+pub(super) fn delta_frame(session: &Session, text: &str) -> Result<Option<String>, AuthError> {
+    session.check()?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let delta = json!({
+        "type": "conversation.item.input_audio_transcription.delta",
+        "delta": text,
+    });
+    Ok(Some(delta.to_string()))
 }
 
 async fn send_error(socket: &mut WebSocket, code: &str, message: &str) -> Result<(), ()> {

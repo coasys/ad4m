@@ -20,30 +20,61 @@ lazy_static::lazy_static! {
         Arc::new(RwLock::new(HashMap::new()));
 }
 
-#[op2]
-#[serde]
-fn perspective_diff_received(#[serde] diff: PerspectiveDiff, #[string] language_address: String) {
-    crate::perspectives::handle_perspective_diff_from_link_language(diff, language_address);
+/// The address of the language this isolate runs, if `claimed` names it. The
+/// `LANGUAGE_CONTROLLER` ops take the address from language code, and a language could name
+/// another neighbourhood's link language (its address is public in the neighbourhood URL):
+/// inject link diffs into that perspective, forge its sync state, address signals for it or
+/// route its Holochain signals to itself. Each `LANGUAGE_CONTROLLER` op in this file acts for
+/// its own isolate's language only, so a call that names another one is refused, like
+/// `PUBSUB.publish`.
+///
+/// Not covered (follow-up): the `HOLOCHAIN_SERVICE` ops
+/// (`holochain_service/holochain_service_extension.rs`) still take an app id from language
+/// code, so a language can name another language's Holochain app.
+fn own_language(claimed: &str) -> Result<String, AnyhowWrapperError> {
+    let own = try_with_isolate_state(|state| state.language_address.clone())
+        .flatten()
+        .ok_or_else(|| anyhow::anyhow!("No language is loaded in this runtime"))?;
+    if claimed != own {
+        let claimed: String = claimed.chars().take(100).collect();
+        log::warn!("Language {own} tried to act for language {claimed:?}; refused");
+        return Err(anyhow::anyhow!(
+            "A language may only act for itself, not for language {claimed:?}"
+        )
+        .into());
+    }
+    Ok(own)
 }
 
 #[op2]
-#[serde]
-fn sync_state_changed(#[serde] state: PerspectiveState, #[string] language_address: String) {
-    crate::perspectives::handle_sync_state_changed_from_link_language(state, language_address);
+fn perspective_diff_received(
+    #[serde] diff: PerspectiveDiff,
+    #[string] language_address: String,
+) -> Result<(), AnyhowWrapperError> {
+    let own = own_language(&language_address)?;
+    crate::perspectives::handle_perspective_diff_from_link_language(diff, own);
+    Ok(())
 }
 
 #[op2]
-#[serde]
+fn sync_state_changed(
+    #[serde] state: PerspectiveState,
+    #[string] language_address: String,
+) -> Result<(), AnyhowWrapperError> {
+    let own = own_language(&language_address)?;
+    crate::perspectives::handle_sync_state_changed_from_link_language(state, own);
+    Ok(())
+}
+
+#[op2]
 fn telepresence_signal_received(
     #[serde] signal: PerspectiveExpression,
     #[string] language_address: String,
     #[string] recipient_did: Option<String>,
-) {
-    crate::perspectives::handle_telepresence_signal_from_link_language(
-        signal,
-        language_address,
-        recipient_did,
-    );
+) -> Result<(), AnyhowWrapperError> {
+    let own = own_language(&language_address)?;
+    crate::perspectives::handle_telepresence_signal_from_link_language(signal, own, recipient_did);
+    Ok(())
 }
 
 /// Drop every `HOLOCHAIN_SIGNAL_HANDLERS` entry that routes to the given
@@ -65,11 +96,16 @@ pub fn drop_holochain_signal_handlers_for_language(language_address: &str) {
     }
 }
 
+/// Routes the Holochain signals of cell `cell_id_key` to this isolate's language. A cell
+/// another loaded language already routes keeps its route: one language cannot take another's
+/// signals. The route goes when that language is removed
+/// ([`drop_holochain_signal_handlers_for_language`]).
 #[op2(fast)]
 fn register_holochain_signal_handler(
     #[string] cell_id_key: String,
     #[string] language_address: String,
-) {
+) -> Result<(), AnyhowWrapperError> {
+    let language_address = own_language(&language_address)?;
     // Synchronous write into the global map. The previous implementation
     // used a `tokio::sync::RwLock` and a fire-and-forget `tokio::spawn` to
     // perform the write, which returned from the op before the mapping
@@ -78,25 +114,33 @@ fn register_holochain_signal_handler(
     // registered) would miss the handler entry and drop the signal with
     // only a debug-level log. Using a `std::sync::RwLock` lets us write
     // synchronously inside the op, so `registerDNAs` has full
-    // happens-before ordering by the time it returns to JS.
-    match HOLOCHAIN_SIGNAL_HANDLERS.write() {
-        Ok(mut map) => {
-            map.insert(cell_id_key, language_address);
-        }
-        Err(poisoned) => {
-            // Recover and proceed — a poisoned lock means some previous
-            // writer panicked, but the map itself is still usable.
+    // happens-before ordering by the time it returns to JS. A poisoned lock means some previous writer panicked, but the map itself is still usable.
+    let mut map = HOLOCHAIN_SIGNAL_HANDLERS
+        .write()
+        .unwrap_or_else(|poisoned| {
             log::warn!(
                 "HOLOCHAIN_SIGNAL_HANDLERS lock was poisoned; recovering and inserting anyway"
             );
-            let mut map = poisoned.into_inner();
+            poisoned.into_inner()
+        });
+    match map.get(&cell_id_key) {
+        Some(owner) if *owner != language_address => log::warn!(
+            "Language {language_address} tried to take the Holochain signals of cell \
+             {cell_id_key}, which language {owner} receives; refused"
+        ),
+        _ => {
             map.insert(cell_id_key, language_address);
         }
     }
+    Ok(())
 }
 
 #[op2]
-fn ad4m_signal_emitted(#[serde] signal: JsonValue, #[string] language_address: String) {
+fn ad4m_signal_emitted(
+    #[serde] signal: JsonValue,
+    #[string] language_address: String,
+) -> Result<(), AnyhowWrapperError> {
+    let language_address = own_language(&language_address)?;
     // Spec §7.5 `emitSignal` is defined as an arbitrary language→runtime
     // signal — no perspective/recipient envelope, no specific shape.
     //
@@ -133,6 +177,7 @@ fn ad4m_signal_emitted(#[serde] signal: JsonValue, #[string] language_address: S
             );
         }
     }
+    Ok(())
 }
 
 // ============================================================================
@@ -215,3 +260,101 @@ deno_core::extension!(
     esm_entry_point = "ext:language_service/languages_extension.js",
     esm = [dir "src/js_core", "languages_extension.js"]
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::perspective_instance::PerspectiveInstance;
+    use crate::types::PerspectiveHandle;
+
+    /// `LANGUAGE_CONTROLLER` took the language address from language code, so a language could
+    /// name another neighbourhood's link language: forge its sync state, inject diffs and
+    /// signals into its perspective, or take its cells' Holochain signals. Now each op acts for
+    /// the isolate's own language: a call naming another is refused, and another language's
+    /// cell route stays.
+    #[tokio::test]
+    async fn a_language_cannot_act_for_another_language() {
+        let run = uuid::Uuid::new_v4().to_string();
+        let (own, victim) = (format!("own-{run}"), format!("victim-{run}"));
+        let handle = PerspectiveHandle {
+            uuid: format!("victim-perspective-{run}"),
+            ..Default::default()
+        };
+        crate::perspectives::register_perspective(
+            handle.uuid.clone(),
+            PerspectiveInstance::new(handle.clone(), None),
+        );
+        crate::perspectives::register_link_language_perspective(victim.clone(), handle.clone());
+        let victim_cell = format!("victim-cell-{run}");
+        HOLOCHAIN_SIGNAL_HANDLERS
+            .write()
+            .unwrap()
+            .insert(victim_cell.clone(), victim.clone());
+
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = crate::languages::language_runtime::LanguageRuntime::new(
+            own.clone(),
+            dir.path().to_path_buf(),
+            false,
+        );
+        runtime.init().await.unwrap();
+        let mut state = IsolateState::new();
+        state.language_address = Some(own.clone());
+        init_isolate_state(state);
+
+        let call = |op: &str, args: String| {
+            format!(
+                r#"(async () => LANGUAGE_CONTROLLER.{op}({args}))().then(
+                    () => "ok", e => "refused: " + (e && e.message))"#
+            )
+        };
+        let lit = |s: &str| serde_json::to_string(s).unwrap();
+        let signal = r#"{ author: "did:key:x", timestamp: "", data: { links: [] }, proof: { signature: "", key: "" } }"#;
+        let diff = "{ additions: [], removals: [] }";
+        for (address, expected) in [(&victim, "refused: A language may only act"), (&own, "ok")] {
+            let a = lit(address);
+            for script in [
+                call("syncStateChanged", format!(r#""SYNCED", {a}"#)),
+                call("perspectiveDiffReceived", format!("{diff}, {a}")),
+                call("telepresenceSignalReceived", format!("{signal}, {a}, null")),
+                call("ad4mSignalEmitted", format!("{signal}, {a}")),
+                call(
+                    "registerHolochainSignalHandler",
+                    format!("{}, {a}", lit(&format!("cell-{address}"))),
+                ),
+            ] {
+                let out = runtime.execute(&script).await.unwrap();
+                assert!(out.contains(expected), "{address}: {script}: {out}");
+            }
+        }
+        let take = call(
+            "registerHolochainSignalHandler",
+            format!("{}, {}", lit(&victim_cell), lit(&own)),
+        );
+        runtime.execute(&take).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let victim_state = crate::perspectives::get_perspective(&handle.uuid)
+            .unwrap()
+            .persisted
+            .lock()
+            .await
+            .state
+            .clone();
+        assert_eq!(
+            victim_state, handle.state,
+            "the victim's sync state was forged"
+        );
+        let routes = HOLOCHAIN_SIGNAL_HANDLERS.read().unwrap().clone();
+        assert_eq!(
+            routes.get(&victim_cell),
+            Some(&victim),
+            "the cell was taken"
+        );
+        assert_eq!(routes.get(&format!("cell-{victim}")), None);
+        assert_eq!(routes.get(&format!("cell-{own}")), Some(&own));
+        drop_holochain_signal_handlers_for_language(&own);
+        drop_holochain_signal_handlers_for_language(&victim);
+        crate::perspectives::unregister_perspective(&handle.uuid);
+    }
+}

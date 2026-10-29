@@ -745,34 +745,6 @@ impl PrologEnginePool {
         }
     }
 
-    /// Increment reference count for a filtered pool (called when subscription starts)
-    pub async fn increment_pool_reference(&self, source_filter: &str) {
-        let pools = self.filtered_pools.read().await;
-        if let Some(entry) = pools.get(source_filter) {
-            entry.reference_count.fetch_add(1, Ordering::Relaxed);
-            *entry.last_access.lock().await = Instant::now();
-            log::debug!(
-                "📊 POOL REF: Incremented reference for '{}' to {}",
-                source_filter,
-                entry.reference_count.load(Ordering::Relaxed)
-            );
-        }
-    }
-
-    /// Decrement reference count for a filtered pool (called when subscription ends)
-    pub async fn decrement_pool_reference(&self, source_filter: &str) {
-        let pools = self.filtered_pools.read().await;
-        if let Some(entry) = pools.get(source_filter) {
-            let prev_count = entry.reference_count.fetch_sub(1, Ordering::Relaxed);
-            log::debug!(
-                "📊 POOL REF: Decremented reference for '{}' from {} to {}",
-                source_filter,
-                prev_count,
-                prev_count.saturating_sub(1)
-            );
-        }
-    }
-
     /// Run a query with smart routing - use filtered pool if it's a subscription query with source filter
     pub async fn run_query_smart(
         &self,
@@ -3377,28 +3349,12 @@ mod tests {
             assert!(filtered_pools.contains_key("cleanup_user2"));
         }
 
-        // Simulate subscription activity on user1 pool but not user2
-        pool.increment_pool_reference("cleanup_user1").await;
-
-        // Verify reference counts
+        // No query is running on either pool
         {
             let filtered_pools = pool.filtered_pools.read().await;
-            let user1_entry = filtered_pools.get("cleanup_user1").unwrap();
-            let user2_entry = filtered_pools.get("cleanup_user2").unwrap();
-            assert_eq!(user1_entry.reference_count.load(Ordering::Relaxed), 1);
-            assert_eq!(user2_entry.reference_count.load(Ordering::Relaxed), 0);
-        }
-
-        // End the subscription for user1
-        pool.decrement_pool_reference("cleanup_user1").await;
-
-        // Verify reference counts are back to 0
-        {
-            let filtered_pools = pool.filtered_pools.read().await;
-            let user1_entry = filtered_pools.get("cleanup_user1").unwrap();
-            let user2_entry = filtered_pools.get("cleanup_user2").unwrap();
-            assert_eq!(user1_entry.reference_count.load(Ordering::Relaxed), 0);
-            assert_eq!(user2_entry.reference_count.load(Ordering::Relaxed), 0);
+            for entry in filtered_pools.values() {
+                assert_eq!(entry.reference_count.load(Ordering::Relaxed), 0);
+            }
         }
 
         // Force last access time to be in the past (simulate timeout)
@@ -3424,7 +3380,6 @@ mod tests {
         }
 
         println!("✅ Filtered pool cleanup test passed!");
-        println!("✅ Reference counting works correctly");
         println!("✅ Timeout-based cleanup works correctly");
         println!("✅ Inactive pools are properly removed");
     }
@@ -3455,8 +3410,17 @@ mod tests {
             .unwrap();
         assert!(user1_created && user2_created);
 
-        // Make user1 pool active with subscription
-        pool.increment_pool_reference("preserve_user1").await;
+        // Make user1 pool active: a query running on it holds a reference
+        // (as `run_query_smart` does while it runs one)
+        let user1_refs = pool
+            .filtered_pools
+            .read()
+            .await
+            .get("preserve_user1")
+            .unwrap()
+            .reference_count
+            .clone();
+        user1_refs.fetch_add(1, Ordering::Relaxed);
 
         // Force both pools' last access time to be in the past
         {
@@ -3484,8 +3448,8 @@ mod tests {
             );
         }
 
-        // End the subscription and verify cleanup works
-        pool.decrement_pool_reference("preserve_user1").await;
+        // The query ends; cleanup now removes the pool
+        user1_refs.fetch_sub(1, Ordering::Relaxed);
 
         // Force time again and cleanup
         {
@@ -3504,14 +3468,14 @@ mod tests {
             assert_eq!(
                 filtered_pools.len(),
                 0,
-                "All pools should be cleaned up after subscription ends"
+                "All pools should be cleaned up once no query holds them"
             );
         }
 
         println!("✅ Active pool preservation test passed!");
         println!("✅ Active pools are preserved during cleanup");
         println!("✅ Reference counting prevents premature cleanup");
-        println!("✅ Cleanup works correctly after subscriptions end");
+        println!("✅ Cleanup works correctly once the query ends");
     }
 
     #[tokio::test]

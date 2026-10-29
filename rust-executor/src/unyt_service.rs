@@ -1059,15 +1059,17 @@ fn credit_and_complete(request: &crate::db::PaymentRequest) {
         }
     };
 
-    if let Err(e) =
-        Ad4mDb::with_global_instance(|db| db.add_user_credits(&request.user_email, amount))
-    {
-        error!("Failed to credit user {}: {}", request.user_email, e);
-        return;
-    }
+    let email =
+        match Ad4mDb::with_global_instance(|db| db.add_agent_credits(&request.agent_did, amount)) {
+            Ok(email) => email,
+            Err(e) => {
+                error!("Failed to credit agent {}: {}", request.agent_did, e);
+                return;
+            }
+        };
 
-    mark_credits_dirty(&request.user_email);
-    info!("Credited user {} with {} HOT", request.user_email, amount);
+    mark_credits_dirty(&email);
+    info!("Credited user {} with {} HOT", email, amount);
 
     if let Some(ref action_hash) = request.proposal_action_hash {
         let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(action_hash));
@@ -1298,20 +1300,19 @@ pub async fn handle_signal(payload_json: &JsonValue) {
     };
 
     // Look up user by their mHOT wallet address (= agent pubkey)
-    let user_email =
-        Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(counterparty));
+    let user = Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(counterparty));
 
-    match user_email {
-        Ok(Some(email)) => match hot_amount.parse::<f64>() {
+    match user {
+        Ok(Some((email, agent_did))) => match hot_amount.parse::<f64>() {
             Ok(amount_f64) => {
                 // Verify pending request matches if we have a proposal hash
                 if let Some(hash) = proposal_hash {
                     match Ad4mDb::with_global_instance(|db| db.get_payment_request_by_hash(hash)) {
                         Ok(Some(ref req)) => {
-                            if req.user_email != email {
+                            if req.agent_did != agent_did {
                                 warn!(
                                     "Unyt signal: payment request payer mismatch for {}: expected {}, got {}",
-                                    hash, req.user_email, email
+                                    hash, req.agent_did, agent_did
                                 );
                                 return;
                             }
@@ -1400,7 +1401,7 @@ pub async fn check_pending_payments() {
                     if is_completed {
                         info!(
                             "Payment request {} completed for user {}",
-                            action_hash, request.user_email
+                            action_hash, request.agent_did
                         );
                         credit_and_complete(&request);
                         continue;

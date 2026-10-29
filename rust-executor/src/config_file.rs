@@ -22,6 +22,7 @@
 //! group or others (mode 0600 or 0400).
 
 use crate::config::{Ad4mConfig, SmtpConfig, TlsConfig, DEFAULT_PORT};
+use crate::secret::Secret;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -205,6 +206,23 @@ pub struct ExecutorConfigFile {
     pub mcp_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_port: Option<u16>,
+    /// IP the SFU's UDP socket binds to, e.g. the machine's LAN address.
+    /// Unset: loopback, or the outbound interface with `localhost: false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfu_bind_addr: Option<String>,
+    /// UDP port the SFU binds. Unset: a free port, chosen at each start. Set
+    /// it to forward the port from a router; the executor refuses to start
+    /// when it is taken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfu_udp_port: Option<u16>,
+    /// Public IP the SFU offers callers next to its bind address, when it
+    /// sits behind NAT. Unset: the address the STUN probe reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfu_public_addr: Option<String>,
+    /// STUN server (`host:port`) the SFU asks once at startup for its public
+    /// address. Unset: no probe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfu_stun_server: Option<String>,
 }
 
 /// Secret keys someone may paste into the config file, as JSON pointers,
@@ -227,7 +245,7 @@ const INLINE_SECRETS: &[(&str, &str)] = &[
 /// which ones are set.
 #[derive(Clone, Default)]
 pub struct ExecutorSecrets {
-    pub admin_credential: Option<String>,
+    pub admin_credential: Option<Secret>,
     pub smtp_password: Option<String>,
     pub unlock_passphrase: Option<String>,
 }
@@ -236,7 +254,10 @@ impl fmt::Debug for ExecutorSecrets {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let shown = |s: &Option<String>| s.as_ref().map(|_| REDACTED);
         f.debug_struct("ExecutorSecrets")
-            .field("admin_credential", &shown(&self.admin_credential))
+            .field(
+                "admin_credential",
+                &self.admin_credential.as_ref().map(|_| REDACTED),
+            )
             .field("smtp_password", &shown(&self.smtp_password))
             .field("unlock_passphrase", &shown(&self.unlock_passphrase))
             .finish()
@@ -272,7 +293,8 @@ impl ExecutorSecrets {
                 Some("AD4M_ADMIN_CREDENTIAL"),
                 "AD4M_ADMIN_CREDENTIAL_FILE",
                 None,
-            )?,
+            )?
+            .map(Secret::from),
             smtp_password: secret_from_env(
                 &env,
                 Some("AD4M_SMTP_PASSWORD"),
@@ -490,6 +512,10 @@ impl ExecutorConfigFile {
             log_config: self.log_config.clone(),
             enable_mcp: self.mcp_enabled,
             mcp_port: self.mcp_port,
+            sfu_bind_addr: self.sfu_bind_addr.clone(),
+            sfu_udp_port: self.sfu_udp_port,
+            sfu_public_addr: self.sfu_public_addr.clone(),
+            sfu_stun_server: self.sfu_stun_server.clone(),
             admin_credential: secrets.admin_credential.clone(),
             ..Ad4mConfig::unprepared()
         })
@@ -502,6 +528,36 @@ mod tests {
 
     fn parse(json: &str) -> Result<ExecutorConfigFile, ConfigFileError> {
         ExecutorConfigFile::parse(json)
+    }
+
+    /// The SFU keys an operator behind NAT sets reach the executor's config.
+    #[test]
+    fn sfu_keys_reach_the_executor_config() {
+        let file = parse(
+            r#"{"sfu_bind_addr": "192.168.0.10", "sfu_udp_port": 40000,
+                "sfu_public_addr": "198.51.100.7", "sfu_stun_server": "stun.l.google.com:19302"}"#,
+        )
+        .unwrap();
+        let config = file.to_ad4m_config(&ExecutorSecrets::default()).unwrap();
+        assert_eq!(config.sfu_bind_addr.as_deref(), Some("192.168.0.10"));
+        assert_eq!(config.sfu_udp_port, Some(40000));
+        assert_eq!(config.sfu_public_addr.as_deref(), Some("198.51.100.7"));
+        assert_eq!(
+            config.sfu_stun_server.as_deref(),
+            Some("stun.l.google.com:19302")
+        );
+
+        let unset = parse("{}")
+            .unwrap()
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap();
+        assert_eq!(unset.sfu_udp_port, None);
+        assert_eq!(unset.sfu_public_addr, None);
+    }
+
+    #[test]
+    fn an_out_of_range_sfu_udp_port_is_refused() {
+        assert!(parse(r#"{"sfu_udp_port": 70000}"#).is_err());
     }
 
     fn scratch_dir(name: &str) -> PathBuf {
@@ -836,7 +892,7 @@ mod tests {
 
         let secrets = ExecutorSecrets::from_env(env_of(vec![]), &file).unwrap();
         assert_eq!(secrets.smtp_password.as_deref(), Some("config-pw"));
-        assert_eq!(secrets.admin_credential, None);
+        assert!(secrets.admin_credential.is_none());
         assert_eq!(secrets.unlock_passphrase, None);
 
         let path = |p: &PathBuf| p.to_string_lossy().into_owned();
@@ -851,7 +907,10 @@ mod tests {
         .unwrap();
         assert_eq!(secrets.smtp_password.as_deref(), Some("env-file-pw"));
         assert_eq!(secrets.unlock_passphrase.as_deref(), Some("passphrase"));
-        assert_eq!(secrets.admin_credential.as_deref(), Some("passphrase"));
+        assert!(secrets
+            .admin_credential
+            .as_ref()
+            .is_some_and(|c| c.expose_for_compare("passphrase")));
 
         let secrets = ExecutorSecrets::from_env(
             env_of(vec![("AD4M_SMTP_PASSWORD", "env-pw".to_string())]),

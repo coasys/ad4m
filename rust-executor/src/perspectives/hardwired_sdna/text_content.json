@@ -1,0 +1,8 @@
+{
+  "target_class": "ad4m://TextContent",
+  "abstract": true,
+  "interpretation_hint": "Text a view or an LLM can read: a message, a note, a block of a document. It may contain HTML or Markdown.",
+  "properties": [
+    {"path": "ad4m://text", "name": "text", "max_count": 1}
+  ]
+}

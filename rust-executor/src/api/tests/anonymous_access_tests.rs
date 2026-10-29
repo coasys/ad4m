@@ -1,7 +1,7 @@
-//! A caller with no token, on a node with no admin credential (#1059).
+//! A caller with no token, on an executor with no admin credential (#1059).
 //!
 //! Such a caller used to be the operator on every listener, including one bound to the
-//! network: anonymous `agent.getApps` returned every app token on the node. It is still the
+//! network: anonymous `agent.getApps` returned every app token on the executor. It is still the
 //! operator on a loopback listener, the single-user local mode, and anonymous on any other.
 //!
 //! The socket tests serve the real router, marked by the same `listener_router` the executor
@@ -9,7 +9,7 @@
 //! so a test reaches a `0.0.0.0` listener through `127.0.0.1` and it still counts as network.
 
 use crate::agent::capabilities::ListenerReach;
-use crate::api::auth::{AppState, AuthContext};
+use crate::api::auth::AppState;
 use crate::api::{api_router, bind_api_listeners, listener_router};
 use axum::body::Body;
 use axum::extract::FromRequestParts;
@@ -25,7 +25,6 @@ use tower::ServiceExt;
 fn no_credential() -> AppState {
     AppState {
         admin_credential: None,
-        auto_permit_cap_requests: false,
     }
 }
 
@@ -102,7 +101,7 @@ async fn an_anonymous_caller_on_a_network_listener_cannot_list_app_tokens() {
     assert!(message.contains("Capability is not matched"), "{reply}");
 }
 
-// `is_admin_credential` gates user management and runtime calls by itself, without a
+// `is_operator()` gates user management and runtime calls by itself, without a
 // capability check, so it has to follow the listener too.
 #[tokio::test]
 async fn an_anonymous_caller_on_a_network_listener_is_not_the_admin() {
@@ -138,7 +137,7 @@ async fn an_anonymous_caller_on_a_loopback_listener_is_still_the_operator() {
 }
 
 /// Status of `GET /v1/models` with no token. It goes through the HTTP auth extractor
-/// (`AuthContext`), not the socket, and checks AI_READ.
+/// (`RequestContext`), not the socket, and checks AI_READ.
 async fn list_models_status(app: axum::Router) -> StatusCode {
     list_models_status_with_headers(app, &[]).await
 }
@@ -228,16 +227,16 @@ async fn a_forwarded_caller_on_a_loopback_http_route_is_anonymous() {
     }
 }
 
-/// `is_admin_credential` as the HTTP extractor sets it, for a request with no token on a
-/// listener with this reach.
+/// Whether the HTTP extractor makes a request with no token on a listener with this reach
+/// the operator.
 async fn http_admin_flag(reach: ListenerReach, headers: &[(&'static str, &str)]) -> bool {
     let mut request = Request::builder().uri("/v1/models").extension(reach);
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
     let (mut parts, _) = request.body(()).unwrap().into_parts();
-    match AuthContext::from_request_parts(&mut parts, &no_credential()).await {
-        Ok(auth) => auth.is_admin_credential,
+    match crate::types::RequestContext::from_request_parts(&mut parts, &no_credential()).await {
+        Ok(ctx) => ctx.is_operator(),
         Err(_) => panic!("the extractor accepts a request with no token"),
     }
 }

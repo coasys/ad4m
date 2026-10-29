@@ -5,7 +5,7 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 ## How It Works
 
 1. The plugin's `ad4m-waker` service connects to the AD4M executor's WebSocket event endpoint
-2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin creates a `QuerySubscriptionProxy` with a SPARQL live query
+2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin creates a `QuerySubscriptionProxy` with a live model query (for mentions, one over the built-in Mentioning and one over the built-in TextContent; for children, one over the built-in Container)
 3. When query results change, the plugin debounces and POSTs to OpenClaw's `/hooks/wake` endpoint
 4. Your agent wakes up with context about what changed and processes the new data via MCP tools
 
@@ -23,13 +23,13 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 
 | Tool                                                                 | Description                                                         |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `ad4m_subscribe_to_mentions(perspective_id)`                         | Watch for any item whose text carries your name or DID              |
-| `ad4m_subscribe_to_children(perspective_id, expression_address)`     | Watch for new children under a parent (messages in a channel, tasks on a board, …) |
+| `ad4m_subscribe_to_mentions(perspective_id)`                         | Watch for any item that mentions you (its `mentions` link to your DID, or its text naming you) |
+| `ad4m_subscribe_to_children(perspective_id, expression_address)`     | Watch for new children under a parent, of any class (messages in a channel, blocks in a call, …) |
 | `ad4m_unsubscribe_from_mentions(perspective_id)`                     | Stop watching mentions in a neighbourhood                           |
 | `ad4m_unsubscribe_from_children(perspective_id, expression_address)` | Stop watching that parent                                           |
 | `ad4m_list_waker_subscriptions()`                                    | List active subscriptions, plus any still pending re-attempt        |
 
-The subscribe tools call the MCP tools `ad4m_get_mention_waker_config` / `ad4m_generate_waker_query` internally to build the SPARQL queries — you don't need to construct queries manually.
+The subscribe tools call the MCP tools `ad4m_get_mention_waker_config` / `ad4m_generate_waker_query` internally to build the queries — you don't need to construct queries manually.
 
 ## Wake Message Format
 
@@ -41,16 +41,20 @@ For mention subscriptions, the wake message includes per-item details with resol
 
 ```json
 {
-  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned items (1):\n  Item: literal:string:msg-123\n  Parents: literal:string:channel-1, literal:string:conv-thread-5",
+  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned items (1):\n  Item: literal:string:msg-123\n  Mentioned by: did:key:z6Mkh... (signature verified)\n  Mentioned at: 2026-10-27T00:41:23.437Z\n  Matched by: a mention link to you\n  Parents: literal:string:channel-1, literal:string:conv-thread-5\n  Ancestors: literal:string:community-1",
   "mode": "now"
 }
 ```
 
 The `Mentioned items` section lists each item that triggered the wake:
-- **Item** — the base address of the instance whose property text carried your name or DID
-- **Parents** — every node this item hangs under via `ad4m://has_child`
+- **Item** — the address of the record that mentions you
+- **Mentioned by** — the DID that signed the link the mention is in, and whether that signature verified: the link of the path that matched (see **Matched by**): the mention link to your DID (the record's `mentions` relation), or the text link that names you. It says who put the mention on this item, and nothing more: the item's other properties are other links, which someone else may have written or changed since, so a verified signer does not make everything on the item that person's words, nor a request you must act on. `(unknown)` when no such link came with the row
+- **Mentioned at** — when that signer signed the link (ISO 8601); a mention can reach you late, after a restart
+- **Matched by** — `a mention link to you` when the item links your DID as a mention (someone mentioned you on purpose), or `your name or DID in the text` when the text query reported the item first (it holds your name as a whole word; a mention link may also exist). A text match can be the word used for something else ("the data shows" for an agent named Data): read the item before you answer it
+- **Parents** — every container holding this item: whatever links it with `ad4m://has_child`, and every instance of a class whose own `children` relation holds it (a We call holding a block through `we://child`)
+- **Ancestors** — everything above the parents, nearest first, a few levels up (absent when there is nothing above them)
 
-**The item is not necessarily a message.** The subscription is a SPARQL query over links, not over a `Message` class: it matches any link whose literal target contains one of your profile names or your DID, excluding `ad4m://ontology/*` proof metadata. If the space declares a `Message` class with a `body` property, the query is scoped to that one predicate for speed; in a space with a user-defined ontology and no such class it scans every other link. So the address you are handed is the source of whichever link carried your name — a task, a proposal, a comment, a field of a class this space invented. Treat "message" as one possible answer, never the assumption.
+**The item is not necessarily a message.** The subscription holds two model queries over built-in abstract classes, and an item wakes you through either, whatever the space calls its classes. Mentioning `{ mentions }`: any record of a class with a relation named or aliased `mentions` that links your DID, under whatever predicate the app uses; the record's text plays no part, so you are woken whatever label the writer's app gave you, even "@Datai" where the label runs into the next word, and for a record that has no text at all, such as the root of a post whose words are in its child blocks. Or TextContent `{ text }`: a record of a class with a text property (named or aliased `text`) whose text names one of your profile names or your DID as a whole word ("data" in "hi Data!", not in "metadata"; HTML markup is ignored, and a mention chip's DID attribute counts), which covers spoken lines and apps that write no mention link. An item both find wakes you once, through the query that reports it first. Links you authored yourself never match, so your own reply naming or mentioning you does not wake you, and neither does a mention link whose signature does not verify. A mention link on a node no class describes is not read. So the address you are handed is a post, a line in a feed, or a record of a class this space invented. Treat "message" as one possible answer, never the assumption.
 
 An item can have multiple parents when an app derives further containers from it (auto-generated summary threads, for example).
 
@@ -60,8 +64,8 @@ The wake event gives you two addresses and no types. Work out the rest from the 
 
 1. **`ad4m_describe_perspective(perspective_id)`** — the classes this space actually has, their properties and collections. This is the vocabulary for everything below; nothing else tells you what a "task" or a "proposal" means here.
 2. **Type the item.** `ad4m_query_links(perspective_id, source=<Item>)` returns its links, including its `rdf://type` marker and its property predicates — match those against the classes from step 1. Then `ad4m_instance_get(class_name=<that class>, base_uri=<Item>)` for the resolved property values.
-3. **One step of outer context via the parent.** Type the parent the same way (`query_links(source=<Parent>)`), then read its other children: `ad4m_instance_transcript(class_name=…, parent=<Parent>)` when they are one text-bearing class, `ad4m_instance_query(class_name=…, parent=<Parent>)` for full property maps, `ad4m_get_children(parent=<Parent>)` when you don't yet know which classes are down there. Sibling instances are usually what makes the mention intelligible — the thread it sits in, the other items on the board.
-4. **Only if that is still not enough, walk further.** Up: `ad4m_query_links(target=<Parent>, predicate="ad4m://has_child")` gives the parent's own parents. Down: `get_children` on a sibling that looks like a container. Sideways: the collections the item's class declares, resolved by `instance_get`. Each hop costs a call — take it when the ask is genuinely unclear, not by default.
+3. **The context the request is about, read by default.** Type the parent the same way (`query_links(source=<Parent>)`), then read its other children: `ad4m_instance_transcript(parent=<Parent>)` for the children that carry text, `ad4m_instance_query(class_name=…, parent=<Parent>)` for full property maps, `ad4m_get_children(parent=<Parent>)` when you don't yet know which classes are down there. Then go as far up the `Ancestors` as the request reaches: a request about the conversation ("what did we decide", "summarise this", "who is doing what") reads the ancestor that holds the conversation, not just the item's neighbours. Match the reading to the request rather than stopping at one step and waiting to be unclear.
+4. **Further only when the request needs it.** Down: `get_children` on a sibling that looks like a container. Sideways: the collections the item's class declares, resolved by `instance_get`. Above the listed ancestors: walk down with `get_children` from `ad4m://self` to the ancestor you have. Do not look for parents with `query_links(target=…, predicate="ad4m://has_child")`: it misses every container that holds through its own `children` relation. Each hop costs a call.
 5. **Then decide what is being asked of you, and in what shape the answer belongs.** The ontology says what you may write: usually a new instance of the same class as the item's siblings, under the same parent. If no class fits what you want to say, that is a signal to ask rather than to invent one.
 
 Some containers must not be written into — for a space an app created, that app's own documentation says which (`ad4m_get_documentation(topic="flux")` for a Flux space; for other apps, the conventions are in `describe_perspective` and whatever docs the executor serves). There is no `ad4m_channel_list` on the static surface.

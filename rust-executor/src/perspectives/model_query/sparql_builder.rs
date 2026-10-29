@@ -24,13 +24,14 @@ use crate::perspectives::sparql_store::status_str;
 use crate::types::LinkStatus;
 use std::collections::BTreeMap;
 
+use super::containment::{contains_patterns, has_child_only};
 use super::link_author::{
     instance_author_filter, is_link_leaf, link_author_join, may_hold_link_author,
     side_by_side_author, side_by_side_scopes, split_leaf, LinkAuthorState,
 };
 use super::types::{
-    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope, ScopeDirection,
-    ShapeResolver, SortKey, SparqlPagination, WhereCondition,
+    ContainedScope, InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope,
+    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{
     emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
@@ -766,18 +767,8 @@ pub(super) fn build_query_patterns(
                 direction,
                 limit_per_anchor: _,
                 levels: _,
+                max_depth: _,
             } => {
-                let safe_pred = match validate_iri(predicate) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        log::warn!(
-                            "Traverse scope matches nothing: invalid IRI in predicate='{}'",
-                            predicate
-                        );
-                        return matches_nothing();
-                    }
-                };
-
                 // An anchor that cannot be written as a term contributes no
                 // results; it must not widen the query to everything else.
                 let safe_ids: Vec<String> = ids
@@ -793,64 +784,128 @@ pub(super) fn build_query_patterns(
                     );
                 }
 
-                // `+` is one-or-more, so a transitive read excludes the anchor
-                // itself — in a tree. In a cycle it does not: `a → b → a` puts
-                // the anchor one-or-more steps from itself, so the path matches
-                // it and the caller gets their own anchor back as its own
-                // descendant. The exclusion the doc promises is stated below
-                // rather than inferred from the path operator.
-                //
-                // A single step is guarded like any other link. A path has no
-                // single link per hop to read a verdict or status from, so
-                // under a guard that restricts links the executor walks it
-                // (`query::guarded_reach`) and this binds the pairs it reached.
-                let path = if *transitive { "+" } else { "" };
                 let anchor = format!("?{ANCHOR_VAR}");
-                let (subject, object) = match direction {
-                    ScopeDirection::Out => (anchor.as_str(), "?source"),
-                    ScopeDirection::In => ("?source", anchor.as_str()),
-                };
-                match (&query.walked, *transitive) {
-                    (Some(pairs), true) => conformance_patterns.push(walked_pairs(
-                        pairs,
-                        &format!("    {subject} <{safe_pred}>+ {object} ."),
-                    )),
-                    _ => {
-                        let guarded = if *transitive {
-                            String::new()
-                        } else {
-                            guard.join("?_sr", subject, &format!("<{safe_pred}>"), object)
+                match predicate {
+                    // A containment walk: the executor walked every edge with
+                    // its holder check (`query::guarded_reach`) and the rows are
+                    // the nodes it reached, whichever anchor reached them.
+                    None if *transitive => {
+                        let Some(pairs) = &query.walked else {
+                            log::warn!(
+                                "Traverse scope matches nothing: a containment walk is made \
+                                 by the executor before the query is built"
+                            );
+                            return matches_nothing();
                         };
+                        let mut seen = std::collections::HashSet::new();
+                        let reached: Vec<String> = pairs
+                            .iter()
+                            .filter(|(_, node)| seen.insert(node.as_str()))
+                            .map(|(_, node)| node.clone())
+                            .collect();
+                        conformance_patterns
+                            .push(format!("    {}", values_or_str_filter("source", &reached)));
+                        conformance_patterns
+                            .extend(not_in_filter("source", &safe_ids).map(|f| format!("    {f}")));
+                    }
+                    // One containment step: a UNION branch per edge, the
+                    // holder check on whichever end holds.
+                    None => {
+                        let edges = query.containment.clone().unwrap_or_else(has_child_only);
+                        let (holder, child) = match direction {
+                            ScopeDirection::Out => (anchor.as_str(), "?source"),
+                            ScopeDirection::In => ("?source", anchor.as_str()),
+                        };
+                        conformance_patterns.push(contains_patterns(&edges, holder, child, guard));
                         conformance_patterns.push(format!(
-                            "    {subject} <{safe_pred}>{path} {object} .{guarded}"
+                            "    {}",
+                            values_or_str_filter(ANCHOR_VAR, &safe_ids)
                         ));
                     }
-                }
-                // An empty anchor list yields an empty VALUES, which is legal
-                // and answers with nothing — the right answer for "the replies
-                // to none of these", and much better than an unbound `?_anchor`
-                // walking the whole store.
-                conformance_patterns.push(format!(
-                    "    {}",
-                    values_or_str_filter(ANCHOR_VAR, &safe_ids)
-                ));
+                    Some(predicate) => {
+                        let safe_pred = match validate_iri(predicate) {
+                            Ok(p) => p,
+                            Err(_) => {
+                                log::warn!(
+                                    "Traverse scope matches nothing: invalid IRI in predicate='{}'",
+                                    predicate
+                                );
+                                return matches_nothing();
+                            }
+                        };
 
-                // A walk excludes the anchors it started from — every one of
-                // them, not just the one a given row came through, so a caller
-                // naming two anchors where one sits below the other gets neither
-                // back. This is what `levels` already does by seeding `seen`
-                // with the roots; the two forms of the same walk should not
-                // disagree about what an anchor is.
-                //
-                // A single step makes no such promise and does not get this
-                // filter: there the scope is "the children of these nodes", and
-                // a node that really is its own child by one link is a fact
-                // about the graph, not an artefact of walking it. The other two
-                // `Scope` forms have never excluded anything either.
-                if *transitive {
-                    conformance_patterns
-                        .extend(not_in_filter("source", &safe_ids).map(|f| format!("    {f}")));
+                        // `+` is one-or-more, so a transitive read excludes the anchor
+                        // itself — in a tree. In a cycle it does not: `a → b → a` puts
+                        // the anchor one-or-more steps from itself, so the path matches
+                        // it and the caller gets their own anchor back as its own
+                        // descendant. The exclusion the doc promises is stated below
+                        // rather than inferred from the path operator.
+                        //
+                        // A single step is guarded like any other link. A path has no
+                        // single link per hop to read a verdict or status from, so
+                        // under a guard that restricts links the executor walks it
+                        // (`query::guarded_reach`) and this binds the pairs it reached.
+                        let path = if *transitive { "+" } else { "" };
+                        let (subject, object) = match direction {
+                            ScopeDirection::Out => (anchor.as_str(), "?source"),
+                            ScopeDirection::In => ("?source", anchor.as_str()),
+                        };
+                        match (&query.walked, *transitive) {
+                            (Some(pairs), true) => conformance_patterns.push(walked_pairs(
+                                pairs,
+                                &format!("    {subject} <{safe_pred}>+ {object} ."),
+                            )),
+                            _ => {
+                                let guarded = if *transitive {
+                                    String::new()
+                                } else {
+                                    guard.join("?_sr", subject, &format!("<{safe_pred}>"), object)
+                                };
+                                conformance_patterns.push(format!(
+                                    "    {subject} <{safe_pred}>{path} {object} .{guarded}"
+                                ));
+                            }
+                        }
+                        // An empty anchor list yields an empty VALUES, which is legal
+                        // and answers with nothing — the right answer for "the replies
+                        // to none of these", and much better than an unbound `?_anchor`
+                        // walking the whole store.
+                        conformance_patterns.push(format!(
+                            "    {}",
+                            values_or_str_filter(ANCHOR_VAR, &safe_ids)
+                        ));
+
+                        // A walk excludes the anchors it started from — every one of
+                        // them, not just the one a given row came through, so a caller
+                        // naming two anchors where one sits below the other gets neither
+                        // back. This is what `levels` already does by seeding `seen`
+                        // with the roots; the two forms of the same walk should not
+                        // disagree about what an anchor is.
+                        //
+                        // A single step makes no such promise and does not get this
+                        // filter: there the scope is "the children of these nodes", and
+                        // a node that really is its own child by one link is a fact
+                        // about the graph, not an artefact of walking it. The other two
+                        // `Scope` forms have never excluded anything either.
+                        if *transitive {
+                            conformance_patterns.extend(
+                                not_in_filter("source", &safe_ids).map(|f| format!("    {f}")),
+                            );
+                        }
+                    }
                 }
+            }
+            // Contained in `id`: one UNION branch per containment edge, each
+            // checking its holder class on `id` (see `super::containment`).
+            Scope::Contained(ContainedScope { id }) => {
+                let Ok(safe_id) = validate_iri(id) else {
+                    log::warn!("Parent scope matches nothing: invalid IRI in id='{}'", id);
+                    return matches_nothing();
+                };
+                let edges = query.containment.clone().unwrap_or_else(has_child_only);
+                let (subj, filter) = parent_subject(safe_id);
+                conformance_patterns.push(contains_patterns(&edges, &subj, "?source", guard));
+                conformance_patterns.extend(filter);
             }
         }
     }
@@ -935,7 +990,7 @@ fn walked_pairs(pairs: &[(String, String)], path: &str) -> String {
 /// `allow_structural_fallback` gates the final tier, which scans every node
 /// carrying any of the class's predicates. It is the weakest signal and the most
 /// expensive one, so a caller that has already narrowed the subject declines it.
-fn shape_conformance_patterns(
+pub(super) fn shape_conformance_patterns(
     shape: &ModelShape,
     allow_structural_fallback: bool,
     guard: LinkGuard,
@@ -2354,7 +2409,11 @@ mod where_compiler_tests {
 /// than by substitution order, so nothing is rewritten twice. Nesting is still
 /// safe because each pass prefixes whatever the previous pass produced, so
 /// depth keeps the names distinct without threading a counter.
-fn rebase_into_subquery(patterns: &[String], namespace: &str, target_var: &str) -> Vec<String> {
+pub(super) fn rebase_into_subquery(
+    patterns: &[String],
+    namespace: &str,
+    target_var: &str,
+) -> Vec<String> {
     patterns
         .iter()
         .map(|p| rebase_pattern(p, namespace, target_var))
@@ -3196,11 +3255,12 @@ mod traverse_scope_tests {
     ) -> Scope {
         Scope::Traverse {
             ids: ids.into_iter().map(String::from).collect(),
-            predicate: "test://comment".to_string(),
+            predicate: Some("test://comment".to_string()),
             transitive,
             direction,
             limit_per_anchor,
             levels: None,
+            max_depth: None,
         }
     }
 

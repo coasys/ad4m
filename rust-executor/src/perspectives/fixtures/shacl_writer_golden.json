@@ -24,7 +24,8 @@
         "in": [{ "value": "rex", "label": "Rex" }, { "value": "fido" }],
         "transform": { "type": "path", "predicate": "zoo://nickname" },
         "interpretation_hint": "The dog's name",
-        "identity": true
+        "identity": true,
+        "alias": { "Named": "title" }
       },
       {
         "path": "zoo://age",
@@ -79,6 +80,7 @@
     {"source": "zoo://Dog.name", "predicate": "rdf://type", "target": "sh://PropertyShape"},
     {"source": "zoo://Dog.name", "predicate": "sh://path", "target": "zoo://name"},
     {"source": "zoo://Dog.name", "predicate": "ad4m://interpretation_hint", "target": "literal:string:The dog's name"},
+    {"source": "zoo://Dog.name", "predicate": "ad4m://alias", "target": "literal:string:%7B%22Named%22%3A%22title%22%7D"},
     {"source": "zoo://Dog.name", "predicate": "ad4m://identity", "target": "literal:string:true"},
     {"source": "zoo://Dog.name", "predicate": "sh://datatype", "target": "xsd://string"},
     {"source": "zoo://Dog.name", "predicate": "sh://minCount", "target": "literal:1^^xsd:integer"},
@@ -154,6 +156,38 @@
     {"source": "memo://Note.body", "predicate": "sh://path", "target": "memo://body"},
     {"source": "memo://Note.body", "predicate": "sh://maxCount", "target": "literal:1^^xsd:integer"},
     {"source": "memo://Note.body", "predicate": "ad4m://setter", "target": "literal:string:[{\"action\":\"setSingleTarget\",\"source\":\"this\",\"predicate\":\"memo://body\",\"target\":\"value\"}]"}
+  ]
+},
+{
+  "name": "Readable",
+  "shape": {
+    "node_shape_uri": "memo://ReadableShape",
+    "target_class": "memo://Readable",
+    "abstract": true,
+    "constructor_actions": [],
+    "destructor_actions": [],
+    "properties": [
+      {
+        "path": "memo://text",
+        "name": "text",
+        "max_count": 1
+      }
+    ]
+  },
+  "links": [
+    {"source": "ad4m://self", "predicate": "ad4m://has_shacl", "target": "literal:string:shacl://Readable"},
+    {"source": "literal:string:shacl://Readable", "predicate": "ad4m://shacl_shape_uri", "target": "memo://ReadableShape"},
+    {"source": "memo://Readable", "predicate": "rdf://type", "target": "ad4m://SubjectClass"},
+    {"source": "memo://Readable", "predicate": "ad4m://shape", "target": "memo://ReadableShape"},
+    {"source": "memo://ReadableShape", "predicate": "rdf://type", "target": "sh://NodeShape"},
+    {"source": "memo://ReadableShape", "predicate": "sh://targetClass", "target": "memo://Readable"},
+    {"source": "memo://ReadableShape", "predicate": "ad4m://abstract", "target": "literal:true"},
+    {"source": "memo://ReadableShape", "predicate": "ad4m://constructor", "target": "literal:string:[]"},
+    {"source": "memo://ReadableShape", "predicate": "ad4m://destructor", "target": "literal:string:[]"},
+    {"source": "memo://ReadableShape", "predicate": "sh://property", "target": "memo://Readable.text"},
+    {"source": "memo://Readable.text", "predicate": "rdf://type", "target": "sh://PropertyShape"},
+    {"source": "memo://Readable.text", "predicate": "sh://path", "target": "memo://text"},
+    {"source": "memo://Readable.text", "predicate": "sh://maxCount", "target": "literal:1^^xsd:integer"}
   ]
 }
 ]

@@ -46,17 +46,24 @@ pub use outputs::{
 pub use uri::proposal_uri;
 
 use super::time::parse_link_timestamp;
-use crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_CLASS;
-use crate::perspectives::model_query::utils::parse_literal_value;
+use crate::perspectives::flow_classes::{
+    FLOW_TRANSITION_PROPOSAL_CLASS, FLOW_TRANSITION_PROPOSAL_SDNA,
+};
+use crate::perspectives::model_query::{links_rows, utils::parse_literal_value};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{DecoratedLinkExpression, LinkQuery, LinkStatus};
+use crate::perspectives::shacl_parser::SHACLShape;
+use crate::types::DecoratedLinkExpression;
 use outputs::named_outputs;
 use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, sync::LazyLock};
 
 // ---------------------------------------------------------------------------
-// The link vocabulary of a flow proposal. One home, because the flow engine
-// is the only thing that reads it.
+// The link vocabulary of a flow proposal. Votes and role revocations are
+// defined in `monotonic`, whose table names them and which depends on nothing
+// in the flow engine, and re-exported here.
 // ---------------------------------------------------------------------------
+
+pub use crate::perspectives::monotonic::{ACCEPTED_BY_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE};
 
 /// Proposal → the `FlowInstance` URI it proposes a transition for.
 pub const FLOW_INSTANCE_PREDICATE: &str = "ad4m://flow/instance";
@@ -96,24 +103,13 @@ pub const OUTPUTS_HASH_TAG: &str = "ad4m-flow-outputs/v2";
 pub const PROPOSAL_NONCE_PREDICATE: &str = "ad4m://flow/nonce";
 /// Domain tag of a proposal's content-addressed URI ([`proposal_uri`]).
 pub const PROPOSAL_URI_TAG: &str = "ad4m-flow-proposal-uri/v1";
-/// Proposal → a voting DID. A vote counts only when the link's author IS the
-/// DID it names, with a valid signature (see [`valid_votes`]).
-pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
-/// Proposal → bookkeeping about how the engine already recorded it.
-/// **Never an input to the fold** — see [`marked_fired`].
-pub const RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
-/// The only [`RESOLVED_AS_PREDICATE`] value this engine writes.
-pub const FIRED_MARK: &str = "fired";
-/// Tombstone: role instance → revoked DID. Written instead of deleting the
-/// grant; the link's author-asserted timestamp is the revocation time. Source =
-/// role-instance URI, target = the DID — literal-encoded or raw, the reader
-/// accepts both (`flow_evaluator::target_names_did`). Authority mirrors the
-/// grant's own rule (`roles::revocation_authorised`): whoever the role
-/// query's `author` condition accepts as granter may revoke, which makes
-/// admin-gated roles admin-revoked, `$did` roles self-revoked, and
-/// open-authorship roles revocable by anyone. Stays in the graph forever so
-/// newcomers can reconstruct the full role-membership history.
-pub const ROLE_GRANT_REVOKED_PREDICATE: &str = "ad4m://flow/role_grant_revoked";
+/// Proposal → `"fired"`: the engine's fired mark as it was written before
+/// #1424, as a `Local` link. Nothing writes or reads it any more — marks live
+/// in [`replica_state`](super::replica_state) — and old links under it are dead
+/// data. Kept only so a perspective whose registered `FlowTransitionProposal`
+/// shape still declares it can be told to re-register
+/// (`flow_classes::ensure_flow_model_classes`).
+pub const LEGACY_RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -354,43 +350,10 @@ pub fn valid_votes(
     votes.into_iter().map(|(_, v)| v).collect()
 }
 
-/// Whether **this replica** marked this proposal fired: a `Local`
-/// `resolved_as → "fired"` link. Marks are per-replica bookkeeping (#987), so
-/// a peer's mark is not a mark here — a forged one cannot mute this replica's
-/// once-only [`FireOutcome`](super::pass::FireOutcome).
-///
-/// # "This replica's" is only true of links this replica read
-///
-/// That guarantee used to rest on a peer's mark arriving `Shared`, which held
-/// while every [`ReadSet`](super::ReadSet) was built from the local store. A
-/// read-set now travels, and `status` is not signed, so on a *carried*
-/// read-set `Some(Local)` means only "whoever sent this claimed `Local`" —
-/// not an answer about this replica at all.
-///
-/// The gap is closed one layer up rather than here:
-/// [`reverified_link`](super::read_set::reverified_link) clears `status` on every
-/// carried link, so a re-verified read-set answers `false` for every
-/// proposal. That is the truthful answer — this replica has marked nothing it
-/// never read — and it is why this function must keep testing
-/// `== Some(Local)` rather than `!= Some(Shared)`, which would read the
-/// cleared value as a mark and hand the sender the forgery back.
-///
-/// Callers therefore get a meaningful answer only from a locally read
-/// read-set, which is the only place [`pass`](super::pass) uses it.
-///
-/// **Bookkeeping only.** The fold never reads it: it exists so a UI can list
-/// history and so the consensus pass knows which edges it has already
-/// recorded. A forged mark therefore moves nothing in either direction — it
-/// cannot fabricate history, and it cannot hide a proposal from the fold.
-pub fn marked_fired(links: &[DecoratedLinkExpression]) -> bool {
-    links_on(links, RESOLVED_AS_PREDICATE)
-        .any(|l| l.status == Some(LinkStatus::Local) && field_value(&l.data.target) == FIRED_MARK)
-}
-
 impl TransitionAtom {
-    /// Build an atom from one proposal's raw links, or say why it is not one.
-    /// `links` is every link with the proposal as source, from every author —
-    /// the filtering is the point of this function.
+    /// Build an atom from one proposal's links, or say why it is not one.
+    /// `links` are its links from every author, each with its own author and
+    /// verdict, never a hydrated instance: the filtering is the point here.
     pub fn from_links(
         instance_uri: &str,
         uri: &str,
@@ -470,44 +433,41 @@ fn earliest_proposer_timestamp(
         .map(|(_, ts)| ts)
 }
 
-/// Enumerate one instance's proposals and read each one's links.
+/// Every predicate a proposal's links are read on, once each: each
+/// `properties[].path` of the `FlowTransitionProposal` SDNA, plus the votes.
+/// The class declares the votes as well (`acceptedBy`); they are added only
+/// when it does not, since a predicate listed twice would read each of its
+/// links twice. A property the class gains is read. The legacy fired mark
+/// ([`LEGACY_RESOLVED_AS_PREDICATE`]) is not: since #1424 a mark is no link.
+static PROPOSAL_LINK_PREDICATES: LazyLock<Vec<String>> =
+    LazyLock::new(|| link_predicates_of(FLOW_TRANSITION_PROPOSAL_SDNA));
+
+fn link_predicates_of(sdna: &str) -> Vec<String> {
+    let shape: SHACLShape = serde_json::from_str(sdna).expect("the class SDNA parses");
+    let mut predicates: Vec<String> = Vec::new();
+    let paths = shape.properties.into_iter().map(|p| p.path);
+    for predicate in paths.chain([ACCEPTED_BY_PREDICATE].map(String::from)) {
+        if !predicates.contains(&predicate) {
+            predicates.push(predicate);
+        }
+    }
+    predicates
+}
+
+/// Enumerate one instance's proposals and read each one's links, in one
+/// `model_query`: the `FlowTransitionProposal` instances whose `flowInstance`
+/// is `instance_uri`, with their `__links` rows on [`PROPOSAL_LINK_PREDICATES`].
 ///
-/// **The dividing principle.** The halves split exactly where hydration starts
-/// destroying what the caller needs. Half 1 only has to know that a proposal
-/// *exists* and belongs to this instance — a fact the model layer preserves
-/// exactly, so discovery belongs there. Half 2 has to know *who wrote each
-/// individual field, and whether that link's signature verified* — per-link
-/// facts hydration collapses away, so field-reading has to stay on raw links.
+/// **Rows, never the hydrated instance.** Hydration makes a scalar
+/// last-write-wins across authors, so a later third-party `to_state` would read
+/// as the proposer's word (#1046 §1). A row is one [`DecoratedLinkExpression`]
+/// with its own author, `status` and signature verdict, which [`signed_by`]
+/// needs. A link whose signature does not verify is in no row and selects no
+/// proposal (the `model_query` default, #1113, #1120).
 ///
-/// **Half 1 — class query (changed in #990, `cda1d95ea`):** a `model_query` over the
-/// hard-wired `FlowTransitionProposal` subject class, filtered by
-/// `flowInstance == instance_uri`, yields the URIs of every proposal that
-/// belongs to this instance. Using the class query rather than a raw
-/// `get_links` scopes the result to properly-typed proposals and reuses the
-/// machinery already validated by `flow_evaluator`'s `run_query`.
-///
-/// This narrows the *pointer* set, not the atom set. Class conformance emits a
-/// triple per required property, so a half-written proposal carrying only
-/// `flowInstance` is no longer discovered — but [`TransitionAtom::from_links`]
-/// already rejected that shape with `MissingField`, so the fold never saw it
-/// either way. The `where` is exists-style (`?source <ad4m://flow/instance>
-/// …`) and this function reads only `instances[].id`, never the hydrated
-/// `flowInstance` value, so a third-party re-point cannot drop a real proposal
-/// from discovery — that is the same attack half 2 refuses to hydrate.
-///
-/// **Half 2 — raw `get_links` per proposal (must stay raw):** model_query
-/// hydration collapses each instance to a single `author` field (the earliest
-/// author across all links, `model_query/hydration.rs:171-183,350`) and
-/// carries no per-link signature verdict — its hydrated record is
-/// `(predicate, target, author, timestamp)`, and `proof.valid` is never in it.
-/// Both identity checks below run through [`signed_by`], which needs both
-/// dropped fields at once: `l.author == did` **and** `proof.valid ==
-/// Some(true)`. Worse than lossy, hydrating would *invert* [`unique_field`]:
-/// scalar properties last-write-win on timestamp with no author filter, so a
-/// later third-party `to_state` becomes the hydrated value while `author`
-/// stays the earliest DID — the forgery would be served back as the
-/// proposer's own word. This half cannot go away until instances carry
-/// per-property `(author, proof.valid)`.
+/// **Executor scope.** `model_query` reads as the executor, not as a viewer,
+/// like the `get_links` it replaced: the engine sees every owner's `Local`
+/// links.
 pub async fn load_proposal_links(
     perspective: &PerspectiveInstance,
     instance_uri: &str,
@@ -517,9 +477,11 @@ pub async fn load_proposal_links(
             "load_proposal_links: instance_uri must not be empty"
         ));
     }
-
-    // Half 1: discovery through the class query.
-    let query_json = serde_json::json!({ "where": { "flowInstance": instance_uri } }).to_string();
+    let query_json = serde_json::json!({
+        "where": { "flowInstance": instance_uri },
+        "links": *PROPOSAL_LINK_PREDICATES,
+    })
+    .to_string();
     let raw = perspective
         .model_query(FLOW_TRANSITION_PROPOSAL_CLASS, &query_json)
         .await
@@ -527,41 +489,122 @@ pub async fn load_proposal_links(
     let result: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
         anyhow::anyhow!("load_proposal_links: model_query returned invalid JSON: {e:#}")
     })?;
-    let mut uris: Vec<String> = result
+    let instances = result
         .get("instances")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| {
             anyhow::anyhow!("load_proposal_links: model_query returned no `instances` array")
-        })?
-        .iter()
-        .filter_map(|inst| {
-            inst.get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .collect();
-    uris.sort();
-    uris.dedup();
-
-    // Half 2: raw links per proposal, never hydrated (see the doc above).
-    let mut out = Vec::with_capacity(uris.len());
-    for uri in uris {
-        let links = perspective
-            .get_links(&LinkQuery {
-                source: Some(uri.clone()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("load_proposal_links: get_links({uri}) failed: {e:#}"))?;
-        out.push((uri, links));
+        })?;
+    let mut out = BTreeMap::new();
+    for instance in instances {
+        let Some(uri) = instance.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let links = proposal_links_of(instance)
+            .map_err(|e| anyhow::anyhow!("load_proposal_links: {uri}: {e:#}"))?;
+        out.insert(uri.to_string(), links);
     }
-    Ok(out)
+    Ok(out.into_iter().collect())
+}
+
+/// One instance's links on every [`PROPOSAL_LINK_PREDICATES`] key, as one list.
+fn proposal_links_of(instance: &serde_json::Value) -> anyhow::Result<Vec<DecoratedLinkExpression>> {
+    let rows = PROPOSAL_LINK_PREDICATES
+        .iter()
+        .map(|p| links_rows(instance, p));
+    Ok(rows.collect::<anyhow::Result<Vec<Vec<_>>>>()?.concat())
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::test_support::*;
     use super::*;
+    /// The read follows the class SDNA: every `properties[].path`, and the
+    /// votes, each once. Red if a property the SDNA gains is not read, as with
+    /// a hand-kept copy of the paths, and red if a predicate the SDNA declares
+    /// and the read adds anyway is listed twice: its links would then be read
+    /// twice.
+    #[test]
+    fn proposal_link_predicates_follow_the_class_sdna() {
+        let read = link_predicates_of(FLOW_TRANSITION_PROPOSAL_SDNA);
+        assert_eq!(*PROPOSAL_LINK_PREDICATES, read);
+        assert!(read.iter().any(|p| p == "ad4m://flow/rationale"));
+        assert!(
+            !read.iter().any(|p| p == LEGACY_RESOLVED_AS_PREDICATE),
+            "the legacy fired mark (#1424) is not read: {read:?}"
+        );
+        let mut once = read.clone();
+        once.sort();
+        once.dedup();
+        assert_eq!(once.len(), read.len(), "each predicate once: {read:?}");
+        let mut sdna: serde_json::Value =
+            serde_json::from_str(FLOW_TRANSITION_PROPOSAL_SDNA).expect("the class SDNA parses");
+        let properties = sdna["properties"].as_array_mut().expect("properties");
+        properties.push(serde_json::json!({ "name": "later", "path": "ad4m://flow/later" }));
+        let mut expected: Vec<String> = properties
+            .iter()
+            .map(|p| p["path"].as_str().expect("path"))
+            .chain([ACCEPTED_BY_PREDICATE])
+            .map(String::from)
+            .collect();
+        expected.sort();
+        expected.dedup();
+        let mut read = link_predicates_of(&sdna.to_string());
+        read.sort();
+        assert_eq!(read, expected);
+    }
+
+    fn instance(links: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "id": "proposal://p1", "__links": links })
+    }
+
+    fn all_keys_empty() -> serde_json::Map<String, serde_json::Value> {
+        PROPOSAL_LINK_PREDICATES
+            .iter()
+            .map(|p| (p.to_string(), serde_json::json!([])))
+            .collect()
+    }
+
+    /// A requested key missing from `__links` is an error, not "no links":
+    /// no `acceptedBy` rows read as none would drop every vote. A row that is
+    /// not a link is an error too. The rows of every key are one list.
+    #[test]
+    fn proposal_rows_missing_or_malformed_are_errors_not_no_links() {
+        let mut missing = all_keys_empty();
+        missing.remove(ACCEPTED_BY_PREDICATE);
+        let err =
+            proposal_links_of(&instance(missing.into())).expect_err("a missing key is an error");
+        assert!(
+            err.to_string().contains(ACCEPTED_BY_PREDICATE),
+            "names the key: {err}"
+        );
+
+        let mut malformed = all_keys_empty();
+        malformed.insert(
+            TO_STATE_PREDICATE.to_string(),
+            serde_json::json!([{ "author": ALICE }]),
+        );
+        let err = proposal_links_of(&instance(malformed.into()))
+            .expect_err("a row that is not a link is an error");
+        assert!(err.to_string().contains("not a link"), "{err}");
+
+        let honest = honest_proposal(ALICE, "review", "approved", "h1", T1);
+        let mut rows = all_keys_empty();
+        for l in &honest {
+            rows[l.data.predicate.as_deref().unwrap()]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::to_value(l).unwrap());
+        }
+        let read = proposal_links_of(&instance(rows.into())).expect("rows parse");
+        assert_eq!(read.len(), honest.len());
+        assert_eq!(
+            atom_of(&read),
+            atom_of(&honest),
+            "the rows read back as the same atom"
+        );
+    }
+
     #[test]
     fn an_engine_minted_proposal_is_an_atom_and_its_proposer_is_its_first_voter() {
         let atom = atom_of(&honest_proposal(ALICE, "review", "approved", "h1", T1))
@@ -759,99 +802,6 @@ mod tests {
             atom_of(&links),
             Err(AtomRejection::NoParseableTimestamp),
             "an undatable proposal is refused, not sorted"
-        );
-    }
-
-    /// A mark is this replica's own bookkeeping, so only a `Local` link is
-    /// one. A peer's mark arrives `Shared` — however well signed — and must
-    /// not count, or a forged mark could mute this replica's once-only
-    /// `FireOutcome` (#987). The mark never reaches the fold either way.
-    #[test]
-    fn only_a_local_fired_mark_is_a_mark() {
-        let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
-        assert!(!marked_fired(&links));
-
-        let mut peer_mark = link(
-            RESOLVED_AS_PREDICATE,
-            &literal(FIRED_MARK),
-            MALLORY,
-            true,
-            T3,
-        );
-        peer_mark.status = Some(LinkStatus::Shared);
-        links.push(peer_mark);
-        assert!(
-            !marked_fired(&links),
-            "a peer's shared mark is not this replica's mark"
-        );
-
-        let mut own_mark = link(RESOLVED_AS_PREDICATE, &literal(FIRED_MARK), ALICE, true, T3);
-        own_mark.status = Some(LinkStatus::Local);
-        links.push(own_mark);
-        assert!(marked_fired(&links), "our own local mark is");
-
-        let mut other_value = link(RESOLVED_AS_PREDICATE, &literal("rejected"), ALICE, true, T3);
-        other_value.status = Some(LinkStatus::Local);
-        assert!(
-            !marked_fired(&[other_value]),
-            "only the `fired` value marks a proposal fired"
-        );
-    }
-
-    /// `only_a_local_fired_mark_is_a_mark` rests on a sentence that stopped
-    /// being true when this PR made `ReadSet` travel: "a peer's mark arrives
-    /// `Shared`". It arrives however the sender wrote it. `status` is not
-    /// signed and locality is not recomputable — it is a fact about *whose
-    /// store a link sits in* — so on a carried read-set `Some(Local)` says
-    /// only "the sender claimed `Local`".
-    ///
-    /// The seam answers it the one way it can: `reverified_link` clears
-    /// `status`, so a carried mark is not this replica's mark no matter what
-    /// it asserts. Note the fixture forges nothing else — the mark is validly
-    /// signed by Mallory and survives the signature half of `reverified`
-    /// untouched. Only the locality claim is dropped.
-    ///
-    /// Killing mutation: delete `link.status = None;` from `reverified_link`.
-    /// Every other test in the crate stays green — `marked_proposals` has one
-    /// production caller (`pass`, on this replica's own store), so this is
-    /// latent rather than live, and latent is exactly what an assertion is
-    /// for. Also red if `marked_fired` is rewritten to `!= Some(Shared)`,
-    /// which reads the cleared value as a mark and hands the claim back.
-    #[test]
-    fn a_carried_local_mark_is_not_this_replicas_mark() {
-        use super::super::{ProposalLinks, ReadSet};
-
-        let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
-        let mut forged_mark = link(
-            RESOLVED_AS_PREDICATE,
-            &literal(FIRED_MARK),
-            MALLORY,
-            true,
-            T3,
-        );
-        forged_mark.status = Some(LinkStatus::Local);
-        links.push(forged_mark);
-
-        let arrived = ReadSet {
-            instance_uri: "flow://instance".into(),
-            subject: "subject://base".into(),
-            genesis: "review".into(),
-            proposals: vec![ProposalLinks {
-                uri: "proposal://p1".into(),
-                links,
-            }],
-            role_grants: vec![],
-        };
-
-        assert!(
-            arrived.marked_proposals().contains("proposal://p1"),
-            "precondition: read as handed over, the sender's claim IS taken as \
-             our mark — this is the forgery the seam exists to answer"
-        );
-        assert!(
-            arrived.reverified().marked_proposals().is_empty(),
-            "a carried `Local` mark must not count as this replica's: we have \
-             marked nothing we never read"
         );
     }
 }

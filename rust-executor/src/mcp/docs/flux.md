@@ -102,8 +102,7 @@ the channel via `parent`.
 | Need | Call |
 | --- | --- |
 | Your own DID (to filter out your own messages) | `get_my_did()` |
-| Read a channel | `instance_transcript(perspective_id, class_name="Message", parent=<channel-id>, limit=20)` — the newest 20, oldest-to-newest, each with timestamp, author name and DID, and body |
-| Read a channel when you need ids or a filter | `instance_query(perspective_id, class_name="Message", parent=<channel-id>)` — raw property maps, but no `order` and the *oldest* matches first |
+| Read a channel | `instance_query(perspective_id, class_name="Message", parent=<channel-id>)` — raw property maps (id, author, timestamp, body), but no `order` and the *oldest* matches first: for the newest 20, pass `offset` = `total_count` minus 20 |
 | Top-level channels of a community | `instance_query(perspective_id, class_name="Channel", parent="ad4m://self")` (with names), or `get_children(perspective_id, parent="ad4m://self")` (ids only, any class) |
 | Post into a channel | `instance_create(perspective_id, class_name="Message", properties={"body": "…"}, parent=<channel-id>)` |
 | The schema of a perspective | `describe_perspective(perspective_id)` |
@@ -112,15 +111,16 @@ the channel via `parent`.
 
 When something points you at a perspective and a parent (a channel id) —
 because you were mentioned, or because you are catching up on a channel — the
-whole loop is two calls plus a filter:
+whole loop is a few calls plus a filter:
 
 ```
 1. get_my_did()
      → your DID
-2. instance_transcript(perspective_id=<the perspective>, class_name="Message",
-                       parent=<the channel id>, limit=20)
-     → the newest 20 messages in order, each with the author's display name and
-       DID. Skip the entries whose DID is yours.
+2. instance_query(perspective_id=<the perspective>, class_name="Message",
+                  parent=<the channel id>)
+     → the messages oldest first, each with its author DID and body, and
+       total_count; for the newest 20, query again with offset = total_count
+       minus 20. Skip the entries whose author is yours.
 3. instance_create(perspective_id=<the same perspective>, class_name="Message",
                    properties={"body": "Your reply"}, parent=<the SAME parent>)
 ```
@@ -130,9 +130,8 @@ Rules that matter here:
 - **Reply into the same parent** you were pointed at. Answering in a different
   channel loses the thread for everyone.
 - Skip your own messages when reading, or you will answer yourself.
-- Use `instance_query(…, parent=…)` instead of `instance_transcript` only when
-  you need message ids or a `filter` (for example to find the Post a comment
-  belongs to) — and remember it returns the *oldest* matches first.
+- `instance_query(…, parent=…)` returns the *oldest* matches first; a
+  `filter` narrows it (for example to find the Post a comment belongs to).
 - Do not follow `instance_create` with an `instance_update` for a field you
   could have passed at creation (it races Holochain gossip — see
   `get_documentation(topic="usage")`).

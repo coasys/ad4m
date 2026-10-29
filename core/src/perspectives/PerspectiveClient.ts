@@ -13,8 +13,10 @@ import { Perspective } from "./Perspective";
 import { PerspectiveHandle } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
-import { AllInstancesResult } from "../model/types";
+import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
+import type { AgentMessage } from "../generated/api/AgentMessage";
+import type { AgentReply } from "../generated/api/AgentReply";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
@@ -24,21 +26,13 @@ import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunIn
 // would otherwise be a cycle).
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
-    FlowReceiptVerdict, FlowValidOutput,
+    FlowReceiptVerdict, FlowStateEntry, FlowValidOutput,
 } from "./FlowInstance";
 
-function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesResult {
-    let finalResult: unknown = raw
 
-    if (typeof finalResult === 'string') {
-        try {
-            finalResult = JSON.parse(finalResult)
-        } catch (e) {
-            console.error(errorContext, e)
-        }
-    }
-
-    return finalResult as AllInstancesResult
+/** The wire form of a model query's classes: `class_name` for one, `class_names` for a union. */
+function classParams(className: string | string[]): { class_name: string } | { class_names: string[] } {
+    return Array.isArray(className) ? { class_names: className } : { class_name: className }
 }
 
 export class PerspectiveClient {
@@ -114,51 +108,33 @@ export class PerspectiveClient {
         return JSON.parse(result) as T
     }
 
-    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
-        const response = await this.#apiClient.call(
-            'perspective.subscribeQuery', { uuid, query }
-        )
-        const { subscriptionId, result } = response
-        const parsed = normalizeQueryResult(result, 'Error parsing subscribeQuery result:')
-        return { subscriptionId, result: parsed }
+    /** Open a live SPARQL query. Updates arrive through {@link onQueryUpdate}. */
+    async subscribeQuery(uuid: string, query: string): Promise<Subscribed> {
+        return this.#apiClient.call('perspective.subscribeQuery', { uuid, query })
     }
 
-    async perspectiveKeepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call(
-            'perspective.keepAliveQuery', { uuid, subscriptionId }
-        )
+    /** Every `query-subscription-update` event on this client's socket. */
+    onQueryUpdate(cb: (update: QueryUpdate | QueryLagged) => void): () => void {
+        return this.#apiClient.on('query-subscription-update', cb)
     }
 
-    async perspectiveDisposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call(
-            'perspective.disposeQuery', { uuid, subscriptionId }
-        )
-    }
-
-    subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
-        return this.#apiClient.on('query-subscription-update', (event) => {
-            if (event.subscriptionId !== subscriptionId) return
-            onData(normalizeQueryResult(event.result, 'Error parsing query subscription:'))
-        })
-    }
-
-    async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call(
-            'perspective.keepAliveQuery', { uuid, subscriptionId }
-        )
+    /** The current result and revision of a live query, after a revision gap. */
+    async resyncSubscription(uuid: string, subscriptionId: string): Promise<{ revision: number, result: any }> {
+        return this.#apiClient.call('perspective.resyncSubscription', { uuid, subscriptionId })
     }
 
     /** Ends the subscription on the executor. The caller releases its local listener
-     *  with the function `subscribeToQueryUpdates` returned. */
+     *  with the function {@link onQueryUpdate} returned. */
     async disposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
         return this.#apiClient.call(
             'perspective.disposeQuery', { uuid, subscriptionId }
         )
     }
 
-    async modelQuery(uuid: string, className: string, queryJson: string, options?: CallOptions): Promise<any> {
+    /** `className` may name several classes: one query over their union (#1238). */
+    async modelQuery(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<any> {
         const resultJson = await this.#apiClient.call(
-            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }, options
+            'perspective.modelQuery', { uuid, ...classParams(className), query_json: queryJson }, options
         )
         return JSON.parse(resultJson)
     }
@@ -186,14 +162,11 @@ export class PerspectiveClient {
         return JSON.parse(resultJson)
     }
 
-    async modelSubscribe(uuid: string, className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
-        const response = await this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson }
+    /** Open a live model query over one class or several. Updates arrive through {@link onQueryUpdate}. */
+    async modelSubscribe(uuid: string, className: string | string[], queryJson: string): Promise<Subscribed> {
+        return this.#apiClient.call(
+            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson }
         )
-        return {
-            subscriptionId: response.subscription_id,
-            result: JSON.parse(response.result)
-        }
     }
 
     async add(name: string): Promise<PerspectiveProxy> {
@@ -325,6 +298,34 @@ export class PerspectiveClient {
     }
 
     /**
+     * A conversation with a model in this perspective, using the executor's own tools: the tools
+     * that read this perspective, and only the writing tools named in `writeTools`. Every tool a
+     * session offers acts on this perspective alone, so tools about other perspectives, the agent
+     * or the node (listing or publishing perspectives, the profile) are not available. Runs as the
+     * caller, with the caller's capabilities, and answers with the model's final reply.
+     *
+     * Defaults to {@link LONG_TIMEOUT_MS}: an agent may read documentation and make many tool
+     * calls before it answers.
+     */
+    async runAgent(
+        uuid: string,
+        messages: AgentMessage[],
+        settings?: {
+            /** What the person is looking at, as a hint for the model (`{ recordId }`). */
+            context?: Record<string, unknown>,
+            /** Tools that write which the model may call. Absent: the session only reads. */
+            writeTools?: string[],
+            /** A model id; the node's default language model when absent. */
+            model?: string,
+            /** How many tool calls before the model must answer. Default 20. */
+            maxToolCalls?: number,
+        },
+        options?: CallOptions,
+    ): Promise<AgentReply> {
+        return this.#apiClient.call('perspective.runAgent', { uuid, messages, ...settings }, options)
+    }
+
+    /**
      * Register a neighbourhood auto-processor on this perspective. The executor's
      * watch loop then runs interpretation automatically over new source items
      * (like Flux per channel), coordinating which peer processes each batch via
@@ -416,6 +417,22 @@ export class PerspectiveClient {
         )
     }
 
+    /** The calling agent's recorded state of each flow instance it has
+     *  derived, optionally narrowed to `instances`. */
+    async flowStates(uuid: string, instances?: string[]): Promise<FlowStateEntry[]> {
+        return this.#apiClient.call(
+            'perspective.flowStates', { uuid, instances },
+        )
+    }
+
+    /** The proposals of `instance` the calling agent's replica recorded as
+     *  fired, sorted. */
+    async flowFired(uuid: string, instance: string): Promise<string[]> {
+        return this.#apiClient.call(
+            'perspective.flowFired', { uuid, instance },
+        )
+    }
+
     /** Mint and store the receipt for a completed flow run. Fails while the
      *  run has not settled into a terminal state, and when an output's
      *  content no longer matches what the quorum committed to. */
@@ -469,6 +486,19 @@ export class PerspectiveClient {
     async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
         return this.#apiClient.call(
             'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId }
+        )
+    }
+
+    /** Through an abstract class (#1435), the executor writes to the record's own classes. */
+    async updateSubject(uuid: string, subjectClass: string, expressionAddress: string, values: string, batchId?: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.updateSubject', { uuid, subjectClass, expressionAddress, values, batchId }
+        )
+    }
+
+    async removeSubject(uuid: string, subjectClass: string, expressionAddress: string, batchId?: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.removeSubject', { uuid, subjectClass, expressionAddress, batchId }
         )
     }
 

@@ -4,38 +4,17 @@ use crate::agent::AgentService;
 use crate::types::domain::LanguageRef;
 use crate::types::{DecoratedExpressionProof, ExpressionRendered, Icon, PerspectiveHandle};
 
-/// Check if a user (identified by email) or the main agent can access a perspective.
-/// Prefer `can_access_perspective_with_did` when a pre-resolved DID is available.
+/// Check if `agent` (a managed agent, or the main agent) can access a perspective.
 pub fn can_access_perspective(
-    user_email: &Option<String>,
+    agent: &crate::agent::AgentContext,
     perspective: &PerspectiveHandle,
 ) -> bool {
-    match user_email {
-        Some(email) => {
-            if let Ok(user_did) = AgentService::get_user_did_by_email(email) {
-                log::debug!(
-                    "📋 can_access_perspective(): user {} perspective {} user_did {}",
-                    email,
-                    perspective.uuid,
-                    user_did
-                );
-                log::debug!(
-                    "📋 can_access_perspective(): perspective.owners {:?}",
-                    perspective.owners
-                );
-                perspective.is_owned_by(&user_did)
-            } else {
-                log::debug!("📋 can_access_perspective(): No DID for user {}", email);
-                false
-            }
-        }
-        None => check_main_agent_access(perspective),
-    }
+    can_access_perspective_with_did(agent.managed_did(), perspective)
 }
 
 /// Fast path: check perspective access using a pre-resolved DID (avoids wallet mutex).
 pub fn can_access_perspective_with_did(
-    user_did: &Option<String>,
+    user_did: Option<&str>,
     perspective: &PerspectiveHandle,
 ) -> bool {
     match user_did {

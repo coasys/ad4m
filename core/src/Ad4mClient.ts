@@ -99,6 +99,16 @@ export class Ad4mClient {
         return this.#apiClient.on(type, handler, filter)
     }
 
+    /**
+     * Call `callback` once when the executor refuses this client's token
+     * (expired, revoked, or no session). Every call then fails with a 401
+     * `RpcError` and the client stops reconnecting: log in again and build a
+     * new client. Returns a function that removes the callback.
+     */
+    onAuthFailed(callback: (reason: string) => void): () => void {
+        return this.#apiClient.onAuthFailed(callback)
+    }
+
     /** Close all event connections and clear in-memory caches */
     close(): void {
         this.#agentClient.clearByDidCache()
