@@ -83,6 +83,9 @@
 //! of any flow, for good. What remains is reader CPU — one parse per junk
 //! body, one verification per body that hashes to its own URI — and the
 //! per-perspective [`VerdictMemo`] keeps repeat reads from paying it twice.
+//! Index and body links are flow links, so they are monotonic
+//! (`perspectives::monotonic`, #1176): nobody can remove a genuine
+//! receipt's index link.
 //!
 //! # The quorum time
 //!

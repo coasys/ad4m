@@ -75,9 +75,9 @@ describe("MCP mcporter Integration Tests", function() {
         registerPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
 
         // Clean up and create test directory
-        if (fs.existsSync(appDataPath)) {
-            fs.rmSync(appDataPath, { recursive: true });
-        }
+        // rmSync with force also removes a dangling symlink, which existsSync reports as absent:
+        // startExecutor links appDataPath to /tmp/ad4m-<hash>, and CI deletes old /tmp dirs.
+        fs.rmSync(appDataPath, { recursive: true, force: true });
         fs.mkdirSync(appDataPath, { recursive: true });
 
         // Start executor with MCP enabled

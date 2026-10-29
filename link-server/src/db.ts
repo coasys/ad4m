@@ -21,8 +21,6 @@ CREATE TABLE IF NOT EXISTS acl (
   room_id TEXT,
   did TEXT,
   added_at TEXT,
-  x25519_public_key TEXT,
-  x25519_signature TEXT,
   PRIMARY KEY (room_id, did)
 );
 CREATE TABLE IF NOT EXISTS links (
@@ -52,6 +50,14 @@ CREATE TABLE IF NOT EXISTS room_keys (
   version INTEGER,
   PRIMARY KEY (room_id, did, version)
 );
+-- The admin's commitment to each room key version: a member keeps an opened key only if it
+-- matches, so a member cannot grant a wrong key that decrypts.
+CREATE TABLE IF NOT EXISTS room_key_commitments (
+  room_id TEXT,
+  version INTEGER,
+  commitment TEXT,
+  PRIMARY KEY (room_id, version)
+);
 CREATE TABLE IF NOT EXISTS server_identity (
   key_type TEXT PRIMARY KEY,
   public_key TEXT,
@@ -61,6 +67,17 @@ CREATE INDEX IF NOT EXISTS idx_links_room ON links(room_id);
 CREATE INDEX IF NOT EXISTS idx_diffs_room_seq ON diffs(room_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_acl_room ON acl(room_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_room_did ON sessions(room_id, did);
+-- Append-only record of ACL changes: who admitted or removed whom, and through which path.
+CREATE TABLE IF NOT EXISTS acl_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_id TEXT NOT NULL,
+  did TEXT NOT NULL,
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_acl_changes_room ON acl_changes(room_id, id);
 `;
 
 export interface RoomRow {
@@ -75,8 +92,17 @@ export interface AclRow {
   room_id: string;
   did: string;
   added_at: string;
-  x25519_public_key: string | null;
-  x25519_signature: string | null;
+}
+
+/** One row of the ACL audit trail. `source` is "operator" (actor = signed-in login) or "room-admin" (actor = admin DID). */
+export interface AclChangeRow {
+  id: number;
+  room_id: string;
+  did: string;
+  action: "add" | "remove";
+  actor: string;
+  source: "operator" | "room-admin";
+  at: string;
 }
 
 export interface LinkRow {
@@ -106,6 +132,8 @@ export interface RoomKeyRow {
   did: string;
   encrypted_key: string;
   version: number;
+  /** The version's commitment; null for a version rotated before commitments. */
+  commitment: string | null;
 }
 
 export interface ServerIdentityRow {
@@ -149,6 +177,10 @@ export class LinkServerDB {
   private prepareStatements() {
     return {
       getRoom: this.raw.prepare("SELECT * FROM rooms WHERE id = ?"),
+      listRooms: this.raw.prepare(
+        `SELECT r.*, (SELECT COUNT(*) FROM acl a WHERE a.room_id = r.id) AS member_count
+         FROM rooms r ORDER BY r.created_at DESC`
+      ),
       createRoom: this.raw.prepare(
         "INSERT INTO rooms (id, admin_did, created_at, e2e_enabled, revision) VALUES (?, ?, ?, 0, ?)"
       ),
@@ -159,12 +191,17 @@ export class LinkServerDB {
       isMember: this.raw.prepare("SELECT 1 FROM acl WHERE room_id = ? AND did = ?"),
       addAcl: this.raw.prepare("INSERT OR IGNORE INTO acl (room_id, did, added_at) VALUES (?, ?, ?)"),
       removeAcl: this.raw.prepare("DELETE FROM acl WHERE room_id = ? AND did = ?"),
-      setX25519: this.raw.prepare("UPDATE acl SET x25519_public_key = ? WHERE room_id = ? AND did = ?"),
-      setX25519WithSig: this.raw.prepare(
-        "UPDATE acl SET x25519_public_key = ?, x25519_signature = ? WHERE room_id = ? AND did = ?"
-      ),
-      getX25519: this.raw.prepare("SELECT x25519_public_key FROM acl WHERE room_id = ? AND did = ?"),
       transferAdmin: this.raw.prepare("UPDATE rooms SET admin_did = ? WHERE id = ?"),
+      recordAclChange: this.raw.prepare(
+        "INSERT INTO acl_changes (room_id, did, action, actor, source, at) VALUES (?, ?, ?, ?, ?, ?)"
+      ),
+      getAclChanges: this.raw.prepare(
+        "SELECT * FROM acl_changes WHERE room_id = ? ORDER BY id DESC LIMIT ?"
+      ),
+      getLatestAdds: this.raw.prepare(
+        `SELECT * FROM acl_changes WHERE id IN
+           (SELECT MAX(id) FROM acl_changes WHERE room_id = ? AND action = 'add' GROUP BY did)`
+      ),
 
       insertLink: this.raw.prepare(
         `INSERT OR IGNORE INTO links (room_id, link_hash, link_data, sequence)
@@ -198,10 +235,20 @@ export class LinkServerDB {
          VALUES (?, ?, ?, ?)`
       ),
       getAllRoomKeys: this.raw.prepare(
-        `SELECT * FROM room_keys WHERE room_id = ? AND did = ? ORDER BY version ASC`
+        `SELECT k.*, c.commitment FROM room_keys k
+         LEFT JOIN room_key_commitments c ON c.room_id = k.room_id AND c.version = k.version
+         WHERE k.room_id = ? AND k.did = ? ORDER BY k.version ASC`
       ),
       getLatestKeyVersion: this.raw.prepare(
-        "SELECT COALESCE(MAX(version), 0) AS max FROM room_keys WHERE room_id = ?"
+        `SELECT COALESCE(MAX(version), 0) AS max FROM (
+           SELECT version FROM room_keys WHERE room_id = ?
+           UNION ALL SELECT version FROM room_key_commitments WHERE room_id = ?)`
+      ),
+      addKeyCommitment: this.raw.prepare(
+        `INSERT INTO room_key_commitments (room_id, version, commitment) VALUES (?, ?, ?)`
+      ),
+      deleteRoomKey: this.raw.prepare(
+        `DELETE FROM room_keys WHERE room_id = ? AND did = ? AND version = ?`
       ),
       getAllMemberKeyVersions: this.raw.prepare(
         `SELECT did, version FROM room_keys WHERE room_id = ? ORDER BY did, version ASC`
@@ -244,6 +291,11 @@ export class LinkServerDB {
     return this.stmts.getRoom.get(roomId) as RoomRow | undefined;
   }
 
+  /** Every room with its ACL size, newest first. Operator listing only. */
+  listRooms(): Array<RoomRow & { member_count: number }> {
+    return this.stmts.listRooms.all() as Array<RoomRow & { member_count: number }>;
+  }
+
   createRoom(roomId: string, adminDid: string): RoomRow {
     const createdAt = new Date().toISOString();
     this.stmts.createRoom.run(roomId, adminDid, createdAt, EMPTY_REVISION);
@@ -270,25 +322,34 @@ export class LinkServerDB {
     return this.stmts.isMember.get(roomId, did) !== undefined;
   }
 
-  addAcl(roomId: string, did: string): void {
-    this.stmts.addAcl.run(roomId, did, new Date().toISOString());
+  /** Returns false when the DID was already a member. */
+  addAcl(roomId: string, did: string): boolean {
+    return this.stmts.addAcl.run(roomId, did, new Date().toISOString()).changes > 0;
   }
 
-  removeAcl(roomId: string, did: string): void {
-    this.stmts.removeAcl.run(roomId, did);
+  /** Returns false when the DID was not a member. */
+  removeAcl(roomId: string, did: string): boolean {
+    return this.stmts.removeAcl.run(roomId, did).changes > 0;
   }
 
-  setX25519PublicKey(roomId: string, did: string, x25519PublicKey: string, x25519Signature?: string): void {
-    if (x25519Signature) {
-      this.stmts.setX25519WithSig.run(x25519PublicKey, x25519Signature, roomId, did);
-    } else {
-      this.stmts.setX25519.run(x25519PublicKey, roomId, did);
-    }
+  recordAclChange(
+    roomId: string,
+    did: string,
+    action: AclChangeRow["action"],
+    actor: string,
+    source: AclChangeRow["source"]
+  ): void {
+    this.stmts.recordAclChange.run(roomId, did, action, actor, source, new Date().toISOString());
   }
 
-  getX25519PublicKey(roomId: string, did: string): string | null {
-    const row = this.stmts.getX25519.get(roomId, did) as { x25519_public_key: string | null } | undefined;
-    return row?.x25519_public_key ?? null;
+  /** Newest first. */
+  getAclChanges(roomId: string, limit = 100): AclChangeRow[] {
+    return this.stmts.getAclChanges.all(roomId, limit) as AclChangeRow[];
+  }
+
+  /** The latest "add" per DID over the whole history: who admitted each current member. */
+  getLatestAdds(roomId: string): AclChangeRow[] {
+    return this.stmts.getLatestAdds.all(roomId) as AclChangeRow[];
   }
 
   // ---- links (active OR-Set) ----
@@ -429,7 +490,7 @@ export class LinkServerDB {
   }
 
   getLatestKeyVersion(roomId: string): number {
-    const row = this.stmts.getLatestKeyVersion.get(roomId) as { max: number };
+    const row = this.stmts.getLatestKeyVersion.get(roomId, roomId) as { max: number };
     return row.max;
   }
 
@@ -446,6 +507,15 @@ export class LinkServerDB {
       }
     }
     return result;
+  }
+
+  addKeyCommitment(roomId: string, version: number, commitment: string): void {
+    this.stmts.addKeyCommitment.run(roomId, version, commitment);
+  }
+
+  /** Deletes one member's box for one version; true when there was one. */
+  deleteRoomKey(roomId: string, did: string, version: number): boolean {
+    return this.stmts.deleteRoomKey.run(roomId, did, version).changes > 0;
   }
 
   /** INSERT OR IGNORE — stores a sealed key only if that (room, did, version) doesn't exist yet. */

@@ -103,11 +103,43 @@ export type Order = { [propertyName: string]: "ASC" | "DESC" };
  * **Traverse form** — bounded traversal from one or more anchors, for reading
  * a tree rather than one node's children. Read-only: AutoProcessor's write
  * scopes reject it, because it names no single parent to write under.
+ *
+ * **Containment form** — `{ id }` alone: everything contained in `id`, through
+ * the built-in `Container`. That is the targets of `id`'s `ad4m://has_child`
+ * links, whatever `id` is, and the targets of the `children` relation (by name,
+ * or aliased to `children`) of every class `id` is an instance of. The caller
+ * names no class and no predicate; the executor resolves them from the
+ * installed classes. See {@link ContainedScope}.
  */
 export type Scope =
   | { model: typeof Ad4mModel; id: string; field?: string }
   | { id: string; predicate: string }
-  | TraverseScope;
+  | TraverseScope
+  | ContainedScope;
+
+/**
+ * Contained in `id`, through `Container`: `{ id }` and nothing else. A
+ * misspelt extra field (`{ id, predicat }`) is an error in the executor,
+ * never a containment read.
+ */
+export interface ContainedScope {
+  id: string;
+  // Never set: they make the other forms. Declared so the type does not
+  // also describe `{ id, predicate }` or `{ id, model }`.
+  predicate?: never;
+  model?: never;
+  field?: never;
+}
+
+/** Whether this traversal follows containment rather than a named predicate. */
+export function isContainmentTraversal(scope: Scope): scope is TraverseByContainment {
+  return isTraverseScope(scope) && !('predicate' in scope && scope.predicate) && !('model' in scope && scope.model);
+}
+
+/** Whether this scope is the containment form, `{ id }` alone. */
+export function isContainedScope(scope: Scope): scope is ContainedScope {
+  return !isTraverseScope(scope) && !('predicate' in scope) && !('model' in scope);
+}
 
 /**
  * Walk a predicate from several anchors at once, and optionally all the way
@@ -121,7 +153,24 @@ export type Scope =
  * or by the model and relation that own it. See {@link TraverseByPredicate} and
  * {@link TraverseByModel}.
  */
-export type TraverseScope = TraverseByPredicate | TraverseByModel;
+export type TraverseScope = TraverseByPredicate | TraverseByModel | TraverseByContainment;
+
+/**
+ * A traversal over containment, through the built-in `Container`: it names no
+ * predicate, and follows every edge the executor resolves from the installed
+ * classes — `ad4m://has_child` on any node, and each class's own `children`
+ * relation on its instances. `direction: 'in'` from a record reaches whatever
+ * holds it: `Container.findAll(p, { parent: { ids: [x], direction: 'in' } })`.
+ *
+ * The rows are the queried class; the nodes a transitive walk passes through
+ * are any container. With no `order`, a transitive walk's rows come nearest
+ * first. `levels` is refused on it, and so is `limitPerAnchor` on a
+ * transitive one; bound it with `maxDepth`.
+ */
+export interface TraverseByContainment extends TraverseOptions {
+  predicate?: never;
+  model?: never;
+}
 
 /** A traversal naming its predicate literally, as the Raw scope does. */
 export interface TraverseByPredicate extends TraverseOptions {
@@ -194,6 +243,11 @@ export interface TraverseOptions {
    * every depth.
    */
   limitPerAnchor?: number;
+  /**
+   * With `transitive`, stop the walk after this many hops (`1` is the direct
+   * neighbours). Refused without `transitive` and alongside `levels`.
+   */
+  maxDepth?: number;
   /**
    * Walk the relation level by level, keeping this many results per anchor at each depth —
    * `[10, 5, 3]` is "ten replies, five under each of those, three under each of *those*".
@@ -335,6 +389,13 @@ export type Query = {
    * Individual relations can still be overridden via `include` (explicit entries take precedence).
    */
   includeAll?: boolean;
+  /**
+   * For a query over several classes (`Ad4mModel.findAllOf` / `queryOf`):
+   * the class names a record that conforms to several of them is read as,
+   * most wanted first. Without it the most specific requested class wins.
+   * Ranks, never excludes. Ignored by a single-class query.
+   */
+  preferClasses?: string[];
   where?: Where;
   order?: Order;
   offset?: number;

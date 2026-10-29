@@ -46,7 +46,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'agent.sign': 'signed-message-data',
     'agent.isLocked': false,
-    'agent.requestCapability': 'request-id-123',
+    'agent.requestCapability': (p: Record<string, unknown>) =>
+        'agent' in p ? `request-for-${p.agent}` : 'request-id-123',
     'agent.permitCapability': 'permitted-token',
     'agent.generateJwt': 'jwt-token-abc',
     'agent.getApps': [{ requestId: 'app1', auth: {}, token: 'tok', revoked: false }],
@@ -108,8 +109,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.getSubjectData': '{"name":"test"}',
     'perspective.createBatch': 'batch-id-1',
     'perspective.commitBatch': { additions: [], removals: [] },
-    'perspective.subscribeQuery': true,
-    'perspective.keepAliveQuery': true,
+    'perspective.subscribeQuery': { subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 },
+    'perspective.resyncSubscription': { revision: 3, result: [{ s: 'c' }] },
     'events.watch': true,
     'perspective.disposeQuery': true,
 
@@ -146,6 +147,9 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'neighbourhood.otherAgents': ['did:other:1', 'did:other:2'],
     'neighbourhood.hasTelepresence': true,
     'neighbourhood.onlineAgents': [{ did: 'did:test:1', status: new Perspective() }],
+    'sfu.status': { reachability: 'nat', isPublic: false, bindAddress: '127.0.0.1:9000', detail: 'nat' },
+    'sfu.servesAllMembers': true,
+    'neighbourhood.ownOnlineStatus': null,
     'neighbourhood.setOnlineStatus': true,
     'neighbourhood.sendSignal': true,
     'neighbourhood.sendBroadcast': true,
@@ -171,7 +175,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'expression.interact': 'interaction-result',
 
     // ── Runtime ──
-    'runtime.info': { ad4mExecutorVersion: '0.1.0', isUnlocked: true, isInitialized: true },
+    'runtime.info': { ad4mExecutorVersion: '0.1.0', ad4mExecutorCommit: null, isUnlocked: true, isInitialized: true },
     'runtime.tlsDomain': 'test.domain.com',
     'runtime.quit': true,
     'runtime.openLink': true,
@@ -190,7 +194,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.grantNotification': true,
     'runtime.deleteNotification': true,
     'runtime.setStatus': true,
-    'runtime.linkLanguageTemplates': ['lang://template1'],
+    'runtime.linkLanguageTemplates': [{ address: 'template1', name: 'Template 1', possibleTemplateParams: ['uid', 'name'] }],
     'runtime.addLinkLanguageTemplates': ['lang://template1', 'lang://template2'],
     'runtime.removeLinkLanguageTemplates': ['lang://template1'],
     'runtime.hcAgentInfos': ['hc-agent-info-1', 'hc-agent-info-2'],
@@ -222,6 +226,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'user.create': { success: true, did: 'did:test:new-user' },
     'user.login': 'login-jwt-token',
     'user.verifyEmail': 'verified-token',
+    'user.logout': true,
+    'user.revokeAllSessions': true,
     'user.requestVerification': { success: true, message: 'Verification email sent', requiresPassword: false, isExistingUser: true },
     'user.list': [{ email: 'user@test.com', credits: 100, freeAccess: false }],
     'user.multiUserEnabled': false,
@@ -375,12 +381,11 @@ function wireHandle(uuid: string): PerspectiveHandle {
     return { uuid, name: 'test-perspective', neighbourhood: null, sharedUrl: null, state: 'SYNCED', owners: null };
 }
 
-const OWNER = 'did:test:123';
-const linkAdded = (perspectiveUuid: string, source: string) => event('link-added', { perspectiveUuid, owner: OWNER, link: wireLink(source) });
-const linkRemoved = (perspectiveUuid: string, source: string) => event('link-removed', { perspectiveUuid, owner: OWNER, link: wireLink(source) });
+const linkAdded = (perspectiveUuid: string, source: string) => event('link-added', { perspectiveUuid, link: wireLink(source) });
+const linkRemoved = (perspectiveUuid: string, source: string) => event('link-removed', { perspectiveUuid, link: wireLink(source) });
 const linkUpdated = (perspectiveUuid: string, oldSource: string, newSource: string) =>
-    event('link-updated', { perspectiveUuid, owner: OWNER, oldLink: wireLink(oldSource), newLink: wireLink(newSource) });
-const perspectiveAdded = (uuid: string) => event('perspective-added', { perspectiveUuid: uuid, owner: OWNER, perspective: wireHandle(uuid) });
+    event('link-updated', { perspectiveUuid, oldLink: wireLink(oldSource), newLink: wireLink(newSource) });
+const perspectiveAdded = (uuid: string) => event('perspective-added', { perspectiveUuid: uuid, perspective: wireHandle(uuid) });
 
 // ===================== TEST SETUP =====================
 
@@ -496,6 +501,13 @@ describe('AgentClient', () => {
     test('requestCapability() returns request ID', async () => {
         const id = await ad4m.agent.requestCapability({ appName: 'test', appDesc: 'test', appDomain: 'test', appUrl: 'test', capabilities: [] } as any);
         expect(id).toBe('request-id-123');
+    });
+
+    // #1399: the request names the agent the app asks to act as; without one, no `agent`
+    // param goes out (the executor's main agent).
+    test('requestCapability() passes the requested agent', async () => {
+        const id = await ad4m.agent.requestCapability({ appName: 'test', appDesc: 'test', appDomain: 'test', appUrl: 'test', capabilities: [] } as any, 'alice@example.org');
+        expect(id).toBe('request-for-alice@example.org');
     });
 
     test('permitCapability() returns token', async () => {
@@ -653,13 +665,10 @@ describe('PerspectiveClient', () => {
         expect(result).toEqual([{ X: 'test' }]);
     });
 
-    test('subscribeToQueryUpdates() routes through the WebSocket endpoint', async () => {
+    test('the last unsubscribe closes the socket', async () => {
         const freshClient = newClient();
-        const callback = jest.fn();
-        const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
+        const unsubscribe = freshClient.perspective.onQueryUpdate(jest.fn());
         const ws = lastOf(MockWebSocket.instances);
-
-        expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
 
         unsubscribe();
         expect(ws.closed).toBe(true);
@@ -705,25 +714,27 @@ describe('PerspectiveClient', () => {
         expect(linkUpdatedCallback).toHaveBeenCalledWith({ oldLink: wireLink('test://updated-old'), newLink: wireLink('test://updated-new') });
     });
 
-    test('subscribeToQueryUpdates() ignores unrelated events and parses the result', async () => {
+    test('onQueryUpdate() gets every live query update and lag signal on the socket', async () => {
         const freshClient = newClient();
         const callback = jest.fn();
-        const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
+        const unsubscribe = freshClient.perspective.onQueryUpdate(callback);
         const ws = lastOf(MockWebSocket.instances);
-        const update = (subscriptionId: string, result: unknown) => event('query-subscription-update', {
-            perspectiveUuid: 'uuid-1', uuid: 'uuid-1', subscriptionId, result: JSON.stringify(result),
-        });
+        const update = {
+            perspectiveUuid: 'uuid-1', uuid: 'uuid-1', subscriptionId: 'sub-1', revision: 1,
+            added: [{ id: 'community://1' }], removed: [],
+        };
 
         ws.emit(perspectiveAdded('uuid-ignored'));
-        ws.emit(update('sub-2', { ignored: true }));
         expect(callback).not.toHaveBeenCalled();
 
-        ws.emit(update('sub-1', [{ id: 'community://1', name: 'REST Smoke Community' }]));
-        expect(callback).toHaveBeenCalledWith([{ id: 'community://1', name: 'REST Smoke Community' }]);
+        ws.emit(event('query-subscription-update', update));
+        ws.emit(event('query-subscription-update', { lagged: true }));
+        expect(callback).toHaveBeenNthCalledWith(1, expect.objectContaining(update));
+        expect(callback).toHaveBeenNthCalledWith(2, expect.objectContaining({ lagged: true }));
 
         unsubscribe();
-        ws.emit(update('sub-1', [{ id: 'community://2', name: 'Should not arrive' }]));
-        expect(callback).toHaveBeenCalledTimes(1);
+        ws.emit(event('query-subscription-update', { ...update, revision: 2 }));
+        expect(callback).toHaveBeenCalledTimes(2);
     });
 
     test('a client asks the executor for the events its listeners need', async () => {
@@ -861,6 +872,34 @@ describe('PerspectiveClient', () => {
         expect(signal).toHaveBeenCalledTimes(1);
     });
 
+    test('a live query applies updates and resyncs on a revision gap', async () => {
+        const freshClient = newClient();
+        const subscription = await freshClient.perspective.byUUID('uuid-1')
+            .then(p => p!.subscribeQuery('SELECT ?s WHERE { ?s ?p ?o }'));
+        const results: unknown[] = [];
+        subscription.onResult(r => results.push(r));
+        const ws = lastOf(MockWebSocket.instances);
+        expect(subscription.result).toEqual([{ s: 'a' }]);
+
+        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', revision: 1, added: [{ s: 'x' }], removed: [] });
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 1, added: [{ s: 'b' }], removed: [{ s: 'a' }] });
+        expect(results).toEqual([[{ s: 'b' }]]);
+
+        // Revision 2 never arrives: the client asks for the current state.
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 3, added: [{ s: 'z' }], removed: [] });
+        await new Promise(r => setTimeout(r, 10));
+        expect(lastRpcCall).toEqual({ type: 'perspective.resyncSubscription', params: { uuid: 'uuid-1', subscriptionId: 'sub-1' } });
+        expect(subscription.result).toEqual([{ s: 'c' }]);
+
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 4, added: [{ s: 'd' }], removed: [] });
+        expect(subscription.result).toEqual([{ s: 'c' }, { s: 'd' }]);
+
+        subscription.dispose();
+        await new Promise(r => setTimeout(r, 10));
+        expect(lastRpcCall).toEqual({ type: 'perspective.disposeQuery', params: { uuid: 'uuid-1', subscriptionId: 'sub-1' } });
+    });
+
     test('publishSnapshotByUUID() publishes a snapshot', async () => {
         const hash = await ad4m.perspective.publishSnapshotByUUID('uuid-1');
         expect(hash).toBe('Qm123');
@@ -976,6 +1015,48 @@ describe('NeighbourhoodClient', () => {
         expect(result).toBe(true);
         expect(lastRpcCall!.params.loopback).toBe(true);
     });
+
+    test('ownOnlineStatus() returns null when the agent has set none', async () => {
+        expect(await ad4m.neighbourhood.ownOnlineStatus('uuid-1')).toBeNull();
+        expect(lastRpcCall!.type).toBe('neighbourhood.ownOnlineStatus');
+        expect(lastRpcCall!.params).toEqual({ uuid: 'uuid-1' });
+    });
+
+    test('sfuServesAllMembers() asks the executor about the perspective', async () => {
+        expect(await ad4m.neighbourhood.sfuServesAllMembers('uuid-1')).toBe(true);
+        expect(lastRpcCall!.type).toBe('sfu.servesAllMembers');
+        expect(lastRpcCall!.params).toEqual({ uuid: 'uuid-1' });
+    });
+
+    test('SFU event subscriptions get only their events and are watched before the next call', async () => {
+        const freshClient = newClient();
+        const offers = jest.fn();
+        const migrations = jest.fn();
+        const data = jest.fn();
+        const releaseOffers = freshClient.neighbourhood.subscribeSfuCallRenegotiationOffer('did:me', offers);
+        freshClient.neighbourhood.subscribeSfuMigrateEvent('did:me', migrations);
+        freshClient.neighbourhood.subscribeSfuDataChannel(data);
+        await freshClient.neighbourhood.sfuStatus();
+        const ws = lastOf(MockWebSocket.instances);
+        expect(ws.rpc.map(c => c.type)).toEqual(['events.watch', 'sfu.status']);
+        expect(ws.rpc[0].params).toEqual({ 'sfu-call-renegotiation-offer': null, 'sfu-data': null, 'sfu-migrate': null });
+
+        const room = { neighbourhoodUrl: 'neighbourhood://n', roomName: 'r' };
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', ...room, sdpOffer: '{"x":1}' }));
+        ws.emit(event('sfu-migrate', { targetDid: 'did:me', ...room, migrateToDid: 'did:node' }));
+        const message = { senderDid: 'did:other', ...room, channelLabel: 'chat', binary: false, data: 'hi' };
+        ws.emit(event('sfu-data', message));
+
+        expect(offers).toHaveBeenCalledTimes(1);
+        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
+        expect(migrations).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, migrateToDid: 'did:node' });
+        expect(data).toHaveBeenCalledWith(expect.objectContaining(message));
+
+        releaseOffers();
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', ...room, sdpOffer: '{}' }));
+        expect(offers).toHaveBeenCalledTimes(1);
+    });
 });
 
 // ===================== EXPRESSION TESTS =====================
@@ -1063,9 +1144,9 @@ describe('RuntimeClient', () => {
         expect(result).toEqual(['did:trusted:1']);
     });
 
-    test('knownLinkLanguageTemplates() returns templates', async () => {
+    test('knownLinkLanguageTemplates() returns each template with its meta', async () => {
         const templates = await ad4m.runtime.knownLinkLanguageTemplates();
-        expect(templates).toEqual(['lang://template1']);
+        expect(templates.map(t => [t.address, t.possibleTemplateParams])).toEqual([['template1', ['uid', 'name']]]);
     });
 
     test('hcAgentInfos() returns agent infos list', async () => {
@@ -1109,6 +1190,22 @@ describe('RuntimeClient', () => {
     test('notifications() returns notifications', async () => {
         const notifications = await ad4m.runtime.notifications();
         expect(notifications).toEqual([]);
+    });
+
+    test('updateNotification() without webhookAuth sends none, so the stored one stays', async () => {
+        const result = await ad4m.runtime.updateNotification('notif-1', {
+            description: 'd',
+            appName: 'a',
+            appUrl: 'https://app.test',
+            appIconPath: '',
+            trigger: 'SELECT ?s WHERE { ?s ?p ?o }',
+            perspectiveIds: ['p1'],
+            webhookUrl: 'https://webhook.test',
+        });
+        expect(result).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.updateNotification');
+        expect(lastRpcCall!.params.id).toBe('notif-1');
+        expect('webhookAuth' in lastRpcCall!.params).toBe(false);
     });
 
     test('grantNotification() grants a notification', async () => {
@@ -1213,6 +1310,21 @@ describe('User and Auth', () => {
     test('verifyEmailCode() returns token', async () => {
         const token = await ad4m.agent.verifyEmailCode('test@test.com', '123456', 'login');
         expect(token).toBe('verified-token');
+    });
+
+    test('logout() revokes the session token', async () => {
+        expect(await ad4m.agent.logout()).toBe(true);
+        expect(lastRpcCall).toEqual({ type: 'user.logout', params: {} });
+    });
+
+    test('revokeAllSessions() revokes the caller\'s sessions when no email is given', async () => {
+        expect(await ad4m.agent.revokeAllSessions()).toBe(true);
+        expect(lastRpcCall).toEqual({ type: 'user.revokeAllSessions', params: {} });
+    });
+
+    test('revokeAllSessions(email) names the user', async () => {
+        expect(await ad4m.agent.revokeAllSessions('test@test.com')).toBe(true);
+        expect(lastRpcCall).toEqual({ type: 'user.revokeAllSessions', params: { email: 'test@test.com' } });
     });
 
     test('hostingUserInfo() returns user info', async () => {
@@ -1386,7 +1498,7 @@ describe('Ad4mClient', () => {
             agentUpdated: jest.fn(), agentStatus: jest.fn(), apps: jest.fn(),
             hosting: jest.fn(),
             added: jest.fn(), updated: jest.fn(), removed: jest.fn(),
-            message: jest.fn(), exception: jest.fn(), notification: jest.fn(),
+            exception: jest.fn(), notification: jest.fn(),
         };
         freshClient.on('agent-updated', ({ agent }) => handlers.agentUpdated(agent));
         freshClient.on('agent-status-changed', ({ agent }) => handlers.agentStatus(agent));
@@ -1395,7 +1507,6 @@ describe('Ad4mClient', () => {
         freshClient.on('perspective-added', ({ perspective }) => handlers.added(perspective));
         freshClient.on('perspective-updated', ({ perspective }) => handlers.updated(perspective));
         freshClient.on('perspective-removed', ({ perspectiveUuid }) => handlers.removed(perspectiveUuid));
-        freshClient.on('message-received', ({ message }) => handlers.message(message));
         freshClient.on('exception-occurred', ({ exception }) => handlers.exception(exception));
         freshClient.on('notification-triggered', ({ notification }) => handlers.notification(notification));
         await freshClient.agent.me(); // wait for the socket to open
@@ -1404,7 +1515,7 @@ describe('Ad4mClient', () => {
         const notification = {
             notification: {
                 id: 'n-1', granted: true, description: 'd', appName: 'a', appUrl: 'u', appIconPath: 'i',
-                trigger: 'q', perspectiveIds: ['uuid-a'], webhookUrl: '', webhookAuth: '', userEmail: null,
+                trigger: 'q', perspectiveIds: ['uuid-a'], webhookUrl: '', hasWebhookAuth: false, ownerDid: 'did:key:owner',
             },
             perspectiveId: 'uuid-a', triggerMatch: '[]',
         };
@@ -1417,12 +1528,8 @@ describe('Ad4mClient', () => {
         }));
         ws.emit(event('hosting-user-info-changed', { email: 'a@b.c', remainingCredits: '1', hotWalletAddress: null, freeAccess: false }));
         ws.emit(perspectiveAdded('uuid-a'));
-        ws.emit(event('perspective-updated', { perspectiveUuid: 'uuid-a', owner: OWNER, perspective: wireHandle('uuid-a') }));
-        ws.emit(event('perspective-removed', { perspectiveUuid: 'uuid-a', uuid: 'uuid-a', owner: OWNER }));
-        ws.emit(event('message-received', { message: {
-            author: 'did:test:1', timestamp: '2024-01-01T00:00:00.000Z', data: { links: [] },
-            proof: { key: 'k', signature: 's', valid: true, invalid: false },
-        } }));
+        ws.emit(event('perspective-updated', { perspectiveUuid: 'uuid-a', perspective: wireHandle('uuid-a') }));
+        ws.emit(event('perspective-removed', { perspectiveUuid: 'uuid-a', uuid: 'uuid-a' }));
         ws.emit(event('exception-occurred', { exception }));
         ws.emit(event('notification-triggered', { perspectiveUuid: 'uuid-a', notification }));
 

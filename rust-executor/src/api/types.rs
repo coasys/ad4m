@@ -6,10 +6,14 @@ use crate::types::{
     LinkInput, LinkMutations, ModelType,
 };
 
-// Re-export for use in handler files
-pub use crate::agent::capabilities::user_email_from_token;
-
 // ── Agent ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentsByDidsRequest {
+    pub dids: Vec<String>,
+}
 
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +66,12 @@ pub struct PublicPerspectiveInput {
 #[ts(export)]
 pub struct RequestCapabilityRequest {
     pub auth_info: AuthInfoInput,
+    // The agent the app asks to act as (#1399): a managed user's email or an agent's DID.
+    // Absent: the executor's main agent. (A plain comment: ts-rs copies doc comments into
+    // the generated type with trailing whitespace.)
+    #[serde(default)]
+    #[ts(optional)]
+    pub agent: Option<String>,
 }
 
 #[derive(Deserialize, TS)]
@@ -413,8 +423,31 @@ pub struct NotificationInput {
     pub trigger: String,
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
-    pub webhook_auth: String,
-    pub granted: Option<bool>,
+    /// Sent as the bearer credential to `webhookUrl`. Results and events say only
+    /// whether one is set (`hasWebhookAuth`).
+    #[ts(type = "string")]
+    pub webhook_auth: crate::secret::Secret,
+}
+
+/// `NotificationInput` for `runtime.updateNotification`. Clients see only `hasWebhookAuth`,
+/// so the credential is optional here.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationUpdateInput {
+    pub description: String,
+    pub app_name: String,
+    pub app_url: String,
+    pub app_icon_path: Option<String>,
+    pub trigger: String,
+    pub perspective_ids: Vec<String>,
+    pub webhook_url: String,
+    /// Without it the update keeps the stored credential, and fails if `webhookUrl`
+    /// changes too, because a credential goes only to the webhook it was set for. An empty
+    /// string clears it.
+    #[serde(default)]
+    #[ts(as = "Option<String>")]
+    pub webhook_auth: Option<crate::secret::Secret>,
 }
 
 /// Grant/revoke a notification (partial update for grant status only)
@@ -665,6 +698,13 @@ pub struct CommitBatchRequest {
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+pub struct DiscardBatchRequest {
+    pub batch_id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct SubscribeQueryRequest {
     pub query: String,
 }
@@ -672,7 +712,7 @@ pub struct SubscribeQueryRequest {
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct KeepAliveQueryRequest {
+pub struct ResyncSubscriptionRequest {
     pub subscription_id: String,
 }
 
@@ -691,6 +731,31 @@ pub struct CreateSubjectRequest {
     pub subject_class: String,
     pub expression_address: String,
     pub initial_values: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+/// Through an abstract class (#1435), dispatched to the record's own classes.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UpdateSubjectRequest {
+    pub subject_class: String,
+    pub expression_address: String,
+    /// A JSON object: property name → value.
+    pub values: String,
+    pub batch_id: Option<String>,
+}
+
+/// Runs the class's destructor; through an abstract class (#1435), that of
+/// each of the record's classes it reads.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RemoveSubjectRequest {
+    pub subject_class: String,
+    pub expression_address: String,
     pub batch_id: Option<String>,
 }
 

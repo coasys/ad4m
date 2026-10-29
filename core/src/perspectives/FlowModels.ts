@@ -159,15 +159,10 @@ export class FlowTransitionProposal extends Ad4mModel {
   @HasMany({ through: "ad4m://acceptedBy", getter: ACCEPTED_BY_GETTER, readOnly: true })
   acceptedBy: string[] = [];
 
-  /**
-   * `"fired"` once this replica's consensus pass has recorded the transition
-   * this proposal settled. Per-replica bookkeeping, never an input to the
-   * engine's own derivation. Only this replica's own `Local` mark is read:
-   * a Shared one a peer wrote says nothing about what happened here.
-   * Read-only.
-   */
-  @Optional({ through: "ad4m://flow/resolved_as", readOnly: true, local: true })
-  resolvedAs?: string;
+  // Whether this proposal settled an edge is not on the record: the
+  // executor keeps that per agent, outside the graph (#1424). Ask
+  // `PerspectiveProxy.flowFired(instance)` for the proposals your replica
+  // recorded as fired, or listen with `onFlowStateChanged`.
 
   // "When was this proposal written?" is answered by `Ad4mModel`'s built-in
   // `createdAt`, synthesized on hydration from the earliest link timestamp
@@ -226,15 +221,10 @@ export class FlowInstanceRecord extends Ad4mModel {
   @Property({ through: "ad4m://flow/base", required: true })
   subject: string = "";
 
-  /**
-   * The state name this replica's executor last derived for the flow — a
-   * per-replica cache written as a `local` link, never the authority (the
-   * fold over the signed proposals is). Optional on the shape: a row that
-   * synced in from a peer carries no value until the local consensus pass
-   * has run, so an empty string means "not yet derived here".
-   */
-  @Property({ through: "ad4m://flow/current_state", local: true })
-  currentState: string = "";
+  // The flow's state is not on the record. It is derived from the signed
+  // proposals, and each agent's executor keeps what it last derived outside
+  // the graph (#1424): read it with `PerspectiveProxy.flowStates`, or use
+  // the `FlowInstance` wrapper, whose `currentStateName` is filled from it.
 
   // "When was this flow started?" is answered by `Ad4mModel`'s built-in
   // `createdAt`, synthesized on hydration from the earliest link timestamp

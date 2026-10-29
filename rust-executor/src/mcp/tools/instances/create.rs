@@ -3,7 +3,7 @@
 use super::{
     check_setters, error_json, fetch_instance, generate_instance_uri, link_target, pretty,
     resolve_class, subject_class, validate_properties, validation_failure, Ad4mMcpHandler,
-    WriteMode, HAS_CHILD,
+    WriteMode,
 };
 use crate::mcp::shacl;
 use crate::types::{Link, LinkStatus};
@@ -26,15 +26,17 @@ pub struct InstanceCreateParams {
     pub properties: Option<Map<String, Value>>,
     /// Optional URI for the new instance. A random one is generated when omitted.
     pub base_uri: Option<String>,
-    /// Optional parent URI. The new instance is additionally linked as an
-    /// `ad4m://has_child` child of this node (e.g. a Message inside a Channel).
+    /// Optional parent URI. The new instance is also put under this node (e.g.
+    /// a Message inside a Channel), the way the node holds children: its
+    /// class's own `children` relation when it has one (a block's
+    /// `we://child`), else `ad4m://has_child`.
     pub parent: Option<String>,
 }
 
 impl Ad4mMcpHandler {
     /// Create an instance of any subject class.
     #[tool(
-        description = "Create a new instance of a subject class. class_name is one of the class names from describe_perspective; properties is a JSON object of property values (single JSON value per scalar property, array of item URIs per collection). Required properties must be present; every value is validated against the class schema (property, expected type, cardinality are named on rejection). Optionally pass parent to also link the instance as an ad4m://has_child child of another instance (e.g. a Message into a Channel). Returns the new instance's base_uri (its id). Example: instance_create(perspective_id, class_name='Message', properties={\"body\": \"Hello\"}, parent='<channel uri>')."
+        description = "Create a new instance of a subject class. class_name is one of the class names from describe_perspective; properties is a JSON object of property values (single JSON value per scalar property, array of item URIs per collection). Required properties must be present; every value is validated against the class schema (property, expected type, cardinality are named on rejection). Optionally pass parent to also put the instance under another node (e.g. a Message into a Channel): through the parent class's own children relation when it has one (a block's we://child), else with an ad4m://has_child link. Returns the new instance's base_uri (its id). Example: instance_create(perspective_id, class_name='Message', properties={\"body\": \"Hello\"}, parent='<channel uri>')."
     )]
     pub async fn instance_create(&self, params: Parameters<InstanceCreateParams>) -> String {
         let p = &params.0;
@@ -187,15 +189,10 @@ impl Ad4mMcpHandler {
 
         let parent = p.parent.as_deref().filter(|s| !s.trim().is_empty());
         if let Some(parent) = parent {
-            let link = Link {
-                source: link_target(parent.trim()),
-                predicate: Some(HAS_CHILD.to_string()),
-                target: base_uri.clone(),
-            };
             if let Err(e) = perspective
-                .add_link(
-                    link,
-                    LinkStatus::Shared,
+                .add_to_container(
+                    &link_target(parent.trim()),
+                    &base_uri,
                     Some(batch_id.clone()),
                     &agent_context,
                 )

@@ -9,18 +9,24 @@ use ts_rs::TS;
 use crate::agent::capabilities::*;
 use crate::agent::AgentService;
 use crate::db::Ad4mDb;
-use crate::globals::AD4M_VERSION;
+use crate::globals::{AD4M_COMMIT, AD4M_VERSION};
 use crate::holochain_service::get_holochain_service;
+use crate::languages::LanguageController;
+use crate::runtime_service::notification_access::{
+    caller_may_manage, granted_after_update, owner_may_read,
+};
 use crate::runtime_service::RuntimeService;
 use crate::types::domain::{ComputeLogEntry, ImportResult};
-use crate::types::Notification;
-use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
+use crate::types::{LanguageMeta, PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
+use crate::types::{Notification, NotificationView};
 
+use super::guards::Guard;
+use super::perspectives_ws::get_perspective_or_404;
 use super::types::{
     AddAgentInfosRequest, ExportRequest, FriendsListRequest, HostRate, ImportRequest,
-    LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput, OpenLinkRequest,
-    SetHostRatesRequest, SetStatusRequest, SetUnytMembraneProofRequest, UnytVersionInfo,
-    VerifySignatureRequest,
+    LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput,
+    NotificationUpdateInput, OpenLinkRequest, SetHostRatesRequest, SetStatusRequest,
+    SetUnytMembraneProofRequest, UnytVersionInfo, VerifySignatureRequest,
 };
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -35,15 +41,13 @@ async fn get_runtime_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<V
             is_initialized: agent_service.is_initialized(),
             is_unlocked: agent_service.is_unlocked(),
             ad4m_executor_version: AD4M_VERSION.clone(),
+            ad4m_executor_commit: AD4M_COMMIT.clone(),
         })
     })?;
     Ok(serde_json::to_value(info)?)
 }
 
-async fn quit_runtime(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn quit_runtime(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         std::process::exit(0);
@@ -52,21 +56,14 @@ async fn quit_runtime(_params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     Ok(Value::Bool(true))
 }
 
-async fn set_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_MY_STATUS_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn set_status(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let _ = params;
     Err(WsRpcError::internal(
         "Runtime status update not implemented",
     ))
 }
 
-async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
-
+async fn open_link(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: OpenLinkRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -116,9 +113,6 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: ExportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -135,8 +129,10 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             let uuid = body.perspective_uuid.as_deref().ok_or_else(|| {
                 WsRpcError::bad_request("perspective_uuid required for perspective export")
             })?;
-            let perspective = crate::perspectives::get_perspective(uuid)
-                .ok_or_else(|| WsRpcError::not_found(format!("Perspective {} not found", uuid)))?;
+            // The guard admits apps, which reach only the unowned and the main agent's
+            // perspectives: the rule `Guard::Owns` applies (a "db" export names none).
+            let perspective =
+                super::perspectives_ws::get_perspective_with_access(uuid, &ctx).await?;
             let links = perspective
                 .get_links(&crate::types::LinkQuery {
                     source: None,
@@ -165,10 +161,7 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(Value::Bool(true))
 }
 
-async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn import_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: ImportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -178,8 +171,11 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             let json_data: serde_json::Value =
                 serde_json::from_str(&data).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-            let result = Ad4mDb::with_global_instance(|db| db.import_from_json(json_data))
-                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            let main_agent_did = AgentService::with_global_instance(|a| a.did.clone());
+            let result = Ad4mDb::with_global_instance(|db| {
+                db.import_from_json(json_data, main_agent_did.as_deref())
+            })
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
             Ok(serde_json::to_value(result).map_err(|e| WsRpcError::internal(e.to_string()))?)
         }
         "perspective" => {
@@ -196,10 +192,7 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     }
 }
 
-async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
+async fn restart_holochain(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let config = crate::config::get_global_config();
     if !config.run_holochain.unwrap_or(true) {
         return Err(WsRpcError::bad_request(
@@ -214,10 +207,7 @@ async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     Ok(Value::Bool(true))
 }
 
-async fn verify_signature(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn verify_signature(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: VerifySignatureRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -231,29 +221,22 @@ async fn verify_signature(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 // ── Friends & Messages ──
+// The friend list and the outbox belong to the main agent; a user session has
+// neither of its own here, so it may not read or change them.
 
-async fn list_friends(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn list_friends(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let friends = RuntimeService::with_global_instance(|runtime| {
         Ok::<Vec<String>, WsRpcError>(runtime.get_friends())
     })?;
     Ok(serde_json::to_value(friends)?)
 }
 
-async fn get_friend_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_FRIEND_STATUS_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_friend_status(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let _ = params.require_str("did")?;
     Err(WsRpcError::not_implemented("Friend status not implemented"))
 }
 
-async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn add_friends(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: FriendsListRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -264,10 +247,7 @@ async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(serde_json::to_value(friends)?)
 }
 
-async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_DELETE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn remove_friends(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: FriendsListRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -281,9 +261,10 @@ async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 /// Not implemented: nothing delivers an outbox message, and the outbox has no owner, so every
 /// user could read every other user's messages through `runtime.outbox`. The params are still
 /// checked against the contract.
-async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
+async fn send_friend_message(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let _: RuntimeSendFriendMessageParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     Err(WsRpcError::not_implemented(
@@ -291,40 +272,93 @@ async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<
     ))
 }
 
-async fn get_inbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
+async fn get_inbox(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     Ok(serde_json::json!([]))
 }
 
-async fn get_outbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_outbox(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let outbox = RuntimeService::with_global_instance(|runtime| runtime.get_outbox());
     Ok(serde_json::to_value(outbox).unwrap_or_default())
 }
 
 // ── Notifications ──
+//
+// Grant, update and delivery rules: `runtime_service::notification_access`.
+
+/// The caller's DID and the main agent's. A managed user's session acts as
+/// the user; every other session acts as the main agent (the operator).
+struct Dids {
+    caller: String,
+    main_agent: String,
+}
+
+fn notification_dids(ctx: &RequestContext) -> Result<Dids, WsRpcError> {
+    let main_agent = AgentService::with_global_instance(|a| a.did.clone())
+        .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
+    // A user session always carries its DID.
+    let caller = ctx
+        .user_did()
+        .map_or_else(|| main_agent.clone(), str::to_string);
+    Ok(Dids { caller, main_agent })
+}
+
+/// Refuses a perspective the caller may not query, or `owner_did` may not
+/// read.
+async fn check_notification_perspectives(
+    perspective_ids: &[String],
+    owner_did: &str,
+    dids: &Dids,
+    ctx: &RequestContext,
+) -> Result<(), WsRpcError> {
+    for uuid in perspective_ids {
+        ctx.require(&perspective_query_capability(vec![uuid.clone()]))
+            .map_err(|e| WsRpcError::forbidden(e))?;
+
+        let perspective = match get_perspective_or_404(uuid).await {
+            Ok(perspective) => perspective,
+            // A missing perspective holds no data, and delivery checks access
+            // again when it fires. The operator still sees every id before
+            // approving a main-agent notification.
+            Err(e) if e.code == 404 && owner_did == dids.main_agent => continue,
+            Err(e) => return Err(e),
+        };
+        let handle = perspective.persisted.lock().await.clone();
+        if !owner_may_read(owner_did, &dids.main_agent, &handle) {
+            return Err(WsRpcError::forbidden(format!(
+                "Access denied: the notification owner cannot read perspective {}",
+                uuid
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The stored notification `id`, if the caller may update or delete it.
+/// Another user's notification reads as not found.
+fn notification_for_caller(id: &str, dids: &Dids) -> Result<Notification, WsRpcError> {
+    Ad4mDb::with_global_instance(|db| db.get_notification(id.to_string()))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .filter(|notification| caller_may_manage(notification, &dids.caller, &dids.main_agent))
+        .ok_or_else(|| WsRpcError::not_found(format!("Notification {} not found", id)))
+}
 
 async fn list_notifications(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let user_email = ctx.user_email.clone();
-    let notifications =
-        Ad4mDb::with_global_instance(|db| db.get_notifications_for_user(user_email))
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let dids = notification_dids(&ctx)?;
+    let notifications: Vec<NotificationView> =
+        Ad4mDb::with_global_instance(|db| db.get_notifications_for_owner(&dids.caller))
+            .map_err(|e| WsRpcError::internal(e.to_string()))?
+            .iter()
+            .map(Notification::view)
+            .collect();
 
     Ok(serde_json::to_value(notifications)?)
 }
 
 async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: NotificationInput = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let dids = notification_dids(&ctx)?;
+    check_notification_perspectives(&body.perspective_ids, &dids.caller, &dids, &ctx).await?;
 
     let domain_input = crate::types::domain::NotificationInput {
         description: body.description,
@@ -337,8 +371,8 @@ async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         webhook_auth: body.webhook_auth,
     };
 
-    let user_email = ctx.user_email.clone();
-    let id = RuntimeService::request_install_notification(domain_input, user_email)
+    let managed_user = dids.caller != dids.main_agent;
+    let id = RuntimeService::request_install_notification(domain_input, dids.caller, managed_user)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -346,12 +380,15 @@ async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let id = params.require_str("id")?;
-    let body: NotificationInput = serde_json::from_value(params.clone())
+    let body: NotificationUpdateInput = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let dids = notification_dids(&ctx)?;
+    let stored = notification_for_caller(&id, &dids)?;
+    check_notification_perspectives(&body.perspective_ids, &stored.owner_did, &dids, &ctx).await?;
+    let webhook_auth = stored
+        .webhook_auth_after_update(&body.webhook_url, body.webhook_auth)
+        .map_err(|refusal| WsRpcError::bad_request(refusal.to_string()))?;
 
     let notification = Notification {
         id: id.clone(),
@@ -362,9 +399,9 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         trigger: body.trigger,
         perspective_ids: body.perspective_ids,
         webhook_url: body.webhook_url,
-        webhook_auth: body.webhook_auth,
-        granted: body.granted.unwrap_or(false),
-        user_email: None,
+        webhook_auth,
+        granted: granted_after_update(&stored, &dids.caller, &dids.main_agent),
+        owner_did: stored.owner_did,
     };
 
     Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))
@@ -373,29 +410,14 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(Value::Bool(true))
 }
 
-async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    if ctx.user_email.is_some() {
-        return Err(WsRpcError::forbidden(
-            "Permission denied: managed users cannot call grantNotification",
-        ));
-    }
-
+async fn grant_notification(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let id = params.require_str("id")?;
     let body: NotificationGrantRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let notifications = Ad4mDb::with_global_instance(|db| db.get_notifications())
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let existing = notifications
-        .iter()
-        .find(|n| n.id == id)
+    let mut updated = Ad4mDb::with_global_instance(|db| db.get_notification(id.clone()))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
         .ok_or_else(|| WsRpcError::not_found(format!("Notification {} not found", id)))?;
-
-    let mut updated = existing.clone();
     updated.granted = body.granted;
 
     Ad4mDb::with_global_instance(|db| db.update_notification(id, &updated))
@@ -405,10 +427,8 @@ async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<V
 }
 
 async fn delete_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let id = params.require_str("id")?;
+    notification_for_caller(&id, &notification_dids(&ctx)?)?;
     Ad4mDb::with_global_instance(|db| db.remove_notification(id))
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -417,32 +437,24 @@ async fn delete_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
 
 // ── Link Language Templates ──
 
+/// Every known link-language template with its meta, so a client choosing
+/// one needs no `language.meta` call per template.
 async fn get_link_language_templates(
     _params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let templates = RuntimeService::with_global_instance(|runtime| {
-        Ok::<Vec<String>, WsRpcError>(runtime.get_know_link_languages())
-    })?;
-    Ok(serde_json::to_value(templates)?)
+    let addresses =
+        RuntimeService::with_global_instance(|runtime| runtime.get_know_link_languages());
+    let metas = LanguageController::global_instance()
+        .language_metas(&addresses)
+        .await;
+    Ok(serde_json::to_value(metas)?)
 }
 
 async fn add_link_language_templates(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -455,14 +467,8 @@ async fn add_link_language_templates(
 
 async fn remove_link_language_templates(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -475,10 +481,10 @@ async fn remove_link_language_templates(
 
 // ── Holochain ──
 
-async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_hc_agent_infos(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let config = crate::config::get_global_config();
     if !config.run_holochain.unwrap_or(true) {
         return Err(WsRpcError::bad_request(
@@ -494,10 +500,7 @@ async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(serde_json::to_value(infos)?)
 }
 
-async fn add_hc_agent_infos(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn add_hc_agent_infos(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let config = crate::config::get_global_config();
     if !config.run_holochain.unwrap_or(true) {
         return Err(WsRpcError::bad_request(
@@ -518,11 +521,8 @@ async fn add_hc_agent_infos(params: Value, ctx: Arc<RequestContext>) -> Result<V
 
 async fn get_network_metrics(
     _params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let config = crate::config::get_global_config();
     if !config.run_holochain.unwrap_or(true) {
         return Err(WsRpcError::bad_request(
@@ -549,11 +549,8 @@ async fn get_free_hosting_enabled(
 
 async fn set_free_hosting_enabled(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let enabled = params
         .get("enabled")
         .and_then(|v| v.as_bool())
@@ -570,28 +567,49 @@ async fn get_tls_domain(_params: Value, _ctx: Arc<RequestContext>) -> Result<Val
 }
 
 async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let user_email = params
-        .opt_str("userEmail")
-        .or_else(|| ctx.user_email.clone());
-
-    let email = user_email.unwrap_or_default();
+    let Some(agent_did) = compute_log_agent(params.opt_str("userEmail"), &ctx)? else {
+        // No such user: an empty log, as before agents were keyed by DID.
+        return Ok(serde_json::json!([]));
+    };
     let since = params.opt_str("since");
     let limit = params.get("limit").and_then(|l| l.as_i64()).unwrap_or(100);
 
     let logs =
-        Ad4mDb::with_global_instance(|db| db.get_compute_log(&email, since.as_deref(), limit))
+        Ad4mDb::with_global_instance(|db| db.get_compute_log(&agent_did, since.as_deref(), limit))
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(logs).unwrap_or_default())
 }
 
-async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
-        return Err(WsRpcError::forbidden("Admin credential required"));
+/// Whose compute log a `runtime.computeLog` call reads, by agent DID. `requested` names a
+/// user by email and resolves to that user's agent here. A user session reads only its own
+/// log, and an omitted `userEmail` means its own. The operator may read any user's log; an
+/// app on the main agent is not the operator and names no user. `None`: no user of this
+/// executor has that email. The email resolves in the local `users` table only, writing
+/// nothing: the compute log is this executor's, and a user it holds entries for has logged
+/// in here, which imported them; a user only in a shared database has none to read.
+fn compute_log_agent(
+    requested: Option<String>,
+    ctx: &RequestContext,
+) -> Result<Option<String>, WsRpcError> {
+    if ctx.user_did().is_none() && requested.is_some() && !ctx.is_operator() {
+        return Err(WsRpcError::forbidden(
+            "Only the operator may read a user's compute log",
+        ));
     }
+    let requested_did = requested
+        .as_deref()
+        .map(crate::agent::AgentService::local_did_for_email);
+    match (ctx.user_did().map(str::to_string), requested_did) {
+        (Some(own), Some(requested)) if requested.as_deref() != Some(own.as_str()) => Err(
+            WsRpcError::forbidden("A user session may read only its own compute log"),
+        ),
+        (Some(own), _) => Ok(Some(own)),
+        (None, requested) => Ok(requested.flatten()),
+    }
+}
+
+async fn set_host_rates(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: SetHostRatesRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let rates = validate_host_rates(body.rates)?;
@@ -626,10 +644,7 @@ fn validate_host_rates(rates: Vec<HostRate>) -> Result<Vec<(String, f64)>, WsRpc
         .collect()
 }
 
-async fn get_host_rates(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
-        .map_err(WsRpcError::forbidden)?;
-
+async fn get_host_rates(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let rates: Vec<HostRate> = Ad4mDb::with_global_instance(|db| db.get_host_rates())
         .map_err(|e| WsRpcError::internal(e.to_string()))?
         .into_iter()
@@ -647,11 +662,8 @@ async fn get_host_rates(_params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 /// `runtime.unytVersionInfo` reports the outcome.
 async fn set_unyt_membrane_proof(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
     let body: SetUnytMembraneProofRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     if body.proof.is_empty() {
@@ -677,9 +689,7 @@ async fn set_unyt_membrane_proof(
     Ok(Value::Bool(true))
 }
 
-async fn unyt_version_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
-        .map_err(WsRpcError::forbidden)?;
+async fn unyt_version_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let (installed, bundled) = crate::unyt_service::version_info();
     Ok(serde_json::to_value(UnytVersionInfo {
         installed,
@@ -697,109 +707,177 @@ async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
+    // Every caller may read it, with or without capabilities.
     map.method::<NoParams, RuntimeInfo>("runtime.info", get_runtime_info)
-        .read();
-    map.method::<NoParams, bool>("runtime.quit", quit_runtime);
+        .read()
+        .guard(Guard::Open);
+    map.method::<NoParams, bool>("runtime.quit", quit_runtime)
+        .guard(Guard::Executor(RUNTIME_QUIT_CAPABILITY.clone()));
     // Always errors: status updates have no implementation yet. The contract
     // is the SDK's call.
-    map.method::<SetStatusRequest, bool>("runtime.setStatus", set_status);
-    map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link);
-    map.method::<ExportRequest, bool>("runtime.exportData", export_data);
-    map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data);
+    map.method::<SetStatusRequest, bool>("runtime.setStatus", set_status)
+        .guard(Guard::Cap(RUNTIME_MY_STATUS_UPDATE_CAPABILITY.clone()));
+    // Opens a browser on the executor's host.
+    map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link)
+        .guard(Guard::Operator);
+    // Read or write any path on the host and the whole executor database. A perspective export
+    // also checks the perspective's owner in the handler.
+    map.method::<ExportRequest, bool>("runtime.exportData", export_data)
+        .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
+    // An import writes rows as they are in the file: notifications with their `granted` flag
+    // and `owner_did`, users with their password hashes. Only the operator imports, as only
+    // the operator grants notifications.
+    map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data)
+        .guard(Guard::Operator);
     map.method::<NoParams, bool>("runtime.restartHolochain", restart_holochain)
-        .long();
+        .long()
+        .guard(Guard::Operator);
     map.method::<VerifySignatureRequest, bool>("runtime.verifySignature", verify_signature)
-        .read();
+        .read()
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // Always `null`, open to every caller.
     map.method::<NoParams, Option<String>>("runtime.tlsDomain", get_tls_domain)
-        .read();
+        .read()
+        .guard(Guard::Open);
+    // A user reads only its own log, and only the operator names another user's; the handler
+    // checks a named `userEmail`.
     map.method::<RuntimeComputeLogParams, Vec<ComputeLogEntry>>(
         "runtime.computeLog",
         get_compute_log,
     )
-    .read();
-    // Friends & messages
+    .read()
+    .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // Friends & messages: the friend list and the outbox belong to the main agent.
     map.method::<NoParams, Vec<String>>("runtime.friends", list_friends)
-        .read();
-    map.method::<FriendsListRequest, Vec<String>>("runtime.addFriends", add_friends);
-    map.method::<FriendsListRequest, Vec<String>>("runtime.removeFriends", remove_friends);
-    // Always errors: friend status has no implementation yet.
+        .read()
+        .guard(Guard::Executor(RUNTIME_FRIENDS_READ_CAPABILITY.clone()));
+    map.method::<FriendsListRequest, Vec<String>>("runtime.addFriends", add_friends)
+        .guard(Guard::Executor(RUNTIME_FRIENDS_CREATE_CAPABILITY.clone()));
+    map.method::<FriendsListRequest, Vec<String>>("runtime.removeFriends", remove_friends)
+        .guard(Guard::Executor(RUNTIME_FRIENDS_DELETE_CAPABILITY.clone()));
+    // Always errors: friend status has no implementation yet. Users get the 501 too.
     map.method::<RuntimeFriendStatusParams, Option<PerspectiveExpression>>(
         "runtime.friendStatus",
         get_friend_status,
     )
-    .read();
+    .read()
+    .guard(Guard::Cap(RUNTIME_FRIEND_STATUS_READ_CAPABILITY.clone()));
     map.method::<RuntimeSendFriendMessageParams, bool>(
         "runtime.sendFriendMessage",
         send_friend_message,
-    );
-    // Always empty: the inbox has no implementation yet.
+    )
+    .guard(Guard::Executor(RUNTIME_MESSAGES_CREATE_CAPABILITY.clone()));
+    // Always empty: the inbox has no implementation yet. Users get the empty list too.
     map.method::<NoParams, Vec<PerspectiveExpression>>("runtime.inbox", get_inbox)
-        .read();
+        .read()
+        .guard(Guard::Cap(RUNTIME_MESSAGES_READ_CAPABILITY.clone()));
     map.method::<NoParams, Vec<SentMessage>>("runtime.outbox", get_outbox)
-        .read();
-    // Notifications
-    map.method::<NoParams, Vec<Notification>>("runtime.notifications", list_notifications)
-        .read();
-    map.method::<NotificationInput, String>("runtime.createNotification", create_notification);
+        .read()
+        .guard(Guard::Executor(RUNTIME_MESSAGES_READ_CAPABILITY.clone()));
+    // Notifications: each caller's own (`notification_dids`); the handlers check the
+    // perspectives a notification names and who may change a stored one.
+    map.method::<NoParams, Vec<NotificationView>>("runtime.notifications", list_notifications)
+        .read()
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+    map.method::<NotificationInput, String>("runtime.createNotification", create_notification)
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<RuntimeUpdateNotificationParams, bool>(
         "runtime.updateNotification",
         update_notification,
-    );
+    )
+    .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+    // Approving a notification is the operator's: an app must not approve the notification
+    // it created, and a managed user holds no admin credential.
     map.method::<RuntimeGrantNotificationParams, bool>(
         "runtime.grantNotification",
         grant_notification,
-    );
+    )
+    .guard(Guard::Operator);
     map.method::<RuntimeNotificationIdParams, bool>(
         "runtime.deleteNotification",
         delete_notification,
-    );
-    // Link language templates
-    map.method::<NoParams, Vec<String>>(
+    )
+    .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+    // Link language templates, with their metas. The executor's list, which users read too.
+    map.method::<NoParams, Vec<LanguageMeta>>(
         "runtime.linkLanguageTemplates",
         get_link_language_templates,
     )
-    .read();
+    .read()
+    .guard(Guard::Cap(
+        RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY.clone(),
+    ));
+    // The executor's templates, offered to every user.
     map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.addLinkLanguageTemplates",
         add_link_language_templates,
-    );
+    )
+    .guard(Guard::Executor(
+        RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY.clone(),
+    ));
     map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.removeLinkLanguageTemplates",
         remove_link_language_templates,
-    );
-    // Holochain
+    )
+    .guard(Guard::Executor(
+        RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY.clone(),
+    ));
+    // Holochain. The conductor's peer records and metrics, which users read too.
     map.method::<NoParams, Vec<String>>("runtime.hcAgentInfos", get_hc_agent_infos)
-        .read();
-    map.method::<AddAgentInfosRequest, bool>("runtime.addHcAgentInfos", add_hc_agent_infos);
+        .read()
+        .guard(Guard::Cap(RUNTIME_HC_AGENT_INFO_READ_CAPABILITY.clone()));
+    // Injects peer records into the executor's Holochain conductor.
+    map.method::<AddAgentInfosRequest, bool>("runtime.addHcAgentInfos", add_hc_agent_infos)
+        .guard(Guard::Executor(
+            RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY.clone(),
+        ));
     map.method::<NoParams, String>("runtime.networkMetrics", get_network_metrics)
-        .read();
-    // Hosting flags
+        .read()
+        .guard(Guard::Cap(RUNTIME_HC_AGENT_INFO_READ_CAPABILITY.clone()));
+    // Hosting flags. Every caller may read it, with or without capabilities.
     map.method::<NoParams, bool>("runtime.freeHostingEnabled", get_free_hosting_enabled)
-        .read();
+        .read()
+        .guard(Guard::Open);
     map.method::<RuntimeSetFreeHostingEnabledParams, bool>(
         "runtime.setFreeHostingEnabled",
         set_free_hosting_enabled,
-    );
+    )
+    // A billing decision for the whole executor: the operator, or a grant on the main agent
+    // that holds every capability (#1328). An app with a narrower grant gets 403.
+    .guard(Guard::Executor(ALL_CAPABILITY.clone()));
+    // The executor's rates and Unyt version, which users read too.
     map.method::<NoParams, Vec<HostRate>>("runtime.hostRates", get_host_rates)
-        .read();
-    map.method::<SetHostRatesRequest, bool>("runtime.setHostRates", set_host_rates);
+        .read()
+        .guard(Guard::Cap(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
+    map.method::<SetHostRatesRequest, bool>("runtime.setHostRates", set_host_rates)
+        .guard(Guard::Operator);
     map.method::<SetUnytMembraneProofRequest, bool>(
         "runtime.setUnytMembraneProof",
         set_unyt_membrane_proof,
-    );
+    )
+    .guard(Guard::Operator);
     map.method::<NoParams, UnytVersionInfo>("runtime.unytVersionInfo", unyt_version_info)
-        .read();
-    // Always error: the remaining unyt endpoints have no implementation yet.
+        .read()
+        .guard(Guard::Cap(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
+    // Always error: the remaining unyt endpoints have no implementation yet. The operator
+    // gets the 501, every other caller the guard's 403.
+    // Operator until implemented: set the real guard with the handler.
     map.method::<NoParams, ()>("runtime.unytAgentKey", stub_not_impl)
-        .read();
-    map.method::<RuntimeUnytSendHotParams, ()>("runtime.unytSendHot", stub_not_impl);
+        .read()
+        .guard(Guard::Operator);
+    map.method::<RuntimeUnytSendHotParams, ()>("runtime.unytSendHot", stub_not_impl)
+        .guard(Guard::Operator);
     map.method::<NoParams, ()>("runtime.unytWalletBalance", stub_not_impl)
-        .read();
+        .read()
+        .guard(Guard::Operator);
     map.method::<RuntimeUnytWalletHistoryParams, ()>("runtime.unytWalletHistory", stub_not_impl)
-        .read();
+        .read()
+        .guard(Guard::Operator);
     map.method::<NoParams, ()>("runtime.unytHotAgentPubkey", stub_not_impl)
-        .read();
-    map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl);
+        .read()
+        .guard(Guard::Operator);
+    map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl)
+        .guard(Guard::Operator);
 }
 
 // ── Contracts ──
@@ -861,7 +939,7 @@ pub struct RuntimeUpdateNotificationParams {
     pub id: String,
     #[serde(flatten)]
     #[ts(flatten)]
-    pub notification: NotificationInput,
+    pub notification: NotificationUpdateInput,
 }
 
 #[derive(Deserialize, TS)]

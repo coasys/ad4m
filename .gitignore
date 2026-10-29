@@ -7,6 +7,7 @@
 !executor/scripts/*.js
 !skills/ad4m/waker/*.js
 !bootstrap-languages/local/*.js
+!rust-executor/src/tool_bundles/*.js
 bootstrap-languages/local/dist/
 build/*
 node_modules
@@ -97,3 +98,6 @@ rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs
 .overnight-status/
 .codegraph/
 .graphcoder/
+
+# Multi-machine verification config (contains SSH hosts / network details)
+tests/js/helpers/sfu/multi-machine.config.json

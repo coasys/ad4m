@@ -18,7 +18,9 @@ pub struct AuthInfo {
     pub app_url: Option<String>,
     pub app_icon_path: Option<String>,
     pub capabilities: Option<Vec<Capability>>,
-    pub user_email: Option<String>, // Email field for multi-user tokens
+    /// The user a multi-user token is minted for: the login name of a managed agent's
+    /// account. The token's `sub` carries the agent's DID; this stays as the account's name.
+    pub user_email: Option<String>,
 }
 
 impl TryFrom<crate::types::AuthInfoInput> for AuthInfo {
@@ -42,7 +44,7 @@ impl TryFrom<crate::types::AuthInfoInput> for AuthInfo {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Capability {
     pub with: Resource,
@@ -58,7 +60,7 @@ impl From<crate::types::CapabilityInput> for Capability {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub domain: String,
@@ -77,20 +79,24 @@ impl From<crate::types::ResourceInput> for Resource {
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct Claims {
     iss: String,
-    pub sub: Option<String>, // User email - make public so we can access it
+    /// The managed agent a user token acts as: its DID.
+    pub sub: Option<String>,
     aud: String,
     exp: u64,
     iat: u64,
     nonce: String,
-    pub capabilities: AuthInfo,
+    // Tokens issued before grants also carry `capabilities` (the app's `AuthInfo`). Serde
+    // skips the unknown field, so they decode and are then refused for lack of a grant.
 }
 
 impl Claims {
+    /// Claims for a token that the main agent's key `issuer` signs, naming the managed agent
+    /// `sub` (`None`: the main agent).
     pub fn new(
         issuer: String,
         audience: String,
         expiration_time: u64,
-        capabilities: AuthInfo,
+        sub: Option<String>,
     ) -> Self {
         let now = SystemTime::now();
         let unix_timestamp = now
@@ -102,12 +108,31 @@ impl Claims {
 
         Claims {
             iss: issuer,
-            sub: capabilities.user_email.clone(), // Set sub to user email
+            sub,
             aud: audience,
             exp: unix_timestamp + expiration_time,
             iat: unix_timestamp,
             nonce,
-            capabilities,
         }
+    }
+
+    /// The DID of the key that signed the token.
+    pub fn issuer(&self) -> &str {
+        &self.iss
+    }
+
+    /// The token's id: a fresh v4 UUID per token.
+    pub fn nonce(&self) -> &str {
+        &self.nonce
+    }
+
+    /// Unix time (seconds) after which the token no longer validates.
+    pub fn expires_at(&self) -> u64 {
+        self.exp
+    }
+
+    /// Unix time (seconds) at which the token was issued.
+    pub fn issued_at(&self) -> u64 {
+        self.iat
     }
 }

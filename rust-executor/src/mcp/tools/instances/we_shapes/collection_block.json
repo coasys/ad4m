@@ -1,0 +1,628 @@
+{
+  "node_shape_uri": "we://CollectionBlockShape",
+  "target_class": "we://CollectionBlock",
+  "parent_shapes": [
+    "we://WeNodeShape"
+  ],
+  "properties": [
+    {
+      "path": "we://flag",
+      "name": "flag",
+      "datatype": "xsd://string",
+      "min_count": 1,
+      "max_count": 1,
+      "has_value": "we://collection_block",
+      "writable": false
+    },
+    {
+      "path": "we://kind",
+      "name": "kind",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://kind",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://mode",
+      "name": "mode",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://mode",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://title",
+      "name": "title",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://title",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://description",
+      "name": "description",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://description",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://slug",
+      "name": "slug",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://slug",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://editor_state",
+      "name": "editorState",
+      "max_count": 1,
+      "writable": true,
+      "resolve_language": "QmzSYwdFileStorageLanguagePlaceholder",
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://editor_state",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://text_content",
+      "name": "textContent",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://text_content",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://version",
+      "name": "version",
+      "datatype": "xsd://decimal",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://version",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://source_ref",
+      "name": "sourceRef",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://source_ref",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://source_name",
+      "name": "sourceName",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://source_name",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://auto_extract",
+      "name": "autoExtract",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://auto_extract",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://extraction_targets",
+      "name": "extractionTargets",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://extraction_targets",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://response",
+      "name": "responses",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://response",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://response",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true
+    },
+    {
+      "path": "we://response",
+      "name": "respondsTo",
+      "node_kind": "IRI",
+      "max_count": 1,
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://response",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://response",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "belongsToOne"
+    },
+    {
+      "path": "we://thread",
+      "name": "thread",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://thread",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://thread",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true
+    },
+    {
+      "path": "we://thread",
+      "name": "inThread",
+      "node_kind": "IRI",
+      "max_count": 1,
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://thread",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://thread",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "belongsToOne"
+    },
+    {
+      "path": "we://child",
+      "name": "partOf",
+      "node_kind": "IRI",
+      "max_count": 1,
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://child",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://child",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "belongsToOne"
+    },
+    {
+      "path": "we://extracted",
+      "name": "extractedFrom",
+      "node_kind": "IRI",
+      "max_count": 1,
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://extracted",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://extracted",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "belongsToOne"
+    },
+    {
+      "path": "we://signal",
+      "name": "signals",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://signal",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://signal",
+          "target": "value"
+        }
+      ],
+      "class": "ad4m://SignalShape",
+      "relation_kind": "hasMany",
+      "collection": true,
+      "target_class_name": "Signal"
+    },
+    {
+      "path": "we://participant",
+      "name": "participants",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://participant",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://participant",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true
+    },
+    {
+      "path": "we://mention",
+      "name": "mentions",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://mention",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://mention",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true
+    },
+    {
+      "path": "we://child",
+      "name": "children",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://child",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://child",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true,
+      "ordering": "linkedList"
+    },
+    {
+      "path": "we://arranges",
+      "name": "arranges",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://arranges",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://arranges",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true,
+      "ordering": "linkedList"
+    },
+    {
+      "path": "we://gathers",
+      "name": "gathers",
+      "node_kind": "IRI",
+      "max_count": 1,
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://gathers",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://gathers",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasOne"
+    },
+    {
+      "path": "we://board",
+      "name": "board",
+      "node_kind": "IRI",
+      "max_count": 1,
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://board",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://board",
+          "target": "value"
+        }
+      ],
+      "getter": "SELECT ?target WHERE { <Base> <we://board> ?target . ?target <we://flag> <we://collection_block> . }",
+      "conformance_conditions": [
+        {
+          "type": "flag",
+          "predicate": "we://flag",
+          "value": "we://collection_block"
+        }
+      ],
+      "class": "we://CollectionBlockShape",
+      "relation_kind": "hasOne",
+      "target_class_name": "CollectionBlock"
+    },
+    {
+      "path": "we://extraction_pass_record",
+      "name": "extractionPasses",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://extraction_pass_record",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://extraction_pass_record",
+          "target": "value"
+        }
+      ],
+      "class": "ad4m://ExtractionPassShape",
+      "relation_kind": "hasMany",
+      "collection": true,
+      "target_class_name": "ExtractionPass"
+    },
+    {
+      "path": "we://extracted",
+      "name": "extracted",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://extracted",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://extracted",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true
+    },
+    {
+      "path": "we://recognised",
+      "name": "recognised",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://recognised",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://recognised",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true
+    },
+    {
+      "path": "we://extraction_amendment",
+      "name": "amendments",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://extraction_amendment",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://extraction_amendment",
+          "target": "value"
+        }
+      ],
+      "class": "ad4m://ExtractionAmendmentShape",
+      "relation_kind": "hasMany",
+      "collection": true,
+      "target_class_name": "ExtractionAmendment"
+    },
+    {
+      "path": "ad4m://collection_order",
+      "name": "_collectionOrder",
+      "node_kind": "IRI"
+    }
+  ],
+  "constructor_actions": [
+    {
+      "action": "addLink",
+      "source": "this",
+      "predicate": "we://flag",
+      "target": "we://collection_block"
+    }
+  ],
+  "destructor_actions": [
+    {
+      "action": "removeLink",
+      "source": "this",
+      "predicate": "we://flag",
+      "target": "*"
+    }
+  ]
+}

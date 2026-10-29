@@ -6,10 +6,15 @@
  *
  * The AD4M executor discards the return value of `perspectiveSyncSync()`.
  * The *only* way an inbound link becomes queryable is `emitPerspectiveDiff`.
- * `applyInboundWireDiff` below is the single choke point every inbound
- * diff — HTTP catch-up batch entries AND WebSocket `"diff"` pushes alike —
- * must funnel through, and it is the only function in this module that
- * calls `deps().emitDiff`. Do not add a second inbound-diff code path.
+ * Every inbound link — HTTP catch-up entries, WebSocket `"diff"` pushes and
+ * the startup `/render` snapshot alike — goes through `openOrHold`, and every
+ * change to the store from them goes through `applyAndEmit`, the only
+ * function in this module that calls `deps().emitDiff`. It emits exactly what
+ * changed in the store, so a link is emitted once however often it arrives.
+ *
+ * A wire link this agent holds no key for is never dropped: it is kept under
+ * `held/` in the store and opened by `retryHeld` once a key opens it. So the
+ * sequence cursor may move past it. Do not add a second inbound-diff path.
  */
 
 import * as store from "./store.js";
@@ -24,63 +29,40 @@ import type {
     WirePerspectiveDiff,
 } from "./types.js";
 import { isEncryptedLinkData } from "./types.js";
-import { decryptLinkFromWire, encryptLinkForWire, latestKeyVersion, statusField, type KeyRing } from "./encryption.js";
+import {
+    decryptLinkFromWire,
+    encryptLinkForWire,
+    latestKeyVersion,
+    statusField,
+    wireLinkHash,
+    type KeyRing,
+} from "./encryption.js";
 
 export interface SyncDeps {
     config: RoomConfig;
     /** Resolves to a guaranteed-fresh bearer token, re-authenticating as needed. */
     getToken: () => Promise<string>;
+    /** Drops the cached token so the next getToken() re-authenticates. Called
+     *  when the server answers 401: it revoked or no longer knows the session. */
+    invalidateToken?: () => void;
     /** MUST be called for every inbound diff — see module doc above. */
     emitDiff: (diff: PerspectiveDiff) => void;
     emitSyncState?: (state: string) => void;
     /** Returns the current key ring, or null for a plaintext (non-E2E) room. */
     getKeyRing: () => KeyRing | null;
-    /** Re-fetches the key ring from the server. Returns true if new versions
-     *  were obtained, false if refreshed but nothing new, or null if the
-     *  call was skipped (e.g. cooldown). */
-    refreshKeyRing?: () => Promise<boolean | null>;
-    /** Called after every successful sync cycle. The admin uses this to grant
-     *  historical keys to members who joined while WS was down — the periodic
-     *  HTTP sync is the fallback discovery path when onPeerJoined never fires. */
+    /** Re-reads the key ring from the server. Catch-up calls it while links
+     *  wait for a key, then retries them (`retryHeld`) whatever it found. */
+    refreshKeyRing?: () => Promise<void>;
+    /** Called after every successful sync cycle. A member holding keys uses
+     *  it to grant them to members lacking them — the periodic HTTP sync is
+     *  the fallback discovery path when onPeerJoined never fires. */
     onPostSync?: () => Promise<void>;
 }
 
 let _deps: SyncDeps | null = null;
 
-/**
- * Key versions that appeared in a catch-up batch but could not be
- * decrypted because the key ring lacked them at the time. Persists
- * across sync cycles: because the sequence cursor advances past
- * encrypted diffs even when links get skipped, a failed
- * refreshKeyRing on the FIRST attempt would otherwise leave those
- * links permanently unreachable — subsequent syncs see empty diffs
- * (cursor already past) and never trigger another refresh. By
- * tracking the missing versions here, every subsequent
- * performSync/catchUp retries the refresh until it succeeds.
- */
-let _pendingMissingVersions = new Set<number>();
-
 export function initSync(deps: SyncDeps): void {
     _deps = deps;
-    _pendingMissingVersions = new Set();
-}
-
-/**
- * Register key versions that could not be decrypted so the next
- * HTTP sync cycle retries the key-ring refresh.  The WebSocket
- * `onDiff` path needs this: it calls `applyInboundWireDiff`
- * directly (outside `catchUp`), so missed versions never reach the
- * `_pendingMissingVersions` set that `catchUp` checks.  Without
- * this bridge the cursor advances past the encrypted diffs and no
- * retry ever triggers.
- */
-export function trackMissingKeyVersions(versions: Set<number>): void {
-    for (const v of versions) _pendingMissingVersions.add(v);
-}
-
-/** Clear the pending-missing-versions set after successful recovery. */
-export function clearPendingMissingVersions(): void {
-    _pendingMissingVersions.clear();
 }
 
 function deps(): SyncDeps {
@@ -88,6 +70,23 @@ function deps(): SyncDeps {
         throw new Error("sync module not initialized. Call initSync() during language init().");
     }
     return _deps;
+}
+
+/**
+ * Runs `fn` with a bearer token. A 401 means the server dropped the session
+ * (revocation, expiry sweep, data reset), so the cached token is discarded
+ * and `fn` runs once more with a fresh one. Without this the dead token is
+ * reused until the executor restarts and nothing reaches the server.
+ */
+async function withToken<T>(fn: (token: string) => Promise<T>): Promise<T> {
+    const d = deps();
+    try {
+        return await fn(await d.getToken());
+    } catch (err) {
+        if (!(err instanceof api.ApiError) || err.status !== 401 || !d.invalidateToken) throw err;
+        d.invalidateToken();
+        return fn(await d.getToken());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,20 +112,31 @@ function toWireLink(link: LinkExpression): WireLinkExpression {
     return encryptLinkForWire(link, key, version);
 }
 
-function fromWireLink(wireLink: WireLinkExpression): LinkExpression {
-    const keyRing = deps().getKeyRing();
-    if (isEncryptedLinkData(wireLink.data) && keyRing) {
-        return decryptLinkFromWire(wireLink, keyRing);
-    }
-    if (isEncryptedLinkData(wireLink.data) && !keyRing) {
-        // Throw the same shape as a missing-version error so
-        // fromWireDiff() catches it and skips the link instead of
-        // crashing the entire sync. Recovery happens via the
-        // refreshKeyRing → re-bootstrap path once the admin grants
-        // keys. The version from the wire link (default 1) ensures
-        // the refresh request knows which version(s) to ask for.
-        const v = wireLink.key_version ?? 1;
-        throw new Error(`no key for version ${v} (key ring not yet available)`);
+/** A wire link the key it names does not open. */
+const UNOPENABLE = Symbol("unopenable");
+
+/**
+ * The link a wire link carries, or null when it is encrypted with a key
+ * version this agent does not hold (yet). A link the key it names does not
+ * open (malformed ciphertext or payload) is logged and `UNOPENABLE`: a key
+ * version is fixed by its rotation's commitment, so no later key opens it
+ * either, and it costs that one link, not the diff, the catch-up batch or
+ * the held links around it.
+ */
+function openWireLink(wireLink: WireLinkExpression): LinkExpression | null | typeof UNOPENABLE {
+    if (isEncryptedLinkData(wireLink.data)) {
+        const keyRing = deps().getKeyRing();
+        const version = wireLink.key_version ?? 1;
+        if (!keyRing || !keyRing.has(version)) return null;
+        try {
+            return decryptLinkFromWire(wireLink, keyRing);
+        } catch (err) {
+            console.error(
+                `[server-link-language] skipping link ${heldId(wireLink)}: key version ${version} does not open it:`,
+                err instanceof Error ? err.message : err,
+            );
+            return UNOPENABLE;
+        }
     }
     return {
         author: wireLink.author ?? "",
@@ -142,64 +152,6 @@ function toWireDiff(diff: PerspectiveDiff): WirePerspectiveDiff {
         additions: diff.additions.map(toWireLink),
         removals: diff.removals.map(toWireLink),
     };
-}
-
-interface FromWireDiffResult {
-    diff: PerspectiveDiff;
-    /** Key versions that appeared in the wire batch but could not be
-     *  decrypted because the key ring lacks them. Empty when everything
-     *  decrypted successfully (or the room uses plaintext). */
-    missingVersions: Set<number>;
-}
-
-/**
- * Converts a wire diff to a local diff. When a link cannot be decrypted
- * — whether the key ring lacks that specific version OR the key ring
- * has not arrived yet (freshly joined member awaiting grant) — the link
- * gets **skipped** (not thrown) and its `key_version` is collected into
- * `missingVersions`. This prevents a single undecryptable link from
- * blocking the entire sync cursor. Recovery happens via
- * refreshKeyRing → re-bootstrap once the admin grants keys.
- */
-function fromWireDiff(wire: WirePerspectiveDiff): FromWireDiffResult {
-    const missingVersions = new Set<number>();
-    const additions: LinkExpression[] = [];
-    const removals: LinkExpression[] = [];
-
-    for (const wireLink of wire.additions ?? []) {
-        try {
-            additions.push(fromWireLink(wireLink));
-        } catch (err) {
-            if (isMissingVersionError(err)) {
-                missingVersions.add(extractMissingVersion(wireLink));
-            } else {
-                throw err; // non-crypto errors propagate
-            }
-        }
-    }
-    for (const wireLink of wire.removals ?? []) {
-        try {
-            removals.push(fromWireLink(wireLink));
-        } catch (err) {
-            if (isMissingVersionError(err)) {
-                missingVersions.add(extractMissingVersion(wireLink));
-            } else {
-                throw err;
-            }
-        }
-    }
-
-    return { diff: { additions, removals }, missingVersions };
-}
-
-/** Matches the error shape thrown by decryptLinkFromWire when the key ring
- *  has entries but lacks the specific version needed. */
-function isMissingVersionError(err: unknown): boolean {
-    return err instanceof Error && /no key for version \d+/.test(err.message);
-}
-
-function extractMissingVersion(wireLink: WireLinkExpression): number {
-    return wireLink.key_version ?? 1;
 }
 
 function normalizeSyncEntry(
@@ -219,31 +171,109 @@ function normalizeSyncEntry(
 }
 
 // ---------------------------------------------------------------------------
-// Inbound — the single choke point (see module doc)
+// Inbound — the single path (see module doc)
 // ---------------------------------------------------------------------------
 
-export interface ApplyResult {
-    diff: PerspectiveDiff;
-    /** Key versions that could not be decrypted — if non-empty, some links
-     *  were skipped and a key ring refresh + re-bootstrap should follow. */
-    missingVersions: Set<number>;
+/** The key a held wire link is stored under: its link_hash, so a later op on
+ *  the same link replaces it. */
+function heldId(wireLink: WireLinkExpression): string {
+    if (wireLink.link_hash) return wireLink.link_hash;
+    const data = wireLink.data as { nonce?: string };
+    return `nonce-${data.nonce ?? ""}`;
 }
 
-export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: number, revision: string): ApplyResult {
-    const { diff, missingVersions } = fromWireDiff(wireDiff);
-
-    if (missingVersions.size > 0) {
-        console.warn(
-            `[server-link-language] skipped ${missingVersions.size} undecryptable key version(s): ` +
-            `${[...missingVersions].join(", ")} — will request key grant`,
-        );
+/**
+ * Opens `wireLink`, or holds it until a key opens it. Either way the newest
+ * op on a link wins: opening one drops any older held op on the same link.
+ */
+function openOrHold(wireLink: WireLinkExpression, op: store.HeldOp): LinkExpression | null {
+    const link = openWireLink(wireLink);
+    if (link === UNOPENABLE) return null;
+    if (!link) {
+        store.holdLink(heldId(wireLink), op, wireLink);
+        return null;
     }
+    store.releaseHeld(wireLinkHash(link));
+    return link;
+}
 
-    store.applyDiff(diff);
+/**
+ * Applies `diff` to the store and emits what it changed: additions not yet
+ * stored, removals of stored links. The ONLY caller of `emitDiff` (see the
+ * module doc). Returns the emitted diff.
+ */
+function applyAndEmit(diff: PerspectiveDiff): PerspectiveDiff {
+    const added = new Map<string, LinkExpression>();
+    const removals: LinkExpression[] = [];
+    for (const link of diff.additions) {
+        if (!store.hasLink(link)) {
+            store.putLink(link);
+            added.set(store.hashLink(link), link);
+        }
+    }
+    for (const link of diff.removals) {
+        if (!store.hasLink(link)) continue;
+        store.removeLink(link);
+        // Added and removed in one diff: the executor never needs to see it.
+        if (!added.delete(store.hashLink(link))) removals.push(link);
+    }
+    const emitted = { additions: [...added.values()], removals };
+    if (emitted.additions.length > 0 || emitted.removals.length > 0) {
+        deps().emitDiff(emitted); // <-- CRITICAL. Do not remove. Do not bypass.
+    }
+    return emitted;
+}
+
+function openOrHoldDiff(wire: WirePerspectiveDiff): PerspectiveDiff {
+    const additions: LinkExpression[] = [];
+    const removals: LinkExpression[] = [];
+    for (const wireLink of wire.additions ?? []) {
+        const link = openOrHold(wireLink, "add");
+        if (link) additions.push(link);
+    }
+    for (const wireLink of wire.removals ?? []) {
+        const link = openOrHold(wireLink, "remove");
+        if (link) removals.push(link);
+    }
+    return { additions, removals };
+}
+
+/** One inbound diff (a catch-up entry or a WebSocket push) at `sequence`.
+ *  Returns what it changed, which is what was emitted. */
+export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: number, revision: string): PerspectiveDiff {
+    const emitted = applyAndEmit(openOrHoldDiff(wireDiff));
     if (revision) store.setRevision(revision);
     if (Number.isFinite(sequence)) store.setSequence(sequence);
-    deps().emitDiff(diff); // <-- CRITICAL. Do not remove. Do not bypass.
-    return { diff, missingVersions };
+    return emitted;
+}
+
+/** Whether inbound links wait for a key this agent does not hold yet. */
+export function hasHeldLinks(): boolean {
+    return store.heldLinks().length > 0;
+}
+
+/**
+ * Opens every held link the current key ring opens, applies and emits them.
+ * Call it whenever the key ring is loaded; catch-up calls it every cycle.
+ */
+export function retryHeld(): PerspectiveDiff {
+    if (!deps().getKeyRing()) return { additions: [], removals: [] };
+    const additions: LinkExpression[] = [];
+    const removals: LinkExpression[] = [];
+    for (const held of store.heldLinks()) {
+        const link = openWireLink(held.link);
+        if (!link) continue;
+        // Opened, or never will be: either way it no longer waits for a key.
+        store.releaseHeld(held.id);
+        if (link === UNOPENABLE) continue;
+        (held.op === "add" ? additions : removals).push(link);
+    }
+    if (additions.length + removals.length > 0) {
+        console.log(
+            `[server-link-language] opened ${additions.length + removals.length} held link(s) with the key ring`,
+        );
+    }
+    return applyAndEmit({ additions, removals });
 }
 
 // ---------------------------------------------------------------------------
@@ -254,15 +284,26 @@ export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: nu
  * Direct single-shot commit. Callers that need error propagation (test
  * harnesses, non-batching write paths) can await this. Used by
  * `enqueueCommitBatched` below to send the accumulated batch.
+ *
+ * The store changes only after the server accepted the diff, so a failed
+ * POST leaves no local-only links. Nothing is emitted back: the executor
+ * committed these links and already holds them. When the server put the
+ * commit right after our cursor, the cursor moves past it so catch-up does
+ * not fetch our own links back (otherwise another agent's diff is between).
  */
 export async function commit(diff: PerspectiveDiff): Promise<void> {
-    const { config, getToken } = deps();
-    const token = await getToken();
+    const { config } = deps();
     console.log(
         `[server-link-language] POST /commit: ${diff.additions.length} adds, ` +
         `${diff.removals.length} removes → room=${config.roomId}`,
     );
-    await api.commitDiff(config, token, toWireDiff(diff));
+    const wire = toWireDiff(diff);
+    const res = await withToken((token) => api.commitDiff(config, token, wire));
+    store.applyDiff(diff);
+    if (typeof res.sequence === "number" && res.sequence === store.getSequence() + 1) {
+        store.setSequence(res.sequence);
+        if (res.revision) store.setRevision(res.revision);
+    }
     emitSyncStateSafe("Synced");
 }
 
@@ -541,35 +582,40 @@ export async function _awaitInflightForTests(): Promise<void> {
 // Cold-start bootstrap — full snapshot instead of replaying every diff
 // ---------------------------------------------------------------------------
 
+/**
+ * Loads the server's current link set (`/render`) as the authoritative state:
+ * stored links it lacks are removed, its links are added, both emitted. Held
+ * links from before are dropped (the snapshot supersedes them); the
+ * snapshot's own links that no key opens yet are held. A stored link whose
+ * encrypted copy is held stays: the key ring not being loaded yet must not
+ * delete links the executor holds.
+ */
 export async function bootstrap(): Promise<void> {
-    const { config, getToken } = deps();
-    const token = await getToken();
+    const { config } = deps();
 
-    const rendered = await api.fetchRender(config, token);
+    const rendered = await withToken((token) => api.fetchRender(config, token));
 
-    // Clear stale pending versions before re-processing the full snapshot.
-    // fromWireDiff will re-track any versions that remain missing.
-    _pendingMissingVersions.clear();
-
-    const renderDiff: WirePerspectiveDiff = { additions: rendered.links, removals: [] };
-    const { diff, missingVersions } = fromWireDiff(renderDiff);
-
-    if (missingVersions.size > 0) {
+    store.clearHeld();
+    const additions: LinkExpression[] = [];
+    const heldIds = new Set<string>();
+    for (const wireLink of rendered.links) {
+        const link = openOrHold(wireLink, "add");
+        if (link) additions.push(link);
+        else heldIds.add(heldId(wireLink));
+    }
+    if (heldIds.size > 0) {
         console.warn(
-            `[server-link-language] bootstrap: skipped ${missingVersions.size} undecryptable ` +
-            `key version(s): ${[...missingVersions].join(", ")} — will recover after key grant`,
+            `[server-link-language] bootstrap: ${heldIds.size} link(s) wait for a room key this agent ` +
+            "does not hold yet; they are applied once it does",
         );
-        trackMissingKeyVersions(missingVersions);
     }
 
-    // Replace the local link set atomically: remove any stale links left
-    // from a previous session, then apply the authoritative server snapshot.
-    // Without this, links deleted while the language was stopped would
-    // remain visible locally.
-    const existing = store.allLinks();
-    store.applyDiff({ additions: [], removals: existing.links });
-    store.applyDiff({ additions: diff.additions, removals: [] });
+    const inSnapshot = new Set(additions.map(store.hashLink));
+    const removals = store
+        .allLinks()
+        .links.filter((link) => !inSnapshot.has(store.hashLink(link)) && !heldIds.has(wireLinkHash(link)));
 
+    applyAndEmit({ additions, removals });
     if (rendered.revision) store.setRevision(rendered.revision);
     if (typeof rendered.sequence === "number") store.setSequence(rendered.sequence);
 }
@@ -581,27 +627,29 @@ export async function bootstrap(): Promise<void> {
 /**
  * Fetches everything since our last known sequence and applies it.
  * Idempotent by construction: `since` only advances after a diff is
- * successfully applied, so a WebSocket that already delivered everything
+ * applied (or held), so a WebSocket that already delivered everything
  * live simply gets back an empty `diffs[]` here — there's no separate
- * "skip because WS is connected" branch to get wrong.
+ * "skip because WS is connected" branch to get wrong. While links are held
+ * for a key, it re-reads the key ring; it then retries the held links
+ * against whatever ring it has. Returns what it emitted.
  */
 export async function catchUp(): Promise<PerspectiveDiff> {
-    const { config, getToken } = deps();
-    const token = await getToken();
+    const { config } = deps();
     const since = store.getSequence();
-    const res = await api.fetchSync(config, token, since);
+    const res = await withToken((token) => api.fetchSync(config, token, since));
     console.log(
         `[server-link-language] catchUp: since=${since}, received ${res.diffs.length} diff(s), ` +
         `revision=${res.revision}, sequence=${res.sequence}`,
     );
 
-    let last: PerspectiveDiff = { additions: [], removals: [] };
-    const allMissingVersions = new Set<number>();
+    const emitted: PerspectiveDiff = { additions: [], removals: [] };
+    const collect = (diff: PerspectiveDiff) => {
+        emitted.additions.push(...diff.additions);
+        emitted.removals.push(...diff.removals);
+    };
     for (const rawEntry of res.diffs) {
         const entry = normalizeSyncEntry(rawEntry, res.revision, res.sequence);
-        const result = applyInboundWireDiff(entry.diff, entry.sequence, entry.revision);
-        last = result.diff;
-        for (const v of result.missingVersions) allMissingVersions.add(v);
+        collect(applyInboundWireDiff(entry.diff, entry.sequence, entry.revision));
     }
 
     if (res.diffs.length === 0 && res.revision) {
@@ -609,47 +657,18 @@ export async function catchUp(): Promise<PerspectiveDiff> {
         store.setSequence(res.sequence);
     }
 
-    // Merge any newly discovered missing versions into the persistent set.
-    // This set survives across sync cycles so that a failed refreshKeyRing
-    // on one cycle retries on the next — the sequence cursor has already
-    // advanced past the encrypted diffs, so subsequent catchUp() calls
-    // will see empty batches and never re-discover the same versions.
-    for (const v of allMissingVersions) _pendingMissingVersions.add(v);
-
-    // If there are ANY unresolved missing versions — from this cycle or
-    // carried over from a previous one — attempt a key ring refresh.
-    if (_pendingMissingVersions.size > 0 && _deps?.refreshKeyRing) {
-        const isRetry = allMissingVersions.size === 0;
-        console.log(
-            `[server-link-language] ${_pendingMissingVersions.size} pending missing key version(s)` +
-            `${isRetry ? " (retry from previous cycle)" : ""} — refreshing key ring…`,
-        );
+    const { refreshKeyRing } = deps();
+    if (refreshKeyRing && hasHeldLinks()) {
         try {
-            const gotNew = await _deps.refreshKeyRing();
-            if (gotNew === null) {
-                console.log(
-                    "[server-link-language] key ring refresh skipped (cooldown) — will retry next cycle",
-                );
-            } else if (gotNew) {
-                console.log("[server-link-language] key ring refreshed with new versions — re-bootstrapping");
-                await bootstrap();
-                const recovered = store.allLinks();
-                if (recovered.links.length > 0) {
-                    deps().emitDiff({ additions: recovered.links, removals: [] });
-                }
-            } else {
-                console.warn(
-                    "[server-link-language] key ring refresh returned no new versions — " +
-                    "admin has not yet granted historical keys",
-                );
-            }
+            await refreshKeyRing();
         } catch (err) {
             console.error("[server-link-language] key ring refresh failed:", err);
         }
     }
+    collect(retryHeld());
 
     emitSyncStateSafe("Synced");
-    return last;
+    return emitted;
 }
 
 /** perspective-sync.sync() (see index.ts). Never throws — sync failures

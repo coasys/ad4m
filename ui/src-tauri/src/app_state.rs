@@ -553,7 +553,10 @@ mod tests {
             (config.enable_mcp, config.mcp_port),
             (Some(true), Some(3001))
         );
-        assert_eq!(config.admin_credential.as_deref(), Some("uuid"));
+        assert!(config
+            .admin_credential
+            .as_ref()
+            .is_some_and(|c| c.expose_for_compare("uuid")));
         assert_eq!(config.run_dapp_server, Some(true));
         assert_eq!(config.auto_permit_cap_requests, None);
 

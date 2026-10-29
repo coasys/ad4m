@@ -78,6 +78,12 @@ pub(super) fn matches_where(
             continue;
         }
 
+        // A name the view answers to with nothing matches nothing, as in
+        // the store (`compile_leaf_condition`).
+        if shape.absent(prop_name).is_some() {
+            return false;
+        }
+
         if prop_name == "base" || prop_name == "id" {
             // Total over every condition shape, including the String and
             // StringArray ones the compiler usually does push to SPARQL.
@@ -451,7 +457,7 @@ pub(super) fn sort_instances(instances: &mut [Value], order: &[(String, OrderDir
 /// (`"location.name"`) traverses nested objects — if an intermediate value
 /// is an array, the first element is used for sort purposes.  Returns
 /// `Value::Null` for any missing step so unknown paths sort to the end.
-fn extract_sort_value(instance: &Value, key: &str) -> Value {
+pub(super) fn extract_sort_value(instance: &Value, key: &str) -> Value {
     if let Some(dot_pos) = key.find('.') {
         let head = &key[..dot_pos];
         let tail = &key[dot_pos + 1..];
@@ -508,6 +514,23 @@ mod tests {
     use crate::perspectives::model_query::test_helpers::*;
     use serde_json::{json, Value};
     use std::cmp::Ordering;
+
+    /// A role gate passes `equals` to `model_query` as it is (#1144), and
+    /// `WhereOps`' `deny_unknown_fields` does not refuse an unknown key there:
+    /// the object falls through to `SubClause`. What keeps the gate closed is
+    /// that a `SubClause` under a property matches no value.
+    #[test]
+    fn an_unknown_operator_key_falls_through_to_a_subclause_that_matches_nothing() {
+        let condition: WhereCondition =
+            serde_json::from_value(json!({ "gt": 1, "bogus": 2 })).expect("decodes");
+        assert!(
+            matches!(condition, WhereCondition::SubClause(_)),
+            "an unknown key falls through to SubClause, got {condition:?}"
+        );
+        for value in [json!(2), json!(5), json!("x"), json!(null)] {
+            assert!(!matches_condition(&value, &condition), "{value} matched");
+        }
+    }
 
     #[test]
     fn test_matches_condition_string() {
@@ -1213,6 +1236,7 @@ mod tests {
         ModelShape {
             target_class: "Test".to_string(),
             shape_uri: "".to_string(),
+            absent: Vec::new(),
             properties: vec![],
             include_relations: vec![],
             interpretation_hint: None,

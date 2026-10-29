@@ -378,6 +378,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     Ok(ModelShape {
         target_class,
         shape_uri,
+        absent: Vec::new(),
         properties,
         include_relations,
         interpretation_hint: class_hint,
@@ -465,7 +466,7 @@ fn parse_bool_literal_target(raw: Option<&str>) -> Option<bool> {
 }
 
 /// Decode the target of a `literal:string:<urlencoded>` link.
-fn decode_literal_string_target(raw: &str) -> String {
+pub(crate) fn decode_literal_string_target(raw: &str) -> String {
     let trimmed = raw
         .strip_prefix("literal://string:")
         .or_else(|| raw.strip_prefix("literal:string:"))
@@ -722,6 +723,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
     Ok(ModelShape {
         target_class,
         shape_uri,
+        absent: Vec::new(),
         properties,
         include_relations,
         interpretation_hint: None,

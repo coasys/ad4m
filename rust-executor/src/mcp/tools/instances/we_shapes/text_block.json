@@ -1,0 +1,393 @@
+{
+  "node_shape_uri": "we://TextBlockShape",
+  "target_class": "we://TextBlock",
+  "parent_shapes": [
+    "we://WeNodeShape"
+  ],
+  "properties": [
+    {
+      "path": "we://flag",
+      "name": "flag",
+      "datatype": "xsd://string",
+      "min_count": 1,
+      "max_count": 1,
+      "has_value": "we://text_block",
+      "writable": false
+    },
+    {
+      "path": "we://style",
+      "name": "style",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://style",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://list_item",
+      "name": "listItem",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://list_item",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://level",
+      "name": "level",
+      "datatype": "xsd://decimal",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://level",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://checked",
+      "name": "checked",
+      "datatype": "xsd://boolean",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://checked",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://align",
+      "name": "align",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://align",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://direction",
+      "name": "direction",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://direction",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://text",
+      "name": "text",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://text",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://marks",
+      "name": "marks",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://marks",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://text_source",
+      "name": "source",
+      "datatype": "xsd://string",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://text_source",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://version",
+      "name": "version",
+      "datatype": "xsd://decimal",
+      "max_count": 1,
+      "writable": true,
+      "setter": [
+        {
+          "action": "setSingleTarget",
+          "source": "this",
+          "predicate": "we://version",
+          "target": "value"
+        }
+      ]
+    },
+    {
+      "path": "we://response",
+      "name": "responses",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://response",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://response",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true
+    },
+    {
+      "path": "we://response",
+      "name": "respondsTo",
+      "node_kind": "IRI",
+      "max_count": 1,
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://response",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://response",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "belongsToOne"
+    },
+    {
+      "path": "we://thread",
+      "name": "thread",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://thread",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://thread",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true
+    },
+    {
+      "path": "we://thread",
+      "name": "inThread",
+      "node_kind": "IRI",
+      "max_count": 1,
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://thread",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://thread",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "belongsToOne"
+    },
+    {
+      "path": "we://child",
+      "name": "partOf",
+      "node_kind": "IRI",
+      "max_count": 1,
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://child",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://child",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "belongsToOne"
+    },
+    {
+      "path": "we://extracted",
+      "name": "extractedFrom",
+      "node_kind": "IRI",
+      "max_count": 1,
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://extracted",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://extracted",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "belongsToOne"
+    },
+    {
+      "path": "we://signal",
+      "name": "signals",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://signal",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://signal",
+          "target": "value"
+        }
+      ],
+      "class": "ad4m://SignalShape",
+      "relation_kind": "hasMany",
+      "collection": true,
+      "target_class_name": "Signal"
+    },
+    {
+      "path": "we://participant",
+      "name": "participants",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://participant",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://participant",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true
+    },
+    {
+      "path": "we://mention",
+      "name": "mentions",
+      "node_kind": "IRI",
+      "adder": [
+        {
+          "action": "addLink",
+          "source": "this",
+          "predicate": "we://mention",
+          "target": "value"
+        }
+      ],
+      "remover": [
+        {
+          "action": "removeLink",
+          "source": "this",
+          "predicate": "we://mention",
+          "target": "value"
+        }
+      ],
+      "relation_kind": "hasMany",
+      "collection": true
+    }
+  ],
+  "constructor_actions": [
+    {
+      "action": "addLink",
+      "source": "this",
+      "predicate": "we://flag",
+      "target": "we://text_block"
+    }
+  ],
+  "destructor_actions": [
+    {
+      "action": "removeLink",
+      "source": "this",
+      "predicate": "we://flag",
+      "target": "*"
+    }
+  ]
+}
