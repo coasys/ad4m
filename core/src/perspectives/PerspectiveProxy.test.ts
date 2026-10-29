@@ -33,6 +33,17 @@ describe('QuerySubscriptionProxy', () => {
     expect(client.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT * WHERE { ?s ?p ?o }');
   });
 
+  it('opens a model query over a class when given one', async () => {
+    const modelSubscribe = jest.fn().mockResolvedValue({ subscriptionId: 'sub-2', result: { instances: [{ id: 'a' }], totalCount: 1 }, revision: 0 });
+    const { client } = liveClient(jest.fn());
+    client.modelSubscribe = modelSubscribe;
+    const subscription = new QuerySubscriptionProxy('perspective-1', '{"limit":1}', client, 'ad4m://TextContent');
+    await subscription.subscribe();
+    expect(modelSubscribe).toHaveBeenCalledWith('perspective-1', 'ad4m://TextContent', '{"limit":1}');
+    expect(client.subscribeQuery).not.toHaveBeenCalled();
+    expect(subscription.result).toEqual({ instances: [{ id: 'a' }], totalCount: 1 });
+  });
+
   it('rejects initialized when the subscribe call fails', async () => {
     const { client } = liveClient(jest.fn().mockRejectedValue(new Error('locked')));
     const subscription = new QuerySubscriptionProxy('p', 'SELECT ?x WHERE { ?x ?p ?o }', client);

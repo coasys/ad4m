@@ -1,12 +1,22 @@
 //! Integration tests for the static `instance_*` surface, driven through
 //! the same handler methods the MCP transport dispatches to.
 
+use super::template_tools::TemplateToolParams;
 use super::*;
 use crate::mcp::server::McpContext;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::perspectives::register_perspective;
 use rmcp::handler::server::wrapper::Parameters;
-use tokio::sync::RwLock;
+
+/// A context whose MCP session presented the admin credential: the operator.
+fn admin_context(dynamic_class_tools: bool) -> McpContext {
+    McpContext::new(
+        Some("test-admin".into()),
+        crate::agent::capabilities::ListenerReach::Loopback,
+        dynamic_class_tools,
+    )
+    .with_token("test-admin")
+}
 
 /// Flux-shaped Channel: string / boolean / integer scalars, one
 /// `has_child` collection, class + property interpretation hints.
@@ -123,11 +133,7 @@ async fn setup_with(
     let (perspective, _shapes, _ctx) = setup_perspective_no_llm(classes).await;
     let uuid = perspective.persisted.lock().await.uuid.clone();
     register_perspective(uuid.clone(), perspective);
-    let handler = Ad4mMcpHandler::new(McpContext {
-        admin_credential: Some("test-admin".to_string()),
-        auth_token: Arc::new(RwLock::new(Some("test-admin".to_string()))),
-        dynamic_class_tools,
-    });
+    let handler = Ad4mMcpHandler::new(admin_context(dynamic_class_tools));
     let guard = PerspectiveGuard(uuid.clone());
     (handler, uuid, guard)
 }
@@ -239,7 +245,7 @@ const LOCAL_CACHE_SDNA: &str = r#"{
 }"#;
 
 /// `describe_perspective` is the only place a client can learn that a property
-/// stays on this node. Until `ShapeProperty` carried `local`, the model-query
+/// stays on this executor. Until `ShapeProperty` carried `local`, the model-query
 /// layer parsed the flag out of the SHACL graph and threw it away, so the
 /// description could not say it at all.
 #[tokio::test(flavor = "multi_thread")]
@@ -1279,6 +1285,124 @@ async fn instance_tools_round_trip_typed_data() {
     assert!(err.contains("Widget") && err.contains("Channel") && err.contains("Message"));
 }
 
+/// What a request without a token on a loopback listener contributes, proxied (with a
+/// forwarding header) or not.
+fn tokenless_request(proxied: bool) -> crate::mcp::tools::RequestAuth {
+    let mut request = axum::http::Request::builder();
+    if proxied {
+        request = request.header("x-forwarded-for", "203.0.113.9");
+    }
+    let (parts, _) = request
+        .extension(crate::agent::capabilities::ListenerReach::Loopback)
+        .body(())
+        .unwrap()
+        .into_parts();
+    crate::mcp::tools::RequestAuth {
+        header: None,
+        reach: Some(crate::api::auth::listener_reach(&parts)),
+    }
+}
+
+// On a loopback listener of an executor without an admin credential, a caller without a
+// token is the operator unless its request came through a proxy (#1059). What a tool resolves
+// without the request in hand (`session()` for tools/list's class tools, the login tools'
+// call without a token, `sign_in`) must read the request's reach, not the listener's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proxied_request_without_a_token_is_not_the_operator_anywhere() {
+    let (_admin, _uuid, _guard) = setup(true).await;
+    let handler = Ad4mMcpHandler::new(McpContext::new(
+        None,
+        crate::agent::capabilities::ListenerReach::Loopback,
+        true,
+    ));
+    let names = |tools: Vec<rmcp::model::Tool>| -> Vec<String> {
+        tools.iter().map(|t| t.name.to_string()).collect()
+    };
+
+    let local = handler.for_request(&tokenless_request(false));
+    assert!(local.session().await.unwrap().is_operator());
+    assert!(local.tokenless_session().unwrap().is_operator());
+    let listed = names(local.exposed_tools().await);
+    assert!(listed.iter().any(|n| n == "channel_create"), "{listed:?}");
+
+    let proxied = handler.for_request(&tokenless_request(true));
+    let err = proxied.session().await.unwrap_err();
+    assert!(err.starts_with("Authentication required"), "{err}");
+    assert!(!proxied.tokenless_session().unwrap().is_authenticated());
+    let listed = names(proxied.exposed_tools().await);
+    assert!(
+        !listed
+            .iter()
+            .any(|n| n.starts_with("channel_") || n.starts_with("message_")),
+        "a proxied caller lists the operator's classes: {listed:?}"
+    );
+}
+
+/// `tools/list` on a fresh MCP session (no remembered caller) with `header` as its
+/// `Authorization` credential, on a network listener: the names it lists.
+async fn listed_on_a_fresh_session(header: Option<&str>) -> Vec<String> {
+    let handler = Ad4mMcpHandler::new(McpContext::new(
+        Some("test-admin".into()),
+        crate::agent::capabilities::ListenerReach::Network,
+        true,
+    ));
+    listed_names(&handler, header).await
+}
+
+async fn listed_names(handler: &Ad4mMcpHandler, header: Option<&str>) -> Vec<String> {
+    let auth = crate::mcp::tools::RequestAuth {
+        header: header.map(str::to_string),
+        reach: Some(crate::agent::capabilities::ListenerReach::Network),
+    };
+    handler
+        .listed_tools(auth)
+        .await
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect()
+}
+
+fn lists_classes(names: &[String]) -> bool {
+    names
+        .iter()
+        .any(|n| n.starts_with("channel_") || n.starts_with("message_"))
+}
+
+// tools/list authenticates with its own request's header, as tools/call does: a client that
+// discovers tools before its first call sees what that credential may read, and only that.
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_list_authenticates_with_its_request_header() {
+    let (_admin, _uuid, _guard) = setup(true).await;
+
+    let listed = listed_on_a_fresh_session(Some("test-admin")).await;
+    assert!(listed.iter().any(|n| n == "channel_create"), "{listed:?}");
+
+    for header in [None, Some("not-a-credential")] {
+        let listed = listed_on_a_fresh_session(header).await;
+        assert!(
+            !lists_classes(&listed),
+            "{header:?} lists private classes: {listed:?}"
+        );
+        assert!(listed.iter().any(|n| n == "instance_create"), "{listed:?}");
+    }
+
+    // A fresh header replaces a remembered session that expired.
+    let expired = crate::agent::session::Session::for_test(
+        crate::agent::session::Principal::Agent(crate::agent::AgentContext::main_agent()),
+    )
+    .expiring_at(1);
+    let handler = Ad4mMcpHandler::new(
+        McpContext::new(
+            Some("test-admin".into()),
+            crate::agent::capabilities::ListenerReach::Network,
+            true,
+        )
+        .with_session(std::sync::Arc::new(expired)),
+    );
+    let listed = listed_names(&handler, Some("test-admin")).await;
+    assert!(listed.iter().any(|n| n == "channel_create"), "{listed:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dynamic_tools_are_hidden_unless_flag_is_set() {
     let (hidden, uuid, _guard) = setup(false).await;
@@ -1327,11 +1451,7 @@ async fn dynamic_tools_are_hidden_unless_flag_is_set() {
     assert!(text.contains("dynamicClassTools"));
 
     // Same perspective, flag on: both surfaces are advertised.
-    let shown = Ad4mMcpHandler::new(McpContext {
-        admin_credential: Some("test-admin".to_string()),
-        auth_token: Arc::new(RwLock::new(Some("test-admin".to_string()))),
-        dynamic_class_tools: true,
-    });
+    let shown = Ad4mMcpHandler::new(admin_context(true));
     let names: Vec<String> = shown
         .exposed_tools()
         .await
@@ -1516,9 +1636,8 @@ async fn add_child_and_get_children_are_class_agnostic() {
             .await,
     );
     assert_eq!(first["success"], true, "{first}");
-    assert_eq!(first["link"]["predicate"], "ad4m://has_child");
-    assert_eq!(first["link"]["target"], "ad4m://obj/one");
-    let wrapped_parent = first["link"]["source"].as_str().unwrap().to_string();
+    assert_eq!(first["child"], "ad4m://obj/one");
+    let wrapped_parent = first["parent"].as_str().unwrap().to_string();
     assert!(
         wrapped_parent.starts_with("literal:"),
         "bare parent must be literal-wrapped, got {wrapped_parent}"
@@ -1536,7 +1655,7 @@ async fn add_child_and_get_children_are_class_agnostic() {
             .await,
     );
     assert_eq!(second["success"], true, "{second}");
-    let second_child = second["link"]["target"].as_str().unwrap().to_string();
+    let second_child = second["child"].as_str().unwrap().to_string();
     assert!(second_child.starts_with("literal:"), "{second_child}");
 
     let listed = parse(
@@ -2552,4 +2671,1774 @@ async fn instance_update_returns_the_store_error_of_the_abstract_check() {
             .await,
     );
     assert_eq!(got["body"], "hello", "{got}");
+}
+
+/// A WE-like text block whose text property and `we://mention` relation
+/// carry other names, aliased to TextContent's `text` and `mentions`. (WE's
+/// own `TextBlock`, [`WE_TEXT_BLOCK_SDNA`], names them `text` and
+/// `mentions` and conforms by name.)
+const ALIASED_WE_BLOCK_SDNA: &str = r#"{
+  "target_class": "we://TextBlock",
+  "properties": [
+    {"path":"we://flag","name":"flag","has_value":"we://text_block","min_count":1,"max_count":1},
+    {"path":"we://text","name":"body","datatype":"xsd:string","max_count":1,"alias":{"TextContent":"text"}},
+    {"path":"we://mention","name":"mentionedAgents","node_kind":"IRI","relation_kind":"hasMany","collection":true,"alias":{"TextContent":"mentions"}}
+  ]
+}"#;
+
+/// WE's mention predicate, in the fixtures only: the executor knows no app's
+/// predicate, it reads whatever a class aliases to `mentions`.
+const WE_MENTION: &str = "we://mention";
+
+/// [`ALIASED_NOTE_SDNA`] with a relation of another name, `cc`, aliased to
+/// TextContent's `mentions`.
+const MENTION_NOTE_SDNA: &str = r#"{
+  "target_class": "app://Note",
+  "properties": [
+    {"path":"app://kind","name":"kind","has_value":"app://note","min_count":1,"max_count":1},
+    {"path":"app://content","name":"content","datatype":"xsd:string","min_count":1,"max_count":1,"alias":{"TextContent":"text"}},
+    {"path":"app://cc","name":"cc","node_kind":"IRI","relation_kind":"hasMany","collection":true,"alias":{"TextContent":"mentions"}}
+  ]
+}"#;
+
+/// A chat line with `text` and no mention relation: it conforms to
+/// TextContent, whose `mentions` is optional, and mentions no one through it.
+const TEXT_ONLY_CHAT_SDNA: &str = r#"{
+  "target_class": "app://Chat",
+  "properties": [
+    {"path":"app://chat_kind","name":"kind","has_value":"app://chat","min_count":1,"max_count":1},
+    {"path":"app://chat_text","name":"text","datatype":"xsd:string","max_count":1}
+  ]
+}"#;
+
+/// The links of a [`TEXT_ONLY_CHAT_SDNA`] line `id` with `text`, by `signer`
+/// at `minutes`.
+fn text_only_chat(
+    signer: &crate::agent::signatures::TestSigner,
+    id: &str,
+    text: &str,
+    minutes: i64,
+) -> Vec<crate::types::LinkExpression> {
+    vec![
+        signed_link(signer, id, "app://chat_kind", "app://chat", minutes),
+        signed_link(signer, id, "app://chat_text", &as_text(text), minutes),
+    ]
+}
+
+/// `literal:string:` with `text` encoded, as a string property is stored.
+fn as_text(text: &str) -> String {
+    format!("literal:string:{}", urlencoding::encode(text))
+}
+
+/// The links of a WE text block `id` with `text`, by `signer` at `minutes`.
+fn we_block(
+    signer: &crate::agent::signatures::TestSigner,
+    id: &str,
+    text: &str,
+    minutes: i64,
+) -> Vec<crate::types::LinkExpression> {
+    vec![
+        signed_link(signer, id, "we://flag", "we://text_block", minutes),
+        signed_link(signer, id, "we://text", &as_text(text), minutes),
+    ]
+}
+
+/// The links of a [`MENTION_NOTE_SDNA`] note `id` with `text`, by `signer`
+/// at `minutes`: another class, whose `mentions` is `app://cc`.
+fn app_note(
+    signer: &crate::agent::signatures::TestSigner,
+    id: &str,
+    text: &str,
+    minutes: i64,
+) -> Vec<crate::types::LinkExpression> {
+    vec![
+        signed_link(signer, id, "app://kind", "app://note", minutes),
+        signed_link(signer, id, "app://content", &as_text(text), minutes),
+    ]
+}
+
+/// Run the waker's mention query for `did` and `names` over `links`,
+/// delivered the way a peer's links arrive (`diff_from_link_language`), in a
+/// perspective with the aliased WE-like block, the aliased note and the
+/// text-only chat line, and return its rows in the order the query gives
+/// them.
+async fn mention_query_rows(
+    did: &str,
+    names: &[&str],
+    links: Vec<crate::types::LinkExpression>,
+) -> Vec<serde_json::Value> {
+    mention_query_rows_in(
+        &[
+            ("TextBlock", ALIASED_WE_BLOCK_SDNA),
+            ("Note", MENTION_NOTE_SDNA),
+            ("Chat", TEXT_ONLY_CHAT_SDNA),
+        ],
+        did,
+        names,
+        links,
+    )
+    .await
+}
+
+/// [`mention_query_rows`] in a perspective with `classes`.
+async fn mention_query_rows_in(
+    classes: &[(&str, &str)],
+    did: &str,
+    names: &[&str],
+    links: Vec<crate::types::LinkExpression>,
+) -> Vec<serde_json::Value> {
+    use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
+    use crate::types::PerspectiveDiff;
+    let (_handler, uuid, _guard) = setup_with(classes, false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(links))
+        .await
+        .expect("diff_from_link_language");
+    let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    let query = crate::mcp::tools::subscriptions::build_mention_query(&names, did);
+    let found = parse(
+        &perspective
+            .model_query(TEXT_CONTENT_URI, &query.to_string())
+            .await
+            .unwrap(),
+    );
+    found["instances"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{found}"))
+        .clone()
+}
+
+/// The `id` of each row [`mention_query_rows`] returns, in its order.
+async fn mention_rows(
+    did: &str,
+    names: &[&str],
+    links: Vec<crate::types::LinkExpression>,
+) -> Vec<String> {
+    mention_query_rows(did, names, links)
+        .await
+        .iter()
+        .map(|row| {
+            row["id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a row without its id: {row}"))
+                .to_string()
+        })
+        .collect()
+}
+
+/// A link `source -predicate-> target` signed by `signer`, `minutes` after a
+/// fixed instant.
+fn signed_link(
+    signer: &crate::agent::signatures::TestSigner,
+    source: &str,
+    predicate: &str,
+    target: &str,
+    minutes: i64,
+) -> crate::types::LinkExpression {
+    use crate::types::{Link, LinkExpression};
+    let at = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+        + chrono::Duration::minutes(minutes);
+    LinkExpression::from(
+        signer.sign_at(
+            Link {
+                source: source.to_string(),
+                predicate: Some(predicate.to_string()),
+                target: target.to_string(),
+            }
+            .normalize(),
+            at,
+        ),
+    )
+}
+
+/// One model query over TextContent finds a record that mentions the agent
+/// through a `mentions` relation, whatever its text says, or through its
+/// text, whatever its relations say, in any class that conforms, one without
+/// a mention relation included. Not a
+/// record the agent wrote itself (its own reply mentioning it, #1459), not a
+/// mention link whose signature does not verify for the author it claims, not
+/// a mention of someone else, and not another predicate to the DID. A record
+/// found both ways is one row. Text matches by substring ("metadata"): the
+/// waker keeps only whole words on that path (`WakerSubscriptionManager`).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mention_query_finds_mention_links_and_text_mentions_by_others() {
+    use crate::agent::signatures::TestSigner;
+    let me = TestSigner::generate();
+    let other = TestSigner::generate();
+    let someone_else = TestSigner::generate();
+    let mut links = Vec::new();
+
+    // Through the mention link, the text naming no one.
+    links.extend(we_block(&other, "ad4m://link", "look at this", 1));
+    links.push(signed_link(&other, "ad4m://link", WE_MENTION, &me.did, 1));
+    // Through the text, no mention link.
+    links.extend(we_block(&other, "ad4m://name", "Data, can you look?", 2));
+    // The DID in the text, in another class.
+    links.extend(app_note(&other, "ad4m://did", &format!("cc {}", me.did), 3));
+    // Both: one row.
+    links.extend(we_block(&other, "ad4m://both", "hey Data", 4));
+    links.push(signed_link(&other, "ad4m://both", WE_MENTION, &me.did, 4));
+    // A second class whose own predicate is aliased to `mentions`.
+    links.extend(app_note(&other, "ad4m://cc", "fyi", 5));
+    links.push(signed_link(&other, "ad4m://cc", "app://cc", &me.did, 5));
+    // A substring: a candidate the waker drops.
+    links.extend(we_block(
+        &other,
+        "ad4m://metadata",
+        "the metadata is stale",
+        6,
+    ));
+
+    // The agent's own record, by name and by link.
+    links.extend(we_block(&me, "ad4m://mine", "Data here, on it", 7));
+    links.push(signed_link(&me, "ad4m://mine", WE_MENTION, &me.did, 7));
+    // A mention link whose signature fails for the author it claims.
+    links.extend(we_block(&other, "ad4m://forged", "hello there", 8));
+    let mut forged = signed_link(&other, "ad4m://forged", WE_MENTION, &me.did, 8);
+    forged.author = someone_else.did.clone();
+    links.push(forged);
+    // A mention of someone else.
+    links.extend(we_block(&other, "ad4m://not-me", "hello", 9));
+    links.push(signed_link(
+        &other,
+        "ad4m://not-me",
+        WE_MENTION,
+        &someone_else.did,
+        9,
+    ));
+    // Another predicate to the DID.
+    links.extend(we_block(&other, "ad4m://other-predicate", "hi", 10));
+    links.push(signed_link(
+        &other,
+        "ad4m://other-predicate",
+        "we://child",
+        &me.did,
+        10,
+    ));
+
+    // A class with text and no mention relation still conforms, so its text
+    // is a mention; one that names no one is not.
+    links.extend(text_only_chat(
+        &other,
+        "ad4m://chat",
+        "Data, can you check the chat?",
+        11,
+    ));
+    links.extend(text_only_chat(&other, "ad4m://chat-quiet", "lunch?", 12));
+
+    let rows = mention_rows(&me.did, &["Data"], links).await;
+    assert_eq!(
+        rows,
+        vec![
+            "ad4m://chat",
+            "ad4m://metadata",
+            "ad4m://cc",
+            "ad4m://both",
+            "ad4m://did",
+            "ad4m://name",
+            "ad4m://link",
+        ],
+        "newest first"
+    );
+}
+
+/// A class without a mention relation answers to TextContent's optional
+/// `mentions` with nothing: a `where` on it alone matches none of that
+/// class's rows (not all of them, and not an error), its negation matches
+/// all of them, reading it gives `[]`, and `links` lists no link for it,
+/// even when the record has a link to the DID on some other predicate. Its
+/// `text` reads and filters as before. A class that aliases its own relation
+/// to `mentions` is read through it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_class_without_a_mention_relation_mentions_no_one() {
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
+    use crate::types::PerspectiveDiff;
+    let me = TestSigner::generate();
+    let other = TestSigner::generate();
+    let (_handler, uuid, _guard) = setup_with(
+        &[("Note", MENTION_NOTE_SDNA), ("Chat", TEXT_ONLY_CHAT_SDNA)],
+        false,
+    )
+    .await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let mut links = app_note(&other, "ad4m://note", "fyi", 1);
+    links.push(signed_link(&other, "ad4m://note", "app://cc", &me.did, 1));
+    links.extend(text_only_chat(
+        &other,
+        "ad4m://chat",
+        "Data, can you look?",
+        2,
+    ));
+    // The Note's mention predicate, from a record that is not a Note.
+    links.push(signed_link(&other, "ad4m://chat", "app://cc", &me.did, 2));
+    perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(links))
+        .await
+        .expect("diff_from_link_language");
+
+    let query = |q: Value| {
+        let perspective = perspective.clone();
+        async move {
+            let found = parse(
+                &perspective
+                    .model_query(TEXT_CONTENT_URI, &q.to_string())
+                    .await
+                    .unwrap_or_else(|e| panic!("{q}: {e}")),
+            );
+            found
+        }
+    };
+    let ids = |found: &Value| -> Vec<String> {
+        found["instances"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{found}"))
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let by_mention = query(json!({ "where": { "mentions": me.did } })).await;
+    assert_eq!(ids(&by_mention), vec!["ad4m://note"], "{by_mention}");
+    let by_mention_of_another =
+        query(json!({ "where": { "mentions": { "eq": me.did, "author": { "not": me.did } } } }))
+            .await;
+    assert_eq!(
+        ids(&by_mention_of_another),
+        vec!["ad4m://note"],
+        "{by_mention_of_another}"
+    );
+    let not_mentioning = query(json!({ "where": { "NOT": { "mentions": me.did } } })).await;
+    assert_eq!(
+        ids(&not_mentioning),
+        vec!["ad4m://chat"],
+        "{not_mentioning}"
+    );
+    let by_text = query(json!({ "where": { "text": { "contains": "Data" } } })).await;
+    assert_eq!(ids(&by_text), vec!["ad4m://chat"], "{by_text}");
+
+    let read = query(json!({
+        "order": { "timestamp": "ASC" },
+        "properties": ["text", "mentions"],
+        "links": ["mentions"],
+    }))
+    .await;
+    assert_eq!(ids(&read), vec!["ad4m://note", "ad4m://chat"], "{read}");
+    let (note, chat) = (&read["instances"][0], &read["instances"][1]);
+    assert_eq!(note["mentions"], json!([me.did]), "{read}");
+    assert_eq!(
+        note["__links"]["mentions"].as_array().unwrap().len(),
+        1,
+        "{read}"
+    );
+    assert_eq!(chat["text"], "Data, can you look?", "{read}");
+    assert_eq!(chat["mentions"], json!([]), "{read}");
+    assert_eq!(chat["__links"]["mentions"], json!([]), "{read}");
+}
+
+/// The query holds the newest [`MENTION_WINDOW`] mentions, however many the
+/// neighbourhood has.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mention_query_holds_the_newest_window() {
+    use crate::agent::signatures::TestSigner;
+    use crate::mcp::tools::subscriptions::MENTION_WINDOW;
+    let me = TestSigner::generate();
+    let other = TestSigner::generate();
+    let total = MENTION_WINDOW + 5;
+    let mut links = Vec::new();
+    for i in 0..total {
+        let id = format!("ad4m://m{i:03}");
+        links.extend(we_block(&other, &id, "see", i as i64));
+        links.push(signed_link(&other, &id, WE_MENTION, &me.did, i as i64));
+    }
+    let rows = mention_rows(&me.did, &[], links).await;
+    let newest: Vec<String> = (0..total)
+        .rev()
+        .take(MENTION_WINDOW)
+        .map(|i| format!("ad4m://m{i:03}"))
+        .collect();
+    assert_eq!(rows, newest);
+}
+
+/// A typed WE message that @-mentions the agent, with the links WE wrote for
+/// it in a live space (2026-10-27): the chip's label "@Data" runs into the
+/// next word, so the text holds "@Datai" and no whole-word "Data", and the
+/// DID is only in the `marks` JSON and the `we://mention` link. The waker's
+/// whole-word check on the text dropped it; through `mentions` the row comes
+/// with the mention link, which wakes the agent as it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_we_at_mention_whose_label_runs_into_the_next_word_is_a_mention() {
+    use crate::agent::signatures::TestSigner;
+    let me = TestSigner::generate();
+    let other = TestSigner::generate();
+    let block = "ad4m://obj/qxxtzxsmhyskwmatpzklxjmt";
+    let marks = format!(
+        r#"[{{"start":0,"end":5,"type":"mention","did":"{}"}}]"#,
+        me.did
+    );
+    let rows = mention_query_rows(
+        &me.did,
+        &["Data"],
+        vec![
+            signed_link(&other, block, "we://flag", "we://text_block", 0),
+            signed_link(
+                &other,
+                block,
+                "we://text",
+                "literal:string:@Datai have taken a dump of prod successfully",
+                0,
+            ),
+            signed_link(
+                &other,
+                block,
+                "we://marks",
+                &format!("literal:string:{marks}"),
+                0,
+            ),
+            signed_link(&other, block, "we://text_source", "literal:string:typed", 0),
+            signed_link(&other, block, WE_MENTION, &me.did, 1),
+        ],
+    )
+    .await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["id"], block, "{}", rows[0]);
+    let mentions = rows[0]["__links"]["mentions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the mention links: {}", rows[0]));
+    assert_eq!(mentions.len(), 1, "{mentions:?}");
+    assert_eq!(mentions[0]["data"]["target"], me.did.as_str());
+}
+
+/// WE's own `TextBlock`, as the SDK writes it today, has `text` and a
+/// `mentions` relation over `we://mention`, so it conforms to TextContent by
+/// name: its mention links and its text both find a record.
+#[tokio::test(flavor = "multi_thread")]
+async fn we_text_blocks_take_part_by_their_own_names() {
+    use crate::agent::signatures::TestSigner;
+    let me = TestSigner::generate();
+    let other = TestSigner::generate();
+    let mut links = we_block(&other, "ad4m://chip", "@Datai have news", 1);
+    links.push(signed_link(&other, "ad4m://chip", WE_MENTION, &me.did, 1));
+    links.extend(we_block(&other, "ad4m://spoken", "Hey, data!", 2));
+    links.extend(we_block(&other, "ad4m://unrelated", "good morning", 3));
+    let rows = mention_query_rows_in(
+        &[("TextBlock", WE_TEXT_BLOCK_SDNA)],
+        &me.did,
+        &["Data"],
+        links,
+    )
+    .await;
+    let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["ad4m://spoken", "ad4m://chip"], "{rows:?}");
+}
+
+/// Each row carries its mention and text links with their own provenance
+/// (#1563): the DID that signed each, its timestamp and the proof verdict, so
+/// the waker hands a woken agent who mentioned it and when without a second
+/// query. An edit by someone else that adds the mention shows that editor on
+/// the mention link; the text link stays its writer's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mention_row_carries_its_mention_and_text_links_provenance() {
+    use crate::agent::signatures::TestSigner;
+    let me = TestSigner::generate();
+    let writer = TestSigner::generate();
+    let editor = TestSigner::generate();
+    let mut links = we_block(&writer, "ad4m://post", "@Data hi", 0);
+    links.push(signed_link(&editor, "ad4m://post", WE_MENTION, &me.did, 2));
+    let rows = mention_query_rows(&me.did, &["Data"], links).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row["id"], "ad4m://post", "{row}");
+    assert_eq!(row["text"], "@Data hi", "{row}");
+    let mention = &row["__links"]["mentions"][0];
+    assert_eq!(mention["author"], editor.did.as_str(), "{row}");
+    assert_eq!(mention["timestamp"], "2026-10-01T12:02:00.000Z", "{row}");
+    assert_eq!(mention["proof"]["valid"], true, "{row}");
+    assert_eq!(mention["data"]["target"], me.did.as_str(), "{row}");
+    let text = &row["__links"]["text"][0];
+    assert_eq!(text["author"], writer.did.as_str(), "{row}");
+    assert_eq!(text["timestamp"], "2026-10-01T12:00:00.000Z", "{row}");
+    assert_eq!(text["proof"]["valid"], true, "{row}");
+}
+
+/// A record with two text links answers the mention query when either one
+/// matches, but its `text` is the newest link's, whoever wrote it, and
+/// `__links.text` lists every link. So the row's `text` and any one of its
+/// text links need not be the same link: the waker reads each link's own
+/// target to find the one that names the agent (`mentionOf`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mention_rows_text_and_its_text_links_can_come_from_different_links() {
+    use crate::agent::signatures::TestSigner;
+    let me = TestSigner::generate();
+    let writer = TestSigner::generate();
+    let mut links = text_only_chat(&writer, "ad4m://line", "the metadata is stale", 1);
+    links.push(signed_link(
+        &me,
+        "ad4m://line",
+        "app://chat_text",
+        &as_text("Data"),
+        2,
+    ));
+    let rows = mention_query_rows(&me.did, &["Data"], links).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row["text"], "Data", "the newest link's text: {row}");
+    let text: Vec<(&str, &str)> = row["__links"]["text"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{row}"))
+        .iter()
+        .map(|l| {
+            (
+                l["author"].as_str().unwrap(),
+                l["data"]["target"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let metadata = as_text("the metadata is stale");
+    let data = as_text("Data");
+    assert!(
+        text.contains(&(writer.did.as_str(), metadata.as_str())),
+        "{row}"
+    );
+    assert!(text.contains(&(me.did.as_str(), data.as_str())), "{row}");
+}
+
+/// The reifier the store keeps `source -predicate-> target`'s metadata on. Any
+/// peer can name it: it is a hash of the link's public data.
+fn reifier_of(
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+    source: &str,
+    predicate: &str,
+    target: &str,
+) -> String {
+    let found = parse(
+        &perspective
+            .sparql_query(format!(
+                "SELECT ?r WHERE {{ ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+                 <<( <{source}> <{predicate}> <{target}> )>> }}"
+            ))
+            .unwrap(),
+    );
+    found[0]["r"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no reifier for {source} {predicate} {target}: {found}"))
+        .to_string()
+}
+
+/// A mention's author, timestamp and verdict are the executor's facts about
+/// the signed mention link, which no peer link can write or erase (#1564). A
+/// member who validly signs links in that vocabulary, on the reifier of
+/// someone else's mention, adds no second author, no later time and no "true"
+/// to a link whose signature failed; removals of those facts strip nothing.
+/// The same holds once the store is rebuilt from the links the perspective
+/// kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_links_cannot_write_or_erase_a_mentions_provenance() {
+    use crate::agent::signatures::TestSigner;
+    use crate::mcp::tools::subscriptions::build_mention_query;
+    use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
+    use crate::types::PerspectiveDiff;
+    let me = TestSigner::generate();
+    let writer = TestSigner::generate();
+    let member = TestSigner::generate();
+    let impostor = TestSigner::generate();
+
+    let (_handler, uuid, _guard) = setup_with(&[("TextBlock", ALIASED_WE_BLOCK_SDNA)], false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let mut unverified = signed_link(&member, "ad4m://claimed", WE_MENTION, &me.did, 2);
+    unverified.author = impostor.did.clone();
+    let mut first = we_block(&writer, "ad4m://post", "see", 1);
+    first.push(signed_link(&writer, "ad4m://post", WE_MENTION, &me.did, 1));
+    first.extend(we_block(&member, "ad4m://claimed", "see", 2));
+    first.push(unverified);
+    perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(first))
+        .await
+        .expect("the mentions");
+    let genuine = reifier_of(&perspective, "ad4m://post", WE_MENTION, &me.did);
+    let claimed = reifier_of(&perspective, "ad4m://claimed", WE_MENTION, &me.did);
+
+    let ontology = |name: &str| format!("ad4m://ontology/{name}");
+    let as_string = |value: &str| format!("literal:string:{value}");
+    let additions = vec![
+        signed_link(
+            &member,
+            &genuine,
+            &ontology("author"),
+            &as_string(&impostor.did),
+            3,
+        ),
+        signed_link(&member, &genuine, &ontology("author"), &impostor.did, 3),
+        signed_link(
+            &member,
+            &genuine,
+            &ontology("timestamp"),
+            &as_string("2099-01-01T00:00:00.000Z"),
+            3,
+        ),
+        signed_link(
+            &member,
+            &claimed,
+            &ontology("proofValid"),
+            &as_string("true"),
+            3,
+        ),
+    ];
+    let removals = vec![
+        signed_link(
+            &member,
+            &genuine,
+            &ontology("author"),
+            &as_string(&writer.did),
+            4,
+        ),
+        signed_link(
+            &member,
+            &genuine,
+            &ontology("proofValid"),
+            &as_string("true"),
+            4,
+        ),
+    ];
+    perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(additions))
+        .await
+        .expect("the member's additions");
+    perspective
+        .diff_from_link_language(PerspectiveDiff::from_removals(removals))
+        .await
+        .expect("the member's removals");
+
+    let query = build_mention_query(&[], &me.did).to_string();
+    let only_the_writers_mention = |stage: &'static str| {
+        let query = query.clone();
+        let perspective = perspective.clone();
+        let (writer, me) = (writer.did.clone(), me.did.clone());
+        async move {
+            let found = parse(
+                &perspective
+                    .model_query(TEXT_CONTENT_URI, &query)
+                    .await
+                    .unwrap(),
+            );
+            let rows = found["instances"].as_array().unwrap();
+            let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+            assert_eq!(ids, vec!["ad4m://post"], "{stage}: {found}");
+            let mentions = rows[0]["__links"]["mentions"].as_array().unwrap();
+            assert_eq!(mentions.len(), 1, "{stage}: {found}");
+            assert_eq!(mentions[0]["author"], writer.as_str(), "{stage}");
+            assert_eq!(
+                mentions[0]["timestamp"], "2026-10-01T12:01:00.000Z",
+                "{stage}"
+            );
+            assert_eq!(mentions[0]["proof"]["valid"], true, "{stage}");
+            assert_eq!(mentions[0]["data"]["target"], me.as_str(), "{stage}");
+        }
+    };
+    only_the_writers_mention("as the links arrived").await;
+
+    let kept = perspective
+        .get_links(&crate::types::LinkQuery::default())
+        .await
+        .unwrap();
+    perspective.sync_existing_links_to_sparql(&kept).unwrap();
+    only_the_writers_mention("after a rebuild from the kept links").await;
+}
+
+// ── Containers (#1446): We's shapes as We writes them ───────────────────────
+
+/// We's `CollectionBlock` and `TextBlock` as the SDK writes them.
+/// `CollectionBlock.children` is a relation over `we://child`, so it conforms
+/// to the built-in Container by name, and its `we://child` links are
+/// containment on CollectionBlocks only.
+const WE_COLLECTION_BLOCK_SDNA: &str = include_str!("we_shapes/collection_block.json");
+const WE_TEXT_BLOCK_SDNA: &str = include_str!("we_shapes/text_block.json");
+
+async fn we_setup() -> (Ad4mMcpHandler, String, PerspectiveGuard) {
+    setup_with(
+        &[
+            ("CollectionBlock", WE_COLLECTION_BLOCK_SDNA),
+            ("TextBlock", WE_TEXT_BLOCK_SDNA),
+        ],
+        false,
+    )
+    .await
+}
+
+/// Create one instance with no parent; its id.
+async fn create_plain(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    class_name: &str,
+    properties: Map<String, Value>,
+) -> String {
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.to_string(),
+                class_name: class_name.into(),
+                properties: Some(properties),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    created["base_uri"].as_str().unwrap().to_string()
+}
+
+/// The targets of `source`'s links on `predicate`.
+async fn targets_of(uuid: &str, source: &str, predicate: &str) -> Vec<String> {
+    let perspective = crate::perspectives::get_perspective(uuid).unwrap();
+    perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(source.into()),
+            predicate: Some(predicate.into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect()
+}
+
+/// Test 10: a We call (`CollectionBlock`) holds a `TextBlock` through
+/// `we://child`, the link We writes. `get_children`, `instance_transcript`
+/// and `instance_query(parent)` read it beside a `has_child` child, and
+/// writes under the call go through its own `children` relation (open
+/// question 5): `instance_create(parent)` and `add_child` write
+/// `we://child`, not `has_child`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_we_calls_blocks_are_its_children() {
+    let (handler, uuid, _guard) = we_setup().await;
+    let call = create_plain(
+        &handler,
+        &uuid,
+        "CollectionBlock",
+        props(&[("kind", json!("call"))]),
+    )
+    .await;
+    let by_we = create_plain(
+        &handler,
+        &uuid,
+        "TextBlock",
+        props(&[("text", json!("Hey @data, can you summarise?"))]),
+    )
+    .await;
+    let linked = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.clone(),
+                source: call.clone(),
+                predicate: "we://child".into(),
+                target: by_we.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(linked["success"], true, "{linked}");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let by_has_child = create_plain(
+        &handler,
+        &uuid,
+        "TextBlock",
+        props(&[("text", json!("filed with has_child"))]),
+    )
+    .await;
+    let linked = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.clone(),
+                source: call.clone(),
+                predicate: "ad4m://has_child".into(),
+                target: by_has_child.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(linked["success"], true, "{linked}");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let listed = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: call.clone(),
+                limit: None,
+            }))
+            .await,
+    );
+    let ids: Vec<&str> = listed["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec![by_we.as_str(), by_has_child.as_str()], "{listed}");
+    assert!(listed["children"][0]["author"]
+        .as_str()
+        .unwrap()
+        .starts_with("did:"));
+
+    let transcript = handler
+        .instance_transcript(Parameters(transcript(&uuid, &call)))
+        .await;
+    assert!(
+        transcript.contains("Hey @data, can you summarise?")
+            && transcript.contains("filed with has_child"),
+        "{transcript}"
+    );
+
+    let queried = parse(
+        &handler
+            .instance_query(Parameters(InstanceQueryParams {
+                perspective_id: uuid.clone(),
+                class_name: "TextBlock".into(),
+                filter: None,
+                parent: Some(call.clone()),
+                limit: None,
+                offset: None,
+            }))
+            .await,
+    );
+    assert_eq!(queried["total_count"], 2, "{queried}");
+
+    // Writes under the call use its own relation.
+    let created = create_under(
+        &handler,
+        &uuid,
+        "TextBlock",
+        props(&[("text", json!("created under the call"))]),
+        &call,
+    )
+    .await;
+    let added = parse(
+        &handler
+            .add_child(Parameters(AddChildParams {
+                perspective_id: uuid.clone(),
+                parent: call.clone(),
+                child: "ad4m://re/parented".into(),
+            }))
+            .await,
+    );
+    assert_eq!(added["success"], true, "{added}");
+    let we_children = targets_of(&uuid, &call, "we://child").await;
+    assert!(
+        we_children.contains(&created) && we_children.contains(&"ad4m://re/parented".to_string()),
+        "{we_children:?}"
+    );
+    assert_eq!(
+        targets_of(&uuid, &call, "ad4m://has_child").await,
+        vec![by_has_child.clone()]
+    );
+
+    // A node no class describes is held by has_child, and a we://child link
+    // on it holds nothing.
+    let plain = "ad4m://plain/node";
+    let added = parse(
+        &handler
+            .add_child(Parameters(AddChildParams {
+                perspective_id: uuid.clone(),
+                parent: plain.into(),
+                child: by_we.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(added["success"], true, "{added}");
+    assert_eq!(
+        targets_of(&uuid, plain, "ad4m://has_child").await,
+        vec![by_we.clone()]
+    );
+    let linked = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.clone(),
+                source: plain.into(),
+                predicate: "we://child".into(),
+                target: by_has_child.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(linked["success"], true, "{linked}");
+    let listed = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: plain.into(),
+                limit: None,
+            }))
+            .await,
+    );
+    assert_eq!(listed["total_count"], 1, "{listed}");
+    assert_eq!(listed["children"][0]["id"], by_we.as_str());
+}
+
+// ── template tools (WE's rules, compiled in) ─────────────────────────────
+
+/// WE's `Template`, as far as the template tools read and write it: the schema is stored through
+/// a language (a file, in WE) and the version moves with it.
+const TEMPLATE_SDNA: &str = r#"{
+  "target_class": "we://Template",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"we://Template"}
+  ],
+  "properties": [
+    {"path":"we://name","name":"name","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://name","target":"value"}]},
+    {"path":"we://template_schema","name":"schema","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "resolve_language":"QmzSYwdTestFileLanguage",
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://template_schema","target":"value"}]},
+    {"path":"we://version","name":"version","datatype":"xsd:integer","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://version","target":"value"}]}
+  ]
+}"#;
+
+/// The same, with the schema held as a literal: what a template written as JSON text looks like.
+fn literal_template_sdna() -> String {
+    TEMPLATE_SDNA.replace(r#""resolve_language":"QmzSYwdTestFileLanguage","#, "")
+}
+
+/// A small template: a column holding a heading.
+fn small_template() -> Value {
+    json!({
+        "type": "Column",
+        "meta": { "name": "Small", "description": "A heading", "icon": "house" },
+        "props": { "bg": "page" },
+        "children": [{ "type": "we-text", "props": { "variant": "heading-lg" }, "children": ["Hello"] }]
+    })
+}
+
+/// A perspective holding one Template, its schema written as `schema`.
+async fn template_setup(
+    sdna: &str,
+    schema: Value,
+) -> (Ad4mMcpHandler, String, PerspectiveGuard, String) {
+    crate::test_utils::init_v8_platform();
+    let (handler, uuid, guard) = setup_with(&[("Template", sdna)], false).await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                properties: Some(props(&[
+                    ("name", json!("Small")),
+                    ("schema", schema),
+                    ("version", json!(1)),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let base_uri = created["base_uri"].as_str().expect("created").to_string();
+    (handler, uuid, guard, base_uri)
+}
+
+fn template_params(uuid: &str, base_uri: &str, arguments: Value) -> Parameters<TemplateToolParams> {
+    Parameters(TemplateToolParams {
+        perspective_id: uuid.to_string(),
+        base_uri: base_uri.to_string(),
+        arguments: arguments.as_object().cloned().unwrap_or_default(),
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_template_tools_are_listed_with_the_bundle_s_arguments() {
+    let (handler, _uuid, _guard) = setup(false).await;
+    let tools = handler.exposed_tools().await;
+    for declared in &crate::tool_bundles::builtin::declared().tools {
+        let listed = tools
+            .iter()
+            .find(|t| t.name == declared.name)
+            .unwrap_or_else(|| panic!("{} is not listed", declared.name));
+        assert_eq!(
+            listed.description.as_deref(),
+            Some(declared.description.as_str())
+        );
+        let schema = Value::Object((*listed.input_schema).clone());
+        for own in declared.parameters["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            assert_eq!(
+                schema["properties"][own], declared.parameters["properties"][own],
+                "{}: {own}",
+                declared.name
+            );
+        }
+        for named in ["perspective_id", "base_uri"] {
+            assert!(schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(named)));
+        }
+    }
+    assert_eq!(
+        crate::tool_bundles::builtin::declared()
+            .tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["template_read", "template_update"],
+        "a tool the bundle adds or renames needs its #[tool] method here"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_read_answers_with_the_stored_template_and_its_version() {
+    let sdna = literal_template_sdna();
+    let (handler, uuid, _guard, base_uri) =
+        template_setup(&sdna, json!(small_template().to_string())).await;
+    let read = parse(
+        &handler
+            .template_read(template_params(&uuid, &base_uri, json!({})))
+            .await,
+    );
+    assert_eq!(read["version"], 1, "{read}");
+    assert!(read.to_string().contains("Hello"), "{read}");
+
+    let found = handler
+        .template_read(template_params(
+            &uuid,
+            &base_uri,
+            json!({ "find": "Hello" }),
+        ))
+        .await;
+    assert!(found.contains("n2 we-text — Hello"), "{found}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_update_saves_the_schema_and_its_version_in_one_write() {
+    // No file language runs here, so the schema is stored as the text of what was written, and
+    // read back as that text: an object is what both sides can read.
+    let (handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let patch = |version: u32| {
+        json!({
+            "version": version,
+            "patches": [{ "targetId": "n2", "node": { "type": "we-text", "props": { "variant": "heading-lg" }, "children": ["Goodbye"] } }]
+        })
+    };
+
+    let stale = handler
+        .template_update(template_params(&uuid, &base_uri, patch(0)))
+        .await;
+    assert!(stale.contains("has changed since it was read"), "{stale}");
+
+    let mut dry_run = patch(1);
+    dry_run["dry_run"] = json!(true);
+    let checked = handler
+        .template_update(template_params(&uuid, &base_uri, dry_run))
+        .await;
+    assert!(checked.starts_with("Valid"), "{checked}");
+
+    let saved = handler
+        .template_update(template_params(&uuid, &base_uri, patch(1)))
+        .await;
+    assert!(saved.starts_with("Saved as version 2."), "{saved}");
+    let after = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri: base_uri.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 2, "{after}");
+    assert!(
+        after["schema"].to_string().contains("data_base64"),
+        "the schema is written as the file WE stores it as: {after}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_update_writes_nothing_the_class_schema_refuses() {
+    // A literal schema property cannot take the file the tool writes: nothing is written, the
+    // version included.
+    let sdna = literal_template_sdna();
+    let (handler, uuid, _guard, base_uri) =
+        template_setup(&sdna, json!(small_template().to_string())).await;
+    let refused = parse(
+        &handler
+            .template_update(template_params(
+                &uuid,
+                &base_uri,
+                json!({
+                    "version": 1,
+                    "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": ["Bye"] } }]
+                }),
+            ))
+            .await,
+    );
+    let error = refused["error"].as_str().unwrap_or_default();
+    assert!(error.contains("Nothing was written"), "{refused}");
+    assert!(error.contains("schema"), "{refused}");
+    let after = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri,
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 1, "{after}");
+}
+
+/// A class the perspective defines that WE's reference does not know.
+const SIGHTING_SDNA: &str = r#"{
+  "target_class": "ns://Sighting",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Sighting"}
+  ],
+  "properties": [
+    {"path":"ns://species","name":"species","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://species","target":"value"}]}
+  ]
+}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_template_may_query_a_class_the_perspective_defines() {
+    crate::test_utils::init_v8_platform();
+    let (handler, uuid, _guard) = setup_with(
+        &[("Template", TEMPLATE_SDNA), ("Sighting", SIGHTING_SDNA)],
+        false,
+    )
+    .await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                properties: Some(props(&[
+                    ("schema", small_template()),
+                    ("version", json!(1)),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let base_uri = created["base_uri"].as_str().expect("created").to_string();
+
+    let read = handler
+        .template_read(template_params(&uuid, &base_uri, json!({})))
+        .await;
+    assert!(read.contains("species"), "the model is described: {read}");
+
+    let checked = handler
+        .template_update(template_params(
+            &uuid,
+            &base_uri,
+            json!({
+                "version": 1,
+                "dry_run": true,
+                "patches": [{ "targetId": "n2", "node": {
+                    "type": "Column",
+                    "$queries": { "rows": { "entity": "Sighting", "limit": 5 } },
+                    "children": []
+                } }]
+            }),
+        ))
+        .await;
+    assert!(checked.starts_with("Valid"), "{checked}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_updates_from_the_same_version_save_once() {
+    let (handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let update = |text: &str| {
+        handler.template_update(template_params(
+            &uuid,
+            &base_uri,
+            json!({
+                "version": 1,
+                "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": [text] } }]
+            }),
+        ))
+    };
+    let (first, second) = tokio::join!(update("One"), update("Two"));
+    let saved = [&first, &second]
+        .iter()
+        .filter(|answer| answer.starts_with("Saved as version 2."))
+        .count();
+    // The other reads the record the first saved. No file language runs here, so it cannot decode
+    // that schema and errors before it reaches the version check: what matters is that it saves
+    // nothing.
+    assert_eq!(saved, 1, "{first}\n{second}");
+    let after = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri: base_uri.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 2, "{after}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_held_up_in_one_perspective_does_not_hold_up_another() {
+    // An update holds its record's lock from its first read to its write. One parked there, as
+    // one waiting on a slow read would be, must not keep a template in another perspective waiting.
+    let (handler, a, _guard_a, record_a) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let (_, b, _guard_b, record_b) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let update = |uuid: &str, base_uri: &str| {
+        handler.template_update(template_params(
+            uuid,
+            base_uri,
+            json!({
+                "version": 1,
+                "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": ["Bye"] } }]
+            }),
+        ))
+    };
+
+    let (reached, go) = super::template_tools::pause::arm(&record_a);
+    let held = update(&a, &record_a);
+    let other = async {
+        reached.await.expect("the update in A reads its record");
+        let other =
+            tokio::time::timeout(std::time::Duration::from_secs(60), update(&b, &record_b)).await;
+        let _ = go.send(());
+        other
+    };
+    let (held, other) = tokio::join!(held, other);
+
+    let other = other.expect("the update in B waited for the one held up in A");
+    assert!(other.starts_with("Saved as version 2."), "{other}");
+    assert!(held.starts_with("Saved as version 2."), "{held}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_save_after_the_tool_s_last_read_is_not_overwritten() {
+    // The app saves through instance_update, which takes no template lock: the tool has read the
+    // record for the last time, the app's save lands, and only then does the tool write.
+    let (handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let get = || {
+        handler.instance_get(Parameters(InstanceGetParams {
+            perspective_id: uuid.clone(),
+            class_name: "Template".into(),
+            base_uri: base_uri.clone(),
+        }))
+    };
+    let mut app_template = small_template();
+    app_template["children"][0]["children"] = json!(["From the app"]);
+
+    let (reached, go) = super::template_tools::pause::arm(&base_uri);
+    let tool = handler.template_update(template_params(
+        &uuid,
+        &base_uri,
+        json!({
+            "version": 1,
+            "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": ["From the tool"] } }]
+        }),
+    ));
+    let app = async {
+        reached.await.expect("the tool reads the record");
+        let saved = handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri: base_uri.clone(),
+                properties: props(&[("schema", app_template), ("version", json!(2))]),
+            }))
+            .await;
+        let saved_record = parse(&get().await);
+        let _ = go.send(());
+        (saved, saved_record)
+    };
+    let (answer, (saved, saved_record)) = tokio::join!(tool, app);
+
+    assert!(!saved.contains("error"), "{saved}");
+    assert_eq!(saved_record["version"], 2, "{saved_record}");
+    assert!(
+        answer.contains("the record changed while 'template_update' ran"),
+        "{answer}"
+    );
+    let after = parse(&get().await);
+    assert_eq!(after, saved_record, "the app's save stands");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_template_tools_refuse_a_record_that_is_not_a_template() {
+    crate::test_utils::init_v8_platform();
+    let (handler, uuid, _guard) = setup(false).await;
+    let channel = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("lobby"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let wrong = parse(
+        &handler
+            .template_read(template_params(
+                &uuid,
+                channel["base_uri"].as_str().unwrap(),
+                json!({}),
+            ))
+            .await,
+    );
+    assert!(
+        wrong["error"]
+            .as_str()
+            .unwrap()
+            .contains("works on Template"),
+        "{wrong}"
+    );
+}
+
+// ── template tools over MCP ──────────────────────────────────────────────
+//
+// These call the tools as a client does: `tools/call` over HTTP to a real MCP server, so the call
+// passes `call_tool`'s gate and the tool router, and the arguments are decoded from the JSON the
+// client sent (the tool's own beside the record's two). The callers who may not write, or may not
+// reach the perspective, hold a session the server's HTTP path would open from a granted token;
+// they call the same tool methods the router dispatches to.
+
+/// An MCP session on a real MCP server, as the operator.
+struct McpClient {
+    url: String,
+    session: String,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl McpClient {
+    async fn operator() -> Self {
+        let (url, session) =
+            crate::mcp::server::tests::local_server_session(Some("template-admin".into())).await;
+        McpClient {
+            url,
+            session,
+            next_id: std::sync::atomic::AtomicU64::new(2),
+        }
+    }
+
+    /// The JSON-RPC answer to `tools/call` of `tool` with `arguments`.
+    async fn answer(&self, tool: &str, arguments: Value) -> Value {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::mcp::server::tests::call_with(
+            &self.url,
+            &self.session,
+            id,
+            tool,
+            arguments,
+            &[("authorization", "Bearer template-admin")],
+        )
+        .await
+    }
+
+    /// The text `tool` answered with.
+    async fn call(&self, tool: &str, arguments: Value) -> String {
+        let answer = self.answer(tool, arguments).await;
+        answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no text in {answer}"))
+            .to_string()
+    }
+
+    async fn template(&self, uuid: &str, base_uri: &str) -> Value {
+        parse(
+            &self
+                .call(
+                    "instance_get",
+                    json!({ "perspective_id": uuid, "class_name": "Template", "base_uri": base_uri }),
+                )
+                .await,
+        )
+    }
+}
+
+/// A Template's arguments for a template tool: the record's two, and the tool's own.
+fn template_arguments(uuid: &str, base_uri: &str, own: Value) -> Value {
+    let mut arguments = own;
+    arguments["perspective_id"] = json!(uuid);
+    arguments["base_uri"] = json!(base_uri);
+    arguments
+}
+
+/// The text of a stored schema file, as the template tools write it.
+fn schema_file_text(record: &Value) -> String {
+    use base64::Engine;
+    let file: Value = match &record["schema"] {
+        Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+        other => other.clone(),
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(file["data_base64"].as_str().unwrap_or_default())
+        .unwrap_or_else(|e| panic!("the schema is not a file ({e}): {record}"));
+    String::from_utf8(bytes).expect("the schema file is text")
+}
+
+fn rename(version: i64, text: &str) -> Value {
+    json!({
+        "version": version,
+        "patches": [{ "targetId": "n2", "node": { "type": "we-text", "children": [text] } }]
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_mcp_an_update_against_the_version_read_is_saved() {
+    let (_handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let client = McpClient::operator().await;
+
+    let read = parse(
+        &client
+            .call(
+                "template_read",
+                template_arguments(&uuid, &base_uri, json!({})),
+            )
+            .await,
+    );
+    assert_eq!(read["version"], 1, "{read}");
+    assert!(read.to_string().contains("Hello"), "{read}");
+
+    let saved = client
+        .call(
+            "template_update",
+            template_arguments(
+                &uuid,
+                &base_uri,
+                rename(read["version"].as_i64().unwrap(), "Goodbye"),
+            ),
+        )
+        .await;
+    assert!(saved.starts_with("Saved as version 2."), "{saved}");
+
+    let after = client.template(&uuid, &base_uri).await;
+    assert_eq!(after["version"], 2, "{after}");
+    let schema = schema_file_text(&after);
+    assert!(
+        schema.contains("Goodbye") && !schema.contains("Hello"),
+        "the patch is what was saved: {schema}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_mcp_an_update_against_a_stale_version_changes_nothing() {
+    let (_handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let client = McpClient::operator().await;
+    let read = parse(
+        &client
+            .call(
+                "template_read",
+                template_arguments(&uuid, &base_uri, json!({})),
+            )
+            .await,
+    );
+    assert_eq!(read["version"], 1, "{read}");
+
+    // Somebody saves after the agent read: the version it holds is stale now.
+    let bumped = client
+        .call(
+            "instance_update",
+            json!({
+                "perspective_id": uuid, "class_name": "Template", "base_uri": base_uri,
+                "properties": { "version": 2 }
+            }),
+        )
+        .await;
+    assert!(!bumped.contains("error"), "{bumped}");
+    let before = client.template(&uuid, &base_uri).await;
+
+    let stale = client
+        .call(
+            "template_update",
+            template_arguments(&uuid, &base_uri, rename(1, "Goodbye")),
+        )
+        .await;
+    assert!(stale.contains("has changed since it was read"), "{stale}");
+    assert!(!stale.contains("Saved"), "{stale}");
+    assert_eq!(client.template(&uuid, &base_uri).await, before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_mcp_a_call_the_template_tools_cannot_run_says_why() {
+    let (_handler, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let client = McpClient::operator().await;
+    let before = client.template(&uuid, &base_uri).await;
+    let error_of = |answer: String| -> String {
+        let answer = parse(&answer);
+        answer["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("not an error: {answer}"))
+            .to_string()
+    };
+
+    // No record named: the server refuses the arguments before the tool runs.
+    let unnamed = client
+        .answer("template_read", json!({ "perspective_id": uuid }))
+        .await;
+    assert!(
+        unnamed["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("base_uri")),
+        "{unnamed}"
+    );
+
+    // A record that is not there.
+    let missing = error_of(
+        client
+            .call(
+                "template_read",
+                template_arguments(&uuid, "we://no-such-template", json!({})),
+            )
+            .await,
+    );
+    assert!(
+        missing.contains("no such record at 'we://no-such-template'"),
+        "{missing}"
+    );
+
+    // A patch naming a node the template does not have.
+    let mut no_node = rename(1, "Goodbye");
+    no_node["patches"][0]["targetId"] = json!("n99");
+    let refused = client
+        .call(
+            "template_update",
+            template_arguments(&uuid, &base_uri, no_node),
+        )
+        .await;
+    assert!(refused.contains("n99"), "{refused}");
+    assert!(!refused.contains("Saved"), "{refused}");
+
+    // An update without the version it was read at.
+    let unversioned = client
+        .call(
+            "template_update",
+            template_arguments(
+                &uuid,
+                &base_uri,
+                json!({ "patches": rename(1, "x")["patches"] }),
+            ),
+        )
+        .await;
+    assert!(unversioned.contains("version"), "{unversioned}");
+    assert!(!unversioned.contains("Saved"), "{unversioned}");
+
+    assert_eq!(client.template(&uuid, &base_uri).await, before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_mcp_a_stored_template_that_is_not_one_is_reported() {
+    let sdna = literal_template_sdna();
+    let (_handler, uuid, _guard, base_uri) =
+        template_setup(&sdna, json!("this is not a template")).await;
+    let client = McpClient::operator().await;
+    let read = client
+        .call(
+            "template_read",
+            template_arguments(&uuid, &base_uri, json!({})),
+        )
+        .await;
+    let error = parse(&read)["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(error.contains("'template_read' failed"), "{read}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_mcp_an_unknown_perspective_is_not_found() {
+    crate::test_utils::init_v8_platform();
+    let client = McpClient::operator().await;
+    for tool in ["template_read", "template_update"] {
+        let answer = parse(
+            &client
+                .call(
+                    tool,
+                    template_arguments(
+                        "00000000-0000-0000-0000-000000000000",
+                        "we://t",
+                        rename(1, "x"),
+                    ),
+                )
+                .await,
+        );
+        assert_eq!(answer["status"], 404, "{tool}: {answer}");
+    }
+}
+
+/// A handler whose MCP session holds `session`.
+fn handler_holding(session: crate::agent::session::Session) -> Ad4mMcpHandler {
+    Ad4mMcpHandler::new(
+        McpContext::new(
+            Some("test-admin".into()),
+            crate::agent::capabilities::ListenerReach::Network,
+            false,
+        )
+        .with_session(std::sync::Arc::new(session)),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_update_refuses_a_caller_who_may_only_read_before_it_runs() {
+    use crate::agent::capabilities::{perspective_query_capability, WILD_CARD};
+    use crate::agent::session::{Principal, Session};
+    let (admin, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let reader = handler_holding(
+        Session::for_test(Principal::Agent(crate::agent::AgentContext::main_agent()))
+            .with_caps(vec![perspective_query_capability(vec![WILD_CARD.into()])]),
+    );
+
+    let read = parse(
+        &reader
+            .template_read(template_params(&uuid, &base_uri, json!({})))
+            .await,
+    );
+    assert_eq!(read["version"], 1, "the reader reads: {read}");
+
+    // The refusal is the RPC guard's own answer and nothing else: the tool did not run.
+    let refused = reader
+        .template_update(template_params(&uuid, &base_uri, rename(1, "Goodbye")))
+        .await;
+    let answer = parse(&refused);
+    assert_eq!(answer["status"], 403, "{refused}");
+    assert!(!refused.contains("Saved"), "{refused}");
+
+    let after = parse(
+        &admin
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri,
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 1, "{after}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_template_tools_do_not_reach_another_owner_s_perspective() {
+    use crate::agent::capabilities::{
+        perspective_query_capability, perspective_update_capability, WILD_CARD,
+    };
+    use crate::agent::session::{Principal, Session};
+    let (admin, uuid, _guard, base_uri) = template_setup(TEMPLATE_SDNA, small_template()).await;
+    let did = "did:key:z6MkTemplateToolsOtherUser";
+    let stranger = handler_holding(
+        Session::for_test(Principal::Agent(crate::agent::AgentContext::managed(
+            did.to_string(),
+        )))
+        .with_caps(vec![
+            perspective_query_capability(vec![WILD_CARD.into()]),
+            perspective_update_capability(vec![WILD_CARD.into()]),
+        ])
+        .with_did(did),
+    );
+
+    let read = stranger
+        .template_read(template_params(&uuid, &base_uri, json!({})))
+        .await;
+    assert_eq!(parse(&read)["status"], 404, "{read}");
+    assert!(!read.contains("Hello"), "{read}");
+    let update = stranger
+        .template_update(template_params(&uuid, &base_uri, rename(1, "Goodbye")))
+        .await;
+    assert_eq!(parse(&update)["status"], 404, "{update}");
+
+    let after = parse(
+        &admin
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri,
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 1, "{after}");
+}
+
+#[tokio::test]
+async fn the_template_documentation_is_served_to_anyone() {
+    crate::test_utils::init_v8_platform();
+    let anonymous = Ad4mMcpHandler::new(McpContext::new(
+        Some("test-admin".into()),
+        crate::agent::capabilities::ListenerReach::Network,
+        false,
+    ));
+    let read = |topic: &str| {
+        anonymous.get_documentation(Parameters(
+            crate::mcp::tools::docs::GetDocumentationParams {
+                topic: topic.into(),
+            },
+        ))
+    };
+    assert!(read("template").await.contains("template_update"));
+    let missing = read("template/nothing").await;
+    assert!(missing.contains("No documentation topic"), "{missing}");
+    let elsewhere = read("rooms").await;
+    assert!(elsewhere.contains("No documentation topic"), "{elsewhere}");
+}
+
+/// A file-like property: its value is stored as an expression on a language rather than as a
+/// literal, so what is written is what that language takes — an object of bytes and type for a
+/// file — whatever the declared datatype says.
+const ATTACHMENT_SDNA: &str = r#"{
+  "target_class": "ns://Attachment",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Attachment"}
+  ],
+  "properties": [
+    {"path":"ns://attachment_title","name":"title","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://attachment_title","target":"value"}]},
+    {"path":"ns://attachment_file","name":"file","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "resolve_language":"QmzSYwdTestFileLanguage",
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://attachment_file","target":"value"}]}
+  ]
+}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_property_stored_through_a_language_takes_the_value_the_language_does() {
+    let (handler, uuid, _guard) = setup_with(&[("Attachment", ATTACHMENT_SDNA)], false).await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Attachment".into(),
+                properties: Some(props(&[("title", json!("notes"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let base_uri = created["base_uri"].as_str().expect("created").to_string();
+    let file =
+        json!({ "data_base64": "e30=", "name": "notes.json", "file_type": "application/json" });
+
+    let on_a_literal = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Attachment".into(),
+                base_uri: base_uri.clone(),
+                properties: props(&[("title", file.clone())]),
+            }))
+            .await,
+    );
+    assert!(on_a_literal.get("error").is_some(), "{on_a_literal}");
+
+    let on_a_file = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Attachment".into(),
+                base_uri,
+                properties: props(&[("file", file)]),
+            }))
+            .await,
+    );
+    assert_eq!(on_a_file["success"], true, "{on_a_file}");
 }
