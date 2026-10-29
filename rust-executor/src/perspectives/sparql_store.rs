@@ -542,11 +542,26 @@ fn is_stored_local(tx: &Transaction<'_>, link: &LinkExpression) -> Result<bool, 
 
 /// Write all quads of `link` with `status` in `tx`: the direct triple, its
 /// reifier, and the reifier's annotations, each replacing what the reifier
-/// held for it.
+/// held for it. The proof annotations are written as [`proof_write`] allows.
 fn write_link_quads(
     tx: &mut Transaction<'_>,
     link: &LinkExpression,
     status: &LinkStatus,
+) -> Result<(), Error> {
+    write_link_quads_proof(tx, link, status, false)
+}
+
+/// [`write_link_quads`], but with `repair` the whole proof is rewritten
+/// whatever the reifier holds. Only for a link the store rebuilt from its
+/// own facts ([`SparqlStore::purge_link_metadata_links`]): the sweep may
+/// have deleted one of the link's proof annotations along with a metadata
+/// link whose direct triple equalled it, and [`proof_write`] would refuse
+/// to put it back on a row still marked verified.
+fn write_link_quads_proof(
+    tx: &mut Transaction<'_>,
+    link: &LinkExpression,
+    status: &LinkStatus,
+    repair: bool,
 ) -> Result<(), Error> {
     let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
     let reifier_iri = make_reifier_iri(link);
@@ -607,7 +622,12 @@ fn write_link_quads(
         (ONT_TIMESTAMP, Some(&link.timestamp)),
         (ONT_STATUS, Some(status_str(status))),
     ];
-    match proof_write(tx, &reifier_iri, incoming_valid, &proof.signature)? {
+    let write = if repair {
+        ProofWrite::Whole
+    } else {
+        proof_write(tx, &reifier_iri, incoming_valid, &proof.signature)?
+    };
+    match write {
         ProofWrite::Whole => annotations.extend([
             (ONT_PROOF_KEY, Some(proof.key.as_str())),
             (ONT_PROOF_SIG, Some(proof.signature.as_str())),
@@ -1915,7 +1935,7 @@ impl SparqlStore {
             ));
         }
         for (link, status) in &restored {
-            write_link_quads(&mut tx, link, status)?;
+            write_link_quads_proof(&mut tx, link, status, true)?;
         }
         tx.commit()?;
         Ok(metadata_links.len())
@@ -3118,6 +3138,47 @@ mod tests {
             mention_rows(&svc, &me.did),
             only_the_writers_mention(&writer)
         );
+    }
+
+    /// A metadata link whose direct triple is the genuine link's own
+    /// signature annotation: the sweep deletes that annotation with it while
+    /// the row stays verified. The rebuilt link must get its whole proof
+    /// back, not only what an ordinary insert on a verified row may write.
+    #[test]
+    fn the_sweep_restores_a_signature_a_metadata_link_equalled() {
+        let (me, writer, member, impostor) = (
+            TestSigner::generate(),
+            TestSigner::generate(),
+            TestSigner::generate(),
+            TestSigner::generate(),
+        );
+        let svc = new_service();
+        let (genuine, _, g, _) = two_mentions(&writer, &member, &impostor, &me.did);
+        svc.add_link(&genuine).unwrap();
+        let overlap = make_link(
+            &member,
+            &g,
+            &ontology("proofSignature"),
+            &format!("literal:string:{}", genuine.proof.signature),
+        );
+        svc.add_link_unguarded(&overlap).unwrap();
+
+        assert_eq!(svc.purge_link_metadata_links().unwrap(), 1);
+        let check = |svc: &SparqlStore| {
+            let links = svc.get_all_links().unwrap();
+            assert_eq!(links.len(), 1, "{links:?}");
+            let link = &links[0];
+            assert_eq!(link.author, writer.did);
+            assert_eq!(link.timestamp, T1);
+            assert_eq!(link.data, genuine.data);
+            assert_eq!(link.proof.key, genuine.proof.key);
+            assert_eq!(link.proof.signature, genuine.proof.signature);
+            assert_eq!(link.proof.valid, Some(true));
+            assert!(link.compute_proof_valid(), "{link:?}");
+        };
+        check(&svc);
+        assert_eq!(svc.purge_link_metadata_links().unwrap(), 0, "idempotent");
+        check(&svc);
     }
 
     /// A link stating, in the store's bookkeeping vocabulary, that the store
