@@ -132,6 +132,7 @@ mod tests {
         ModelShape {
             target_class: target_class.to_string(),
             shape_uri: format!("{target_class}Shape"),
+            absent: Vec::new(),
             properties: Vec::new(),
             include_relations: Vec::new(),
             interpretation_hint: None,
