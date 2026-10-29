@@ -13,7 +13,7 @@ Every stored link has a **link status**: `Shared` (the default) or `Local`. In a
 | `perspective.addLink`, `addLinks`, `linkMutations` additions | the `status` parameter (`parse_link_status`): missing, `"shared"` or `"SHARED"` means `Shared`; any other value means `Local` |
 | `perspective.removeLinks`, `linkMutations` removals | the status the link was stored with, not the call's |
 | Model property declared `local: true`, SHACL action with `local` | `Local` (`execute_commands`) |
-| Links that arrive from the link language | always `Shared` (`diff_from_link_language`) |
+| Links that arrive from the link language | always `Shared` (`diff_from_link_language`); a diff does not add, relabel or remove a link stored as `Local` (`persist_remote_diff`) |
 | SDNA and SHACL links (`add_sdna`) | always `Shared` |
 | Built-in `InterpretationRun.debugPrompt` / `debugResponse` | `Local` ([hardwired_sdna/interpretation_run.json](../../../rust-executor/src/perspectives/hardwired_sdna/interpretation_run.json)) |
 

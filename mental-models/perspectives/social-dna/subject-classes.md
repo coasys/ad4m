@@ -27,7 +27,7 @@ Writes:
 
 `execute_commands` turns each `Command` (`addLink`, `removeLink`, `setSingleTarget`, `collectionSetter`) into link writes; a command marked `local` writes a local link. A `collectionSetter` on a relation with a declared ordering strategy also writes ordering entries on the parent (`apply_collection_ordering`, [ordering/](../../../rust-executor/src/perspectives/ordering)).
 
-Reads go through [Model queries](../querying/model-queries.md). `perspective.subjectClassesOf` lists the classes a URI conforms to. An **abstract class** (for example the built-in `ad4m://TextContent`) reads several concrete classes. A write through it goes to the instance's own classes; creating one is refused.
+Reads go through [Model queries](../querying/model-queries.md). `perspective.subjectClassesOf` lists the classes a URI conforms to. An **abstract class** (for example the built-ins `ad4m://TextContent` and `ad4m://Mentioning`) reads several concrete classes. A write through it goes to the instance's own classes; creating one is refused.
 
 </details>
 

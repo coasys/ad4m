@@ -11,7 +11,7 @@ A **link** (`Link`) is a triple of strings, usually URIs: `source`, optional `pr
 1. A caller sends a `Link` (`perspective.addLink`). `Link::validate` refuses an empty source or target; it does not require URIs, so bare strings such as `"root"` are valid. `Link::normalize` turns an empty predicate into `None`.
 2. `create_signed_expression(link, context)` signs the normalized link as the agent in the caller's `AgentContext` (main agent or a managed agent; see [Signing and verification](../../agents/identity/signing-and-verification.md)). The result is a `LinkExpression`.
 3. On read the executor returns a `DecoratedLinkExpression`: the same fields plus `proof.valid` / `proof.invalid` and `status`.
-4. The store computes the signature verdict on every insert (`LinkExpression::compute_proof_valid`) and stores it next to the link. It never trusts a verdict from the caller. A link that fails verification is stored, not refused. Model queries leave it out by default; link queries and SPARQL return it.
+4. The store computes the signature verdict on every insert (`LinkExpression::compute_proof_valid`) and stores it next to the link. It never trusts a verdict from the caller. A local write that fails verification is stored, not refused. Model queries leave it out by default; link queries and SPARQL return it. A link that arrives from a neighbourhood and fails verification against its own `author` is dropped before the store (`retain_ingestible`, [Link write path](write-path.md)).
 5. `Literal` ([Literal expressions](../../languages/expressions/literals.md)) encodes a value as `literal:<type>:<percent-encoded value>`.
 
 </details>

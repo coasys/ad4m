@@ -30,6 +30,8 @@ Binding (`resolve_host`, `resolve_plain_host`, `start_tls_listener`), with no `M
 
 An explicit `MCP_HOST` environment variable sets the plain listener's address in every row; without a credential and off loopback it only logs a warning. The HTTPS listener always binds `0.0.0.0` (`resolve_host`, `start_tls_listener` in [server.rs](../../../rust-executor/src/mcp/server.rs)).
 
+The mention waker: `get_mention_waker_config` returns one subscription with two model queries over built-in abstract classes. `mentionQuery` reads `ad4m://Mentioning` (`{ mentions }`): records whose `mentions` relation links the agent's DID. `query` reads `ad4m://TextContent` (`{ text }`): records whose text contains one of the agent's profile names or its DID. Both match only links another agent wrote whose signature verifies. The SDK's `WakerSubscriptionManager` opens both with `perspective.modelSubscribe` under one id, so a record both find wakes the agent once.
+
 The interpretation harness calls the same tools in the process (`mcp/tools/harness_bridge.rs`), with the dynamic tools included.
 
 An **agent session** (`perspective.runAgent`, `PerspectiveProxy.runAgent`) runs the harness over the caller's conversation with these tools, in one perspective and as the caller's `Session`. It offers only the static tools in `SESSION_READS` and the writes the caller names from `SESSION_WRITES`, and binds `perspective_id` on every call. It answers with the model's last message (`AgentReply`).
@@ -46,6 +48,7 @@ An **agent session** (`perspective.runAgent`, `PerspectiveProxy.runAgent`) runs 
 - [rust-executor/src/mcp/tools/auth.rs](../../../rust-executor/src/mcp/tools/auth.rs): login and capability tools, `auth_status`.
 - [rust-executor/src/mcp/tools/instances/](../../../rust-executor/src/mcp/tools/instances), [dynamic.rs](../../../rust-executor/src/mcp/tools/dynamic.rs): instance tools (see [Perspectives](../../perspectives/README.md)).
 - [rust-executor/src/mcp/tools/instances/template_tools.rs](../../../rust-executor/src/mcp/tools/instances/template_tools.rs): `template_read`, `template_update`, `from_bundle`; [rust-executor/src/tool_bundles/](../../../rust-executor/src/tool_bundles): `BundleSandbox`, `builtin` (WE's bundle).
+- [rust-executor/src/mcp/tools/subscriptions.rs](../../../rust-executor/src/mcp/tools/subscriptions.rs): `get_mention_waker_config`, `build_mention_query`, `build_mentioning_query`, `generate_waker_query`; SDK side: [core/src/perspectives/WakerSubscriptionManager.ts](../../../core/src/perspectives/WakerSubscriptionManager.ts).
 - [rust-executor/src/mcp/tools/harness_bridge.rs](../../../rust-executor/src/mcp/tools/harness_bridge.rs): in-process tool calls.
 - [rust-executor/src/perspectives/agent_session.rs](../../../rust-executor/src/perspectives/agent_session.rs): `run_agent_session`, `SESSION_READS`, `SESSION_WRITES`; [rust-executor/src/api/agent_session_ws.rs](../../../rust-executor/src/api/agent_session_ws.rs): `perspective.runAgent`.
 - [rust-executor/src/mcp/shacl.rs](../../../rust-executor/src/mcp/shacl.rs): class shapes for the tools, read by `load_class` and by `load_class_properties_with_uri`.

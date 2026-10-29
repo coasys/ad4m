@@ -27,6 +27,8 @@ FlowReplicaState (SQLite, per agent)    ── cached state + fired marks, `flow
 
 RPC: `perspective.proposeFlowTransition`, `acceptFlowProposal`, `rejectFlowProposal`, `flowStates`, `flowFired`, `flowValidOutputs`, `mintFlowReceipt`, `verifyFlowReceipt`. Minting an instance or a proposal registers the hard-wired `FlowInstance` and `FlowTransitionProposal` classes first (`ensure_flow_model_classes`); so does `add_sdna` with type `flow`.
 
+Flow links are **monotonic**: a `Shared` link whose predicate starts with `ad4m://flow/`, or is `ad4m://acceptedBy`, is never removed by a diff. A peer's removal is dropped, and a local removal fails ([Link write path](../../links/write-path.md)). The link ends only by its author's signed tombstone, `<source> ad4m://retracted literal:string:<signature>`, which every executor applies in its own store. Role revocations (`ad4m://flow/role_grant_revoked`) and tombstones never end. The table of predicates is `MONOTONIC_PREDICATES`.
+
 The derived state and fired marks are kept per agent in SQLite (`flow_replica_state`, `flow_fired_mark`), outside the graph. So clients do not model-query or subscribe to flow state: they read it with `flowStates` and `flowFired` and watch the `flow-state-changed` event.
 
 </details>
@@ -36,6 +38,7 @@ The derived state and fired marks are kept per agent in SQLite (`flow_replica_st
 - [perspectives/shacl_parser.rs](../../../../rust-executor/src/perspectives/shacl_parser.rs): `SHACLFlow`, `FlowState`, `FlowTransition`, `ConsensusRule`, `parse_flow_to_links`, `parse_flow_from_links`, `check_consensus_rule_links`.
 - [perspectives/flow_classes.rs](../../../../rust-executor/src/perspectives/flow_classes.rs): hard-wired `FlowInstance` / `FlowTransitionProposal`, `mint_flow_instance`, `ensure_flow_model_classes`.
 - [perspectives/flow_instance/](../../../../rust-executor/src/perspectives/flow_instance): the consensus engine; read its [mod.rs](../../../../rust-executor/src/perspectives/flow_instance/mod.rs) first.
+- [perspectives/monotonic.rs](../../../../rust-executor/src/perspectives/monotonic.rs): `MONOTONIC_PREDICATES`, `retraction_for`, `retraction_effects`.
 - [api/perspectives_ws.rs](../../../../rust-executor/src/api/perspectives_ws.rs): flow RPC handlers. MCP: [mcp/tools/flows.rs](../../../../rust-executor/src/mcp/tools/flows.rs).
 - SDK: [core/src/shacl/SHACLFlow.ts](../../../../core/src/shacl/SHACLFlow.ts), [core/src/perspectives/FlowInstance.ts](../../../../core/src/perspectives/FlowInstance.ts), [core/src/perspectives/FlowModels.ts](../../../../core/src/perspectives/FlowModels.ts).
 - Docs: [docs-src/pages/flows.mdx](../../../../docs-src/pages/flows.mdx), [writing-a-flow.mdx](../../../../docs-src/pages/developer-guides/writing-a-flow.mdx), [docs/flow-interpretation-hints-design.md](../../../../docs/flow-interpretation-hints-design.md).

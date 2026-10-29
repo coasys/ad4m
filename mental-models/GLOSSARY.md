@@ -2,7 +2,7 @@
 
 One definition per term, in alphabetical order. Each entry gives the code name in brackets and the page that explains the term. "not: …" lists words that pages must not use for this concept.
 
-**Abstract class** (`model_query/abstract_classes.rs`, built-in `ad4m://TextContent`): A subject class that reads the instances of several concrete classes, sends each write to the record's own classes, and cannot be created. [Subject classes](perspectives/social-dna/subject-classes.md)
+**Abstract class** (`model_query/abstract_classes.rs`, built-ins `ad4m://TextContent`, `ad4m://Mentioning`, `ad4m://Container` in `model_query/builtin_classes.rs`): A subject class that reads the instances of several concrete classes, sends each write to the record's own classes, and cannot be created. [Subject classes](perspectives/social-dna/subject-classes.md)
 
 **Access check** (`Guard` in `api/guards.rs`, `get_perspective_with_access`): The code in the method guard of an RPC method or MCP tool that applies a session's grant to one call: a capability check, an ownership check, or both. [Access checks](agents/access/checks.md); event delivery: [Events](agents/interfaces/events.md); language ops: [Signing and verification](agents/identity/signing-and-verification.md) — not: guard alone (a guard is a flow term; say method guard)
 
@@ -126,7 +126,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Guard** (`requires` on `FlowState`): A model query on a flow state that must match before a transition into that state may be proposed. [Flow spawn and guards](perspectives/social-dna/flows/spawn-and-guards.md) — not: method guard
 
-**Hard-wired class** (`hardwired_class.rs`, `hardwired_sdna/`): A subject class that the executor registers itself from bundled JSON, such as `FlowInstance`, `InterpretationRun` or `AutoProcessor`. [Social DNA](perspectives/social-dna/README.md) — not: built-in class (except for the abstract `ad4m://TextContent`)
+**Hard-wired class** (`hardwired_class.rs`, `hardwired_sdna/`): A subject class that the executor registers itself from bundled JSON, such as `FlowInstance`, `InterpretationRun` or `AutoProcessor`. [Social DNA](perspectives/social-dna/README.md) — not: built-in class (that is an abstract class the executor declares and never stores, such as `ad4m://TextContent`)
 
 **Harness** (`ai_service/harness/`, `run_with_tools`): The tool-calling LLM loop that interpretation can use instead of a single prompt, and that agent sessions run. [Interpretation](perspectives/social-dna/interpretation/README.md)
 
@@ -224,6 +224,8 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Model shape** (`ModelShape`, `load_shape_from_store`): The parsed, cached form of a subject class's SHACL that model queries are built from. [Model queries](perspectives/querying/model-queries.md)
 
+**Monotonic predicate** (`MONOTONIC_PREDICATES`, `Ending` in `perspectives/monotonic.rs`): A predicate under which a `Shared` link is never removed by a diff; it ends only by a tombstone, by a revocation, or never. Everything under `ad4m://flow/` and `ad4m://acceptedBy` is one. [Link write path](perspectives/links/write-path.md)
+
 **Multi-user mode** (`enable_multi_user`, `Ad4mDb::get_multi_user_enabled`): The executor setting that lets anonymous callers sign up and log in as managed agents. [Managed agents](agents/executor/managed-agents.md)
 
 **Neighbourhood** (`Neighbourhood`, `rust-executor/src/neighbourhoods.rs`): A perspective shared between agents through a link language, published at a `neighbourhood://` URL. [Neighbourhoods](perspectives/neighbourhoods/README.md)
@@ -274,7 +276,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Publishing (a neighbourhood)** (`neighbourhood.publish`, `neighbourhood_publish_from_perspective_with_context`): Turning a perspective into a neighbourhood by storing a neighbourhood expression and recording its URL on the perspective. [Publishing and joining](perspectives/neighbourhoods/publishing-and-joining.md)
 
-**Read set** (`ReadSet`): All signed links that a flow state read uses: proposals, votes, role grants and tombstones. [Flow consensus](perspectives/social-dna/flows/consensus.md)
+**Read set** (`ReadSet`): All signed links that a flow state read uses: proposals, votes, role grants and role revocations. [Flow consensus](perspectives/social-dna/flows/consensus.md)
 
 **Reifier** (`make_reifier_iri`): The RDF 1.2 node that carries a stored link's author, timestamp, proof, verdict and status. [Oxigraph store](perspectives/links/oxigraph-store.md)
 
@@ -323,6 +325,8 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 **Template variable** (`//!@ad4m-template-variable`, `apply_template_data`): A constant in a bundle, marked by a comment line, that templating replaces. [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
 
 **Templated language** (`language_apply_template_on_source`): A language made by templating a source language; its meta carries `templateAppliedParams` and `templateSourceLanguageAddress`. [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
+
+**Tombstone** (`ad4m://retracted`, `retraction_for`, `retraction_effects`): A signed link `<source> ad4m://retracted literal:string:<signature>` by which the author of a `Shared` link under a monotonic predicate ends it; every executor removes the named link from its own store and stores no later copy. [Flows](perspectives/social-dna/flows/README.md) — not: removal
 
 **Tool bundle** (`tool_bundles/`, `BundleSandbox`, `tool_bundles::builtin`): An app's JavaScript for its agents' tools, which the executor runs in a sandbox isolate that reaches no executor op. The one compiled in is WE's, behind `template_read` and `template_update`. [MCP server](agents/interfaces/mcp-server.md) — not: language
 

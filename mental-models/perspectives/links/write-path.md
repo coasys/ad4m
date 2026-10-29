@@ -14,14 +14,16 @@ Local write (`add_link` → `add_link_expression`):
 2. `Link::validate`, then sign as the caller's `AgentContext`.
 3. `check_consensus_rule_links`: refuse a flow consensus rule this executor could not read back.
 4. With a `batch_id`: append to the batch's `PerspectiveDiff` in `batch_store` and return.
-5. `persist_link_diff` → `SparqlStore` (removals first, then additions).
+5. `persist_link_diff` → `SparqlStore` (removals first, then additions). `retraction_effects` applies `ad4m://retracted` tombstones in every store write: it removes the link a tombstone names and does not write an addition a stored tombstone names.
 6. `update_prolog_engines(diff)` → `spawn_prolog_facts_update`: in a spawned task, set the notification and live-query flags and record the changed predicates.
 7. If `Shared`: `spawn_commit_and_handle_error` starts `commit` in a spawned task and does not wait for it. A commit that fails becomes a pending diff ([Neighbourhood sync](../neighbourhoods/sync.md)).
 8. `pubsub_publish_diff`: queue a flow pass if a flow definition changed, drop derived shapes if SHACL changed, seed bookkeeping for newly minted flow instances, then emit one `link-added` / `link-removed` event to all owners (`publish_to_owners`; the main agent for an unowned perspective) ([Events](../../agents/interfaces/events.md)).
 
 `link_mutations` (also behind `addLinks` and `removeLinks`) runs the same steps for many links, emits events before it commits, and commits only the shared part.
 
-Inbound write (`diff_from_link_language`): de-duplicate, set status `Shared`, persist, clear the shape cache if SHACL arrived, then steps 6 and 8, plus `schedule_flow_consensus_pass`.
+A removal of a stored `Shared` link under a **monotonic predicate** (everything under `ad4m://flow/`, `ad4m://acceptedBy`, `ad4m://retracted`, `ad4m://monotonic`) fails before anything is written (`refuse_monotonic_removal` in `remove_link(s)`, `update_link`, `link_mutations`; `commit_batch` checks again). Such a link ends only by its author's tombstone ([Flows](../social-dna/flows/README.md)). Local links are not affected.
+
+Inbound write (`diff_from_link_language`): de-duplicate, drop removals under a monotonic predicate (`drop_monotonic_removals`), drop additions whose proof does not verify against their own `author` (`retain_ingestible`), set status `Shared`, persist (`persist_remote_diff`: a link this executor stores as `Local` is not added, changed or removed), clear the shape cache if SHACL arrived, then steps 6 and 8, plus `schedule_flow_consensus_pass`. Only what the store applied is published. Removals of `Shared` links are not checked for authorship.
 
 Batch: `perspective.createBatch` → writes with `batchId` → `perspective.commitBatch` signs the added links again, splits the diff into shared and local, starts the commit of the shared part when a link language is attached (step 7), then persists both and runs steps 6 and 8. `create_batch` drops batches older than `BATCH_TIMEOUT_SECS` (300 s). Batches live only in memory: an executor restart loses an open batch, and the next call with its id fails with "Batch not found" or "No batch found with given UUID". `commit_batch` is `commit_batch_if` with no expected links. `commit_batch_if` takes the links a caller read (`expect_links`: the links from one source along one predicate) and checks them under `persist_lock`, which `persist_link_diff` also takes, right before it writes. If one changed, it drops the batch unwritten, commits nothing to the link language and fails with `LinksChanged`.
 
@@ -30,6 +32,8 @@ Batch: `perspective.createBatch` → writes with `batchId` → `perspective.comm
 <details><summary>Where in the code</summary>
 
 - [perspectives/perspective_instance.rs](../../../rust-executor/src/perspectives/perspective_instance.rs): `add_link`, `add_link_expression`, `add_links`, `link_mutations`, `update_link`, `remove_link(s)`, `persist_link_diff`, `update_prolog_engines`, `spawn_prolog_facts_update`, `pubsub_publish_diff`, `diff_from_link_language`, `create_batch`, `commit_batch`, `discard_batch`.
+- [perspectives/ingest.rs](../../../rust-executor/src/perspectives/ingest.rs): `retain_ingestible`, `persist_remote_diff`.
+- [perspectives/monotonic.rs](../../../rust-executor/src/perspectives/monotonic.rs): `MONOTONIC_PREDICATES`, `Ending`, `refuse_monotonic_removal`, `drop_monotonic_removals`, `retraction_effects`.
 - [perspectives/perspective_instance/expected_links.rs](../../../rust-executor/src/perspectives/perspective_instance/expected_links.rs): `commit_batch_if`, `expect_links`, `ExpectedLinks`, `LinksChanged`.
 - [events.rs](../../../rust-executor/src/events.rs): `Topic`, `Audience`, `Event`; events reach clients through `api/events_ws.rs` ([Events](../../agents/interfaces/events.md)).
 - [api/perspectives_ws.rs](../../../rust-executor/src/api/perspectives_ws.rs): the RPC handlers and their credit checks (`check_credits`, `reserve_credits`).

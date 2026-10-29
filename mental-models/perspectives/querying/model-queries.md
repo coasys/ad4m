@@ -18,7 +18,7 @@ A **model query** asks for instances of one or more subject classes: `perspectiv
 6. **Getters and relations**: SPARQL `ASK` / `SELECT` getters, reverse relations, recursive `include`.
 7. **Projections**: counts and lists over relation edges.
 
-Query input (`ModelQueryInput`): `where`, `order`, `limit`, `offset`, `count`, `properties`, `include`, `projections`, `parent` scope, `polymorphic`, `preferClasses`, `linkStatus`, `includeUnverified`. By default only links whose signature verifies are read. Several classes in one query go through `execute_union_query`. Abstract classes (for example the built-in `ad4m://TextContent`) resolve to the concrete classes that implement them.
+Query input (`ModelQueryInput`): `where`, `order`, `limit`, `offset`, `count`, `properties`, `include`, `projections`, `parent` scope, `polymorphic`, `preferClasses`, `linkStatus`, `includeUnverified`. By default only links whose signature verifies are read. Several classes in one query go through `execute_union_query`. Abstract classes (for example the built-ins `ad4m://TextContent` and `ad4m://Mentioning`) resolve to the concrete classes that implement them.
 
 </details>
 

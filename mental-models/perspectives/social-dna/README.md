@@ -21,7 +21,7 @@ Subject classes (`perspective.addSdna(name, code, "subject_class", shaclJson)`, 
 
 Flows (`PerspectiveProxy.addFlow(name, flow)` in the SDK): the SDK writes `SHACLFlow.toLinks()` plus `ad4m://self → ad4m://has_flow` and `ad4m://flow_uri` itself through `linkMutations`. It sends only the difference to the stored definition. Readers use `parse_flow_from_links` → `SHACLFlow`.
 
-The executor also registers **hard-wired classes** it needs itself (flow instances and proposals, interpretation runs and overlays, auto-processors, `TextContent`) from JSON files in `hardwired_sdna/`.
+The executor also registers **hard-wired classes** it needs itself (flow instances and proposals, interpretation runs and overlays, auto-processors) from JSON files in `hardwired_sdna/`. The built-in abstract classes `TextContent`, `Mentioning` and `Container` come from the same directory, but no perspective stores them (`model_query/builtin_classes.rs`).
 
 </details>
 
