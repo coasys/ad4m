@@ -226,8 +226,8 @@ impl Person {
     }
 
     /// The `add` that spends `claim` on `offer` (not pushed).
-    pub fn add_claimed(&self, offer: &Offer, claim: &ClaimView, expires: Option<u64>) -> Event {
-        build::add_claimed(&self.chain, &self.current_master(), offer, claim, expires).unwrap()
+    pub fn add_claimed(&self, offer: &Offer, claim: &ClaimView) -> Event {
+        build::add_claimed(&self.chain, &self.current_master(), offer, claim).unwrap()
     }
 
     /// A `revoke` of `ids` (not pushed).

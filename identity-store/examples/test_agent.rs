@@ -16,7 +16,7 @@
 //! | `device` | `label` | `{sign, enc, did}` of a device key not yet in a log |
 //! | `offer` | `name`, `kind`, `ttl`, `now`, `bound?` (a device label), `bot?` | `{offer, s}` |
 //! | `claim` | `name`, `device`, `offerId`, `s`, `canKeepMaster?` | the `Claim` |
-//! | `add` | `name`, `offer`, `claim`, `claimedAt`, `expires?` | the `add` event (not pushed) |
+//! | `add` | `name`, `offer`, `claim`, `claimedAt` | the `add` event (not pushed) |
 //! | `revoke` | `name`, `ids` | the `revoke` event (not pushed) |
 //! | `rotate` | `name` | the `rotate` event (not pushed) |
 //! | `push` | `name`, `event` | `{seq}`: the person's copy takes the event the store took |
@@ -146,9 +146,8 @@ impl Apps {
                 let claim: Claim = parse(req, "claim")?;
                 let view: ClaimView =
                     ad4m_identity_core::link::claim_view(&claim, number(req, "claimedAt")?);
-                let expires = req.get("expires").and_then(Value::as_u64);
                 let person = self.person(req)?;
-                to_json(&person.add_claimed(&offer.offer, &view, expires))
+                to_json(&person.add_claimed(&offer.offer, &view))
             }
             "revoke" => {
                 let ids: Vec<String> = parse(req, "ids")?;

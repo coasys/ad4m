@@ -179,7 +179,7 @@ export interface KeyIndexEntry {
     revoked: number | null;
     /** The bot scope in force at the head. */
     bot: JsonObject | null;
-    /** An Until key's expiry, or the bot scope's. */
+    /** The bot scope's expiry; null for a standing key or a master (only a bot key expires). */
     expires: number | null;
     /** A bot key under a pause record in force; false for every other key. */
     paused: boolean;

@@ -82,8 +82,10 @@ tests name them by these names.
    SCID; `log::admit_new_log` decides whether a new log may start (proof of work, vouching
    note; see "No brake yet" below).
 3. **The replay check.** Every event replays with the identity core (`KelPolicy`) on the stored
-   state, so the store can withhold an event but never forge one. Each key's `expires` in an
-   `incept` or `add` lies in the future, by the store's clock, and at most 400 days ahead.
+   state, so the store can withhold an event but never forge one. Each bot scope's `expires` in an
+   `incept` or `add` lies in the future, by the store's clock, and at most 400 days ahead
+   (`400 expires`). Only a bot key expires: a device key with `expires` and no bot mark is
+   the core's `ExpiresWithoutBotMark`.
 4. **The one-key check.** It looks across every log: a signing key (masters included) that sits
    in `keys`, revoked or not, is `409 key-taken`, in an `incept`, an `add`, a `rotate` and a
    claim. One key speaks for at most one identity, ever.

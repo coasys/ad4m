@@ -18,7 +18,7 @@ use crate::{Fault, Store};
 pub const MAX_EVENTS: usize = 32;
 /// Events per log page.
 pub const PAGE_EVENTS: u32 = ad4m_ldk::identity::LOG_PAGE_EVENTS;
-/// The furthest ahead an `expires` in an `incept` or `add` may lie: 400 days.
+/// The furthest ahead a bot scope's `expires` in an `incept` or `add` may lie: 400 days.
 pub const MAX_KEY_LIFE_S: u64 = 400 * 86_400;
 
 fn chain_error(e: &ChainError<FoldError>) -> ApiError {
@@ -59,20 +59,19 @@ pub fn admit_new_log(
     Ok(())
 }
 
-/// The store's own check of expiries (the core reads no clock): an `expires` in an `incept` or
-/// `add` neither in the past
-/// nor more than 400 days ahead, by the store's clock.
+/// The store's own check of expiries (the core reads no clock): a bot scope's `expires` in an
+/// `incept` or `add` neither in the past nor more than 400 days ahead, by the store's clock.
+/// Only a bot key expires; the core refuses an `expires` without the bot mark on replay.
 fn check_expires(event: &Event, now: u64) -> Result<(), ApiError> {
     let keys: &[DeviceKey] = match &event.op {
         Op::Incept { add, .. } | Op::Add { add, .. } => add,
         _ => return Ok(()),
     };
     for key in keys {
-        let expires = match &key.life {
-            KeyLife::Standing => continue,
-            KeyLife::Until(at) => *at,
-            KeyLife::Bot(scope) => scope.expires,
+        let KeyLife::Bot(scope) = &key.life else {
+            continue;
         };
+        let expires = scope.expires;
         if expires <= now {
             return Err(ApiError::invalid(
                 "expires",
