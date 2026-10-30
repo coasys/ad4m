@@ -299,7 +299,9 @@ impl IdentityService {
     }
 
     /// Records that `agent` speaks for the log `scid` when its device key is valid at the log's
-    /// trusted seq (the accepted, store-signed head); the key's id when listed up to there.
+    /// trusted seq (the accepted, store-signed head); the key's id when listed up to there. On
+    /// the first binding, publishes the person's profile (a failure is logged; the next profile
+    /// publish tries again).
     pub(super) async fn record_agent_if_listed(
         &self,
         agent: &AgentContext,
@@ -320,6 +322,7 @@ impl IdentityService {
             return Ok(None);
         };
         if state.key_valid_at_time(&id, trusted, now()) {
+            let bound_before = db(|db| db.agent_identity(&agent_did))?.is_some();
             db(|db| db.set_agent_identity(&agent_did, scid, now()))
                 .map_err(|e| error(409, format!("identity-exists: {}", e.message)))?;
             // The main agent's status gains its identity (a managed agent's status event names
@@ -329,6 +332,16 @@ impl IdentityService {
                 crate::pubsub::get_global_pubsub()
                     .await
                     .publish_event(crate::events::Event::agent_status(&status.with_identity()));
+            }
+            if !bound_before {
+                if let Err(e) =
+                    crate::agent::AgentService::publish_person_profile(agent, self).await
+                {
+                    log::warn!(
+                        "identity: the person's profile of {agent_did} under {} was not published ({e}); the next profile publish tries again",
+                        did_of(scid)
+                    );
+                }
             }
         }
         Ok(Some(id))
@@ -840,6 +853,13 @@ mod tests {
                 .inner
                 .key
                 .sign_head(chain.id(), head.seq, &head.hash, 1))
+        }
+        async fn put_agent(
+            &self,
+            record: &ad4m_ldk::identity::AgentRecord,
+            req: Option<&ad4m_ldk::identity::SignedRequest>,
+        ) -> Result<(), IdentityError> {
+            self.inner.put_agent(record, req).await
         }
         async fn open_offer(
             &self,
