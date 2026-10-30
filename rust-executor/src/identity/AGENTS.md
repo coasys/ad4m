@@ -166,7 +166,9 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
 - **Reads.** Logic reads (model queries, flows, SHACL, SDNA facts) count only links with
   `proofValid` `true`. The display reads `perspective.queryLinks` and `perspective.snapshot`
   (`get_links_shown`) leave out `invalid` links and return `cantCheck` and `flagged` ones with
-  `verdict`. `PerspectiveInstance::get_links` returns every stored link with its verdict.
+  `verdict`; with `includeUnverified: true` on the `LinkQuery` they return `invalid` links too
+  (so an owner can find and remove them; removal does not check the verdict).
+  `PerspectiveInstance::get_links` returns every stored link with its verdict.
 
 ## DID resolution (`identity.resolve`)
 

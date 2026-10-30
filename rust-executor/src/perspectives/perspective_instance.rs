@@ -2706,12 +2706,14 @@ impl PerspectiveInstance {
 
     /// The display read behind `perspective.queryLinks` and `perspective.snapshot`: as
     /// [`Self::get_links`], without the links whose verdict is `invalid` (`cantCheck` and
-    /// `flagged` links are returned, with their verdict).
+    /// `flagged` links are returned, with their verdict). With `q.include_unverified ==
+    /// Some(true)` it returns the invalid links too, as [`Self::get_links`] does.
     pub async fn get_links_shown(
         &self,
         q: &LinkQuery,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        self.links(q, true).await
+        let shown_only = q.include_unverified != Some(true);
+        self.links(q, shown_only).await
     }
 
     async fn links(
@@ -3977,6 +3979,7 @@ impl PerspectiveInstance {
                 from_date: None,
                 until_date: None,
                 limit: None,
+                include_unverified: None,
             })
             .await?;
         // Entries this batch has already staged count as prior ordering: without
@@ -5153,6 +5156,7 @@ impl PerspectiveInstance {
                             from_date: None,
                             until_date: None,
                             limit: None,
+                            include_unverified: None,
                         })
                         .await?;
                     for link_expression in link_expressions {
@@ -5191,6 +5195,7 @@ impl PerspectiveInstance {
                             from_date: None,
                             until_date: None,
                             limit: None,
+                            include_unverified: None,
                         })
                         .await?;
                     for link_expression in link_expressions {
@@ -5239,6 +5244,7 @@ impl PerspectiveInstance {
                             from_date: None,
                             until_date: None,
                             limit: None,
+                            include_unverified: None,
                         })
                         .await?;
 
@@ -7906,6 +7912,92 @@ mod tests {
         map.forget(&log.scid());
     }
 
+    /// A display read leaves out an invalid link; with `include_unverified` it returns it,
+    /// with its verdict, and the owner can remove it.
+    #[tokio::test]
+    async fn include_unverified_returns_an_invalid_link_and_the_owner_can_remove_it() {
+        use crate::identity::verdict::InvalidReason;
+
+        let mut perspective = setup().await;
+        let signed: LinkExpression = perspective
+            .add_link(
+                create_link(),
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap()
+            .into();
+        // The same proof over another target: the signature no longer holds.
+        let mut forged = signed.clone();
+        forged.data.target = "test://forged".to_string();
+        perspective.sparql_store.add_link(&forged).unwrap();
+
+        let forged_query = |include_unverified| LinkQuery {
+            target: Some("test://forged".to_string()),
+            include_unverified,
+            ..Default::default()
+        };
+        for limit in [None, Some(10)] {
+            let shown = LinkQuery {
+                limit,
+                ..forged_query(None)
+            };
+            assert!(
+                perspective
+                    .get_links_shown(&shown)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "a display read leaves the invalid link out (limit {limit:?})"
+            );
+            let all = LinkQuery {
+                limit,
+                ..forged_query(Some(true))
+            };
+            let links = perspective.get_links_shown(&all).await.unwrap();
+            assert_eq!(links.len(), 1, "limit {limit:?}");
+            assert_eq!(
+                links[0].verdict,
+                Some(LinkVerdict::Invalid(InvalidReason::BadSignature))
+            );
+            assert!(!links[0].proof.valid.unwrap_or(true));
+        }
+        let everything = perspective
+            .get_links_shown(&LinkQuery {
+                include_unverified: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(everything.len(), 2, "the valid link and the invalid one");
+
+        let invalid = perspective
+            .get_links_shown(&forged_query(Some(true)))
+            .await
+            .unwrap();
+        let removed = perspective
+            .remove_links(invalid.into_iter().map(Into::into).collect(), None)
+            .await
+            .unwrap();
+        assert_eq!(removed.len(), 1, "the owner removes the invalid link");
+        assert!(perspective
+            .get_links(&forged_query(None))
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            perspective
+                .get_links_shown(&LinkQuery::default())
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the valid link stays"
+        );
+    }
+
     #[tokio::test]
     async fn test_link_query_date_filtering() {
         let mut perspective = setup().await;
@@ -8335,6 +8427,7 @@ mod tests {
             from_date: None,
             until_date: None,
             limit: None,
+            include_unverified: None,
         };
         let links = perspective.get_links(&query).await.unwrap();
         assert_eq!(links.len(), 0);

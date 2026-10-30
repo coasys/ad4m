@@ -94,6 +94,7 @@ export class PerspectiveClient {
         if (query.fromDate) params.fromDate = query.fromDate instanceof Date ? query.fromDate.toISOString() : String(query.fromDate)
         if (query.untilDate) params.untilDate = query.untilDate instanceof Date ? query.untilDate.toISOString() : String(query.untilDate)
         if (query.limit !== undefined) params.limit = query.limit
+        if (query.includeUnverified) params.includeUnverified = true
         const links = await this.#apiClient.call('perspective.queryLinks', params, options)
         return links.map(LinkExpression.fromWire)
     }

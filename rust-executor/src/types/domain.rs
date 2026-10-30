@@ -440,6 +440,10 @@ pub struct LinkQuery {
     pub source: Option<String>,
     pub target: Option<String>,
     pub until_date: Option<DateTime>,
+    /// A display read leaves out links whose verdict is `invalid`; `Some(true)` returns
+    /// them too, each with its verdict (so the owner can see and remove them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_unverified: Option<bool>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
