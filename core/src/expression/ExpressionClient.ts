@@ -13,13 +13,16 @@ export class ExpressionClient {
     /** Maximum total size (in bytes of JSON) of the expressions kept in memory. */
     static MAX_MEM_BYTES = 5 * 1024 * 1024; // 5 MB
 
-    // The misses of the `get` and `getMany` calls made in one tick go out in
-    // one `expression.getMany`, which answers per URL what `expression.get` would.
+    // A `get` miss is its own `expression.get`, so it waits for no slower
+    // expression and has its own call timeout. The misses of the `getMany`
+    // calls made in one tick go out in one `expression.getMany`, which answers
+    // per URL what `expression.get` would.
     #expressions: KeyedCache<ExpressionRendered>;
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
         this.#expressions = new KeyedCache<ExpressionRendered>({
+            load: (url) => this.#apiClient.call('expression.get', { url }),
             loadMany: async (urls) => (await this.#apiClient.call('expression.getMany', { urls })).map(entry =>
                 entry && 'code' in entry ? new RpcError(entry.code, entry.message) : entry as ExpressionRendered | null),
             persistent: createPersistentCache<StoredEntry<ExpressionRendered>>('ad4m-expression-cache', 'expressions'),

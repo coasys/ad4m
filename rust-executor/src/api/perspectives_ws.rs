@@ -2022,10 +2022,23 @@ async fn flow_states_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(serde_json::to_value(entries)?)
 }
 
+/// Most instances one `perspective.flowFired` call may name: their marks are
+/// read under one database lock.
+pub(crate) const MAX_FLOW_FIRED_INSTANCES: usize = 200;
+
+/// `perspective.flowFired { instances }`: more than
+/// [`MAX_FLOW_FIRED_INSTANCES`] instances → 400.
 async fn flow_fired_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
     let body: PerspectiveFlowFiredParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    if body.instances.len() > MAX_FLOW_FIRED_INSTANCES {
+        return Err(WsRpcError::bad_request(format!(
+            "`instances` holds {} entries; the limit is {}",
+            body.instances.len(),
+            MAX_FLOW_FIRED_INSTANCES
+        )));
+    }
     let agent_did = flow_bookkeeping_agent(&ctx)?;
     let fired =
         crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instances(

@@ -13,6 +13,12 @@ export interface KeyedCacheOptions<V> {
      * readers only).
      */
     loadMany(keys: string[]): Promise<Array<V | null | Error>>;
+    /**
+     * Reads one key (`null` when not found; rejects when the read failed).
+     * When set, a miss of {@link KeyedCache.get} is read alone with it, so it
+     * waits for no other key; only {@link KeyedCache.getMany} uses `loadMany`.
+     */
+    load?(key: string): Promise<V | null>;
     /** Most keys per `loadMany` call. Default: no limit. */
     maxBatch?: number;
     /** Second tier, read on a memory miss (IndexedDB in browsers). */
@@ -34,7 +40,8 @@ interface Loaded<V> {
 /**
  * Keyed read cache shared by profile and expression lookups. Concurrent reads
  * of one key share one request; misses of one tick go out in one `loadMany`
- * call. A `null` (not found) is returned but not kept.
+ * call, except a `get()` miss when the options have `load`. A `null` (not
+ * found) is returned but not kept.
  */
 export class KeyedCache<V> {
     #opts: KeyedCacheOptions<V>;
@@ -48,11 +55,12 @@ export class KeyedCache<V> {
     }
 
     get(key: string): Promise<V | null> {
-        return this.#read(key);
+        const load = this.#opts.load;
+        return this.#read(key, load ? k => this.#loadOne(k, load) : k => this.#enqueue(k));
     }
 
     getMany(keys: string[]): Promise<Array<V | null>> {
-        return Promise.all(keys.map(key => this.#read(key)));
+        return Promise.all(keys.map(key => this.#read(key, k => this.#enqueue(k))));
     }
 
     /** Stores a value known to be current; a read in flight for the key is not kept. */
@@ -76,13 +84,13 @@ export class KeyedCache<V> {
         if (persistent) this.#opts.persistent?.clear(); // fire-and-forget
     }
 
-    #read(key: string): Promise<V | null> {
+    #read(key: string, fetch: (key: string) => Promise<Loaded<V>>): Promise<V | null> {
         const hit = this.#values.get(key);
         if (hit && Date.now() - hit.ts < (this.#opts.maxAgeMs?.(key) ?? Infinity)) return Promise.resolve(hit.value);
         const inFlight = this.#pending.get(key);
         if (inFlight) return inFlight;
 
-        const loading = this.#enqueue(key);
+        const loading = fetch(key);
         const promise: Promise<V | null> = loading.then(
             ({ value, stored }) => {
                 // A set(), delete() or clear() since the read started wins over its result.
@@ -116,6 +124,10 @@ export class KeyedCache<V> {
             if (entry.value instanceof Error) throw entry.value;
             return entry as Loaded<V>;
         });
+    }
+
+    async #loadOne(key: string, load: (key: string) => Promise<V | null>): Promise<Loaded<V>> {
+        return (await this.#stored(key)) ?? { value: await load(key), stored: false };
     }
 
     async #loadBatch(keys: string[]): Promise<Map<string, Loaded<V | Error>>> {

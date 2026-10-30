@@ -28,6 +28,40 @@ describe('KeyedCache', () => {
         expect(loadMany).toHaveBeenCalledTimes(1);
     });
 
+    test('with load, a get() miss is read alone and settles without waiting for a slower key', async () => {
+        const slow = deferred<string>();
+        const load = jest.fn((key: string) => key === 'slow' ? slow.promise : Promise.resolve(key.toUpperCase()));
+        const loadMany = jest.fn(async (keys: string[]) => keys.map(k => k.toUpperCase()));
+        const cache = new KeyedCache<string>({ load, loadMany });
+        const slowRead = cache.get('slow');
+        expect(await cache.get('fast')).toBe('FAST');
+        // A getMany() shares the get() in flight, and only its other misses go to loadMany.
+        const many = cache.getMany(['fast', 'slow', 'b']);
+        slow.resolve('SLOW');
+        expect(await slowRead).toBe('SLOW');
+        expect(await many).toEqual(['FAST', 'SLOW', 'B']);
+        expect(load.mock.calls).toEqual([['slow'], ['fast']]);
+        expect(loadMany.mock.calls).toEqual([[['b']]]);
+    });
+
+    test('with load, a get() miss is served from the persistent store before load', async () => {
+        const persistent = new MapStore<string>();
+        persistent.entries.set('a', { value: 'stored', ts: Date.now() });
+        const load = jest.fn(async (key: string) => key);
+        const cache = new KeyedCache<string>({ load, loadMany: async keys => keys, persistent });
+        expect(await cache.get('a')).toBe('stored');
+        expect(load).not.toHaveBeenCalled();
+        expect(persistent.puts).toEqual([]);
+    });
+
+    test('with load, a failed get() rejects that read only, and the next get() retries', async () => {
+        const load = jest.fn().mockRejectedValueOnce(new Error('boom')).mockResolvedValue('ok');
+        const cache = new KeyedCache<string>({ load, loadMany: async keys => keys });
+        await expect(cache.get('a')).rejects.toThrow('boom');
+        expect(await cache.get('a')).toBe('ok');
+        expect(load).toHaveBeenCalledTimes(2);
+    });
+
     test('maxBatch splits one tick of misses into calls of at most that size', async () => {
         const loadMany = jest.fn(async (keys: string[]) => keys);
         const cache = new KeyedCache<string>({ loadMany, maxBatch: 2 });

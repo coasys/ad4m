@@ -49,6 +49,9 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'expression.create': (p: Record<string, unknown>) => `lang://test/Qm-created-${Date.now()}`,
 };
 
+/** How long the mock executor takes to answer a call; reset to 0 before each test. */
+let replyDelayMs: (type: string, params: Record<string, unknown>) => number = () => 0;
+
 // ===================== MOCK WEBSOCKET =====================
 
 class MockWebSocket {
@@ -110,7 +113,7 @@ class MockWebSocket {
 
             setTimeout(() => {
                 this.onmessage?.({ data: JSON.stringify(reply) });
-            }, 0);
+            }, replyDelayMs(msgType, params));
         } catch { /* malformed JSON */ }
     }
 
@@ -154,6 +157,7 @@ afterAll(() => {
 
 beforeEach(() => {
     rpcCallLog = [];
+    replyDelayMs = () => 0;
     MockWebSocket.instances = [];
     // Fresh client per test to avoid cache leakage
     ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
@@ -455,19 +459,43 @@ describe('Profile and expression lookups batch concurrent misses', () => {
         expect(second.map(e => JSON.parse(e.data).url)).toEqual(['lang://test/Qm-s2', 'lang://test/Qm-s3']);
     });
 
+    test('a fast get() settles without waiting for a slow get() of the same tick', async () => {
+        // Like a language that answers one URL in 5 ms and another in 300 ms.
+        const delay = (url: string) => url.endsWith('/Qm-slow') ? 300 : 5;
+        replyDelayMs = (type, params) => type === 'expression.get' ? delay(params.url as string)
+            : type === 'expression.getMany' ? Math.max(0, ...(params.urls as string[]).map(delay)) : 0;
+        await ad4m.agent.status(); // connect first, so the timing is the call's own
+        rpcCallLog = [];
+
+        const started = Date.now();
+        const fast = ad4m.expression.get('lang://test/Qm-fast').then(() => Date.now() - started);
+        const slow = ad4m.expression.get('lang://test/Qm-slow').then(() => Date.now() - started);
+        expect(await fast).toBeLessThan(150);
+        expect(await slow).toBeGreaterThanOrEqual(290);
+        expect(calls('expression.get').map(c => c.params.url)).toEqual(['lang://test/Qm-fast', 'lang://test/Qm-slow']);
+        expect(calls('expression.getMany')).toHaveLength(0);
+    });
+
     test('a get() in flight serves a concurrent getMany() of the same URL', async () => {
         const [one, many] = await Promise.all([
             ad4m.expression.get('lang://test/Qm-shared'),
             ad4m.expression.getMany(['lang://test/Qm-shared', 'lang://test/Qm-own']),
         ]);
-        expect(calls('expression.get')).toHaveLength(0);
-        expect(calls('expression.getMany').map(c => c.params.urls)).toEqual([['lang://test/Qm-shared', 'lang://test/Qm-own']]);
+        expect(calls('expression.get').map(c => c.params.url)).toEqual(['lang://test/Qm-shared']);
+        expect(calls('expression.getMany').map(c => c.params.urls)).toEqual([['lang://test/Qm-own']]);
         expect(JSON.stringify(many[0])).toEqual(JSON.stringify(one));
     });
 
-    test('concurrent get() calls make one expression.getMany, each settling as a lone get() does', async () => {
+    test('concurrent get() calls make one expression.get per URL', async () => {
+        const urls = ['lang://test/Qm-g1', 'lang://test/Qm-g2', 'lang://test/Qm-g1'];
+        await Promise.all(urls.map(url => ad4m.expression.get(url)));
+        expect(calls('expression.get').map(c => c.params.url)).toEqual(['lang://test/Qm-g1', 'lang://test/Qm-g2']);
+        expect(calls('expression.getMany')).toHaveLength(0);
+    });
+
+    test('concurrent getMany() reads make one expression.getMany, each URL settling as a lone get() does', async () => {
         const urls = ['lang://test/Qm-g1', 'lang://test/Qm-g2', 'lang://test/missing', 'lang://test/broken', 'lang://test/Qm-g1'];
-        const batched = await Promise.allSettled(urls.map(url => ad4m.expression.get(url)));
+        const batched = await Promise.allSettled(urls.map(url => ad4m.expression.getMany([url]).then(([expression]) => expression)));
         expect(calls('expression.getMany')).toHaveLength(1);
         expect(calls('expression.get')).toHaveLength(0);
 
@@ -490,13 +518,14 @@ describe('Profile and expression lookups batch concurrent misses', () => {
         expect(good.status).toBe('fulfilled');
         expect(bad.status).toBe('rejected');
         await expect(ad4m.expression.getMany(['lang://test/Qm-ok', 'lang://test/broken'])).rejects.toMatchObject({ status: 500 });
-        expect(calls('expression.getMany').map(c => c.params.urls)).toEqual([['lang://test/Qm-ok', 'lang://test/broken'], ['lang://test/broken']]);
+        expect(calls('expression.get').map(c => c.params.url)).toEqual(['lang://test/Qm-ok', 'lang://test/broken']);
+        expect(calls('expression.getMany').map(c => c.params.urls)).toEqual([['lang://test/broken']]);
     });
 });
 
 // ===================== EXPRESSION CACHE TESTS =====================
 
-/** RPCs that read expressions: `expression.get` (alwaysGet) or a batch of `get`/`getMany` misses. */
+/** RPCs that read expressions: `expression.get` (a `get` miss) or a batch of `getMany` misses. */
 const expressionReads = () => rpcCallLog.filter(c => c.type === 'expression.get' || c.type === 'expression.getMany');
 
 describe('ExpressionClient Cache', () => {
@@ -590,8 +619,8 @@ describe('ExpressionClient Cache', () => {
 
         // getMany should only have fetched Qm-2 (the uncached one)
         const getManyCalls = rpcCallLog.filter(c => c.type === 'expression.getMany');
-        expect(getManyCalls).toHaveLength(2);
-        expect(getManyCalls[1].params.urls).toEqual(['lang://test/Qm-2']);
+        expect(getManyCalls).toHaveLength(1);
+        expect(getManyCalls[0].params.urls).toEqual(['lang://test/Qm-2']);
     });
 
     test('getMany() all cached — no RPC', async () => {

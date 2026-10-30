@@ -317,6 +317,94 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
         await Promise.all([proxy.querySparql(QUERY), proxy.querySparql(QUERY, { signal: controller.signal })])
         expect(sparqlCalls()).toBe(2)
     })
+
+    // A query sent before a write answers with the state before it, so the
+    // same query started after `await proxy.add(...)` must not join it.
+    function executorAnsweringAtSendTime() {
+        let rows = [{ s: 'old' }]
+        const pending: Array<() => void> = []
+        mockCall.mockImplementation((method: string) => {
+            if (method === 'perspective.querySparql') {
+                const answer = JSON.stringify(rows)
+                return new Promise(resolve => pending.push(() => resolve(answer)))
+            }
+            rows = [{ s: 'old' }, { s: 'new' }]
+            const added = { author: 'did:test', timestamp: '2026-01-01T00:00:00Z', data: { source: 'a', target: 'new' }, proof: { key: 'k', signature: 's' } }
+            const replies: Record<string, unknown> = {
+                'perspective.addLinks': [added],
+                'perspective.removeLinks': [added],
+                'perspective.linkMutations': { additions: [added], removals: [] },
+                'perspective.commitBatch': { additions: [added], removals: [] },
+            }
+            return Promise.resolve(method in replies ? replies[method] : added)
+        })
+        return { settleQueries: () => pending.splice(0).forEach(resolve => resolve()) }
+    }
+
+    it('a call started after a write makes its own RPC and reads the write back', async () => {
+        const executor = executorAnsweringAtSendTime()
+        const proxy = makeProxy()
+        const before = proxy.querySparql(QUERY)
+        await proxy.add({ source: 'a', target: 'new' })
+        const after = proxy.querySparql(QUERY)
+        executor.settleQueries()
+        expect(await before).toEqual([{ s: 'old' }])
+        expect(await after).toEqual([{ s: 'old' }, { s: 'new' }])
+        expect(sparqlCalls()).toBe(2)
+    })
+
+    it('calls waiting before a write keep sharing their RPC', async () => {
+        const executor = executorAnsweringAtSendTime()
+        const proxy = makeProxy()
+        const first = proxy.querySparql(QUERY)
+        const second = proxy.querySparql(QUERY)
+        await proxy.add({ source: 'a', target: 'new' })
+        executor.settleQueries()
+        expect(await first).toEqual([{ s: 'old' }])
+        expect(await second).toEqual([{ s: 'old' }])
+        expect(sparqlCalls()).toBe(1)
+    })
+
+    it('a write to another perspective does not split the sharing', async () => {
+        const executor = executorAnsweringAtSendTime()
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const first = makeProxy(client, 'p1').querySparql(QUERY)
+        await makeProxy(client, 'p2').add({ source: 'a', target: 'new' })
+        const second = makeProxy(client, 'p1').querySparql(QUERY)
+        executor.settleQueries()
+        await Promise.all([first, second])
+        expect(sparqlCalls()).toBe(1)
+    })
+
+    it('every write path of the client starts a new generation', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const link = { source: 'a', target: 'new' }
+        const stored = { author: 'did:test', timestamp: '2026-01-01T00:00:00Z', data: link, proof: { key: 'k', signature: 's' } } as any
+        const writes: Array<() => Promise<unknown>> = [
+            () => client.addLink('u', link),
+            () => client.addLinks('u', [link]),
+            () => client.removeLinks('u', [stored]),
+            () => client.linkMutations('u', { additions: [link], removals: [] }),
+            () => client.addLinkExpression('u', stored),
+            () => client.updateLink('u', stored, link),
+            () => client.removeLink('u', stored),
+            () => client.executeCommands('u', '[]', 'expr', '[]'),
+            () => client.createSubject('u', 'C', 'expr'),
+            () => client.updateSubject('u', 'C', 'expr', '{}'),
+            () => client.removeSubject('u', 'C', 'expr'),
+            () => client.commitBatch('u', 'b'),
+        ]
+        for (const write of writes) {
+            const executor = executorAnsweringAtSendTime()
+            mockCall.mockClear()
+            const before = client.querySparql('u', QUERY)
+            await write()
+            const after = client.querySparql('u', QUERY)
+            executor.settleQueries()
+            await Promise.all([before, after])
+            expect([write.toString(), sparqlCalls()]).toEqual([write.toString(), 2])
+        }
+    })
 })
 
 describe('PerspectiveProxy.getAllShacl reads shapes in one RPC', () => {
