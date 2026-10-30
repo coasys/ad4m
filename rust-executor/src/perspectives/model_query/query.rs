@@ -339,6 +339,29 @@ async fn walk_levels(
     Ok(ordered)
 }
 
+/// The total a page tells by itself, or `None` when only a COUNT can say.
+///
+/// A page shorter than `limit` means the scope ran out inside it: with no offset the page is the
+/// whole set, and after an offset the set is `offset + rows` — as long as the page is not empty,
+/// because an empty page after an offset only says the set ends somewhere before the offset. A
+/// full page says nothing about what follows it. `limit: 0` (count-only) and no limit never take
+/// this path.
+fn total_from_short_page(
+    offset: Option<usize>,
+    limit: Option<usize>,
+    rows: usize,
+) -> Option<usize> {
+    let limit = limit.filter(|&l| l > 0)?;
+    if rows >= limit {
+        return None;
+    }
+    match offset.unwrap_or(0) {
+        0 => Some(rows),
+        _ if rows == 0 => None,
+        offset => Some(offset + rows),
+    }
+}
+
 /// Execute a model query against the Oxigraph store.
 ///
 /// This is the main public entry point.  It delegates to
@@ -877,8 +900,23 @@ pub(super) async fn execute_model_query_inner(
     // A per-anchor limit without a walk keeps the store's count. There the scope *is* the whole
     // question — "how many replies exist under these anchors" — and the limit says how many of them
     // to return, exactly the "showing 5 of 320" reading a total carries everywhere else.
+    //
+    // A page the store cut short already tells the total, so no COUNT runs for it. That only holds
+    // where the store applied the caller's window (`window_pushed`): then nothing after the id phase
+    // drops rows (no post-hydration filter, no per-anchor slice), and the id phase groups by
+    // `?source` over the same scope patterns the COUNT's `DISTINCT ?source` reads, so its page
+    // length (not the hydrated instances) is the figure the COUNT would extend.
+    let page_total = if window_pushed {
+        pagination_source_order.as_ref().and_then(|page| {
+            total_from_short_page(query_input.offset, query_input.limit, page.len())
+        })
+    } else {
+        None
+    };
     let total_count = if walk.is_some() {
         instances.len()
+    } else if let Some(total) = page_total {
+        total
     } else if sparql_pagination.is_some() {
         if let Some(count_sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(&count_sparql)?;
