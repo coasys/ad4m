@@ -309,3 +309,17 @@ The beauty of this approach is that AD4M apps don't need to know about the under
    - Listen for changes
    - Update UI in real-time
    - Handle conflicts gracefully
+
+
+## SFU call recovery
+
+An SFU room publishes its current roster after each join or departure. Sessions
+must watch `sfu-room-roster` and hold the neighbourhood-read capability to receive
+it. The audience is the listed DIDs and, on departure, the DID just removed;
+the payload still lists only the participants currently in the room. It is not
+broadcast to every member of the neighbourhood.
+
+The SDK rebuilds its call if a received roster leaves its own DID out for three
+seconds. A roster listing it again cancels that grace, and leaving the call
+cancels it too. This recovery needs a working executor event connection: it does
+not detect a roster event lost during an executor API outage.
