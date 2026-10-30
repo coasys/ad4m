@@ -374,6 +374,40 @@ async fn the_root_holds_class_less_channels() {
     assert_eq!(channel["children"], json!(["ad4m://m/top"]));
 }
 
+/// The cost of the guard on one container's children, among 6000 other links.
+/// As in `attach_links`, the guard's required triples written after the
+/// `OPTIONAL`s made Oxigraph re-run the row's patterns once per verified link
+/// in the store (`test_perf_links_rows_on_a_large_store`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_perf_container_children_on_a_large_store() {
+    let (mut p, ctx) = setup().await;
+    let others = (0..6000)
+        .map(|i| Link {
+            source: format!("ad4m://elsewhere/{}", i % 100),
+            predicate: Some(HAS_CHILD.into()),
+            target: format!("ad4m://m/{i}"),
+        })
+        .collect();
+    p.add_links(others, LinkStatus::Shared, None, &ctx)
+        .await
+        .unwrap();
+    let top = "ad4m://channel/top";
+    link(&mut p, &ctx, top, HAS_CHILD, "ad4m://m/top").await;
+
+    let start = std::time::Instant::now();
+    let rows = query(
+        &p,
+        CONTAINER_URI,
+        json!({"where": {"id": top}, "links": ["children"]}),
+    )
+    .await;
+    let elapsed = start.elapsed();
+    eprintln!("one container's children among 6000 signed links: {elapsed:?}");
+    assert_eq!(ids(&rows), vec![top.to_string()]);
+    assert_eq!(rows[0]["children"], json!(["ad4m://m/top"]), "{}", rows[0]);
+    assert!(elapsed.as_secs() < 2, "{elapsed:?}");
+}
+
 /// A subscription, its passes driven by hand as in the abstract-class tests.
 pub(super) struct Sub {
     pub(super) id: String,

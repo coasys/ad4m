@@ -258,3 +258,54 @@ async fn test_perf_guarded_selection_paginated_query() {
     assert!(timings[0].as_secs() < 5, "{:?}", timings[0]);
     assert!(timings[2].as_secs() < 5, "{:?}", timings[2]);
 }
+
+/// The cost of the guard on `__links` rows. The verdict and status checks are
+/// required triples on the row's reifier; written after the `OPTIONAL`s that
+/// read the proof, Oxigraph ran the row's patterns again for every verified
+/// link in the store. On a WE space (4.6k links) that was 14 s per read, so
+/// once the flow engine read proposals through `links` (#1153), every
+/// `proposeFlowTransition` took 14 to 28 s. One instance's rows, out of 1500
+/// instances of 2 signed links each, with the default guard and under
+/// `linkStatus`.
+#[tokio::test]
+async fn test_perf_links_rows_on_a_large_store() {
+    let store = SparqlStore::new(None).unwrap();
+    let admin = TestSigner::generate();
+    for i in 0..1500u32 {
+        let msg = format!("sg://msg-{i}");
+        let second = (i % 50) + 1;
+        add(
+            &store,
+            [
+                signed(&admin, &msg, "ad4m://type", "sg://Grant", second),
+                signed(
+                    &admin,
+                    &msg,
+                    "sg://name",
+                    &format!("literal:string:m{i}"),
+                    second,
+                ),
+            ],
+        );
+    }
+    let default = json!({ "where": { "id": "sg://msg-7" }, "links": ["name"] });
+    let mut shared = default.clone();
+    shared["linkStatus"] = json!("SHARED");
+    let mut timings = Vec::new();
+    for q in [default, shared] {
+        let start = std::time::Instant::now();
+        let got = run(&store, q.clone()).await;
+        timings.push(start.elapsed());
+        assert_eq!(ids(&got), vec!["sg://msg-7"], "{q}");
+        let rows = got.instances[0]["__links"]["name"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{q}: {rows:?}");
+        assert_eq!(rows[0]["data"]["target"], json!("literal:string:m7"), "{q}");
+    }
+    eprintln!(
+        "`__links` rows of one instance among 1500 (3000 signed links): \
+         default {:?} / linkStatus {:?}",
+        timings[0], timings[1]
+    );
+    assert!(timings[0].as_secs() < 2, "{:?}", timings[0]);
+    assert!(timings[1].as_secs() < 2, "{:?}", timings[1]);
+}
