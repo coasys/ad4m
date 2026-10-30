@@ -53,7 +53,16 @@ impl PerspectiveInstance {
             .lock()
             .await
             .insert(id.clone(), query);
-        let result = match first_result.await {
+        // A call the client cancels (`request.cancel`, or its connection closing) drops this
+        // future while the first result computes. Take the subscription out again then, or it
+        // stays registered and re-runs on every change for a query nobody holds (#1595).
+        let mut unregister = UnregisterOnDrop {
+            queries: self.subscribed_queries.clone(),
+            id: Some(id.clone()),
+        };
+        let first = first_result.await;
+        unregister.id = None;
+        let result = match first {
             Ok(result) => result,
             Err(e) => {
                 self.subscribed_queries.lock().await.remove(&id);
@@ -237,6 +246,31 @@ fn rows_delta(old: &Value, new: &Value) -> Option<Map<String, Value>> {
         ("added".into(), json!(added)),
         ("removed".into(), json!(removed)),
     ]))
+}
+
+/// Removes subscription `id` from `queries` when dropped, unless `id` was taken
+/// first: what `open_subscription` leaves behind when its caller drops it before
+/// the first result is in.
+struct UnregisterOnDrop {
+    queries: std::sync::Arc<tokio::sync::Mutex<HashMap<String, SubscribedQuery>>>,
+    id: Option<String>,
+}
+
+impl Drop for UnregisterOnDrop {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else { return };
+        // Drop cannot await the lock: take it if free, else remove from a task.
+        if let Ok(mut queries) = self.queries.try_lock() {
+            queries.remove(&id);
+            return;
+        }
+        let queries = self.queries.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                queries.lock().await.remove(&id);
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -473,6 +507,28 @@ mod tests {
             .await
             .expect_err("a Prolog live query is refused");
         assert_eq!(err.to_string(), super::super::PROLOG_LIVE_QUERY_UNSUPPORTED);
+        assert!(p.subscribed_queries.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_subscribe_dropped_before_its_first_result_is_not_left_registered() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let query = super::SubscribedQuery::new(
+            "SELECT ?s ?o WHERE { ?s <test://p> ?o }".into(),
+            "c".into(),
+            None,
+        );
+        // The client cancels (or its connection closes) while the first
+        // result is still being computed: the call future is dropped (#1595).
+        let never = std::future::pending::<Result<String, deno_core::error::AnyError>>();
+        let opening = p.open_subscription(query, never);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), opening)
+                .await
+                .is_err(),
+            "still computing when dropped"
+        );
+        tokio::task::yield_now().await;
         assert!(p.subscribed_queries.lock().await.is_empty());
     }
 }

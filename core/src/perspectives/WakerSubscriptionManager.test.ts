@@ -261,13 +261,149 @@ describe('WakerSubscriptionManager', () => {
       onWake: () => {},
     });
 
-    await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting every/);
+    await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting within/);
     expect(manager.getPending()).toHaveLength(1);
 
     await waitUntil(() => manager.has(sub.id));
     expect(manager.has(sub.id)).toBe(true);
     expect(manager.getPending()).toHaveLength(0);
     expect(opened).toBe(4);
+
+    manager.disposeAll();
+  });
+
+  it('cancels the subscribe call of a handshake it gives up on (#1595)', async () => {
+    const disposeArgs: any[] = [];
+    const ProxyClass = function () {
+      return {
+        initialized: Promise.resolve(true),
+        subscribe: () => new Promise<void>(() => {}),
+        dispose: (options?: any) => { disposeArgs.push(options); },
+        onResult: () => {},
+      };
+    };
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: ProxyClass,
+      subscribeTimeoutMs: 30,
+      retryPendingMs: 60_000,
+      onWake: () => {},
+    });
+
+    await expect(manager.subscribe(sub)).rejects.toThrow(/timed out after 30ms/);
+    // Both queries of the mention subscription: otherwise the executor keeps
+    // computing their first results for nobody.
+    expect(disposeArgs).toEqual([{ cancelOpening: true }, { cancelOpening: true }]);
+
+    manager.disposeAll();
+  });
+
+  it('backs off between re-attempt rounds, up to maxRetryPendingMs (#1595)', async () => {
+    jest.useFakeTimers();
+    try {
+      let opened = 0;
+      const openedAt: number[] = [];
+      const ProxyClass = function () {
+        opened += 1;
+        openedAt.push(Date.now());
+        const error = new Error('Perspective fake-uuid not found');
+        const initialized = Promise.reject(error);
+        initialized.catch(() => {});
+        return { initialized, subscribe: () => Promise.reject(error), dispose: () => {}, onResult: () => {} };
+      };
+      const manager = new WakerSubscriptionManager({
+        perspectiveClient,
+        logger: noopLogger(),
+        QuerySubscriptionProxy: ProxyClass,
+        subscribeTimeoutMs: 0,
+        retryPendingMs: 1000,
+        maxRetryPendingMs: 4000,
+        onWake: () => {},
+      });
+      await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting within 1s, then less often \(at most every 4s\)/);
+      // Two proxies per attempt (text and mention query).
+      const attempts = () => opened / 2;
+      expect(attempts()).toBe(1);
+
+      await jest.advanceTimersByTimeAsync(1000 + 2000 + 4000 + 4000);
+      expect(attempts()).toBeGreaterThanOrEqual(5);
+      // One timestamp per attempt (each opens two proxies at once); the first five.
+      const at = openedAt.filter((_, i) => i % 2 === 0).slice(0, 5);
+      const waits = at.slice(1).map((t, i) => t - at[i]);
+      // Each wait is between half and all of 1 s, 2 s, 4 s, then the 4 s cap.
+      const ceilings = [1000, 2000, 4000, 4000];
+      waits.forEach((wait, i) => {
+        expect(wait).toBeGreaterThanOrEqual(ceilings[i] / 2);
+        expect(wait).toBeLessThanOrEqual(ceilings[i]);
+      });
+
+      // Enrolling (or dropping) the last pending subscription starts the backoff over.
+      manager.dispose(sub.id);
+      await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting within 1s/);
+      manager.disposeAll();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('reports a subscription whose live query is re-opening as pending, and active again once it re-opened (#1595)', async () => {
+    const statusListeners: ((status: any) => void)[] = [];
+    const disposeArgs: any[] = [];
+    const ProxyClass = function () {
+      return {
+        initialized: Promise.resolve(true),
+        subscribe: () => Promise.resolve(),
+        dispose: (options?: any) => { disposeArgs.push(options); },
+        result: { instances: [], totalCount: 0 },
+        onResult: () => {},
+        onStatus: (listener: (status: any) => void) => { statusListeners.push(listener); },
+      };
+    };
+    const persisted: string[][] = [];
+    const warnings: string[] = [];
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: { ...noopLogger(), warn: (msg: string) => { warnings.push(msg); } },
+      QuerySubscriptionProxy: ProxyClass,
+      retryPendingMs: 60_000,
+      onWake: () => {},
+      onPersist: (subs) => { persisted.push(subs.map((s) => s.id)); },
+    });
+    await manager.subscribe(sub);
+    expect(manager.getActive().map((s) => s.id)).toEqual([sub.id]);
+    // The text query and the mention query.
+    expect(statusListeners).toHaveLength(2);
+    const [text, mention] = statusListeners;
+    const notFound = new Error('Perspective fake-uuid not found');
+
+    // Both queries lose their subscription with the executor restart.
+    text({ state: 'reopening', error: notFound, retryInMs: 1000 });
+    mention({ state: 'reopening', error: notFound, retryInMs: 1000 });
+    expect(manager.has(sub.id)).toBe(false);
+    expect(manager.getActive()).toHaveLength(0);
+    expect(manager.getPending().map((s) => s.id)).toEqual([sub.id]);
+    expect(warnings.filter((w) => w.includes('could not be re-opened'))).toHaveLength(1);
+
+    // The queries retry themselves: the manager does not open new ones.
+    await manager.retryPending();
+    expect(disposeArgs).toHaveLength(0);
+
+    // Still persisted, so a restart in the meantime restores it.
+    (manager as any).persist();
+    expect(persisted[persisted.length - 1]).toEqual([sub.id]);
+
+    // Active again only once both are open.
+    text({ state: 'open' });
+    expect(manager.getActive()).toHaveLength(0);
+    mention({ state: 'open' });
+    expect(manager.getActive().map((s) => s.id)).toEqual([sub.id]);
+    expect(manager.getPending()).toHaveLength(0);
+
+    // A status from a subscription replaced since is ignored.
+    await manager.subscribe(sub);
+    text({ state: 'reopening', error: notFound, retryInMs: 1000 });
+    expect(manager.getActive().map((s) => s.id)).toEqual([sub.id]);
 
     manager.disposeAll();
   });

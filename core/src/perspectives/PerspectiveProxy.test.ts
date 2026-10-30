@@ -30,7 +30,7 @@ describe('QuerySubscriptionProxy', () => {
     await expect(subscription.initialized).resolves.toBe(true);
     expect(subscription.result).toEqual([{ s: 'a' }]);
     expect(subscription.id).toBe('sub-1');
-    expect(client.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT * WHERE { ?s ?p ?o }');
+    expect(client.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT * WHERE { ?s ?p ?o }', { signal: expect.any(AbortSignal) });
   });
 
   it('opens a model query over a class when given one', async () => {
@@ -39,7 +39,7 @@ describe('QuerySubscriptionProxy', () => {
     client.modelSubscribe = modelSubscribe;
     const subscription = new QuerySubscriptionProxy('perspective-1', '{"limit":1}', client, 'ad4m://TextContent');
     await subscription.subscribe();
-    expect(modelSubscribe).toHaveBeenCalledWith('perspective-1', 'ad4m://TextContent', '{"limit":1}');
+    expect(modelSubscribe).toHaveBeenCalledWith('perspective-1', 'ad4m://TextContent', '{"limit":1}', { signal: expect.any(AbortSignal) });
     expect(client.subscribeQuery).not.toHaveBeenCalled();
     expect(subscription.result).toEqual({ instances: [{ id: 'a' }], totalCount: 1 });
   });
