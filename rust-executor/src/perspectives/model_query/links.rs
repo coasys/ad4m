@@ -229,6 +229,10 @@ pub(super) async fn attach_links(
         let local_status = local_status_filter(shape);
         let link_status = link_status_filter(link_status);
         let proof_valid = proof_valid_filter(include_unverified);
+        // The guard's required triples go before the `OPTIONAL`s. After them,
+        // Oxigraph re-ran the row's patterns once per verified link in the
+        // store: 14 s per read on a WE space (`test_perf_links_rows_on_a_large_store`).
+        // The rows are the same either way: the guard binds only `?_reifier`.
         let sparql = format!(
             r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?rowStatus WHERE {{
     {source_constraint}
@@ -237,12 +241,12 @@ pub(super) async fn attach_links(
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-    OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
+{link_status}{proof_valid}    OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?rowStatus . }}
-{link_status}{proof_valid}{local_status}}}"#
+{local_status}}}"#
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
         for row in &rows {
