@@ -98,6 +98,9 @@ jobs:
         with:
           deno-version: v2.x
 
+      - name: jq
+        run: command -v jq >/dev/null || { apt-get update && apt-get install -y jq; }
+
       - name: Install the pinned hc (DNAs must be packed with the Cargo.lock version)
         run: |
           bash scripts/install-hc-toolchain.sh
@@ -117,8 +120,14 @@ jobs:
 
       - run: pnpm install --no-frozen-lockfile
 
-      - name: Build the bootstrap languages
-        run: pnpm run build-languages
+      - name: Build the languages the seed proto publishes
+        # Only these: a language outside the proto can't fail the seed. The
+        # proto names each by its bundle, ../bootstrap-languages/<dir>/build/bundle.js.
+        run: |
+          mapfile -t filters < <(jq -r '[.languageLanguageRef, (.linkLanguages[], .alsoPublish[], .agentLanguage, .neighbourhoodLanguage, .perspectiveLanguage | .resource)][]
+            | capture("^\\.\\./(?<d>bootstrap-languages/[^/]+)/").d | "--filter=./" + .' cli/seed_proto.json | sort -u)
+          [ "${#filters[@]}" -gt 0 ] || { echo "::error::No language found in cli/seed_proto.json"; exit 1; }
+          pnpm exec turbo run build --concurrency=1 "${filters[@]}"
 
       - name: The committed seed pins the built languages
         run: python3 scripts/bootstrap-seed.py --check --out built-seed.json | tee -a "$GITHUB_STEP_SUMMARY"
@@ -142,7 +151,6 @@ jobs:
         id: store
         if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main') }}
         run: |
-          command -v jq >/dev/null || { apt-get update && apt-get install -y jq; }
           if scripts/verify-bootstrap-seed.sh cli/mainnet_seed.json | tee -a "$GITHUB_STEP_SUMMARY"; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
