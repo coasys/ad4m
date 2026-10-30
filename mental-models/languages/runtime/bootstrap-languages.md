@@ -14,7 +14,7 @@ When the seed languages load (the executor's whole boot order is on [Executor st
 2. On agent generate or unlock (`agent_ws.rs`), `load_core_system_languages` loads the language language from the inline bundle, then the agent, neighbourhood and perspective languages by address, in parallel, and registers the aliases.
 3. With `run_holochain`, `conductor_startup.rs` starts the Holochain conductor in the background and then runs `load_link_and_installed_languages` (not with `language_language_only`): the known link languages, then every other `languages/<addr>/bundle.js`. Without `run_holochain`, neither runs at unlock.
 
-The default seed, built by `ad4m dev generate-bootstrap` from `cli/seed_proto.json`:
+`ad4m dev generate-bootstrap` builds the default seed from `cli/seed_proto.json`. The proto's `trustedAgents` must include the publishing agent, and its `seedOutputs` are the two seed copies, `cli/mainnet_seed.json` and `rust-executor/src/mainnet_seed.json`. On every push to dev that changes the proto or a language it names, the [bootstrap-publish.yml](../../../.github/workflows/bootstrap-publish.yml) workflow publishes the languages and commits the seed:
 
 | Role | Package |
 |---|---|

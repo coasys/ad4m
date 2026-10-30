@@ -30,7 +30,7 @@ socket: /api/v1/ws (the only event socket)
 | `auto-processor-event`, `flow-state-changed` | the agent the event names, if it is one of the perspective's owners; the main agent's flow state on a perspective it does not own goes to the operator only |
 | `notification-triggered` | the notification's owner ([Live queries](../../perspectives/querying/live-queries.md)) |
 | `apps-changed`, capability requests and notification install requests in `exception-occurred` | the agent that the approval is for, with `agent/PERMIT` ([App grants](../access/app-grants.md)) |
-| `sfu-*` | the participant or the room members that the event names ([SFU](../executor/services/sfu.md)) |
+| `sfu-*` | the participant or the room members that the event names; `sfu-room-roster` after a departure also goes to the departed DID ([SFU](../executor/services/sfu.md)) |
 | `hosting-user-info-changed` | the user it names, with `RUNTIME_HOSTING_READ`; a copy to the main agent, with `RUNTIME_USER_MANAGEMENT_READ` |
 | `model-loading-status`, other exceptions | everyone |
 

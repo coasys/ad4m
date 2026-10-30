@@ -8,12 +8,12 @@ The **RPC API** is one WebSocket per client at `GET /api/v1/ws?token=…`. The c
 
 <details><summary>How it works</summary>
 
-1. Upgrade: `ws_rpc::ws_rpc` opens a `RequestContext` from `?token=` ([Sessions](../access/sessions.md)). A refused token closes the socket (1008, or 1013 when locked).
+1. Upgrade: `ws_rpc::ws_rpc` opens a `RequestContext` from `?token=` ([Sessions](../access/sessions.md)). A refused token closes the socket (1008, or 1013 when locked). The executor sends a WebSocket ping every 20 s and ends a connection whose client sent no frame for 60 s, or longer while a large write can still be on its way to it (`Liveness` in `ws_rpc.rs`).
 2. Each message: the executor answers inline control messages (`events.watch`, `events.unwatch`, `request.cancel`) at once. Any other message runs `Session::check()` (a failure answers 401 and closes the socket), then `HandlerMap::dispatch(type, params, ctx)`. Dispatch answers 404 for an unknown method and 400 for params that do not fit the method's contract.
 3. Dispatch runs the method's guard: its capability, if it has one (403), then its rule (403, or 404 for a resource that is missing or not the caller's) ([Access checks](../access/checks.md)). Then the handler runs and returns JSON. Errors are `WsRpcError { code, message }` with HTTP-like codes (400, 401, 403, 404, 499 cancelled, 500, 501).
 4. Method flags: `.read()` marks an idempotent method, which the SDK retries after a reconnect. `.long()` marks a method that runs for minutes; the SDK waits 20 minutes for it instead of 30 seconds. `.or_null()` answers `null` in place of 404. `.guard(..)` sets the method's guard; the executor does not start with a method that has none.
 5. Events: the socket gets none until `events.watch`. Each delivered event runs `Session::check()` again and must pass `Session::may_receive`: the session is in the event's audience and holds its capability ([Events](events.md)).
-6. Live queries (`perspective.subscribeQuery`, `perspective.modelSubscribe`) belong to the RPC connection that opened them and end when it closes. The client repairs a gap with `perspective.resyncSubscription` ([Live queries](../../perspectives/querying/live-queries.md)).
+6. Live queries (`perspective.subscribeQuery`, `perspective.modelSubscribe`) belong to the RPC connection that opened them and end when it closes. Closing also cancels the calls that still open one; every other call finishes. One connection runs at most 8 of these opens at once (`MAX_OPENING_LIVE_QUERIES`). The client repairs a gap with `perspective.resyncSubscription` ([Live queries](../../perspectives/querying/live-queries.md)).
 
 Other routes in the same axum server:
 
