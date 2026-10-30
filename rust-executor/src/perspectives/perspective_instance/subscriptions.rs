@@ -61,15 +61,17 @@ impl PerspectiveInstance {
             id: Some(id.clone()),
         };
         let first = first_result.await;
+        // Disarm only with the lock held: a call dropped while it waits for the lock gets no
+        // reply either, so nobody would ever hold its subscription.
+        let mut queries = self.subscribed_queries.lock().await;
         unregister.id = None;
         let result = match first {
             Ok(result) => result,
             Err(e) => {
-                self.subscribed_queries.lock().await.remove(&id);
+                queries.remove(&id);
                 return Err(e);
             }
         };
-        let mut queries = self.subscribed_queries.lock().await;
         Ok(match queries.get_mut(&id) {
             Some(q) if q.revision > 0 => (id, q.revision, q.last_result.clone()),
             Some(q) => {
@@ -529,6 +531,33 @@ mod tests {
             "still computing when dropped"
         );
         tokio::task::yield_now().await;
+        assert!(p.subscribed_queries.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_subscribe_dropped_while_it_stores_its_first_result_is_not_left_registered() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let query = super::SubscribedQuery::new(
+            "SELECT ?s ?o WHERE { ?s <test://p> ?o }".into(),
+            "c".into(),
+            None,
+        );
+        let (computed, first_result) = tokio::sync::oneshot::channel();
+        let mut opening =
+            Box::pin(p.open_subscription(query, async move { first_result.await.unwrap() }));
+        let short = std::time::Duration::from_millis(20);
+        assert!(tokio::time::timeout(short, opening.as_mut()).await.is_err());
+        // A check of the live queries holds the registry as the first result comes in,
+        // and the client cancels while the call waits for it.
+        let held = p.subscribed_queries.lock().await;
+        computed.send(Ok("[]".to_string())).unwrap();
+        assert!(
+            tokio::time::timeout(short, opening.as_mut()).await.is_err(),
+            "waiting for the registry"
+        );
+        drop(opening);
+        drop(held);
+        tokio::time::sleep(short).await;
         assert!(p.subscribed_queries.lock().await.is_empty());
     }
 }
