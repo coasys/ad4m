@@ -781,8 +781,9 @@ impl SfuService {
 
     /// Tell everyone in `room_id` who is in it now. Called after every join
     /// and every departure, so clients follow membership without inferring it
-    /// from media.
-    async fn publish_roster(&self, room_id: &RoomId) {
+    /// from media. A departure also reaches the removed DID, including when the
+    /// room became empty; the payload still lists only current participants.
+    async fn publish_roster(&self, room_id: &RoomId, departed: Option<&str>) {
         let _order = self.roster_order.lock().await;
         let mut participants: Vec<super::SfuRosterParticipant> = self
             .rooms
@@ -807,7 +808,7 @@ impl SfuService {
         };
         crate::pubsub::get_global_pubsub()
             .await
-            .publish_event(crate::events::Event::sfu_room_roster(&roster));
+            .publish_event(crate::events::Event::sfu_room_roster(&roster, departed));
     }
 
     /// Get the local address of the SFU server.
@@ -1117,7 +1118,7 @@ impl SfuService {
         };
 
         self.announce_room(&room_id.to_string(), local_count).await;
-        self.publish_roster(&room_id).await;
+        self.publish_roster(&room_id, None).await;
 
         Ok(CallSessionInfo {
             room_name: room_name.to_string(),
@@ -1164,7 +1165,7 @@ impl SfuService {
             .send(SfuCommand::RemovePeer(pid.clone()))
             .await;
 
-        self.after_participant_left(&room_id, &pid, local_count)
+        self.after_participant_left(&room_id, &pid, agent_did, local_count)
             .await;
         Ok(true)
     }
@@ -1187,8 +1188,13 @@ impl SfuService {
             "SFU: participant {} ({}) in {} died, freeing its slot",
             dead.participant_id, dead.agent_did, dead.room_id
         );
-        self.after_participant_left(&dead.room_id, &dead.participant_id, local_count)
-            .await;
+        self.after_participant_left(
+            &dead.room_id,
+            &dead.participant_id,
+            &dead.agent_did,
+            local_count,
+        )
+        .await;
     }
 
     /// Remove `pid` from its room, destroying the room once empty. Returns
@@ -1205,12 +1211,15 @@ impl SfuService {
         }
     }
 
-    /// Gossip and preference bookkeeping after a participant left, by
-    /// leaving or by dying.
+    /// Gossip, roster and preference bookkeeping after the session `pid` of
+    /// `agent_did` left, by leaving or by dying. The roster also goes to
+    /// `agent_did`, so the departed session sees that it is no longer listed
+    /// even when no other session of that agent remains.
     async fn after_participant_left(
         &self,
         room_id: &RoomId,
         pid: &ParticipantId,
+        agent_did: &str,
         local_count: u32,
     ) {
         // Always re-announce the fresh local count (lets healthy peers
@@ -1222,7 +1231,7 @@ impl SfuService {
         // room will never come.
         let room_key = room_id.to_string();
         self.announce_room(&room_key, local_count).await;
-        self.publish_roster(room_id).await;
+        self.publish_roster(room_id, Some(agent_did)).await;
         if local_count == 0 {
             let signal = CascadeSignal::Leave {
                 did: self.gossip.local_did().to_string(),
@@ -1953,6 +1962,123 @@ mod tests {
             mode: mode.into(),
             ..Default::default()
         }
+    }
+
+    /// The production departure path publishes through the real event stream,
+    /// not a fake SDK API that bypasses audience filtering. The departed
+    /// session's DID receives the roster that no longer lists that session:
+    /// when it was the agent's only session, when the room became empty, and
+    /// when another device of the same agent stays in the room.
+    #[tokio::test]
+    async fn departed_session_receives_the_roster_without_itself() {
+        use crate::agent::capabilities::NEIGHBOURHOOD_READ_CAPABILITY;
+        use crate::agent::session::{Principal, Session};
+        use crate::agent::AgentContext;
+        use futures::StreamExt;
+
+        let session = |did: &str, read: bool| {
+            Arc::new(
+                Session::for_test(Principal::Agent(AgentContext::managed(did.to_string())))
+                    .with_did(did)
+                    .with_caps(if read {
+                        vec![NEIGHBOURHOOD_READ_CAPABILITY.clone()]
+                    } else {
+                        vec![]
+                    }),
+            )
+        };
+        let service = test_service().await;
+        // Who stays in the room after P1 of did:departed goes.
+        let stays: [Option<(&str, &str)>; 3] = [
+            None,
+            Some(("did:remaining", "device-r")),
+            Some(("did:departed", "device-b")),
+        ];
+        for dead in [false, true] {
+            for (case, stayer) in stays.iter().enumerate() {
+                let room_id = RoomId::new("departure-delivery", format!("{dead}-{case}"));
+                {
+                    let mut rooms = service.rooms.write().await;
+                    rooms.create_room(room_id.clone(), None).unwrap();
+                    let room = rooms.get_room_mut(&room_id).unwrap();
+                    assert_eq!(
+                        room.add_participant(
+                            ParticipantId(1),
+                            "did:departed".into(),
+                            "device-a".into()
+                        )
+                        .unwrap(),
+                        None
+                    );
+                    if let Some((did, device)) = stayer {
+                        assert_eq!(
+                            room.add_participant(
+                                ParticipantId(2),
+                                did.to_string(),
+                                device.to_string()
+                            )
+                            .unwrap(),
+                            None
+                        );
+                    }
+                }
+                let departed = session("did:departed", true);
+                let mut stream = crate::api::events_ws::build_event_stream(
+                    departed.clone(),
+                    crate::api::event_interest::watching_all(),
+                    None,
+                )
+                .await;
+                let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+                if dead {
+                    service
+                        .remove_dead_participant(super::super::server::DeadPeer {
+                            room_id: room_id.clone(),
+                            agent_did: "did:departed".into(),
+                            participant_id: ParticipantId(1),
+                            is_pipe: false,
+                        })
+                        .await;
+                } else {
+                    assert!(service
+                        .call_leave(
+                            &room_id.neighbourhood_url,
+                            &room_id.room_name,
+                            "did:departed",
+                            "P1"
+                        )
+                        .await
+                        .unwrap());
+                }
+                let event = events.try_recv().unwrap();
+                assert_eq!(event.topic, Topic::SfuRoomRoster);
+                assert!(
+                    departed.may_receive(&event),
+                    "departure must reach the removed DID"
+                );
+                assert!(!session("did:outsider", true).may_receive(&event));
+                assert!(!session("did:departed", false).may_receive(&event));
+                assert_eq!(
+                    session("did:remaining", true).may_receive(&event),
+                    matches!(stayer, Some(("did:remaining", _)))
+                );
+                let message = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                    .await
+                    .expect("departed session receives the real stream event")
+                    .unwrap();
+                let message: serde_json::Value = serde_json::from_str(&message).unwrap();
+                assert_eq!(message["type"], "sfu-room-roster");
+                assert_eq!(
+                    message["participants"],
+                    match stayer {
+                        None => serde_json::json!([]),
+                        Some((did, _)) =>
+                            serde_json::json!([{ "agentDid": did, "participantId": "P2" }]),
+                    }
+                );
+            }
+        }
+        service.shutdown().await;
     }
 
     #[test]

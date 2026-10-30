@@ -154,10 +154,13 @@ a session (`callLeave`, `callAnswerServerOffer`, `addIceCandidate`,
 `callSetQualityPreference`, `sendData`) names the `participantId` its join
 returned, and acts only on that session of the caller's DID; the SDK sends
 none of them without one, so a tab that never joined cannot end another
-tab's call (E19, E21). The executor publishes `sfu-room-roster` (only to the
-listed DIDs) after every join and departure, listing sessions
-(`participantId` + `agentDid`), and the SDK keys participants by participant
-id from it; tracks are attributed only by the `trackMapping` mids (which name
+tab's call (E19, E21). The executor publishes `sfu-room-roster` (to the
+listed DIDs, plus the departed session's DID on departure) after every join
+and departure, listing sessions (`participantId` + `agentDid`), and the SDK
+keys participants by participant id from it; when the roster stops listing
+this session (its `participantId`) for 3 s, the SDK rebuilds the call, but a
+replaced session never does; tracks are attributed only by the `trackMapping`
+mids (which name
 the participant id); a session never receives its own media or its own
 `sfu-data` (`senderParticipantId`), but does receive its agent's other
 device; room capacity comes from the

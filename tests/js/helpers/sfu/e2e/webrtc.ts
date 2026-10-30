@@ -98,6 +98,13 @@ export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPee
     open.delete(pc);
     void operations.then(closeNative);
   };
+  // Always, not only with E2E_DEBUG: a session that does not recover from an
+  // outage is a flake to diagnose from CI's log, and the SDK acts on these
+  // states (E6, CI job 53158). A handful of lines per connection.
+  const who = process.env.E2E_WHO ?? String(process.pid);
+  (pc as any).addEventListener?.("iceconnectionstatechange", () => {
+    console.log(`[e2e ${who}] ${new Date().toISOString().slice(11, 23)} ICE ${pc.iceConnectionState}`);
+  });
   if (process.env.E2E_DEBUG) trace(pc);
   return pc as RTCPeerConnection;
 }

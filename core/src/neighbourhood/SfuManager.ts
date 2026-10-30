@@ -30,6 +30,7 @@ import type {
     SfuDataMessage,
     SfuQualityPreference,
     SfuRoomRoster,
+    SfuRosterParticipant,
     SfuSessionReplaced,
 } from "./SfuTypes"
 
@@ -278,6 +279,10 @@ export class SfuManager {
     private joinSettled: Promise<void> = Promise.resolve()
     private dataChannelUnsubscribe: (() => void) | null = null
     private disconnectedTimer: ReturnType<typeof setTimeout> | null = null
+    /** Running while the room's roster leaves this session out: see `noticeRoster`. */
+    private unlistedTimer: ReturnType<typeof setTimeout> | null = null
+    /** How long the roster may leave this session out before the call is rebuilt. */
+    private static readonly UNLISTED_GRACE_MS = 3_000
 
     constructor(
         neighbourhood: SfuNeighbourhoodApi,
@@ -625,6 +630,43 @@ export class SfuManager {
         this.renegotiationUnsubscribe = null
         this.rosterUnsubscribe?.()
         this.rosterUnsubscribe = null
+        this.clearUnlistedTimer()
+    }
+
+    private clearUnlistedTimer(): void {
+        if (this.unlistedTimer) {
+            clearTimeout(this.unlistedTimer)
+            this.unlistedTimer = null
+        }
+    }
+
+    /**
+     * The room's roster no longer lists this session (its participant id)
+     * while `pc` is the call's: the server has dropped this session, and ICE
+     * may not say so. In E6 (CI job 53158) one of six sessions never started
+     * a rebuild after a 20 s outage the server had dropped it for. The check
+     * is per session, not per agent: another device of this agent keeps the
+     * DID listed. Rebuild once the roster has left this session out for
+     * `UNLISTED_GRACE_MS`; a roster that lists it again in that time
+     * cancels, since one published just before this join landed can arrive
+     * after it. A manager with no session (between leave and join, or
+     * stopped because a later tab replaced it) starts no rebuild: `stop`
+     * clears the timer and drops `pc`, so a replaced session never rejoins
+     * and never takes the call back from the newer tab.
+     */
+    private noticeRoster(pc: RTCPeerConnection, sessions: SfuRosterParticipant[]): void {
+        const participantId = this.state.participantId
+        if (!participantId || sessions.some((s) => s.participantId === participantId)) {
+            this.clearUnlistedTimer()
+            return
+        }
+        if (this.unlistedTimer) return
+        this.unlistedTimer = setTimeout(() => {
+            this.unlistedTimer = null
+            if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
+            console.info("SFU: the room no longer lists this session, rebuilding the call")
+            void this.reconnect()
+        }, SfuManager.UNLISTED_GRACE_MS)
     }
 
     /**
@@ -695,7 +737,9 @@ export class SfuManager {
         this.rosterUnsubscribe = this.neighbourhood.subscribeSfuRoomRoster((roster) => {
             if (!ours(roster) || this.state.peerConnection !== pc) return
             void joined.then(() => {
-                if (this.state.peerConnection === pc) this.applyRoster(roster.participants, true)
+                if (this.state.peerConnection !== pc) return
+                this.applyRoster(roster.participants, true)
+                this.noticeRoster(pc, roster.participants)
             })
         })
         // A notice can name the id the join in flight is about to return.

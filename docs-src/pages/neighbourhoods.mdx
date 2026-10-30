@@ -332,3 +332,22 @@ browser. An app that is neither (Electron, a test harness) passes its own as
    - Listen for changes
    - Update UI in real-time
    - Handle conflicts gracefully
+
+
+## SFU call recovery
+
+An SFU room publishes its current roster after each join or departure. Sessions
+must watch `sfu-room-roster` and hold the neighbourhood-read capability to receive
+it. The roster lists sessions: each entry has an `agentDid` and the
+`participantId` of one session (one per device). The audience is the DIDs of
+the listed sessions and, on departure, the DID of the session just removed;
+the payload still lists only the sessions currently in the room. It is not
+broadcast to every member of the neighbourhood.
+
+The SDK rebuilds its call if received rosters stop listing its own session
+(its `participantId`) for three seconds. The check is per session: another
+device of the same agent in the room does not stop it. A roster listing the
+session again cancels that grace, and leaving the call cancels it too. A
+session that a later tab on the same device replaced stops and does not
+rebuild. This recovery needs a working executor event connection: it does
+not detect a roster event lost during an executor API outage.
