@@ -10,6 +10,12 @@ Usage, from the repo root, after `pnpm run build-languages`:
   scripts/bootstrap-seed.py --check   # exit 1 if a committed seed differs from the built one
   scripts/bootstrap-seed.py --write   # write the built seed to every seedOutputs path
 --out FILE also writes the built seed to FILE.
+
+Commit the seed that CI built (the `built-seed` artifact of the Bootstrap seed
+workflow). The builds are byte-stable at one checkout path, and CI always builds
+at the same one. A local build elsewhere gives another centralized-agent-language
+address: cargo hashes the absolute path of its out-of-workspace ad4m-ldk
+dependency into the symbol names.
 """
 
 import argparse
@@ -115,8 +121,9 @@ def main() -> int:
                 print(f"DRIFT {os.path.relpath(path)} {field}: committed {describe(field, committed.get(field))}, "
                       f"built {describe(field, value)}")
     if drift:
-        print("The committed seed doesn't pin the languages this source builds. "
-              "Run scripts/bootstrap-seed.py --write after pnpm run build-languages and commit the seed.")
+        print("The committed seed doesn't pin the languages this source builds. Commit the built seed: "
+              "in CI, copy the run's built-seed artifact to every path above; locally, run "
+              "scripts/bootstrap-seed.py --write after pnpm run build-languages.")
         return 1
     print("The committed seed pins the languages this source builds:")
     for field in ("agentLanguage", "perspectiveLanguage", "neighbourhoodLanguage"):
