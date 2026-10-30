@@ -879,8 +879,8 @@ jobs:
           name: Build the executor image from this commit's binaries
           command: bash tests/agent-harness/interop/executor/build-image.sh
       - run:
-          name: Install and typecheck the agent harness
-          command: cd tests/agent-harness && pnpm install --ignore-workspace --frozen-lockfile && pnpm run build
+          name: Install, typecheck and unit-test the agent harness
+          command: cd tests/agent-harness && pnpm install --ignore-workspace --frozen-lockfile && pnpm run build && pnpm test
       - run:
           name: Run agent harness scenarios
           command: |
