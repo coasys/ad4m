@@ -512,6 +512,13 @@ them against those two guards.
   bypass `events.watch`), and `ws_rpc::serve` ends them when the socket closes, and again as each
   call still in flight ends (a late subscribe). No keepalive; subscribing without a connection
   (REST) is a 400.
+- Opening a live query (`subscribeQuery` / `modelSubscribe`) is the one kind of call that a socket
+  close cancels (its `cancel_token` is a child of `Connection::closed`); every other call still
+  finishes after the close. One connection runs at most `MAX_OPENING_LIVE_QUERIES` (8) of these
+  opens at once, and the rest wait, cancellably. A subscribe cancelled before its reply
+  unregisters its query again (`open_subscription`). Cancelling cannot stop a SPARQL statement
+  that is already running: it stops at the next await, and the plain `subscribeQuery` first
+  result has none (#1595).
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and
