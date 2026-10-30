@@ -30,6 +30,8 @@ runs:
         set -uo pipefail
         command -v jq >/dev/null || { apt-get update -qq && apt-get install -y -qq jq >/dev/null; }
         summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
+        bundle=$(mktemp)
+        trap 'rm -f "$bundle"' EXIT
 
         # The worker answers ?key=K with a presigned URL for the object.
         fetch() {
@@ -60,7 +62,8 @@ runs:
               problem="the meta names another address"
             elif ! printf '%s\n' "${trusted[@]}" | grep -qxF -- "$author"; then
               problem="author is not in trustedAgents"
-            elif [ "$(fetch "$address" | wc -c)" -eq 0 ]; then
+            elif ! fetch "$address" > "$bundle" || [ ! -s "$bundle" ]; then
+              # A fetch that fails after writing some bytes is not a bundle.
               problem="no bundle in the store"
             fi
           fi
