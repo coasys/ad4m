@@ -182,7 +182,7 @@ fn add_claimed_spends_the_claim_and_folds() {
     let mut log = Log::new();
     let offer = signed_offer(&log, link_offer(&log, OfferKind::Device, None));
     let view = claimed(&log, 2);
-    let add = build::add_claimed(&log.chain, &master(0), &offer.offer, &view, None).unwrap();
+    let add = build::add_claimed(&log.chain, &master(0), &offer.offer, &view).unwrap();
     assert_eq!(
         check_add(&offer, &view, log.chain.state(), &add, LINK_NOW),
         Ok(())
@@ -197,33 +197,24 @@ fn add_claimed_spends_the_claim_and_folds() {
 }
 
 #[test]
-fn add_claimed_copies_a_bot_offers_scope_and_sets_an_until_expiry() {
+fn add_claimed_copies_a_bot_offers_scope_and_refuses_a_mismatched_shape() {
     let log = Log::new();
     let bot = signed_offer(&log, link_offer(&log, OfferKind::Bot, Some(bot_scope())));
     let view = claimed(&log, 2);
-    let add = build::add_claimed(&log.chain, &master(0), &bot.offer, &view, None).unwrap();
+    let add = build::add_claimed(&log.chain, &master(0), &bot.offer, &view).unwrap();
     let Op::Add { add: keys, .. } = &add.op else {
         panic!("not an add")
     };
     assert_eq!(keys[0].life, KeyLife::Bot(bot_scope()));
-    assert_eq!(
-        build::add_claimed(&log.chain, &master(0), &bot.offer, &view, Some(5)),
-        Err(BuildError::OfferShape)
-    );
-
-    let device = signed_offer(&log, link_offer(&log, OfferKind::Device, None));
-    let add = build::add_claimed(
-        &log.chain,
-        &master(0),
-        &device.offer,
-        &view,
-        Some(1_750_000_000),
-    )
-    .unwrap();
-    let Op::Add { add: keys, .. } = &add.op else {
-        panic!("not an add")
-    };
-    assert_eq!(keys[0].life, KeyLife::Until(1_750_000_000));
+    for offer in [
+        link_offer(&log, OfferKind::Bot, None),
+        link_offer(&log, OfferKind::Device, Some(bot_scope())),
+    ] {
+        assert_eq!(
+            build::add_claimed(&log.chain, &master(0), &offer, &view),
+            Err(BuildError::OfferShape)
+        );
+    }
 }
 
 #[test]
@@ -231,7 +222,7 @@ fn check_add_refuses_each_condition_alone() {
     let log = Log::new();
     let offer = signed_offer(&log, link_offer(&log, OfferKind::Device, None));
     let view = claimed(&log, 2);
-    let good = build::add_claimed(&log.chain, &master(0), &offer.offer, &view, None).unwrap();
+    let good = build::add_claimed(&log.chain, &master(0), &offer.offer, &view).unwrap();
     let state = log.chain.state();
     let claim_err = |r: Result<(), LinkError>| matches!(r, Err(LinkError::Claim(_)));
 
@@ -239,8 +230,7 @@ fn check_add_refuses_each_condition_alone() {
     let mut rotated = Log::new();
     let old_offer = signed_offer(&rotated, link_offer(&rotated, OfferKind::Device, None));
     rotated.rotate(&[], false);
-    let after =
-        build::add_claimed(&rotated.chain, &master(1), &old_offer.offer, &view, None).unwrap();
+    let after = build::add_claimed(&rotated.chain, &master(1), &old_offer.offer, &view).unwrap();
     assert!(claim_err(check_add(
         &old_offer,
         &view,
@@ -256,21 +246,19 @@ fn check_add_refuses_each_condition_alone() {
 
     // 4. The key, its encryption key or the co-signature differ from the claim's.
     let other = claimed(&log, 3);
-    let other_add = build::add_claimed(&log.chain, &master(0), &offer.offer, &other, None).unwrap();
+    let other_add = build::add_claimed(&log.chain, &master(0), &offer.offer, &other).unwrap();
     assert!(claim_err(check_add(
         &offer, &view, state, &other_add, LINK_NOW
     )));
     let mut other_enc = view.clone();
     other_enc.enc_key = enc("other");
-    let enc_add =
-        build::add_claimed(&log.chain, &master(0), &offer.offer, &other_enc, None).unwrap();
+    let enc_add = build::add_claimed(&log.chain, &master(0), &offer.offer, &other_enc).unwrap();
     assert!(claim_err(check_add(
         &offer, &view, state, &enc_add, LINK_NOW
     )));
     let mut other_sig = view.clone();
     other_sig.co_sig = "z1".into();
-    let sig_add =
-        build::add_claimed(&log.chain, &master(0), &offer.offer, &other_sig, None).unwrap();
+    let sig_add = build::add_claimed(&log.chain, &master(0), &offer.offer, &other_sig).unwrap();
     assert!(claim_err(check_add(
         &offer, &view, state, &sig_add, LINK_NOW
     )));
@@ -278,7 +266,7 @@ fn check_add_refuses_each_condition_alone() {
     // 5. A bot offer with an add without the mark, and a device offer with a bot key.
     let bot = signed_offer(&log, link_offer(&log, OfferKind::Bot, Some(bot_scope())));
     assert!(claim_err(check_add(&bot, &view, state, &good, LINK_NOW)));
-    let bot_add = build::add_claimed(&log.chain, &master(0), &bot.offer, &view, None).unwrap();
+    let bot_add = build::add_claimed(&log.chain, &master(0), &bot.offer, &view).unwrap();
     assert!(claim_err(check_add(
         &offer, &view, state, &bot_add, LINK_NOW
     )));

@@ -74,7 +74,7 @@ impl Op {
 }
 
 /// A device key as the log lists it. Serialises flat:
-/// `{id, sign, enc}` · `{id, sign, enc, expires}` · `{id, sign, enc, kind: "bot", can, expires}`.
+/// `{id, sign, enc}` · `{id, sign, enc, kind: "bot", can, expires}`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceKey {
     pub id: KeyId,
@@ -86,10 +86,8 @@ pub struct DeviceKey {
 /// How long a device key lives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyLife {
-    /// No `kind`, no `expires`: valid until revoked.
+    /// No `kind`, `can` or `expires`: valid until revoked.
     Standing,
-    /// No `kind`, `expires` set (unix seconds), no `can`: valid until revoked or until `expires`.
-    Until(u64),
     /// `kind: "bot"` with `can` and `expires`.
     Bot(BotScope),
 }
@@ -132,7 +130,6 @@ impl Serialize for DeviceKey {
         map.serialize_entry("enc", &self.enc)?;
         match &self.life {
             KeyLife::Standing => {}
-            KeyLife::Until(expires) => map.serialize_entry("expires", expires)?,
             KeyLife::Bot(scope) => {
                 map.serialize_entry("kind", "bot")?;
                 map.serialize_entry("can", &scope.can)?;
@@ -411,10 +408,8 @@ fn parse_device_key(value: &Value) -> Result<DeviceKey, FoldError> {
     }
     let life = match map.get("kind") {
         None if map.contains_key("can") => return Err(FoldError::CanWithoutBotMark),
-        None => match map.get("expires") {
-            None => KeyLife::Standing,
-            Some(_) => KeyLife::Until(integer(map, "expires")?),
-        },
+        None if map.contains_key("expires") => return Err(FoldError::ExpiresWithoutBotMark),
+        None => KeyLife::Standing,
         Some(Value::String(kind)) if kind == "bot" => KeyLife::Bot(BotScope {
             can: strings(map, "can")?,
             expires: integer(map, "expires")?,
