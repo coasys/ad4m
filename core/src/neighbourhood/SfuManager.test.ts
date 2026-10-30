@@ -1019,6 +1019,60 @@ test("ICE going disconnected during a restart does not ask again", async () => {
     }
 })
 
+test("a roster that lists this agent during a restart lets the restart finish in place", async () => {
+    // The server keeps the session while ICE restarts: rosters still list it.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        await iceState("disconnected")
+        api.emitRoster(roster([ALICE, ME]))
+        await flush()
+        api.emitOffer(offer("restart-offer"))
+        await flush()
+        await jest.advanceTimersByTimeAsync(4_000)
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(30_000)
+
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(FakePeerConnection.instances).toHaveLength(1)
+        expect(currentPc().closed).toBe(false)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a roster that leaves this agent out during a restart rebuilds after its grace, once", async () => {
+    // The server dropped the session: the restart cannot heal it, so the
+    // roster's grace (3 s) ends it before the restart's timeout (5 s).
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        await iceState("disconnected")
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(2_999)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(1)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+
+        // The rebuild ended the restart: its timeout does not rebuild again.
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        expect(FakePeerConnection.instances).toHaveLength(2)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("ICE failed still rebuilds at once, ending a restart in flight", async () => {
     fakeTimers()
     try {

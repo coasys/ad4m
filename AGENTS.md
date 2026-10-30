@@ -164,9 +164,12 @@ on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
 offer), and rebuilds the call if that has not reconnected within 5 s; a
 failed connection is rebuilt at once, and a rebuild retries the join for
-120 s. `ApiClient` drops an executor socket whose ping stays
-unanswered for a ping interval (10 s, `PING_INTERVAL_MS`; longer while a large
-write it sent may still be crossing a 16 kB/s link) and dials a new one, so a
+120 s. A room roster that leaves this agent out for 3 s also rebuilds the
+call (the executor sends the departure roster to the departed DID too); a
+roster that lists it, as during a restart in place, changes nothing.
+`ApiClient` drops an executor socket whose ping stays unanswered for a ping
+interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
+still be crossing a 16 kB/s link) and dials a new one, so a
 socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
 at once; `change` on `navigator.connection` and ICE `disconnected` run
 `checkConnection`, which drops a socket silent for 2 s after its ping.
