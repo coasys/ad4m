@@ -585,3 +585,118 @@ pub async fn fill_container_rows(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `children` read of `Container` rows stays keyed on a large
+    /// perspective. With `{link_status}{proof_valid}` after the `OPTIONAL`s,
+    /// oxigraph joined its patterns without keys: seconds on a few thousand
+    /// links. Both required filters triggered it, so both are checked.
+    #[tokio::test]
+    async fn container_children_stay_fast_on_a_large_perspective() {
+        use super::super::test_helpers::{flag, shape};
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression};
+        use serde_json::json;
+
+        let signer = TestSigner::generate();
+        let store = SparqlStore::new(None).unwrap();
+        let add = |source: &str, predicate: &str, target: &str| {
+            let e = signer.sign(
+                Link {
+                    source: source.into(),
+                    predicate: Some(predicate.into()),
+                    target: target.into(),
+                }
+                .normalize(),
+            );
+            store
+                .add_link(&LinkExpression {
+                    author: e.author,
+                    timestamp: e.timestamp,
+                    data: e.data,
+                    proof: e.proof,
+                    status: Some(LinkStatus::Shared),
+                })
+                .unwrap();
+        };
+        // 400 nodes with 10 links each over 40 distinct predicates, then a
+        // Block (we://s7) holding we://c1 through has_child and we://c2 through
+        // its own relation, and a non-Block (we://s8) whose we://items link
+        // holds nothing.
+        for i in 0..4000 {
+            add(
+                &format!("we://s{}", i / 10),
+                &format!("we://p{}", i % 40),
+                &format!("we://v{i}"),
+            );
+        }
+        add("we://s7", "ad4m://type", "we://Block");
+        add("we://s7", HAS_CHILD, "we://c1");
+        add("we://s7", "we://items", "we://c2");
+        add("we://s8", "we://items", "we://c3");
+
+        let edges = vec![
+            ContainmentEdge::has_child(),
+            ContainmentEdge {
+                predicate: "we://items".into(),
+                holder: Some(Holder {
+                    class: "Block".into(),
+                    shape: Arc::new(shape(
+                        "Block",
+                        vec![flag("type", "ad4m://type", "we://Block")],
+                    )),
+                }),
+            },
+        ];
+        for (status, include_unverified) in [(None, None), (Some(LinkStatus::Shared), Some(true))] {
+            let mut rows = vec![
+                json!({ "id": "we://s7", LINKS_KEY: { "children": [] } }),
+                json!({ "id": "we://s8", "children": [] }),
+            ];
+            let started = std::time::Instant::now();
+            fill_container_rows(
+                &store,
+                &mut rows,
+                &edges,
+                true,
+                status.as_ref(),
+                include_unverified,
+            )
+            .await
+            .unwrap();
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_millis(500),
+                "Container children took {elapsed:?} (status {status:?})"
+            );
+
+            assert_eq!(
+                rows[0]["children"],
+                json!(["we://c1", "we://c2"]),
+                "{rows:?}"
+            );
+            assert_eq!(rows[1]["children"], json!([]), "{rows:?}");
+            let links = rows[0][LINKS_KEY]["children"].as_array().unwrap();
+            let mut found: Vec<(&str, &str)> = links
+                .iter()
+                .map(|r| {
+                    assert_eq!(r["data"]["source"], "we://s7");
+                    assert_eq!(r["author"], signer.did.as_str());
+                    assert_eq!(r["proof"]["valid"], true);
+                    (
+                        r["data"]["predicate"].as_str().unwrap(),
+                        r["data"]["target"].as_str().unwrap(),
+                    )
+                })
+                .collect();
+            found.sort();
+            assert_eq!(
+                found,
+                vec![(HAS_CHILD, "we://c1"), ("we://items", "we://c2")]
+            );
+        }
+    }
+}
