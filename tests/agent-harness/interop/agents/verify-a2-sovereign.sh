@@ -46,7 +46,7 @@ echo "[a2sv] provision Sovereign's own user identity (signup + login)"
 PROV=$(A2_ADMIN="$ADMIN" "$TSX" "$AGENTS/ad4m-user.ts" provision "http://127.0.0.1:${MCP_PORT}" "$EMAIL" "$UPASS")
 JWT=$(echo "$PROV" | grep '^JWT=' | cut -d= -f2- || true)
 DID=$(echo "$PROV" | grep '^DID=' | cut -d= -f2- || true)
-if [ -z "$JWT" ] || [ -z "$DID" ]; then echo "[a2sv] FAIL — could not provision a user identity"; echo "$PROV" | sed 's/^/    /'; exit 1; fi
+if [ -z "$JWT" ] || [ -z "$DID" ]; then echo "[a2sv] FAIL — could not provision a user identity"; echo "$PROV" | sed -e 's/^JWT=.*/JWT=<redacted>/' -e 's/^/    /'; exit 1; fi
 echo "[a2sv] provisioned DID: $DID"
 
 echo "[a2sv] start mock LLM (Anthropic streaming; scripted ad4m tool call)"
