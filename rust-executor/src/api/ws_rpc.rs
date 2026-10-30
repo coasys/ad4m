@@ -384,7 +384,24 @@ pub(crate) struct Connection {
     interest: event_interest::SharedInterest,
     /// Dispatched calls still running.
     calls: std::sync::Mutex<tokio::task::JoinSet<()>>,
+    /// Fires when the connection closes (and with `session_over`, its parent). The calls that
+    /// open a live query race it: their first result has nobody left to receive it, and an
+    /// abandoned one kept a blocking thread busy for minutes (#1595). Other calls still
+    /// finish, so a write the client sent completes.
+    closed: CancellationToken,
+    /// Bounds how many calls that open a live query one connection runs at once; the rest
+    /// wait their turn. A client that gives up on its subscribe call and asks again (the waker
+    /// retried every 30 s) piled up one first-result computation per attempt: ~200 busy
+    /// threads on staging (#1595).
+    opening: Arc<tokio::sync::Semaphore>,
 }
+
+/// The calls that open a live query and compute its first result.
+const OPENS_LIVE_QUERY: [&str; 2] = ["perspective.subscribeQuery", "perspective.modelSubscribe"];
+
+/// How many calls that open a live query one connection runs at once (see
+/// [`Connection::opening`]).
+pub(crate) const MAX_OPENING_LIVE_QUERIES: usize = 8;
 
 impl Connection {
     /// A connection whose replies and events go to `tx`.
@@ -396,6 +413,7 @@ impl Connection {
         // A grant revoked before this line has already fired, so its child starts cancelled:
         // no window in which a revoked token's connection stays open.
         let session_over = ctx.session.ended();
+        let closed = session_over.child_token();
         Self {
             handler_map,
             ctx,
@@ -404,6 +422,8 @@ impl Connection {
             inflight: Default::default(),
             interest: Default::default(),
             calls: Default::default(),
+            closed,
+            opening: Arc::new(tokio::sync::Semaphore::new(MAX_OPENING_LIVE_QUERIES)),
         }
     }
 
@@ -504,8 +524,15 @@ impl Connection {
         // work against `cancel_token.cancelled()`; if the client sends
         // `request.cancel`, the racing future fires immediately and we
         // reply with an `AbortError` (code 499). A child of `session_over`: a revocation or
-        // expiry cancels the calls in flight too.
-        let cancel_token = self.session_over.child_token();
+        // expiry cancels the calls in flight too. A call that opens a live query is a child
+        // of `closed`, so the connection closing cancels it as well.
+        let opens_live_query = OPENS_LIVE_QUERY.contains(&msg_type.as_str());
+        let cancel_token = if opens_live_query {
+            self.closed.child_token()
+        } else {
+            self.session_over.child_token()
+        };
+        let opening = opens_live_query.then(|| self.opening.clone());
         {
             let mut guard = self.inflight.lock().await;
             guard.insert(id.clone(), cancel_token.clone());
@@ -567,7 +594,14 @@ impl Connection {
                         json!({"id": id, "error": {"code": 499, "message": "Request cancelled by client"}})
                     }
                 }
-                result = handler_map.dispatch(&msg_type, params, req_ctx) => {
+                result = async {
+                    // Waits for a turn, cancellably: the select drops it with the call.
+                    let _turn = match opening {
+                        Some(opening) => opening.acquire_owned().await.ok(),
+                        None => None,
+                    };
+                    handler_map.dispatch(&msg_type, params, req_ctx).await
+                } => {
                     match result {
                         Ok(val) => json!({"id": id, "result": val}),
                         Err(e) => json!({"id": id, "error": {"code": e.code, "message": e.message}}),
@@ -626,6 +660,8 @@ where
 
     event_task.abort();
     let _ = event_task.await;
+    // Nobody receives the first result of a live query still opening.
+    conn.closed.cancel();
 
     // End the live queries now. A subscribe still in flight adds one after
     // this sweep, so sweep again as each call ends.
