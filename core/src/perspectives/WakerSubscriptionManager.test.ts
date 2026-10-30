@@ -408,6 +408,94 @@ describe('WakerSubscriptionManager', () => {
     manager.disposeAll();
   });
 
+  it('offers a wake held back while re-opening once the live query is open again, once (#1595)', async () => {
+    const statusListeners: ((status: any) => void)[] = [];
+    const delivers: Record<string, (result: any) => Promise<void>> = {};
+    const ProxyClass = function (...args: any[]) {
+      const path = args[3] === 'ad4m://Mentioning' ? 'mentions' : 'text';
+      return {
+        initialized: Promise.resolve(true),
+        subscribe: () => Promise.resolve(),
+        dispose: () => {},
+        result: undefined,
+        onResult: (cb: (result: any) => Promise<void>) => { delivers[path] = cb; },
+        onStatus: (listener: (status: any) => void) => { statusListeners.push(listener); },
+      };
+    };
+    const wakes: string[][] = [];
+    let taken = false;
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: {
+        querySparql: () => Promise.resolve([]),
+        modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }),
+      },
+      logger: noopLogger(),
+      QuerySubscriptionProxy: ProxyClass,
+      debounceMs: 10,
+      retryPendingMs: 60_000,
+      retryWakeMs: 20,
+      onWake: (_sub, _result, mentions) => {
+        wakes.push(mentions.map((m: any) => m.address));
+        return taken;
+      },
+    } as any);
+    await manager.subscribe(sub);
+
+    // A mention whose wake is not taken: it is offered again in 20 ms.
+    await delivers.text(result(named('test://m1')));
+    await waitUntil(() => wakes.length === 1);
+    // Before then the executor restarts, and both queries are re-opening.
+    const notFound = new Error('Perspective fake-uuid not found');
+    for (const listener of statusListeners) listener({ state: 'reopening', error: notFound, retryInMs: 1000 });
+    taken = true;
+    await new Promise((r) => setTimeout(r, 100));
+    expect(wakes).toHaveLength(1);
+
+    for (const listener of statusListeners) listener({ state: 'open' });
+    await waitUntil(() => wakes.length === 2, 500);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(wakes).toEqual([['test://m1'], ['test://m1']]);
+
+    manager.disposeAll();
+  });
+
+  it('starts the re-attempt backoff over once a re-attempt empties the pending set (#1595)', async () => {
+    jest.useFakeTimers();
+    try {
+      let refuse = true;
+      const ProxyClass = function () {
+        if (!refuse) {
+          return { initialized: Promise.resolve(true), subscribe: () => Promise.resolve(), dispose: () => {}, onResult: () => {} };
+        }
+        const error = new Error('Perspective fake-uuid not found');
+        const initialized = Promise.reject(error);
+        initialized.catch(() => {});
+        return { initialized, subscribe: () => Promise.reject(error), dispose: () => {}, onResult: () => {} };
+      };
+      const manager = new WakerSubscriptionManager({
+        perspectiveClient,
+        logger: noopLogger(),
+        QuerySubscriptionProxy: ProxyClass,
+        subscribeTimeoutMs: 0,
+        retryPendingMs: 1000,
+        maxRetryPendingMs: 8000,
+        onWake: () => {},
+      });
+      await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting within 1s/);
+      // Two rounds fail (1 s, 2 s); the third (within 4 s) gets through.
+      await jest.advanceTimersByTimeAsync(1000 + 2000);
+      refuse = false;
+      await jest.advanceTimersByTimeAsync(4000);
+      expect(manager.has(sub.id)).toBe(true);
+
+      refuse = true;
+      await expect(manager.subscribe({ ...sub, id: 'another' })).rejects.toThrow(/re-attempting within 1s/);
+      manager.disposeAll();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   /**
    * Delivers one new mention (or each of the `deliveries` in turn, {@link toMentions}'s to the mention query) and returns
    * what it woke with, every model query the manager made (`[className, parsed query]`), any warnings and the

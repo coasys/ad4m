@@ -285,6 +285,31 @@ describe('LiveQuery', () => {
             expect(open).toHaveBeenCalledTimes(6);
         });
 
+        it('a re-open that fails after a newer one took over leaves the newer one alone', async () => {
+            const { client, reconnect } = fakeClient();
+            let failLate!: (e: Error) => void;
+            const open = jest.fn()
+                .mockResolvedValueOnce({ subscriptionId: 's1', result: [], revision: 0 })
+                // The first re-open hangs (the old socket), and fails only after the next reconnect.
+                .mockReturnValueOnce(new Promise((_, reject) => { failLate = reject; }))
+                .mockResolvedValueOnce({ subscriptionId: 's2', result: ['x'], revision: 0 });
+            const live = new LiveQuery(client as any, 'p', open, jest.fn());
+            const statuses: LiveQueryStatus[] = [];
+            live.onStatus(s => statuses.push(s));
+            await live.start();
+            reconnect();
+            reconnect();
+            await jest.advanceTimersByTimeAsync(0);
+            expect(live.id).toBe('s2');
+
+            failLate(new Error('socket closed'));
+            await jest.advanceTimersByTimeAsync(120_000);
+            expect(statuses).toEqual([]);
+            expect(live.reopening).toBe(false);
+            expect(open).toHaveBeenCalledTimes(3);
+            expect(live.id).toBe('s2');
+        });
+
         it('retries a re-open after a failed resync too', async () => {
             const { client, update } = fakeClient();
             client.resyncSubscription.mockRejectedValue(new Error('gone'));
