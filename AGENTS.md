@@ -141,6 +141,9 @@ so the same file runs on both link languages.
   participant process's TCP and UDP sockets from `/proc`, and the lease
   drops all their traffic (netem 100 % loss, matched by protocol and port)
   while sockets opened later work. Skips without passwordless `sudo -n tc`.
+  E18 makes the same cut, then fires `online` in the participant process
+  (`Participant.networkChanged`). Both assert the call came back in place:
+  u2 saw no departures, so no rebuild.
 - A participant process killed by a signal nobody sent (the libwebrtc binding
   crashes rarely while closing) reruns the scenario once; an assertion failure
   never does.
@@ -155,11 +158,18 @@ participants by DID from it; tracks are attributed only by the `trackMapping`
 mids; `sfu-data` never echoes to its sender; room capacity comes from the
 space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
 per-node capacity only drives redirects; the server drops a peer only after
-10 s of ICE `Disconnected`; the SDK rebuilds a failed connection and retries
-the join for 120 s. `ApiClient` drops an executor socket whose ping stays
+10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
+(`sfu.callRestartIce`), 10 s after the request or after the restart's answer;
+on ICE `disconnected` or a network change the SDK restarts ICE in place (the
+SFU stays the only offerer: the restart comes as a server renegotiation
+offer), and rebuilds the call if that has not reconnected within 5 s; a
+failed connection is rebuilt at once, and a rebuild retries the join for
+120 s. `ApiClient` drops an executor socket whose ping stays
 unanswered for a ping interval (10 s, `PING_INTERVAL_MS`; longer while a large
 write it sent may still be crossing a 16 kB/s link) and dials a new one, so a
-socket a network switch left OPEN is noticed in 10 to 20 s.
+socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
+at once; `change` on `navigator.connection` and ICE `disconnected` run
+`checkConnection`, which drops a socket silent for 2 s after its ping.
 
 SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
 binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port
