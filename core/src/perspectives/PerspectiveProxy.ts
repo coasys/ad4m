@@ -18,7 +18,7 @@ import { AIClient } from "../ai/AIClient";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
-import { LiveQuery, Subscribed } from "./LiveQuery";
+import { LiveQuery, LiveQueryStatus, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
@@ -68,8 +68,8 @@ export class QuerySubscriptionProxy {
      *  `{ instances, totalCount }`. Without it, `query` is SPARQL. */
     constructor(uuid: string, query: string, client: PerspectiveClient, className?: string | string[]) {
         const open = className === undefined
-            ? () => client.subscribeQuery(uuid, query)
-            : () => client.modelSubscribe(uuid, className, query);
+            ? (signal: AbortSignal) => client.subscribeQuery(uuid, query, { signal })
+            : (signal: AbortSignal) => client.modelSubscribe(uuid, className, query, { signal });
         this.#live = new LiveQuery(client, uuid, open, result => this.#deliver(result));
         this.#initialized = new Promise<boolean>((resolve, reject) => {
             this.#initResolve = resolve;
@@ -112,6 +112,20 @@ export class QuerySubscriptionProxy {
         return () => this.#callbacks.delete(callback);
     }
 
+    /** Whether the query lost its subscription (a reconnect, a failed
+     *  resync), could not open it again yet and is retrying: `result` is then
+     *  not live. */
+    get reopening(): boolean {
+        return this.#live.reopening;
+    }
+
+    /** Call `listener` on each failed re-open of the subscription and when a
+     *  re-open succeeds after one failed (see {@link LiveQueryStatus}).
+     *  Returns a remover. */
+    onStatus(listener: (status: LiveQueryStatus) => void): () => void {
+        return this.#live.onStatus(listener);
+    }
+
     #deliver(result: AllInstancesResult) {
         this.#initResolve?.(true);
         this.#initResolve = this.#initReject = undefined;
@@ -124,9 +138,11 @@ export class QuerySubscriptionProxy {
         }
     }
 
-    /** End the subscription on the executor and drop all callbacks. */
-    dispose() {
-        this.#live.dispose();
+    /** End the subscription on the executor and drop all callbacks. With
+     *  `cancelOpening`, a `subscribe()` still waiting on the executor is
+     *  cancelled too, and rejects. */
+    dispose(options: { cancelOpening?: boolean } = {}) {
+        this.#live.dispose(options);
         this.#callbacks.clear();
     }
 }
@@ -2304,7 +2320,14 @@ export class PerspectiveProxy {
      *  refuses a Prolog query (400): Prolog live queries are not supported. */
     async subscribeQuery(query: string): Promise<QuerySubscriptionProxy> {
         const subscription = new QuerySubscriptionProxy(this.uuid, query, this.#client);
-        await subscription.subscribe();
+        try {
+            await subscription.subscribe();
+        } catch (e) {
+            // Nobody gets the proxy, so nobody can dispose it: left as is, it
+            // would re-open on every reconnect and retry for good (#1595).
+            subscription.dispose({ cancelOpening: true });
+            throw e;
+        }
         return subscription;
     }
 
