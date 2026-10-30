@@ -74,18 +74,19 @@ members, and no others:
 | `rotate` | `master` (the revealed key), `salt`, `next` (commitment or `null`), `revoke` (device key ids; left out when empty) | the revealed key |
 | `scope` | `key` (a bot key id), `can`, `expires` | the current master key |
 
-A device key has one of three flat forms, and no other member:
+A device key has one of two flat forms, and no other member:
 
 ```json
 { "id": "d1", "sign": "z6Mk…", "enc": "z6LS…" }
-{ "id": "d2", "sign": "z6Mk…", "enc": "z6LS…", "expires": 1800000000 }
-{ "id": "d3", "sign": "z6Mk…", "enc": "z6LS…", "kind": "bot", "can": ["read"], "expires": 1750000000 }
+{ "id": "d2", "sign": "z6Mk…", "enc": "z6LS…", "kind": "bot", "can": ["read"], "expires": 1750000000 }
 ```
 
-The first is valid until revoked; the second (`KeyLife::Until`) until revoked or until
-`expires` (unix seconds); the third is a bot key with its actions (`read`, `write`, `join`) and
-its expiry. A log holds nothing else: no names, device models, addresses, endpoints, emails
-or free text. The private record, kept outside the log, holds names. `fold` does not read `offer` or
+The first is a standing key, valid until an event ends it. The second is a bot key with its
+actions (`read`, `write`, `join`) and its expiry (unix seconds). Only a bot key expires: a
+bot grant is meant to lapse, while a device key's validity over time comes from the log's
+ordered events, never from a reader's clock. A log holds nothing else: no names, device
+models, addresses, endpoints, emails or free text. The private record, kept outside the log,
+holds names. `fold` does not read `offer` or
 `coSig`; the store checks them against the claim (the claim check, listed in
 `identity-store/AGENTS.md`).
 
@@ -118,7 +119,8 @@ rule. Each rule names the error that the reference implementation returns
   for its op (`Format(UnknownField)`); each member has its type (`Format(Missing)`,
   `Format(Type)`).
 - **P4** A device key holds only `id`, `sign`, `enc`, `kind`, `can`, `expires`
-  (`Format(UnknownField)`); `can` without `kind: "bot"` fails (`CanWithoutBotMark`); `kind` is
+  (`Format(UnknownField)`); `can` without `kind: "bot"` fails (`CanWithoutBotMark`), and so
+  does `expires` without it (`ExpiresWithoutBotMark`); `kind` is
   `bot` or absent (`Format(UnsupportedKind)`); a bot key carries `can` and `expires`.
 - **P5** `kind` of an `incept` is `human`; `group` is reserved (`Format(UnsupportedKind)`).
 - **P6** The event serialises back to exactly the JSON it came from: an empty `proof` or an
@@ -170,8 +172,7 @@ rule. Each rule names the error that the reference implementation returns
   hash to the stored `next` (`NextMismatch`); the revealed key signs as `m<n+1>`; its `revoke`
   follows K12; `next` is a multihash or `null`.
 - **K14** `scope` names a device key (`UnknownKey`) that no event ended (`RevokedKey`) and that
-  carries the bot mark (`NotABot`); signed by the current master. An `Until` key is never
-  extended: its app adds a new key.
+  carries the bot mark (`NotABot`); signed by the current master.
 - **K15** A bot scope (in `add` or `scope`) names at least one action (`EmptyScope`), each one of
   `read`, `write`, `join` (`Format(UnknownAction)`). `expires` is checked only as an integer
   below 2^53; the core reads no clock.
@@ -192,9 +193,9 @@ and the seq that ended it, the bot scopes per seq, `next`, and `ended`.
 
 - `key_valid_at(k, s)`: `k` (a key id or a signing multikey) was added at or before `s` and not
   revoked, replaced or ended at or before `s`. A key revoked at *N* stays valid below *N*.
-- `key_valid_at_time(k, s, t)`: `key_valid_at(k, s)`, and for a key with `expires` (`Until`)
-  `t < expires`, and for a bot key `t < expires` of the scope in force at `s`. `t` is the
-  caller's trusted time.
+- `key_valid_at_time(k, s, t)`: `key_valid_at(k, s)`, and for a bot key `t < expires` of the
+  scope in force at `s`. `t` is the caller's trusted time. For every other key it equals
+  `key_valid_at(k, s)`.
 - The current master is the last master, until the log ends.
 
 ## 7. The `coasys:kel` domain
@@ -259,16 +260,15 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
 ## 9. DID document
 
 The DID document of a log at seq *s* is a pure function of the state after *s*. It reads no
-clock: an expiry is a property of a verification method, never a filter, and a verifier
-compares it with its own trusted time (`key_valid_at_time`, section 6). The reference is
-`ad4m_identity_core::did_document`.
+clock: a bot scope's expiry is a property of its verification method, never a filter, and a
+verifier compares it with its own trusted time (`key_valid_at_time`, section 6). The
+reference is `ad4m_identity_core::did_document`.
 
 | Log item at *s* | DID document | Why |
 |---|---|---|
 | Standing device key `dN` valid at *s* (`key_valid_at`) | `verificationMethod` `#dN`: `Multikey`, `publicKeyMultibase` = its `sign`. Listed in `authentication` and `assertionMethod` | devices sign as the person: links, records, logins |
-| `Until` device key valid at *s* | as a standing key, plus `"coasys:expires": <expires>` on the method | DID Core has no expiry on a method. A verifier that ignores the property sees a key that the log refuses after `expires` |
 | Bot key valid at *s* | `verificationMethod` `#dN` with `"coasys:bot": {"can": […], "expires": …}`, the scope in force at *s*. Listed only in `capabilityInvocation`, never in `authentication` or `assertionMethod` | a bot acts within a scope, not as the person: a generic verifier must not take a bot's statement as the person's |
-| The `enc` key of each standing or `Until` key | `verificationMethod` `#dN-enc`: `Multikey`, `publicKeyMultibase` = its `enc`. Listed in `keyAgreement` | where messages to the person are sealed. A bot's `enc` key is absent: a bot has no inbox, and a message to the person must not reach one |
+| The `enc` key of each standing key | `verificationMethod` `#dN-enc`: `Multikey`, `publicKeyMultibase` = its `enc`. Listed in `keyAgreement` | where messages to the person are sealed. A bot's `enc` key is absent: a bot has no inbox, and a message to the person must not reach one |
 | A key revoked, replaced or ended at or before *s* | absent | a document describes one state; a document of an earlier version lists it |
 | Masters `mN` | absent | masters control the log, not the subject's statements; the log never lets them sign for the person |
 | Next-key commitment | absent | a log parameter, not a key |
@@ -285,7 +285,7 @@ its `-enc` method. Method ids are relative DID URLs (`#d1`), resolved against `i
 JSON-LD form has `@context` first, then `id`, `controller`, `verificationMethod`,
 `authentication`, `assertionMethod`, `keyAgreement`, `capabilityInvocation` (each written even
 when empty) and `alsoKnownAs` (left out when empty). A method has `id`, `type`, `controller`,
-`publicKeyMultibase`, then `coasys:expires` and `coasys:bot` when they apply.
+`publicKeyMultibase`, then `coasys:bot` on a bot key.
 
 Example: the log of `vectors/log.json` at `versionId=3` (`vectors/document.json`):
 
@@ -296,25 +296,25 @@ Example: the log of `vectors/log.json` at `versionId=3` (`vectors/document.json`
     "https://w3id.org/security/multikey/v1",
     "https://coasys.org/ns/did-scid-coasys/v1"
   ],
-  "id": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
-  "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+  "id": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
+  "controller": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
   "verificationMethod": [
     {
       "id": "#d1",
       "type": "Multikey",
-      "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "controller": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
       "publicKeyMultibase": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
     },
     {
       "id": "#d1-enc",
       "type": "Multikey",
-      "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "controller": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
       "publicKeyMultibase": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz"
     },
     {
       "id": "#d3",
       "type": "Multikey",
-      "controller": "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt",
+      "controller": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
       "publicKeyMultibase": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr",
       "coasys:bot": { "can": ["read"], "expires": 1900000000 }
     }
@@ -324,7 +324,7 @@ Example: the log of `vectors/log.json` at `versionId=3` (`vectors/document.json`
   "keyAgreement": ["#d1-enc"],
   "capabilityInvocation": ["#d3"],
   "alsoKnownAs": [
-    "did:scid:coasys:1:QmXRT2vLohNRbSeywATckzZPEow3qznARyeHUY6sXwurHt?src=store.example"
+    "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c?src=store.example"
   ]
 }
 ```
@@ -332,7 +332,7 @@ Example: the log of `vectors/log.json` at `versionId=3` (`vectors/document.json`
 Its metadata: `{"versionId": "3", "nextVersionId": "4", "deactivated": true}` (the log of
 the vectors ends at seq 6).
 
-The context `https://coasys.org/ns/did-scid-coasys/v1` defines the two extension properties:
+The context `https://coasys.org/ns/did-scid-coasys/v1` defines the extension property:
 
 ```json
 {
@@ -340,10 +340,6 @@ The context `https://coasys.org/ns/did-scid-coasys/v1` defines the two extension
     "@version": 1.1,
     "@protected": true,
     "coasys": "https://coasys.org/ns/did-scid-coasys/v1#",
-    "coasys:expires": {
-      "@id": "coasys:expires",
-      "@type": "http://www.w3.org/2001/XMLSchema#integer"
-    },
     "coasys:bot": {
       "@id": "coasys:bot",
       "@context": {
@@ -359,8 +355,8 @@ The context `https://coasys.org/ns/did-scid-coasys/v1` defines the two extension
 }
 ```
 
-`coasys:expires` is unix seconds: the `expires` of an `Until` key. `coasys:bot` is a bot key's
-scope: `can` (actions from `read`, `write`, `join`) and `expires` (unix seconds).
+`coasys:bot` is a bot key's scope: `can` (actions from `read`, `write`, `join`) and `expires`
+(unix seconds, the IRI `coasys:expires`). No other method carries an expiry.
 
 ## 10. Where `src` goes
 
@@ -415,10 +411,9 @@ freezes the identity, so a hash would add bytes to every record and link and ena
   identity there either.
 - The core reads no clock. Expiries are compared with the caller's trusted time. The window a
   host accepts for a new `expires` is host policy (section 14).
-- A generic DID Core verifier ignores `coasys:expires` and `coasys:bot`. Bot keys sit outside
-  `authentication` and `assertionMethod`, so such a verifier never takes a bot's signature as
-  the person's; it does not apply an `Until` expiry, which the log and a `coasys/1` resolver
-  still enforce.
+- A generic DID Core verifier ignores `coasys:bot`. Bot keys sit outside `authentication` and
+  `assertionMethod`, so such a verifier never takes a bot's signature as the person's, and
+  every key it does use is valid without a clock.
 - A `src` fetched from untrusted data is a request to an address someone else chose. A
   resolver on a server limits it (HTTPS only, public addresses only, no redirect to another
   host).
@@ -515,7 +510,8 @@ Coasys identity store adds these checks:
 - **One key per identity.** A host may require that a signing key appears in at most one log
   it holds (rule K8 already holds within one log). Revoked keys count: a log that ever listed
   the key keeps it, so a revoked key can never enter another log on that host.
-- **Expiry window.** The store refuses an `expires` in the past or more than 400 days ahead.
+- **Expiry window.** The store refuses a bot scope's `expires` in the past or more than 400
+  days ahead.
 - **Proof of work for a log with no vouching note**, below.
 
 ### Proof of work for a log with no vouching note

@@ -229,22 +229,18 @@ fn signed_by_master(
 
 /// The `add` that spends `claim` on `offer`, signed by the current master key.
 /// The key takes the next device id. A bot offer copies `offer.bot` into the key's bot mark;
-/// a device or node offer gives a standing key, or a `KeyLife::Until` key when `expires` is set
-/// (the store refuses one more than 400 days ahead). A bot offer without a scope, or `expires`
-/// on a bot offer, is refused.
+/// a device or node offer gives a standing key. A bot offer without a scope, or a device or
+/// node offer with one, is refused.
 pub fn add_claimed(
     chain: &KelChain,
     master: &dyn Signer,
     offer: &Offer,
     claim: &ClaimView,
-    expires: Option<u64>,
 ) -> Result<Event, BuildError> {
-    let life = match (offer.kind, &offer.bot, expires) {
-        (OfferKind::Bot, Some(scope), None) => KeyLife::Bot(scope.clone()),
-        (OfferKind::Bot, _, _) => return Err(BuildError::OfferShape),
-        (_, Some(_), _) => return Err(BuildError::OfferShape),
-        (_, None, Some(at)) => KeyLife::Until(at),
-        (_, None, None) => KeyLife::Standing,
+    let life = match (offer.kind, &offer.bot) {
+        (OfferKind::Bot, Some(scope)) => KeyLife::Bot(scope.clone()),
+        (OfferKind::Bot, None) | (_, Some(_)) => return Err(BuildError::OfferShape),
+        (_, None) => KeyLife::Standing,
     };
     let device = DeviceKey {
         id: chain.state().next_device_id(),
