@@ -371,6 +371,44 @@ nobody can correct. A DID URL with `src` is for telling a reader where to look: 
 a QR code, a profile card, the `alsoKnownAs` of the DID document. A resolver that gets a bare
 DID uses its caller's sources and its configured hosts.
 
+### Anchors
+
+A content anchor is one integer that a signed piece of content (an agent record, a link)
+carries with its signature: the seq of the signer's identity log that the signer knew when it
+signed. It places the signature at a position in the log, so revocation is checked without
+clocks.
+
+- A signature by a device key `k` of identity X, anchored at seq `s`, holds only when X's log
+  lists `k` and `key_valid_at(k, s)` (section 6). A key revoked at *N* signs nothing valid
+  anchored at or after *N*; content anchored below *N* that was admitted before the revocation
+  stays valid.
+- An anchor past the head of the log the verifier holds is refused.
+- The signer picks the anchor, so the anchor alone cannot stop a holder of a revoked key from
+  backdating new content to a seq below *N*. The host that admits signed content (for an agent
+  record, the store that takes the `PUT`) orders arrivals: when the content arrives it also
+  checks `k` listed and valid at the head of the log it holds, and refuses the content
+  otherwise, whatever anchor it names. A revoked key so cannot backdate new content past that
+  host. Readers check at the anchor and rely on that host's admission for arrival order.
+- A reader that first sees a signature after the key's revocation, anchored before it, and
+  did not get it through such a host, may flag it. That is the reader's policy; the signature
+  holds.
+
+The anchor carries no DID, key id or hash. The identity is known from the content: a record is
+keyed by its did:scid, and a link's author key maps to its identity through a key lookup that
+the verifier confirms against the log (a key enters a log only with its own co-signature). The
+key id is read from the log, which lists the signing key. A hash would only tell forked
+branches apart, and a fork is only detected, never resolved (sections 8 and 11): it already
+freezes the identity, so a hash would add bytes to every record and link and enable no check.
+
+The anchor is not a parameter of the signer's `did:key`. A `did:key` has one fixed DID
+document, so a version of it means nothing, and the `did:key` method defines no DID parameters.
+The anchor is a version of the identity's log. As a DID URL it is
+`did:scid:coasys:1:<scid>?versionId=<s>#<keyId>`: the signing key's verification method in the
+DID document at version *s* (section 8). That is the DID URL a W3C Data Integrity proof names
+in `verificationMethod`, so a system that verifies signatures by DID URL gets the same check.
+Content carries only the integer, inside the signed bytes. A verifier or an exporter derives the
+DID URL from the identity, the anchor and the key id that the log lists for the signing key.
+
 ## 11. Security and privacy
 
 - A store can withhold events but cannot add one: every event carries proofs by keys the state

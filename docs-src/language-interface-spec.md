@@ -398,6 +398,112 @@ For Languages that store other languages (the Language Language).
 |---|---|---|
 | `interactions(address)` | `string` | `Interaction[]` |
 
+### 5.8 Identity (agent language only)
+
+The agent language's identity interface: the calls the executor makes
+to read, append and resolve `did:scid:coasys:1` key logs and to pass offers and claims. The
+closed beta's `centralized-agent-language` maps each call to one route of the shared identity
+store (`identity-store`); a later Holochain or Holograph agent language serves the same calls.
+
+Each call is its own capability (`identity-log`, `identity-head`, …), detected from its flat
+export. **The executor calls them only on the language at `system_addresses.agent_language`**
+(`LanguageController::language_for_capability` refuses any other language with
+`NotAgentLanguage`), so a third-party language that exports them is never asked.
+
+| Export | Parameters | Returns | Store route |
+|---|---|---|---|
+| `identityLog(did, from)` | `string`, `number` | `Promise<LogPage \| null>` | `GET /v1/logs/{scid}?from=` |
+| `identityHead(did)` | `string` | `Promise<SignedHead \| null>` | `GET /v1/heads/{scid}` |
+| `identityAppend(did, req)` | `string`, `AppendRequest` | `Promise<SignedHead>` | `POST /v1/logs/{scid}/events` |
+| `identityKeyOwner(multikey, waitSec?)` | `string`, `number` (0–8) | `Promise<KeyIndexEntry \| null>` | `GET /v1/keys/{multikey}?wait=` |
+| `identityPowParams()` | — | `Promise<PowParams>` | `GET /v1/pow` |
+| `identityAttachNote(did, token, req)` | `string`, `string`, `SignedRequest` | `Promise<VouchNote>` | `POST /v1/notes/{scid}` |
+| `identityPutAgent(record, req?)` | `AgentRecord`, `SignedRequest?` | `Promise<void>` | `PUT /v1/agents/{did}` |
+| `identityOpenOffer(offer)` | `SignedOffer` | `Promise<OfferOpened>` | `POST /v1/offers/{scid}` |
+| `identityListOffers(did, req, waitSec?)` | `string`, `SignedRequest`, `number` | `Promise<OfferListing[]>` | `GET /v1/offers/{scid}?wait=` |
+| `identityCancelOffer(did, offerId, req)` | `string`, `string`, `SignedRequest` | `Promise<void>` | `DELETE /v1/offers/{scid}/{offerId}` |
+| `identityClaimOffer(did, offerId, claim)` | `string`, `string`, `Claim` | `Promise<ClaimReceipt>` | `POST /v1/offers/{scid}/{offerId}/claim` |
+| `identityOfferState(did, offerId, key, waitSec?)` | `string`, `string`, `string`, `number` | `Promise<OfferProgress>` | `GET /v1/offers/{scid}/{offerId}/state` |
+
+Every call goes to the language's own store. A did:scid `src` hint (a DID URL's `?src=`,
+another host of the log) is not part of this interface: the executor fetches such a host
+itself, over the did:scid host profile (`GET {base}/v1/logs/{scid}?from=`), with a transport
+that refuses non-public addresses when it connects. A log page over 256 events or over the
+size of 257 store bodies (64 KiB each) is refused as `invalid` (`too-large`).
+
+`did` is the full `did:scid:coasys:1:<scid>`. The wire types live in `ad4m-ldk`
+(`js/src/types.ts`, `rust/src/identity.rs`); JSON field names are camelCase.
+
+Rules for an implementation:
+
+- **It signs nothing and holds no key.** Events, offers, claims and signed requests pass
+  through unchanged; a `SignedRequest` travels in the `X-Coasys-Request` header. Its `req`
+  is `{did, store, keyId, kelSeq, kelHash, method, path, bodyHash, nonce, expires}`, where
+  `store` is the `did:key` of the store the request is for (as a signed head names its
+  store): a store refuses a request for another as `forbidden` (`store`), so a request cannot
+  be replayed to a second store holding the same log. The signer takes it from
+  `identity.storeKeys`, or from the `store` of a head it checked against them. Events are
+  opaque JSON objects, so a new event format needs no new language: the language never reads
+  one; the executor and the store check each with the identity core.
+- **Refusals map one to one** onto `IdentityErrorCode` (`conflict` with the store's head,
+  `key-taken`, `forbidden` with a reason (`vouch`, `pow`, `claim`, `signer`, `secret`,
+  `bound`, `cosig`, `writer`, `store`), `invalid`, `rate-limited`, `gone` with the offer's
+  state, `not-found`, `unavailable`). A refusal crosses the runtime as a language error whose
+  message is the refusal as JSON (`IdentityError` in JS, `IdentityErrorCode::from_language_error`
+  in Rust). A network failure or the 10-second host timeout is `unavailable`.
+- **The store's base URL comes from the language settings** (`{"storeUrl": "https://…"}`),
+  which the executor fills from its config key `identity.storeUrl` before the language loads.
+  The executor accepts a head from the language only when one of the keys in its config key
+  `identity.storeKeys` signed it (`coasys:head`).
+- `expressionGet` / `expressionCreate` keep working for agent profiles, on the store's
+  `/v1/agents/{did}` routes. A `did:key` record's `profile` is the Agent as the agent's signed
+  AD4M expression (the host's `createSignedExpression`), and `expressionGet` answers that
+  expression unchanged, so the executor's check of `proof.signature` holds as before.
+- **A `did:scid` profile carries its record's proof.** A `did:scid` record's `profile` is the
+  Agent as an AD4M expression authored by the did:scid, with `proof.key` the record's
+  `signedBy` and no `proof.valid`, `proof.invalid` or `proof.record`. `expressionGet` answers
+  it exactly as stored plus one field, `proof.record` = `{version, anchor, sig}` of the record
+  (`AgentRecordProof`), and ignores a record whose profile is not of that form. The executor
+  then checks the record itself at its anchor, from signed data only: removing `proof.record`
+  gives back `profile`, `sig` must hold over `{profile, version, anchor}` (`coasys:link`) by
+  `proof.key`, and that key must be valid at `anchor` in the log. A profile the store took
+  before a revocation so stays valid after it, as the anchor rule below says.
+- **An agent record's `anchor` is one seq.** `sig` covers `{profile, version, anchor}`. A
+  `did:key` record's `anchor` is `null`; a `did:scid` record's is the seq of that log the
+  signer knew when it signed. The store on write and the language on read keep a `did:scid`
+  record only when the anchor is at or below the log's head and the log lists `signedBy` (a
+  bare `did:key`) as a device key (never a master: the master never signs for the person),
+  without the bot mark and valid at the anchor: a key revoked at seq N signs
+  nothing valid anchored at or after N. The signer picks the anchor, so the store, which
+  orders arrivals, also requires `signedBy` without the bot mark and valid at the log's head
+  when the record arrives (`403 signer` otherwise): a revoked key cannot backdate a new record
+  to an anchor before its revocation, and a record the store took before the revocation stays
+  valid. The language on read checks at the anchor and relies on that admission. The DID is the record's, the key id is in the log, and
+  a fork freezes the identity anyway, so the anchor carries no DID, key id or hash.
+
+The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the
+calls it makes today are `log`, `append`, `openOffer`, `listOffers`, `claimOffer` and
+`offerState`; the language serves the others for apps and for later executor features.
+
+### 5.9 Token (agent language only, interfaces only)
+
+The token interface: accounts are DIDs, amounts are decimal
+strings (`Amount { value, decimals }`, no floats), and the interface carries no signature (the
+language signs through its context, as for expressions). Same routing rule as identity: the
+executor calls these only on the agent language.
+
+| Export | Parameters | Returns |
+|---|---|---|
+| `tokenAssets()` | — | `Promise<string[]>` |
+| `tokenBalance(account, asset)` | `string`, `string` | `Promise<TokenBalance>` |
+| `tokenSend(to, asset, amount, memo?)` | `string`, `string`, `Amount`, `string?` | `Promise<TokenTransfer>` |
+| `tokenReceived(cursor, limit)` | `string \| null`, `number` | `Promise<{ items: TokenTransfer[]; cursor: string \| null }>` |
+
+Transfers reach the executor as a language signal with the tag `token-transfer`. Refusals are
+`TokenErrorCode` (`disabled`, `unknown-asset`, `unknown-account`, `insufficient`, `refused`,
+`unavailable`), carried like identity refusals (`TokenError`). In the closed beta no language
+implements the interface and every call answers `{ code: "disabled" }`.
+
 ---
 
 ## 6. Event handler exports (RUNTIME → LANGUAGE for asynchronous events)

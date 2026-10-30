@@ -2207,6 +2207,30 @@ impl LanguageController {
         Ok(Language::new(address))
     }
 
+    /// The language to call `cap` on, for a caller that names `address`.
+    /// Identity and token capabilities resolve only to the language at
+    /// `system_addresses.agent_language`; for any other
+    /// address they answer `NotAgentLanguage`. Other capabilities resolve to
+    /// `address` itself.
+    pub async fn language_for_capability(
+        &self,
+        address: &str,
+        cap: capability::Capability,
+    ) -> Result<Language, LanguageError> {
+        let agent_language = self.system_addresses.lock().await.agent_language.clone();
+        capability::check_capability_target(cap, address, agent_language.as_deref())?;
+        Ok(Language::new(address.to_string()))
+    }
+
+    /// The agent language, for an identity or token capability.
+    pub async fn agent_language_for(
+        &self,
+        cap: capability::Capability,
+    ) -> Result<Language, LanguageError> {
+        let agent = self.get_agent_language().await?;
+        self.language_for_capability(agent.address(), cap).await
+    }
+
     /// Get the language language
     pub async fn get_language_language(&self) -> Result<Language, LanguageError> {
         let sys = self.system_addresses.lock().await;
@@ -3102,6 +3126,124 @@ mod template_tests {
         assert_eq!(
             lines[3], r#"const UID = "unique-id-123""#,
             "UID gets replaced"
+        );
+    }
+}
+
+#[cfg(test)]
+mod capability_routing_tests {
+    use super::capability::Capability;
+    use super::*;
+
+    async fn controller_with_agent_language(agent: Option<&str>) -> LanguageController {
+        let controller = LanguageController::new();
+        controller.system_addresses.lock().await.agent_language = agent.map(str::to_string);
+        controller
+    }
+
+    #[tokio::test]
+    async fn identity_and_token_calls_resolve_only_to_the_agent_language() {
+        let controller = controller_with_agent_language(Some("QmAgent")).await;
+        for cap in [
+            Capability::IdentityLog,
+            Capability::IdentityClaimOffer,
+            Capability::TokenSend,
+        ] {
+            let language = controller
+                .language_for_capability("QmAgent", cap)
+                .await
+                .unwrap();
+            assert_eq!(language.address(), "QmAgent");
+            assert_eq!(
+                controller.agent_language_for(cap).await.unwrap().address(),
+                "QmAgent"
+            );
+            match controller
+                .language_for_capability("QmLinkLanguage", cap)
+                .await
+            {
+                Err(LanguageError::NotAgentLanguage {
+                    address,
+                    capability,
+                }) => {
+                    assert_eq!(address, "QmLinkLanguage");
+                    assert_eq!(capability, cap.wire_name());
+                }
+                Err(other) => panic!("unexpected error {other}"),
+                Ok(_) => panic!("{} resolved to a link language", cap.wire_name()),
+            }
+        }
+        let link = controller
+            .language_for_capability("QmLinkLanguage", Capability::PerspectiveCommit)
+            .await
+            .unwrap();
+        assert_eq!(link.address(), "QmLinkLanguage");
+    }
+
+    #[tokio::test]
+    async fn identity_calls_fail_before_the_agent_language_is_known() {
+        let controller = controller_with_agent_language(None).await;
+        assert!(matches!(
+            controller
+                .agent_language_for(Capability::IdentityHead)
+                .await,
+            Err(LanguageError::NotFound { .. })
+        ));
+        assert!(matches!(
+            controller
+                .language_for_capability("QmAgent", Capability::IdentityHead)
+                .await,
+            Err(LanguageError::NotAgentLanguage { .. })
+        ));
+    }
+}
+
+/// The agent language's profile expressions on the executor's read path: every expression a
+/// language answers goes through `verify_expression_proof`, so the profile `expressionGet`
+/// answers has to carry the agent's own AD4M signature of that expression.
+#[cfg(test)]
+mod agent_language_profile_tests {
+    use super::*;
+
+    /// What the centralized agent language's `expressionGet` answers for a did:key agent's
+    /// profile; `bootstrap-languages/centralized-agent-language/rust-impl/tests/language.rs`
+    /// (`PROFILE_FIXTURE`) pins the same text as the language's output: change both together.
+    const PROFILE_FIXTURE: &str = r#"{"author":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","timestamp":"2027-01-15T08:00:00.123Z","data":{"did":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","directMessageLanguage":"lang://dm","perspective":{"links":[{"author":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","data":{"predicate":"sioc://likes","source":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA","target":"literal://string:hi"},"proof":{"key":"k","signature":"ab"},"timestamp":"2027-01-15T08:00:00.000Z"}]}},"proof":{"signature":"01458e67b883f12668acf6a8bd17f12f1229f7526c48ff60ce3cda50719ec4fa559cca32a959eca1d0e9e15808ad92df1ab2115dded42138c4339f7f2645340d","key":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA#z6MkmCaBGuSHkLjurVa3zQKf8shzTuETxwycjjASL8Pd2DPA"}}"#;
+
+    fn verdict(mut expression: JsonValue) -> (JsonValue, JsonValue) {
+        LanguageController::verify_expression_proof(&mut expression);
+        (
+            expression["proof"]["valid"].clone(),
+            expression["proof"]["invalid"].clone(),
+        )
+    }
+
+    #[test]
+    fn the_agent_languages_profile_expression_verifies() {
+        let expression: JsonValue = serde_json::from_str(PROFILE_FIXTURE).unwrap();
+        assert_eq!(
+            verdict(expression),
+            (JsonValue::Bool(true), JsonValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn a_changed_profile_or_a_record_signature_in_its_place_does_not_verify() {
+        let expression: JsonValue = serde_json::from_str(PROFILE_FIXTURE).unwrap();
+
+        let mut changed = expression.clone();
+        changed["data"]["directMessageLanguage"] = JsonValue::from("lang://other");
+        assert_eq!(
+            verdict(changed),
+            (JsonValue::Bool(false), JsonValue::Bool(true))
+        );
+
+        // A store record's multibase `coasys:link` signature is not an AD4M expression proof.
+        let mut record_sig = expression;
+        record_sig["proof"]["signature"] = JsonValue::from("z3Jx6Yb4rD9aQnL2");
+        assert_eq!(
+            verdict(record_sig),
+            (JsonValue::Bool(false), JsonValue::Bool(true))
         );
     }
 }
