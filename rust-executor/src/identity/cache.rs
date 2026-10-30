@@ -805,7 +805,7 @@ pub(crate) mod tests {
                     added: record.added,
                     revoked: record.revoked,
                     bot: None,
-                    expires: record.expires,
+                    expires: record.scopes.last().map(|(_, scope)| scope.expires),
                     paused: false,
                     head: signed,
                 }),

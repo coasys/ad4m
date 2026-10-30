@@ -503,7 +503,7 @@ pub fn device_views(state: &ad4m_identity_core::KeyState, this: &str) -> Vec<Dev
                     can: s.can.clone(),
                     expires: s.expires,
                 }),
-                expires: record.expires.or(scope.map(|s| s.expires)),
+                expires: scope.map(|s| s.expires),
                 added_seq: record.added,
                 revoked_seq: record.revoked,
                 this_device: record.sign == this,
