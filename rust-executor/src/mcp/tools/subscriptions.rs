@@ -7,8 +7,9 @@
 use super::Ad4mMcpHandler;
 use crate::agent::AgentService;
 use crate::mcp::shacl;
-use crate::perspectives::model_query::builtin_classes::CONTAINER_URI;
-use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
+use crate::perspectives::model_query::builtin_classes::{
+    CONTAINER_URI, MENTIONING_URI, TEXT_CONTENT_URI,
+};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -45,8 +46,6 @@ pub struct SubscribeToModelParams {
 pub struct MentionWakerConfigParams {
     /// Perspective UUID of the neighbourhood to watch for mentions.
     pub perspective_id: String,
-    /// Override the agent name used in the query (defaults to profile username/given_name).
-    pub name_override: Option<String>,
 }
 
 // ============================================================================
@@ -188,7 +187,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. It is a model query over the built-in TextContent (class ad4m://TextContent): every record whose text, in a link another agent wrote, contains one of the terms, case-insensitively, whatever the app calls its class or text property, newest first. Links the agent authored itself never match, so its own reply naming it does not wake it. The query matches substrings; the waker keeps a record only when its text holds one of the returned terms as a whole word (\"data\" matches \"hi Data!\", not \"metadata\"). HTML markup is ignored by the waker; only visible whole-word text or exact DID mention targets wake it. The waker opens it with perspective.modelSubscribe and, when it fires, resolves the parent channels of each mentioned record in a second query. Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent in a neighbourhood. It carries two model queries over built-in abstract classes, which the waker opens under one id, so a record both find wakes it once, through the query that reports it first. `mentionQuery` reads Mentioning (class ad4m://Mentioning, `{ mentions }`): every record whose `mentions` relation links the agent's DID, whatever the app calls its class, with text or without: a class takes part when it has a relation named `mentions`, or one aliased to `mentions`, under any predicate (the built-in's own is `ad4m://mentions`). `query` reads TextContent (class ad4m://TextContent, `{ text }`): every record whose text contains one of the agent's profile names (username, given_name, family_name) or its DID, case-insensitively, whatever the app calls its class or text property. Both match only through a link another agent wrote, whose signature verifies, so the agent's own reply naming it does not wake it; both are newest first. A mention link wakes the agent whatever the text says. The text query matches substrings: the waker keeps a record found through its text only when the text holds a returned term as a whole word (\"data\" matches \"hi Data!\", not \"metadata\"); HTML markup is ignored, and a mention chip's DID attribute counts. The rows carry each mention link's or text link's author, timestamp and signature verdict (`__links`), which the waker hands the woken agent. The waker opens both with perspective.modelSubscribe and, when one fires, resolves the parent channels of each mentioned record in a second query. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -210,14 +209,12 @@ impl Ad4mMcpHandler {
             Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
-
         let did = agent.did.clone();
 
         // Collect all profile names from the agent's public perspective.
         // Note on profile ontology: sioc:// predicates are currently shared with Flux;
         // a dedicated ad4m-wide profile ontology should replace these in the future.
         let mut names: Vec<String> = Vec::new();
-
         if let Some(ref perspective) = agent.perspective {
             for link in &perspective.links {
                 if link.data.source == "flux://profile" {
@@ -235,15 +232,9 @@ impl Ad4mMcpHandler {
             }
         }
 
-        // Append name_override as an additional alias (does not replace profile names)
-        if let Some(ref override_name) = params.0.name_override {
-            if !override_name.is_empty() && !names.contains(override_name) {
-                names.push(override_name.clone());
-            }
-        }
-
         let perspective_id = &params.0.perspective_id;
         let query = build_mention_query(&names, &did).to_string();
+        let mention_query = build_mentioning_query(&did).to_string();
         let terms = mention_terms(&names, &did);
         let sub_id = build_mention_sub_id(perspective_id);
 
@@ -253,6 +244,9 @@ impl Ad4mMcpHandler {
             "class": TEXT_CONTENT_URI,
             "query": query,
             "terms": terms,
+            "did": did,
+            "mentionClass": MENTIONING_URI,
+            "mentionQuery": mention_query,
         });
 
         json!({
@@ -261,16 +255,19 @@ impl Ad4mMcpHandler {
             "perspective_id": perspective_id,
             "class": TEXT_CONTENT_URI,
             "query": query,
+            "mention_class": MENTIONING_URI,
+            "mention_query": mention_query,
             "terms": terms,
             "subscription": subscription,
             "message": format!(
                 "Add the subscription entry to your waker config and restart the waker. \
-                 This single query watches for mentions of {} by {} in perspective {}.",
+                 It watches for Mentioning records whose `mentions` link {} and for {} in \
+                 TextContent text, in perspective {}.",
                 did,
                 if names.is_empty() {
-                    "DID only".to_string()
+                    "the DID".to_string()
                 } else {
-                    format!("name(s) [{}] or", names.join(", "))
+                    format!("name(s) [{}] or the DID", names.join(", "))
                 },
                 perspective_id
             ),
@@ -289,8 +286,8 @@ pub const MENTION_WINDOW: usize = 50;
 /// The distinct mention terms, profile names first and the DID last.
 ///
 /// The waker gets them with the subscription (`terms`): the query below
-/// matches substrings, and the waker keeps a record only when its text holds
-/// one of these as a whole word.
+/// matches text by substring, and the waker keeps a record found only through
+/// its text when the text holds one of these as a whole word.
 pub fn mention_terms(names: &[String], did: &str) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
     for term in names.iter().map(String::as_str).chain(std::iter::once(did)) {
@@ -301,20 +298,26 @@ pub fn mention_terms(names: &[String], did: &str) -> Vec<String> {
     terms
 }
 
-/// The model query that finds mentions (#1446): over the built-in
-/// `TextContent`, every record whose `text` contains a profile name or the
-/// DID in a link another agent wrote, newest first, with its `text`.
+/// The model query that finds the agent named in text: every record whose
+/// `text` contains a profile name or the DID, in a link another agent wrote,
+/// newest first, at most [`MENTION_WINDOW`], over the built-in
+/// `TextContent { text }` (#1446), so every class with a text property takes
+/// part under whatever name it aliases to `text`. Mention links are the other
+/// query's ([`build_mentioning_query`]).
 ///
-/// `contains` compiles to a case-insensitive `CONTAINS` in the store, so the
-/// terms go in as they are, and it matches substrings: "data" is in
-/// "metadata". Model query has no word match, so the waker
-/// (`WakerSubscriptionManager`) checks each row's `text` for a whole-word
-/// term and drops the rest; that is why the rows carry `text`.
+/// Each branch carries `author: { not: did }`, a per-link author: a record
+/// matches only through a link someone else wrote. A reply that names its own
+/// author is not a mention of that author, and waking on it loops the bot
+/// (#1459).
 ///
-/// Each term carries `author: { not: did }`, a per-link author: a record
-/// matches only through a text link someone else wrote. A reply that names
-/// its own author is not a mention of that author, and waking on it loops
-/// the bot (#1459).
+/// `contains` compiles to a case-insensitive `CONTAINS` and matches
+/// substrings ("data" is in "metadata"); model query has no word match. So
+/// the rows carry `text`, and the waker keeps one only when its text holds a
+/// term as a whole word (`WakerSubscriptionManager`). `links: ["text"]`
+/// returns each row's text links with their author, timestamp and signature
+/// verdict (`__links`): the waker takes the mention's provenance from the
+/// newest verified one by another agent whose own text names the agent
+/// (#1576).
 ///
 /// Pure over its inputs, so it unit-tests without an agent or perspective.
 pub fn build_mention_query(names: &[String], did: &str) -> serde_json::Value {
@@ -327,6 +330,40 @@ pub fn build_mention_query(names: &[String], did: &str) -> serde_json::Value {
         "order": { "timestamp": "DESC" },
         "limit": MENTION_WINDOW,
         "properties": ["text"],
+        "links": ["text"],
+    })
+}
+
+/// The model query that finds mention links to `did`: every record whose
+/// `mentions` relation links `did` in a link another agent wrote, newest
+/// first, at most [`MENTION_WINDOW`], over the built-in
+/// `Mentioning { mentions }`. Every class with a relation named or aliased
+/// `mentions` takes part, with text or without: WE puts a post's mention on
+/// the post's root, which has no text (#1557), and the root's
+/// `CollectionBlock` has `mentions` over `we://mention` like every WE block.
+/// A record no class describes is not read: a mention is a relation of a
+/// class.
+///
+/// `author: { not: did }` is a per-link author, as in the text query: a link
+/// the agent wrote itself is not a mention of it (#1459). The model query
+/// reads only links whose signature verified (`includeUnverified` is off), so
+/// a forged mention link, which may claim any author, matches nothing.
+///
+/// `links: ["mentions"]` returns each row's mention links with their author,
+/// timestamp and signature verdict (`__links`, from the links' reifiers,
+/// which no peer link can write, #1564): the waker hands the woken agent the
+/// newest verified one to its DID by another agent as the mention's
+/// provenance (#1563). A row wakes the agent whatever its text says (WE's
+/// chip label may run into the next word, "@Datai have…").
+///
+/// Pure over its input, so it unit-tests without an agent or perspective.
+pub fn build_mentioning_query(did: &str) -> serde_json::Value {
+    json!({
+        "where": { "mentions": { "eq": did, "author": { "not": did } } },
+        "order": { "timestamp": "DESC" },
+        "limit": MENTION_WINDOW,
+        "properties": ["mentions"],
+        "links": ["mentions"],
     })
 }
 
@@ -364,12 +401,12 @@ mod tests {
         assert_eq!(current.parent.as_deref(), Some("chan://2"));
     }
 
-    /// One `contains` per distinct term, names first and the DID last, ORed,
-    /// over `text`, each through a text link the agent did not write; newest
-    /// first, bounded, with `text` for the waker's word check. Terms go in as
-    /// they are: the store compares case-insensitively, and a JSON value needs
-    /// no escaping. The store-backed behaviour (substring candidates, own
-    /// writes skipped) is in `instances/tests.rs`, next to the shapes.
+    /// The text query over TextContent: one `contains` per distinct term
+    /// (names first, the DID last), each through a link the agent did not
+    /// write; newest first, bounded, with `text` for the waker's word check and
+    /// the text links for its provenance. Terms go in as they are: the store
+    /// compares case-insensitively, and a JSON value needs no escaping. The
+    /// store-backed behaviour (which records match) is in `instances/tests.rs`.
     #[test]
     fn mention_query_ors_a_text_contains_per_term() {
         let q = build_mention_query(
@@ -388,6 +425,7 @@ mod tests {
                 "order": { "timestamp": "DESC" },
                 "limit": MENTION_WINDOW,
                 "properties": ["text"],
+                "links": ["text"],
             })
         );
         // It is a query the model query engine accepts.
@@ -401,6 +439,31 @@ mod tests {
             ),
             vec!["Alice".to_string(), "did:key:zAgent".to_string()]
         );
+    }
+
+    /// The mention query over Mentioning: `mentions` linking the DID through a
+    /// link the agent did not write, newest first, bounded, with the mention
+    /// links for the waker's provenance. The store-backed behaviour is in
+    /// `instances/tests.rs`.
+    #[test]
+    fn mentioning_query_reads_mention_links_to_the_did_by_others() {
+        let q = build_mentioning_query("did:key:zAgent");
+        assert_eq!(
+            q,
+            json!({
+                "where": { "mentions": {
+                    "eq": "did:key:zAgent",
+                    "author": { "not": "did:key:zAgent" },
+                } },
+                "order": { "timestamp": "DESC" },
+                "limit": MENTION_WINDOW,
+                "properties": ["mentions"],
+                "links": ["mentions"],
+            })
+        );
+        let parsed: crate::perspectives::model_query::ModelQueryInput =
+            serde_json::from_value(q).expect("a model query");
+        assert_eq!(parsed.limit, Some(MENTION_WINDOW));
     }
 
     #[test]
@@ -421,9 +484,9 @@ mod tests {
 
     #[test]
     fn test_escape_sparql_literal_neutralizes_quote_breakout() {
-        // A profile name / name_override containing a `"` must not be able
-        // to close the SPARQL string literal early and inject a second
-        // CONTAINS(...) clause (or worse) into the mention FILTER.
+        // A target value containing a `"` must not be able to close the
+        // SPARQL string literal early and inject a second CONTAINS(...)
+        // clause (or worse) into the FILTER.
         let malicious = r#"x") || CONTAINS(STR(?target), "leaked"#;
         let escaped = escape_sparql_literal(malicious);
 
