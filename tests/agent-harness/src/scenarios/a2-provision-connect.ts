@@ -2,119 +2,47 @@
  * A2 — Provision & Connect (multi-harness).
  *
  * A user instructs an AI agent harness to onboard to ADAM and end up with a
- * working, verified agent. Covered across harnesses + routes:
- *   - OpenClaw external, native MCP client (signup + login)
- *   - OpenClaw external, via the real @coasys/openclaw-ad4m plugin (ad4m-setup)
- *   - OpenClaw managed (download + install a fresh node, agent.generate)
- *   - Hermes external, native MCP client (mcp_servers.ad4m, Bearer JWT)
- *   - Sovereign external, Claude-Agent-SDK ad4m MCP injection
+ * working, verified agent. Routes:
+ *   - external-native  OpenClaw's native MCP client (signup + login)
+ *   - external-plugin  OpenClaw via the @coasys/openclaw-ad4m plugin (ad4m-setup)
+ *   - managed          OpenClaw managed mode (fresh node + agent.generate, no network)
+ *   - hermes           Hermes's native MCP client (mcp_servers.ad4m, Bearer JWT)
+ *   - sovereign        Sovereign's Claude-Agent-SDK ad4m MCP injection
  *
- * This scenario is pod-managed (`managesOwnEnvironment`): it drives the
- * self-contained, hardened, fully-isolated verify scripts under
- * `interop/agents/`, each of which stands up its Docker pod (AD4M node + mock
- * LLM + the real harness), runs the onboarding turn, verifies the created
- * identity, and tears the pod down. Nothing touches the host OS.
- *
- * A sub-path whose script is absent is skipped honestly (recorded, not failed).
+ * Each route's verify script under `interop/agents/` stands up its hardened
+ * Docker pod (AD4M node + mock LLM + the real harness), runs the onboarding
+ * turn, verifies the created identity over MCP, and tears the pod down.
  */
-
-import { execSync } from "child_process";
-import { existsSync } from "fs";
-import { dirname, join, resolve } from "path";
-import { fileURLToPath } from "url";
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";
+import { Route, runRoutes, scenarioResult } from "../routes.js";
 
-// Resolve scripts relative to this module so the runner works from any cwd.
-const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-interface SubRun {
-  name: string;
-  script: string;
-  passRe: RegExp;
-}
-
-const SUBRUNS: SubRun[] = [
-  // external via OpenClaw's native MCP client (portable, harness-agnostic route)
-  { name: "external-native", script: "interop/agents/verify-a2-openclaw.sh", passRe: /\[a2\] PASS/ },
-  // external via the real @coasys/openclaw-ad4m plugin (ad4m-setup); regression-guards the plugin
-  { name: "external-plugin", script: "interop/agents/verify-a2-openclaw-external-plugin.sh", passRe: /\[a2xp\] PASS/ },
-  // managed (download+install a fresh node) via the plugin's managed mode
-  { name: "managed", script: "interop/agents/verify-a2-openclaw-managed.sh", passRe: /\[a2m\] PASS/ },
-  // Hermes harness — external, native MCP client (mcp_servers.ad4m, Bearer JWT)
-  { name: "hermes", script: "interop/agents/verify-a2-hermes.sh", passRe: /\[a2h\] PASS/ },
-  // Sovereign harness — external, Claude-Agent-SDK ad4m MCP injection
-  { name: "sovereign", script: "interop/agents/verify-a2-sovereign.sh", passRe: /\[a2sv\] PASS/ },
+const ROUTES: Route[] = [
+  {
+    name: "external-native",
+    script: "interop/agents/verify-a2-openclaw.sh",
+    passRe: /\[a2\] PASS/,
+    timeoutMs: 360_000,
+    metrics: (out): Record<string, number> => {
+      const tools = out.match(/ad4m: (\d+) tools/);
+      return tools ? { mcpTools: Number(tools[1]) } : {};
+    },
+  },
+  { name: "external-plugin", script: "interop/agents/verify-a2-openclaw-external-plugin.sh", passRe: /\[a2xp\] PASS/, timeoutMs: 600_000 },
+  { name: "managed", script: "interop/agents/verify-a2-openclaw-managed.sh", passRe: /\[a2m\] PASS/, timeoutMs: 900_000 },
+  { name: "hermes", script: "interop/agents/verify-a2-hermes.sh", passRe: /\[a2h\] PASS/, timeoutMs: 1_200_000 },
+  { name: "sovereign", script: "interop/agents/verify-a2-sovereign.sh", passRe: /\[a2sv\] PASS/, timeoutMs: 360_000 },
 ];
 
 export const a2ProvisionConnect: Scenario = {
   id: "a2",
   name: "Provision & Connect (multi-harness)",
   description:
-    "AI agent harnesses onboard to ADAM and create + verify a distinct agent: OpenClaw (external native MCP, external via the @coasys/openclaw-ad4m plugin, and managed download+install), Hermes (external native MCP), and Sovereign (external Claude-Agent-SDK MCP injection). Self-managed, hardened Docker pod per route.",
-  managesOwnEnvironment: true,
+    "AI agent harnesses onboard to ADAM and create + verify a distinct agent: OpenClaw (external native MCP, external via the @coasys/openclaw-ad4m plugin, and managed install), Hermes (external native MCP), and Sovereign (external Claude-Agent-SDK MCP injection). Hardened Docker pod per route.",
+  routes: ROUTES.map((r) => r.name),
 
   async run(ctx: ScenarioContext): Promise<ScenarioResult> {
     const startTime = Date.now();
-    const samples: ScenarioResult["samples"] = [];
-    const metrics: Record<string, any> = {};
-    let ran = 0;
-    let passCount = 0;
-    let allPassed = true;
-
-    for (const sub of SUBRUNS) {
-      const scriptPath = join(REPO, sub.script);
-      if (!existsSync(scriptPath)) {
-        metrics[sub.name] = "not-implemented";
-        continue;
-      }
-      ran++;
-      const t0 = performance.now();
-      let out = "";
-      let status: "pass" | "skip" | "fail";
-      try {
-        out = execSync(`bash "${scriptPath}"`, { encoding: "utf8", timeout: 360000, env: process.env });
-        status = sub.passRe.test(out) ? "pass" : /\bSKIP\b/.test(out) ? "skip" : "fail";
-      } catch (err: any) {
-        out = (err.stdout?.toString?.() ?? "") + (err.stderr?.toString?.() ?? err.message ?? "");
-        status = /\bSKIP\b/.test(out) ? "skip" : "fail";
-      }
-      const didMatch = out.match(/did[=:]\s*(did:key:[A-Za-z0-9]+)/i);
-      const toolsMatch = out.match(/ad4m: (\d+) tools/);
-      samples.push({
-        name: `${sub.name}-onboard`,
-        durationMs: performance.now() - t0,
-        timestamp: Date.now(),
-        error: status === "fail" ? "verify script did not report PASS" : undefined,
-      });
-      metrics[sub.name] = status;
-      if (didMatch) metrics[`${sub.name}Did`] = didMatch[1];
-      if (toolsMatch) metrics[`${sub.name}McpTools`] = Number(toolsMatch[1]);
-      if (status === "pass") passCount++;
-      if (status === "fail") allPassed = false;
-    }
-
-    const endTime = Date.now();
-    const passed = passCount > 0 && allPassed;
-    const passedPaths = Object.entries(metrics)
-      .filter(([, v]) => v === "pass")
-      .map(([k]) => k)
-      .join(" + ");
-    return {
-      scenario: "a2-provision-connect",
-      branch: ctx.branch,
-      startTime,
-      endTime,
-      durationMs: endTime - startTime,
-      passed,
-      metrics,
-      samples,
-      summary: passed
-        ? `A2 provision & connect — verified: ${passedPaths} (harness → ADAM agent)`
-        : ran === 0
-          ? "A2 provision & connect — no sub-run scripts available"
-          : allPassed
-            ? "A2 provision & connect — all paths skipped, nothing verified"
-            : "A2 provision & connect — one or more paths failed",
-    };
+    const outcome = runRoutes("a2", ROUTES, ctx);
+    return scenarioResult("a2", "a2-provision-connect", "A2 provision & connect", startTime, outcome);
   },
 };

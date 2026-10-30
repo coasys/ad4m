@@ -855,6 +855,53 @@ jobs:
           path: /tmp/test-artifacts
           destination: sfu-test-logs
 
+  # Agent harness scenarios (tests/agent-harness): A2 provision & connect, A4
+  # waker and A5 mocked A/V loop, each route in its own Docker pod (executor +
+  # mock LLM + the real OpenClaw / Hermes / Sovereign harness). Nightly only:
+  # the harness images are third-party and large, and a run takes tens of
+  # minutes. Like integration-tests-sfu it builds its own binaries, then wraps
+  # them in a thin executor image. Sovereign needs a privately built image and
+  # skips here; every OpenClaw and Hermes route is required, so a failure or a
+  # skip (e.g. an image that cannot be pulled) fails the job.
+  integration-tests-agent-harness:
+    machine: true
+    resource_class: coasys/marvin
+    environment:
+      AD4M_EXEC_IMAGE: ad4m-agent-harness-executor:nightly
+      AGENT_HARNESS_REQUIRED: a2/external-native,a2/external-plugin,a2/managed,a2/hermes,a4/openclaw,a4/hermes,a5/hermes,a5/openclaw
+    steps:
+      - setup_integration_test_environment:
+          build_binaries: true
+      - run:
+          name: Check Docker
+          command: docker info --format 'Docker {{.ServerVersion}}, {{.NCPU}} CPUs'
+      - run:
+          name: Build the executor image from this commit's binaries
+          command: bash tests/agent-harness/interop/executor/build-image.sh
+      - run:
+          name: Install and typecheck the agent harness
+          command: cd tests/agent-harness && pnpm install --ignore-workspace --frozen-lockfile && pnpm run build
+      - run:
+          name: Run agent harness scenarios
+          command: |
+            rm -rf /tmp/agent-harness-results
+            cd tests/agent-harness && ./node_modules/.bin/tsx src/main.ts --results-dir /tmp/agent-harness-results
+          no_output_timeout: 30m
+      - run:
+          name: Remove this run's harness images
+          when: always
+          command: docker image rm "$AD4M_EXEC_IMAGE" ad4m-agent-harness-openclaw-node:local ad4m-agent-harness-mockllm:local >/dev/null 2>&1 || true
+      - run:
+          name: Collect results and pod logs on failure
+          when: on_fail
+          command: |
+            mkdir -p /tmp/test-artifacts
+            cp -r /tmp/agent-harness-results/agent-harness /tmp/test-artifacts/ 2>/dev/null || true
+      - store_artifacts:
+          when: on_fail
+          path: /tmp/test-artifacts
+          destination: agent-harness
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin-light
@@ -985,12 +1032,12 @@ workflows:
 
   # Nightly against `dev`. An API trigger (or a Project Trigger) sets
   # `run-nightly-llm`. In-config cron does not reach this project.
-  # Same resource class (Marvin) so Ollama is local. llm-e2e and the SFU
-  # wind tunnel start together and do not build on each other's result:
-  # an llm-e2e failure must not skip the tunnel, and a tunnel failure must
-  # not skip llm-e2e. Three API triggers fire this pipeline every night on
-  # one host. Each job has its own serial group, so a second trigger waits
-  # instead of sharing ports, DIDs and the GPU with the first.
+  # Same resource class (Marvin) so Ollama is local. llm-e2e, the SFU wind
+  # tunnel and the agent harness start together and do not build on each
+  # other's result: one failing must not skip the others. Three API triggers
+  # fire this pipeline every night on one host. Each job has its own serial
+  # group, so a second trigger waits instead of sharing ports, DIDs and the
+  # GPU with the first.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
@@ -1001,3 +1048,5 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-llm
       - integration-tests-sfu:
           serial-group: << pipeline.project.slug >>/nightly-sfu
+      - integration-tests-agent-harness:
+          serial-group: << pipeline.project.slug >>/nightly-agent-harness

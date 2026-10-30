@@ -12,18 +12,11 @@
  *                                                     (a channel child whose body
  *                                                      contains <marker>)
  */
-import { fileURLToPath, pathToFileURL } from "url";
-import { dirname, resolve } from "path";
-import { existsSync } from "fs";
-
-let HARNESS = dirname(fileURLToPath(import.meta.url));
-while (HARNESS !== "/" && !existsSync(resolve(HARNESS, "src/mcp-client.ts"))) {
-  HARNESS = resolve(HARNESS, "..");
-}
+import { pathToFileURL } from "url";
+import { McpClient } from "../../../src/mcp-client.ts";
 
 /** Locate + construct the shared MCP client, initialised for a session. */
 export async function connectMcp(base: string, token: string, label = "a4sv"): Promise<any> {
-  const { McpClient } = await import(`${HARNESS}/src/mcp-client.ts`);
   const c = new McpClient(base, token);
   await c.initialize(label);
   return c;
@@ -48,7 +41,7 @@ export async function seedMentionMessage(
   msg: string,
   body: string,
 ): Promise<void> {
-  const literal = `literal://string:${encodeURIComponent(body)}`;
+  const literal = `literal:string:${encodeURIComponent(body)}`;
   await c.callToolJson("add_link", { perspective_id: uuid, source: chan, predicate: "ad4m://has_child", target: msg });
   await c.callToolJson("add_link", { perspective_id: uuid, source: msg, predicate: "ad4m://message_body", target: literal });
 }

@@ -11,6 +11,7 @@
 # Build (run from anywhere):
 #   docker build -f interop/agents/sovereign/Dockerfile \
 #     -t swwt-sovereign:latest <path-to>/sovereign
+# (or any tag, passed to the verify scripts as SOVEREIGN_IMAGE).
 #
 # Config is NOT baked. The server reads host/port/tls from config.json in
 # SOVEREIGN_CONFIG_DIR. Supply it at run time and boot with no host mounts:
@@ -21,7 +22,7 @@
 # ANTHROPIC_AUTH_TOKEN passed at `docker run` (the bundled claude CLI inherits
 # process.env). Health: GET /health -> {"status":"ok","message":"sovereign"}
 
-FROM node:26-bookworm
+FROM node:26-bookworm@sha256:0353e48e0e8a993db87b720c242f54b207059d1bcc0106534896e8a11054c837
 
 # node-pty is the ONLY native addon in the tree; node-gyp needs python3 + a
 # C/C++ toolchain to compile its linux binding.

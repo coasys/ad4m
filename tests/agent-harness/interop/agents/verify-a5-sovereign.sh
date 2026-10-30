@@ -30,29 +30,26 @@
 # NOTE (honest scope): the Sovereign presence-internal turn exposes only presence
 # tools, not ad4m read tools, and the native waker's inline body resolution does
 # not surface in this image — so perceive is proven by content-gating (the wake
-# rides the transcript content), not by an explicit agent-issued read. OpenClaw +
-# Hermes, whose woken turns DO carry ad4m read tools, prove perceive by an
-# explicit transcript read.
+# rides the transcript content), not by an explicit agent-issued read. Hermes,
+# whose woken turn carries ad4m read tools, proves perceive by an explicit
+# transcript read.
+#
+# The transcript is written and signed by the caller, another agent, as the
+# mock-av fixture describes.
 #
 # True cross-user visibility needs neighbourhood sync, which is OUT of scope — the
 # reply is asserted to land + be readable, not to sync to a second agent.
 #
-# No Sovereign source changes are needed — A5 reuses the A4 waker/reply loop.
-#
-# Hardened + host-isolated, full teardown. Needs the swwt-sovereign image + a
-# plugins/ad4m checkout (AD4M_PLUGIN_DIR); SKIPs if absent. KEEP=1 leaves the pod.
+# Hardened + host-isolated, full teardown. Needs a locally built Sovereign image
+# (SOVEREIGN_IMAGE); SKIPs if absent. See lib.sh for env. KEEP=1 leaves the pod.
 #
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../.." && pwd)"
-SV_IMG="${SOVEREIGN_IMAGE:-swwt-sovereign:latest}"
-EXE_IMG="${A5SV_EXEC_IMAGE:-ad4m-test:latest}"
-MOCK_IMG="${A5SV_MOCK_IMAGE:-a2wt-mockllm}"
+TAG=a5sv
 NET=a5sv-net
+source "$(dirname "$0")/lib.sh"
 EXE=a5sv-exec
 SV=a5sv-sovereign
 MOCK=a5sv-mock
-ADMIN=windtunnel-admin
 EMAIL="sovereign-a5@agent.local"
 UPASS="sovereign-a5-pass-123"
 CHAN="a5sv://channel"
@@ -61,51 +58,27 @@ TRANSCRIPT="Earlier on the call someone said: hey Aria, can you summarise the la
 MARK="summarise the last point"
 MCP_PORT=14451
 SV_PORT=14452
-KEEP="${KEEP:-}"
+WS_PORT=14453
 
 if ! docker image inspect "$SV_IMG" >/dev/null 2>&1; then
   echo "[a5sv] SKIP — no test-Sovereign image ($SV_IMG). Build interop/agents/sovereign/Dockerfile first."
   exit 0
 fi
-PLUGIN_DIR="${AD4M_PLUGIN_DIR:-${AD4M_REPO:+$AD4M_REPO/plugins/ad4m}}"
-if [ -z "${PLUGIN_DIR:-}" ] || [ ! -f "$PLUGIN_DIR/package.json" ]; then
-  echo "[a5sv] SKIP — no ad4m plugin for the waker driver (set AD4M_PLUGIN_DIR to a plugins/ad4m checkout)"
-  exit 0
-fi
-[ -d "$PLUGIN_DIR/node_modules/@coasys/ad4m" ] || ( cd "$PLUGIN_DIR" && NODE_ENV=development npm install --include=dev >/dev/null 2>&1 )
 
-teardown() { [ -n "$KEEP" ] && { echo "[a5sv] KEEP set — leaving pod up"; return; }; docker rm -f "$EXE" "$SV" "$MOCK" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
-trap teardown EXIT
-
-echo "[a5sv] clean slate"; docker rm -f "$EXE" "$SV" "$MOCK" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true
-docker network create "$NET" >/dev/null
-# Always (re)build the mock image — A5 relies on the current server.mjs
-# (MOCK_LLM_MARK perceive flag). The build is a trivial COPY, so this is cheap.
-docker build -q -t "$MOCK_IMG" "$HERE/mock-llm" >/dev/null
+echo "[a5sv] clean slate"; pod_init "$EXE" "$SV" "$MOCK"
+build_mock
 
 echo "[a5sv] start multi-user node (MCP + WS, Holochain off, hardened)"
-docker run -d --name "$EXE" --network "$NET" \
-  -e ADMIN_CREDENTIAL="$ADMIN" -e ENABLE_MULTI_USER=true -e ENABLE_MCP=true -e MCP_PORT=3001 \
-  -e RUN_HOLOCHAIN=false -e AGENT_PASSPHRASE=windtunnel-pass \
-  -p 127.0.0.1:${MCP_PORT}:3001 -p 127.0.0.1:14453:12000 \
-  --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE --cap-add FOWNER \
-  --security-opt no-new-privileges:true --memory 4g --cpus 1.5 --pids-limit 512 \
-  "$EXE_IMG" >/dev/null
-for i in $(seq 1 60); do
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST http://127.0.0.1:${MCP_PORT}/mcp \
-    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "Authorization: Bearer $ADMIN" \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"w","version":"1"}}}' 2>/dev/null || echo 000)
-  [ "$code" = "200" ] && { echo "[a5sv] node MCP ready"; break; }
-  sleep 2
-done
+start_node "$EXE" "$MCP_PORT" "$WS_PORT" 4g
 
 echo "[a5sv] provision a user + mint a channel perspective"
-PROV=$(cd "$ROOT" && A2_ADMIN="$ADMIN" npx tsx "$HERE/ad4m-user.ts" provision "http://127.0.0.1:${MCP_PORT}" "$EMAIL" "$UPASS")
+PROV=$(A2_ADMIN="$ADMIN" "$TSX" "$AGENTS/ad4m-user.ts" provision "http://127.0.0.1:${MCP_PORT}" "$EMAIL" "$UPASS")
 JWT=$(echo "$PROV" | grep '^JWT=' | cut -d= -f2-); DID=$(echo "$PROV" | grep '^DID=' | cut -d= -f2-)
 [ -z "$JWT" ] && { echo "[a5sv] FAIL — provisioning"; echo "$PROV" | sed 's/^/    /'; exit 1; }
-UUID=$(cd "$ROOT" && npx tsx "$HERE/sovereign/waker-ad4m.ts" mint "http://127.0.0.1:${MCP_PORT}" "$JWT" "a5sv-channel" | grep '^UUID=' | cut -d= -f2-)
+UUID=$("$TSX" "$AGENTS/sovereign/waker-ad4m.ts" mint "http://127.0.0.1:${MCP_PORT}" "$JWT" "a5sv-channel" | grep '^UUID=' | cut -d= -f2-)
 [ -z "$UUID" ] && { echo "[a5sv] FAIL — could not mint perspective"; exit 1; }
 echo "[a5sv] DID=$DID perspective=$UUID"
+"$TSX" "$AGENTS/mock-av.ts" register "http://127.0.0.1:${MCP_PORT}" "http://127.0.0.1:${WS_PORT}" "$JWT" "$UUID" "$CHAN" >/dev/null
 
 echo "[a5sv] start mock LLM (presence turn replies via presence_reply_ad4m)"
 docker run -d --name "$MOCK" --network "$NET" -e MOCK_LLM_LOG=1 \
@@ -115,7 +88,8 @@ docker run -d --name "$MOCK" --network "$NET" -e MOCK_LLM_LOG=1 \
   "$MOCK_IMG" >/dev/null
 
 echo "[a5sv] start headless Sovereign (ad4m.host waker + agentName Aria + mock Anthropic)"
-cat >/tmp/a5sv-config.json <<JSON
+CFG="$(mktemp)"; TOK="$(mktemp)"
+cat >"$CFG" <<JSON
 {
   "server": { "port": 8080, "host": "0.0.0.0", "tls": { "enabled": false } },
   "identity": { "agentName": "Aria", "agentIcon": "A" },
@@ -129,14 +103,15 @@ cat >/tmp/a5sv-config.json <<JSON
   "seed": { "membraneId": "personal", "membraneName": "Personal", "threadLabel": "Main" }
 }
 JSON
-printf '{"token":"%s"}' "$JWT" >/tmp/a5sv-token.json
+printf '{"token":"%s"}' "$JWT" >"$TOK"
 docker create --name "$SV" --network "$NET" \
   -e ANTHROPIC_BASE_URL="http://$MOCK:8080" -e ANTHROPIC_API_KEY=sk-ant-mock -e ANTHROPIC_AUTH_TOKEN=mock-token -e IS_SANDBOX=1 \
   -p 127.0.0.1:${SV_PORT}:8080 \
   --security-opt no-new-privileges:true --memory 3g --cpus 2 --pids-limit 1024 \
   "$SV_IMG" >/dev/null
-docker cp /tmp/a5sv-config.json "$SV":/data/config/config.json >/dev/null
-docker cp /tmp/a5sv-token.json "$SV":/data/data/ad4m-token.json >/dev/null
+docker cp "$CFG" "$SV":/data/config/config.json >/dev/null
+docker cp "$TOK" "$SV":/data/data/ad4m-token.json >/dev/null
+rm -f "$CFG" "$TOK"
 docker start "$SV" >/dev/null
 for i in $(seq 1 45); do
   curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${SV_PORT}/health" 2>/dev/null | grep -q 200 && { echo "[a5sv] Sovereign healthy"; break; }
@@ -192,10 +167,10 @@ done
 # so a wake that appears only after the transcript proves the transcript content
 # drove it.
 echo "[a5sv] seed ONLY the mocked call-presence entry (negative control)"
-cd "$ROOT" && npx tsx "$HERE/mock-av.ts" seed-presence "http://127.0.0.1:${MCP_PORT}" "$JWT" "$UUID" "$CHAN" | sed 's/^/    /'
+"$TSX" "$AGENTS/mock-av.ts" seed-presence "http://127.0.0.1:${MCP_PORT}" "http://127.0.0.1:${WS_PORT}" "$JWT" "$UUID" "$CHAN" | sed 's/^/    /'
 
 echo "[a5sv] assert the call-presence entry is readable over MCP"
-PRES=$( (cd "$ROOT" && npx tsx "$HERE/mock-av.ts" call-active "http://127.0.0.1:${MCP_PORT}" "$JWT" "$UUID" "$CHAN" 2>/dev/null || true) | grep '^PRESENCE=' | cut -d= -f2- || true)
+PRES=$( ("$TSX" "$AGENTS/mock-av.ts" call-active "http://127.0.0.1:${MCP_PORT}" "http://127.0.0.1:${WS_PORT}" "$JWT" "$UUID" "$CHAN" 2>/dev/null || true) | grep '^PRESENCE=' | cut -d= -f2- || true)
 echo "[a5sv] callPresence=${PRES:-absent}"
 if [ "$PRES" != "active" ]; then echo "[a5sv] FAIL — call-presence entry did not land / is not readable"; exit 1; fi
 
@@ -212,7 +187,7 @@ fi
 
 # ── WAKE + ACT ───────────────────────────────────────────────────────────────
 echo "[a5sv] seed the transcript (free-text spoken name) — the wake trigger"
-cd "$ROOT" && npx tsx "$HERE/mock-av.ts" seed-transcript "http://127.0.0.1:${MCP_PORT}" "$JWT" "$UUID" "$CHAN" "$TRANSCRIPT" | sed 's/^/    /'
+"$TSX" "$AGENTS/mock-av.ts" seed-transcript "http://127.0.0.1:${MCP_PORT}" "http://127.0.0.1:${WS_PORT}" "$JWT" "$UUID" "$CHAN" "$TRANSCRIPT" | sed 's/^/    /'
 
 echo "[a5sv] wait for native waker -> presence agent turn -> reply write-back"
 # WAKE: the transcript reached an act-capable turn — the mock records, per request,
@@ -223,7 +198,7 @@ WOKE=""; REPLY=""
 for i in $(seq 1 45); do
   if [ -z "$WOKE" ] && docker logs "$MOCK" 2>&1 | grep -q 'has_mention=true has_presence_reply_tool=true'; then WOKE=1; fi
   if [ -n "$WOKE" ]; then
-    R=$( (cd "$ROOT" && npx tsx "$HERE/sovereign/waker-ad4m.ts" child-has "http://127.0.0.1:${MCP_PORT}" "$JWT" "$UUID" "$CHAN" "$MARKER" 2>/dev/null || true) | grep '^REPLY=' | cut -d= -f2- || true)
+    R=$( ("$TSX" "$AGENTS/sovereign/waker-ad4m.ts" child-has "http://127.0.0.1:${MCP_PORT}" "$JWT" "$UUID" "$CHAN" "$MARKER" 2>/dev/null || true) | grep '^REPLY=' | cut -d= -f2- || true)
     [ "$R" = "found" ] && { REPLY=1; break; }
   fi
   sleep 3

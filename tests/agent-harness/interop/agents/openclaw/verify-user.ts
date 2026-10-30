@@ -8,13 +8,13 @@
  *
  * Usage: tsx verify-user.ts <email> <password> <mcpBaseUrl>
  */
+import { McpClient } from "../../../src/mcp-client.ts";
+
 const [, , email, password, base] = process.argv;
 if (!email || !password || !base) {
   console.error("usage: verify-user.ts <email> <password> <mcpBaseUrl>");
   process.exit(2);
 }
-
-const { McpClient } = await import(new URL("../../../src/mcp-client.ts", import.meta.url).href);
 
 const anon = new McpClient(base); // login_email needs no prior auth
 await anon.initialize("a2-verify");

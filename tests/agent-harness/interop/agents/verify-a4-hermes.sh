@@ -2,81 +2,45 @@
 #
 # A4 (Hermes) — Waker. A neighbourhood event wakes Hermes and it acts.
 #
-# The driver (a4-hermes-driver.ts) runs the REAL @coasys/openclaw-ad4m waker
-# component (WakerSubscriptionManager + a live perspective SPARQL subscription)
-# against a containerised node, and delivers each detected channel message to
-# Hermes's REAL webhook wake ingress (`hermes gateway run` + a `/webhooks/wake`
-# route, HMAC-SHA256 signed via GitHub's X-Hub-Signature-256 scheme). Each wake
-# fires a Hermes agent turn (against the mock model) — the harness acts.
+# The driver (a4-waker-driver.ts) runs core's WakerSubscriptionManager (the class
+# the @coasys/openclaw-ad4m plugin re-exports) on a live channel subscription
+# against a containerised node, and delivers each detected change to Hermes's REAL
+# webhook wake ingress (`hermes gateway run` + a `/webhooks/wake` route,
+# HMAC-SHA256 signed via GitHub's X-Hub-Signature-256 scheme). Each wake fires a
+# Hermes agent turn (against the mock model) — the harness acts.
 #
 # Asserts: 1 msg -> 1 wake; 3 rapid msgs coalesce to 1 (debounce dedup); a later
 # msg -> 1 more wake; every wake reaches the webhook (2xx); and at least one
 # agent turn actually ran (mock model called).
 #
 # Hardened + host-isolated: private network, no host mounts, loopback-only
-# published ports, Holochain off, full teardown. Needs a dist-built plugin
-# (AD4M_PLUGIN_DIR) + the Hermes image; SKIPs otherwise.
+# published ports, Holochain off, full teardown.
 #
-# Env: KEEP=1 leaves the pod up for debugging.
+# Env: see lib.sh. KEEP=1 leaves the pod up for debugging.
 #
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../.." && pwd)"
-HER_IMG="${HERMES_IMAGE:-nousresearch/hermes-agent:latest}"
-EXE_IMG="${A4H_EXEC_IMAGE:-ad4m-test:latest}"
-MOCK_IMG="${A4H_MOCK_IMAGE:-a2wt-mockllm}"
+TAG=a4h
 NET=a4h-net
+source "$(dirname "$0")/lib.sh"
 EXE=a4h-exec
 OC=a4h-hermes
 MOCK=a4h-mock
-ADMIN=windtunnel-admin
 SECRET=a4-wake-secret
 MCP_PORT=14421
 WS_PORT=14422
 HOOK_PORT=18644
-KEEP="${KEEP:-}"
 
-PLUGIN_DIR="${AD4M_PLUGIN_DIR:-${AD4M_REPO:+$AD4M_REPO/plugins/ad4m}}"
-if [ -z "${PLUGIN_DIR:-}" ] || [ ! -f "$PLUGIN_DIR/package.json" ]; then
-  echo "[a4h] SKIP — no ad4m plugin (set AD4M_PLUGIN_DIR to a plugins/ad4m checkout carrying coasys/ad4m#880)"
-  exit 0
-fi
-if ! docker image inspect "$HER_IMG" >/dev/null 2>&1; then
-  echo "[a4h] pull $HER_IMG (large, first run only)"
-  timeout 600 docker pull "$HER_IMG" >/dev/null 2>&1 || { echo "[a4h] SKIP — Hermes image unavailable"; exit 0; }
-fi
-
-teardown() { [ -n "$KEEP" ] && { echo "[a4h] KEEP set — leaving pod up"; return; }; docker rm -f "$EXE" "$OC" "$MOCK" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
-trap teardown EXIT
-
-echo "[a4h] clean slate"; docker rm -f "$EXE" "$OC" "$MOCK" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true
-docker network create "$NET" >/dev/null
-
-if ! docker image inspect "$MOCK_IMG" >/dev/null 2>&1; then
-  echo "[a4h] build mock-llm image ($MOCK_IMG)"; docker build -q -t "$MOCK_IMG" "$HERE/mock-llm" >/dev/null
-fi
-echo "[a4h] build ad4m plugin (for the waker component + @coasys/ad4m)"
-( cd "$PLUGIN_DIR" && NODE_ENV=development npm install --include=dev >/dev/null 2>&1 && NODE_ENV=development npm run build >/dev/null 2>&1 )
+need_image "$HER_IMG"
+echo "[a4h] clean slate"; pod_init "$EXE" "$OC" "$MOCK"
+build_mock
 
 echo "[a4h] start multi-user node (MCP + WS, Holochain off, hardened)"
-docker run -d --name "$EXE" --network "$NET" \
-  -e ADMIN_CREDENTIAL="$ADMIN" -e ENABLE_MULTI_USER=true -e ENABLE_MCP=true -e MCP_PORT=3001 \
-  -e RUN_HOLOCHAIN=false -e AGENT_PASSPHRASE=windtunnel-pass \
-  -p 127.0.0.1:${MCP_PORT}:3001 -p 127.0.0.1:${WS_PORT}:12000 \
-  --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE --cap-add FOWNER \
-  --security-opt no-new-privileges:true --memory 2g --cpus 1.5 --pids-limit 512 \
-  "$EXE_IMG" >/dev/null
-for i in $(seq 1 60); do
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST http://127.0.0.1:${MCP_PORT}/mcp \
-    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "Authorization: Bearer $ADMIN" \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"w","version":"1"}}}' 2>/dev/null || echo 000)
-  [ "$code" = "200" ] && { echo "[a4h] node MCP ready"; break; }
-  sleep 2
-done
+start_node "$EXE" "$MCP_PORT" "$WS_PORT"
 
 echo "[a4h] start mock LLM + Hermes gateway (webhook ingress)"
 docker run -d --name "$MOCK" --network "$NET" -e MOCK_LLM_LOG=1 "$MOCK_IMG" >/dev/null
-cat >/tmp/a4h-config.yaml <<YAML
+CFG="$(mktemp)"
+cat >"$CFG" <<YAML
 _config_version: 33
 model:
   provider: custom
@@ -95,33 +59,35 @@ YAML
 docker create --name "$OC" --network "$NET" -e WEBHOOK_ENABLED=true -e WEBHOOK_PORT=8644 \
   --memory 3g --cpus 2 --pids-limit 1024 -p 127.0.0.1:${HOOK_PORT}:8644 \
   "$HER_IMG" gateway run >/dev/null
-docker cp /tmp/a4h-config.yaml "$OC":/opt/data/config.yaml >/dev/null
+docker cp "$CFG" "$OC":/opt/data/config.yaml >/dev/null; rm -f "$CFG"
 docker start "$OC" >/dev/null
+UP=""
 for i in $(seq 1 45); do
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:${HOOK_PORT}/ 2>/dev/null || echo 000)
-  [ "$code" != "000" ] && { echo "[a4h] webhook ingress up (HTTP $code)"; break; }
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:${HOOK_PORT}/ 2>/dev/null || true)
+  [ -n "$code" ] && [ "$code" != "000" ] && { UP=1; echo "[a4h] webhook ingress up (HTTP $code)"; break; }
   sleep 2
 done
+[ -n "$UP" ] || { echo "[a4h] FAIL — Hermes webhook ingress never came up"; exit 1; }
 echo "[a4h] register signed webhook route"
-docker exec "$OC" hermes webhook subscribe wake --secret "$SECRET" --prompt "AD4M event: {payload.text}. Acknowledge it." >/dev/null 2>&1 || true
+docker exec "$OC" hermes webhook subscribe wake --secret "$SECRET" --prompt "AD4M event: {text}. Acknowledge it." >/dev/null 2>&1 \
+  || { echo "[a4h] FAIL — could not register the Hermes webhook route"; exit 1; }
 sleep 4
 
 echo "[a4h] run waker driver (real ad4m subscription -> signed Hermes webhook)"
-cd "$ROOT"
 set +e
-OUT=$(AD4M_PLUGIN_DIR="$PLUGIN_DIR" \
+OUT=$(A4_TAG=a4h A4_TARGET=hermes \
   A4_WS="http://127.0.0.1:${WS_PORT}" A4_MCP="http://127.0.0.1:${MCP_PORT}" A4_ADMIN="$ADMIN" \
-  A4H_WEBHOOK="http://127.0.0.1:${HOOK_PORT}/webhooks/wake" A4H_SECRET="$SECRET" \
-  timeout 120 npx tsx "$HERE/a4-hermes-driver.ts" 2>&1)
+  A4_INGRESS="http://127.0.0.1:${HOOK_PORT}/webhooks/wake" A4_SECRET="$SECRET" \
+  timeout 120 "$TSX" "$AGENTS/a4-waker-driver.ts" 2>&1)
 RC=$?
 set -e
-echo "$OUT" | grep -E '\[a4h\]' | sed 's/^/    /'
+echo "$OUT" | sed 's/^/    /'
 if [ $RC -ne 0 ]; then echo "[a4h] FAIL — waker driver did not pass"; exit 1; fi
 
 echo "[a4h] confirm at least one agent turn actually ran (mock model called)"
 CALLS=0
-for i in $(seq 1 10); do
-  CALLS=$(docker logs "$MOCK" 2>&1 | grep -cE 'chat/completions|/messages' || true)
+for i in $(seq 1 15); do
+  CALLS=$(mock_calls "$MOCK")
   [ "$CALLS" -ge 1 ] && break
   sleep 2
 done

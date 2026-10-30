@@ -8,16 +8,10 @@
  *
  * `base` is the node's MCP URL (e.g. http://127.0.0.1:14420). Admin credential
  * from A2_ADMIN / A2H_ADMIN (default windtunnel-admin). Uses the harness's real
- * MCP client, located by walking up to the repo root.
+ * MCP client.
  */
-import { fileURLToPath } from "url";
-import { dirname, resolve } from "path";
-import { existsSync } from "fs";
+import { McpClient } from "../../src/mcp-client.ts";
 
-let HARNESS = dirname(fileURLToPath(import.meta.url));
-while (HARNESS !== "/" && !existsSync(resolve(HARNESS, "src/mcp-client.ts"))) {
-  HARNESS = resolve(HARNESS, "..");
-}
 const ADMIN = process.env.A2_ADMIN || process.env.A2H_ADMIN || "windtunnel-admin";
 
 function pick(o: any, ...keys: string[]): string {
@@ -27,7 +21,6 @@ function pick(o: any, ...keys: string[]): string {
 }
 
 (async () => {
-  const { McpClient } = await import(`${HARNESS}/src/mcp-client.ts`);
   const [, , action, base, ...rest] = process.argv;
 
   if (action === "provision") {

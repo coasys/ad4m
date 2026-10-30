@@ -1,80 +1,98 @@
 /**
- * A4 waker driver — drives the REAL @coasys/openclaw-ad4m waker component
- * end-to-end against a live executor and a live OpenClaw gateway hook.
+ * A4 waker driver — drives the REAL waker component end-to-end against a live
+ * executor and a live wake ingress.
  *
- * It imports the plugin's own `WakerSubscriptionManager` + `postWake` (the exact
- * shipped code, the same way the plugin's unit tests drive it) plus `Ad4mClient`
- * + `QuerySubscriptionProxy` from the plugin's `@coasys/ad4m` — so the whole
- * subscribe → detect → debounce → wake → POST path is production code, not a
- * re-implementation. The wake is delivered to a REAL OpenClaw gateway `/hooks/wake`
- * endpoint (real Bearer-token auth, action=agent), satisfying the "no stub sink"
- * requirement.
+ * The detection half is production code from this checkout: core's
+ * `WakerSubscriptionManager` (the class the @coasys/openclaw-ad4m plugin
+ * re-exports) on `Ad4mClient` + `QuerySubscriptionProxy`, subscribed to the
+ * query the executor's `generate_waker_query` returns for a channel: a model
+ * query over the built-in `ad4m://Container` (the channel's children). The
+ * delivery half depends on the harness:
+ *   A4_TARGET=openclaw  the plugin's own `postWake` to OpenClaw's real
+ *                       /hooks/wake (Bearer wake token, action=agent);
+ *   A4_TARGET=hermes    a signed POST to Hermes's real /webhooks/<route>
+ *                       ingress (HMAC-SHA256, GitHub X-Hub-Signature-256).
  *
  * Assertions (all must hold):
  *   - single:   one injected channel message  -> exactly one wake
  *   - dedup:    three rapid messages          -> coalesced to exactly one wake (debounce)
  *   - liveness: a later message               -> exactly one more wake
- *   - hook:     every wake reaches the real gateway hook (2xx), zero failures
+ *   - ingress:  every wake reaches the real ingress (2xx), zero failures
  *
- * Env: AD4M_PLUGIN_DIR (required, a plugins/ad4m checkout with dist + node_modules),
- *   A4_WS, A4_MCP, A4_HOOK, A4_WAKE_TOKEN, A4_ADMIN. Prints a `[a4] PASS|FAIL|METRICS`
- *   line and exits 0 (pass) / 1 (assertion fail) / 2 (fatal).
+ * Env: A4_TAG (log prefix), A4_TARGET, A4_WS, A4_MCP, A4_ADMIN, A4_INGRESS (wake
+ * URL), A4_WAKE_TOKEN (openclaw) or A4_SECRET (hermes), AD4M_PLUGIN_DIR
+ * (openclaw). Prints `[<tag>] METRICS|PASS|FAIL` and exits 0 (pass) /
+ * 1 (assertion fail) / 2 (fatal).
  */
-import { fileURLToPath } from "url";
-import { dirname, resolve } from "path";
+import { createHmac } from "crypto";
+import { Ad4mClient, QuerySubscriptionProxy, WakerSubscriptionManager } from "@coasys/ad4m";
+import { McpClient } from "../../src/mcp-client.ts";
 
-const HARNESS = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const TAG = process.env.A4_TAG || "a4";
+const TARGET = process.env.A4_TARGET || "openclaw";
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
-  const PD = process.env.AD4M_PLUGIN_DIR;
-  if (!PD) {
-    console.log("[a4] FATAL AD4M_PLUGIN_DIR not set");
-    process.exit(2);
-  }
-  const require = (await import("module")).createRequire(import.meta.url);
-  const { Ad4mClient, QuerySubscriptionProxy } = require(`${PD}/node_modules/@coasys/ad4m`);
-  const { WakerSubscriptionManager } = await import(`${PD}/wakerSubscriptionManager.ts`);
-  const { postWake } = await import(`${PD}/wakerHelpers.ts`);
-  const { McpClient } = await import(`${HARNESS}/src/mcp-client.ts`);
-
-  const WS = process.env.A4_WS || "http://127.0.0.1:14411";
-  const MCP = process.env.A4_MCP || "http://127.0.0.1:14410";
-  const HOOK = process.env.A4_HOOK || "http://127.0.0.1:18790/hooks/wake";
-  const WT = process.env.A4_WAKE_TOKEN || "a4-wake-tok";
+  const WS = process.env.A4_WS!;
+  const MCP = process.env.A4_MCP!;
+  const INGRESS = process.env.A4_INGRESS!;
   const TOKEN = process.env.A4_ADMIN || "windtunnel-admin";
-  const CHAN = "a4://channel";
+  const CHAN = `${TAG}://channel`;
   const DEBOUNCE = 1000;
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   const logs: string[] = [];
   const rec = (lvl: string) => (m: string) => logs.push(`${lvl} ${String(m)}`);
   const logger = { info: rec("I"), warn: rec("W"), error: rec("E"), debug: () => {} };
 
-  const client = new Ad4mClient(WS, TOKEN, true);
+  // The wake delivery for this harness: resolves true on a 2xx from its ingress.
+  let deliver: (sub: any, did: string, mentions: any) => Promise<boolean>;
+  if (TARGET === "openclaw") {
+    const { postWake } = await import(`${process.env.AD4M_PLUGIN_DIR}/wakerHelpers.ts`);
+    const config = { wakeUrl: INGRESS, wakeToken: process.env.A4_WAKE_TOKEN };
+    deliver = (sub, did, mentions) => postWake(config, sub, did, logger, mentions);
+  } else {
+    const secret = process.env.A4_SECRET || "";
+    deliver = async (_sub, _did, _mentions) => {
+      const body = JSON.stringify({ text: "New messages in an AD4M channel." });
+      const sig = "sha256=" + createHmac("sha256", secret).update(body).digest("hex");
+      try {
+        const res = await fetch(INGRESS, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Hub-Signature-256": sig },
+          body,
+          signal: AbortSignal.timeout(15000),
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    };
+  }
+
+  const client = new Ad4mClient(WS, TOKEN);
   const status = await client.agent.status();
   if (!status.isInitialized || status.isUnlocked === false) {
-    console.log("[a4] FAIL agent not ready");
+    console.log(`[${TAG}] FAIL agent not ready`);
     process.exit(1);
   }
-  const did = status.did;
-  const uuid = (await client.perspective.add("a4-channel")).uuid;
+  const did = status.did!;
+  const uuid = (await client.perspective.add(`${TAG}-channel`)).uuid;
 
   const mcp = new McpClient(MCP, TOKEN);
-  await mcp.initialize("a4drv");
+  await mcp.initialize(`${TAG}drv`);
   const gen = await mcp.callToolJson("generate_waker_query", {
     perspective_id: uuid,
     class_name: "Message",
-    parent_address: CHAN,
+    parent: CHAN,
   });
-  const query = gen.query ?? gen.waker_config?.query;
-  if (!query) {
-    console.log("[a4] FAIL no waker query generated");
+  if (!gen?.query || !gen?.query_class) {
+    console.log(`[${TAG}] FAIL generate_waker_query returned no model query: ${JSON.stringify(gen)}`);
     process.exit(1);
   }
 
-  const config = { wakeUrl: HOOK, wakeToken: WT } as any;
   let woke = 0;
   const wakeTimes: number[] = [];
+  const deliveries: Promise<boolean>[] = [];
   const mgr = new WakerSubscriptionManager({
     perspectiveClient: client.perspective,
     logger,
@@ -83,19 +101,26 @@ const HARNESS = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
     onWake: (sub: any, _r: any, mentions: any) => {
       woke++;
       wakeTimes.push(Date.now());
-      postWake(config, sub, did, logger, mentions);
+      deliveries.push(deliver(sub, did, mentions));
     },
   });
-  await mgr.subscribe({ id: "a4-chan", type: "channel-messages", perspective: uuid, channel: CHAN, query });
+  await mgr.subscribe({
+    id: `${TAG}-chan`,
+    type: "channel-messages",
+    perspective: uuid,
+    channel: CHAN,
+    query: gen.query,
+    className: gen.query_class,
+  });
 
   const inject = (n: number) =>
     mcp.callToolJson("add_link", {
       perspective_id: uuid,
       source: CHAN,
       predicate: "ad4m://has_child",
-      target: `a4://msg/${n}`,
+      target: `${TAG}://msg/${n}`,
     });
-  const settle = DEBOUNCE + 1500;
+  const settle = DEBOUNCE + 2000;
 
   const t0 = Date.now();
   await inject(1);
@@ -112,16 +137,17 @@ const HARNESS = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
   await inject(5);
   await sleep(settle);
   const afterLive = woke;
-  await sleep(500); // let the final postWake resolve
 
-  const postOk = logs.filter((l) => l.includes("wake POST sent successfully")).length;
-  const postFail = logs.filter((l) => l.includes("wake POST failed") || l.includes("wake POST error")).length;
+  const results = await Promise.all(deliveries);
+  mgr.disposeAll();
+  const postOk = results.filter(Boolean).length;
+  const postFail = results.length - postOk;
 
   const singleOk = afterSingle === 1;
   const dedupOk = afterBurst - afterSingle === 1;
   const liveOk = afterLive - afterBurst === 1;
-  const hookOk = postOk >= afterLive && postFail === 0;
-  const pass = singleOk && dedupOk && liveOk && hookOk;
+  const ingressOk = postOk === afterLive && postFail === 0;
+  const pass = singleOk && dedupOk && liveOk && ingressOk;
 
   const metrics = {
     wakesTotal: woke,
@@ -135,20 +161,19 @@ const HARNESS = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
     singleOk,
     dedupOk,
     liveOk,
-    hookOk,
-    did: String(did).slice(0, 40),
+    ingressOk,
   };
-  console.log("[a4] METRICS " + JSON.stringify(metrics));
+  console.log(`[${TAG}] METRICS ` + JSON.stringify(metrics));
   if (!pass) {
-    console.log("[a4] FAIL " + JSON.stringify({ singleOk, dedupOk, liveOk, hookOk }));
+    console.log(`[${TAG}] FAIL ` + JSON.stringify({ singleOk, dedupOk, liveOk, ingressOk }));
     console.log(logs.slice(-30).join("\n"));
     process.exit(1);
   }
   console.log(
-    `[a4] PASS real waker -> real OpenClaw hook: 1 msg=1 wake, 3 rapid coalesced to 1, liveness ok, ${postOk} hook 200s`,
+    `[${TAG}] WAKER-OK real waker -> real ${TARGET} ingress: 1 msg=1 wake, 3 rapid coalesced to 1, liveness ok, ${postOk} ingress 2xx`,
   );
   process.exit(0);
 })().catch((e) => {
-  console.error("[a4] FATAL", e?.stack || e);
+  console.error(`[${TAG}] FATAL`, e?.stack || e);
   process.exit(2);
 });
