@@ -1,5 +1,6 @@
 import { ApiClient } from "../apiClient";
 import type { ClaimOfferResult } from "../generated/api/ClaimOfferResult";
+import type { DeviceKeys } from "../generated/api/DeviceKeys";
 import type { DeviceView } from "../generated/api/DeviceView";
 import type { DidResolutionResult } from "../generated/api/DidResolutionResult";
 import type { IdentityLog } from "../generated/api/IdentityLog";
@@ -101,5 +102,23 @@ export class IdentityClient {
     /** The identity's device keys, from its log. */
     async devices(): Promise<DeviceView[]> {
         return this.#apiClient.call("identity.devices", {});
+    }
+
+    /**
+     * A new main wallet key for this executor, so a revoked executor can link again. The old
+     * key stays for history. Only the operator on the executor's machine (the admin credential
+     * on a loopback listener); any other caller gets 403 `local-only`.
+     */
+    async rekey(): Promise<DeviceKeys> {
+        return this.#apiClient.call("identity.rekey", {});
+    }
+
+    /**
+     * The custody channel: the device keys a master key for this computer is sealed to. Only
+     * the admin credential on a loopback listener of an executor started with
+     * `--custody-channel`; any other caller gets 403.
+     */
+    async custodyStatus(): Promise<DeviceKeys> {
+        return this.#apiClient.call("identity.custodyStatus", {});
     }
 }

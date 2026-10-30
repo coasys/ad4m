@@ -184,6 +184,7 @@ fn params(method: &str, fx: &Fixture) -> Value {
             json!({ "deviceKey": "leak-test-device", "deviceKeyType": "ethereum" })
         }
         "ai.getDefaultModel" => json!({ "modelType": "LLM" }),
+        "runtime.logTail" => json!({ "lines": 10 }),
         "ai.modelLoadingStatus" => json!({ "modelId": fx.model_id }),
         "expression.get" | "expression.getRaw" | "expression.interactions" => {
             json!({ "url": "literal://string:leak" })
