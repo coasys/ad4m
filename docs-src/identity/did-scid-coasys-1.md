@@ -239,7 +239,11 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
    answers with the log it held first, and reports the fork in the DID resolution metadata
    (`coasys:fork`: the seq and the two event hashes).
 4. **The DID document.** The resolver derives the DID document (section 9) from the state
-   after the head. With `versionId=<seq>`, it derives it from the state after that seq. A
+   after the head. With `versionId=<seq>`, it derives it from the state after that seq.
+   DID Core defines `versionId` only as an identifier of a version of the DID document and
+   leaves its form to the method. In this method a version is a seq of the log: version *n*
+   is the DID document of the state after event *n*, so every event makes one version, and
+   versions are ordered as the log is. A
    `versionId` that is not a decimal integer is `invalidDidUrl`; a seq past the head of the
    log the resolver holds is `notFound`. A fragment `#<keyId>` dereferences the verification
    method with that id in the chosen document: `?versionId=4#d3` is `#d3` as of seq 4, which is
