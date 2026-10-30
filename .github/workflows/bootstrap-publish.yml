@@ -1,27 +1,79 @@
-# Publishes the bootstrap languages of a staging release and commits the
-# release's network seed (cli/mainnet_seed.json and the copy the binary
-# compiles in, rust-executor/src/mainnet_seed.json) onto the release branch.
+# Keeps the network seed (cli/mainnet_seed.json and the copy the binary
+# compiles in, rust-executor/src/mainnet_seed.json) equal to the bootstrap
+# languages the source builds, and publishes those languages when a commit
+# reaches staging or main.
 #
-# Run it on the head branch of the staging.N PR, before that PR is merged:
-#   gh workflow run bootstrap-publish.yml -R coasys/ad4m --ref release/0.13.1-staging.6
+# A language's address is the hash of its bundle, so the seed needs no key:
+# scripts/bootstrap-seed.py computes it from the built bundles. That is why the
+# seed is committed *before* the merge, with the code that changes a bundle,
+# and only the publish waits for staging or main. A seed commit after the merge
+# would come too late: the release's binaries and npm packages are built from
+# the merge commit, and publish_staging.yml refuses a second commit under the
+# same version.
 #
-# The seed is built from cli/seed_proto.json and the languages built here. The
-# publish job signs with the trusted agent kept in the `bootstrap-publish`
-# environment, so it waits for a required reviewer before it can read the key.
-# The build runs in a job without the key: nothing that `pnpm install` or a
-# build script runs ever sees it.
+# - Every run (push to dev/staging/main, PR to them): build the languages
+#   without secrets and fail if the committed seed pins other addresses. The
+#   built seed is in the run's `built-seed` artifact: copy it to both paths.
+# - Push to staging or main: if a pinned language is not yet in the store,
+#   signed by a trusted agent, build the executor and publish with the trusted
+#   agent of the `bootstrap-publish` environment, then check the store again.
+#   The publish job writes nothing to the repo.
+#
+# The build jobs never see the key: nothing that `pnpm install` or a build
+# script runs can read it.
 
-name: Bootstrap publish
+name: Bootstrap seed
 
 on:
+  push:
+    branches: [dev, staging, main]
+    # Anything that can change a built bundle, generously. Same list below.
+    paths:
+      - bootstrap-languages/**
+      - ad4m-ldk/**
+      - core/**
+      - cli/seed_proto.json
+      - cli/mainnet_seed.json
+      - rust-executor/src/mainnet_seed.json
+      - scripts/bootstrap-seed.py
+      - scripts/verify-bootstrap-seed.sh
+      - scripts/install-hc-toolchain.sh
+      - Cargo.lock
+      - rust-toolchain.toml
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - deno.lock
+      - turbo.json
+      - .github/workflows/bootstrap-publish.yml
+  pull_request:
+    branches: [dev, staging, main]
+    paths:
+      - bootstrap-languages/**
+      - ad4m-ldk/**
+      - core/**
+      - cli/seed_proto.json
+      - cli/mainnet_seed.json
+      - rust-executor/src/mainnet_seed.json
+      - scripts/bootstrap-seed.py
+      - scripts/verify-bootstrap-seed.sh
+      - scripts/install-hc-toolchain.sh
+      - Cargo.lock
+      - rust-toolchain.toml
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - deno.lock
+      - turbo.json
+      - .github/workflows/bootstrap-publish.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: bootstrap-publish
-  cancel-in-progress: false
+  group: bootstrap-seed-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:
@@ -29,20 +81,18 @@ defaults:
     shell: bash
 
 jobs:
-  build:
+  seed:
     # GitHub-hosted: a self-hosted runner keeps files between jobs.
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 120
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
+    outputs:
+      publish: ${{ steps.store.outputs.publish }}
     steps:
-      - name: Only on a release branch
-        if: ${{ !startsWith(github.ref, 'refs/heads/release/') }}
-        run: |
-          echo "::error::Run this on the head branch of a staging release PR (release/*), not ${{ github.ref }}"
-          exit 1
-
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: denoland/setup-deno@v2
         with:
@@ -51,12 +101,62 @@ jobs:
       - name: Install the pinned hc (DNAs must be packed with the Cargo.lock version)
         run: |
           bash scripts/install-hc-toolchain.sh
-          # Only the binaries are needed; the hc build tree takes disk the
-          # executor build needs.
+          # Only the binaries are needed.
           rm -rf .hc-toolchain/src
 
       - name: wasm-bindgen for the agent-language build
         run: wasm-bindgen --version 2>/dev/null | grep -q ' 0.2.118$' || cargo install wasm-bindgen-cli --version 0.2.118
+
+      - run: pnpm install --no-frozen-lockfile
+
+      - name: Build the bootstrap languages
+        run: pnpm run build-languages
+
+      - name: The committed seed pins the built languages
+        run: python3 scripts/bootstrap-seed.py --check --out built-seed.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: built-seed
+          path: built-seed.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-bundles
+          path: bootstrap-languages/*/build/bundle.js
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Is every pinned language in the store?
+        id: store
+        if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main') }}
+        run: |
+          command -v jq >/dev/null || { apt-get update && apt-get install -y jq; }
+          if scripts/verify-bootstrap-seed.sh cli/mainnet_seed.json | tee -a "$GITHUB_STEP_SUMMARY"; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Publishing the seed's languages." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  executor:
+    needs: seed
+    if: ${{ needs.seed.outputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
 
       - run: pnpm install --no-frozen-lockfile
 
@@ -65,36 +165,41 @@ jobs:
           RUSTY_V8_MIRROR: https://github.com/coasys/rusty_v8/releases/download
         run: pnpm build-libs
 
-      - name: Build the bootstrap languages
-        run: pnpm run build-languages
-
       - uses: actions/upload-artifact@v4
         with:
-          name: bootstrap-build
-          path: |
-            target/release/ad4m-executor
-            bootstrap-languages/*/build/bundle.js
+          name: executor
+          path: target/release/ad4m-executor
           if-no-files-found: error
           retention-days: 3
 
   publish:
-    needs: build
+    needs: [seed, executor]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
-    # Holds AD4M_BOOTSTRAP_AGENT_JSON and AD4M_BOOTSTRAP_PASSPHRASE.
+    # Holds AD4M_BOOTSTRAP_AGENT_JSON and AD4M_BOOTSTRAP_PASSPHRASE. Its
+    # deployment branches are staging and main; it has no required reviewer.
     environment: bootstrap-publish
-    permissions:
-      contents: write
+    concurrency:
+      group: bootstrap-publish
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:
-          name: bootstrap-build
+          name: bootstrap-bundles
+          path: bootstrap-languages
 
-      - name: Publish the languages and write the seed
+      - uses: actions/download-artifact@v4
+        with:
+          name: executor
+          path: target/release
+
+      - name: Publish the languages
         working-directory: cli
         env:
           AD4M_BOOTSTRAP_AGENT_JSON: ${{ secrets.AD4M_BOOTSTRAP_AGENT_JSON }}
@@ -119,23 +224,11 @@ jobs:
           printf '%s\n' "$passphrase" \
             | ../target/release/ad4m-executor dev generate-bootstrap "$agent" - seed_proto.json
 
-      - name: Check every pinned language is installable
+      - name: The publish gave the committed seed, and every pinned language is installable
         run: |
           command -v jq >/dev/null || { apt-get update && apt-get install -y jq; }
-          cmp cli/mainnet_seed.json rust-executor/src/mainnet_seed.json
-          scripts/verify-bootstrap-seed.sh cli/mainnet_seed.json | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Commit the seed onto the release branch
-        run: |
+          # generate-bootstrap rewrote both seed copies from the addresses the
+          # store answered. They must still be the committed bytes.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          if git diff --quiet -- cli/mainnet_seed.json rust-executor/src/mainnet_seed.json; then
-            echo "The seed is unchanged." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add cli/mainnet_seed.json rust-executor/src/mainnet_seed.json
-          git commit -m "chore(seed): publish the bootstrap languages for ${GITHUB_REF_NAME}" \
-            -m "Bootstrap publish run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
-          echo "Committed the new seed onto ${GITHUB_REF_NAME}: $(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+          git diff --exit-code -- cli/mainnet_seed.json rust-executor/src/mainnet_seed.json
+          scripts/verify-bootstrap-seed.sh cli/mainnet_seed.json | tee -a "$GITHUB_STEP_SUMMARY"
