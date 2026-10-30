@@ -310,6 +310,24 @@ impl EventReceiver {
             }
         }
     }
+
+    /// The next already-published event of the topic, without waiting: `Empty` once
+    /// drained. Test-only. Tests drain with it to assert that an event was *not*
+    /// published, so a lag (events dropped before they were read) panics: ending the
+    /// drain early would let that assertion pass on a partial view.
+    #[cfg(test)]
+    pub fn try_recv(&mut self) -> Result<String, broadcast::error::TryRecvError> {
+        loop {
+            match self.rx.try_recv() {
+                Ok(event) if event.topic == self.topic => return Ok(event.payload.to_string()),
+                Ok(_) => continue,
+                Err(broadcast::error::TryRecvError::Lagged(missed)) => {
+                    panic!("{missed} events dropped before they were read")
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }
 
 /// Subscription to the auto-processor event topic (JSON strings), whoever the events'
