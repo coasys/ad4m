@@ -31,6 +31,18 @@ fn default_seed_outputs() -> Vec<String> {
     vec!["mainnet_seed.json".to_string()]
 }
 
+/// A publish has to write the seed somewhere: the languages it publishes can't
+/// be taken back, so a proto with an empty `seedOutputs` is an error.
+pub fn check_seed_outputs(outputs: &[String]) -> Result<(), String> {
+    if outputs.is_empty() {
+        return Err(
+            "the seed proto's seedOutputs is empty: the published languages would be in no seed"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// The seed's `trustedAgents` for a publish signed by `publisher`. Every
 /// language in the seed is signed by the publisher, and a node installs only
 /// languages signed by a trusted agent, so a list without the publisher is an
@@ -109,6 +121,10 @@ pub async fn start_publishing(
 
     // Checked before anything is published: a published language can't be
     // taken back.
+    if let Err(error) = check_seed_outputs(&seed_proto.seed_outputs) {
+        colour::red_ln!("Not publishing: {}", error);
+        exit(1);
+    }
     let trusted_agents = match seed_trusted_agents(
         &seed_proto.trusted_agents,
         &agent.did.expect("an unlocked agent has a DID"),
@@ -227,6 +243,12 @@ mod tests {
     use super::*;
 
     const PUBLISHER: &str = "did:key:publisher";
+
+    #[test]
+    fn an_empty_seed_outputs_list_is_refused() {
+        assert!(check_seed_outputs(&[]).is_err());
+        assert!(check_seed_outputs(&["mainnet_seed.json".to_string()]).is_ok());
+    }
 
     #[test]
     fn a_proto_without_trusted_agents_trusts_the_publisher() {
