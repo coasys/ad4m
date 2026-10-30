@@ -104,8 +104,16 @@ jobs:
           # Only the binaries are needed.
           rm -rf .hc-toolchain/src
 
-      - name: wasm-bindgen for the agent-language build
-        run: wasm-bindgen --version 2>/dev/null | grep -q ' 0.2.118$' || cargo install wasm-bindgen-cli --version 0.2.118
+      - name: wasm-bindgen 0.2.118 for the agent-language build
+        # The image has another version on PATH; this one goes in front of it.
+        run: |
+          if ! wasm-bindgen --version 2>/dev/null | grep -q ' 0.2.118$'; then
+            cargo install --locked wasm-bindgen-cli --version 0.2.118 --root "$RUNNER_TEMP/wasm-bindgen"
+            echo "$RUNNER_TEMP/wasm-bindgen/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Check the wasm-bindgen version
+        run: wasm-bindgen --version | grep ' 0.2.118$'
 
       - run: pnpm install --no-frozen-lockfile
 
