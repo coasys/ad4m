@@ -9902,6 +9902,148 @@ mod tests {
         assert!(old_left.is_empty(), "the old link is removed");
     }
 
+    /// M9: a batched update reaches the link language only when its link is
+    /// Shared. A Local update stays on this replica, as a non-batch one does.
+    #[tokio::test]
+    async fn test_commit_batch_sends_only_shared_updates_to_the_link_language() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let local: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap()
+            .into();
+        let shared: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap()
+            .into();
+
+        // A neighbourhood whose link language records what it is sent.
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = sent.clone();
+        perspective.persisted.lock().await.neighbourhood =
+            Some(DecoratedNeighbourhoodExpression::default());
+        *perspective.link_language.write().await = Some(Language::with_test_commit(
+            "test-link-language".to_string(),
+            Arc::new(move |diff: PerspectiveDiff| {
+                let mut sent = record.lock().unwrap();
+                sent.extend(diff.additions.iter().map(|l| format!("+{}", l.data.target)));
+                sent.extend(diff.removals.iter().map(|l| format!("-{}", l.data.target)));
+                Ok(None)
+            }),
+        ));
+
+        let new_local = create_link();
+        let new_shared = create_link();
+        let batch_id = perspective.create_batch().await;
+        for (old, new) in [(&local, &new_local), (&shared, &new_shared)] {
+            perspective
+                .update_link(old.clone(), new.clone(), Some(batch_id.clone()), &context)
+                .await
+                .unwrap();
+        }
+        perspective.commit_batch(batch_id, &context).await.unwrap();
+
+        // The commit is spawned: wait until the Shared update has arrived.
+        // (The spawned commit of the Shared add above may land here too.)
+        let shared_update = [
+            format!("+{}", new_shared.target),
+            format!("-{}", shared.data.target),
+        ];
+        let mut got = Vec::new();
+        for _ in 0..100 {
+            got = sent.lock().unwrap().clone();
+            if shared_update.iter().all(|e| got.contains(e)) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            shared_update.iter().all(|e| got.contains(e)),
+            "the Shared update is sent: {got:?}"
+        );
+        let local_targets = [&local.data.target, &new_local.target];
+        assert!(
+            !got.iter()
+                .any(|e| local_targets.iter().any(|t| &e[1..] == t.as_str())),
+            "nothing of the Local update is sent: {got:?}"
+        );
+    }
+
+    /// M9: an update whose new link later work in the batch dropped commits
+    /// as a plain removal. Here `setSingleTarget` on the same source and
+    /// predicate prunes the staged new link and sets a third target.
+    #[tokio::test]
+    async fn test_commit_batch_publishes_an_update_broken_by_set_single_target_as_a_removal() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let old: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap()
+            .into();
+        let source = old.data.source.clone();
+        let predicate = old.data.predicate.clone();
+        let updated = Link {
+            target: "test://updated".to_string(),
+            ..old.data.clone()
+        };
+
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .update_link(old.clone(), updated, Some(batch_id.clone()), &context)
+            .await
+            .unwrap();
+        perspective
+            .execute_commands(
+                vec![Command {
+                    source: Some(source.clone()),
+                    predicate: predicate.clone(),
+                    target: Some("test://final".to_string()),
+                    local: None,
+                    action: Action::SetSingleTarget,
+                }],
+                source.clone(),
+                vec![],
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut rx = pubsub.subscribe_events();
+        perspective.commit_batch(batch_id, &context).await.unwrap();
+
+        let uuid = perspective.uuid.clone();
+        let mut updates = 0;
+        while let Ok(event) = rx.try_recv() {
+            if event.perspective.as_deref() == Some(uuid.as_str())
+                && event.topic == Topic::LinkUpdated
+            {
+                updates += 1;
+            }
+        }
+        assert_eq!(
+            updates, 0,
+            "no UPDATED for an update whose new link was dropped"
+        );
+
+        let stored: Vec<String> = perspective
+            .get_links(&LinkQuery {
+                source: Some(source),
+                predicate,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        assert_eq!(stored, vec!["test://final".to_string()]);
+    }
+
     /// Regression: paginated `get_links(limit=N)` must use the bounded-heap
     /// store-side top-N method, not "materialise full Vec then sort+truncate".
     /// Asserts the dedicated store method `query_links_top_n_by_timestamp`
