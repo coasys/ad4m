@@ -482,6 +482,10 @@ impl SubscribedQuery {
 /// A batch with its creation timestamp, for timeout-based cleanup.
 struct TimestampedBatch {
     diff: PerspectiveDiff,
+    /// `(old, new)` pairs staged by `update_link`. Each half also sits in
+    /// `diff`, so batch-aware reads see it; `commit_batch` publishes a pair
+    /// whose halves are both still there as one update.
+    updates: Vec<(LinkExpression, LinkExpression)>,
     created_at: Instant,
 }
 
@@ -2032,6 +2036,37 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Publish one `link-updated` event, to all of the perspective's
+    /// `event_recipients`, for each `(old, new)` pair, and queue the
+    /// flow-definition sweep that `pubsub_publish_diff` queues for other
+    /// writes (once for the whole set).
+    async fn publish_link_updates(
+        &self,
+        updates: &[(DecoratedLinkExpression, DecoratedLinkExpression)],
+    ) {
+        if updates.is_empty() {
+            return;
+        }
+        let (olds, news): (Vec<_>, Vec<_>) = updates.iter().cloned().unzip();
+        self.schedule_flow_pass_on_definition_change(&DecoratedPerspectiveDiff::from(news, olds));
+
+        // Only the recipients come from the handle; the lock is released before publishing.
+        let owners = super::event_recipients(&*self.persisted.lock().await);
+
+        // One event per update, to all of the owners.
+        for (old_link, new_link) in updates {
+            super::publish_to_owners(
+                Topic::LinkUpdated,
+                owners.clone(),
+                PerspectiveLinkUpdatedEvent {
+                    perspective_uuid: self.uuid.clone(),
+                    old_link: old_link.clone(),
+                    new_link: new_link.clone(),
+                },
+            );
+        }
+    }
+
     pub async fn add_link_expression(
         &mut self,
         link_expression: LinkExpression,
@@ -2367,28 +2402,25 @@ impl PerspectiveInstance {
         let new_link_expression =
             LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
 
+        // Both links keep the stored status. The old one is the stored link:
+        // the caller's `old_link` may carry no status, which reads as Shared.
+        let mut stored_new = new_link_expression.clone();
+        stored_new.status = Some(link_status.clone());
+        let mut stored_old = link.clone();
+        stored_old.status = Some(link_status.clone());
+
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
-            let diff = &mut batch.diff;
 
-            // Queue the stored link with its stored status: the caller's
-            // `old_link` may carry none, which the commit reads as Shared.
-            let mut stored_old = link.clone();
-            stored_old.status = Some(link_status.clone());
-            diff.removals.push(stored_old);
-            let mut new_link_expr = new_link_expression.clone();
-            new_link_expr.status = Some(link_status.clone());
-            diff.additions.push(new_link_expr.clone());
+            batch.diff.removals.push(stored_old.clone());
+            batch.diff.additions.push(stored_new.clone());
+            batch.updates.push((stored_old, stored_new.clone()));
 
-            Ok(DecoratedLinkExpression::from((new_link_expr, link_status)))
+            Ok(DecoratedLinkExpression::from((stored_new, link_status)))
         } else {
-            let mut stored_new = new_link_expression.clone();
-            stored_new.status = Some(link_status.clone());
-            let mut stored_old = link.clone();
-            stored_old.status = Some(link_status.clone());
             let diff = PerspectiveDiff::from(vec![stored_new], vec![stored_old]);
             let decorated_new_link_expression =
                 DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
@@ -2405,22 +2437,13 @@ impl PerspectiveInstance {
                 .fold_into(&mut decorated_diff);
 
             // Queue the Prolog fact update and the notification + live-query checks
-            self.update_prolog_engines(decorated_diff.clone()).await;
+            self.update_prolog_engines(decorated_diff).await;
 
-            // An update publishes its own topic rather than going through
-            // `pubsub_publish_diff`, so it queues the definition sweep here.
-            self.schedule_flow_pass_on_definition_change(&decorated_diff);
-
-            // One event, to all of the owners.
-            super::publish_to_owners(
-                Topic::LinkUpdated,
-                super::event_recipients(&handle),
-                PerspectiveLinkUpdatedEvent {
-                    perspective_uuid: handle.uuid.clone(),
-                    old_link: decorated_old_link.clone(),
-                    new_link: decorated_new_link_expression.clone(),
-                },
-            );
+            self.publish_link_updates(&[(
+                decorated_old_link,
+                decorated_new_link_expression.clone(),
+            )])
+            .await;
 
             if link_status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&diff);
@@ -6716,6 +6739,7 @@ impl PerspectiveInstance {
                     additions: Vec::new(),
                     removals: Vec::new(),
                 },
+                updates: Vec::new(),
                 created_at: now,
             },
         );
@@ -9778,6 +9802,246 @@ mod tests {
             link.target,
             msg
         );
+    }
+
+    /// M9: a link updated inside a batch reaches subscribers as one
+    /// `link-updated` event to all of the owners on commit, not as a removal
+    /// plus an addition, and both links keep the stored status.
+    #[tokio::test]
+    async fn test_commit_batch_publishes_batched_update_as_link_updated() {
+        let mut perspective = setup().await;
+        let owners = vec![
+            "did:test:owner-a".to_string(),
+            "did:test:owner-b".to_string(),
+        ];
+        perspective.persisted.lock().await.owners = Some(owners.clone());
+        let old: LinkExpression = perspective
+            .add_link(
+                create_link(),
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap()
+            .into();
+        let new_link = create_link();
+
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .update_link(
+                old.clone(),
+                new_link.clone(),
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut rx = pubsub.subscribe_events();
+
+        perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
+
+        // The event channel is global: keep only this perspective's events.
+        let uuid = perspective.uuid.clone();
+        let mut mine = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if event.perspective.as_deref() == Some(uuid.as_str()) {
+                mine.push(event);
+            }
+        }
+        let of = |topic: Topic| {
+            mine.iter()
+                .filter(|e| e.topic == topic)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert!(of(Topic::LinkAdded).is_empty(), "no ADDED for an update");
+        assert!(
+            of(Topic::LinkRemoved).is_empty(),
+            "no REMOVED for an update"
+        );
+        let updated = of(Topic::LinkUpdated);
+        assert_eq!(updated.len(), 1, "one UPDATED for the update");
+        match &updated[0].audience {
+            crate::events::Audience::Dids(dids) => {
+                let mut dids = dids.clone();
+                dids.sort();
+                assert_eq!(dids, owners, "the UPDATED goes to all of the owners");
+            }
+            _ => panic!("the UPDATED goes to the owners' DIDs"),
+        }
+        for event in &updated {
+            let v = &event.payload;
+            assert_eq!(v["oldLink"]["data"]["target"], old.data.target.as_str());
+            assert_eq!(v["newLink"]["data"]["target"], new_link.target.as_str());
+            assert_eq!(v["oldLink"]["status"], "LOCAL");
+            assert_eq!(v["newLink"]["status"], "LOCAL");
+        }
+
+        let stored = perspective
+            .get_links(&LinkQuery {
+                source: Some(new_link.source.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].status, Some(LinkStatus::Local));
+        let old_left = perspective
+            .get_links(&LinkQuery {
+                source: Some(old.data.source.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(old_left.is_empty(), "the old link is removed");
+    }
+
+    /// M9: a batched update reaches the link language only when its link is
+    /// Shared. A Local update stays on this replica, as a non-batch one does.
+    #[tokio::test]
+    async fn test_commit_batch_sends_only_shared_updates_to_the_link_language() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let local: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap()
+            .into();
+        let shared: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap()
+            .into();
+
+        // A neighbourhood whose link language records what it is sent.
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = sent.clone();
+        perspective.persisted.lock().await.neighbourhood =
+            Some(DecoratedNeighbourhoodExpression::default());
+        *perspective.link_language.write().await = Some(Language::with_test_commit(
+            "test-link-language".to_string(),
+            Arc::new(move |diff: PerspectiveDiff| {
+                let mut sent = record.lock().unwrap();
+                sent.extend(diff.additions.iter().map(|l| format!("+{}", l.data.target)));
+                sent.extend(diff.removals.iter().map(|l| format!("-{}", l.data.target)));
+                Ok(None)
+            }),
+        ));
+
+        let new_local = create_link();
+        let new_shared = create_link();
+        let batch_id = perspective.create_batch().await;
+        for (old, new) in [(&local, &new_local), (&shared, &new_shared)] {
+            perspective
+                .update_link(old.clone(), new.clone(), Some(batch_id.clone()), &context)
+                .await
+                .unwrap();
+        }
+        perspective.commit_batch(batch_id, &context).await.unwrap();
+
+        // The commit is spawned: wait until the Shared update has arrived.
+        // (The spawned commit of the Shared add above may land here too.)
+        let shared_update = [
+            format!("+{}", new_shared.target),
+            format!("-{}", shared.data.target),
+        ];
+        let mut got = Vec::new();
+        for _ in 0..100 {
+            got = sent.lock().unwrap().clone();
+            if shared_update.iter().all(|e| got.contains(e)) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            shared_update.iter().all(|e| got.contains(e)),
+            "the Shared update is sent: {got:?}"
+        );
+        let local_targets = [&local.data.target, &new_local.target];
+        assert!(
+            !got.iter()
+                .any(|e| local_targets.iter().any(|t| &e[1..] == t.as_str())),
+            "nothing of the Local update is sent: {got:?}"
+        );
+    }
+
+    /// M9: an update whose new link later work in the batch dropped commits
+    /// as a plain removal. Here `setSingleTarget` on the same source and
+    /// predicate prunes the staged new link and sets a third target.
+    #[tokio::test]
+    async fn test_commit_batch_publishes_an_update_broken_by_set_single_target_as_a_removal() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let old: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap()
+            .into();
+        let source = old.data.source.clone();
+        let predicate = old.data.predicate.clone();
+        let updated = Link {
+            target: "test://updated".to_string(),
+            ..old.data.clone()
+        };
+
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .update_link(old.clone(), updated, Some(batch_id.clone()), &context)
+            .await
+            .unwrap();
+        perspective
+            .execute_commands(
+                vec![Command {
+                    source: Some(source.clone()),
+                    predicate: predicate.clone(),
+                    target: Some("test://final".to_string()),
+                    local: None,
+                    action: Action::SetSingleTarget,
+                }],
+                source.clone(),
+                vec![],
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut rx = pubsub.subscribe_events();
+        perspective.commit_batch(batch_id, &context).await.unwrap();
+
+        let uuid = perspective.uuid.clone();
+        let mut updates = 0;
+        while let Ok(event) = rx.try_recv() {
+            if event.perspective.as_deref() == Some(uuid.as_str())
+                && event.topic == Topic::LinkUpdated
+            {
+                updates += 1;
+            }
+        }
+        assert_eq!(
+            updates, 0,
+            "no UPDATED for an update whose new link was dropped"
+        );
+
+        let stored: Vec<String> = perspective
+            .get_links(&LinkQuery {
+                source: Some(source),
+                predicate,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        assert_eq!(stored, vec!["test://final".to_string()]);
     }
 
     /// Regression: paginated `get_links(limit=N)` must use the bounded-heap
