@@ -400,6 +400,15 @@ key id is read from the log, which lists the signing key. A hash would only tell
 branches apart, and a fork is only detected, never resolved (sections 8 and 11): it already
 freezes the identity, so a hash would add bytes to every record and link and enable no check.
 
+The anchor is not a parameter of the signer's `did:key`. A `did:key` has one fixed DID
+document, so a version of it means nothing, and the `did:key` method defines no DID parameters.
+The anchor is a version of the identity's log. As a DID URL it is
+`did:scid:coasys:1:<scid>?versionId=<s>#<keyId>`: the signing key's verification method in the
+DID document at version *s* (section 8). That is the DID URL a W3C Data Integrity proof names
+in `verificationMethod`, so a system that verifies signatures by DID URL gets the same check.
+Content carries only the integer, inside the signed bytes. A verifier or an exporter derives the
+DID URL from the identity, the anchor and the key id that the log lists for the signing key.
+
 ## 11. Security and privacy
 
 - A store can withhold events but cannot add one: every event carries proofs by keys the state
