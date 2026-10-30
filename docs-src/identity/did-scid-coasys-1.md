@@ -239,7 +239,11 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
    answers with the log it held first, and reports the fork in the DID resolution metadata
    (`coasys:fork`: the seq and the two event hashes).
 4. **The DID document.** The resolver derives the DID document (section 9) from the state
-   after the head. With `versionId=<seq>`, it derives it from the state after that seq. A
+   after the head. With `versionId=<seq>`, it derives it from the state after that seq.
+   DID Core defines `versionId` only as an identifier of a version of the DID document and
+   leaves its form to the method. In this method a version is a seq of the log: version *n*
+   is the DID document of the state after event *n*, so every event makes one version, and
+   versions are ordered as the log is. A
    `versionId` that is not a decimal integer is `invalidDidUrl`; a seq past the head of the
    log the resolver holds is `notFound`. A fragment `#<keyId>` dereferences the verification
    method with that id in the chosen document: `?versionId=4#d3` is `#d3` as of seq 4, which is
@@ -395,6 +399,15 @@ the verifier confirms against the log (a key enters a log only with its own co-s
 key id is read from the log, which lists the signing key. A hash would only tell forked
 branches apart, and a fork is only detected, never resolved (sections 8 and 11): it already
 freezes the identity, so a hash would add bytes to every record and link and enable no check.
+
+The anchor is not a parameter of the signer's `did:key`. A `did:key` has one fixed DID
+document, so a version of it means nothing, and the `did:key` method defines no DID parameters.
+The anchor is a version of the identity's log. As a DID URL it is
+`did:scid:coasys:1:<scid>?versionId=<s>#<keyId>`: the signing key's verification method in the
+DID document at version *s* (section 8). That is the DID URL a W3C Data Integrity proof names
+in `verificationMethod`, so a system that verifies signatures by DID URL gets the same check.
+Content carries only the integer, inside the signed bytes. A verifier or an exporter derives the
+DID URL from the identity, the anchor and the key id that the log lists for the signing key.
 
 ## 11. Security and privacy
 
