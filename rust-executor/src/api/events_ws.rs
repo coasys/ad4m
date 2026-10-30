@@ -41,7 +41,7 @@
 //! | `sfu-call-renegotiation-offer` | (inline)     | `targetDid`            | SFU server-pushed SDP offer          |
 //! | `sfu-migrate`                 | (inline)      | `targetDid`            | SFU cascade rebalance: rejoin elsewhere (`acceptRedirect` joins only) |
 //! | `sfu-data`                    | (inline)      | the room's other agents on this executor | SFU data channel message |
-//! | `sfu-room-roster`             | (inline)      | the participants it lists | Who is in a call room now         |
+//! | `sfu-room-roster`             | (inline)      | listed DIDs and the departed DID | Who is in a call room now         |
 //! | `flow-state-changed`          | (inline)      | `agentDid` if it reads the perspective; else the main agent's to `Operator` | A flow instance's state moved on that agent's replica (#1424) |
 //! | `identity-fork`               | (inline)      | the local agents that speak for the identity | The key-log cache found two logs (a different event at a held seq, or a shorter log) and kept its own (a shorter log never truncates a held one) |
 //!
