@@ -52,7 +52,7 @@ mod tests {
     use crate::languages::language_runtime::{LanguageOperation, LanguageRuntimeRequest};
     use crate::languages::language_runtime_handle::LanguageRuntimeHandle;
     use crate::languages::LanguageController;
-    use crate::perspectives::update_perspective;
+    use crate::perspectives::update_perspective_with;
     use crate::test_utils::setup_wallet;
     use crate::types::PerspectiveState;
     use std::collections::HashSet;
@@ -142,9 +142,9 @@ mod tests {
         let first = SetLocal::of(requests.recv().await.unwrap());
         assert_eq!(first.agents, [a.clone()]);
         // B joins now: no link language is exposed for its join to tell.
-        let mut joined = instance.persisted.lock().await.clone();
-        joined.add_owner(&b);
-        update_perspective(&joined).await.unwrap();
+        update_perspective_with(&instance.uuid, |h| h.add_owner(&b))
+            .await
+            .unwrap();
         first.apply(&mut local);
 
         let refresh = SetLocal::of(requests.recv().await.unwrap());

@@ -35,6 +35,8 @@ pub mod utils_extension;
 
 #[cfg(test)]
 mod host_http_fetch_tests;
+#[cfg(test)]
+mod host_storage_tests;
 
 use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 

@@ -6,10 +6,13 @@
 //! [`ShapeResolver`] that recursive include resolution uses to look up
 //! target-class shapes (themselves cached).
 
+use super::containment::{contains_patterns, has_child_only, ContainmentEdge};
 use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
-use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
+use super::hydration::{
+    filter_properties, group_results_by_source, hydrate_instances, ALWAYS_KEPT,
+};
 use super::link_author::refuse_unanswerable_link_author;
 use super::links::{attach_links, resolve_link_keys};
 use super::projection::resolve_projections;
@@ -21,23 +24,24 @@ use super::sparql_builder::{
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
-    ScopeDirection, ShapeResolver, SortKey, SparqlPagination,
+    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::Error;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// The anchors, predicate and direction a walk starts from.
+/// The anchors, predicate and direction a `levels` walk starts from.
 ///
-/// `None` for any scope that is not a traversal — the walk is meaningless without a relation to
-/// follow, and the caller falls back to asking once.
+/// `None` for any scope that is not a traversal over a predicate — the walk is meaningless without
+/// a relation to follow, and the caller falls back to asking once. (A containment traversal with
+/// `levels` is refused before this is asked.)
 fn walk_roots(query: &ModelQueryInput) -> Option<(Vec<String>, String, ScopeDirection)> {
     match &query.parent {
         Some(Scope::Traverse {
             ids,
-            predicate,
+            predicate: Some(predicate),
             direction,
             ..
         }) => Some((ids.clone(), predicate.clone(), *direction)),
@@ -45,70 +49,148 @@ fn walk_roots(query: &ModelQueryInput) -> Option<(Vec<String>, String, ScopeDire
     }
 }
 
-/// Everything each of `starts` reaches over `<predicate>` in one or more steps,
+/// Everything each of `starts` reaches over `edges` in one or more steps,
 /// following only links `guard` admits, as `(start, reached)` pairs without
-/// duplicates.
+/// duplicates, nearest first: every pair one hop out, then two, up to
+/// `max_depth` hops when that is set.
 ///
-/// A property path (`<p>+`) is a reachability test over triples and has no
-/// link per hop whose status or verdict it could read, so a transitive walk
-/// that must honour `linkStatus` / `includeUnverified` is done here (#1120):
-/// one guarded single-step query per depth for the whole frontier, until no
+/// An edge is a predicate, and for a containment edge the class its holder
+/// must be (see [`super::containment`]): a traversal over one predicate is one
+/// edge with no holder check. A property path (`<p>+`) is a reachability test
+/// over triples and has no link per hop whose status or verdict it could
+/// read, nor a holder to check, so the walk is done here (#1120): one guarded
+/// query per depth for the whole frontier, a `UNION` of the edges, until no
 /// new node turns up. `Out` follows `start -> node`, `In` follows
 /// `node -> start`. As with `+`, a start on a cycle reaches itself.
 pub(super) fn guarded_reach(
     store: &SparqlStore,
     starts: &[String],
-    predicate: &str,
+    edges: &[ContainmentEdge],
     direction: ScopeDirection,
     guard: LinkGuard,
+    max_depth: Option<usize>,
 ) -> Result<Vec<(String, String)>, Error> {
-    let pred = format!("<{predicate}>");
     // `?s` is always the frontier end of the step, `?o` the node it reaches.
-    let (subject, object) = match direction {
-        ScopeDirection::Out => ("?s", "?o"),
-        ScopeDirection::In => ("?o", "?s"),
+    let step = match direction {
+        ScopeDirection::Out => contains_patterns(edges, "?s", "?o", guard),
+        ScopeDirection::In => contains_patterns(edges, "?o", "?s", guard),
     };
-    let step = format!(
-        "{subject} {pred} {object} .{}",
-        guard.join("?_wr", subject, &pred, object)
-    );
-    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
-    // Every node queued so far, so each is expanded once.
-    let mut discovered: HashSet<String> = starts.iter().cloned().collect();
-    let mut frontier: Vec<String> = starts.to_vec();
-    while !frontier.is_empty() {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut reached: HashMap<String, HashSet<String>> = HashMap::new();
+    // Frontier node -> the starts it was reached from at this depth.
+    let mut frontier: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for start in starts {
+        frontier
+            .entry(start.clone())
+            .or_default()
+            .push(start.clone());
+    }
+    let mut depth = 0;
+    while !frontier.is_empty() && max_depth.is_none_or(|max| depth < max) {
+        let nodes: Vec<String> = frontier.keys().cloned().collect();
         let sparql = format!(
-            "SELECT ?s ?o WHERE {{ {step} {} }}",
-            values_or_str_filter("s", &frontier)
+            "SELECT DISTINCT ?s ?o WHERE {{\n{step}\n    {} }}",
+            values_or_str_filter("s", &nodes)
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query(&sparql)?)?;
-        let mut next: Vec<String> = Vec::new();
-        for row in &rows {
-            let (Some(s), Some(o)) = (row["s"].as_str(), row["o"].as_str()) else {
-                continue;
-            };
-            edges.entry(s.to_string()).or_default().push(o.to_string());
-            if discovered.insert(o.to_string()) {
-                next.push(o.to_string());
-            }
-        }
-        frontier = next;
-    }
-
-    let mut pairs = Vec::new();
-    for start in starts {
-        let mut seen: HashSet<&str> = HashSet::new();
-        let mut stack: Vec<&str> = vec![start.as_str()];
-        while let Some(node) = stack.pop() {
-            for next in edges.get(node).into_iter().flatten() {
-                if seen.insert(next.as_str()) {
-                    pairs.push((start.clone(), next.clone()));
-                    stack.push(next.as_str());
+        let mut steps: Vec<(String, String)> = rows
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    row["s"].as_str()?.to_string(),
+                    row["o"].as_str()?.to_string(),
+                ))
+            })
+            .collect();
+        steps.sort();
+        let mut next: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (s, o) in steps {
+            for start in frontier.get(&s).into_iter().flatten() {
+                if reached.entry(start.clone()).or_default().insert(o.clone()) {
+                    pairs.push((start.clone(), o.clone()));
+                    next.entry(o.clone()).or_default().push(start.clone());
                 }
             }
         }
+        frontier = next;
+        depth += 1;
     }
     Ok(pairs)
+}
+
+/// `query` with its walk made (see [`ModelQueryInput::walked`]), or `None`
+/// when its scope needs none: a transitive traversal over containment, one
+/// bounded by `maxDepth`, or one under a guard that restricts links. A
+/// traversal over one predicate with an open guard and no bound is left to
+/// the `+` path.
+pub(super) fn with_walk(
+    store: &SparqlStore,
+    query: &ModelQueryInput,
+) -> Result<Option<ModelQueryInput>, Error> {
+    let Some(Scope::Traverse {
+        ids,
+        predicate,
+        transitive: true,
+        direction,
+        max_depth,
+        ..
+    }) = &query.parent
+    else {
+        return Ok(None);
+    };
+    if query.walked.is_some() {
+        return Ok(None);
+    }
+    let guard = LinkGuard::of(query);
+    let edges: Vec<ContainmentEdge> = match predicate {
+        None => query
+            .containment
+            .clone()
+            .unwrap_or_else(has_child_only)
+            .to_vec(),
+        Some(_) if guard.is_open() && max_depth.is_none() => return Ok(None),
+        Some(predicate) => match validate_iri(predicate) {
+            Ok(safe) => vec![ContainmentEdge {
+                predicate: safe.to_string(),
+                holder: None,
+            }],
+            // The builder answers an invalid predicate with nothing.
+            Err(_) => return Ok(None),
+        },
+    };
+    let anchors: Vec<String> = ids
+        .iter()
+        .filter(|id| validate_iri(id).is_ok())
+        .cloned()
+        .collect();
+    let pairs = guarded_reach(store, &anchors, &edges, *direction, guard, *max_depth)?;
+    Ok(Some(ModelQueryInput {
+        walked: Some(pairs),
+        ..query.clone()
+    }))
+}
+
+/// The position of each node in a containment walk's order (nearest first),
+/// when the query asked for no order: a containment walk's rows keep it, so
+/// the waker's ancestors come back nearest first. `None` otherwise.
+pub(super) fn walk_order(query: &ModelQueryInput) -> Option<HashMap<String, usize>> {
+    if query.order.is_some() {
+        return None;
+    }
+    let Some(Scope::Traverse {
+        predicate: None,
+        transitive: true,
+        ..
+    }) = &query.parent
+    else {
+        return None;
+    };
+    let mut positions = HashMap::new();
+    for (_, node) in query.walked.iter().flatten() {
+        let next = positions.len();
+        positions.entry(node.clone()).or_insert(next);
+    }
+    Some(positions)
 }
 
 /// Keep the first `n` rows of each anchor, discarding the rest.
@@ -184,11 +266,12 @@ async fn walk_levels(
         let mut level_input = query_input.clone();
         level_input.parent = Some(Scope::Traverse {
             ids: frontier.clone(),
-            predicate: predicate.to_string(),
+            predicate: Some(predicate.to_string()),
             transitive: false,
             direction,
             limit_per_anchor: Some(*limit),
             levels: None,
+            max_depth: None,
         });
         // Paging belongs to the caller's whole result, not to a level of the walk.
         level_input.limit = None;
@@ -328,44 +411,44 @@ pub(super) async fn execute_model_query_inner(
         }
     }
 
-    // A transitive scope under a guard that restricts links is walked here and
-    // handed to the builder as pairs (see `ModelQueryInput::walked`), so the
-    // rows, the page and the count all read the same guarded walk.
-    let walked_input;
-    let query_input = match &query_input.parent {
-        Some(Scope::Traverse {
-            ids,
-            predicate,
-            transitive: true,
-            direction,
-            ..
-        }) if query_input.walked.is_none() && !LinkGuard::of(query_input).is_open() => {
-            match validate_iri(predicate) {
-                Ok(safe_pred) => {
-                    let anchors: Vec<String> = ids
-                        .iter()
-                        .filter(|id| validate_iri(id).is_ok())
-                        .cloned()
-                        .collect();
-                    let pairs = guarded_reach(
-                        store,
-                        &anchors,
-                        safe_pred,
-                        *direction,
-                        LinkGuard::of(query_input),
-                    )?;
-                    walked_input = ModelQueryInput {
-                        walked: Some(pairs),
-                        ..query_input.clone()
-                    };
-                    &walked_input
-                }
-                // The builder answers an invalid predicate with nothing.
-                Err(_) => query_input,
-            }
+    if let Some(Scope::Traverse {
+        predicate,
+        transitive,
+        limit_per_anchor,
+        levels,
+        max_depth,
+        ..
+    }) = &query_input.parent
+    {
+        if max_depth.is_some() && !*transitive {
+            return Err(Error::msg(
+                "Traverse scope: `maxDepth` bounds a transitive walk. Set `transitive: true`, or \
+                 leave it out for one step.",
+            ));
         }
-        _ => query_input,
-    };
+        // A containment walk is made in the executor over every edge, with no
+        // per-level breadth yet (design note, open in v1).
+        if predicate.is_none() && levels.is_some() {
+            return Err(Error::msg(
+                "Traverse scope: `levels` needs a `predicate`. A containment walk (no predicate) \
+                 takes `transitive` and `maxDepth`.",
+            ));
+        }
+        if predicate.is_none() && *transitive && limit_per_anchor.is_some() {
+            return Err(Error::msg(
+                "Traverse scope: `limitPerAnchor` is not supported on a transitive containment \
+                 walk. Bound it with `maxDepth`, or page the result with `limit`.",
+            ));
+        }
+    }
+
+    // A transitive scope over containment, bounded by `maxDepth`, or under a
+    // guard that restricts links is walked here and handed to the builder as
+    // pairs (see `ModelQueryInput::walked`), so the rows, the page and the
+    // count all read the same walk.
+    let walked_input = with_walk(store, query_input)?;
+    let query_input = walked_input.as_ref().unwrap_or(query_input);
+    let walk_order = walk_order(query_input);
 
     // A per-link `author` condition is answered in the store or not at all.
     // The post-hydration fallback only knows the earliest link's author, so a
@@ -535,7 +618,12 @@ pub(super) async fn execute_model_query_inner(
     // taken one of its parent's places. That is the same trade `limit_per_anchor` has always made,
     // and the alternative — fetching a level whole to filter it — is what the limit exists to avoid.
     let scope_needs_phases = anchor_limit.is_some() || walk.is_some();
-    let sparql_pagination = if scope_needs_phases
+    // A containment walk with no order keeps the walk's order, which the
+    // store cannot sort by: it is applied below, with the window, after
+    // hydration.
+    let sparql_pagination = if walk_order.is_some() {
+        None
+    } else if scope_needs_phases
         || (can_push_pagination && (query_input.limit.is_some() || query_input.offset.is_some()))
     {
         let direction = query_input
@@ -735,8 +823,18 @@ pub(super) async fn execute_model_query_inner(
         });
     }
 
-    // Apply transform expressions for resolveLanguage properties
-    resolve_language_transforms(&shape, &mut instances).await?;
+    // Apply transform expressions for resolveLanguage properties. A language-backed value is a
+    // fetch per row, so it is resolved only where it is needed, each once:
+    //   - what the filter and sort below read (`read_before_window`), for every row, here;
+    //   - what the query hands back (`returned`: every property when it names no `properties`)
+    //     and the filter and sort did not read, for the page only, after the window.
+    // A property in neither is never resolved: it keeps its hydrated value and is stripped.
+    let read_before_window = read_before_window(query_input);
+    let returned_keys = returned(query_input);
+    resolve_language_transforms(shape, &mut instances, |name| {
+        read_before_window.contains(name)
+    })
+    .await?;
 
     // Resolve reverse relations
     let reverse_rels: Vec<(String, String, bool)> = shape
@@ -825,7 +923,15 @@ pub(super) async fn execute_model_query_inner(
             instances.into_iter().skip(offset).collect()
         }
     } else {
-        if let Some(ref order) = query_input.order {
+        if let Some(positions) = &walk_order {
+            instances.sort_by_key(|inst| {
+                inst["id"]
+                    .as_str()
+                    .and_then(|id| positions.get(id))
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        } else if let Some(ref order) = query_input.order {
             sort_instances(&mut instances, order);
         } else if query_input.limit.is_some() || query_input.offset.is_some() {
             sort_instances(
@@ -841,6 +947,16 @@ pub(super) async fn execute_model_query_inner(
             instances.into_iter().skip(offset).collect()
         }
     };
+
+    // The language-backed values the filter and sort did not read, for the page only, and of
+    // those only what the query hands back: the strip below drops the rest.
+    resolve_language_transforms(shape, &mut paginated, |name| {
+        !read_before_window.contains(name)
+            && returned_keys
+                .as_ref()
+                .is_none_or(|keep| keep.iter().any(|k| k == name))
+    })
+    .await?;
 
     // Evaluate property/relation getters (post-pagination)
     if !paginated.is_empty() {
@@ -874,15 +990,7 @@ pub(super) async fn execute_model_query_inner(
     }
 
     // Strip unrequested properties if specified
-    let mut final_instances: Vec<Value> = if let Some(ref requested) = query_input.properties {
-        let mut keep = requested.clone();
-        if let Some(ref inc) = query_input.include {
-            for rel_name in inc.keys() {
-                if !keep.contains(rel_name) {
-                    keep.push(rel_name.clone());
-                }
-            }
-        }
+    let mut final_instances: Vec<Value> = if let Some(keep) = returned_keys {
         paginated
             .into_iter()
             .map(|inst| filter_properties(inst, &keep))
@@ -923,6 +1031,58 @@ pub(super) async fn execute_model_query_inner(
     })
 }
 
+/// The keys a query hands back of each instance, or `None` when it names no `properties` and so
+/// returns every one: the named properties, the `include` keys beside them, and [`ALWAYS_KEPT`] —
+/// exactly what [`filter_properties`] keeps.
+pub(super) fn returned(query: &ModelQueryInput) -> Option<Vec<String>> {
+    let requested = query.properties.as_ref()?;
+    let mut keep: Vec<String> = ALWAYS_KEPT.iter().map(|k| k.to_string()).collect();
+    let include_keys = query.include.iter().flat_map(|include| include.keys());
+    for name in requested.iter().chain(include_keys) {
+        if !keep.contains(name) {
+            keep.push(name.clone());
+        }
+    }
+    Some(keep)
+}
+
+/// Every property the `where` and the `order` name, read as [`matches_where`] and
+/// [`sort_instances`] read them: the values the post-hydration filter and sort need, so the ones a
+/// language holds are resolved before them. A name too many costs a fetch per row; a name missing
+/// would filter or sort on the undecoded value.
+fn read_before_window(query: &ModelQueryInput) -> HashSet<String> {
+    fn walk(clause: &BTreeMap<String, WhereCondition>, names: &mut HashSet<String>) {
+        for (name, condition) in clause {
+            match (name.as_str(), condition) {
+                ("OR" | "AND", WhereCondition::SubClauses(branches)) => {
+                    branches.iter().for_each(|branch| walk(branch, names))
+                }
+                ("NOT", _) => {
+                    if let Some(branch) = condition.as_not_clause() {
+                        walk(&branch, names);
+                    }
+                }
+                _ => {
+                    names.insert(name.clone());
+                }
+            }
+        }
+    }
+    let mut names: HashSet<String> = HashSet::new();
+    if let Some(clause) = &query.where_clause {
+        walk(clause, &mut names);
+    }
+    // A dotted sort key (`file.name`) reads a field of the decoded `file`.
+    names.extend(
+        query
+            .order
+            .iter()
+            .flatten()
+            .map(|(key, _)| key.split('.').next().unwrap_or(key).to_string()),
+    );
+    names
+}
+
 /// Apply transform expressions to expression-resolved properties.
 ///
 /// Properties whose values are stored as signed expression URIs (rather than
@@ -933,9 +1093,14 @@ pub(super) async fn execute_model_query_inner(
 ///   - `Some(<addr>)`    → expression on that custom language.
 /// Values stored as deterministic `literal:` IRIs (i.e. `resolve_language ==
 /// None`) are left untouched by the per-value check below.
-async fn resolve_language_transforms(
+///
+/// Only the properties whose name `resolve` accepts are touched, so a pipeline
+/// can resolve what its filter reads before the filter and what it returns after
+/// its page, each once (see `execute_model_query_inner`).
+pub(super) async fn resolve_language_transforms(
     shape: &ModelShape,
     instances: &mut [Value],
+    resolve: impl Fn(&str) -> bool,
 ) -> Result<(), Error> {
     // Two kinds of properties need post-hydration work here:
     //   - expression-resolved properties (`resolve_language` set): fetch the
@@ -947,6 +1112,10 @@ async fn resolve_language_transforms(
         .properties
         .iter()
         .filter(|p| !p.is_deterministic_literal() || p.transform.is_some())
+        // A reverse property holds the ids of the instances that point here,
+        // filled in between the two passes, not a value to resolve.
+        .filter(|p| p.direction.as_deref() != Some("reverse"))
+        .filter(|p| resolve(&p.name))
         .collect();
 
     if resolve_props.is_empty() {

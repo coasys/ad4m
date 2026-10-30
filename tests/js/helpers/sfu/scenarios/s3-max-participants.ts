@@ -51,7 +51,7 @@ export const s3MaxParticipantsEnforced: Scenario = {
         executorBin: ctx.executorPath!,
         nodeCount: 2,
         maxParticipantsPerNode: MAX_PER_NODE,
-        wsBasePort: 13300,
+        workDir: ctx.tmpDirBase,
       });
 
       const didToNode = new Map<string, CascadeNode>();

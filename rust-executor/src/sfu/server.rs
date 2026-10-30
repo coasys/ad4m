@@ -26,12 +26,12 @@ use super::simulcast::{is_keyframe, LayerSelector};
 /// uniformly:
 ///
 /// - **Client peer** — `is_pipe = false`. `agent_did` is the user's
-///   DID; renegotiation offers go out via the events_ws pubsub topic
-///   for the client's events subscription to receive.
+///   DID; renegotiation offers go out as an `sfu-call-renegotiation-offer`
+///   event to that agent.
 /// - **Pipe peer** — `is_pipe = true`. Represents the local end of a
 ///   pipe transport to a remote SFU node. `agent_did` is the remote
 ///   node's DID; renegotiation offers go out via the cascade gossip
-///   transport instead of pubsub so the remote node receives them.
+///   transport instead (through `pipe_bus`) so the remote node receives them.
 pub struct SfuPeer {
     pub id: ParticipantId,
     pub room_id: RoomId,
@@ -143,7 +143,7 @@ pub enum SfuCommand {
     /// gossip transport, addressed to our local end of an existing
     /// pipe.  The event loop applies the offer through the pipe's
     /// `sdp_api()`, produces an answer, and republishes it to
-    /// `SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC` so the cascade router
+    /// the pipe bus (`pipe_bus::publish_answer`) so the cascade router
     /// can ship it back over gossip.
     ApplyPipeRenegotiationOffer {
         participant_id: ParticipantId,
@@ -614,12 +614,7 @@ impl SfuServer {
                                         room_id,
                                         sdp_answer: answer_json,
                                     };
-                                    if let Ok(payload_json) = serde_json::to_string(&payload) {
-                                        crate::pubsub::get_global_pubsub_sync().publish_sync(
-                                            &crate::pubsub::SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC,
-                                            &payload_json,
-                                        );
-                                    }
+                                    super::pipe_bus::publish_answer(payload);
                                     info!(
                                         "SFU: pipe renegotiation answer published for {}",
                                         participant_id
@@ -717,12 +712,9 @@ impl SfuServer {
                             binary,
                             &data,
                         );
-                        if let Ok(payload_json) = serde_json::to_string(&payload) {
-                            crate::pubsub::get_global_pubsub_sync().publish_sync(
-                                &crate::pubsub::SFU_DATA_CHANNEL_TOPIC,
-                                &payload_json,
-                            );
-                        }
+                        let recipients = data_recipients(&peers, &origin_room, &origin_did);
+                        crate::pubsub::get_global_pubsub_sync()
+                            .publish_event(crate::events::Event::sfu_data(&payload, recipients));
                     }
                     Ok(SfuCommand::GetQualityPreferences { reply }) => {
                         let _ = reply.send(quality_preferences.clone());
@@ -802,6 +794,8 @@ impl SfuServer {
             let mut media_to_relay: Vec<(ParticipantId, MediaData)> = Vec::new();
             let mut tracks_opened: Vec<(ParticipantId, Mid, MediaKind)> = Vec::new();
             let mut keyframe_requests: Vec<(ParticipantId, KeyframeRequest)> = Vec::new();
+            // Data channel messages, published once the poll loop no longer borrows `peers`.
+            let mut data_received: Vec<crate::sfu::types::SfuDataMessage> = Vec::new();
 
             for (pid, peer) in peers.iter_mut() {
                 loop {
@@ -864,9 +858,8 @@ impl SfuServer {
                                     let relay_data = data.data;
 
                                     // Can't relay inside this loop (borrows
-                                    // peers mutably), so push for deferred
-                                    // relay below.  Simpler: publish via
-                                    // pubsub so events_ws fans it out.
+                                    // peers mutably): published after it, to
+                                    // the room's agents, as `sfu-data`.
                                     let payload = crate::sfu::types::SfuDataMessage::new(
                                         origin_did,
                                         origin_room.neighbourhood_url,
@@ -875,12 +868,7 @@ impl SfuServer {
                                         relay_binary,
                                         &relay_data,
                                     );
-                                    if let Ok(payload_json) = serde_json::to_string(&payload) {
-                                        crate::pubsub::get_global_pubsub_sync().publish_sync(
-                                            &crate::pubsub::SFU_DATA_CHANNEL_TOPIC,
-                                            &payload_json,
-                                        );
-                                    }
+                                    data_received.push(payload);
                                 }
                             }
                             Event::ChannelClose(cid) => {
@@ -896,6 +884,15 @@ impl SfuServer {
                             break;
                         }
                     }
+                }
+            }
+
+            if !data_received.is_empty() {
+                let pubsub = crate::pubsub::get_global_pubsub_sync();
+                for payload in data_received {
+                    let room = RoomId::new(&payload.neighbourhood_url, &payload.room_name);
+                    let recipients = data_recipients(&peers, &room, &payload.sender_did);
+                    pubsub.publish_event(crate::events::Event::sfu_data(&payload, recipients));
                 }
             }
 
@@ -1100,24 +1097,28 @@ impl SfuServer {
                     continue;
                 }
                 let room_id = target_peer.room_id.clone();
-                let mut api = target_peer.rtc.sdp_api();
-                let mut new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind)> = Vec::new();
-                for (kind, origin_pid, origin_mid) in &additions {
-                    // Skip tracks already forwarded — matches the deferred path's
-                    // tracks_out_rev check to prevent duplicate outbound m-lines.
-                    if target_peer
-                        .tracks_out_rev
-                        .contains_key(&(origin_pid.clone(), *origin_mid))
-                    {
-                        continue;
-                    }
-                    let new_mid =
-                        api.add_media(*kind, str0m::media::Direction::SendOnly, None, None, None);
-                    new_outbound.push((new_mid, origin_pid.clone(), *origin_mid, *kind));
-                }
-                let Some((offer, pending)) = api.apply() else {
+                // Skip tracks already forwarded — matches the deferred path's
+                // tracks_out_rev check to prevent duplicate outbound m-lines.
+                let to_add: Vec<(MediaKind, ParticipantId, Mid)> = additions
+                    .into_iter()
+                    .filter(|(_, origin_pid, origin_mid)| {
+                        !target_peer
+                            .tracks_out_rev
+                            .contains_key(&(origin_pid.clone(), *origin_mid))
+                    })
+                    .collect();
+                let kinds: Vec<MediaKind> = to_add.iter().map(|(kind, _, _)| *kind).collect();
+                let Some((offer, pending, mids)) = offer_send_only(&mut target_peer.rtc, &kinds)
+                else {
                     continue;
                 };
+                let new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind)> = mids
+                    .into_iter()
+                    .zip(to_add)
+                    .map(|(new_mid, (kind, origin_pid, origin_mid))| {
+                        (new_mid, origin_pid, origin_mid, kind)
+                    })
+                    .collect();
 
                 // Build track attribution from the newly assigned mids.
                 let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
@@ -1149,7 +1150,7 @@ impl SfuServer {
                 info!(
                     "SFU: peer {} renegotiation offer prepared ({} new outbound m-lines)",
                     target_pid,
-                    additions.len()
+                    kinds.len()
                 );
 
                 let sdp_offer_json = match serde_json::to_string(&offer) {
@@ -1168,12 +1169,7 @@ impl SfuServer {
                         room_id: room_id.to_string(),
                         sdp_offer: sdp_offer_json,
                     };
-                    if let Ok(payload_json) = serde_json::to_string(&payload) {
-                        crate::pubsub::get_global_pubsub_sync().publish_sync(
-                            &crate::pubsub::SFU_PIPE_RENEGOTIATION_OFFER_TOPIC,
-                            &payload_json,
-                        );
-                    }
+                    super::pipe_bus::publish_offer(payload);
                 } else {
                     let payload = crate::sfu::SfuCallRenegotiationOffer {
                         target_did: target_peer.agent_did.clone(),
@@ -1182,12 +1178,8 @@ impl SfuServer {
                         sdp_offer: sdp_offer_json,
                         track_mapping,
                     };
-                    if let Ok(payload_json) = serde_json::to_string(&payload) {
-                        crate::pubsub::get_global_pubsub_sync().publish_sync(
-                            &crate::pubsub::SFU_CALL_RENEGOTIATION_OFFER_TOPIC,
-                            &payload_json,
-                        );
-                    }
+                    crate::pubsub::get_global_pubsub_sync()
+                        .publish_event(crate::events::Event::sfu_renegotiation_offer(&payload));
                 }
             }
 
@@ -1289,6 +1281,34 @@ fn clean_stale_track_refs(
     }
 }
 
+/// One SDP change adding a send-only m-line per entry of `kinds`: its offer,
+/// the pending offer, and the new mids in the order of `kinds`. `None` when
+/// `kinds` is empty.
+///
+/// str0m draws each mid at random (three characters) and checks it only
+/// against the m-lines the session already has, not against the others
+/// added in the same change, so a batch can name two m-lines alike. The
+/// client refuses such an offer ("Duplicate a=mid value") and rebuilds its
+/// connection, and `tracks_out_rev` would send both origins to the one mid.
+/// A batch with a repeated mid is dropped unapplied (adding media only
+/// queues a change) and drawn again.
+fn offer_send_only(
+    rtc: &mut Rtc,
+    kinds: &[MediaKind],
+) -> Option<(SdpOffer, str0m::change::SdpPendingOffer, Vec<Mid>)> {
+    loop {
+        let mut api = rtc.sdp_api();
+        let mids: Vec<Mid> = kinds
+            .iter()
+            .map(|kind| api.add_media(*kind, str0m::media::Direction::SendOnly, None, None, None))
+            .collect();
+        if mids.iter().collect::<HashSet<_>>().len() == mids.len() {
+            return api.apply().map(|(offer, pending)| (offer, pending, mids));
+        }
+        debug!("SFU: an SDP batch drew a repeated mid; drawing again");
+    }
+}
+
 /// Drain deferred tracks from a peer and produce a renegotiation
 /// offer.  Returns `(sdp_offer_json, track_mapping)` or `None` when
 /// no actionable tracks remain.
@@ -1298,14 +1318,15 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
     }
     let deferred: Vec<_> = peer.deferred_tracks.drain(..).collect();
 
-    // Filter out tracks already plumbed — must happen before
-    // borrowing rtc via sdp_api().
+    // Filter out tracks already plumbed, and repeats: a track is queued
+    // again each time this peer opens one of its own while an offer is
+    // pending. Must happen before borrowing rtc via sdp_api().
+    let mut queued = HashSet::new();
     let to_add: Vec<_> = deferred
         .into_iter()
         .filter(|(origin_pid, origin_mid, _, _)| {
-            !peer
-                .tracks_out_rev
-                .contains_key(&(origin_pid.clone(), *origin_mid))
+            let track = (origin_pid.clone(), *origin_mid);
+            !peer.tracks_out_rev.contains_key(&track) && queued.insert(track)
         })
         .collect();
 
@@ -1313,14 +1334,15 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
         return None;
     }
 
-    let mut api = peer.rtc.sdp_api();
-    let mut new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = Vec::new();
-    for (origin_pid, origin_mid, kind, agent_did) in to_add {
-        let new_mid = api.add_media(kind, str0m::media::Direction::SendOnly, None, None, None);
-        new_outbound.push((new_mid, origin_pid, origin_mid, kind, agent_did));
-    }
-
-    let (offer, pending) = api.apply()?;
+    let kinds: Vec<MediaKind> = to_add.iter().map(|(_, _, kind, _)| *kind).collect();
+    let (offer, pending, mids) = offer_send_only(&mut peer.rtc, &kinds)?;
+    let new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = mids
+        .into_iter()
+        .zip(to_add)
+        .map(|(new_mid, (origin_pid, origin_mid, kind, agent_did))| {
+            (new_mid, origin_pid, origin_mid, kind, agent_did)
+        })
+        .collect();
 
     let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
         .iter()
@@ -1351,9 +1373,27 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
     Some((sdp_offer_json, track_mapping))
 }
 
+/// The agents that get a data channel message `sender` sent in `room`: the agent of every
+/// client peer in that room on this executor but the sender, which has what it sent. Pipe
+/// peers stand for other SFU nodes, not agents, so none of them is in it.
+fn data_recipients(
+    peers: &HashMap<ParticipantId, SfuPeer>,
+    room: &RoomId,
+    sender: &str,
+) -> Vec<String> {
+    let mut dids: Vec<String> = peers
+        .values()
+        .filter(|p| !p.is_pipe && p.room_id == *room && p.agent_did != sender)
+        .map(|p| p.agent_did.clone())
+        .collect();
+    dids.sort();
+    dids.dedup();
+    dids
+}
+
 /// Publish a renegotiation offer for a peer's deferred tracks.
-/// Routes to the appropriate pubsub topic based on whether the peer
-/// represents a client or a pipe transport.
+/// A client peer gets an `sfu-call-renegotiation-offer` event; a pipe
+/// transport's offer goes to the cascade router through the pipe bus.
 fn publish_renegotiation_offer(
     peer: &SfuPeer,
     pid: &ParticipantId,
@@ -1366,12 +1406,7 @@ fn publish_renegotiation_offer(
             room_id: peer.room_id.to_string(),
             sdp_offer: sdp_offer_json,
         };
-        if let Ok(payload_json) = serde_json::to_string(&payload) {
-            crate::pubsub::get_global_pubsub_sync().publish_sync(
-                &crate::pubsub::SFU_PIPE_RENEGOTIATION_OFFER_TOPIC,
-                &payload_json,
-            );
-        }
+        super::pipe_bus::publish_offer(payload);
     } else {
         let payload = crate::sfu::SfuCallRenegotiationOffer {
             target_did: peer.agent_did.clone(),
@@ -1380,12 +1415,8 @@ fn publish_renegotiation_offer(
             sdp_offer: sdp_offer_json,
             track_mapping,
         };
-        if let Ok(payload_json) = serde_json::to_string(&payload) {
-            crate::pubsub::get_global_pubsub_sync().publish_sync(
-                &crate::pubsub::SFU_CALL_RENEGOTIATION_OFFER_TOPIC,
-                &payload_json,
-            );
-        }
+        crate::pubsub::get_global_pubsub_sync()
+            .publish_event(crate::events::Event::sfu_renegotiation_offer(&payload));
     }
     info!(
         "SFU: deferred-track renegotiation offer published for peer {}",
@@ -1421,6 +1452,81 @@ mod tests {
             .filter_map(|l| l.strip_prefix("a=candidate:"))
             .map(str::to_string)
             .collect()
+    }
+
+    #[test]
+    fn a_batch_of_new_tracks_never_repeats_a_mid() {
+        // str0m's mids are three random characters, unchecked within one
+        // change: a 600-line batch repeats one about half the time, so 20
+        // batches all but surely draw a repeat unless the batch is redrawn.
+        let kinds: Vec<MediaKind> = (0..600)
+            .map(|i| {
+                if i % 2 == 0 {
+                    MediaKind::Audio
+                } else {
+                    MediaKind::Video
+                }
+            })
+            .collect();
+        for _ in 0..20 {
+            let mut rtc = Rtc::new(Instant::now());
+            let (offer, _pending, mids) =
+                offer_send_only(&mut rtc, &kinds).expect("an offer for a non-empty batch");
+            assert_eq!(mids.len(), kinds.len());
+            let distinct: HashSet<&Mid> = mids.iter().collect();
+            assert_eq!(distinct.len(), mids.len(), "a mid repeats within the batch");
+            let sdp = offer.to_sdp_string();
+            let offered: Vec<&str> = sdp
+                .lines()
+                .filter_map(|l| l.strip_prefix("a=mid:"))
+                .collect();
+            let offered_distinct: HashSet<&str> = offered.iter().copied().collect();
+            assert_eq!(offered.len(), kinds.len());
+            assert_eq!(
+                offered_distinct.len(),
+                offered.len(),
+                "the offer repeats an a=mid"
+            );
+            // The mids come back in the order of `kinds`, so the caller's
+            // track mapping names the right m-line.
+            for (mid, kind) in mids.iter().zip(&kinds) {
+                let section = sdp
+                    .split("\r\nm=")
+                    .find(|section| section.contains(&format!("a=mid:{}\r\n", mid)))
+                    .expect("the mid's m-line");
+                assert!(section.starts_with(if kind.is_audio() { "audio" } else { "video" }));
+            }
+        }
+        assert!(offer_send_only(&mut Rtc::new(Instant::now()), &[]).is_none());
+    }
+
+    /// A track queued twice while an offer was pending (a peer that opens
+    /// a second track has every other peer's tracks queued for it again)
+    /// goes out on one m-line, not one per time it was queued.
+    #[test]
+    fn a_track_queued_twice_is_offered_once() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let (rtc, _) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let mut peer = SfuPeer::new(
+            ParticipantId::next(),
+            RoomId::new("neighbourhood://test", "room"),
+            "did:key:target".to_string(),
+            rtc,
+            false,
+        );
+        let origin = ParticipantId::next();
+        let origin_mid = Mid::from("0");
+        for _ in 0..2 {
+            peer.deferred_tracks.push((
+                origin.clone(),
+                origin_mid,
+                MediaKind::Audio,
+                "did:key:origin".to_string(),
+            ));
+        }
+        let (_, mapping) = apply_deferred_tracks(&mut peer).expect("the track is offered");
+        assert_eq!(mapping.len(), 1, "{mapping:?}");
+        assert_eq!(peer.tracks_out.len(), 1);
     }
 
     /// Behind NAT the answer offers the bound socket and the public address

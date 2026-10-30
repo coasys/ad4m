@@ -30,8 +30,6 @@ import { wireRenegotiation, RenegotiationWire } from "../renegotiation.js";
 
 const ROOM_NAME = "f9-crash-cleanup";
 const NEIGHBOURHOOD = `windtunnel://f9`;
-const WS_BASE = 13200;
-const GOSSIP_BASE = 25200;
 const MAX_PER_NODE = 4;
 const PIPE_TIMEOUT_MS = 15_000;
 const TTL_WAIT_MS = 35_000;
@@ -58,8 +56,7 @@ export const f9CascadeNodeCrashCleanup: Scenario = {
       executorBin: ctx.executorPath!,
       nodeCount: 2,
       maxParticipantsPerNode: MAX_PER_NODE,
-      wsBasePort: WS_BASE,
-      gossipBasePort: GOSSIP_BASE,
+      workDir: ctx.tmpDirBase,
     });
     const [nodeA, nodeB] = cluster.nodes;
     metrics["nodeA_did"] = nodeA.did;

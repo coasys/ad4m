@@ -1,4 +1,9 @@
 //! Neighbourhood WS-native handlers.
+//!
+//! Every method that names a perspective declares `Guard::Owns` on it, as the
+//! `perspective.*` methods do: a user who learns another user's perspective uuid must not
+//! publish it (which adds the caller to its owners), signal or broadcast through it, or read
+//! who is in it.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -8,17 +13,30 @@ use ts_rs::TS;
 use crate::agent::capabilities::*;
 use crate::agent::{create_signed_expression, AgentContext};
 use crate::neighbourhoods::{self, install_neighbourhood_with_context};
-use crate::perspectives::get_perspective;
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
+use super::guards::{Guard, IdParam, Owner};
+use super::perspectives_ws::guarded_perspective;
 use super::types::*;
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
+use super::ws_handler::{HandlerMap, WsRpcError};
+
+// The neighbourhood capabilities name no perspective; the guard's rule adds the owner check.
+fn neighbourhood_create(_: Vec<String>) -> Capability {
+    NEIGHBOURHOOD_CREATE_CAPABILITY.clone()
+}
+fn neighbourhood_read(_: Vec<String>) -> Capability {
+    NEIGHBOURHOOD_READ_CAPABILITY.clone()
+}
+fn neighbourhood_update(_: Vec<String>) -> Capability {
+    NEIGHBOURHOOD_UPDATE_CAPABILITY.clone()
+}
+
+/// The perspective `neighbourhood.publish` shares: `perspectiveUuid` (or the older
+/// `perspectiveUUID`).
+const PUBLISHED_PERSPECTIVE: IdParam = IdParam::FirstOf(&["perspectiveUuid", "perspectiveUUID"]);
 
 async fn join_neighbourhood(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: JoinNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -34,15 +52,14 @@ async fn publish_neighbourhood(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    ctx.require(&NEIGHBOURHOOD_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+    // The perspective the guard checked.
+    let perspective_uuid = PUBLISHED_PERSPECTIVE.require(&params)?;
     let body: PublishNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_context = ctx.acts_as();
     let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
-        &body.perspective_uuid,
+        &perspective_uuid,
         body.link_language,
         body.meta,
         &agent_context,
@@ -97,16 +114,11 @@ fn build_signed_perspective(
 }
 
 async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let uuid = params.require_str("uuid")?;
     let body: BroadcastRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_context = ctx.acts_as();
-    let perspective_instance = get_perspective(&uuid)
-        .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
+    let perspective_instance = guarded_perspective(&params).await?;
 
     let signed_perspective =
         build_signed_perspective(&body.payload, body.signed.unwrap_or(true), &agent_context)?;
@@ -120,16 +132,11 @@ async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let uuid = params.require_str("uuid")?;
     let body: SignalRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_context = ctx.acts_as();
-    let perspective_instance = get_perspective(&uuid)
-        .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
+    let perspective_instance = guarded_perspective(&params).await?;
 
     let signed_perspective =
         build_signed_perspective(&body.payload, body.signed.unwrap_or(true), &agent_context)?;
@@ -143,16 +150,11 @@ async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let uuid = params.require_str("uuid")?;
     let body: SetOnlineStatusRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_context = ctx.acts_as();
-    let perspective_instance = get_perspective(&uuid)
-        .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
+    let perspective_instance = guarded_perspective(&params).await?;
 
     let signed_perspective =
         build_signed_perspective(&body.status, body.signed.unwrap_or(true), &agent_context)?;
@@ -169,39 +171,22 @@ async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 /// here, or `null`. Lets a client change part of its status without
 /// replacing the rest.
 async fn own_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let uuid = params.require_str("uuid")?;
-    let agent_context = ctx.acts_as();
-    let did = crate::agent::did_for_context(&agent_context)
+    let perspective = guarded_perspective(&params).await?;
+    let did = crate::agent::did_for_context(&ctx.acts_as())
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
     Ok(serde_json::to_value(
         perspective.online_status_of(&did).await,
     )?)
 }
 
-async fn has_telepresence(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let uuid = params.require_str("uuid")?;
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
-
+async fn has_telepresence(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let perspective = guarded_perspective(&params).await?;
     Ok(Value::Bool(perspective.has_telepresence_adapter().await))
 }
 
-async fn online_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let uuid = params.require_str("uuid")?;
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
+async fn online_agents(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let perspective = guarded_perspective(&params).await?;
 
     let agents = perspective
         .online_agents()
@@ -211,27 +196,11 @@ async fn online_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     Ok(serde_json::to_value(agents)?)
 }
 
+/// The other agents in the neighbourhood: every member but the caller's own agent.
 async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let uuid = params.require_str("uuid")?;
-    let agent_context = ctx.acts_as();
-    let current_user_did = crate::agent::did_for_context(&agent_context)
+    let perspective = guarded_perspective(&params).await?;
+    let current_user_did = crate::agent::did_for_context(&ctx.acts_as())
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let perspective = get_perspective(&uuid)
-        .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
-
-    let handle = perspective.persisted.lock().await.clone();
-
-    if let Some(owners) = &handle.owners {
-        if !owners.contains(&current_user_did) {
-            return Err(WsRpcError::forbidden(
-                "Access denied: You are not an owner of this neighbourhood perspective",
-            ));
-        }
-    }
 
     let all_dids = perspective
         .others()
@@ -247,36 +216,52 @@ async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
+    // The caller joins and publishes as itself (`ctx.acts_as()`).
     map.method::<JoinNeighbourhoodRequest, PerspectiveHandle>(
         "neighbourhood.join",
         join_neighbourhood,
     )
-    .long();
+    .long()
+    .guard(Guard::Cap(NEIGHBOURHOOD_READ_CAPABILITY.clone()));
+    // Publishing adds the caller to the perspective's owners, so it needs the perspective.
     map.method::<PublishNeighbourhoodRequest, String>(
         "neighbourhood.publish",
         publish_neighbourhood,
     )
-    .long();
-    map.method::<NeighbourhoodBroadcastParams, bool>("neighbourhood.sendBroadcast", send_broadcast);
-    map.method::<NeighbourhoodSignalParams, bool>("neighbourhood.sendSignal", send_signal);
+    .long()
+    .guard(Guard::Owns {
+        cap: neighbourhood_create,
+        id: PUBLISHED_PERSPECTIVE,
+        owner: Owner::Perspective,
+    });
+    // The perspective that holds the neighbourhood decides who may use it.
+    map.method::<NeighbourhoodBroadcastParams, bool>("neighbourhood.sendBroadcast", send_broadcast)
+        .guard(Guard::perspective(neighbourhood_update));
+    map.method::<NeighbourhoodSignalParams, bool>("neighbourhood.sendSignal", send_signal)
+        .guard(Guard::perspective(neighbourhood_update));
     map.method::<NeighbourhoodOnlineStatusParams, bool>(
         "neighbourhood.setOnlineStatus",
         set_online_status,
-    );
+    )
+    .guard(Guard::perspective(neighbourhood_update));
     map.method::<NeighbourhoodUuidParams, Option<PerspectiveExpression>>(
         "neighbourhood.ownOnlineStatus",
         own_online_status,
     )
-    .read();
+    .read()
+    .guard(Guard::perspective(neighbourhood_read));
     map.method::<NeighbourhoodUuidParams, bool>("neighbourhood.hasTelepresence", has_telepresence)
-        .read();
+        .read()
+        .guard(Guard::perspective(neighbourhood_read));
     map.method::<NeighbourhoodUuidParams, Vec<OnlineAgent>>(
         "neighbourhood.onlineAgents",
         online_agents,
     )
-    .read();
+    .read()
+    .guard(Guard::perspective(neighbourhood_read));
     map.method::<NeighbourhoodUuidParams, Vec<String>>("neighbourhood.otherAgents", other_agents)
-        .read();
+        .read()
+        .guard(Guard::perspective(neighbourhood_read));
 }
 
 // ── Contracts ──

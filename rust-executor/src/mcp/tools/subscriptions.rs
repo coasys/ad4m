@@ -1,12 +1,15 @@
 //! Subscription / waker query tools
 //!
-//! Tools for generating SPARQL queries for external waker processes.
+//! Tools for generating SPARQL and model queries for external waker processes.
 //! Queries are derived from SHACL class definitions when available,
 //! avoiding hardcoded type-specific predicates.
 
 use super::Ad4mMcpHandler;
 use crate::agent::AgentService;
 use crate::mcp::shacl;
+use crate::perspectives::model_query::builtin_classes::{
+    CONTAINER_URI, MENTIONING_URI, TEXT_CONTENT_URI,
+};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -43,8 +46,6 @@ pub struct SubscribeToModelParams {
 pub struct MentionWakerConfigParams {
     /// Perspective UUID of the neighbourhood to watch for mentions.
     pub perspective_id: String,
-    /// Override the agent name used in the query (defaults to profile username/given_name).
-    pub name_override: Option<String>,
 }
 
 // ============================================================================
@@ -52,11 +53,10 @@ pub struct MentionWakerConfigParams {
 // ============================================================================
 
 /// Escape a string for safe interpolation inside a double-quoted SPARQL
-/// string literal. Mention terms come from profile names / `name_override`
-/// — untrusted input, potentially attacker-controlled in a shared
-/// neighbourhood — so without this, a `"` or `\` breaks out of the literal
-/// and can inject arbitrary SPARQL into the mention-matching FILTER. Also
-/// escapes CR/LF/TAB, which SPARQL STRING_LITERAL2 forbids raw.
+/// string literal. `generate_waker_query`'s `target_value` is caller input,
+/// so without this a `"` or `\` breaks out of the literal and can inject
+/// SPARQL into the FILTER. Also escapes CR/LF/TAB, which SPARQL
+/// STRING_LITERAL2 forbids raw.
 fn escape_sparql_literal(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -89,14 +89,9 @@ fn validate_sparql_iri(s: &str) -> Result<&str, String> {
 impl Ad4mMcpHandler {
     /// Generate a waker query config for watching model changes in a perspective
     #[tool(
-        description = "Generate a SPARQL query config for watching changes to a subject class in a perspective. This does NOT create a live subscription — it returns a query and config that you pass to an external waker process. The waker uses perspective query subscriptions for live updates. Flow: 1) Call this tool to get the query config, 2) Store subscription_id + context in memory, 3) Add waker_config to the waker's config file and restart it, 4) When woken, use MCP tools to fetch the latest data. The query is derived from the SHACL class definition — no hardcoded type predicates."
+        description = "Generate a query config for watching changes in a perspective. This does NOT create a live subscription — it returns a query and config that you pass to an external waker process. The waker uses perspective query subscriptions for live updates. Flow: 1) Call this tool to get the query config, 2) Store subscription_id + context in memory, 3) Add waker_config to the waker's config file and restart it, 4) When woken, use MCP tools to fetch the latest data. With parent, the query is a model query over the built-in class in query_class (ad4m://Container): the parent's children, whatever their class and however the parent holds them; subscribe to it with a model subscription. Otherwise it is SPARQL derived from the SHACL class definition — no hardcoded type predicates."
     )]
     pub async fn generate_waker_query(&self, params: Parameters<SubscribeToModelParams>) -> String {
-        let _capabilities = match self.get_capabilities().await {
-            Ok(c) => c,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
         let p = &params.0;
 
         let perspective = match self.get_readable_perspective(&p.perspective_id).await {
@@ -104,16 +99,22 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
+        // Under a parent, the subscription is a model query over the built-in
+        // Container (#1446): that parent's row, whose `children` are
+        // everything it holds, through `has_child` or its class's own
+        // `children` relation. It changes when a child is added or removed.
+        let mut query_class: Option<&str> = None;
         let query = if let Some(ref parent) = p.parent {
-            // Scope to children of a specific parent
             let parent_encoded = Self::wrap_bare_as_literal(parent);
             if let Err(e) = validate_sparql_iri(&parent_encoded) {
                 return json!({"error": format!("Invalid parent: {}", e)}).to_string();
             }
-            format!(
-                "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?source) = \"{}\" && STR(?predicate) = \"ad4m://has_child\") }}",
-                parent_encoded
-            )
+            query_class = Some(CONTAINER_URI);
+            json!({
+                "where": { "id": parent_encoded },
+                "properties": ["children"],
+            })
+            .to_string()
         } else if let Some(ref predicate) = p.predicate {
             if let Err(e) = validate_sparql_iri(predicate) {
                 return json!({"error": format!("Invalid predicate: {}", e)}).to_string();
@@ -173,6 +174,7 @@ impl Ad4mMcpHandler {
             "predicate": p.predicate,
             "target_value": p.target_value,
             "query": query,
+            "query_class": query_class,
             "message": format!(
                 "Subscription {} created for {} changes{}.",
                 subscription_id,
@@ -185,16 +187,21 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Watches for any link whose target contains a mention term as a whole word, case-insensitively (\"data\" matches \"hi Data!\", not \"metadata\"), and skips links the agent authored itself. The waker plugin resolves parent channels in a second query when the subscription fires. Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent in a neighbourhood. It carries two model queries over built-in abstract classes, which the waker opens under one id, so a record both find wakes it once, through the query that reports it first. `mentionQuery` reads Mentioning (class ad4m://Mentioning, `{ mentions }`): every record whose `mentions` relation links the agent's DID, whatever the app calls its class, with text or without: a class takes part when it has a relation named `mentions`, or one aliased to `mentions`, under any predicate (the built-in's own is `ad4m://mentions`). `query` reads TextContent (class ad4m://TextContent, `{ text }`): every record whose text contains one of the agent's profile names (username, given_name, family_name) or its DID, case-insensitively, whatever the app calls its class or text property. Both match only through a link another agent wrote, whose signature verifies, so the agent's own reply naming it does not wake it; both are newest first. A mention link wakes the agent whatever the text says. The text query matches substrings: the waker keeps a record found through its text only when the text holds a returned term as a whole word (\"data\" matches \"hi Data!\", not \"metadata\"); HTML markup is ignored, and a mention chip's DID attribute counts. The rows carry each mention link's or text link's author, timestamp and signature verdict (`__links`), which the waker hands the woken agent. The waker opens both with perspective.modelSubscribe and, when one fires, resolves the parent channels of each mentioned record in a second query. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker."
     )]
     pub async fn get_mention_waker_config(
         &self,
         params: Parameters<MentionWakerConfigParams>,
     ) -> String {
-        let token = self.get_auth_token().await.unwrap_or_default();
+        if let Err(e) = self
+            .get_readable_perspective(&params.0.perspective_id)
+            .await
+        {
+            return e;
+        }
 
         // Resolve agent
-        let context = match self.agent_context_for(&token) {
+        let context = match self.get_agent_context().await {
             Ok(context) => context,
             Err(e) => return json!({"error": e}).to_string(),
         };
@@ -202,22 +209,12 @@ impl Ad4mMcpHandler {
             Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
-
         let did = agent.did.clone();
-
-        // Validate perspective
-        if let Err(e) = self
-            .get_readable_perspective(&params.0.perspective_id)
-            .await
-        {
-            return json!({"error": format!("Perspective not accessible: {}", e)}).to_string();
-        }
 
         // Collect all profile names from the agent's public perspective.
         // Note on profile ontology: sioc:// predicates are currently shared with Flux;
         // a dedicated ad4m-wide profile ontology should replace these in the future.
         let mut names: Vec<String> = Vec::new();
-
         if let Some(ref perspective) = agent.perspective {
             for link in &perspective.links {
                 if link.data.source == "flux://profile" {
@@ -235,59 +232,42 @@ impl Ad4mMcpHandler {
             }
         }
 
-        // Append name_override as an additional alias (does not replace profile names)
-        if let Some(ref override_name) = params.0.name_override {
-            if !override_name.is_empty() && !names.contains(override_name) {
-                names.push(override_name.clone());
-            }
-        }
-
         let perspective_id = &params.0.perspective_id;
-
-        // Discover the body property predicate from SHACL to scope the query.
-        // Without this, the query scans ALL links which is very slow on large perspectives.
-        let perspective = self
-            .get_readable_perspective(&params.0.perspective_id)
-            .await
-            .ok();
-        let body_predicate = if let Some(ref p) = perspective {
-            let props = shacl::load_class_properties(p, "Message").await;
-            props
-                .iter()
-                .find(|prop| prop.name.to_lowercase() == "body")
-                .and_then(|prop| prop.predicate.clone())
-                .filter(|p| validate_sparql_iri(p).is_ok())
-        } else {
-            None
-        };
-
-        if body_predicate.is_none() {
-            log::warn!("get_mention_waker_config: no body predicate found in SHACL for Message class, falling back to unscoped (but ontology-excluded) query");
-        }
-        let query = build_mention_query(&names, &did, body_predicate.as_deref());
-
+        let query = build_mention_query(&names, &did).to_string();
+        let mention_query = build_mentioning_query(&did).to_string();
+        let terms = mention_terms(&names, &did);
         let sub_id = build_mention_sub_id(perspective_id);
 
         let subscription = json!({
             "id": sub_id,
             "perspective": perspective_id,
+            "class": TEXT_CONTENT_URI,
             "query": query,
+            "terms": terms,
+            "did": did,
+            "mentionClass": MENTIONING_URI,
+            "mentionQuery": mention_query,
         });
 
         json!({
             "did": did,
             "names": names,
             "perspective_id": perspective_id,
+            "class": TEXT_CONTENT_URI,
             "query": query,
+            "mention_class": MENTIONING_URI,
+            "mention_query": mention_query,
+            "terms": terms,
             "subscription": subscription,
             "message": format!(
                 "Add the subscription entry to your waker config and restart the waker. \
-                 This single query watches for mentions of {} by {} in perspective {}.",
+                 It watches for Mentioning records whose `mentions` link {} and for {} in \
+                 TextContent text, in perspective {}.",
                 did,
                 if names.is_empty() {
-                    "DID only".to_string()
+                    "the DID".to_string()
                 } else {
-                    format!("name(s) [{}] or", names.join(", "))
+                    format!("name(s) [{}] or the DID", names.join(", "))
                 },
                 perspective_id
             ),
@@ -296,60 +276,95 @@ impl Ad4mMcpHandler {
     }
 }
 
-/// Build the SPARQL mention-detection query for the waker.
+/// How many of the newest mention candidates the subscription holds. The waker keeps
+/// the ids it has woken on and wakes only on new ones, so the window only has
+/// to cover the mentions that arrive between two of its results; it keeps
+/// what the executor re-sends on every change bounded however long the
+/// neighbourhood's history grows.
+pub const MENTION_WINDOW: usize = 50;
+
+/// The distinct mention terms, profile names first and the DID last.
 ///
-/// A term matches as a whole word, case-insensitively, in the parsed literal
-/// target: "Data" matches "hi Data!" and "@data", not "metadata". Each term is
-/// regex-escaped and wrapped in `(?:^|\W)…(?:\W|$)` rather than `\b…\b`, so a
-/// name that starts or ends with punctuation still matches. Oxigraph runs
-/// `REGEX` on the Rust `regex` crate, which is what `regex::escape` escapes for.
-/// `body_predicate` scopes the scan to the message-body predicate when SHACL
-/// resolves it (much faster on large perspectives).
+/// The waker gets them with the subscription (`terms`): the query below
+/// matches text by substring, and the waker keeps a record found only through
+/// its text when the text holds one of these as a whole word.
+pub fn mention_terms(names: &[String], did: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for term in names.iter().map(String::as_str).chain(std::iter::once(did)) {
+        if !term.is_empty() && !terms.iter().any(|t| t == term) {
+            terms.push(term.to_string());
+        }
+    }
+    terms
+}
+
+/// The model query that finds the agent named in text: every record whose
+/// `text` contains a profile name or the DID, in a link another agent wrote,
+/// newest first, at most [`MENTION_WINDOW`], over the built-in
+/// `TextContent { text }` (#1446), so every class with a text property takes
+/// part under whatever name it aliases to `text`. Mention links are the other
+/// query's ([`build_mentioning_query`]).
 ///
-/// Both the scoped and the unscoped-fallback query exclude `ad4m://ontology/*`
-/// predicates (author DID, timestamp, proofKey — see `sparql_store`). Without
-/// that exclusion the DID search term matches every link the agent itself
-/// authored (its own author-DID proof metadata), so the agent would wake on its
-/// own writes rather than on real mentions.
+/// Each branch carries `author: { not: did }`, a per-link author: a record
+/// matches only through a link someone else wrote. A reply that names its own
+/// author is not a mention of that author, and waking on it loops the bot
+/// (#1459).
 ///
-/// Links the agent authored itself never match either: a reply that names its
-/// own author is not a mention of that author, and waking on it loops the bot.
-///
-/// Search terms (profile names, DID) are interpolated into the query, so each is
-/// escaped as a SPARQL string literal — a name containing `"` or `\` would
-/// otherwise break out of the REGEX literal and could inject query syntax.
+/// `contains` compiles to a case-insensitive `CONTAINS` and matches
+/// substrings ("data" is in "metadata"); model query has no word match. So
+/// the rows carry `text`, and the waker keeps one only when its text holds a
+/// term as a whole word (`WakerSubscriptionManager`). `links: ["text"]`
+/// returns each row's text links with their author, timestamp and signature
+/// verdict (`__links`): the waker takes the mention's provenance from the
+/// newest verified one by another agent whose own text names the agent
+/// (#1576).
 ///
 /// Pure over its inputs, so it unit-tests without an agent or perspective.
-pub fn build_mention_query(names: &[String], did: &str, body_predicate: Option<&str>) -> String {
-    let mention_conditions: Vec<String> = names
+pub fn build_mention_query(names: &[String], did: &str) -> serde_json::Value {
+    let any_term: Vec<serde_json::Value> = mention_terms(names, did)
         .iter()
-        .map(String::as_str)
-        .chain(std::iter::once(did))
-        .map(|term| {
-            let pattern = format!(r"(?:^|\W){}(?:\W|$)", regex::escape(term));
-            format!(
-                "REGEX(STR(<ad4m://fn/parse_literal>(?target)), \"{}\", \"i\")",
-                escape_sparql_literal(&pattern)
-            )
-        })
+        .map(|term| json!({ "text": { "contains": term, "author": { "not": did } } }))
         .collect();
-    let mention_predicate = format!("({})", mention_conditions.join(" || "));
-    // Never match proof metadata, else the DID term self-matches authored links.
-    let ontology_guard = "FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))";
-    let own_writes_guard = format!(
-        "FILTER NOT EXISTS {{ ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> ; <ad4m://ontology/author> \"{}\" . }}",
-        escape_sparql_literal(did)
-    );
-    match body_predicate {
-        Some(pred) => format!(
-            "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\") {} FILTER({}) {} }}",
-            pred, ontology_guard, mention_predicate, own_writes_guard
-        ),
-        None => format!(
-            "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) {} FILTER({}) {} }}",
-            ontology_guard, mention_predicate, own_writes_guard
-        ),
-    }
+    json!({
+        "where": { "OR": any_term },
+        "order": { "timestamp": "DESC" },
+        "limit": MENTION_WINDOW,
+        "properties": ["text"],
+        "links": ["text"],
+    })
+}
+
+/// The model query that finds mention links to `did`: every record whose
+/// `mentions` relation links `did` in a link another agent wrote, newest
+/// first, at most [`MENTION_WINDOW`], over the built-in
+/// `Mentioning { mentions }`. Every class with a relation named or aliased
+/// `mentions` takes part, with text or without: WE puts a post's mention on
+/// the post's root, which has no text (#1557), and the root's
+/// `CollectionBlock` has `mentions` over `we://mention` like every WE block.
+/// A record no class describes is not read: a mention is a relation of a
+/// class.
+///
+/// `author: { not: did }` is a per-link author, as in the text query: a link
+/// the agent wrote itself is not a mention of it (#1459). The model query
+/// reads only links whose signature verified (`includeUnverified` is off), so
+/// a forged mention link, which may claim any author, matches nothing.
+///
+/// `links: ["mentions"]` returns each row's mention links with their author,
+/// timestamp and signature verdict (`__links`, from the links' reifiers,
+/// which no peer link can write, #1564): the waker hands the woken agent the
+/// newest verified one to its DID by another agent as the mention's
+/// provenance (#1563). A row wakes the agent whatever its text says (WE's
+/// chip label may run into the next word, "@Datai have…").
+///
+/// Pure over its input, so it unit-tests without an agent or perspective.
+pub fn build_mentioning_query(did: &str) -> serde_json::Value {
+    json!({
+        "where": { "mentions": { "eq": did, "author": { "not": did } } },
+        "order": { "timestamp": "DESC" },
+        "limit": MENTION_WINDOW,
+        "properties": ["mentions"],
+        "links": ["mentions"],
+    })
 }
 
 /// Build a mention-subscription id keyed on the perspective.
@@ -386,192 +401,69 @@ mod tests {
         assert_eq!(current.parent.as_deref(), Some("chan://2"));
     }
 
+    /// The text query over TextContent: one `contains` per distinct term
+    /// (names first, the DID last), each through a link the agent did not
+    /// write; newest first, bounded, with `text` for the waker's word check and
+    /// the text links for its provenance. Terms go in as they are: the store
+    /// compares case-insensitively, and a JSON value needs no escaping. The
+    /// store-backed behaviour (which records match) is in `instances/tests.rs`.
     #[test]
-    fn scoped_query_excludes_ontology_proof_metadata() {
+    fn mention_query_ors_a_text_contains_per_term() {
         let q = build_mention_query(
-            &["alice".to_string()],
+            &["Alice".into(), "a\"b".into(), "Alice".into(), "".into()],
             "did:key:zAgent",
-            Some("ad4m://message_body"),
         );
-        assert!(
-            q.contains("ad4m://message_body"),
-            "scoped to the body predicate"
-        );
-        assert!(
-            q.contains("FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))"),
-            "excludes ontology proof metadata"
-        );
-    }
-
-    #[test]
-    fn unscoped_fallback_still_excludes_ontology_proof_metadata() {
-        // Regression: the fallback (no body predicate) used to be fully unscoped,
-        // so the DID term matched the agent's own ad4m://ontology/author links.
-        let q = build_mention_query(&["alice".to_string()], "did:key:zAgent", None);
-        assert!(
-            q.contains("FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))"),
-            "fallback must still exclude proof metadata"
-        );
-    }
-
-    #[test]
-    fn query_matches_names_and_did_case_insensitively() {
-        let q = build_mention_query(
-            &["Alice".to_string(), "Bob".to_string()],
-            "did:key:zABC",
-            None,
-        );
-        assert!(q.contains("Alice"), "first name included");
-        assert!(q.contains("Bob"), "second name included");
-        assert!(q.contains("did:key:zABC"), "DID included");
+        let not_me = json!({ "not": "did:key:zAgent" });
         assert_eq!(
-            q.matches(", \"i\")").count(),
-            3,
-            "every term case-insensitive"
+            q,
+            json!({
+                "where": { "OR": [
+                    { "text": { "contains": "Alice", "author": not_me } },
+                    { "text": { "contains": "a\"b", "author": not_me } },
+                    { "text": { "contains": "did:key:zAgent", "author": not_me } },
+                ] },
+                "order": { "timestamp": "DESC" },
+                "limit": MENTION_WINDOW,
+                "properties": ["text"],
+                "links": ["text"],
+            })
         );
-        assert!(q.contains("parse_literal"), "decodes literal targets");
-    }
-
-    #[test]
-    fn query_escapes_quotes_and_backslashes_in_terms() {
-        // A term containing a double-quote or backslash must not break out of the
-        // REGEX string literal (SPARQL injection guard). `regex::escape` doubles
-        // the backslash, then the SPARQL literal escape doubles both again.
-        let q = build_mention_query(&["a\"b\\c".to_string()], "did:key:zX", None);
-        assert!(
-            q.contains("a\\\"b\\\\\\\\c"),
-            "quote + backslash escaped: {q}"
-        );
-        assert!(
-            !q.contains("\"a\"b"),
-            "raw unescaped quote must not appear: {q}"
-        );
-    }
-
-    #[test]
-    fn query_escapes_control_characters_in_terms() {
-        // SPARQL STRING_LITERAL2 forbids raw CR/LF/TAB; a term carrying them must
-        // be escaped, not embedded raw, or the query fails to parse.
-        let q = build_mention_query(&["a\nb\tc\rd".to_string()], "did:key:zX", None);
-        assert!(q.contains("a\\nb\\tc\\rd"), "control chars escaped: {q:?}");
-        assert!(!q.contains('\n'), "no raw newline in the query: {q:?}");
-        assert!(!q.contains('\t'), "no raw tab in the query: {q:?}");
-    }
-
-    /// Run the mention query against a real store holding one body link per
-    /// `(author, source, text)` and return the matched sources, sorted.
-    fn mention_matches(
-        did: &str,
-        names: &[&str],
-        bodies: &[(&crate::agent::signatures::TestSigner, &str, &str)],
-    ) -> Vec<String> {
-        use crate::perspectives::sparql_store::SparqlStore;
-        use crate::types::{Link, LinkExpression, LinkStatus};
-
-        let store = SparqlStore::new(None).unwrap();
-        for (signer, source, text) in bodies {
-            let data = Link {
-                source: source.to_string(),
-                predicate: Some("flux://body".to_string()),
-                target: format!("literal:string:{}", urlencoding::encode(text)),
-            };
-            let signed = signer.sign(data.normalize());
-            store
-                .add_link(&LinkExpression {
-                    author: signed.author,
-                    timestamp: signed.timestamp,
-                    data: signed.data,
-                    proof: signed.proof,
-                    status: Some(LinkStatus::Shared),
-                })
-                .unwrap();
-        }
-        let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-        let query = build_mention_query(&names, did, Some("flux://body"));
-        let rows: serde_json::Value =
-            serde_json::from_str(&store.query_arbitrary(&query).expect(&query)).unwrap();
-        let mut sources: Vec<String> = rows
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|row| row["source"].as_str().unwrap().to_string())
-            .collect();
-        sources.sort();
-        sources
-    }
-
-    #[test]
-    fn mention_query_matches_the_name_as_a_whole_word_only() {
-        // e2e 2026-10-15: "data" woke the bot named Data on "metadata".
-        let me = crate::agent::signatures::TestSigner::generate();
-        let other = crate::agent::signatures::TestSigner::generate();
-        let matched = mention_matches(
-            &me.did,
-            &["Data"],
-            &[
-                (&other, "ad4m://m1", "hi Data!"),
-                (&other, "ad4m://m2", "the metadata is stale"),
-                (&other, "ad4m://m3", "DATA, look"),
-                (&other, "ad4m://m4", "a database row"),
-                (&other, "ad4m://m5", "@data"),
-                (&other, "ad4m://m6", "data"),
-                (&other, "ad4m://m7", "Data's turn"),
-            ],
-        );
+        // It is a query the model query engine accepts.
+        let parsed: crate::perspectives::model_query::ModelQueryInput =
+            serde_json::from_value(q).expect("a model query");
+        assert_eq!(parsed.limit, Some(MENTION_WINDOW));
         assert_eq!(
-            matched,
-            vec![
-                "ad4m://m1",
-                "ad4m://m3",
-                "ad4m://m5",
-                "ad4m://m6",
-                "ad4m://m7"
-            ]
+            mention_terms(
+                &["Alice".into(), "".into(), "Alice".into()],
+                "did:key:zAgent"
+            ),
+            vec!["Alice".to_string(), "did:key:zAgent".to_string()]
         );
     }
 
+    /// The mention query over Mentioning: `mentions` linking the DID through a
+    /// link the agent did not write, newest first, bounded, with the mention
+    /// links for the waker's provenance. The store-backed behaviour is in
+    /// `instances/tests.rs`.
     #[test]
-    fn mention_query_treats_regex_characters_in_names_literally() {
-        let me = crate::agent::signatures::TestSigner::generate();
-        let other = crate::agent::signatures::TestSigner::generate();
-        let matched = mention_matches(
-            &me.did,
-            &["J.R. (bot)"],
-            &[
-                (&other, "ad4m://m1", "ask J.R. (bot) please"),
-                (&other, "ad4m://m2", "ask JxRx (bot) please"),
-            ],
+    fn mentioning_query_reads_mention_links_to_the_did_by_others() {
+        let q = build_mentioning_query("did:key:zAgent");
+        assert_eq!(
+            q,
+            json!({
+                "where": { "mentions": {
+                    "eq": "did:key:zAgent",
+                    "author": { "not": "did:key:zAgent" },
+                } },
+                "order": { "timestamp": "DESC" },
+                "limit": MENTION_WINDOW,
+                "properties": ["mentions"],
+                "links": ["mentions"],
+            })
         );
-        assert_eq!(matched, vec!["ad4m://m1"]);
-        // Quote and backslash survive both escapes and still match themselves.
-        let matched = mention_matches(
-            &me.did,
-            &["a\"b\\c"],
-            &[
-                (&other, "ad4m://m1", "hi a\"b\\c!"),
-                (&other, "ad4m://m2", "hi a\"bc!"),
-            ],
-        );
-        assert_eq!(matched, vec!["ad4m://m1"]);
-    }
-
-    #[test]
-    fn mention_query_skips_the_agents_own_writes() {
-        // e2e 2026-10-15: a bot's reply naming itself woke the bot again.
-        let me = crate::agent::signatures::TestSigner::generate();
-        let other = crate::agent::signatures::TestSigner::generate();
-        let did_mention = format!("cc {}", me.did);
-        let matched = mention_matches(
-            &me.did,
-            &["data"],
-            &[
-                (&me, "ad4m://mine", "Data here, on it"),
-                (&me, "ad4m://mine-did", &did_mention),
-                (&other, "ad4m://theirs", "data, can you look?"),
-                (&other, "ad4m://theirs-did", &did_mention),
-            ],
-        );
-        assert_eq!(matched, vec!["ad4m://theirs", "ad4m://theirs-did"]);
+        let parsed: crate::perspectives::model_query::ModelQueryInput =
+            serde_json::from_value(q).expect("a model query");
+        assert_eq!(parsed.limit, Some(MENTION_WINDOW));
     }
 
     #[test]
@@ -592,9 +484,9 @@ mod tests {
 
     #[test]
     fn test_escape_sparql_literal_neutralizes_quote_breakout() {
-        // A profile name / name_override containing a `"` must not be able
-        // to close the SPARQL string literal early and inject a second
-        // CONTAINS(...) clause (or worse) into the mention FILTER.
+        // A target value containing a `"` must not be able to close the
+        // SPARQL string literal early and inject a second CONTAINS(...)
+        // clause (or worse) into the FILTER.
         let malicious = r#"x") || CONTAINS(STR(?target), "leaked"#;
         let escaped = escape_sparql_literal(malicious);
 

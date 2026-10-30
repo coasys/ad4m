@@ -10,6 +10,11 @@ import { defineLanguage, agentCreateSignedExpression, hash } from "@coasys/ad4m-
 
 const PROXY_URL = "https://bootstrap-store-gateway.perspect3vism.workers.dev/";
 
+// A neighbourhood's address is the hash of its content, so the expression under
+// an address never changes: keep the ones written or read here, and answer a
+// repeat read without another round trip to the store.
+const expressions = new Map<string, any>();
+
 const language = defineLanguage({
     name: "neighbourhood-store",
     version: "0.1.0",
@@ -30,6 +35,8 @@ const language = defineLanguage({
             const neighbourhoodPostResult = await axiod.post(PROXY_URL, neighbourhoodPostData);
             if (neighbourhoodPostResult.status != 200) {
                 console.error("Upload neighbourhood data gets error: ", neighbourhoodPostResult);
+            } else {
+                expressions.set(address, expression);
             }
 
             return address;
@@ -37,6 +44,7 @@ const language = defineLanguage({
 
         async get(address: string): Promise<any> {
             const cid = address.toString();
+            if (expressions.has(cid)) return expressions.get(cid);
 
             let presignedUrl;
             try {
@@ -56,6 +64,8 @@ const language = defineLanguage({
                 return null;
             }
 
+            // Not there (yet): not kept, so the next read asks again.
+            if (neighbourhoodObject) expressions.set(cid, neighbourhoodObject);
             return neighbourhoodObject;
         },
     },

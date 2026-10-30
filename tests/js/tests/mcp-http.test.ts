@@ -9,6 +9,7 @@ import chaiAsPromised from "chai-as-promised";
 import { sleep, startExecutor, stopChildProcess } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
+import { createHash, generateKeyPairSync, sign as signBytes } from "node:crypto";
 import { EventSource } from 'eventsource';
 import { McpResponse, mcpHttpRequest, callMcpTool, listMcpTools, initializeMcp } from './mcp-utils';
 
@@ -137,6 +138,8 @@ const MESSAGE_SHACL = JSON.stringify({
             max_count: 1,
             writable: true,
             resolve_language: "literal",
+            // Flux's Message conforms to TextContent by naming `body` its `text`.
+            alias: { TextContent: "text" },
             setter: [
                 { action: "setSingleTarget", source: "this", predicate: "flux://body", target: "value", local: false }
             ]
@@ -147,6 +150,17 @@ const MESSAGE_SHACL = JSON.stringify({
         { action: "addLink", source: "this", predicate: "rdf://type", target: "flux://Message", local: false }
     ],
     destructor_actions: []
+});
+
+// A WE post's root as WE writes it: a CollectionBlock, with no text, whose
+// `mentions` relation (`we://mention`) links each agent the post mentions.
+// It conforms to the built-in Mentioning by name.
+const WE_POST_ROOT_SHACL = JSON.stringify({
+    target_class: "we://CollectionBlock",
+    properties: [
+        { path: "we://flag", name: "flag", has_value: "we://collection_block", min_count: 1, max_count: 1 },
+        { path: "we://mention", name: "mentions", node_kind: "IRI", relation_kind: "hasMany", collection: true },
+    ],
 });
 
 // WakerSubscriptionManager — the canonical implementation, exported from core.
@@ -1244,7 +1258,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             console.log("add_child result 1:", JSON.stringify(result));
             expect(result.success).to.be.true;
-            expect(result.link.predicate).to.equal("ad4m://has_child");
+            // A parent no class describes holds its children by ad4m://has_child.
+            expect(result.parent).to.be.a('string');
+            expect(result.child).to.be.a('string');
 
             result = await callMcpTool(MCP_BASE_URL,'add_child', {
                 perspective_id: perspectiveUuid,
@@ -1446,11 +1462,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     // 8. Waker Subscription Integration Tests
     //
     // Tests the full subscription pipeline:
-    //   get_mention_waker_config → SPARQL subscription → add message with
-    //   mention → verify subscription fires with correct result
+    //   get_mention_waker_config → a model subscription over TextContent → a
+    //   peer's message with a `we://mention` link to the agent, or naming it in
+    //   its text → verify the subscription fires
     // ========================================================================
 
-    describe("8. Waker Subscription (SPARQL Live Query)", function() {
+    describe("8. Waker Subscription (Live Query)", function() {
         // Uses WakerSubscriptionManager from @coasys/ad4m — the single
         // implementation; the OpenClaw plugin re-exports this same class.
         let wakerClient: Ad4mClient;
@@ -1460,20 +1477,46 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         // A peer in the neighbourhood. The mention query skips links the agent
         // authored itself, so a mention has to come from someone else.
         // addLinkExpression stores a link under the author it claims, the same
-        // way a synced link arrives from a neighbourhood.
-        const peerDid = "did:key:z6MkWakerTestPeer";
-        async function peerSays(perspectiveId: string, channel: string, text: string) {
+        // way a synced link arrives from a neighbourhood. The peer holds a real
+        // did:key and signs like the executor (sha256 over the link's JSON and
+        // the timestamp, Ed25519): the mention query reads verified links
+        // only, as it reads a real peer's synced links.
+        const peer = (function() {
+            const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+            const base58btc = function(bytes: Buffer) {
+                let n = BigInt("0x" + bytes.toString("hex"));
+                let out = "";
+                while (n > 0n) { out = B58[Number(n % 58n)] + out; n = n / 58n; }
+                for (const byte of bytes) { if (byte !== 0) break; out = "1" + out; }
+                return out;
+            };
+            const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+            const raw = publicKey.export({ format: "der", type: "spki" }).subarray(-32);
+            const did = "did:key:z" + base58btc(Buffer.concat([Buffer.from([0xed, 0x01]), raw]));
+            return {
+                did,
+                link(data: { source: string, predicate: string, target: string }) {
+                    const timestamp = new Date().toISOString();
+                    // Field order of the executor's `Link`: predicate, source, target.
+                    const signed = { predicate: data.predicate, source: data.source, target: data.target };
+                    const hash = createHash("sha256").update(JSON.stringify(signed)).update(timestamp).digest();
+                    const signature = signBytes(null, hash, privateKey).toString("hex");
+                    return { author: did, timestamp, data: signed, proof: { key: did + "#" + did.slice(8), signature } };
+                },
+            };
+        })();
+        // The peer posts `text` into `channel`, and, as WE does for a mention,
+        // links the message to each DID in `mentioning` with `we://mention`.
+        async function peerSays(perspectiveId: string, channel: string, text: string, mentioning: string[] = []) {
             const message = "flux://peer-message-" + Date.now() + "-" + Math.random();
-            const timestamp = new Date().toISOString();
-            const proof = { key: peerDid + "#key", signature: "not-a-real-signature" };
-            await wakerClient.perspective.addLinkExpression(perspectiveId, {
-                author: peerDid, timestamp, proof,
-                data: { source: channel, predicate: "ad4m://has_child", target: message },
-            } as any);
-            await wakerClient.perspective.addLinkExpression(perspectiveId, {
-                author: peerDid, timestamp, proof,
-                data: { source: message, predicate: "flux://body", target: Literal.from(text).toUrl() },
-            } as any);
+            await wakerClient.perspective.addLinkExpression(perspectiveId,
+                peer.link({ source: channel, predicate: "ad4m://has_child", target: message }) as any);
+            await wakerClient.perspective.addLinkExpression(perspectiveId,
+                peer.link({ source: message, predicate: "flux://body", target: Literal.from(text).toUrl() }) as any);
+            for (const did of mentioning) {
+                await wakerClient.perspective.addLinkExpression(perspectiveId,
+                    peer.link({ source: message, predicate: "we://mention", target: did }) as any);
+            }
             return message;
         }
 
@@ -1481,7 +1524,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Create a dedicated Ad4mClient for subscriptions (REST + SSE transport)
             wakerClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
 
-            // Set up a profile so get_mention_waker_config has names to search for
+            // The mention query matches the agent's profile names in text, so
+            // give it names (section 7 leaves the profile as "restored-user").
             await callMcpTool(MCP_BASE_URL, 'set_agent_profile', {
                 username: "wakerbot",
                 given_name: "WakerTest",
@@ -1516,24 +1560,35 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("Waker test channel:", wakerChannelAddr);
         });
 
-        it("should get mention waker config with SPARQL query", async function() {
+        it("should get mention waker config as two model queries, over TextContent's text and Mentioning's mentions", async function() {
             var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
                 perspective_id: wakerPerspectiveUuid,
             }, mcpSessionId);
             console.log("Mention waker config:", JSON.stringify(config, null, 2));
 
             expect(config.did).to.equal(agentDid);
-            expect(config.names).to.be.an('array');
+            expect(config.class).to.equal("ad4m://TextContent");
             expect(config.names).to.include("wakerbot");
             expect(config.names).to.include("WakerTest");
-            expect(config.query).to.be.a('string');
-            // Whole-word, case-insensitive match, never on the agent's own links
-            expect(config.query).to.include("REGEX");
-            expect(config.query).to.include('"i")');
-            expect(config.query).to.include("<ad4m://ontology/author> \"" + agentDid + "\"");
-            // Query uses SPARQL with FILTER for mention matching
-            expect(config.query).to.include("SELECT ?source ?predicate ?target WHERE");
-            console.log("SPARQL query:", config.query);
+            expect(config.terms).to.include("wakerbot");
+            expect(config.terms[config.terms.length - 1]).to.equal(agentDid);
+            var query = JSON.parse(config.query);
+            var notMe = { not: agentDid };
+            // The text, through a link someone else wrote.
+            expect(query.where.OR).to.deep.include({ text: { contains: "wakerbot", author: notMe } });
+            expect(query.links).to.deep.equal(["text"]);
+            // Mention links: Mentioning's `mentions` to the DID, through a link someone else wrote.
+            expect(config.mention_class).to.equal("ad4m://Mentioning");
+            var mentionQuery = JSON.parse(config.mention_query);
+            expect(mentionQuery.where).to.deep.equal({ mentions: { eq: agentDid, author: notMe } });
+            expect(mentionQuery.links).to.deep.equal(["mentions"]);
+            expect(config.subscription.class).to.equal(config.class);
+            expect(config.subscription.query).to.equal(config.query);
+            expect(config.subscription.terms).to.deep.equal(config.terms);
+            expect(config.subscription.did).to.equal(agentDid);
+            expect(config.subscription.mentionClass).to.equal(config.mention_class);
+            expect(config.subscription.mentionQuery).to.equal(config.mention_query);
+            console.log("Mention queries:", config.query, config.mention_query);
         });
 
         it("should create WakerSubscriptionManager and receive initial (empty) result via onWake", async function() {
@@ -1558,6 +1613,11 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: wakerPerspectiveUuid,
                 channel: "",
                 query: config.query,
+                className: config.class,
+                terms: config.terms,
+                did: config.did,
+                mentionClass: config.mention_class,
+                mentionQuery: config.mention_query,
             });
 
             // Wait for subscription to initialize — should NOT fire onWake for empty result
@@ -1596,12 +1656,17 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     perspective: wakerPerspectiveUuid,
                     channel: "",
                     query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
+                    mentionClass: config.mention_class,
+                    mentionQuery: config.mention_query,
                 }).catch(reject);
             });
 
             await sleep(2000);
 
-            var peerMessage = await peerSays(wakerPerspectiveUuid, wakerChannelAddr, "Hey @wakerbot, can you help with this?");
+            var peerMessage = await peerSays(wakerPerspectiveUuid, wakerChannelAddr, "Hey @wakerbot, can you help with this?", [agentDid]);
             console.log("Peer message created with mention:", peerMessage);
 
             var wake = await wakePromise;
@@ -1668,12 +1733,20 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: freshPerspId,
                 channel: "",
                 query: config.query,
+                className: config.class,
+                terms: config.terms,
+                did: config.did,
+                mentionClass: config.mention_class,
+                mentionQuery: config.mention_query,
             });
 
             await sleep(1000);
 
-            // "wakerbots" and "WakerTesting" contain the agent's names but do not name it.
+            // "wakerbots" and "WakerTesting" contain the agent's names but do not
+            // name it, and there is no mention link. Nor is a mention link to
+            // someone else a mention of the agent.
             await peerSays(freshPerspId, freshChannel, "Just a normal message about wakerbots and WakerTesting metadata.");
+            await peerSays(freshPerspId, freshChannel, "Hey @someonei", [peer.did]);
             console.log("Non-mention message created in fresh perspective");
 
             await sleep(5000);
@@ -1728,23 +1801,34 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: ownPerspId,
                 channel: "",
                 query: config.query,
+                className: config.class,
+                terms: config.terms,
+                did: config.did,
+                mentionClass: config.mention_class,
+                mentionQuery: config.mention_query,
             });
             await sleep(1000);
 
-            // A bot's reply that names itself (e2e 2026-10-15 woke the bot again).
+            // A bot's reply that names and mentions itself (e2e 2026-10-15 woke the
+            // bot again): its own message, with its own `we://mention` link to its DID.
             var createResult = await callMcpTool(MCP_BASE_URL, 'message_create', {
                 perspective_id: ownPerspId,
                 body: "wakerbot here: on it, " + agentDid,
                 parent: ownChannel,
             }, mcpSessionId);
             expect(createResult.created).to.be.true;
+            await wakerClient.perspective.addLink(ownPerspId, {
+                source: createResult.expression_address,
+                predicate: "we://mention",
+                target: agentDid,
+            } as any);
 
             await sleep(5000);
             manager.disposeAll();
             expect(wakeCount).to.equal(0, "onWake fired for the agent's own message");
         });
 
-        it("should fire onWake when mention uses agent DID", async function() {
+        it("should fire onWake on a mention link whatever name the text shows", async function() {
             this.timeout(30000);
 
             var didPerspResult = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
@@ -1761,6 +1845,11 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective_id: didPerspId,
                 class_name: "Message",
                 shacl_json: MESSAGE_SHACL,
+            }, mcpSessionId);
+            await callMcpTool(MCP_BASE_URL, 'add_model', {
+                perspective_id: didPerspId,
+                class_name: "CollectionBlock",
+                shacl_json: WE_POST_ROOT_SHACL,
             }, mcpSessionId);
 
             var didChannel = "flux://did-mention-channel-" + Date.now();
@@ -1784,10 +1873,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
                     QuerySubscriptionProxy,
                     debounceMs: 100,
-                    onWake: function(sub: any, result: any, parentChannel?: string) {
-                        console.log("  [DID mention] onWake fired! parentChannel:", parentChannel);
+                    onWake: function(sub: any, result: any, mentions?: any[]) {
+                        console.log("  [DID mention] onWake fired!", JSON.stringify(mentions));
                         clearTimeout(timeout);
-                        resolve({ sub, result, parentChannel });
+                        resolve({ sub, result, mentions });
                     },
                 });
 
@@ -1797,18 +1886,189 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     perspective: didPerspId,
                     channel: "",
                     query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
+                    mentionClass: config.mention_class,
+                    mentionQuery: config.mention_query,
                 }).catch(reject);
             });
 
             await sleep(2000);
 
-            await peerSays(didPerspId, didChannel, "Ping " + agentDid + " — please respond");
-            console.log("DID-mention message created");
+            // A WE post: its root, a CollectionBlock with no text, links the
+            // agent's DID with `we://mention`, its `mentions`; its text block
+            // labels the agent by a shortened DID, as WE does for a member
+            // without a profile.
+            var root = "we://post-" + Date.now();
+            await wakerClient.perspective.addLinkExpression(didPerspId,
+                peer.link({ source: didChannel, predicate: "ad4m://has_child", target: root }) as any);
+            await wakerClient.perspective.addLinkExpression(didPerspId,
+                peer.link({ source: root, predicate: "we://flag", target: "we://collection_block" }) as any);
+            await wakerClient.perspective.addLinkExpression(didPerspId,
+                peer.link({ source: root, predicate: "we://mention", target: agentDid }) as any);
+            await peerSays(didPerspId, root, "Ping @" + agentDid.slice(0, 12) + "… please respond");
+            console.log("Post with a mention on its root created");
 
             var wake = await wakePromise;
-            console.log("DID mention onWake fired!");
-            var resultArr = Array.isArray(wake.result) ? wake.result : [wake.result];
-            expect(resultArr.length).to.be.greaterThan(0);
+            expect(wake.mentions.map(function(m: any) { return [m.address, m.via, m.author]; }))
+                .to.deep.equal([[root, "mentions", peer.did]]);
+        });
+
+        // A record that names the agent in its text, with no mention link (a
+        // spoken line, an app that writes no link), wakes it on a whole word.
+        it("should fire onWake on a plain-text mention by name, with no mention link", async function() {
+            this.timeout(30000);
+
+            var textPerspResult = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
+                name: "Waker Text Mention Test",
+            }, mcpSessionId);
+            var textPerspId = textPerspResult.uuid;
+            await callMcpTool(MCP_BASE_URL, 'add_model', {
+                perspective_id: textPerspId,
+                class_name: "Message",
+                shacl_json: MESSAGE_SHACL,
+            }, mcpSessionId);
+            var textChannel = "flux://text-mention-channel-" + Date.now();
+
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: textPerspId,
+            }, mcpSessionId);
+
+            var manager: any;
+            var wakePromise = new Promise<any[]>(function(resolve, reject) {
+                var timeout = setTimeout(function() {
+                    reject(new Error("WakerSubscriptionManager did not fire onWake for a text mention within 15s"));
+                }, 15000);
+                manager = new WakerSubscriptionManager({
+                    perspectiveClient: wakerClient.perspective,
+                    logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                    QuerySubscriptionProxy,
+                    debounceMs: 100,
+                    onWake: function(_sub: any, _result: any, mentions?: any[]) {
+                        clearTimeout(timeout);
+                        resolve(mentions ?? []);
+                    },
+                });
+                manager.subscribe({
+                    id: "test-text-mention-" + Date.now(),
+                    type: "mention" as const,
+                    perspective: textPerspId,
+                    channel: "",
+                    query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
+                    mentionClass: config.mention_class,
+                    mentionQuery: config.mention_query,
+                }).catch(reject);
+            });
+
+            await sleep(2000);
+            var named = await peerSays(textPerspId, textChannel, "wakerbot, can you look at this?");
+
+            var mentions = await wakePromise;
+            manager.disposeAll();
+            expect(mentions.map(function(m: any) { return m.address; })).to.deep.equal([named]);
+            // The provenance is the text link's: the peer wrote it.
+            expect(mentions[0].author).to.equal(peer.did);
+            expect(mentions[0].verified).to.equal(true);
+            expect(mentions[0].via).to.equal("text");
+        });
+
+        // Test 11 (#1446): a mention under a message held by a We-style block.
+        // The block holds the message through its own `children` relation
+        // (`we://child`), not has_child; the waker reports it as a parent and
+        // the root above it as an ancestor.
+        it("should report the block holding a mention as its parent, and the chain above it", async function() {
+            this.timeout(30000);
+            await callMcpTool(MCP_BASE_URL, 'add_model', {
+                perspective_id: wakerPerspectiveUuid,
+                class_name: "Block",
+                shacl_json: JSON.stringify({
+                    target_class: "test://Block",
+                    properties: [
+                        { path: "test://block_kind", name: "kind", has_value: "test://block", min_count: 1, max_count: 1 },
+                        {
+                            path: "we://child", name: "blocks", node_kind: "IRI", relation_kind: "hasMany", collection: true,
+                            alias: { Container: "children" },
+                            adder: [{ action: "addLink", source: "this", predicate: "we://child", target: "value", local: false }],
+                            remover: [{ action: "removeLink", source: "this", predicate: "we://child", target: "value", local: false }],
+                        },
+                    ],
+                    constructor_actions: [
+                        { action: "addLink", source: "this", predicate: "test://block_kind", target: "test://block", local: false },
+                    ],
+                    destructor_actions: [],
+                }),
+            }, mcpSessionId);
+            var block = "test://block-" + Date.now();
+            var created = await callMcpTool(MCP_BASE_URL, 'instance_create', {
+                perspective_id: wakerPerspectiveUuid,
+                class_name: "Block",
+                base_uri: block,
+                properties: {},
+                parent: "ad4m://self",
+            }, mcpSessionId);
+            expect(created.created).to.be.true;
+
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: wakerPerspectiveUuid,
+            }, mcpSessionId);
+            var manager: any;
+            var mentions = await new Promise<any[]>(function(resolve, reject) {
+                var timeout = setTimeout(function() {
+                    reject(new Error("no wake for the mention under the block within 20s"));
+                }, 20000);
+                manager = new WakerSubscriptionManager({
+                    perspectiveClient: wakerClient.perspective,
+                    logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                    QuerySubscriptionProxy,
+                    debounceMs: 100,
+                    onWake: function(_sub: any, _result: any, found?: any[]) {
+                        var mine = (found ?? []).filter((m: any) => m.parents.includes(block));
+                        if (mine.length) {
+                            clearTimeout(timeout);
+                            resolve(mine);
+                        }
+                    },
+                });
+                manager.subscribe({
+                    id: "test-mention-block-" + Date.now(),
+                    type: "mention" as const,
+                    perspective: wakerPerspectiveUuid,
+                    channel: "",
+                    query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
+                    mentionClass: config.mention_class,
+                    mentionQuery: config.mention_query,
+                }).then(async function() {
+                    await sleep(1000);
+                    // The block files the message through its own relation, then a peer writes it.
+                    var message = "flux://block-held-message-" + Date.now();
+                    var added = await callMcpTool(MCP_BASE_URL, 'add_child', {
+                        perspective_id: wakerPerspectiveUuid,
+                        parent: block,
+                        child: message,
+                    }, mcpSessionId);
+                    expect(added.success).to.be.true;
+                    await wakerClient.perspective.addLinkExpression(wakerPerspectiveUuid,
+                        peer.link({ source: message, predicate: "flux://body", target: Literal.from("Hey @wakerbot, in the block").toUrl() }) as any);
+                    await wakerClient.perspective.addLinkExpression(wakerPerspectiveUuid,
+                        peer.link({ source: message, predicate: "we://mention", target: agentDid }) as any);
+                }).catch(reject);
+            });
+            manager.disposeAll();
+            console.log("Mention under a block:", JSON.stringify(mentions));
+            expect(mentions[0].parents).to.deep.equal([block]);
+            expect(mentions[0].ancestors).to.deep.equal(["ad4m://self"]);
+            var children = await callMcpTool(MCP_BASE_URL, 'get_children', {
+                perspective_id: wakerPerspectiveUuid,
+                parent: block,
+            }, mcpSessionId);
+            expect(children.children.map((c: any) => c.id)).to.include(mentions[0].address);
         });
 
         it("should generate_waker_query for channel children subscription", async function() {
@@ -1821,8 +2081,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             console.log("Channel waker query:", JSON.stringify(config, null, 2));
 
-            expect(config.query).to.be.a('string');
-            expect(config.query).to.include("ad4m://has_child");
+            // A model query over the built-in Container: the channel's row,
+            // whose children are everything it holds (#1446).
+            expect(config.query_class).to.equal("ad4m://Container");
+            expect(JSON.parse(config.query).where.id).to.equal(wakerChannelAddr);
             expect(config.subscription_id).to.be.a('string');
 
             // Use WakerSubscriptionManager to subscribe and verify it works
@@ -1843,21 +2105,24 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: wakerPerspectiveUuid,
                 channel: wakerChannelAddr,
                 query: config.query,
+                className: config.query_class,
             });
 
-            // The subscription should fire with existing children (from the mention test)
-            await sleep(3000);
-
+            await sleep(1000);
+            // A new child of any class under the channel wakes it.
+            initialWake = null;
+            var child = "test://new-child-" + Date.now();
+            var added = await callMcpTool(MCP_BASE_URL, 'add_child', {
+                perspective_id: wakerPerspectiveUuid,
+                parent: wakerChannelAddr,
+                child,
+            }, mcpSessionId);
+            expect(added.success).to.be.true;
+            for (var i = 0; i < 50 && !initialWake; i++) await sleep(100);
             manager.disposeAll();
-
-            // We added a mention message earlier, so there should be at least 1 child
-            if (initialWake) {
-                var resultArr = Array.isArray(initialWake) ? initialWake : [];
-                console.log("Channel subscription fired with", resultArr.length, "existing children");
-                expect(resultArr.length).to.be.greaterThanOrEqual(1);
-            } else {
-                console.log("Channel subscription did not fire — initial result may have been empty or unchanged");
-            }
+            expect(initialWake, "a new child wakes the children subscription").to.not.equal(null);
+            var row = (initialWake.instances ?? []).find((r: any) => r.id === wakerChannelAddr);
+            expect(row?.children ?? []).to.include(child);
         });
 
         // A subscription the executor refuses used to resolve silently, which
@@ -1877,6 +2142,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 onWake: function() { wakeCount++; },
             });
 
+            // A complete mention subscription, as get_mention_waker_config
+            // returns it, for a perspective the executor does not have: the
+            // executor refuses it, not the manager's own shape check.
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: wakerPerspectiveUuid,
+            }, mcpSessionId);
             var bogusId = "00000000-0000-0000-0000-000000000000";
             var subscriptionId = "test-stale-" + Date.now();
             var error: any = null;
@@ -1886,7 +2157,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     type: "mention" as const,
                     perspective: bogusId,
                     channel: "",
-                    query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
+                    query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
+                    mentionClass: config.mention_class,
+                    mentionQuery: config.mention_query,
                 });
             } catch (e) {
                 error = e;
@@ -1923,6 +2199,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 onWake: function() {},
             });
 
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: wakerPerspectiveUuid,
+            }, mcpSessionId);
             var bogusId = "00000000-0000-0000-0000-000000000000";
             try {
                 await manager.subscribe({
@@ -1930,7 +2209,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     type: "mention" as const,
                     perspective: bogusId,
                     channel: "",
-                    query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
+                    query: config.query,
+                    className: config.class,
+                    terms: config.terms,
+                    did: config.did,
+                    mentionClass: config.mention_class,
+                    mentionQuery: config.mention_query,
                 });
             } catch {
                 // Expected — subscribe should throw for non-existent perspective

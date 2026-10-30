@@ -5,7 +5,7 @@ use super::*;
 
 /// **Lal's attack, live-graph variant.** Alice proposes the final edge
 /// committing to [`TASK`], Bob co-signs, the edge settles — and Alice then
-/// deletes her `outputs_hash`/`output` links and re-signs new ones under the
+/// retracts her `outputs_hash`/`output` links and re-signs new ones under the
 /// same URI. On a random URI the fold re-read the proposal with the swapped
 /// commitment and both votes intact. The URI is a content address now, so
 /// the re-signed fields no longer address it: the proposal stops being an
@@ -51,9 +51,14 @@ async fn a_live_graph_outputs_swap_after_the_co_sign_uncounts_the_votes() {
         })
         .map(LinkExpression::from)
         .collect();
-    assert!(!stale.is_empty(), "the commitment links exist to remove");
+    assert!(!stale.is_empty(), "the commitment links exist to retract");
+    let tombstones = stale
+        .iter()
+        .map(crate::perspectives::monotonic::retraction_for)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("tombstones");
     f.perspective
-        .remove_links(stale, None)
+        .add_links(tombstones, LinkStatus::Shared, None, &f.ctx)
         .await
         .expect("retract the committed outputs");
     f.link(

@@ -20,6 +20,8 @@ import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "..
 import { AllInstancesResult } from "../model/types";
 import { LiveQuery, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
+import type { AgentMessage } from "../generated/api/AgentMessage";
+import type { AgentReply } from "../generated/api/AgentReply";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
 import { SHACLShape } from "../shacl/SHACLShape";
@@ -41,7 +43,7 @@ function extractNamespaceFromUri(uri: string): string {
 }
 
 
-/** A live SPARQL query with its latest result.
+/** A live SPARQL or model query with its latest result.
  *
  * `subscribe()` opens the query and resolves once the first result is in;
  * `onResult()` callbacks then get every later result. The executor sends
@@ -61,8 +63,14 @@ export class QuerySubscriptionProxy {
     #initResolve?: (value: boolean) => void;
     #initReject?: (reason?: any) => void;
 
-    constructor(uuid: string, query: string, client: PerspectiveClient) {
-        this.#live = new LiveQuery(client, uuid, () => client.subscribeQuery(uuid, query), result => this.#deliver(result));
+    /** With `className`, `query` is a model query (JSON) over that class or
+     *  union of classes, opened with `modelSubscribe`; results are
+     *  `{ instances, totalCount }`. Without it, `query` is SPARQL. */
+    constructor(uuid: string, query: string, client: PerspectiveClient, className?: string | string[]) {
+        const open = className === undefined
+            ? () => client.subscribeQuery(uuid, query)
+            : () => client.modelSubscribe(uuid, className, query);
+        this.#live = new LiveQuery(client, uuid, open, result => this.#deliver(result));
         this.#initialized = new Promise<boolean>((resolve, reject) => {
             this.#initResolve = resolve;
             this.#initReject = reject;
@@ -427,6 +435,24 @@ export class PerspectiveProxy {
             emitDebugEvents,
             options,
         )
+    }
+
+    /**
+     * Ask a model something about this perspective, or ask it to change something, with the
+     * executor's own tools — including the tools apps install for their records. It reads freely;
+     * it writes only with the tools named in `settings.writeTools`, as you. Answers with the
+     * model's final reply.
+     *
+     * @param messages the conversation so far, the person's request last
+     * @param settings `context` (what the person is looking at), `writeTools`, `model`, `maxToolCalls`
+     * @param options `signal` / `timeoutMs` (default {@link LONG_TIMEOUT_MS})
+     */
+    async runAgent(
+        messages: AgentMessage[],
+        settings?: Parameters<PerspectiveClient['runAgent']>[2],
+        options?: CallOptions,
+    ): Promise<AgentReply> {
+        return await this.#client.runAgent(this.#handle.uuid, messages, settings, options)
     }
 
     /**
@@ -827,6 +853,12 @@ export class PerspectiveProxy {
 
         /**
      * Adds a pre-signed LinkExpression to the perspective.
+     *
+     * The executor checks the signature against `link.author` and stores the
+     * verdict as `proof.valid`. If the same link (author, source, predicate,
+     * target and timestamp) is already stored with a signature that verifies,
+     * its stored proof is kept. The expression passed here is still returned
+     * and, when Shared, committed to the neighbourhood as given.
      * 
      * @param link - The signed LinkExpression to add
      * @param status - Whether the link should be shared

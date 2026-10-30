@@ -15,8 +15,11 @@
  * frames silently when the peer is unreachable, so the partition is
  * one-shot iptables and clean to revert.
  *
- * Requires `iptables` + passwordless `sudo`.  Skips gracefully when
- * unavailable.
+ * Requires `iptables` + passwordless `sudo`; shows as skipped without.
+ * The DROP rules sit in a chain of this run's own (see `dropTcpPorts`)
+ * and match only this cluster's gossip ports, which come from the OS,
+ * so a concurrent run on the same host is not partitioned.  The chain
+ * is removed in `finally`, and on process exit or SIGINT/SIGTERM.
  */
 
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";
@@ -28,7 +31,7 @@ import {
   registerClusterSfuMembers,
   ClusterPeerSession,
 } from "../users.js";
-import { iptablesPartitionAvailable, dropTcpPorts, clearPartition } from "../net.js";
+import { iptablesPartitionAvailable, dropTcpPorts, TcpPartition } from "../net.js";
 
 const ROOM_NAME = "f4-network-partition";
 const NEIGHBOURHOOD = `windtunnel://f4`;
@@ -39,28 +42,17 @@ export const f4NetworkPartition: Scenario = {
   name: "Cascade network partition",
   description: "2-node cluster, partition A↔B via iptables, verify no ghost cascade decisions",
 
+  unavailable() {
+    return iptablesPartitionAvailable() ? null : "iptables + passwordless sudo not available on this host";
+  },
+
   async run(ctx: ScenarioContext): Promise<ScenarioResult> {
     const { branch } = ctx;
     const startTime = Date.now();
     const samples: ScenarioResult["samples"] = [];
     const metrics: Record<string, unknown> = {};
 
-    if (!iptablesPartitionAvailable()) {
-      metrics["skipped"] = true;
-      metrics["skip_reason"] = "iptables + passwordless sudo not available on this host";
-      return {
-        scenario: "f4-network-partition",
-        branch,
-        startTime,
-        endTime: Date.now(),
-        durationMs: Date.now() - startTime,
-        passed: true,
-        metrics,
-        samples,
-        summary: `F4: SKIPPED — ${metrics["skip_reason"]}`,
-      };
-    }
-
+    let partition: TcpPartition | null = null;
     let cluster: Awaited<ReturnType<typeof startCluster>> | null = null;
     const peers: { peer: WebRtcPeer; node: CascadeNode; session: ClusterPeerSession }[] = [];
     let clusterSessions: ClusterPeerSession[] = [];
@@ -71,7 +63,7 @@ export const f4NetworkPartition: Scenario = {
         executorBin: ctx.executorPath!,
         nodeCount: 2,
         maxParticipantsPerNode: MAX_PER_NODE,
-        wsBasePort: 16600,
+        workDir: ctx.tmpDirBase,
       });
 
       const didToNode = new Map<string, CascadeNode>();
@@ -146,9 +138,9 @@ export const f4NetworkPartition: Scenario = {
       // each side's known-nodes view stops being refreshed by the
       // peer's announces.
       const partitionStart = Date.now();
-      const partitionOk = dropTcpPorts([nodeA.gossipPort, nodeB.gossipPort]);
-      metrics["partitionApplied"] = partitionOk;
-      if (!partitionOk) {
+      partition = dropTcpPorts([nodeA.gossipPort, nodeB.gossipPort]);
+      metrics["partitionApplied"] = partition !== null;
+      if (!partition) {
         throw new Error("F4 dropTcpPorts failed despite iptablesPartitionAvailable()");
       }
       // Wait for one announce-tick worth of TTL.
@@ -222,7 +214,7 @@ export const f4NetworkPartition: Scenario = {
         timestamp: Date.now(),
       });
     } finally {
-      clearPartition();
+      partition?.clear();
       for (const { peer, node, session } of peers) {
         try {
           await session.byNode.get(node.did)!.client.call("sfu.callLeave", {
