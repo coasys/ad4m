@@ -545,6 +545,12 @@ jobs:
           command: cd cli && cargo test --release
           no_output_timeout: 30m
       - run:
+          # The identity crates: one run per crate, because each tests its own feature set.
+          name: identity crates tests
+          command: |
+            cargo test --release -p ad4m-hash-chain --all-features
+          no_output_timeout: 30m
+      - run:
           # ad4m-ldk/rust is its own workspace, so the commands above skip it. Here
           # rather than in a separate job because rust-tests is a required check.
           name: ad4m-ldk (Rust) tests
