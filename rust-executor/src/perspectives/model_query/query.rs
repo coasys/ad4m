@@ -10,7 +10,9 @@ use super::containment::{contains_patterns, has_child_only, ContainmentEdge};
 use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
-use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
+use super::hydration::{
+    filter_properties, group_results_by_source, hydrate_instances, ALWAYS_KEPT,
+};
 use super::link_author::refuse_unanswerable_link_author;
 use super::links::{attach_links, resolve_link_keys};
 use super::projection::resolve_projections;
@@ -22,7 +24,7 @@ use super::sparql_builder::{
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
-    ScopeDirection, ShapeResolver, SortKey, SparqlPagination,
+    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::SparqlStore;
@@ -821,8 +823,18 @@ pub(super) async fn execute_model_query_inner(
         });
     }
 
-    // Apply transform expressions for resolveLanguage properties
-    resolve_language_transforms(&shape, &mut instances).await?;
+    // Apply transform expressions for resolveLanguage properties. A language-backed value is a
+    // fetch per row, so it is resolved only where it is needed, each once:
+    //   - what the filter and sort below read (`read_before_window`), for every row, here;
+    //   - what the query hands back (`returned`: every property when it names no `properties`)
+    //     and the filter and sort did not read, for the page only, after the window.
+    // A property in neither is never resolved: it keeps its hydrated value and is stripped.
+    let read_before_window = read_before_window(query_input);
+    let returned_keys = returned(query_input);
+    resolve_language_transforms(shape, &mut instances, |name| {
+        read_before_window.contains(name)
+    })
+    .await?;
 
     // Resolve reverse relations
     let reverse_rels: Vec<(String, String, bool)> = shape
@@ -936,6 +948,16 @@ pub(super) async fn execute_model_query_inner(
         }
     };
 
+    // The language-backed values the filter and sort did not read, for the page only, and of
+    // those only what the query hands back: the strip below drops the rest.
+    resolve_language_transforms(shape, &mut paginated, |name| {
+        !read_before_window.contains(name)
+            && returned_keys
+                .as_ref()
+                .is_none_or(|keep| keep.iter().any(|k| k == name))
+    })
+    .await?;
+
     // Evaluate property/relation getters (post-pagination)
     if !paginated.is_empty() {
         let deep_query = query_input.deep_query.unwrap_or(true);
@@ -968,15 +990,7 @@ pub(super) async fn execute_model_query_inner(
     }
 
     // Strip unrequested properties if specified
-    let mut final_instances: Vec<Value> = if let Some(ref requested) = query_input.properties {
-        let mut keep = requested.clone();
-        if let Some(ref inc) = query_input.include {
-            for rel_name in inc.keys() {
-                if !keep.contains(rel_name) {
-                    keep.push(rel_name.clone());
-                }
-            }
-        }
+    let mut final_instances: Vec<Value> = if let Some(keep) = returned_keys {
         paginated
             .into_iter()
             .map(|inst| filter_properties(inst, &keep))
@@ -1017,6 +1031,58 @@ pub(super) async fn execute_model_query_inner(
     })
 }
 
+/// The keys a query hands back of each instance, or `None` when it names no `properties` and so
+/// returns every one: the named properties, the `include` keys beside them, and [`ALWAYS_KEPT`] —
+/// exactly what [`filter_properties`] keeps.
+pub(super) fn returned(query: &ModelQueryInput) -> Option<Vec<String>> {
+    let requested = query.properties.as_ref()?;
+    let mut keep: Vec<String> = ALWAYS_KEPT.iter().map(|k| k.to_string()).collect();
+    let include_keys = query.include.iter().flat_map(|include| include.keys());
+    for name in requested.iter().chain(include_keys) {
+        if !keep.contains(name) {
+            keep.push(name.clone());
+        }
+    }
+    Some(keep)
+}
+
+/// Every property the `where` and the `order` name, read as [`matches_where`] and
+/// [`sort_instances`] read them: the values the post-hydration filter and sort need, so the ones a
+/// language holds are resolved before them. A name too many costs a fetch per row; a name missing
+/// would filter or sort on the undecoded value.
+fn read_before_window(query: &ModelQueryInput) -> HashSet<String> {
+    fn walk(clause: &BTreeMap<String, WhereCondition>, names: &mut HashSet<String>) {
+        for (name, condition) in clause {
+            match (name.as_str(), condition) {
+                ("OR" | "AND", WhereCondition::SubClauses(branches)) => {
+                    branches.iter().for_each(|branch| walk(branch, names))
+                }
+                ("NOT", _) => {
+                    if let Some(branch) = condition.as_not_clause() {
+                        walk(&branch, names);
+                    }
+                }
+                _ => {
+                    names.insert(name.clone());
+                }
+            }
+        }
+    }
+    let mut names: HashSet<String> = HashSet::new();
+    if let Some(clause) = &query.where_clause {
+        walk(clause, &mut names);
+    }
+    // A dotted sort key (`file.name`) reads a field of the decoded `file`.
+    names.extend(
+        query
+            .order
+            .iter()
+            .flatten()
+            .map(|(key, _)| key.split('.').next().unwrap_or(key).to_string()),
+    );
+    names
+}
+
 /// Apply transform expressions to expression-resolved properties.
 ///
 /// Properties whose values are stored as signed expression URIs (rather than
@@ -1027,9 +1093,14 @@ pub(super) async fn execute_model_query_inner(
 ///   - `Some(<addr>)`    → expression on that custom language.
 /// Values stored as deterministic `literal:` IRIs (i.e. `resolve_language ==
 /// None`) are left untouched by the per-value check below.
-async fn resolve_language_transforms(
+///
+/// Only the properties whose name `resolve` accepts are touched, so a pipeline
+/// can resolve what its filter reads before the filter and what it returns after
+/// its page, each once (see `execute_model_query_inner`).
+pub(super) async fn resolve_language_transforms(
     shape: &ModelShape,
     instances: &mut [Value],
+    resolve: impl Fn(&str) -> bool,
 ) -> Result<(), Error> {
     // Two kinds of properties need post-hydration work here:
     //   - expression-resolved properties (`resolve_language` set): fetch the
@@ -1041,6 +1112,10 @@ async fn resolve_language_transforms(
         .properties
         .iter()
         .filter(|p| !p.is_deterministic_literal() || p.transform.is_some())
+        // A reverse property holds the ids of the instances that point here,
+        // filled in between the two passes, not a value to resolve.
+        .filter(|p| p.direction.as_deref() != Some("reverse"))
+        .filter(|p| resolve(&p.name))
         .collect();
 
     if resolve_props.is_empty() {

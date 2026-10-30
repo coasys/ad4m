@@ -2,6 +2,7 @@ use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
+use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
 use super::update_perspective_with;
@@ -39,7 +40,7 @@ use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, PoisonError};
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::{sleep, Instant};
@@ -72,6 +73,9 @@ pub(crate) use subscriptions::result_json;
 mod subscription_triggers;
 // Registering this executor's owners with the link language.
 mod local_agents;
+// Committing a batch only if the links it expects still stand.
+mod expected_links;
+pub use expected_links::{ExpectedLinks, LinksChanged};
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -620,16 +624,29 @@ pub struct PerspectiveInstance {
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
+    /// Held by `commit` from its pending-queue check until the diff is sent or
+    /// queued, so a diff that fails after a slow language call is queued ahead
+    /// of every diff committed after it.
+    commit_order: Arc<Mutex<()>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
     batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
     pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
+    /// Held by every write to `sparql_store` ([`Self::persist_link_diff`]), and by
+    /// [`Self::commit_batch_if`] from checking what it expects through its write, so no other
+    /// write lands in between. A std mutex: held for store calls, never across an await.
+    pub(super) persist_lock: Arc<std::sync::Mutex<()>>,
     /// In-memory cache of parsed `ModelShape` instances keyed by class name.
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// Receipt verdicts this perspective has already taken, keyed by
+    /// `(receipt URI, flow DNA hash)` so a DNA change can never be served a
+    /// stale answer — see `flow_instance::verify::memo` (#1177).
+    pub(crate) receipt_verdict_memo:
+        Arc<crate::perspectives::flow_instance::verify::memo::VerdictMemo>,
     /// The abstract classes and aliases installed here, and the classes each
     /// abstract class reads (#1435). Derived from every class's shape, so
     /// dropped whenever any shape is (see `forget_derived_shapes`).
@@ -658,6 +675,11 @@ pub struct PerspectiveInstance {
     /// nothing behind.
     #[cfg(test)]
     fail_add_link_after: Arc<AtomicI64>,
+    /// Test-only hook run once by [`Self::diff_from_link_language`] after
+    /// its ingest filter and before the store write, so a test can land a
+    /// concurrent local write in that gap deterministically (#1146).
+    #[cfg(test)]
+    pub(crate) ingest_gap_hook: Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
     /// Test-only: makes the next [`Self::commit_batch`] fail, dropping the
     /// batch as a real failure does. Compiled out in non-test builds — see
     /// [`Self::fail_next_commit_batch`].
@@ -722,6 +744,7 @@ impl PerspectiveInstance {
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
+            commit_order: Arc::new(Mutex::new(())),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
@@ -730,12 +753,16 @@ impl PerspectiveInstance {
                 crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
+            persist_lock: Arc::new(std::sync::Mutex::new(())),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            receipt_verdict_memo: Arc::new(Default::default()),
             abstract_cache: Arc::new(std::sync::RwLock::new(Default::default())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             flow_pass_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
+            #[cfg(test)]
+            ingest_gap_hook: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             fail_next_commit: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
@@ -1619,6 +1646,14 @@ impl PerspectiveInstance {
             return Ok(());
         }
 
+        // One commit at a time decides "send now or queue". Without this, a
+        // diff committed while a slow language call is in flight is queued
+        // (or sent) first, and if that call then fails, its diff is queued
+        // behind the newer one: peers see the newer diff first. The
+        // immediate-commit counter has its own short lock, so
+        // set_immediate_commits never waits for a language call.
+        let _commit_order = self.commit_order.lock().await;
+
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
         let (_, pending_ids) =
             Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
@@ -1658,9 +1693,20 @@ impl PerspectiveInstance {
                 // error path below queues the diff. Legacy languages that
                 // implement perspective-sync still behave correctly because
                 // they throw from commit() when not synced.
-                let mut immediate_commits_remaining = self.immediate_commits_remaining.lock().await;
-                if *immediate_commits_remaining > 0 {
-                    *immediate_commits_remaining -= 1;
+                // Take the slot and release the counter lock before the
+                // language call: a slow commit must not hold up
+                // set_immediate_commits.
+                let immediate = {
+                    let mut immediate_commits_remaining =
+                        self.immediate_commits_remaining.lock().await;
+                    if *immediate_commits_remaining > 0 {
+                        *immediate_commits_remaining -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if immediate {
                     link_language.commit(diff.clone()).await
                 } else {
                     Err(anyhow!("Debouncing commit burst"))
@@ -1747,7 +1793,9 @@ impl PerspectiveInstance {
 
         let mut seen_rem: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut unique_removals: Vec<LinkExpression> = Vec::new();
-        for link in diff.removals.iter() {
+        // A peer's removal never ends a monotonic link (#1176); dropped here
+        // rather than in `persist_link_diff`, whose local callers get an error.
+        for link in drop_monotonic_removals(diff.removals).iter() {
             let key_tuple = (
                 &link.author,
                 &link.timestamp,
@@ -1764,6 +1812,13 @@ impl PerspectiveInstance {
             }
         }
 
+        super::ingest::retain_ingestible(&mut unique_additions);
+
+        #[cfg(test)]
+        if let Some(hook) = self.ingest_gap_hook.lock().unwrap().take() {
+            hook();
+        }
+
         // Links arriving from the link language are shared by definition, but
         // the wire form usually carries `status: None`. Assign it explicitly
         // here — the store refuses status-less inserts rather than defaulting.
@@ -1776,21 +1831,26 @@ impl PerspectiveInstance {
                     l
                 })
                 .collect(),
-            removals: unique_removals.clone(),
-        };
-        let decorated_diff = DecoratedPerspectiveDiff {
-            additions: unique_additions
-                .iter()
-                .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
-                .collect(),
-            removals: unique_removals
-                .iter()
-                .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
-                .collect(),
+            removals: unique_removals,
         };
 
-        // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&store_diff).await?;
+        // Write to SPARQL store (primary storage for links). Only what was
+        // applied is decorated and published, with what the diff's
+        // tombstones did folded in.
+        let (applied, effects) = self.persist_remote_diff(store_diff)?;
+        let mut decorated_diff = DecoratedPerspectiveDiff {
+            additions: applied
+                .additions
+                .into_iter()
+                .map(|link| DecoratedLinkExpression::from((link, LinkStatus::Shared)))
+                .collect(),
+            removals: applied
+                .removals
+                .into_iter()
+                .map(|link| DecoratedLinkExpression::from((link, LinkStatus::Shared)))
+                .collect(),
+        };
+        effects.fold_into(&mut decorated_diff);
 
         // If any of the inbound links change a class's SHACL definition,
         // drop that entry from the in-memory shape cache so the next
@@ -1890,6 +1950,7 @@ impl PerspectiveInstance {
 
             let link_from_db = LinkExpression::from(decorated_link.clone());
             let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
+            refuse_monotonic_removal(&link_from_db, &status)?;
 
             diff.removals.push(link_from_db.clone());
             Ok(DecoratedLinkExpression::from((link_from_db, status)))
@@ -1906,6 +1967,7 @@ impl PerspectiveInstance {
             )? {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
+                refuse_monotonic_removal(&link_from_db, &status)?;
 
                 let diff = PerspectiveDiff::from_removals(vec![link_from_db.clone()]);
                 let decorated_link_result =
@@ -2020,11 +2082,13 @@ impl PerspectiveInstance {
         let diff = PerspectiveDiff::from_additions(vec![stored]);
         let decorated_link_expression =
             DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
-        let decorated_perspective_diff =
+        let mut decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&diff).await?;
+        self.persist_link_diff(&diff)
+            .await?
+            .fold_into(&mut decorated_perspective_diff);
 
         // Queue the Prolog fact update and the notification + live-query checks
         self.update_prolog_engines(decorated_perspective_diff.clone())
@@ -2090,11 +2154,13 @@ impl PerspectiveInstance {
                     })
                     .collect(),
             );
-            let decorated_perspective_diff =
+            let mut decorated_perspective_diff =
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
             // Write to SPARQL store (primary storage for links)
-            self.persist_link_diff(&perspective_diff).await?;
+            self.persist_link_diff(&perspective_diff)
+                .await?
+                .fold_into(&mut decorated_perspective_diff);
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(&decorated_perspective_diff).await;
@@ -2166,6 +2232,11 @@ impl PerspectiveInstance {
                     &link.author,
                     &link.timestamp,
                 )?;
+                if stored.is_none() {
+                    // Not held, so dropped below; under a monotonic predicate
+                    // the call's status decides, and Shared is refused (#1176).
+                    refuse_monotonic_removal(&link, &status)?;
+                }
                 Ok(stored.map(|stored| {
                     let link_status = stored.status.clone().unwrap_or(LinkStatus::Local);
                     let mut stored = LinkExpression::from(stored);
@@ -2177,6 +2248,12 @@ impl PerspectiveInstance {
             .into_iter()
             .flatten()
             .collect();
+        // A held link's stored status decides (#1176): a Shared monotonic
+        // link ends only as its `monotonic` table entry allows, never by a
+        // removal.
+        for link in &removals {
+            refuse_monotonic_removal(link, link.status.as_ref().unwrap_or(&LinkStatus::Local))?;
+        }
         let additions: Vec<LinkExpression> = additions
             .into_iter()
             .map(|mut l| {
@@ -2190,13 +2267,15 @@ impl PerspectiveInstance {
             let link_status = l.status.clone().unwrap_or(LinkStatus::Local);
             DecoratedLinkExpression::from((l, link_status))
         };
-        let decorated_diff = DecoratedPerspectiveDiff {
+        let mut decorated_diff = DecoratedPerspectiveDiff {
             additions: additions.into_iter().map(decorated).collect(),
             removals: removals.into_iter().map(decorated).collect(),
         };
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&store_diff).await?;
+        self.persist_link_diff(&store_diff)
+            .await?
+            .fold_into(&mut decorated_diff);
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(&decorated_diff).await;
@@ -2211,7 +2290,7 @@ impl PerspectiveInstance {
         let shared_diff =
             PerspectiveDiff::from(shared(&store_diff.additions), shared(&store_diff.removals));
         if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
-            self.spawn_commit_and_handle_error(&shared_diff);
+            self.spawn_commit_and_handle_error(&committable(&shared_diff));
             // Reset fallback sync interval when new shared links are added
             self.reset_fallback_sync_interval().await;
         }
@@ -2263,7 +2342,7 @@ impl PerspectiveInstance {
             &old_link.timestamp,
         )?;
 
-        let (_link, link_status) = match decorated_link_option {
+        let (link, link_status) = match decorated_link_option {
             Some(decorated) => {
                 let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
                 (LinkExpression::from(decorated), status)
@@ -2281,6 +2360,8 @@ impl PerspectiveInstance {
                 )))
             }
         };
+        // The old link is a removal.
+        refuse_monotonic_removal(&link, &link_status)?;
 
         check_consensus_rule_links([&new_link])?;
         let new_link_expression =
@@ -2293,7 +2374,11 @@ impl PerspectiveInstance {
                 .ok_or(anyhow!("Batch not found"))?;
             let diff = &mut batch.diff;
 
-            diff.removals.push(old_link.clone());
+            // Queue the stored link with its stored status: the caller's
+            // `old_link` may carry none, which the commit reads as Shared.
+            let mut stored_old = link.clone();
+            stored_old.status = Some(link_status.clone());
+            diff.removals.push(stored_old);
             let mut new_link_expr = new_link_expression.clone();
             new_link_expr.status = Some(link_status.clone());
             diff.additions.push(new_link_expr.clone());
@@ -2302,20 +2387,22 @@ impl PerspectiveInstance {
         } else {
             let mut stored_new = new_link_expression.clone();
             stored_new.status = Some(link_status.clone());
-            let mut stored_old = old_link.clone();
+            let mut stored_old = link.clone();
             stored_old.status = Some(link_status.clone());
             let diff = PerspectiveDiff::from(vec![stored_new], vec![stored_old]);
             let decorated_new_link_expression =
                 DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
             let decorated_old_link =
                 DecoratedLinkExpression::from((old_link.clone(), link_status.clone()));
-            let decorated_diff = DecoratedPerspectiveDiff::from(
+            let mut decorated_diff = DecoratedPerspectiveDiff::from(
                 vec![decorated_new_link_expression.clone()],
                 vec![decorated_old_link.clone()],
             );
 
             // Write to SPARQL store (primary storage for links)
-            self.persist_link_diff(&diff).await?;
+            self.persist_link_diff(&diff)
+                .await?
+                .fold_into(&mut decorated_diff);
 
             // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -2382,6 +2469,10 @@ impl PerspectiveInstance {
         // Skip if no links found
         if existing_links.is_empty() {
             return Ok(Vec::new());
+        }
+        // All or nothing: one refused link fails the whole call.
+        for (link, status) in &existing_links {
+            refuse_monotonic_removal(link, status)?;
         }
 
         if let Some(batch_id) = batch_id {
@@ -4140,7 +4231,25 @@ impl PerspectiveInstance {
         })
     }
 
-    pub(crate) async fn persist_link_diff(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
+    /// Returns what `ad4m://retracted` tombstones did on the way in
+    /// (`monotonic::RetractionEffects`); callers that publish the diff fold
+    /// it in so subscribers see what the store holds.
+    pub(crate) async fn persist_link_diff(
+        &self,
+        diff: &PerspectiveDiff,
+    ) -> Result<super::monotonic::RetractionEffects, AnyError> {
+        let _persisting = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.write_link_diff(diff)
+    }
+
+    /// The store write of [`Self::persist_link_diff`], for a caller that holds `persist_lock`.
+    fn write_link_diff(
+        &self,
+        diff: &PerspectiveDiff,
+    ) -> Result<super::monotonic::RetractionEffects, AnyError> {
         // IMPORTANT: Process removals BEFORE additions!
         // The remove_link function matches by source/predicate/target (not unique ID).
         // If we add first and remove second, we'd delete the newly added links too.
@@ -4150,14 +4259,17 @@ impl PerspectiveInstance {
         // and computes the verdict itself. Callers decorate *after* persist for
         // pubsub/prolog, rather than decorating and converting back here.
 
+        let effects = self.retraction_effects(&diff.additions)?;
+        let retracted = effects.retracted.iter().cloned().map(LinkExpression::from);
+
         // Removals first
-        for removal in &diff.removals {
-            if let Err(e) = self.sparql_store.remove_link(removal) {
+        for removal in diff.removals.iter().cloned().chain(retracted) {
+            if let Err(e) = self.sparql_store.remove_link(&removal) {
                 log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
-        for addition in &diff.additions {
+        for addition in diff.additions.iter().filter(|a| !effects.covers(a)) {
             if let Err(e) = self.sparql_store.add_link(addition) {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
@@ -4179,7 +4291,7 @@ impl PerspectiveInstance {
         // configuration (smaller write_buffer_size, more memtables) or a
         // throttled background flush, not a per-write fsync.
 
-        Ok(())
+        Ok(effects)
     }
 
     /// Record the links of a diff into `changed_predicates`. A link without a
@@ -6625,135 +6737,7 @@ impl PerspectiveInstance {
         batch_uuid: String,
         context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
-        //let commit_start = std::time::Instant::now();
-        //log::info!("🔄 BATCH COMMIT: Starting batch commit for batch_uuid: {}", batch_uuid);
-        //let batch_retrieval_start = std::time::Instant::now();
-
-        // Get the diff without holding lock during the entire operation
-        let diff = {
-            let mut batch_store = self.batch_store.write().await;
-
-            match batch_store.remove(&batch_uuid) {
-                Some(batch) => batch.diff,
-                None => return Err(anyhow!("No batch found with given UUID")),
-            }
-        };
-        #[cfg(test)]
-        if self.fail_next_commit.swap(false, Ordering::SeqCst) {
-            drop(diff);
-            return Err(anyhow!("injected fault (test seam): commit_batch failed"));
-        }
-
-        //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
-        //    batch_retrieval_start.elapsed(), diff.additions.len(), diff.removals.len());
-
-        //let processing_start = std::time::Instant::now();
-        let mut shared_diff = DecoratedPerspectiveDiff {
-            additions: Vec::new(),
-            removals: Vec::new(),
-        };
-        let mut local_diff = DecoratedPerspectiveDiff {
-            additions: Vec::new(),
-            removals: Vec::new(),
-        };
-
-        let mut persist_diff = PerspectiveDiff::empty();
-
-        // Process additions
-        for link in diff.additions {
-            let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr = create_signed_expression(link.data.normalize(), context)?;
-            let mut stored = LinkExpression::from(signed_expr);
-            stored.status = Some(status.clone());
-            persist_diff.additions.push(stored.clone());
-            let decorated = DecoratedLinkExpression::from((stored, status.clone()));
-
-            match status {
-                LinkStatus::Shared => shared_diff.additions.push(decorated),
-                LinkStatus::Local => local_diff.additions.push(decorated),
-            }
-        }
-
-        // Process removals
-        for link in diff.removals {
-            let status = link.status.clone().unwrap_or(LinkStatus::Shared);
-            persist_diff.removals.push(link.clone());
-            let decorated = DecoratedLinkExpression::from((link, status.clone()));
-            match status {
-                LinkStatus::Shared => shared_diff.removals.push(decorated),
-                LinkStatus::Local => local_diff.removals.push(decorated),
-            }
-        }
-
-        //log::info!("🔄 BATCH COMMIT: Link processing took {:?} - shared: {} add/{} rem, local: {} add/{} rem",
-        //    processing_start.elapsed(),
-        //    shared_diff.additions.len(), shared_diff.removals.len(),
-        //    local_diff.additions.len(), local_diff.removals.len());
-
-        // Apply shared changes
-        if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
-            //let db_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting DB operations for shared changes");
-
-            // Commit to link language (SPARQL store will be updated later via persist_link_diff)
-            if self.has_link_language().await {
-                //let link_lang_start = std::time::Instant::now();
-                //log::info!("🔄 BATCH COMMIT: Starting link language commit");
-
-                let perspective_diff = PerspectiveDiff {
-                    additions: shared_diff
-                        .additions
-                        .iter()
-                        .map(|l| l.clone().into())
-                        .collect(),
-                    removals: shared_diff
-                        .removals
-                        .iter()
-                        .map(|l| l.clone().into())
-                        .collect(),
-                };
-                self.spawn_commit_and_handle_error(&perspective_diff);
-
-                //log::info!("🔄 BATCH COMMIT: Link language commit spawned in {:?}", link_lang_start.elapsed());
-            }
-        }
-
-        // Create combined diff for prolog update, SPARQL store update, and return value
-        let combined_diff = DecoratedPerspectiveDiff {
-            additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
-            removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
-        };
-
-        // Only update storage / subscription engines when there are changes.
-        // The SPARQL store must be updated first so any subscription re-checks
-        // triggered by update_prolog_engines() see the committed batch state.
-        if !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty() {
-            //let prolog_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting DB + prolog updates - {} add, {} rem",
-            //    combined_diff.additions.len(), combined_diff.removals.len());
-
-            self.persist_link_diff(&persist_diff).await?;
-
-            // Queue the Prolog fact update and the notification + live-query checks
-            self.update_prolog_engines(combined_diff.clone()).await;
-
-            // Publish link-added/-removed/-updated to WS subscribers.
-            // The single-mutation paths (add_link / link_mutations /
-            // diff_from_link_language) publish their diff synchronously before
-            // spawning the prolog update, and spawn_prolog_facts_update
-            // deliberately skips publishing to avoid double-delivery on those
-            // paths. commit_batch never went through that publish step, so
-            // batched diffs were never reaching WS subscribers — that's what
-            // this call restores.
-            self.pubsub_publish_diff(&combined_diff).await;
-
-            //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
-        }
-
-        //log::info!("🔄 BATCH COMMIT: Total batch commit took {:?}", commit_start.elapsed());
-
-        // Return combined diff
-        Ok(combined_diff)
+        self.commit_batch_if(batch_uuid, context, &[]).await
     }
 }
 
@@ -7990,6 +7974,90 @@ mod tests {
 
         let links_after = perspective.get_links(&query).await.unwrap();
         assert_eq!(links_after.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn commit_batch_if_writes_nothing_once_an_expected_link_changed() {
+        let mut perspective = setup().await;
+        let ctx = AgentContext::main_agent();
+        let link = |predicate: &str, target: &str| Link {
+            source: "test://record".to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        };
+        let body = |perspective: &PerspectiveInstance| {
+            perspective
+                .sparql_store
+                .query_links(
+                    Some("test://record"),
+                    Some("test://body"),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .len()
+        };
+        perspective
+            .add_link(
+                link("test://version", "test://v1"),
+                LinkStatus::Shared,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        // Another write lands between taking the expectation and committing.
+        let expected = perspective
+            .expect_links("test://record", "test://version")
+            .unwrap();
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .add_link(
+                link("test://body", "test://from-batch"),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        perspective
+            .add_link(
+                link("test://version", "test://v2"),
+                LinkStatus::Shared,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let refused = perspective
+            .commit_batch_if(batch_id, &ctx, &[expected])
+            .await
+            .unwrap_err();
+        assert!(refused.is::<LinksChanged>(), "{refused:#}");
+        assert_eq!(body(&perspective), 0, "nothing of the batch is written");
+
+        // Taken again, the expectation holds and the batch commits.
+        let expected = perspective
+            .expect_links("test://record", "test://version")
+            .unwrap();
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .add_link(
+                link("test://body", "test://from-batch"),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        perspective
+            .commit_batch_if(batch_id, &ctx, &[expected])
+            .await
+            .unwrap();
+        assert_eq!(body(&perspective), 1);
     }
 
     #[tokio::test]
@@ -9806,3 +9874,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "monotonic_tests.rs"]
+mod monotonic_tests;
