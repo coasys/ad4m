@@ -145,6 +145,14 @@ if [[ -f \$STUB_DIR/fail-jq && \$* == *'.["last_failed_sha"] ='* ]]; then
   echo "jq: error: No space left on device" >&2
   exit 2
 fi
+# With \$STUB_DIR/kill-after-pending, update.sh is killed on the status write
+# that follows the combined deployed_sha + link_server_pending commit (the
+# agent field), before release cleanup and link-server sync.
+if [[ -f \$STUB_DIR/kill-after-pending && \$* == *'.["agent"] ='* ]]; then
+  rm "\$STUB_DIR/kill-after-pending"
+  kill -9 "\$(cat "\$STUB_DIR/update.pid")"
+  exit 1
+fi
 exec $(command -v jq) "\$@"
 EOF
 printf '#!/bin/sh\n' >"$T/stubs/sleep"
@@ -173,10 +181,24 @@ mkdir -p "$T/config/secrets" "$T/www"
 echo '{}' >"$T/config/executor-config.json"
 (umask 077 && echo cred >"$T/config/secrets/admin-credential" && echo pass >"$T/config/secrets/unlock-passphrase")
 
-export STUB_DIR=$T PATH=$T/stubs:$PATH
+# The updater's default helper is $HOME/bin/deploy-link-server.sh, an absolute
+# path. PATH stubs cannot intercept it, and this operator account has that
+# helper plus a prod instance.env. A temp HOME and an explicit stub keep the
+# suite off the real link-servers.
+mkdir -p "$T/home"
+cat >"$T/deploy-link-server" <<'EOF'
+#!/usr/bin/env bash
+echo "deploy-link-server $*" >>"$STUB_DIR/calls"
+if [[ -f $STUB_DIR/fail-link ]]; then exit 1; fi
+exit 0
+EOF
+chmod +x "$T/deploy-link-server"
+export STUB_DIR=$T PATH=$T/stubs:$PATH HOME=$T/home
+export AD4M_LINK_SERVER_DEPLOY=$T/deploy-link-server
 export AD4M_STAGING_REPO=$T/repo AD4M_STAGING_SRC=$T/src AD4M_STAGING_STATE=$T/state
 export AD4M_STAGING_CONFIG=$T/config AD4M_STAGING_DATA=$T/data
 export AD4M_STAGING_PUBLIC_STATUS=$T/www/status.json AD4M_STAGING_GATE_SECONDS=1
+[[ $HOME == "$T/home" && -x $AD4M_LINK_SERVER_DEPLOY ]]
 run() {
   : >"$T/calls"
   "$UPDATE" "$@" >"$T/out" 2>&1 &
@@ -204,10 +226,14 @@ check "first deploy has no previous_sha" [ -z "$(status previous_sha)" ]
 check "current points at the release" [ "$(readlink "$T/state/current")" = "releases/$first" ]
 check "init ran with the new build" called "init $first init --data-path $T/data"
 check "public status shows the deployed SHA" [ "$(jq -r .deployed_sha "$T/www/status.json")" = "$first" ]
+check "first deploy syncs the staging link-server through the stub" \
+  grep -q "deploy-link-server staging $first" "$T/calls"
+check "and does not call prod" bash -c "! grep -q 'deploy-link-server prod' '$T/calls'"
+check "and clears link_server_pending" [ "$(status link_server_pending)" = "" ]
 
-# 3. Nothing new: no build, no restart.
+# 3. Nothing new: no build, no restart, no link-server deploy.
 run
-check "same SHA is skipped" bash -c "! grep -qE 'cargo|systemctl' '$T/calls'"
+check "same SHA is skipped" bash -c "! grep -qE 'cargo|systemctl|deploy-link-server' '$T/calls'"
 
 # 4. A build that never unlocks: roll back binary and data.
 bad=$(commit "breaks unlock" "AD4M_UNLOCK_PASSPHRASE_FILE")
@@ -730,6 +756,66 @@ check "and the partial snapshot is gone" \
   [ "$(find "$T/state20/snapshots" -mindepth 1 -maxdepth 1 -name "*-$one" | wc -l)" = 1 ]
 check "and the kept snapshot is whole" \
   bash -c "! grep -q partial '$T/state20/snapshots/'*-$one/written-by"
+
+# 31. Link-server sync stays inside the fixture. A failing stub leaves the
+# pending marker; the next quiet check retries it and does not rebuild.
+export AD4M_STAGING_STATE=$T/state21 AD4M_STAGING_DATA=$T/data21 AD4M_STAGING_SRC=$T/src21
+link21=$(commit "link-server sync" "AD4M_UNLOCK_PASSPHRASE_FILE")
+run
+check "a deploy calls the link-server stub for staging" \
+  grep -q "deploy-link-server staging $link21" "$T/calls"
+check "and does not call prod when that instance is absent" \
+  bash -c "! grep -q 'deploy-link-server prod' '$T/calls'"
+check "a successful sync clears link_server_pending" \
+  [ "$(jq -r .link_server_pending "$T/state21/status.json")" = null ]
+touch "$T/fail-link"
+link21b=$(commit "link-server sync fails" "AD4M_UNLOCK_PASSPHRASE_FILE")
+run
+check "a failing link-server stub is called" \
+  grep -q "deploy-link-server staging $link21b" "$T/calls"
+check "and the deploy exits non-zero" exited_non_zero
+check "and leaves link_server_pending set" \
+  [ "$(jq -r .link_server_pending "$T/state21/status.json")" = "$link21b" ]
+check "and still records the executor as deployed" \
+  [ "$(jq -r .deployed_sha "$T/state21/status.json")" = "$link21b" ]
+rm "$T/fail-link"
+run
+check "the next quiet check retries the link-server" \
+  grep -q "deploy-link-server staging $link21b" "$T/calls"
+check "and does not rebuild" bash -c "! grep -q cargo '$T/calls'"
+check "and clears link_server_pending after the retry" \
+  [ "$(jq -r .link_server_pending "$T/state21/status.json")" = null ]
+
+# 32. A kill after the deployed_sha commit, before cleanup and sync, still
+# leaves the pending marker. The next quiet check syncs it.
+export AD4M_STAGING_STATE=$T/state22 AD4M_STAGING_DATA=$T/data22 AD4M_STAGING_SRC=$T/src22
+link22=$(commit "killed after status commit" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/kill-after-pending"
+run
+flock "$T/state22/update.lock" true
+check "a kill after the status commit still records deployed_sha" \
+  [ "$(jq -r .deployed_sha "$T/state22/status.json")" = "$link22" ]
+check "and leaves link_server_pending set" \
+  [ "$(jq -r .link_server_pending "$T/state22/status.json")" = "$link22" ]
+check "and does not reach the link-server stub" \
+  bash -c "! grep -q deploy-link-server '$T/calls'"
+run
+check "the next quiet check syncs the link-server" \
+  grep -q "deploy-link-server staging $link22" "$T/calls"
+check "and clears the pending marker" \
+  [ "$(jq -r .link_server_pending "$T/state22/status.json")" = null ]
+
+# 33. prod is called only when that instance exists under the fixture HOME.
+mkdir -p "$HOME/link-server/prod"
+echo PORT=1 >"$HOME/link-server/prod/instance.env"
+export AD4M_STAGING_STATE=$T/state23 AD4M_STAGING_DATA=$T/data23 AD4M_STAGING_SRC=$T/src23
+link23=$(commit "prod instance present" "AD4M_UNLOCK_PASSPHRASE_FILE")
+run
+rm -rf "$HOME/link-server"
+check "a deploy calls the stub for staging and prod" \
+  bash -c "grep -q 'deploy-link-server staging $link23' '$T/calls' && grep -q 'deploy-link-server prod $link23' '$T/calls'"
+check "and clears pending after both" \
+  [ "$(jq -r .link_server_pending "$T/state23/status.json")" = null ]
 
 echo "$failures failed"
 ((failures == 0))

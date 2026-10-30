@@ -110,8 +110,9 @@ export class PerspectiveClient {
     }
 
     /** Open a live SPARQL query. Updates arrive through {@link onQueryUpdate}. */
-    async subscribeQuery(uuid: string, query: string): Promise<Subscribed> {
-        return this.#apiClient.call('perspective.subscribeQuery', { uuid, query })
+    /** `options.signal` cancels the call, and the executor stops computing the first result. */
+    async subscribeQuery(uuid: string, query: string, options?: CallOptions): Promise<Subscribed> {
+        return this.#apiClient.call('perspective.subscribeQuery', { uuid, query }, options)
     }
 
     /** Every `query-subscription-update` event on this client's socket. */
@@ -164,9 +165,10 @@ export class PerspectiveClient {
     }
 
     /** Open a live model query over one class or several. Updates arrive through {@link onQueryUpdate}. */
-    async modelSubscribe(uuid: string, className: string | string[], queryJson: string): Promise<Subscribed> {
+    /** `options.signal` cancels the call, and the executor stops computing the first result. */
+    async modelSubscribe(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<Subscribed> {
         return this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson }
+            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson }, options
         )
     }
 

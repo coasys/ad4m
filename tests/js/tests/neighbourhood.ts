@@ -585,7 +585,10 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                         //@ts-ignore
                         aliceData = payload;
                     };
-                    aliceNH!.addSignalHandler(aliceHandler)
+                    // Awaited: it resolves once the executor applied the
+                    // socket's `signal` watch. A signal that arrives before
+                    // that is not delivered to the client, nor sent again.
+                    await aliceNH!.addSignalHandler(aliceHandler)
 
                     let bobCalls = 0;
                     let bobData = null;
@@ -594,7 +597,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                         //@ts-ignore
                         bobData = payload;
                     };
-                    bobNH!.addSignalHandler(bobHandler)
+                    await bobNH!.addSignalHandler(bobHandler)
 
                     let link = new LinkExpression()
                     link.author = aliceDID!;
@@ -638,7 +641,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                         //@ts-ignore
                         aliceData = payload;
                     };
-                    aliceNH!.addSignalHandler(aliceHandler)
+                    await aliceNH!.addSignalHandler(aliceHandler)
 
                     let bobCalls = 0;
                     let bobData = null;
@@ -647,7 +650,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                         //@ts-ignore
                         bobData = payload;
                     };
-                    bobNH!.addSignalHandler(bobHandler)
+                    await bobNH!.addSignalHandler(bobHandler)
 
                     // Test broadcast without loopback
                     let link = new Link({source: "alice", target: "broadcast", predicate: "test"});
