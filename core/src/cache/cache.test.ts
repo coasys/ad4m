@@ -531,6 +531,13 @@ describe('ExpressionClient Cache', () => {
         expect(getCalls).toHaveLength(2);
     });
 
+    test('get() alwaysGet stores what it read for the next get()', async () => {
+        await ad4m.expression.get('lang://test/Qm-always-fills', true);
+        await ad4m.expression.get('lang://test/Qm-always-fills');
+
+        expect(expressionReads()).toHaveLength(1);
+    });
+
     test('get() different URLs make separate RPCs', async () => {
         await ad4m.expression.get('lang://test/Qm-a');
         await ad4m.expression.get('lang://test/Qm-b');

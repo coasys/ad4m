@@ -64,6 +64,16 @@ describe('KeyedCache', () => {
         expect(loadMany).toHaveBeenCalledTimes(2);
     });
 
+    test('a clear() while a read is in flight keeps the read out of the cache', async () => {
+        const loadMany = jest.fn(async (keys: string[]) => keys);
+        const cache = new KeyedCache<string>({ loadMany });
+        const reading = cache.get('a');
+        cache.clear();
+        await reading;
+        await cache.get('a');
+        expect(loadMany).toHaveBeenCalledTimes(2);
+    });
+
     test('maxAgeMs expires a value per key', async () => {
         const loadMany = jest.fn(async (keys: string[]) => keys);
         const cache = new KeyedCache<string>({ loadMany, maxAgeMs: k => (k === 'keep' ? Infinity : 0) });
