@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-executor"
-version = "0.13.1-staging.3"
+version = "0.13.1-staging.5"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
 description = "Runtime implementation of AD4M as library - https://ad4m.dev"
@@ -116,12 +116,17 @@ serde_ignored = "0.1"
 secp256k1 = { version = "0.27.0", features = ["rand", "serde"] }
 crypto_box = "0.8.2"
 chacha20poly1305 = "0.10.1"
+# Sealed boxes to an agent's DID key (agent/sealed_box.rs).
+aes-gcm = "0.10.3"
+curve25519-dalek = "4.1.3"
+hkdf = "0.12.4"
 zeroize = "1.9"
 hex = "0.4.3"
+lru = "0.12.5"
 argon2 = { version = "0.5.0", features = ["simple"] }
 rand = "0.8.5"
 base64 = "0.21.0"
-rmcp = { version = "0.15.0", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "0.17.0", features = ["server", "transport-streamable-http-server"] }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
@@ -186,7 +191,7 @@ sodoken = "=0.1.0"
 scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client", version="0.13.1-staging.3" }
+ad4m-client = { path = "../rust-client", version="0.13.1-staging.5" }
 reqwest = { version = "0.11.20", features = ["json", "native-tls", "blocking", "stream"] }
 
 # rusqlite = { version = "0.29.0", git = "https://github.com/coasys/rusqlite.git", rev = "12ec1330bd4b46411ab9895364da4a3e172d0fbb", features = ["bundled"] }
@@ -254,6 +259,7 @@ tokio-tungstenite = "0.29"
 
 [build-dependencies]
 fs_extra = "1.3.0"
+sha2 = "0.10.8"
 
 
 # Force static CRT on Windows MSVC to match libort_sys (ONNX Runtime) and avoid LNK2038 mismatch

@@ -20,6 +20,8 @@ import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "..
 import { AllInstancesResult } from "../model/types";
 import { LiveQuery, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
+import type { AgentMessage } from "../generated/api/AgentMessage";
+import type { AgentReply } from "../generated/api/AgentReply";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
 import { SHACLShape } from "../shacl/SHACLShape";
@@ -436,6 +438,24 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Ask a model something about this perspective, or ask it to change something, with the
+     * executor's own tools — including the tools apps install for their records. It reads freely;
+     * it writes only with the tools named in `settings.writeTools`, as you. Answers with the
+     * model's final reply.
+     *
+     * @param messages the conversation so far, the person's request last
+     * @param settings `context` (what the person is looking at), `writeTools`, `model`, `maxToolCalls`
+     * @param options `signal` / `timeoutMs` (default {@link LONG_TIMEOUT_MS})
+     */
+    async runAgent(
+        messages: AgentMessage[],
+        settings?: Parameters<PerspectiveClient['runAgent']>[2],
+        options?: CallOptions,
+    ): Promise<AgentReply> {
+        return await this.#client.runAgent(this.#handle.uuid, messages, settings, options)
+    }
+
+    /**
      * Register a neighbourhood auto-processor on this perspective. The executor
      * then runs interpretation automatically over new source items (like Flux
      * per channel), coordinating which peer processes each batch. Returns the
@@ -833,6 +853,12 @@ export class PerspectiveProxy {
 
         /**
      * Adds a pre-signed LinkExpression to the perspective.
+     *
+     * The executor checks the signature against `link.author` and stores the
+     * verdict as `proof.valid`. If the same link (author, source, predicate,
+     * target and timestamp) is already stored with a signature that verifies,
+     * its stored proof is kept. The expression passed here is still returned
+     * and, when Shared, committed to the neighbourhood as given.
      * 
      * @param link - The signed LinkExpression to add
      * @param status - Whether the link should be shared

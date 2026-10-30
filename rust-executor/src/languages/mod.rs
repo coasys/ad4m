@@ -1,4 +1,6 @@
 mod byte_array;
+#[cfg(test)]
+mod call_deadline_tests;
 pub mod capability;
 mod conductor_languages;
 pub mod error;
@@ -24,8 +26,9 @@ use deno_core::error::AnyError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use crate::events::Event;
 use crate::logging::span;
-use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
+use crate::pubsub::get_global_pubsub;
 use crate::runtime_service::RuntimeService;
 use crate::types::Address;
 use crate::types::{
@@ -1887,11 +1890,7 @@ impl LanguageController {
                 };
                 get_global_pubsub()
                     .await
-                    .publish(
-                        &EXCEPTION_OCCURRED_TOPIC,
-                        &serde_json::to_string(&exception).unwrap_or_default(),
-                    )
-                    .await;
+                    .publish_event(Event::exception(&exception));
 
                 return Err(LanguageError::LoadError {
                     address: resolved_address,
@@ -1933,11 +1932,7 @@ impl LanguageController {
                 };
                 get_global_pubsub()
                     .await
-                    .publish(
-                        &EXCEPTION_OCCURRED_TOPIC,
-                        &serde_json::to_string(&exception).unwrap_or_default(),
-                    )
-                    .await;
+                    .publish_event(Event::exception(&exception));
 
                 return Err(LanguageError::LoadError {
                     address: resolved_address,

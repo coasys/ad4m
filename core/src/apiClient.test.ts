@@ -403,10 +403,27 @@ describe('ApiClient notices a socket that went silent', () => {
         await jest.advanceTimersByTimeAsync(15_000)
         expect(socket(0).readyState).toBe(1)
         expect(write()).toBe('pending')
-        // Once the write could have crossed and the ping after it is still unanswered: dropped.
+        // The ping could reach the executor at 37.5 s; its pong gets 5 s more to come back.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(0).readyState).toBe(1)
+        // Still unanswered at the next tick: dropped.
         await jest.advanceTimersByTimeAsync(10_000)
         expect(socket(0).readyState).toBe(2)
         expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+    })
+
+    it('gives a ping that waited behind a large write time for its pong to come back', async () => {
+        // The write could have crossed at about 39.94 s, just before the 40 s tick.
+        // The ping after it is read then, and its pong comes back 100 ms later.
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(638_900) }, { timeoutMs: 120_000 }))
+        await jest.advanceTimersByTimeAsync(40_040)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ type: 'pong' })
+        await jest.advanceTimersByTimeAsync(15_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(write()).toBe('pending')
     })
 
     it('does not give a silent socket more time for what it sent after its unanswered ping', async () => {
@@ -796,7 +813,7 @@ describe('ApiClient.onReconnect', () => {
 })
 
 describe('ApiClient when the executor refuses the token', () => {
-    const REASON = 'token expired or revoked'
+    const REASON = 'Unauthorized access: the token expired or was revoked'
     let authFailed: jest.Mock
     beforeEach(() => {
         TestSocket.autoOpen = false
@@ -893,7 +910,7 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(authFailed).not.toHaveBeenCalled()
     })
 
-    // A locked wallet is a state of the node: the token may be good. 1013 is not an auth failure.
+    // A locked wallet is a state of the executor: the token may be good. 1013 is not an auth failure.
     it('treats close code 1013 (executor locked) as an ordinary close that carries its reason', async () => {
         const LOCKED = 'Executor is locked: ask the operator to unlock it, then reconnect'
         open()
@@ -973,7 +990,6 @@ function linkAdded(perspectiveUuid: string, target = 'literal://x') {
     return {
         type: 'link-added',
         perspectiveUuid,
-        owner: 'did:test:owner',
         link: {
             author: 'did:test:alice',
             timestamp: '2026-01-01T00:00:00Z',

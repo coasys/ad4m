@@ -17,6 +17,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `sdna.rs`, `shacl_to_prolog.rs` | Prolog fact generation from links/SHACL. Only used when Prolog mode ≠ Disabled |
 | `flow_classes.rs`, `flow_evaluator.rs`, `flow_spawn.rs`, `flow_semantic_check.rs`, `flow_context/` | SHACLFlow state machines: hard-wired classes, deterministic transition evaluation, spawn candidates, LLM flow context. Moving to `agentic/` (spec item 7) |
 | `interpretation/` | LLM interpretation: text → typed subjects. `run.rs` orchestrates, `prompt.rs`, `parse.rs`, `dedup.rs`, `graph/{read,write}.rs`, `overlay/` (provenance + human accept). Depends on `ai_service::harness` |
+| `agent_session.rs` | `perspective.runAgent`: a conversation with a model in one perspective over the static MCP tools in `SESSION_READS`, plus the writes the caller names from `SESSION_WRITES`. Both lists are explicit and perspective-scoped (a tool joins only by being added there), and `perspective_id` is forced. Same harness as interpretation, neutral prompt. Tests with a scripted model in `agent_session_tests.rs` |
 | `auto_processor/` | Runs interpretation automatically over neighbourhood conversations: `config.rs`, `watcher.rs` (debounce/batch), `cursor.rs`, `claim.rs` (multi-agent claim), `events.rs` (pubsub step signals) |
 | `ordering/` | CRDT ordering for `@HasMany`. Parsed into `ModelShape.ordering` but **not wired** into hydration/writes yet (spec D2) |
 | `hardwired_class.rs` | Registration of hard-wired subject classes (used by flows and overlay) |
@@ -31,13 +32,17 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   write is held across `PrologService` awaits on purpose. Never hold `persisted` across an await;
   the idiom is `let h = self.persisted.lock().await.clone();`.
 - Every link write goes: persist to `SparqlStore` → Prolog facts (no-op when disabled) →
-  pubsub (`PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED`, fanned out per owner) → commit to
+  typed event (`Topic::LinkAdded/LinkRemoved/LinkUpdated`, one event to all owners via
+  `publish_to_owners`, the main agent if unowned) → commit to
   link language if `LinkStatus::Shared`. Use the same sequence; a helper `apply_diff` is planned.
 - SHACL triples are the source of truth for shapes. `shape_cache` on the instance is
   invalidated by `add_sdna_inner`. `get_shape(class)` → `Arc<ModelShape>`.
 - `get_subject_data` currently routes through Prolog and, while Prolog is disabled, returns only
   `author`/`timestamp` with no other properties. Migrating it to `model_query` is planned (spec
   item 1). Prefer `model_query` for reads.
+- `commit`: holds `commit_order` from its pending-queue check until the diff is sent or queued,
+  so a commit whose language call fails is queued ahead of every later one. The immediate-commit
+  counter has its own short lock: `set_immediate_commits` never waits for a language call.
 - `pending_diffs_loop`: a failed `commit_pending_diffs` is logged at warn and retried after
   100 ms doubling to 30 s, reset on success (tests: `perspective_instance_pending_diffs_tests.rs`).
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,

@@ -226,6 +226,10 @@ export class SfuManager {
      *  again joins it, a network change replaces it. */
     private restartTimer: ReturnType<typeof setTimeout> | null = null
     private networkUnsubscribe: (() => void) | null = null
+    /** Running while the room's roster leaves this agent out: see `noticeRoster`. */
+    private unlistedTimer: ReturnType<typeof setTimeout> | null = null
+    /** How long the roster may leave this agent out before the call is rebuilt. */
+    private static readonly UNLISTED_GRACE_MS = 3_000
 
     constructor(
         neighbourhood: SfuNeighbourhoodApi,
@@ -573,6 +577,37 @@ export class SfuManager {
         this.renegotiationUnsubscribe = null
         this.rosterUnsubscribe?.()
         this.rosterUnsubscribe = null
+        this.clearUnlistedTimer()
+    }
+
+    private clearUnlistedTimer(): void {
+        if (this.unlistedTimer) {
+            clearTimeout(this.unlistedTimer)
+            this.unlistedTimer = null
+        }
+    }
+
+    /**
+     * The room's roster no longer lists this agent while `pc` is the call's:
+     * the server has dropped this session, and ICE may not say so. In E6
+     * (CI job 53158) one of six sessions never started a rebuild after a
+     * 20 s outage the server had dropped it for. Rebuild once the roster has
+     * left this agent out for `UNLISTED_GRACE_MS`; a roster that lists it
+     * again in that time cancels, since one published just before this
+     * join landed can arrive after it.
+     */
+    private noticeRoster(pc: RTCPeerConnection, dids: string[]): void {
+        if (dids.includes(this.agentDid)) {
+            this.clearUnlistedTimer()
+            return
+        }
+        if (this.unlistedTimer) return
+        this.unlistedTimer = setTimeout(() => {
+            this.unlistedTimer = null
+            if (this.state.peerConnection !== pc) return
+            console.info("SFU: the room no longer lists this session, rebuilding the call")
+            void this.reconnect()
+        }, SfuManager.UNLISTED_GRACE_MS)
     }
 
     /** Undo a join that failed part way: its subscription and its connection. */
@@ -611,7 +646,9 @@ export class SfuManager {
         this.rosterUnsubscribe = this.neighbourhood.subscribeSfuRoomRoster((roster) => {
             if (!ours(roster) || this.state.peerConnection !== pc) return
             void joined.then(() => {
-                if (this.state.peerConnection === pc) this.applyRoster(roster.participants, true)
+                if (this.state.peerConnection !== pc) return
+                this.applyRoster(roster.participants, true)
+                this.noticeRoster(pc, roster.participants)
             })
         })
 
