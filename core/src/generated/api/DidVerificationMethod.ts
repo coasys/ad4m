@@ -10,10 +10,6 @@ export type DidVerificationMethod = {
  */
 id: string, type: string, controller: string, publicKeyMultibase: string, 
 /**
- * An `Until` key's expiry (unix seconds).
- */
-"coasys:expires"?: number, 
-/**
  * A bot key's scope at the document's seq.
  */
 "coasys:bot"?: DidBotScope, };
