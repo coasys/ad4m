@@ -304,6 +304,30 @@ mod tests {
         assert_eq!(many[5], Value::Null);
     }
 
+    /// Entries come back in URL order even when later lookups finish first.
+    #[tokio::test]
+    async fn get_many_keeps_url_order_when_later_lookups_finish_first() {
+        let urls: Vec<String> = (0..6).map(|i| format!("good://{i}")).collect();
+        let slower_first = |language: String, address: String| async move {
+            let i: u64 = address.parse().unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis((6 - i) * 10)).await;
+            fake_lookup(language, address).await
+        };
+
+        let many = serde_json::to_value(get_many_entries(urls, slower_first).await).unwrap();
+        let addresses: Vec<Value> = (0..6)
+            .map(|i| json!(format!("{{\"address\":\"{i}\"}}")))
+            .collect();
+        assert_eq!(
+            many.as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["data"].clone())
+                .collect::<Vec<_>>(),
+            addresses
+        );
+    }
+
     #[test]
     fn a_failed_entry_round_trips_as_failed() {
         let wire = json!([null, { "code": 500, "message": "m" }]);
