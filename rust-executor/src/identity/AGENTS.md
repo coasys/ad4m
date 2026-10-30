@@ -148,7 +148,7 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   key: `valid`, as before key logs. No anchor and a log lists the key: judged as anchored at
   the seq that added the key. With an anchor: no log lists the key, `invalid`; nothing known
   or the anchor past the trusted seq, `cantCheck`; a master key, `invalid`; the key added
-  after the anchor or revoked at or before it, `invalid`; an `Until` key or bot scope past its
+  after the anchor or revoked at or before it, `invalid`; a bot key whose scope is past its
   `expires` by the clock now, `invalid`. A key revoked after the anchor: `flagged` when the
   link entered the space's ordered history after the `revoke`, else `valid`. No link language
   gives that order today, so `check_signed` passes none.
