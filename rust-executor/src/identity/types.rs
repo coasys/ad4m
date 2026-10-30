@@ -531,14 +531,6 @@ pub struct DidVerificationMethod {
     pub type_: String,
     pub controller: String,
     pub public_key_multibase: String,
-    /// An `Until` key's expiry (unix seconds).
-    #[ts(type = "number", optional)]
-    #[serde(
-        rename = "coasys:expires",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub expires: Option<u64>,
     /// A bot key's scope at the document's seq.
     #[ts(optional)]
     #[serde(

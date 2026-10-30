@@ -16,6 +16,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
 | `custody.rs` | The custody channel's guard `admit` (the admin credential on a loopback listener of an executor started with `--custody-channel`; else 403 `no-custody-channel`) and `main_device_keys`; `identity.custodyStatus` is its one call so far |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
+| `person.rs` | the person's profile: `person_record` (the agent record under the `did:scid` and its signed request, by the device key at the trusted head), `IdentityService::publish_person_profile` |
 | `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key, never `canKeepMaster`), `join_status` (the main agent's claims only) |
 | `service.rs` | `IdentityService`: status, log, resetLog, cosignIncept, publish, openOffer, offers, devices; error mapping |
 | `types.rs` | the RPC contracts (ts-rs) mirroring `ad4m_ldk::identity`'s JSON, `IdentityForkEvent`, `AgentWithIdentity` |
@@ -108,6 +109,16 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   `agent.get` carry it as `identity`, `did` stays the device `did:key` (and
   `agent.status().didDocument` the device's did:key document; `identity.resolve` serves the
   person's).
+- **An agent that speaks for a person publishes the person's profile** under the `did:scid`
+  (`person.rs`, `identityPutAgent`), on the first binding (`record_agent_if_listed`: a claim
+  spent, or `publish` of a log listing the key; main agent or managed user) and on every
+  profile publish after the did:key one (`AgentService::publish_profile`). It speaks for the
+  person while `identity_agents` binds it and its device key is listed, valid and without the
+  bot mark at the trusted seq. The record: the agent's profile with `did` the `did:scid`, as an
+  expression authored by the `did:scid` and signed by the device key (`proof.key` the bare
+  `did:key`), `anchor` the trusted seq, `version` the time in ms; the signed request: the same
+  key at the accepted head, for the store that signed that head. A failure is logged, never
+  fails the did:key publish, and the next profile publish tries again.
 
 ## DID resolution (`identity.resolve`)
 

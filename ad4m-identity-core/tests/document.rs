@@ -98,24 +98,6 @@ fn an_earlier_version_lists_the_keys_valid_then() {
 }
 
 #[test]
-fn an_until_key_carries_its_expiry_and_signs_as_the_person() {
-    let mut log = Log::new();
-    log.add(KeyLife::Until(1_800_000_000));
-    let (doc, _) = doc(&log, None);
-    assert_eq!(method(&doc, "#d2").expires, Some(1_800_000_000));
-    assert_eq!(method(&doc, "#d2-enc").expires, None);
-    assert_eq!(method(&doc, "#d1").expires, None);
-    assert_eq!(ids(&doc.authentication), ["#d1", "#d2"]);
-    assert_eq!(ids(&doc.assertion_method), ["#d1", "#d2"]);
-    // The expiry is a property of the method, not a filter: the document takes no time.
-    let value = serde_json::to_value(&doc).unwrap();
-    assert_eq!(
-        value["verificationMethod"][2]["coasys:expires"],
-        1_800_000_000
-    );
-}
-
-#[test]
 fn the_bot_scope_is_the_one_in_force_at_the_version() {
     let mut log = revoked_log();
     log.scope("d3", &["read"], 1_900_000_000); // seq 4

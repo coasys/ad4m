@@ -10,9 +10,9 @@
 use std::time::Duration;
 
 use ad4m_ldk::identity::{
-    AppendRequest, Claim, ClaimReceipt, ForbiddenReason, IdentityErrorCode, KeyIndexEntry, LogPage,
-    OfferListing, OfferOpened, OfferProgress, RateLimitScope, SignedHead, SignedOffer,
-    SignedRequest,
+    AgentRecord, AppendRequest, Claim, ClaimReceipt, ForbiddenReason, IdentityErrorCode,
+    KeyIndexEntry, LogPage, OfferListing, OfferOpened, OfferProgress, RateLimitScope, SignedHead,
+    SignedOffer, SignedRequest,
 };
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -94,6 +94,13 @@ pub trait IdentityBackend: Send + Sync {
         wait_s: u8,
     ) -> Result<Option<KeyIndexEntry>, IdentityError>;
     async fn append(&self, did: &str, req: &AppendRequest) -> Result<SignedHead, IdentityError>;
+    /// Writes an agent record (`PUT /v1/agents/{did}`); a `did:scid` record comes with a
+    /// signed request of that identity.
+    async fn put_agent(
+        &self,
+        record: &AgentRecord,
+        req: Option<&SignedRequest>,
+    ) -> Result<(), IdentityError>;
     async fn open_offer(&self, offer: &SignedOffer) -> Result<OfferOpened, IdentityError>;
     async fn list_offers(
         &self,
@@ -222,6 +229,16 @@ impl IdentityBackend for AgentLanguageBackend {
 
     async fn append(&self, did: &str, req: &AppendRequest) -> Result<SignedHead, IdentityError> {
         self.call(Capability::IdentityAppend, &[did.into(), json(req)?])
+            .await
+    }
+
+    async fn put_agent(
+        &self,
+        record: &AgentRecord,
+        req: Option<&SignedRequest>,
+    ) -> Result<(), IdentityError> {
+        let req = req.map(json).transpose()?.unwrap_or(Value::Null);
+        self.call(Capability::IdentityPutAgent, &[json(record)?, req])
             .await
     }
 

@@ -32,8 +32,7 @@ async fn an_append_on_the_head_passes_the_same_seq_again_and_a_gap_get_409_with_
     let mut alice = Person::new("alice");
     t.publish(&alice).await;
     let phone = Device::new("alice phone");
-    t.link(&mut alice, &phone, OfferKind::Device, None, None)
-        .await;
+    t.link(&mut alice, &phone, OfferKind::Device, None).await;
     assert_eq!(alice.head_seq(), 1);
 
     // The same seq again: an event at seq 1 that differs from the stored one.
@@ -41,7 +40,7 @@ async fn an_append_on_the_head_passes_the_same_seq_again_and_a_gap_get_409_with_
     let other = Device::new("alice other");
     let (offer, s) = fork.offer(OfferKind::Device, None, None, t.now() + 300);
     let claim = other.claim(&fork.scid(), &offer.offer.offer_id, s, false);
-    let add = fork.add_claimed(&offer.offer, &other.view(&claim, t.now()), None);
+    let add = fork.add_claimed(&offer.offer, &other.view(&claim, t.now()));
     let reply = t.append(&alice.scid(), &[&add]).await;
     assert_eq!(reply.status, StatusCode::CONFLICT);
     let head = head_of(&reply.body);
@@ -68,9 +67,7 @@ async fn a_key_of_log_a_in_an_incept_of_log_b_is_taken_also_after_a_revoked_it()
     let mut alice = Person::new("alice");
     t.publish(&alice).await;
     let laptop = Device::new("shared laptop");
-    let id = t
-        .link(&mut alice, &laptop, OfferKind::Device, None, None)
-        .await;
+    let id = t.link(&mut alice, &laptop, OfferKind::Device, None).await;
 
     // Bob's #0 lists the laptop's key, co-signed by it.
     let bob_incept = |laptop: &Device| {
@@ -172,8 +169,7 @@ async fn every_events_response_carries_a_head_that_verifies_under_the_store_key(
     assert_eq!(head.store, format!("did:key:{}", t.store_key()));
 
     let phone = Device::new("alice phone");
-    t.link(&mut alice, &phone, OfferKind::Device, None, None)
-        .await;
+    t.link(&mut alice, &phone, OfferKind::Device, None).await;
     let page: LogPage = serde_json::from_value(
         t.get(&format!("/v1/logs/{}?from=0", alice.scid()))
             .await
@@ -211,7 +207,7 @@ async fn the_key_index_answers_revoked_keys_bot_keys_with_scope_and_404_for_unkn
     let bot = Device::new("alice bot");
     let scope = bot_scope(T0 + 86_400);
     let bot_id = t
-        .link(&mut alice, &bot, OfferKind::Bot, Some(scope.clone()), None)
+        .link(&mut alice, &bot, OfferKind::Bot, Some(scope.clone()))
         .await;
     let revoke = alice.revoke(&["d1"]);
     assert_eq!(
@@ -255,17 +251,17 @@ async fn the_key_index_answers_revoked_keys_bot_keys_with_scope_and_404_for_unkn
 }
 
 #[tokio::test]
-async fn an_add_with_expires_in_the_past_or_401_days_ahead_is_refused_and_the_index_answers_expires(
+async fn a_bot_scope_expiring_in_the_past_or_401_days_ahead_is_refused_and_the_index_answers_expires(
 ) {
     let t = TestStore::new();
     let mut alice = Person::new("alice");
     t.publish(&alice).await;
-    let browser = Device::new("alice browser");
+    let bot = Device::new("alice bot");
     for expires in [T0 - 1, T0 + 401 * 86_400] {
         let (offer, view) = t
-            .claimed_offer(&mut alice, &browser, OfferKind::Device, None)
+            .claimed_offer(&mut alice, &bot, OfferKind::Bot, Some(bot_scope(expires)))
             .await;
-        let add = alice.add_claimed(&offer.offer, &view, Some(expires));
+        let add = alice.add_claimed(&offer.offer, &view);
         let reply = t.append(&alice.scid(), &[&add]).await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
         assert_eq!(reply.body["error"], "expires");
@@ -277,20 +273,58 @@ async fn an_add_with_expires_in_the_past_or_401_days_ahead_is_refused_and_the_in
             StatusCode::NO_CONTENT
         );
     }
-    let expires = T0 + 30 * 86_400;
-    t.link(&mut alice, &browser, OfferKind::Device, None, Some(expires))
+    let scope = bot_scope(T0 + 30 * 86_400);
+    t.link(&mut alice, &bot, OfferKind::Bot, Some(scope.clone()))
         .await;
+    let entry: KeyIndexEntry =
+        serde_json::from_value(t.get(&format!("/v1/keys/{}", bot.sign_key())).await.body).unwrap();
+    assert_eq!(entry.expires, Some(scope.expires));
+    assert_eq!(entry.bot, Some(serde_json::to_value(&scope).unwrap()));
+    assert!(!entry.paused);
+    let page = t.get(&format!("/v1/logs/{}", alice.scid())).await.body;
+    assert_eq!(page["pauses"], json!([]));
+}
+
+#[tokio::test]
+async fn a_standing_key_has_no_expires_in_the_index_and_an_add_with_expires_without_the_bot_mark_is_refused(
+) {
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let browser = Device::new("alice browser");
+    let (offer, view) = t
+        .claimed_offer(&mut alice, &browser, OfferKind::Device, None)
+        .await;
+    let add = alice.add_claimed(&offer.offer, &view);
+    // A device key with `expires` and no `kind: "bot"`: the core refuses it on replay, as a
+    // format rule, before any proof is checked; the store answers its name and keeps nothing.
+    let mut raw = serde_json::to_value(&add).unwrap();
+    raw["add"][0]["expires"] = json!(T0 + 30 * 86_400);
+    let reply = t
+        .post(
+            &format!("/v1/logs/{}/events", alice.scid()),
+            &json!({ "events": [raw] }),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "ExpiresWithoutBotMark");
+    assert_eq!(
+        t.get(&format!("/v1/keys/{}", browser.sign_key()))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+
+    // The same add without `expires` lands, a standing key with no expiry in the index.
+    assert_eq!(t.append_push(&mut alice, add).await.status, StatusCode::OK);
     let entry: KeyIndexEntry = serde_json::from_value(
         t.get(&format!("/v1/keys/{}", browser.sign_key()))
             .await
             .body,
     )
     .unwrap();
-    assert_eq!(entry.expires, Some(expires));
+    assert_eq!(entry.expires, None);
     assert_eq!(entry.bot, None);
-    assert!(!entry.paused);
-    let page = t.get(&format!("/v1/logs/{}", alice.scid())).await.body;
-    assert_eq!(page["pauses"], json!([]));
 }
 
 #[tokio::test]
@@ -317,7 +351,7 @@ async fn a_key_index_wait_answers_within_one_second_of_the_append() {
         (status, Instant::now(), body)
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let add = alice.add_claimed(&offer.offer, &view, None);
+    let add = alice.add_claimed(&offer.offer, &view);
     let appended = Instant::now();
     assert_eq!(t.append_push(&mut alice, add).await.status, StatusCode::OK);
     let (status, answered, body) = waiting.await.unwrap();
@@ -347,13 +381,10 @@ async fn signed_requests_expired_replayed_wrong_body_bot_key_and_revoked_key_are
             &bot,
             OfferKind::Bot,
             Some(bot_scope(T0 + 86_400)),
-            None,
         )
         .await;
     let phone = Device::new("alice phone");
-    let phone_id = t
-        .link(&mut alice, &phone, OfferKind::Device, None, None)
-        .await;
+    let phone_id = t.link(&mut alice, &phone, OfferKind::Device, None).await;
 
     let path = format!("/v1/notes/{}", alice.scid());
     let body = serde_json::to_vec(&json!({ "token": "a-token" })).unwrap();
@@ -643,14 +674,8 @@ async fn a_bot_writes_its_own_record_only_while_its_scope_is_in_force() {
     let mut alice = Person::new("alice");
     t.publish(&alice).await;
     let bot = Device::new("alice bot");
-    t.link(
-        &mut alice,
-        &bot,
-        OfferKind::Bot,
-        Some(bot_scope(T0 + 100)),
-        None,
-    )
-    .await;
+    t.link(&mut alice, &bot, OfferKind::Bot, Some(bot_scope(T0 + 100)))
+        .await;
     let profile = json!({ "name": "bot" });
     let path = format!("/v1/agents/did:key:{}", bot.sign_key());
     let record = did_key_record(&bot.key, profile.clone(), 1);
@@ -683,9 +708,7 @@ async fn a_did_scid_record_needs_a_signed_request_and_a_valid_non_bot_key_of_the
     let mut alice = Person::new("alice");
     t.publish(&alice).await;
     let phone = Device::new("alice phone");
-    let phone_id = t
-        .link(&mut alice, &phone, OfferKind::Device, None, None)
-        .await;
+    let phone_id = t.link(&mut alice, &phone, OfferKind::Device, None).await;
     let d1 = alice.device_key(1);
     let path = format!("/v1/agents/{}", alice.did());
     let profile = json!({ "did": alice.did(), "perspective": { "links": [] } });
@@ -800,7 +823,6 @@ async fn a_did_scid_record_signed_by_a_bot_key_is_refused() {
         &bot,
         OfferKind::Bot,
         Some(bot_scope(T0 + 86_400)),
-        None,
     )
     .await;
     let d1 = alice.device_key(1);

@@ -220,7 +220,7 @@ pub(crate) fn put_keys(conn: &Connection, state: &KeyState, head_seq: u64) -> Re
     )?;
     for record in state.masters.iter().chain(state.keys.values()) {
         let bot = state.bot_scope_at(&record.id, head_seq);
-        let expires = record.expires.or(bot.map(|b| b.expires));
+        let expires = bot.map(|b| b.expires);
         let bot = bot
             .map(serde_json::to_string)
             .transpose()

@@ -364,9 +364,17 @@ impl Event {
         Event::new(Topic::SfuData, Audience::Dids(recipients), message)
     }
 
-    /// `sfu-room-roster`: who is in a call room now, to the participants it lists.
-    pub fn sfu_room_roster(roster: &crate::sfu::SfuRoomRoster) -> Event {
-        let audience = Audience::Dids(roster.participants.clone());
+    /// `sfu-room-roster`: who is in a call room now, to the participants it lists
+    /// and, on departure, the removed DID so it can detect its missing session.
+    /// The departed DID is a recipient, not a member of the payload's roster.
+    pub fn sfu_room_roster(roster: &crate::sfu::SfuRoomRoster, departed: Option<&str>) -> Event {
+        let mut recipients = roster.participants.clone();
+        if let Some(did) = departed {
+            if !recipients.iter().any(|recipient| recipient == did) {
+                recipients.push(did.to_string());
+            }
+        }
+        let audience = Audience::Dids(recipients);
         Event::new(Topic::SfuRoomRoster, audience, roster)
     }
 
@@ -461,9 +469,9 @@ mod tests {
         assert_eq!(approved.capability, *caps::AGENT_PERMIT_CAPABILITY);
     }
 
-    // #712 filtered the SFU streams at delivery: `targetDid`, the roster's participants, the
-    // sender's room on this executor, all behind NEIGHBOURHOOD_READ. The publisher names the
-    // same agents now, and the capability stays NEIGHBOURHOOD_READ.
+    // SFU streams name their recipients rather than broadcasting to a neighbourhood:
+    // targetDid, listed room participants (plus the departed DID on removal), or the
+    // sender's room. Every one remains behind NEIGHBOURHOOD_READ.
     #[test]
     fn sfu_events_reach_only_the_call_participants_they_name() {
         use crate::agent::session::{Principal, Session};
@@ -494,11 +502,14 @@ mod tests {
                 room_name: "r".into(),
                 migrate_to_did: "did:node".into(),
             }),
-            Event::sfu_room_roster(&SfuRoomRoster {
-                neighbourhood_url: "n".into(),
-                room_name: "r".into(),
-                participants: vec!["did:alice".into(), "did:bob".into()],
-            }),
+            Event::sfu_room_roster(
+                &SfuRoomRoster {
+                    neighbourhood_url: "n".into(),
+                    room_name: "r".into(),
+                    participants: vec!["did:alice".into(), "did:bob".into()],
+                },
+                None,
+            ),
             Event::sfu_data(
                 &SfuDataMessage::new(
                     "did:bob".into(),
