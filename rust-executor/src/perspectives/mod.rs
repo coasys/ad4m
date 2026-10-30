@@ -1,3 +1,6 @@
+pub(crate) mod agent_session;
+#[cfg(test)]
+mod agent_session_tests;
 pub mod auto_processor;
 pub(crate) mod content_address;
 pub(crate) mod flow_classes;
@@ -12,6 +15,7 @@ pub(crate) mod flow_semantic_check;
 pub(crate) mod flow_spawn;
 pub(crate) mod hardwired_class;
 pub(crate) mod hosted_status;
+pub(crate) mod ingest;
 pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;
@@ -22,10 +26,13 @@ mod interpretation_harness_e2e;
 // `PerspectiveInstance` instead of duplicating the setup. Still `#[cfg(test)]`,
 // so it never reaches a release build.
 #[cfg(test)]
+mod ingest_proof_tests;
+#[cfg(test)]
 pub(crate) mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;
+pub(crate) mod monotonic;
 pub mod ordering;
 pub mod perspective_instance;
 #[cfg(test)]
@@ -37,8 +44,8 @@ pub mod sparql_store;
 pub mod subject_classes_of;
 pub mod utils;
 use crate::types::{
-    LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,
-    PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveWithOwner,
+    LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveEvent, PerspectiveExpression,
+    PerspectiveHandle, PerspectiveRemovedEvent, PerspectiveState,
 };
 use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
@@ -47,10 +54,8 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use crate::db::Ad4mDb;
-use crate::pubsub::{
-    get_global_pubsub, get_global_pubsub_sync, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
-    PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
-};
+use crate::events::{Audience, Event, Topic};
+use crate::pubsub::get_global_pubsub_sync;
 use crate::types::{LinkExpression, PerspectiveDiff};
 
 lazy_static! {
@@ -72,6 +77,23 @@ tokio::task_local! {
     /// change at exactly that point. Set per task, so only the task under test
     /// runs it.
     static BEFORE_ROUTING_CACHE_WRITE: RoutingCacheWriteHook;
+}
+
+/// Test seam: [`sweep_link_metadata`] fails for the perspectives named here,
+/// so a test can see what startup does when the sweep fails.
+#[cfg(test)]
+static FAIL_METADATA_SWEEP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Remove the links in the store's metadata vocabulary that `p`'s store holds
+/// (see [`sparql_store::SparqlStore::purge_link_metadata_links`]).
+fn sweep_link_metadata(p: &PerspectiveInstance) -> Result<usize, deno_core::anyhow::Error> {
+    #[cfg(test)]
+    if FAIL_METADATA_SWEEP.lock().unwrap().contains(&p.uuid) {
+        return Err(deno_core::anyhow::anyhow!(
+            "induced metadata-vocabulary sweep failure"
+        ));
+    }
+    p.sparql_store.purge_link_metadata_links()
 }
 
 /// Set the application data path for perspective storage
@@ -102,7 +124,10 @@ pub struct SerializedPerspective {
     pub links: Vec<LinkExpression>,
 }
 
-pub fn initialize_from_db() {
+/// Open every perspective in the database, each in its own task. Returns the
+/// tasks, so a test can wait for them.
+pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
+    let mut tasks = Vec::new();
     let handles = Ad4mDb::global_instance()
         .lock()
         .expect("Couldn't get write lock on Ad4mDb")
@@ -127,7 +152,7 @@ pub fn initialize_from_db() {
         }
 
         // Spawn async task to initialize perspective
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             let p = PerspectiveInstance::new(handle_clone.clone(), None);
 
             // Run literal:// → literal: URI migration (idempotent)
@@ -145,6 +170,27 @@ pub fn initialize_from_db() {
                 }
                 Ok(_) => {} // Already migrated or nothing to migrate
                 Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
+            }
+
+            // A store written before it refused links in its metadata
+            // vocabulary may hold some (#1564): remove them. A perspective
+            // whose store could not be swept does not open, so nothing reads
+            // provenance from it; the next start tries again.
+            match sweep_link_metadata(&p) {
+                Ok(0) => {}
+                Ok(removed) => log::warn!(
+                    "Removed {} link(s) in the metadata vocabulary from perspective {}",
+                    removed,
+                    handle_clone.uuid
+                ),
+                Err(e) => {
+                    log::error!(
+                        "Not opening perspective {}: its metadata-vocabulary sweep failed: {}",
+                        handle_clone.uuid,
+                        e
+                    );
+                    return;
+                }
             }
 
             // No named-graph → reifier migration. The named-graph storage model
@@ -224,8 +270,9 @@ pub fn initialize_from_db() {
                 // Start background tasks
                 tokio::spawn(p.start_background_tasks());
             }
-        });
+        }));
     }
+    tasks
 }
 
 pub async fn add_perspective(
@@ -274,40 +321,34 @@ pub async fn add_perspective(
         perspectives.insert(handle.uuid.clone(), RwLock::new(p));
     }
 
-    // Publish one event per owner so each user gets their own notification
-    let pubsub = get_global_pubsub().await;
-    let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
-
-    if let Some(owners) = owners_list {
-        for owner in owners {
-            let perspective_with_owner = PerspectiveWithOwner {
-                perspective_uuid: handle.uuid.clone(),
-                perspective: handle.clone(),
-                owner: owner.clone(),
-            };
-            pubsub
-                .publish(
-                    &PERSPECTIVE_ADDED_TOPIC,
-                    &serde_json::to_string(&perspective_with_owner).unwrap(),
-                )
-                .await;
-        }
-    } else {
-        // For perspectives without explicit owners (main agent), publish with main agent DID
-        let main_agent_did = crate::agent::did();
-        let perspective_with_owner = PerspectiveWithOwner {
+    publish_to_owners(
+        Topic::PerspectiveAdded,
+        event_recipients(&handle),
+        PerspectiveEvent {
             perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
-            owner: main_agent_did,
-        };
-        pubsub
-            .publish(
-                &PERSPECTIVE_ADDED_TOPIC,
-                &serde_json::to_string(&perspective_with_owner).unwrap(),
-            )
-            .await;
-    }
+        },
+    );
     Ok(())
+}
+
+/// The DIDs that receive a perspective's events: its owners, or the main agent for an
+/// unowned perspective (the rule of `helpers::can_access_perspective`). Read from the
+/// handle when the event is published. Empty while the main agent has no DID.
+pub(crate) fn event_recipients(handle: &PerspectiveHandle) -> Vec<String> {
+    match handle.owners.as_ref().filter(|owners| !owners.is_empty()) {
+        Some(owners) => owners.clone(),
+        None => crate::agent::did_for_context(&crate::agent::AgentContext::main_agent())
+            .ok()
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// Publishes one `topic` event with `payload` to the sessions of every DID in `owners` (a
+/// perspective's [`event_recipients`]): one event per audience, not one per owner.
+pub(crate) fn publish_to_owners(topic: Topic, owners: Vec<String>, payload: impl Serialize) {
+    get_global_pubsub_sync().publish_event(Event::new(topic, Audience::Dids(owners), payload));
 }
 
 /// End every live query the RPC connection `connection_id` opened.
@@ -395,39 +436,14 @@ pub async fn update_perspective_with(
         persisted.clone()
     };
 
-    // Publish one event per owner so each user gets their own notification
-    let pubsub = get_global_pubsub().await;
-    let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
-
-    if let Some(owners) = owners_list {
-        for owner in owners {
-            let perspective_with_owner = PerspectiveWithOwner {
-                perspective_uuid: handle.uuid.clone(),
-                perspective: handle.clone(),
-                owner: owner.clone(),
-            };
-            pubsub
-                .publish(
-                    &PERSPECTIVE_UPDATED_TOPIC,
-                    &serde_json::to_string(&perspective_with_owner).unwrap(),
-                )
-                .await;
-        }
-    } else {
-        // For perspectives without explicit owners (main agent), publish with main agent DID
-        let main_agent_did = crate::agent::did();
-        let perspective_with_owner = PerspectiveWithOwner {
+    publish_to_owners(
+        Topic::PerspectiveUpdated,
+        event_recipients(&handle),
+        PerspectiveEvent {
             perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
-            owner: main_agent_did,
-        };
-        pubsub
-            .publish(
-                &PERSPECTIVE_UPDATED_TOPIC,
-                &serde_json::to_string(&perspective_with_owner).unwrap(),
-            )
-            .await;
-    }
+        },
+    );
     Ok(handle)
 }
 
@@ -463,7 +479,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         // Drop any link-language -> perspective cache entries that
         // pointed at this uuid. Without this, the cache keeps a
         // stale PerspectiveHandle forever; the slow-path fallback
-        // self-heals for the async lookup but `publish_telepresence_signal_sync`
+        // self-heals for the async lookup but the fast path
         // in handle_telepresence_signal_from_link_language uses the
         // cached handle DIRECTLY without verifying get_perspective
         // still returns Some, so signals would keep flowing for a
@@ -494,24 +510,15 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
             }
         }
 
-        // Publish one removal event per owner so each user gets their own notification
-        let handle = instance.persisted.lock().await.clone();
-        let pubsub = get_global_pubsub().await;
-        if let Some(owners) = &handle.owners {
-            for owner in owners {
-                let removed_with_owner = PerspectiveRemovedWithOwner {
-                    perspective_uuid: uuid.to_string(),
-                    uuid: uuid.to_string(),
-                    owner: owner.clone(),
-                };
-                pubsub
-                    .publish(
-                        &PERSPECTIVE_REMOVED_TOPIC,
-                        &serde_json::to_string(&removed_with_owner).unwrap(),
-                    )
-                    .await;
-            }
-        }
+        let recipients = event_recipients(&*instance.persisted.lock().await);
+        publish_to_owners(
+            Topic::PerspectiveRemoved,
+            recipients,
+            PerspectiveRemovedEvent {
+                perspective_uuid: uuid.to_string(),
+                uuid: uuid.to_string(),
+            },
+        );
     }
 
     removed_instance
@@ -627,7 +634,7 @@ pub fn handle_telepresence_signal_from_link_language(
     // delay spawned tasks by seconds when the executor is busy with Deno operations.
     if let Some(handle) = cached_perspective_handle(&language_address) {
         signal.verify_signatures();
-        publish_telepresence_signal_sync(handle, signal, recipient_did);
+        publish_telepresence_signal(handle, signal, recipient_did);
     } else {
         // Slow path: need to look up perspective by language address
         tokio::spawn(handle_telepresence_signal_from_link_language_impl(
@@ -638,102 +645,49 @@ pub fn handle_telepresence_signal_from_link_language(
     }
 }
 
-/// Publish a telepresence signal to PubSub for delivery to REST subscribers
-pub(crate) async fn publish_telepresence_signal(
+/// The `signal` event that carries `signal` on `handle` to the sessions of `recipient`. The
+/// payload names the recipient.
+pub(crate) fn signal_event(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,
-    recipient_did: Option<String>,
-) {
-    if let Some(recipient) = recipient_did {
-        get_global_pubsub()
-            .await
-            .publish(
-                &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                &serde_json::to_string(&NeighbourhoodSignalFilter {
-                    perspective_uuid: handle.uuid.clone(),
-                    perspective: handle,
-                    signal,
-                    recipient: Some(recipient),
-                })
-                .unwrap(),
-            )
-            .await;
-    } else if let Some(owners) = handle.owners.as_ref().filter(|o| !o.is_empty()) {
-        for owner_did in owners {
-            get_global_pubsub()
-                .await
-                .publish(
-                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                    &serde_json::to_string(&NeighbourhoodSignalFilter {
-                        perspective_uuid: handle.uuid.clone(),
-                        perspective: handle.clone(),
-                        signal: signal.clone(),
-                        recipient: Some(owner_did.clone()),
-                    })
-                    .unwrap(),
-                )
-                .await;
-        }
-    } else {
-        get_global_pubsub()
-            .await
-            .publish(
-                &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                &serde_json::to_string(&NeighbourhoodSignalFilter {
-                    perspective_uuid: handle.uuid.clone(),
-                    perspective: handle,
-                    signal,
-                    recipient: None,
-                })
-                .unwrap(),
-            )
-            .await;
-    }
+    recipient: String,
+) -> Event {
+    let audience = Audience::Dids(vec![recipient.clone()]);
+    let payload = NeighbourhoodSignalFilter {
+        perspective_uuid: handle.uuid.clone(),
+        perspective: handle,
+        signal,
+        recipient: Some(recipient),
+    };
+    Event::new(Topic::NeighbourhoodSignal, audience, payload)
 }
 
-/// Synchronous version of publish_telepresence_signal for use in Deno op context
-/// where tokio::spawn tasks get delayed by Tokio scheduler contention.
-fn publish_telepresence_signal_sync(
+/// Publishes a telepresence signal from the link language: to `recipient_did`, or else once
+/// to each of the perspective's [`event_recipients`] (its owners, or the main agent for an
+/// unowned perspective), each copy naming that DID as `recipient`. Never to every session.
+/// A `recipient_did` that is not one of those recipients gets nothing: a link language or a
+/// peer may not address a local DID that does not own the perspective.
+pub(crate) fn publish_telepresence_signal(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,
     recipient_did: Option<String>,
 ) {
-    let pubsub = get_global_pubsub_sync();
-    if let Some(recipient) = recipient_did {
-        pubsub.publish_sync(
-            &NEIGHBOURHOOD_SIGNAL_TOPIC,
-            &serde_json::to_string(&NeighbourhoodSignalFilter {
-                perspective_uuid: handle.uuid.clone(),
-                perspective: handle,
-                signal,
-                recipient: Some(recipient),
-            })
-            .unwrap(),
-        );
-    } else if let Some(owners) = &handle.owners {
-        for owner_did in owners {
-            pubsub.publish_sync(
-                &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                &serde_json::to_string(&NeighbourhoodSignalFilter {
-                    perspective_uuid: handle.uuid.clone(),
-                    perspective: handle.clone(),
-                    signal: signal.clone(),
-                    recipient: Some(owner_did.clone()),
-                })
-                .unwrap(),
+    let audience = event_recipients(&handle);
+    let recipients = match recipient_did {
+        Some(recipient) if audience.contains(&recipient) => vec![recipient],
+        Some(recipient) => {
+            log::debug!(
+                "Dropping telepresence signal for {} on perspective {}: not one of its recipients",
+                recipient,
+                handle.uuid
             );
+            return;
         }
-    } else {
-        pubsub.publish_sync(
-            &NEIGHBOURHOOD_SIGNAL_TOPIC,
-            &serde_json::to_string(&NeighbourhoodSignalFilter {
-                perspective_uuid: handle.uuid.clone(),
-                perspective: handle,
-                signal,
-                recipient: None,
-            })
-            .unwrap(),
-        );
+        None => audience,
+    };
+    let pubsub = get_global_pubsub_sync();
+    for recipient in recipients {
+        pubsub.publish_event(signal_event(handle.clone(), signal.clone(), recipient));
     }
 }
 

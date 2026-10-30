@@ -70,9 +70,11 @@ failed that check is not tried again until `staging` moves on.
 The build is the CircleCI build job plus `--features cuda` on
 `cargo build --release` in `cli`. The in-process candle models need that
 feature; CircleCI does not pass it. The link adds an rpath to
-`${AD4M_STAGING_CUDA_ROOT:-/usr/local/cuda}/lib64`, because cudarc links
+`${AD4M_STAGING_CUDA_ROOT:-/usr/local/cuda-12.8}/lib64`, because cudarc links
 `libcudart` and does not set one, and that library is not on the default
-linker path.
+linker path. cudarc 0.13.9 accepts 12.8 and rejects 13.0 (`/usr/local/cuda`
+on this host). It reads `nvcc` from `PATH`, so the build prepends
+`$CUDA_ROOT/bin`.
 
 Anyone who can merge to `staging` can run code on this box as `marvin`.
 `staging` is protected (one approving review) for that reason. As of this
@@ -570,13 +572,13 @@ Expected: no output.
 
 > **Not done. Needs a window approved by Nico.** The team node serves the
 > team; this is the plan for that window, not something to run ahead of it.
-> Nothing here touches the node until step 5 of the guide's "Moving a node
+> Nothing here touches the node until step 5 of the guide's "Moving an executor
 > off the launcher".
 
 The team node runs today inside the ADAM Launcher on the same box: TLS on
 `0.0.0.0:12100`, MCP on `0.0.0.0:3001`, RPC on `127.0.0.1:12000`, the dapp
 server on `127.0.0.1:8080`, multi-user on, SMTP set. Follow the guide's
-"Moving a node off the launcher" with these values:
+"Moving an executor off the launcher" with these values:
 
 - Config: `~/.config/ad4m-team/executor-config.json` with `port: 12000`,
   `tls_config` (certificate and key paths, `tls_port: 12100`),

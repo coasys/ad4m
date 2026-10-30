@@ -339,7 +339,7 @@ describe('Ad4mConnect', () => {
       ['an InvalidSignature (403)', new RpcError(403, 'InvalidSignature')],
       ['an ExpiredSignature (403)', new RpcError(403, 'ExpiredSignature')],
       ['a revoked token (403)', new RpcError(403, 'Unauthorized access')],
-      ['an expired or revoked token (401)', new RpcError(401, 'token expired or revoked')],
+      ['an expired or revoked token (401)', new RpcError(401, 'Unauthorized access: the token expired or was revoked')],
     ])('clears the token and rebuilds the client without it on %s', async (_, refusal) => {
       mockAgent.isLocked.mockResolvedValueOnce(false);
       mockAgent.status.mockRejectedValueOnce(refusal);
@@ -414,7 +414,7 @@ describe('Ad4mConnect', () => {
       conn.addEventListener('authstatechange', (e: any) => authStates.push(e.detail));
 
       const onAuthFailed = mockClientInstance.onAuthFailed.mock.calls.at(-1)![0];
-      onAuthFailed('token expired or revoked');
+      onAuthFailed('Unauthorized access: the token expired or was revoked');
 
       expect(conn.token).toBe('');
       expect(getLocal('ad4m-token')).toBeFalsy();
