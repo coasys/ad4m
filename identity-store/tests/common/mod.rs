@@ -243,11 +243,10 @@ impl TestStore {
         device: &Device,
         kind: OfferKind,
         bot: Option<ad4m_identity_core::BotScope>,
-        expires: Option<u64>,
     ) -> String {
         let id = person.chain.state().next_device_id();
         let (offer, view) = self.claimed_offer(person, device, kind, bot).await;
-        let add = person.add_claimed(&offer.offer, &view, expires);
+        let add = person.add_claimed(&offer.offer, &view);
         let reply = self.append_push(person, add).await;
         assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
         id

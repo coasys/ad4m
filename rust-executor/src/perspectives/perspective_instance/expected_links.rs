@@ -89,6 +89,14 @@ impl PerspectiveInstance {
             drop(diff);
             return Err(anyhow!("injected fault (test seam): commit_batch failed"));
         }
+        // Backstop for a removal queued past the refusing entry points; the
+        // batch is dropped whole, as on any other commit error.
+        for link in &diff.removals {
+            crate::perspectives::monotonic::refuse_monotonic_removal(
+                link,
+                link.status.as_ref().unwrap_or(&LinkStatus::Shared),
+            )?;
+        }
 
         //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
         //    batch_retrieval_start.elapsed(), diff.additions.len(), diff.removals.len());
@@ -158,7 +166,7 @@ impl PerspectiveInstance {
         };
 
         // Create combined diff for prolog update, SPARQL store update, and return value
-        let combined_diff = DecoratedPerspectiveDiff {
+        let mut combined_diff = DecoratedPerspectiveDiff {
             additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
             removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
         };
@@ -177,14 +185,17 @@ impl PerspectiveInstance {
                     return Err(LinksChanged.into());
                 }
             }
-            // Commit to link language (SPARQL store is updated right after)
+            // Commit to link language (SPARQL store is updated right after).
+            // Tombstone removals stay out of this diff: they are this replica's
+            // store effect only.
             if let Some(diff) = &link_language_diff {
                 self.spawn_commit_and_handle_error(diff);
             }
             // The SPARQL store must be updated first so any subscription re-checks
             // triggered by update_prolog_engines() see the committed batch state.
             if changed {
-                self.write_link_diff(&persist_diff);
+                self.write_link_diff(&persist_diff)?
+                    .fold_into(&mut combined_diff);
             }
         }
 

@@ -814,14 +814,38 @@ impl AgentService {
 
     /// Unified method to publish an agent profile to the agent language.
     /// Works for both the main agent and managed users.
-    /// Strips link decorations before publishing.
+    /// Strips link decorations before publishing. When the agent speaks for a person, also
+    /// publishes the person's profile under its `did:scid` (`identity::person`).
     pub async fn publish_agent_to_language(context: &AgentContext) -> Result<(), AnyError> {
         let controller = crate::languages::LanguageController::global_instance();
         let agent_lang = controller
             .get_agent_language()
             .await
             .map_err(|e| anyhow!("Agent language not available: {}", e))?;
+        let identity = crate::identity::service().ok();
+        let (controller, agent_lang) = (&controller, &agent_lang);
+        Self::publish_profile(context, identity.as_deref(), |agent_json| async move {
+            controller
+                .expression_create(agent_lang.address(), agent_json, context)
+                .await
+                .map(|_| ())
+                .map_err(|e| anyhow!("Failed to publish agent to language: {}", e))
+        })
+        .await
+    }
 
+    /// Publishes `context`'s profile with `publish_did_key` (the did:key profile), then, through
+    /// `identity`, the person's profile. A failure of the person's profile is logged and leaves
+    /// the did:key publish successful; the next publish tries again.
+    pub(crate) async fn publish_profile<F, Fut>(
+        context: &AgentContext,
+        identity: Option<&crate::identity::service::IdentityService>,
+        publish_did_key: F,
+    ) -> Result<(), AnyError>
+    where
+        F: FnOnce(serde_json::Value) -> Fut,
+        Fut: std::future::Future<Output = Result<(), AnyError>>,
+    {
         // Must be taken before the read below, not after: reading the profile
         // outside the lock would let a stale snapshot be published last.
         let _publish_guard = AGENT_PUBLISH_LOCK.lock().await;
@@ -835,13 +859,35 @@ impl AgentService {
             ));
         }
         let agent_json = agent_to_publish_json(&agent)?;
-        controller
-            .expression_create(agent_lang.address(), agent_json, context)
-            .await
-            .map_err(|e| anyhow!("Failed to publish agent to language: {}", e))?;
-
+        publish_did_key(agent_json.clone()).await?;
         log::info!("Published agent {} to agent language", agent.did);
+
+        if let Some(identity) = identity {
+            match identity.publish_person_profile(context, &agent_json).await {
+                Ok(Some(person)) => log::info!("Published the profile of {person} from {}", agent.did),
+                Ok(None) => {}
+                Err(e) => log::warn!(
+                    "The person's profile of {} was not published ({}); the next publish tries again",
+                    agent.did,
+                    e.message
+                ),
+            }
+        }
         Ok(())
+    }
+
+    /// Publishes only the person's profile of `context` through `identity` (right after the
+    /// agent is bound to a person); `None` when it speaks for no one.
+    pub async fn publish_person_profile(
+        context: &AgentContext,
+        identity: &crate::identity::service::IdentityService,
+    ) -> Result<Option<String>, AnyError> {
+        let _publish_guard = AGENT_PUBLISH_LOCK.lock().await;
+        let agent = Self::get_agent_for_context(context)?;
+        identity
+            .publish_person_profile(context, &agent_to_publish_json(&agent)?)
+            .await
+            .map_err(|e| anyhow!(e.message))
     }
 
     /// Get the Agent data for a given context (main agent or managed user).

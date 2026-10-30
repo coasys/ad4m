@@ -1,5 +1,5 @@
 /**
- * Identity end to end (create, link, the first-link refusal, revoke, DID resolution on an
+ * Identity end to end (create, link, the person's profile, the first-link refusal, revoke, DID resolution on an
  * executor that never saw the log, fork, restart): executors
  * with no Holochain, a real identity-store this suite starts on a temp file, and the
  * centralized agent language seeded as every executor's agent language.
@@ -16,7 +16,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { ChildProcess, execSync } from "child_process";
-import { Ad4mClient } from "@coasys/ad4m";
+import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import {
     baseUrl, executorBinary, executorDataPath, pollUntil, quitExecutor, spawnExecutor, startExecutor,
 } from "../utils/utils";
@@ -56,6 +56,7 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
     const nodes: Node[] = [];
     let a: Node, b: Node, c: Node;
     let did = "";
+    let agentLanguage = "";
     const storeCopy = path.join(TEST_DIR, "identity-store-before-revoke.sqlite");
 
     async function startNode(name: string, initArgs: string[] = []): Promise<Node> {
@@ -97,7 +98,7 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
 
     before(async () => {
         if (!fs.existsSync(TEST_DIR)) throw Error("run prepare-test-local before the identity suite");
-        writeIdentitySeed();
+        agentLanguage = writeIdentitySeed();
         buildIdentityTools();
         const [storePort] = await getFreePorts(1);
         registerPorts([storePort]);
@@ -138,6 +139,10 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         const agentStatus = await a.client.agent.status();
         expect(agentStatus.did).to.equal(`did:key:${status.deviceKey}`);
         expect(agentStatus.identity).to.equal(did);
+        // Binding A published the person's profile, anchored at the incept.
+        const record = await (await fetch(`${store.url}/v1/agents/${did}`)).json();
+        expect(record.signedBy).to.equal(agentStatus.did);
+        expect(record.anchor).to.equal(0);
 
         // The store holds the log the executor checked.
         const page = await (await fetch(`${store.url}/v1/logs/${did.split(":").pop()}`)).json();
@@ -169,6 +174,39 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(joined.keyId).to.equal("d2");
         const devices = await a.client.identity.devices();
         expect(devices.map((d) => [d.keyId, d.thisDevice])).to.deep.equal([["d1", true], ["d2", false]]);
+    });
+
+    it("publishes the person's profile under the did:scid on joining and on every profile publish", async () => {
+        const recordOf = async () => (await fetch(`${store.url}/v1/agents/${did}`)).json();
+        const keyOf = async (node: Node) => `did:key:${(await node.client.identity.status()).deviceKey}`;
+
+        // B's join wrote it, signed by B's key and anchored at the add that listed B.
+        let record = await recordOf();
+        expect(record.signedBy).to.equal(await keyOf(b));
+        expect(record.anchor).to.equal(1);
+        expect(record.profile.author).to.equal(did);
+        expect(record.profile.data.did).to.equal(did);
+
+        // A profile update on A publishes A's did:key profile and the person's.
+        const link = new LinkExpression();
+        link.author = await keyOf(a);
+        link.timestamp = new Date().toISOString();
+        link.data = new Link({ source: did, predicate: "sioc://has_name", target: "literal://string:Ada" });
+        link.proof = new ExpressionProof("sig", "key");
+        await a.client.agent.updatePublicPerspective(new Perspective([link]));
+        record = await recordOf();
+        expect(record.signedBy).to.equal(await keyOf(a));
+        expect(record.anchor).to.equal(1);
+
+        // Others see the person: the profile verifies at its anchor, and byDID answers it.
+        const expression = await b.client.expression.get(`${agentLanguage}://${did}`);
+        expect(expression.author).to.equal(did);
+        expect(expression.proof.valid).to.be.true;
+        const person = await b.client.agent.byDID(did);
+        expect(person.did).to.equal(did);
+        expect(person.perspective!.links.map((l) => l.data.target)).to.deep.equal(["literal://string:Ada"]);
+        // The device's own profile stays under its did:key.
+        expect((await b.client.agent.byDID(await keyOf(a))).did).to.equal(await keyOf(a));
     });
 
     it("refuses a claim on an executor started without --operator, and a stranger's first link", async () => {

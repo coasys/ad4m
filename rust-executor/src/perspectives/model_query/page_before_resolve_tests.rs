@@ -22,13 +22,13 @@ use std::time::{Duration, Instant};
 
 /// A file language served by the test, one call at a time as a language
 /// runtime serves them, `latency` per `expressionGet`. `gets` counts those.
-struct FileLanguage {
+pub(super) struct FileLanguage {
     address: String,
     gets: Arc<AtomicUsize>,
 }
 
 impl FileLanguage {
-    async fn serve(latency: Duration) -> Self {
+    pub(super) async fn serve(latency: Duration) -> Self {
         let address = format!("QmTestFiles{}", uuid::Uuid::new_v4().simple());
         let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel::<
             crate::languages::language_runtime::LanguageRuntimeRequest,
@@ -61,15 +61,19 @@ impl FileLanguage {
         FileLanguage { address, gets }
     }
 
-    fn gets(&self) -> usize {
+    pub(super) fn gets(&self) -> usize {
         self.gets.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn address(&self) -> &str {
+        &self.address
     }
 
     fn reset(&self) {
         self.gets.store(0, Ordering::SeqCst);
     }
 
-    async fn stop(self) {
+    pub(super) async fn stop(self) {
         LanguageController::global_instance()
             .set_runtime_for_test(&self.address, None)
             .await;
@@ -92,7 +96,7 @@ fn file_expression(script: &str) -> String {
     .to_string()
 }
 
-fn file_type(i: usize) -> &'static str {
+pub(super) fn file_type(i: usize) -> &'static str {
     if i % 3 == 0 {
         "image/png"
     } else {
@@ -129,19 +133,19 @@ fn ts(i: usize) -> String {
 }
 
 /// `ts(i)` in epoch milliseconds, the form a `where` on `timestamp` takes.
-fn ts_ms(i: usize) -> i64 {
+pub(super) fn ts_ms(i: usize) -> i64 {
     chrono::DateTime::parse_from_rfc3339(&ts(i))
         .unwrap()
         .timestamp_millis()
 }
 
-fn id(i: usize) -> String {
+pub(super) fn id(i: usize) -> String {
     format!("item://{i:05}")
 }
 
 /// `n` items: even ones are posts, odd ones notes, each with a title and a
 /// rank, and with a file on `files` when given.
-fn seed(n: usize, files: Option<&FileLanguage>) -> SparqlStore {
+pub(super) fn seed(n: usize, files: Option<&FileLanguage>) -> SparqlStore {
     let store = SparqlStore::new(None).unwrap();
     for i in 0..n {
         let (s, t) = (id(i), ts(i));
@@ -187,7 +191,7 @@ fn seed(n: usize, files: Option<&FileLanguage>) -> SparqlStore {
     store
 }
 
-fn shape_json(files: Option<&FileLanguage>) -> String {
+pub(super) fn shape_json(files: Option<&FileLanguage>) -> String {
     let file = files
         .map(|f| {
             format!(
@@ -210,7 +214,11 @@ fn shape_json(files: Option<&FileLanguage>) -> String {
     )
 }
 
-async fn run(store: &SparqlStore, shape: &str, query: Value) -> (Vec<Value>, usize, Duration) {
+pub(super) async fn run(
+    store: &SparqlStore,
+    shape: &str,
+    query: Value,
+) -> (Vec<Value>, usize, Duration) {
     let mut query: ModelQueryInput = serde_json::from_value(query).unwrap();
     // Fixture proofs do not verify.
     query.include_unverified = Some(true);
@@ -221,7 +229,7 @@ async fn run(store: &SparqlStore, shape: &str, query: Value) -> (Vec<Value>, usi
     (result.instances, result.total_count, started.elapsed())
 }
 
-fn ids(instances: &[Value]) -> Vec<String> {
+pub(super) fn ids(instances: &[Value]) -> Vec<String> {
     instances
         .iter()
         .map(|inst| inst["id"].as_str().unwrap().to_string())
@@ -229,7 +237,7 @@ fn ids(instances: &[Value]) -> Vec<String> {
 }
 
 /// The decoded file of item `i`, as the default file transform renders it.
-fn data_uri(i: usize) -> Value {
+pub(super) fn data_uri(i: usize) -> Value {
     json!(format!("data:{};base64,{i}", file_type(i)))
 }
 

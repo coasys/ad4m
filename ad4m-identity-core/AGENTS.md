@@ -33,8 +33,10 @@ the signing domains other than `coasys:kel`), is informative.
   `words::generate` (OS source) and `words::generate_with` (caller's RNG). Every feature builds
   for `wasm32-unknown-unknown`.
 - The executor and the store enable `build`, never `words`: no node can make the words.
+- Only a bot scope expires. A device key's validity over time comes from the log's events, so
+  `fold` refuses `expires` on a key without `kind: "bot"` (`ExpiresWithoutBotMark`).
 - The DID document is time-free: it lists the keys `key_valid_at` gives at the seq and carries
-  an expiry as `coasys:expires` / `coasys:bot`, never as a filter. Bot keys go only in
+  a bot scope's expiry in `coasys:bot`, never as a filter. Bot keys go only in
   `capabilityInvocation`; masters are never in the document. `deactivated` says the log has
   ended, whatever the version.
 - Signed or long-lived data (log events, link anchors, agent records, expressions) carries the
@@ -71,7 +73,7 @@ generator builds; after an intended change regenerate and review the diff:
 `check_add`; `vectors/link.json` pins the offer commit, the claim and offer signing bytes,
 the match code, the offer and device strings, and the `add` events (device and bot) that
 spend a claim.
-`tests/document.rs` covers the DID document mapping (live, revoked, `Until`, bot, rotated,
+`tests/document.rs` covers the DID document mapping (live, revoked, bot, rotated,
 ended, past the head, member order); `vectors/document.json` pins the document and metadata
 of the log of `log.json` at the head and after every seq.
 `tests/fold.rs` has one test per refusal case and fails if a case in `refusal_cases()` has none.

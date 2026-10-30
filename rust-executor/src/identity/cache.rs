@@ -823,8 +823,8 @@ pub(crate) mod tests {
     use ad4m_identity_core::build::{cosign, incept_human, revoke, Signer};
     use ad4m_identity_core::{DeviceKey, KeyLife};
     use ad4m_ldk::identity::{
-        AppendRequest, Claim, ClaimReceipt, KeyIndexEntry, LogPage, OfferListing, OfferOpened,
-        OfferProgress, SignedOffer, SignedRequest,
+        AgentRecord, AppendRequest, Claim, ClaimReceipt, KeyIndexEntry, LogPage, OfferListing,
+        OfferOpened, OfferProgress, SignedOffer, SignedRequest,
     };
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
@@ -929,6 +929,10 @@ pub(crate) mod tests {
         /// A `key_owner` call fails as unavailable.
         pub key_index_down: AtomicBool,
         pub key_owner_calls: AtomicUsize,
+        /// The agent records written, with their signed requests.
+        pub puts: StdMutex<Vec<(AgentRecord, Option<SignedRequest>)>>,
+        /// A `put_agent` call fails as unavailable.
+        pub put_down: AtomicBool,
     }
 
     impl FakeStore {
@@ -942,6 +946,8 @@ pub(crate) mod tests {
                 store_down: AtomicBool::new(false),
                 key_index_down: AtomicBool::new(false),
                 key_owner_calls: AtomicUsize::new(0),
+                puts: StdMutex::new(vec![]),
+                put_down: AtomicBool::new(false),
             }
         }
 
@@ -1026,7 +1032,7 @@ pub(crate) mod tests {
                     added: record.added,
                     revoked: record.revoked,
                     bot: None,
-                    expires: record.expires,
+                    expires: record.scopes.last().map(|(_, scope)| scope.expires),
                     paused: false,
                     head: signed,
                 }),
@@ -1035,6 +1041,20 @@ pub(crate) mod tests {
         }
         async fn append(&self, _: &str, _: &AppendRequest) -> Result<SignedHead, IdentityError> {
             unimplemented_call("append")
+        }
+        async fn put_agent(
+            &self,
+            record: &AgentRecord,
+            req: Option<&SignedRequest>,
+        ) -> Result<(), IdentityError> {
+            if self.put_down.load(Ordering::SeqCst) {
+                return Err(IdentityError::Unavailable("down".into()));
+            }
+            self.puts
+                .lock()
+                .unwrap()
+                .push((record.clone(), req.cloned()));
+            Ok(())
         }
         async fn open_offer(&self, _: &SignedOffer) -> Result<OfferOpened, IdentityError> {
             unimplemented_call("open_offer")

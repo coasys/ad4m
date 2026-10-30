@@ -87,7 +87,7 @@ async fn an_offer_is_claimed_listed_and_spent_once_by_its_add() {
     let progress_reply = progress(&t, &alice.scid(), &id, &phone.sign_key()).await;
     assert_eq!(progress_reply.body, json!({ "state": "claimed" }));
 
-    let add = alice.add_claimed(&offer.offer, &view, None);
+    let add = alice.add_claimed(&offer.offer, &view);
     let again = add.clone();
     let reply = t.append_push(&mut alice, add).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
@@ -136,13 +136,13 @@ async fn an_add_without_a_confirmed_claim_is_refused() {
     let view = phone.view(&claim, t.now());
 
     // The offer is open: no claim yet.
-    let add = alice.add_claimed(&offer.offer, &view, None);
+    let add = alice.add_claimed(&offer.offer, &view);
     let reply = t.append(&alice.scid(), &[&add]).await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
     assert_eq!(reply.body["error"], "claim");
     // An add naming no offer of this identity.
     let (unopened, _) = alice.offer(OfferKind::Device, None, None, t.now() + 300);
-    let add = alice.add_claimed(&unopened.offer, &view, None);
+    let add = alice.add_claimed(&unopened.offer, &view);
     let reply = t.append(&alice.scid(), &[&add]).await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
     assert_eq!(reply.body["error"], "claim");
@@ -163,7 +163,7 @@ async fn rule_a7_fails_on_each_condition_alone() {
     let other = Device::new("swapped");
     let mut swapped = view.clone();
     swapped.device_key = other.sign_key();
-    let add = alice.add_claimed(&offer.offer, &swapped, None);
+    let add = alice.add_claimed(&offer.offer, &swapped);
     assert_eq!(
         t.append(&alice.scid(), &[&add]).await.body["error"],
         "claim"
@@ -171,7 +171,7 @@ async fn rule_a7_fails_on_each_condition_alone() {
     // 4: another enc key.
     let mut swapped = view.clone();
     swapped.enc_key = enc_of(&other.key);
-    let add = alice.add_claimed(&offer.offer, &swapped, None);
+    let add = alice.add_claimed(&offer.offer, &swapped);
     assert_eq!(
         t.append(&alice.scid(), &[&add]).await.body["error"],
         "claim"
@@ -181,7 +181,7 @@ async fn rule_a7_fails_on_each_condition_alone() {
     swapped.co_sig = other
         .claim(&alice.scid(), &offer.offer.offer_id, [1; 32], false)
         .co_sig;
-    let add = alice.add_claimed(&offer.offer, &swapped, None);
+    let add = alice.add_claimed(&offer.offer, &swapped);
     assert_eq!(
         t.append(&alice.scid(), &[&add]).await.body["error"],
         "claim"
@@ -191,7 +191,7 @@ async fn rule_a7_fails_on_each_condition_alone() {
     let mut bot_offer = offer.offer.clone();
     bot_offer.kind = OfferKind::Bot;
     bot_offer.bot = Some(bot_scope());
-    let add = alice.add_claimed(&bot_offer, &view, None);
+    let add = alice.add_claimed(&bot_offer, &view);
     assert_eq!(
         t.append(&alice.scid(), &[&add]).await.body["error"],
         "claim"
@@ -200,7 +200,7 @@ async fn rule_a7_fails_on_each_condition_alone() {
     // Condition 6 with the one-transaction rule: a failure after the event insert leaves the
     // offer claimed and the log as it was.
     t.store.inject_fault(Fault::AfterEvents);
-    let add = alice.add_claimed(&offer.offer, &view, None);
+    let add = alice.add_claimed(&offer.offer, &view);
     let reply = t.append(&alice.scid(), &[&add]).await;
     assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
     t.store.inject_fault(Fault::None);
@@ -219,7 +219,7 @@ async fn rule_a7_fails_on_each_condition_alone() {
     let mut device_offer = offer.offer.clone();
     device_offer.kind = OfferKind::Device;
     device_offer.bot = None;
-    let add = alice.add_claimed(&device_offer, &view, None);
+    let add = alice.add_claimed(&device_offer, &view);
     assert_eq!(
         t.append(&alice.scid(), &[&add]).await.body["error"],
         "claim"
@@ -229,12 +229,12 @@ async fn rule_a7_fails_on_each_condition_alone() {
         can: vec!["read".into(), "write".into(), "join".into()],
         expires: T0 + 86_400,
     });
-    let add = alice.add_claimed(&wider, &view, None);
+    let add = alice.add_claimed(&wider, &view);
     assert_eq!(
         t.append(&alice.scid(), &[&add]).await.body["error"],
         "claim"
     );
-    let add = alice.add_claimed(&offer.offer, &view, None);
+    let add = alice.add_claimed(&offer.offer, &view);
     assert_eq!(t.append_push(&mut alice, add).await.status, StatusCode::OK);
 
     // 3: past expires + the confirm grace.
@@ -243,7 +243,7 @@ async fn rule_a7_fails_on_each_condition_alone() {
         .claimed_offer(&mut alice, &late, OfferKind::Device, None)
         .await;
     t.set_now(offer.offer.expires + CONFIRM_GRACE_S);
-    let add = alice.add_claimed(&offer.offer, &view, None);
+    let add = alice.add_claimed(&offer.offer, &view);
     let reply = t.append(&alice.scid(), &[&add]).await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
     assert_eq!(reply.body["error"], "claim");
@@ -262,7 +262,7 @@ async fn rule_a7_fails_on_each_condition_alone() {
     );
     let state = progress(&t, &alice.scid(), &offer.offer.offer_id, &tablet.sign_key()).await;
     assert_eq!(state.body["state"], "superseded");
-    let add = alice.add_claimed(&offer.offer, &view, None);
+    let add = alice.add_claimed(&offer.offer, &view);
     let reply = t.append(&alice.scid(), &[&add]).await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
     assert_eq!(reply.body["error"], "claim");
@@ -296,8 +296,7 @@ async fn offers_by_a_device_key_by_an_old_master_or_at_a_moved_head_are_refused_
     // At a moved head: 409 with the head.
     let (stale, _) = alice.offer(OfferKind::Device, None, None, t.now() + 300);
     let phone = Device::new("alice phone");
-    t.link(&mut alice, &phone, OfferKind::Device, None, None)
-        .await;
+    t.link(&mut alice, &phone, OfferKind::Device, None).await;
     let reply = t.open_offer(&stale).await;
     assert_eq!(reply.status, StatusCode::CONFLICT);
     assert_eq!(reply.body["head"]["seq"], 1);
@@ -587,7 +586,7 @@ async fn a_listing_with_wait_answers_when_a_claim_arrives() {
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     let claim = phone.claim(&alice.scid(), &offer.offer.offer_id, s, false);
-    let add = alice.add_claimed(&offer.offer, &phone.view(&claim, t.now()), None);
+    let add = alice.add_claimed(&offer.offer, &phone.view(&claim, t.now()));
     assert_eq!(t.append_push(&mut alice, add).await.status, StatusCode::OK);
     assert_eq!(
         waiting.await.unwrap(),
@@ -613,7 +612,7 @@ async fn no_row_and_no_response_holds_the_offer_secret() {
             .await
             .raw,
     );
-    let add = alice.add_claimed(&offer.offer, &phone.view(&claim, t.now()), None);
+    let add = alice.add_claimed(&offer.offer, &phone.view(&claim, t.now()));
     bodies.push(t.append_push(&mut alice, add).await.raw);
     bodies.push(t.get(&format!("/v1/logs/{}", alice.scid())).await.raw);
     for body in bodies {

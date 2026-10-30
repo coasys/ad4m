@@ -24,6 +24,14 @@ use std::sync::{Arc, OnceLock};
 pub const TEXT_CONTENT_URI: &str = "ad4m://TextContent";
 pub(crate) const TEXT_CONTENT_SDNA: &str = include_str!("../hardwired_sdna/text_content.json");
 
+/// `Mentioning { mentions }`: a record that mentions agents, a relation to
+/// their DIDs. Any class with a relation named or aliased `mentions` conforms,
+/// under any predicate, with text or without. The waker's mention
+/// subscription reads it
+/// (`get_mention_waker_config`).
+pub const MENTIONING_URI: &str = "ad4m://Mentioning";
+pub(crate) const MENTIONING_SDNA: &str = include_str!("../hardwired_sdna/mentioning.json");
+
 /// `Container { children }`: what holds other records. A record is contained
 /// in P when `P ad4m://has_child X` exists, whatever P is, or when P is an
 /// instance of a class that conforms to `Container` and links X through that
@@ -35,6 +43,7 @@ pub(crate) const CONTAINER_SDNA: &str = include_str!("../hardwired_sdna/containe
 /// [`Builtin::member`]).
 const BUILTINS: &[(&str, &str, &str, bool)] = &[
     (TEXT_CONTENT_URI, "TextContent", TEXT_CONTENT_SDNA, false),
+    (MENTIONING_URI, "Mentioning", MENTIONING_SDNA, false),
     (CONTAINER_URI, "Container", CONTAINER_SDNA, true),
 ];
 
@@ -133,6 +142,28 @@ mod tests {
     }
 
     #[test]
+    fn mentioning_is_an_abstract_class_with_mentions() {
+        let mentioning = builtin(MENTIONING_URI).expect("Mentioning is built in");
+        assert_eq!(mentioning.name, "Mentioning");
+        assert_eq!(mentioning.shape.target_class, MENTIONING_URI);
+        assert!(mentioning
+            .shape
+            .properties
+            .iter()
+            .all(|p| p.name == "mentions"));
+        // `mentions` is a relation to the agents (DIDs) the record mentions.
+        let relations = &mentioning.shape.include_relations;
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].name, "mentions");
+        assert_eq!(relations[0].predicate, "ad4m://mentions");
+        assert_eq!(relations[0].direction, "forward");
+        // No rows of its own: a node no class describes mentions no one.
+        assert!(mentioning.member.is_none());
+        let sdna: serde_json::Value = serde_json::from_str(MENTIONING_SDNA).unwrap();
+        assert_eq!(sdna["abstract"], true);
+    }
+
+    #[test]
     fn container_is_an_abstract_class_with_children_over_has_child() {
         let container = builtin(CONTAINER_URI).expect("Container is built in");
         assert_eq!(container.name, "Container");
@@ -156,5 +187,6 @@ mod tests {
         assert!(builtin("TextContent").is_none());
         assert!(builtin("app://TextContent").is_none());
         assert!(builtin("Container").is_none());
+        assert!(builtin("Mentioning").is_none());
     }
 }

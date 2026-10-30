@@ -250,7 +250,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
     pub async fn confirm(self, claimed: &Claimed) -> Result<SignedHead, ClientError> {
         let chain = chain_of(self.executor, &self.did).await?;
         let signer = self.unlocked.signer(self.clock.now())?;
-        let event = add_claimed(&chain, signer, &self.offer, &claimed.claim, None)?;
+        let event = add_claimed(&chain, signer, &self.offer, &claimed.claim)?;
         Ok(self.executor.publish(std::slice::from_ref(&event)).await?)
     }
 }

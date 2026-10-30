@@ -9,8 +9,8 @@ use common::*;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
-/// (signing key, added, revoked, until-expiry, bot scopes as (seq, expires))
-type ModelKey = (String, u64, Option<u64>, Option<u64>, Vec<(u64, u64)>);
+/// (signing key, added, revoked, bot scopes as (seq, expires))
+type ModelKey = (String, u64, Option<u64>, Vec<(u64, u64)>);
 
 #[derive(Default, Debug)]
 struct Model {
@@ -26,26 +26,21 @@ fn model(events: &[Event]) -> Model {
         match &e.op {
             Op::Incept { master, add, .. } => {
                 m.keys
-                    .insert("m0".into(), (master.clone(), 0, None, None, vec![]));
+                    .insert("m0".into(), (master.clone(), 0, None, vec![]));
                 m.masters = 1;
                 for k in add {
-                    let until = match k.life {
-                        KeyLife::Until(x) => Some(x),
-                        _ => None,
-                    };
                     m.keys
-                        .insert(k.id.clone(), (k.sign.clone(), 0, None, until, vec![]));
+                        .insert(k.id.clone(), (k.sign.clone(), 0, None, vec![]));
                 }
             }
             Op::Add { add, .. } => {
                 let k = &add[0];
-                let (until, scopes) = match &k.life {
-                    KeyLife::Standing => (None, vec![]),
-                    KeyLife::Until(x) => (Some(*x), vec![]),
-                    KeyLife::Bot(b) => (None, vec![(s, b.expires)]),
+                let scopes = match &k.life {
+                    KeyLife::Standing => vec![],
+                    KeyLife::Bot(b) => vec![(s, b.expires)],
                 };
                 m.keys
-                    .insert(k.id.clone(), (k.sign.clone(), s, None, until, scopes));
+                    .insert(k.id.clone(), (k.sign.clone(), s, None, scopes));
             }
             Op::Revoke { revoke } => {
                 for id in revoke {
@@ -53,7 +48,7 @@ fn model(events: &[Event]) -> Model {
                 }
             }
             Op::Scope { key, expires, .. } => {
-                m.keys.get_mut(key).unwrap().4.push((s, *expires));
+                m.keys.get_mut(key).unwrap().3.push((s, *expires));
             }
             Op::Rotate {
                 master,
@@ -65,7 +60,7 @@ fn model(events: &[Event]) -> Model {
                 m.keys.get_mut(&old).unwrap().2 = Some(s);
                 let new = format!("m{}", m.masters);
                 m.masters += 1;
-                m.keys.insert(new, (master.clone(), s, None, None, vec![]));
+                m.keys.insert(new, (master.clone(), s, None, vec![]));
                 for id in revoke {
                     m.keys.get_mut(id).unwrap().2 = Some(s);
                 }
@@ -95,9 +90,8 @@ fn build_log(steps: &[(u8, u8, u8)], end: bool) -> Log {
     for &(kind, a, b) in steps {
         match kind % 4 {
             0 => {
-                let life = match b % 3 {
+                let life = match b % 2 {
                     0 => KeyLife::Standing,
-                    1 => KeyLife::Until(1_000 + u64::from(a) * 10),
                     _ => bot(&["read"], 1_000 + u64::from(a) * 10),
                 };
                 log.add(life);
@@ -150,14 +144,13 @@ proptest! {
         let m = model(&log.events);
         prop_assert_eq!(state.ended, end);
         let last = log.seq() + 1;
-        for (id, (sign, added, revoked, until, scopes)) in &m.keys {
+        for (id, (sign, added, revoked, scopes)) in &m.keys {
             for s in 0..=last {
                 let want = *added <= s && revoked.is_none_or(|r| s < r);
                 prop_assert_eq!(state.key_valid_at(id, s), want, "{} at {}", id, s);
                 prop_assert_eq!(state.key_valid_at(sign, s), want, "{} by key at {}", id, s);
-                let in_time = until.is_none_or(|u| now < u)
-                    && (scopes.is_empty()
-                        || scopes.iter().rev().find(|(at, _)| *at <= s).is_some_and(|(_, e)| now < *e));
+                let in_time = scopes.is_empty()
+                    || scopes.iter().rev().find(|(at, _)| *at <= s).is_some_and(|(_, e)| now < *e);
                 prop_assert_eq!(state.key_valid_at_time(id, s, now), want && in_time, "{} at {} t {}", id, s, now);
             }
         }

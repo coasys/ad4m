@@ -158,21 +158,18 @@ fn bot_key_lapses_and_comes_back_with_a_later_scope() {
 }
 
 #[test]
-fn until_key_valid_before_expires_and_never_rescoped() {
-    let mut log = Log::incept(vec![
+fn standing_key_has_no_expiry_and_is_never_scoped() {
+    let log = Log::incept(vec![
         device(1, KeyLife::Standing),
-        device(2, KeyLife::Until(1_000)),
+        device(2, KeyLife::Standing),
     ]);
     let state = log.chain.state();
-    assert!(state.key_valid_at_time("d2", 0, 999));
-    assert!(!state.key_valid_at_time("d2", 0, 1_000));
-    assert!(!state.key_valid_at_time("d2", 0, 1_001));
     assert!(
-        state.key_valid_at_time("d1", 0, u64::MAX),
+        state.key_valid_at_time("d2", 0, u64::MAX),
         "a standing key has no expiry"
     );
     assert_eq!(state.bot_scope_at("d2", 0), None);
-    // An Until key is never extended by scope.
+    // A scope never gives a standing key an expiry.
     let scope = build::scope(
         &log.chain,
         &master(0),
@@ -187,10 +184,6 @@ fn until_key_valid_before_expires_and_never_rescoped() {
         log.try_push(&scope),
         Err(ChainError::Policy(FoldError::NotABot("d2".into())))
     );
-    // An add may list an Until key too.
-    let id = log.add(KeyLife::Until(5_000));
-    assert!(log.chain.state().key_valid_at_time(&id, 1, 4_999));
-    assert!(!log.chain.state().key_valid_at_time(&id, 1, 5_000));
 }
 
 #[test]

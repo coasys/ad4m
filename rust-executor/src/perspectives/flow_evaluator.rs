@@ -801,27 +801,26 @@ impl RoleGrantLinks {
         did: &str,
     ) -> anyhow::Result<Self> {
         use crate::perspectives::flow_instance::time::parse_link_timestamp;
-        use crate::perspectives::model_query::LINKS_KEY;
+        use crate::perspectives::model_query::links_rows;
 
         let instance_id = instance["id"].as_str().unwrap_or("<no id>");
+        // A row carries its link's `status`: this executor's read-model flag,
+        // not signed link material. Carried evidence is plain signed links,
+        // and every consumer re-derives its verdict from the signature.
         let rows = |key: &str| -> anyhow::Result<Vec<LinkExpression>> {
-            let Some(rows) = instance[LINKS_KEY][key].as_array() else {
-                bail!(
-                    "role grant links: role instance `{instance_id}` came back without \
-                     `{LINKS_KEY}.{key}`, so its grant history for `{did}` cannot be read; \
-                     refusing to gate (fail-closed)"
-                );
-            };
-            rows.iter()
-                .map(|row| {
-                    serde_json::from_value::<LinkExpression>(row.clone()).map_err(|e| {
-                        anyhow!(
-                            "role grant links: role instance `{instance_id}`: a `{key}` row is \
-                             not a link ({e}): {row}"
-                        )
-                    })
+            let rows: Vec<LinkExpression> = links_rows(instance, key).map_err(|e| {
+                anyhow!(
+                    "role grant links: role instance `{instance_id}`: {e}, so its grant \
+                     history for `{did}` cannot be read; refusing to gate (fail-closed)"
+                )
+            })?;
+            Ok(rows
+                .into_iter()
+                .map(|mut l| {
+                    l.status = None;
+                    l
                 })
-                .collect()
+                .collect())
         };
 
         let did_literal =
@@ -928,10 +927,9 @@ pub trait RequiresQueryable: Send + Sync {
     /// caller (see
     /// [`flow_instance::grant`](crate::perspectives::flow_instance::grant)).
     ///
-    /// Over [`MAX_FLOW_RECEIPTS`](crate::perspectives::flow_instance::produced::MAX_FLOW_RECEIPTS)
-    /// this is an `Err` carrying
-    /// [`ReceiptBudgetExceeded`](crate::perspectives::flow_instance::produced::ReceiptBudgetExceeded),
-    /// never a shorter list.
+    /// Junk under the index is skipped by the loader, never refused and
+    /// never allowed to hide a genuine receipt (#1177); a store error is an
+    /// `Err`, never a shorter list.
     ///
     /// The default knows nothing, which is the fail-closed answer here: no
     /// receipts means no grant, so a stub that stays on this default never
@@ -947,6 +945,16 @@ pub trait RequiresQueryable: Send + Sync {
     /// in the catalogue is an error, never "not a member".
     async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {
         Ok(HashMap::new())
+    }
+
+    /// This store's memo of receipt verdicts, if it keeps one (#1177). The
+    /// verdict is the same with or without it — see
+    /// [`VerdictMemo`](crate::perspectives::flow_instance::verify::memo::VerdictMemo) —
+    /// so the default is none, and a stub pays a verification per read.
+    fn receipt_verdict_memo(
+        &self,
+    ) -> Option<&crate::perspectives::flow_instance::verify::memo::VerdictMemo> {
+        None
     }
 }
 
@@ -969,11 +977,17 @@ impl RequiresQueryable for PerspectiveInstance {
         PerspectiveInstance::model_query(self, class_name, query_json).await
     }
 
-    /// `produced`'s loader, unchanged: scoped to the flow before it is
-    /// budgeted, and an error over budget. One reader of F's receipts for
-    /// every consumer, so the role gate cannot drift from `flowValidOutputs`.
+    /// `produced`'s loader, unchanged: scoped to the flow, content-addressed
+    /// candidates only. One reader of F's receipts for every consumer, so the
+    /// role gate cannot drift from `flowValidOutputs`.
     async fn flow_receipts(&self, flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
         crate::perspectives::flow_instance::produced::load_flow_receipts(self, flow_uri).await
+    }
+
+    fn receipt_verdict_memo(
+        &self,
+    ) -> Option<&crate::perspectives::flow_instance::verify::memo::VerdictMemo> {
+        Some(&self.receipt_verdict_memo)
     }
 
     async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {

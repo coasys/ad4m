@@ -47,7 +47,7 @@ pub enum InvalidReason {
     NotYetValid,
     /// The key was revoked at or before the anchor.
     Revoked,
-    /// A `KeyLife::Until` key or a bot scope is past its `expires` by the executor's clock.
+    /// A bot key's scope is past its `expires` by the executor's clock.
     Expired,
 }
 
@@ -141,7 +141,7 @@ pub struct LinkFacts<'a> {
     /// key: `Some(true)` after it, `Some(false)` before it, `None` when the space gives no
     /// order (a private perspective, or a link language that records no revocations).
     pub entered_after_revoke: Option<bool>,
-    /// The executor's clock (unix seconds), for `KeyLife::Until` keys and bot scopes only.
+    /// The executor's clock (unix seconds), for bot scopes only.
     pub now: u64,
 }
 
@@ -417,20 +417,6 @@ mod tests {
         assert_eq!(
             judge(&facts(listed, &device, Some(1))),
             LinkVerdict::CantCheck
-        );
-    }
-
-    #[test]
-    fn an_expired_key_is_invalid_by_the_executor_clock() {
-        let (mut state, device, _) = log_with(None);
-        state.keys.get_mut("d1").expect("d1").expires = Some(NOW);
-        let listed = SignerLog::Listed {
-            state: &state,
-            trusted: 0,
-        };
-        assert_eq!(
-            judge(&facts(listed, &device, Some(0))),
-            LinkVerdict::Invalid(InvalidReason::Expired)
         );
     }
 
