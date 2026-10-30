@@ -162,7 +162,7 @@ so the same file runs on both link languages.
   adds the caller of each local description.
 
 SFU behaviour the scenarios pin: the executor publishes `sfu-room-roster`
-(only to the listed DIDs) after every join and departure, and the SDK keys
+(to the listed DIDs, plus the removed DID on departure) after every join and departure, and the SDK keys
 participants by DID from it; tracks are attributed only by the `trackMapping`
 mids; `sfu-data` never echoes to its sender; room capacity comes from the
 space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade

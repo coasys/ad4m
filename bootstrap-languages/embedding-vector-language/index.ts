@@ -5,7 +5,7 @@
  * The "address" IS the compressed expression — no external storage.
  */
 
-import pako from "https://esm.sh/v135/pako@2.0.4";
+import pako from "./vendor/pako@2.0.4.mjs";
 import base64js from "https://esm.sh/v135/base64-js@1.5.1";
 import { defineLanguage, agentCreateSignedExpression } from "@coasys/ad4m-ldk";
 
