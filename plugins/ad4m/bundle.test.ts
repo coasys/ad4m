@@ -165,6 +165,7 @@ describe("shipped bundle", () => {
       "perspective-uuid",
       "ad4m://TextContent",
       '{"limit":50}',
+      { signal: expect.any(AbortSignal) },
     );
     expect(client.subscribeQuery).not.toHaveBeenCalled();
     expect(proxy.id).toBe("sub-1");
