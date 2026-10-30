@@ -16,6 +16,12 @@ if [ ! -f Cargo.lock ]; then
     fi
 fi
 
+# The wasm carries the source paths of its panic locations. Remapped, the
+# bundle (and so the language's address in the network seed) is the same
+# wherever the repo and the cargo registry are.
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$REPO_ROOT=/ad4m --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+
 echo "==> cargo build --target wasm32-unknown-unknown --release"
 cargo build --target wasm32-unknown-unknown --release
 
