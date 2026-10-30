@@ -4348,6 +4348,27 @@ describe("get() and update() on a missing instance", () => {
       expect(perspective[write]).not.toHaveBeenCalled();
     }
   });
+
+  it("save() re-snapshots an instance that reads back as missing after the write", async () => {
+    @Model({ name: "MissOptional" })
+    class MissOptional extends Ad4mModel {
+      @Property({ through: "miss://note" })
+      note?: string;
+    }
+    // An all-optional model: the re-read after the update finds no row.
+    const perspective = makePerspective([]);
+    perspective.modelQuery
+      .mockResolvedValueOnce({ instances: [{ id: "miss://o1", note: "old" }], totalCount: 1 })
+      .mockResolvedValue({ instances: [], totalCount: 0 });
+    const note = new MissOptional(perspective, "miss://o1");
+    await note.get();
+
+    note.note = "new";
+    await note.save();
+
+    expect(perspective.executeAction).toHaveBeenCalledTimes(1);
+    expect(note.isDirty()).toBe(false);
+  });
 });
 
 describe("querying by class name (overrideModelClassName)", () => {
