@@ -84,8 +84,13 @@ settle_mock_calls() {
 # npm package with its own lockfile and CI job; NODE_ENV=development keeps devDeps.
 build_plugin() {
   [ -f "$PLUGIN_DIR/package.json" ] || { echo "[$TAG] SKIP — no ad4m plugin at $PLUGIN_DIR"; exit 0; }
-  ( cd "$PLUGIN_DIR" && NODE_ENV=development npm install --include=dev >/dev/null 2>&1 && NODE_ENV=development npm run build >/dev/null 2>&1 ) \
-    || { echo "[$TAG] FAIL — could not build the ad4m plugin in $PLUGIN_DIR"; exit 1; }
+  local out; out=$(mktemp)
+  if ! ( cd "$PLUGIN_DIR" && NODE_ENV=development npm install --include=dev && NODE_ENV=development npm run build ) >"$out" 2>&1; then
+    echo "[$TAG] FAIL — could not build the ad4m plugin in $PLUGIN_DIR"
+    tail -n 40 "$out" | sed 's/^/    /'
+    rm -f "$out"; exit 1
+  fi
+  rm -f "$out"
 }
 
 # start_node <name> <host MCP port> [<host WS port>] [<memory>]: a hardened

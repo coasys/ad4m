@@ -69,6 +69,7 @@ pnpm start --scenario a4                  # one scenario (a2 | a4 | a5)
 pnpm start --require a4/openclaw,a4/hermes
 bash interop/agents/verify-a4-hermes.sh   # one route
 pnpm run build                            # typecheck (src + interop drivers)
+pnpm test                                 # unit test of the reply oracle, with negative controls (no Docker)
 ```
 
 Results land in `results/agent-harness/<scenario>.json`, each route's output in

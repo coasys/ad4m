@@ -54,9 +54,9 @@ start_node "$EXE" "$MCP_PORT"
 
 echo "[a4sv] provision a user + mint a channel perspective"
 PROV=$(A2_ADMIN="$ADMIN" "$TSX" "$AGENTS/ad4m-user.ts" provision "http://127.0.0.1:${MCP_PORT}" "$EMAIL" "$UPASS")
-JWT=$(echo "$PROV" | grep '^JWT=' | cut -d= -f2-); DID=$(echo "$PROV" | grep '^DID=' | cut -d= -f2-)
+JWT=$(echo "$PROV" | grep '^JWT=' | cut -d= -f2- || true); DID=$(echo "$PROV" | grep '^DID=' | cut -d= -f2- || true)
 [ -z "$JWT" ] && { echo "[a4sv] FAIL — provisioning"; echo "$PROV" | sed 's/^/    /'; exit 1; }
-UUID=$("$TSX" "$AGENTS/sovereign/waker-ad4m.ts" mint "http://127.0.0.1:${MCP_PORT}" "$JWT" "a4sv-channel" | grep '^UUID=' | cut -d= -f2-)
+UUID=$("$TSX" "$AGENTS/sovereign/waker-ad4m.ts" mint "http://127.0.0.1:${MCP_PORT}" "$JWT" "a4sv-channel" | grep '^UUID=' | cut -d= -f2- || true)
 [ -z "$UUID" ] && { echo "[a4sv] FAIL — could not mint perspective"; exit 1; }
 echo "[a4sv] DID=$DID perspective=$UUID"
 

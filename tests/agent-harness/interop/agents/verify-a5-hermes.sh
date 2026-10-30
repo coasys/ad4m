@@ -54,7 +54,7 @@ echo "[a5h] start multi-user node (MCP + WS, Holochain off, hardened)"
 start_node "$EXE" "$MCP_PORT" "$WS_PORT" 4g
 
 echo "[a5h] mint a channel perspective (shared by mock, driver, assertions)"
-UUID=$("$TSX" "$AGENTS/sovereign/waker-ad4m.ts" mint "http://127.0.0.1:${MCP_PORT}" "$ADMIN" "a5h-channel" | grep '^UUID=' | cut -d= -f2-)
+UUID=$("$TSX" "$AGENTS/sovereign/waker-ad4m.ts" mint "http://127.0.0.1:${MCP_PORT}" "$ADMIN" "a5h-channel" | grep '^UUID=' | cut -d= -f2- || true)
 [ -z "$UUID" ] && { echo "[a5h] FAIL — could not mint perspective"; exit 1; }
 echo "[a5h] perspective=$UUID"
 

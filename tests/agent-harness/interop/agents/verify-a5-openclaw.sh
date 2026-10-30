@@ -51,7 +51,7 @@ echo "[a5oc] start multi-user node (MCP + WS, Holochain off, hardened)"
 start_node "$EXE" "$MCP_PORT" "$WS_PORT" 4g
 
 echo "[a5oc] mint a channel perspective"
-UUID=$("$TSX" "$AGENTS/sovereign/waker-ad4m.ts" mint "http://127.0.0.1:${MCP_PORT}" "$ADMIN" "a5oc-channel" | grep '^UUID=' | cut -d= -f2-)
+UUID=$("$TSX" "$AGENTS/sovereign/waker-ad4m.ts" mint "http://127.0.0.1:${MCP_PORT}" "$ADMIN" "a5oc-channel" | grep '^UUID=' | cut -d= -f2- || true)
 [ -z "$UUID" ] && { echo "[a5oc] FAIL — could not mint perspective"; exit 1; }
 echo "[a5oc] perspective=$UUID"
 
@@ -82,6 +82,14 @@ for i in $(seq 1 30); do
 done
 [ -n "$READY" ] || { echo "[a5oc] FAIL — OpenClaw gateway hook never answered"; docker exec "$OC" tail -20 /tmp/gw.log | sed 's/^/    /'; exit 1; }
 # The readiness probe itself starts a turn; count model calls from after it.
+# Wait for that turn to reach the mock first: settling alone can finish before
+# it starts, and the probe's call would then count as the wake's turn.
+PROBE_SEEN=""
+for i in $(seq 1 45); do
+  [ "$(mock_calls "$MOCK")" -ge 1 ] && { PROBE_SEEN=1; break; }
+  sleep 2
+done
+[ -n "$PROBE_SEEN" ] || { echo "[a5oc] FAIL — the readiness probe's turn never reached the mock, so the call baseline is unknown"; docker exec "$OC" tail -20 /tmp/gw.log | sed 's/^/    /'; exit 1; }
 settle_mock_calls "$MOCK"
 CALLS0=$(mock_calls "$MOCK")
 

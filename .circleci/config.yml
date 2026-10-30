@@ -870,6 +870,9 @@ jobs:
       AD4M_EXEC_IMAGE: ad4m-agent-harness-executor:nightly
       AGENT_HARNESS_REQUIRED: a2/external-native,a2/external-plugin,a2/managed,a2/hermes,a4/openclaw,a4/hermes,a5/hermes,a5/openclaw
     steps:
+      - run:
+          name: Clear results and artifacts from earlier runs on this host
+          command: rm -rf /tmp/agent-harness-results /tmp/agent-harness-artifacts
       - setup_integration_test_environment:
           build_binaries: true
       - run:
@@ -884,7 +887,6 @@ jobs:
       - run:
           name: Run agent harness scenarios
           command: |
-            rm -rf /tmp/agent-harness-results
             cd tests/agent-harness && ./node_modules/.bin/tsx src/main.ts --results-dir /tmp/agent-harness-results
           no_output_timeout: 30m
       - run:
@@ -895,11 +897,11 @@ jobs:
           name: Collect results and pod logs on failure
           when: on_fail
           command: |
-            mkdir -p /tmp/test-artifacts
-            cp -r /tmp/agent-harness-results/agent-harness /tmp/test-artifacts/ 2>/dev/null || true
+            mkdir -p /tmp/agent-harness-artifacts
+            cp -r /tmp/agent-harness-results/agent-harness /tmp/agent-harness-artifacts/ 2>/dev/null || true
       - store_artifacts:
           when: on_fail
-          path: /tmp/test-artifacts
+          path: /tmp/agent-harness-artifacts
           destination: agent-harness
 
   integration-tests-cli:
