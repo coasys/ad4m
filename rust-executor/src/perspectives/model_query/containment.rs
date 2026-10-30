@@ -516,6 +516,8 @@ pub async fn fill_container_rows(
         .collect();
     let link_status = link_status_filter(link_status);
     let proof_valid = proof_valid_filter(include_unverified);
+    // Required patterns before the first OPTIONAL (see `links::attach_links`): after it,
+    // oxigraph leaves the joins before the OPTIONALs unkeyed, a cartesian product.
     let sparql = format!(
         r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid WHERE {{
     {{ {} }}
@@ -523,11 +525,11 @@ pub async fn fill_container_rows(
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-    OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
+{link_status}{proof_valid}    OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
-{link_status}{proof_valid}}}"#,
+}}"#,
         branches.join(" } UNION { "),
         values_or_str_filter("source", &ids),
     );
