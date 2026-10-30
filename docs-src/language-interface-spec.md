@@ -482,8 +482,8 @@ Rules for an implementation:
   a fork freezes the identity anyway, so the anchor carries no DID, key id or hash.
 
 The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the
-calls it makes today are `log`, `append`, `openOffer`, `listOffers`, `claimOffer` and
-`offerState`; the language serves the others for apps and for later executor features.
+calls it makes today are `log`, `keyOwner`, `append`, `openOffer`, `listOffers`, `claimOffer`
+and `offerState`; the language serves the others for apps and for later executor features.
 
 ### 5.9 Token (agent language only, interfaces only)
 

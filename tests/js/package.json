@@ -5,6 +5,7 @@
   "scripts": {
     "test-main": "pnpm run test-main-local",
     "test-main-local": "export LOCAL_MODE=true && node scripts/cleanTestingData.js && pnpm run prepare-test-local && pnpm run test-all-local && node scripts/cleanTestingData.js",
+    "test-main-identity": "export LOCAL_MODE=true && node scripts/cleanTestingData.js && pnpm run prepare-test-local && node scripts/cleanup.js && pnpm run test-identity && node scripts/cleanup.js && node scripts/cleanTestingData.js",
     "test-main-server-link": "export LOCAL_MODE=true && node scripts/cleanTestingData.js && pnpm run prepare-test-local && node scripts/cleanup.js && pnpm run test-integration-server-link && node scripts/cleanup.js && node scripts/cleanTestingData.js",
     "test-main-multi-node-holochain": "node scripts/cleanTestingData.js && pnpm run prepare-test && node scripts/cleanup.js && pnpm run test-integration && node scripts/cleanup.js && node scripts/cleanTestingData.js",
     "test:windows": "pnpm run prepare-test:windows && pnpm run test-all:windows && node scripts/cleanTestingData.js",
@@ -12,6 +13,7 @@
     "test-all-local": "node scripts/cleanup.js && pnpm run test-simple && node scripts/cleanup.js && pnpm run test-app && node scripts/cleanup.js && pnpm run test-auth && node scripts/cleanup.js && pnpm run test-config-file && node scripts/cleanup.js && pnpm run test-integration-local && node scripts/cleanup.js && pnpm run test-prolog-and-literals && node scripts/cleanup.js",
     "test-simple": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/simple.test.ts",
     "test-integration": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration.test.ts",
+    "test-identity": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/identity.test.ts",
     "test-integration-server-link": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration-server-link.test.ts",
     "test-integration-local": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration-local.test.ts",
     "test-app": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/app.test.ts",

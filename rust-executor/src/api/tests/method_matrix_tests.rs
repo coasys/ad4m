@@ -139,6 +139,17 @@ pub(super) fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
             (UserAppWithout, Forbidden),
             (Anonymous, Forbidden),
         ],
+        // The capability, then the operator or a session on a managed agent: the main agent's
+        // apps never, whatever they hold.
+        Guard::UserOrOperator(_) => vec![
+            (Operator, Granted),
+            (AppWithout, Forbidden),
+            (AppWith, Forbidden),
+            (User, Granted),
+            (OtherUser, Granted),
+            (UserAppWithout, Forbidden),
+            (Anonymous, Forbidden),
+        ],
         Guard::Owns { .. } => vec![],
     }
 }
@@ -609,7 +620,49 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "sfu.ensureMembership",
         || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "did": "did:key:z6Mk" }),
     ),
+    // The identity calls.
+    ("identity.log", || json!({ "did": "did:scid:coasys:1:Qm" })),
+    (
+        "identity.resetLog",
+        || json!({ "did": "did:scid:coasys:1:Qm" }),
+    ),
+    (
+        "identity.resolve",
+        || json!({ "didUrl": "did:scid:coasys:1:Qm" }),
+    ),
+    ("identity.cosignIncept", || json!({ "event": {} })),
+    ("identity.publish", || json!({ "events": [] })),
+    (
+        "identity.openOffer",
+        || json!({ "signedOffer": signed_offer() }),
+    ),
+    ("identity.offers", || json!({ "request": signed_request() })),
+    (
+        "identity.claimOffer",
+        || json!({ "offer": "coasys:offer:1:x" }),
+    ),
+    ("identity.joinStatus", || json!({ "offerId": "o" })),
 ];
+
+fn signed_offer() -> Value {
+    json!({
+        "offer": { "scid": "Qm", "offerId": "o", "kind": "node", "commit": "Qm", "expires": 1 },
+        "by": { "keyId": "m0", "kelSeq": 0, "kelHash": "Qm" },
+        "sig": "z",
+    })
+}
+
+fn signed_request() -> Value {
+    json!({
+        "req": {
+            "did": "did:scid:coasys:1:Qm", "store": "did:key:z6Mk", "keyId": "m0",
+            "kelSeq": 0, "kelHash": "Qm",
+            "method": "GET", "path": "/v1/offers/Qm", "bodyHash": "Qm", "nonce": "n",
+            "expires": 1,
+        },
+        "sig": "z",
+    })
+}
 
 fn sfu_neighbourhood() -> Value {
     json!({ "neighbourhoodUrl": "neighbourhood://Qm" })
@@ -935,6 +988,8 @@ fn register_test_methods(map: &mut HandlerMap, calls: &Arc<AtomicUsize>) {
         .guard(Guard::Open);
     map.method::<NoParams, bool>("test.operator", handler())
         .guard(Guard::Operator);
+    map.method::<NoParams, bool>("test.user_or_operator", handler())
+        .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
 }
 
 #[tokio::test]
@@ -946,9 +1001,10 @@ async fn every_method_admits_exactly_the_callers_its_guard_names() {
     let (failures, checked) = walk(&map, &world).await;
     world.remove().await;
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    // The test methods alone: Open, Operator and Executor × 6 rows, 2 Cap guards × 7 rows, 2
-    // perspective guards and 1 task guard: the walk reached them all.
-    let least = 3 * 6 + 2 * 7 + 2 * perspective_rows().len() + agent_resource_rows().len();
+    // The test methods alone: Open, Operator and Executor × 6 rows, 2 Cap guards and the
+    // UserOrOperator guard × 7 rows, 2 perspective guards and 1 task guard: the walk reached
+    // them all.
+    let least = 3 * 6 + 3 * 7 + 2 * perspective_rows().len() + agent_resource_rows().len();
     assert!(checked >= least, "only {checked} rows checked");
 }
 
@@ -966,6 +1022,59 @@ async fn a_users_app_without_agent_update_cannot_revoke_the_users_sessions() {
     let user = context(Caller::User, Some(AGENT_UPDATE_CAPABILITY.clone()));
     assert!(map
         .admit("user.revokeAllSessions", &json!({}), &user)
+        .await
+        .is_ok());
+}
+
+/// An app token on the main agent holds `agent:SIGN` and `agent:UPDATE` (the default set every
+/// app gets) and still may not co-sign an incept or publish for the main agent: that binds the
+/// main agent to an identity for good, so only the admin credential does. A user co-signs and
+/// publishes for their own agent.
+#[tokio::test]
+async fn only_the_operator_binds_the_main_agent_to_an_identity() {
+    let map = build_handler_map();
+    let app = RequestContext::app_for_test(vec![
+        crate::agent::capabilities::AGENT_SIGN_CAPABILITY.clone(),
+        AGENT_UPDATE_CAPABILITY.clone(),
+    ]);
+    let all =
+        RequestContext::app_for_test(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]);
+    let user = RequestContext::user_for_test(
+        USER_DID,
+        vec![
+            crate::agent::capabilities::AGENT_SIGN_CAPABILITY.clone(),
+            AGENT_UPDATE_CAPABILITY.clone(),
+        ],
+    );
+    let operator = RequestContext::operator_for_test();
+    for method in ["identity.cosignIncept", "identity.publish"] {
+        let params = params(method, None, false);
+        for app in [&app, &all] {
+            let refused = map.admit(method, &params, app).await.unwrap_err();
+            assert_eq!(refused.code, 403, "{method}: {}", refused.message);
+            assert!(
+                refused.message.contains("needs the admin credential"),
+                "{method}: {}",
+                refused.message
+            );
+        }
+        assert!(
+            map.admit(method, &params, &operator).await.is_ok(),
+            "{method}"
+        );
+        assert!(map.admit(method, &params, &user).await.is_ok(), "{method}");
+    }
+    // A log reset is the operator's alone.
+    let reset = params("identity.resetLog", None, false);
+    for caller in [&app, &all, &user] {
+        let refused = map
+            .admit("identity.resetLog", &reset, caller)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 403);
+    }
+    assert!(map
+        .admit("identity.resetLog", &reset, &operator)
         .await
         .is_ok());
 }
@@ -1011,6 +1120,8 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
     assert_eq!(
         operator_methods,
         vec![
+            "identity.claimOffer",
+            "identity.resetLog",
             "runtime.grantNotification",
             "runtime.importData",
             "runtime.openLink",

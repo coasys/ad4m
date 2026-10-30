@@ -80,6 +80,7 @@ handler. `HandlerMap::admit` runs the steps before the handler alone.
 | `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of an executor without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
 | `Cap(cap)` | none: any caller holding `cap`. An anonymous caller holds only the anonymous set (request a capability, redeem it, sign up, log in, verify an email); the handler acts on `ctx.acts_as()` |
 | `Executor(cap)` | the operator or a grant on the main agent: 403 naming the method to a session on a managed agent, whatever its capabilities, and to an anonymous caller. A grant on the main agent passes (D5): WE web administers a local executor with an app token holding `*` |
+| `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`): every app holds their capabilities by default |
 | `Owns { cap, id, owner }` | the resource `id` reads from the params exists and the operator or the session's agent owns it (`guards::owns`), else 404, missing or not |
 
 `Owns` per `Owner` (who owns the resource; the operator reaches all):
@@ -143,7 +144,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-194 methods: Cap 72, Executor 33, Open 5, Operator 16, Owns 68.
+205 methods: Cap 79, Executor 33, Open 5, Operator 18, Owns 68, UserOrOperator 2.
 
 | Method | Guard |
 |---|---|
@@ -198,6 +199,17 @@ the guard checked:
 | `hosting.setHotWallet` | `Cap(agent:UPDATE)` |
 | `hosting.wallet` | `Executor(runtime.hosting:READ)` |
 | `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
+| `identity.claimOffer` | `Operator` |
+| `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
+| `identity.devices` | `Cap(agent:READ)` |
+| `identity.joinStatus` | `Cap(agent:READ)` |
+| `identity.log` | `Cap(agent:READ)` |
+| `identity.offers` | `Cap(agent:READ)` |
+| `identity.openOffer` | `Cap(agent:UPDATE)` |
+| `identity.publish` | `UserOrOperator(agent:UPDATE)` |
+| `identity.resetLog` | `Operator` |
+| `identity.resolve` | `Cap(agent:READ)` |
+| `identity.status` | `Cap(agent:READ)` |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |

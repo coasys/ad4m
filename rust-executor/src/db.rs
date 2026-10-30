@@ -27,8 +27,13 @@ use url::Url;
 use uuid::Uuid;
 
 mod grants;
+mod identity;
 mod tasks;
 pub use grants::GrantRow;
+#[cfg(test)]
+pub(crate) use identity::operator_record_in;
+pub(crate) use identity::set_operator_record_if_empty_in;
+pub use identity::{JoinRow, OperatorRecordRow, OperatorSetBy};
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -383,6 +388,8 @@ impl Ad4mDb {
 
         // The tokens the executor issued: see agent::grants.
         Self::create_grants_table(&conn)?;
+        // The operator record and the identities local agents speak for: see identity::.
+        Self::create_identity_tables(&conn)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS email_verifications (
