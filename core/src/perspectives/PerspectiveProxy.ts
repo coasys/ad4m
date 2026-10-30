@@ -2320,7 +2320,14 @@ export class PerspectiveProxy {
      *  refuses a Prolog query (400): Prolog live queries are not supported. */
     async subscribeQuery(query: string): Promise<QuerySubscriptionProxy> {
         const subscription = new QuerySubscriptionProxy(this.uuid, query, this.#client);
-        await subscription.subscribe();
+        try {
+            await subscription.subscribe();
+        } catch (e) {
+            // Nobody gets the proxy, so nobody can dispose it: left as is, it
+            // would re-open on every reconnect and retry for good (#1595).
+            subscription.dispose({ cancelOpening: true });
+            throw e;
+        }
         return subscription;
     }
 

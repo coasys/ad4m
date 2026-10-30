@@ -66,6 +66,28 @@ describe('QuerySubscriptionProxy', () => {
       process.off('unhandledRejection', record);
     }
   });
+
+  it('perspective.subscribeQuery leaves nothing re-opening when the first subscribe fails', async () => {
+    const reconnects = new Set<() => void>();
+    const subscribeQuery = jest.fn().mockRejectedValue(new Error('Prolog live queries are not supported'));
+    const client = {
+      subscribeQuery,
+      onQueryUpdate: () => () => {},
+      onReconnect: (cb: () => void) => { reconnects.add(cb); return () => reconnects.delete(cb); },
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    } as any;
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(createProxy(client).subscribeQuery('a Prolog query')).rejects.toThrow('not supported');
+      // The caller never got a proxy to dispose: a reconnect must not open the query again.
+      for (const reconnect of [...reconnects]) reconnect();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(subscribeQuery).toHaveBeenCalledTimes(1);
+      expect(reconnects.size).toBe(0);
+    } finally {
+      errors.mockRestore();
+    }
+  });
 });
 
 describe('PerspectiveProxy.subjectClassTargetClasses', () => {
