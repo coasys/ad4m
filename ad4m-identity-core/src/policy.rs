@@ -88,6 +88,8 @@ pub enum FoldError {
     UnsupportedKeyType,
     #[error("CanWithoutBotMark: `can` on a key without `kind: \"bot\"`")]
     CanWithoutBotMark,
+    #[error("ExpiresWithoutBotMark: `expires` on a key without `kind: \"bot\"`")]
+    ExpiresWithoutBotMark,
 }
 
 impl FormatError {
@@ -136,6 +138,7 @@ impl FoldError {
             FoldError::Ended => "Ended",
             FoldError::UnsupportedKeyType => "UnsupportedKeyType",
             FoldError::CanWithoutBotMark => "CanWithoutBotMark",
+            FoldError::ExpiresWithoutBotMark => "ExpiresWithoutBotMark",
         }
     }
 }
@@ -194,7 +197,6 @@ impl ChainPolicy for KelPolicy {
                 enc: None,
                 added: 0,
                 revoked: None,
-                expires: None,
                 scopes: Vec::new(),
             }],
             next: Some(next.clone()),
@@ -272,7 +274,6 @@ impl ChainPolicy for KelPolicy {
                     enc: None,
                     added: seq,
                     revoked: None,
-                    expires: None,
                     scopes: Vec::new(),
                 });
                 state.next = next.clone();
@@ -362,12 +363,11 @@ fn insert_key(state: &mut KeyState, key: &DeviceKey, seq: u64) -> Result<(), Fol
     if state.key_id_of(&key.sign).is_some() {
         return Err(FoldError::DuplicateKey(key.sign.clone()));
     }
-    let (expires, scopes) = match &key.life {
-        KeyLife::Standing => (None, Vec::new()),
-        KeyLife::Until(expires) => (Some(*expires), Vec::new()),
+    let scopes = match &key.life {
+        KeyLife::Standing => Vec::new(),
         KeyLife::Bot(scope) => {
             check_actions(&scope.can)?;
-            (None, vec![(seq, scope.clone())])
+            vec![(seq, scope.clone())]
         }
     };
     state.keys.insert(
@@ -378,7 +378,6 @@ fn insert_key(state: &mut KeyState, key: &DeviceKey, seq: u64) -> Result<(), Fol
             enc: Some(key.enc.clone()),
             added: seq,
             revoked: None,
-            expires,
             scopes,
         },
     );

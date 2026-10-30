@@ -143,6 +143,20 @@ fn can_without_bot_mark() {
 }
 
 #[test]
+fn expires_without_bot_mark() {
+    // A device key whose validity ends at a time is not part of the format: only a bot
+    // scope expires.
+    assert_eq!(
+        policy_of(refuse("expires without bot mark")),
+        FoldError::ExpiresWithoutBotMark
+    );
+    assert_eq!(
+        policy_of(refuse("expires without bot mark in incept")),
+        FoldError::ExpiresWithoutBotMark
+    );
+}
+
+#[test]
 fn wrong_prev_is_the_modules() {
     assert!(matches!(refuse("wrong prev"), ChainError::Prev { .. }));
 }
@@ -399,7 +413,7 @@ fn typed_big_integer_has_no_canonical_form() {
     // refuses it before the policy runs.
     let mut event = incept_event(vec![device(1, KeyLife::Standing)]);
     if let ad4m_identity_core::Op::Incept { add, .. } = &mut event.op {
-        add[0].life = KeyLife::Until(u64::MAX);
+        add[0].life = bot(&["read"], u64::MAX);
     }
     assert!(event_hash(&event).is_err());
     assert!(ad4m_identity_core::derive_scid(&event).is_err());
@@ -407,7 +421,7 @@ fn typed_big_integer_has_no_canonical_form() {
     assert!(ad4m_identity_core::build::incept_unsigned(
         &mk(&master(0)),
         next(1),
-        vec![device(1, KeyLife::Until(1 << 53))]
+        vec![device(1, bot(&["read"], 1 << 53))]
     )
     .is_err());
 }
@@ -434,15 +448,11 @@ fn serde_parsing_is_strict() {
 }
 
 #[test]
-fn device_key_round_trips_its_three_flat_forms() {
+fn device_key_round_trips_its_two_flat_forms() {
     let forms = [
         (
             KeyLife::Standing,
             json!({"id": "d1", "sign": mk(&dev(1)), "enc": enc("d1")}),
-        ),
-        (
-            KeyLife::Until(1_800_000_000),
-            json!({"id": "d1", "sign": mk(&dev(1)), "enc": enc("d1"), "expires": 1_800_000_000u64}),
         ),
         (
             bot(&["read", "join"], 1_700_000_000),
@@ -458,18 +468,12 @@ fn device_key_round_trips_its_three_flat_forms() {
     let can_no_kind = json!({"id": "d1", "sign": mk(&dev(1)), "enc": enc("d1"),
                              "can": ["read"], "expires": 5});
     assert!(serde_json::from_value::<DeviceKey>(can_no_kind).is_err());
+    let expires_no_kind = json!({"id": "d1", "sign": mk(&dev(1)), "enc": enc("d1"),
+                                 "expires": 1_800_000_000u64});
+    assert!(serde_json::from_value::<DeviceKey>(expires_no_kind).is_err());
     let bot_no_expiry = json!({"id": "d1", "sign": mk(&dev(1)), "enc": enc("d1"),
                                "kind": "bot", "can": ["read"]});
     assert!(serde_json::from_value::<DeviceKey>(bot_no_expiry).is_err());
-}
-
-#[test]
-fn incept_with_an_until_key_passes() {
-    let log = Log::incept(vec![
-        device(1, KeyLife::Standing),
-        device(2, KeyLife::Until(1_800_000_000)),
-    ]);
-    assert_eq!(log.chain.state().keys["d2"].expires, Some(1_800_000_000));
 }
 
 #[test]

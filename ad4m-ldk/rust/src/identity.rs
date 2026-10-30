@@ -98,7 +98,7 @@ pub struct KeyIndexEntry {
     /// The bot scope in force at the head.
     #[serde(default)]
     pub bot: Option<serde_json::Value>,
-    /// An Until key's expiry, or the bot scope's.
+    /// The bot scope's expiry; `None` for a standing key or a master (only a bot key expires).
     #[serde(default)]
     pub expires: Option<u64>,
     /// A bot key under a pause record in force; false for every other key.

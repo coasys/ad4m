@@ -36,8 +36,6 @@ pub struct KeyRecord {
     pub added: u64,
     /// The seq that revoked it, replaced it (a master at a `rotate`) or ended the log.
     pub revoked: Option<u64>,
-    /// The `expires` of a key added with `KeyLife::Until`.
-    pub expires: Option<u64>,
     /// A bot key: `(seq, scope)` per `add` or `scope`, in seq order. Empty for every other key.
     pub scopes: Vec<(u64, BotScope)>,
 }
@@ -69,19 +67,14 @@ impl KeyState {
         self.record(key).is_some_and(|r| r.valid_at(seq))
     }
 
-    /// `key_valid_at`, and `now` (the caller's trusted time, unix seconds) before the `expires`
-    /// of a `KeyLife::Until` key or of the bot scope in force at `seq`.
+    /// `key_valid_at`, and for a bot key `now` (the caller's trusted time, unix seconds) before
+    /// the `expires` of the scope in force at `seq`.
     pub fn key_valid_at_time(&self, key: &str, seq: u64, now: u64) -> bool {
         let Some(record) = self.record(key) else {
             return false;
         };
         if !record.valid_at(seq) {
             return false;
-        }
-        if let Some(expires) = record.expires {
-            if now >= expires {
-                return false;
-            }
         }
         if !record.scopes.is_empty() {
             return scope_at(record, seq).is_some_and(|s| now < s.expires);

@@ -2,17 +2,17 @@
 //! function of the folded state at one seq. It reads no clock and does no I/O, so every
 //! resolver (executor, host, browser) derives the same document from the same log.
 //!
-//! The document is time-free. An `Until` key's `expires` and a bot scope's `expires` are
-//! properties of their verification methods (`coasys:expires`, `coasys:bot`), never a filter:
-//! the document lists every key that [`KeyState::key_valid_at`] gives at the seq, and a
-//! verifier compares an expiry with its own trusted time.
+//! The document is time-free. A bot scope's `expires` is a property of the bot's verification
+//! method (`coasys:bot`), never a filter: the document lists every key that
+//! [`KeyState::key_valid_at`] gives at the seq, and a verifier compares the expiry with its own
+//! trusted time.
 //!
 //! The mapping:
 //!
 //! - every device key valid at the seq is a `Multikey` method `#<keyId>` (its signing key);
 //!   a key that is not a bot's also has a `Multikey` method `#<keyId>-enc` (its X25519 key)
 //!   listed in `keyAgreement`, where messages to the person are sealed;
-//! - a standing or `Until` key is listed in `authentication` and `assertionMethod`;
+//! - a standing key is listed in `authentication` and `assertionMethod`;
 //! - a bot key is listed only in `capabilityInvocation`, with the scope in force at the seq,
 //!   so a generic verifier never takes a bot's signature as the person's;
 //! - master keys are absent: they control the log, not the subject's statements;
@@ -30,7 +30,7 @@ use crate::{KelChain, KeyState};
 pub const DID_CONTEXT: &str = "https://www.w3.org/ns/did/v1";
 /// The Multikey context.
 pub const MULTIKEY_CONTEXT: &str = "https://w3id.org/security/multikey/v1";
-/// The `coasys/1` context: defines `coasys:bot` and `coasys:expires`.
+/// The `coasys/1` context: defines `coasys:bot`.
 pub const COASYS_CONTEXT: &str = "https://coasys.org/ns/did-scid-coasys/v1";
 /// The `@context` of every document, in order.
 pub const CONTEXTS: [&str; 3] = [DID_CONTEXT, MULTIKEY_CONTEXT, COASYS_CONTEXT];
@@ -65,8 +65,6 @@ pub struct VerificationMethod {
     pub type_: &'static str,
     pub controller: String,
     pub public_key_multibase: String,
-    /// `coasys:expires`: the `expires` of a `KeyLife::Until` key.
-    pub expires: Option<u64>,
     /// `coasys:bot`: the bot scope in force at the document's seq.
     pub bot: Option<BotScope>,
 }
@@ -150,7 +148,6 @@ fn document_at(state: &KeyState, seq: u64, also_known_as: &[String]) -> DidDocum
             type_: MULTIKEY,
             controller: did.clone(),
             public_key_multibase: record.sign.clone(),
-            expires: record.expires,
             bot,
         });
         if is_bot {
@@ -167,7 +164,6 @@ fn document_at(state: &KeyState, seq: u64, also_known_as: &[String]) -> DidDocum
                 type_: MULTIKEY,
                 controller: did.clone(),
                 public_key_multibase: enc.clone(),
-                expires: None,
                 bot: None,
             });
             doc.key_agreement.push(enc_id);
@@ -207,9 +203,6 @@ impl Serialize for VerificationMethod {
         map.serialize_entry("type", self.type_)?;
         map.serialize_entry("controller", &self.controller)?;
         map.serialize_entry("publicKeyMultibase", &self.public_key_multibase)?;
-        if let Some(expires) = self.expires {
-            map.serialize_entry("coasys:expires", &expires)?;
-        }
         if let Some(bot) = &self.bot {
             map.serialize_entry("coasys:bot", bot)?;
         }

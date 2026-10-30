@@ -190,7 +190,7 @@ pub fn json(event: &Event) -> Value {
 pub fn vector_log() -> Log {
     let mut log = Log::incept(vec![
         device(1, KeyLife::Standing),
-        device(2, KeyLife::Until(1_800_000_000)),
+        device(2, KeyLife::Standing),
     ]);
     let bot_id = log.add(bot(&["read", "write"], 1_750_000_000)); // d3, seq 1
     log.scope(&bot_id, &["read"], 1_900_000_000); // seq 2
@@ -307,6 +307,20 @@ pub fn refusal_cases() -> Vec<Case> {
         "8",
         with_second(&base, &add, |v| v["add"][0]["can"] = json!(["read"])),
         policy("CanWithoutBotMark"),
+    );
+    case(
+        "expires without bot mark",
+        "8",
+        with_second(&base, &add, |v| {
+            v["add"][0]["expires"] = json!(1_800_000_000u64)
+        }),
+        policy("ExpiresWithoutBotMark"),
+    );
+    case(
+        "expires without bot mark in incept",
+        "8",
+        incept_json(|v| v["add"][0]["expires"] = json!(1_800_000_000u64)),
+        policy("ExpiresWithoutBotMark"),
     );
     case(
         "wrong prev",
@@ -1092,14 +1106,13 @@ fn build_link() -> Value {
     let offer = signed_offer(&log, link_offer(&log, OfferKind::Device, None));
     let claim = link_claim(&log, 2, true);
     let view = claim_view(&claim, LINK_NOW + 10);
-    let add = build::add_claimed(&log.chain, &master(0), &offer.offer, &view, None).unwrap();
+    let add = build::add_claimed(&log.chain, &master(0), &offer.offer, &view).unwrap();
     let bot_scope = BotScope {
         can: vec!["read".into()],
         expires: 1_800_000_000,
     };
     let bot_offer = signed_offer(&log, link_offer(&log, OfferKind::Bot, Some(bot_scope)));
-    let bot_add =
-        build::add_claimed(&log.chain, &master(0), &bot_offer.offer, &view, None).unwrap();
+    let bot_add = build::add_claimed(&log.chain, &master(0), &bot_offer.offer, &view).unwrap();
     let offer_string = OfferString {
         store: "https://store.coasys.org".into(),
         scid: scid.clone(),
