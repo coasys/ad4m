@@ -13,15 +13,20 @@
 //!    [`execute_model_query_inner`], and replace the raw ID arrays with fully
 //!    hydrated child instances.  This supports arbitrary nesting depth
 //!    (bounded by [`MAX_INCLUDE_DEPTH`](super::utils::MAX_INCLUDE_DEPTH)).
+//!    An include's `limit` / `offset` page each parent's rows, not the whole
+//!    page's ([`PerParentPage`]): the sub-query is then scoped as a
+//!    `Traverse` from the parents, cut per anchor in the store where the store
+//!    can cut it exactly ([`per_parent_query`]).
 
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
-use super::query::execute_model_query_inner;
-use super::sparql_builder::verified_link_exists;
+use super::query::{execute_model_query_inner, order_fully_pushable};
+use super::sparql_builder::{all_where_pushable, verified_link_exists};
 use super::types::{
-    IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
+    IncludeValue, ModelQueryInput, ModelShape, OrderDirection, Scope, ScopeDirection,
+    ShapeRelation, ShapeResolver, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
@@ -173,7 +178,9 @@ pub(super) async fn resolve_includes_recursive(
         if rel.direction == "reverse" {
             resolve_reverse_include(store, instances, rel, &sub_query, resolver, depth).await?;
         } else {
-            resolve_forward_include(store, instances, rel, &sub_query, resolver, depth).await?;
+            let links = links_are_the_relation(shape, rel);
+            resolve_forward_include(store, instances, rel, links, &sub_query, resolver, depth)
+                .await?;
         }
     }
     Ok(())
@@ -400,15 +407,184 @@ async fn hydrate_polymorphic(
     Ok(())
 }
 
+/// Whether a forward relation's values are exactly its links over its
+/// predicate, so that a [`Scope::Traverse`] over that predicate reaches the same
+/// rows the relation lists.
+///
+/// True for a plain link relation and for one filled by the conformance getter
+/// the SDK generates for a typed relation (the target class's conformance is
+/// also applied by the include's own query). False for a getter of the model
+/// author's own, a relation `where`, and a `local` relation (read from Local
+/// links only, which the scope's link guard does not know of): each of those
+/// lists something other than the links.
+fn links_are_the_relation(shape: &ModelShape, rel: &ShapeRelation) -> bool {
+    let Some(prop) = shape.properties.iter().find(|p| p.name == rel.name) else {
+        return false;
+    };
+    let getter_lists_links = match &prop.getter {
+        None => true,
+        Some(getter) => super::getters::is_generated_relation_getter(getter, &rel.predicate),
+    };
+    getter_lists_links && prop.where_filter.is_none() && !prop.local
+}
+
+/// An include's `limit` / `offset`, read per parent.
+///
+/// `include: { comments: { limit: 5 } }` on a page of posts is each post with
+/// its own five, so the window cannot go to the include's sub-query as written:
+/// one query for the whole page, cut once, hands the five to whichever posts
+/// own them and `[]` to the rest. The sub-query runs without a window and each
+/// parent's rows are cut here; [`per_parent_query`] lets the store do the
+/// cutting where it can do it exactly.
+///
+/// `offset` is per parent too, for the same reason: skipping the first N rows
+/// of the whole page would skip one post's comments and none of another's.
+struct PerParentPage {
+    offset: usize,
+    limit: Option<usize>,
+}
+
+impl PerParentPage {
+    /// `None` when the include asks for no window: every parent keeps every
+    /// related row, read exactly as before.
+    fn of(sub_query: &ModelQueryInput) -> Option<Self> {
+        if sub_query.limit.is_none() && sub_query.offset.is_none() {
+            return None;
+        }
+        Some(Self {
+            offset: sub_query.offset.unwrap_or(0),
+            limit: sub_query.limit,
+        })
+    }
+
+    /// How many rows of each parent the store must keep for this page:
+    /// everything the offset skips, and the page after it.
+    fn per_anchor(&self) -> Option<usize> {
+        self.limit.map(|limit| self.offset.saturating_add(limit))
+    }
+
+    /// One parent's page of `ordered`, the sub-query's rows in the order that
+    /// chooses them. `members` are the parent's own related ids; with
+    /// `keep_member_order` the page is shown in their order (the relation's
+    /// link order, as an include without `order` always has been).
+    fn select<'a>(
+        &self,
+        ordered: &'a [String],
+        members: &'a [String],
+        keep_member_order: bool,
+    ) -> Vec<&'a str> {
+        let page: Vec<&str> = ordered
+            .iter()
+            .filter(|id| members.contains(id))
+            .skip(self.offset)
+            .take(self.limit.unwrap_or(usize::MAX))
+            .map(String::as_str)
+            .collect();
+        if !keep_member_order {
+            return page;
+        }
+        let mut seen = std::collections::HashSet::new();
+        members
+            .iter()
+            .map(String::as_str)
+            .filter(|id| page.contains(id) && seen.insert(*id))
+            .collect()
+    }
+}
+
+/// The sub-query for a windowed include: the related rows of every parent on
+/// the page, scoped as a [`Scope::Traverse`] from the parents over the
+/// relation's predicate, without the caller's window (each parent's is applied
+/// by [`PerParentPage::select`]).
+///
+/// The rows are chosen in the include's `order`, or oldest first without one —
+/// what a limited read with no order has always meant. When the store can sort
+/// by that order and evaluate the whole `where`, the scope carries
+/// `limitPerAnchor`, so the store keeps only each parent's first
+/// `offset + limit` ids and hydration sees only those. Otherwise a cut in the
+/// store would keep rows the caller did not ask for — the order it slices by
+/// is not the requested one, or a filter run after hydration removes rows that
+/// had already taken a parent's places — so every related row is read, and
+/// filtered and sorted in the executor, before each parent is cut. That is the
+/// cost an include with such an order or filter has always paid.
+///
+/// The scope stands for the relation only when `links_are_the_relation`: the
+/// relation lists exactly its links (see [`links_are_the_relation`]). Where it
+/// does not, where a parent id is not an IRI, or where the sub-query names a
+/// `parent` scope of its own (which it keeps), the relation is applied as the
+/// `where.id` list of `members` instead, as an include without a window is, and
+/// nothing is cut in the store.
+#[allow(clippy::too_many_arguments)]
+fn per_parent_query(
+    sub_query: &ModelQueryInput,
+    rel: &ShapeRelation,
+    links_are_the_relation: bool,
+    parent_ids: &[String],
+    direction: ScopeDirection,
+    members: &[String],
+    page: &PerParentPage,
+    target_shape: &ModelShape,
+    resolver: &dyn ShapeResolver,
+) -> ModelQueryInput {
+    let mut query = sub_query.clone();
+    query.limit = None;
+    query.offset = None;
+    if query.order.is_none() {
+        query.order = Some(vec![("timestamp".to_string(), OrderDirection::ASC)]);
+    }
+    // A Traverse drops an anchor that is not an IRI, which would leave that
+    // parent with nothing where the id list still reaches its rows.
+    if !links_are_the_relation
+        || query.parent.is_some()
+        || validate_iri(&rel.predicate).is_err()
+        || parent_ids.iter().any(|id| validate_iri(id).is_err())
+    {
+        let mut wc = query.where_clause.take().unwrap_or_default();
+        let ids = match wc.get("id") {
+            Some(WhereCondition::String(s)) => {
+                members.iter().filter(|id| *id == s).cloned().collect()
+            }
+            Some(WhereCondition::StringArray(arr)) => members
+                .iter()
+                .filter(|id| arr.contains(id))
+                .cloned()
+                .collect(),
+            Some(_) => vec![],
+            None => members.to_vec(),
+        };
+        wc.insert("id".to_string(), WhereCondition::StringArray(ids));
+        query.where_clause = Some(wc);
+        return query;
+    }
+    let store_can_cut = order_fully_pushable(&query, target_shape, resolver)
+        && all_where_pushable(&query, target_shape, Some(resolver));
+    query.parent = Some(Scope::Traverse {
+        ids: parent_ids.to_vec(),
+        predicate: Some(rel.predicate.clone()),
+        transitive: false,
+        direction,
+        limit_per_anchor: if store_can_cut {
+            page.per_anchor()
+        } else {
+            None
+        },
+        levels: None,
+        max_depth: None,
+    });
+    query
+}
+
 /// Resolve a forward relation (`@HasMany` / `@HasOne`) for all instances.
 ///
 /// Collects all unique target IDs from the relation arrays, runs a sub-query
 /// to hydrate them, and replaces the raw ID arrays with hydrated JSON objects.
 /// If the sub-query specifies an `order`, the result order is preserved.
+/// A `limit` / `offset` pages each instance's targets ([`PerParentPage`]).
 async fn resolve_forward_include(
     store: &SparqlStore,
     instances: &mut [Value],
     rel: &ShapeRelation,
+    links_are_the_relation: bool,
     sub_query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
@@ -446,6 +622,8 @@ async fn resolve_forward_include(
         all_ids.retain(|id| filter_ids.contains(id));
     }
     let polymorphic = sub_query.polymorphic.unwrap_or(false);
+    // Never set on a polymorphic include, which refuses `limit`/`offset`.
+    let page = PerParentPage::of(sub_query);
     let target_ids = all_ids.clone();
     wc.insert("id".to_string(), WhereCondition::StringArray(all_ids));
     query.where_clause = Some(wc);
@@ -484,6 +662,23 @@ async fn resolve_forward_include(
             ));
         }
         let target_shape = resolver.get_shape(&rel.target_class_name)?;
+        if let Some(page) = &page {
+            let parent_ids: Vec<String> = instances
+                .iter()
+                .filter_map(|inst| inst["id"].as_str().map(str::to_string))
+                .collect();
+            query = per_parent_query(
+                sub_query,
+                rel,
+                links_are_the_relation,
+                &parent_ids,
+                ScopeDirection::Out,
+                &target_ids,
+                page,
+                target_shape.as_ref(),
+                resolver,
+            );
+        }
         let result = Box::pin(execute_model_query_inner(
             store,
             target_shape.as_ref(),
@@ -517,7 +712,9 @@ async fn resolve_forward_include(
             continue;
         };
 
-        let iter_ids: Vec<&str> = if has_sub_order {
+        let iter_ids: Vec<&str> = if let Some(page) = &page {
+            page.select(&ordered_ids, &parent_ids, !has_sub_order)
+        } else if has_sub_order {
             ordered_ids
                 .iter()
                 .filter(|id| parent_ids.iter().any(|pid| pid == *id))
@@ -623,6 +820,8 @@ async fn resolve_reverse_include(
     // concrete class — the classes need not share the property at all — so the
     // link order is kept across classes, as on the forward path.
     let has_sub_order = sub_query.order.is_some() && !polymorphic;
+    // Never set on a polymorphic include, which refuses `limit`/`offset`.
+    let page = PerParentPage::of(sub_query);
     let mut hydrated: HashMap<String, Value> = HashMap::new();
     let mut ordered_result_ids: Vec<String> = Vec::new();
     if !all_source_ids.is_empty() {
@@ -672,6 +871,22 @@ async fn resolve_reverse_include(
                 ));
             }
             let target_shape = resolver.get_shape(&rel.target_class_name)?;
+            if let Some(page) = &page {
+                // The sources were read above over the same predicate and
+                // under the same link guard as the scope's step, so the scope
+                // is the relation.
+                query = per_parent_query(
+                    sub_query,
+                    rel,
+                    true,
+                    &safe_ids,
+                    ScopeDirection::In,
+                    &target_ids,
+                    page,
+                    target_shape.as_ref(),
+                    resolver,
+                );
+            }
             let result = Box::pin(execute_model_query_inner(
                 store,
                 target_shape.as_ref(),
@@ -699,12 +914,20 @@ async fn resolve_reverse_include(
         let source_ids = sources_by_target.get(&inst_id).cloned().unwrap_or_default();
 
         let resolved = if rel.kind == "belongsToOne" || rel.max_count == Some(1) {
-            source_ids
-                .first()
-                .and_then(|id| hydrated.get(id).cloned())
+            let first = match &page {
+                Some(page) => page
+                    .select(&ordered_result_ids, &source_ids, !has_sub_order)
+                    .first()
+                    .map(|id| id.to_string()),
+                None => source_ids.first().cloned(),
+            };
+            first
+                .and_then(|id| hydrated.get(&id).cloned())
                 .unwrap_or(Value::Null)
         } else {
-            let iter_ids: Vec<&str> = if has_sub_order {
+            let iter_ids: Vec<&str> = if let Some(page) = &page {
+                page.select(&ordered_result_ids, &source_ids, !has_sub_order)
+            } else if has_sub_order {
                 ordered_result_ids
                     .iter()
                     .filter(|id| source_ids.contains(id))
@@ -723,4 +946,201 @@ async fn resolve_reverse_include(
             .map(|obj| obj.insert(rel.name.clone(), resolved));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod per_parent_tests {
+    use super::*;
+    use crate::perspectives::model_query::shape::parse_shape_from_json;
+    use crate::perspectives::model_query::test_helpers::StaticShapeResolver;
+
+    const COMMENT: &str = r#"{
+        "className": "Comment",
+        "properties": {
+            "cflag": { "predicate": "we://cflag", "required": true, "flag": true, "initial": "we://comment" },
+            "body": { "predicate": "we://body", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    fn post(relation: &str) -> ModelShape {
+        parse_shape_from_json(
+            &format!(
+                r#"{{
+                "className": "Post",
+                "properties": {{}},
+                "relations": {{ "comments": {relation} }}
+            }}"#
+            ),
+            "Post",
+        )
+        .unwrap()
+    }
+
+    fn comments_relation(shape: &ModelShape) -> &ShapeRelation {
+        shape
+            .include_relations
+            .iter()
+            .find(|r| r.name == "comments")
+            .unwrap()
+    }
+
+    #[test]
+    fn a_plain_or_generated_relation_is_its_links_and_others_are_not() {
+        let plain = post(
+            r#"{ "predicate": "we://comment", "kind": "hasMany", "targetClassName": "Comment" }"#,
+        );
+        assert!(links_are_the_relation(&plain, comments_relation(&plain)));
+
+        let generated = post(
+            r#"{ "predicate": "we://comment", "kind": "hasMany", "targetClassName": "Comment",
+                 "getter": "SELECT ?target WHERE { <Base> <we://comment> ?target . ?target <we://cflag> <we://comment> . }" }"#,
+        );
+        assert!(links_are_the_relation(
+            &generated,
+            comments_relation(&generated)
+        ));
+
+        let own = post(
+            r#"{ "predicate": "we://comment", "kind": "hasMany", "targetClassName": "Comment",
+                 "getter": "SELECT ?target WHERE { ?target <we://reply_to> <Base> . }" }"#,
+        );
+        assert!(!links_are_the_relation(&own, comments_relation(&own)));
+
+        let local = post(
+            r#"{ "predicate": "we://comment", "kind": "hasMany", "targetClassName": "Comment", "local": true }"#,
+        );
+        assert!(!links_are_the_relation(&local, comments_relation(&local)));
+    }
+
+    fn plan(sub_query: ModelQueryInput, links: bool) -> ModelQueryInput {
+        let shape = post(
+            r#"{ "predicate": "we://comment", "kind": "hasMany", "targetClassName": "Comment" }"#,
+        );
+        let (resolver, comment) = StaticShapeResolver::from_json("Comment", COMMENT).unwrap();
+        let page = PerParentPage::of(&sub_query).expect("a window");
+        per_parent_query(
+            &sub_query,
+            comments_relation(&shape),
+            links,
+            &["we://post/1".to_string(), "we://post/2".to_string()],
+            ScopeDirection::Out,
+            &["we://c/1".to_string()],
+            &page,
+            comment.as_ref(),
+            &resolver,
+        )
+    }
+
+    /// An order and filter the store can evaluate: the store keeps each
+    /// parent's `offset + limit`, and nothing else bounds the read.
+    #[test]
+    fn a_store_expressible_include_is_cut_per_anchor_in_the_store() {
+        let q = plan(
+            ModelQueryInput {
+                limit: Some(2),
+                offset: Some(1),
+                order: Some(vec![("timestamp".to_string(), OrderDirection::DESC)]),
+                ..Default::default()
+            },
+            true,
+        );
+        assert_eq!((q.limit, q.offset), (None, None));
+        assert!(q
+            .where_clause
+            .as_ref()
+            .is_none_or(|w| !w.contains_key("id")));
+        match q.parent {
+            Some(Scope::Traverse {
+                ids,
+                predicate,
+                direction,
+                limit_per_anchor,
+                transitive: false,
+                ..
+            }) => {
+                assert_eq!(ids, vec!["we://post/1", "we://post/2"]);
+                assert_eq!(predicate.as_deref(), Some("we://comment"));
+                assert_eq!(direction, ScopeDirection::Out);
+                assert_eq!(limit_per_anchor, Some(3));
+            }
+            other => panic!("expected a Traverse scope, got {other:?}"),
+        }
+    }
+
+    /// Two order keys: the store cannot sort by them, so it must not cut.
+    #[test]
+    fn an_order_the_store_cannot_express_is_not_cut_in_the_store() {
+        let q = plan(
+            ModelQueryInput {
+                limit: Some(2),
+                order: Some(vec![
+                    ("body".to_string(), OrderDirection::DESC),
+                    ("timestamp".to_string(), OrderDirection::ASC),
+                ]),
+                ..Default::default()
+            },
+            true,
+        );
+        assert!(matches!(
+            q.parent,
+            Some(Scope::Traverse {
+                limit_per_anchor: None,
+                ..
+            })
+        ));
+    }
+
+    /// A relation that is not its links is scoped by its listed ids instead.
+    #[test]
+    fn a_relation_that_is_not_its_links_is_scoped_by_its_ids() {
+        let q = plan(
+            ModelQueryInput {
+                limit: Some(2),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(q.parent.is_none());
+        assert!(matches!(
+            q.where_clause.as_ref().and_then(|w| w.get("id")),
+            Some(WhereCondition::StringArray(ids)) if ids == &vec!["we://c/1".to_string()]
+        ));
+        assert_eq!(
+            q.order,
+            Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+            "a limited include with no order chooses oldest first"
+        );
+    }
+
+    /// A Traverse would drop an anchor that is not an IRI, leaving that parent
+    /// with nothing; such a page is scoped by the listed ids instead.
+    #[test]
+    fn a_parent_id_that_is_not_an_iri_is_scoped_by_its_ids() {
+        let shape = post(
+            r#"{ "predicate": "we://comment", "kind": "hasMany", "targetClassName": "Comment" }"#,
+        );
+        let (resolver, comment) = StaticShapeResolver::from_json("Comment", COMMENT).unwrap();
+        let sub_query = ModelQueryInput {
+            limit: Some(2),
+            ..Default::default()
+        };
+        let page = PerParentPage::of(&sub_query).expect("a window");
+        let q = per_parent_query(
+            &sub_query,
+            comments_relation(&shape),
+            true,
+            &["we://post/1".to_string(), "we://post 2".to_string()],
+            ScopeDirection::Out,
+            &["we://c/1".to_string()],
+            &page,
+            comment.as_ref(),
+            &resolver,
+        );
+        assert!(q.parent.is_none());
+        assert!(matches!(
+            q.where_clause.as_ref().and_then(|w| w.get("id")),
+            Some(WhereCondition::StringArray(ids)) if ids == &vec!["we://c/1".to_string()]
+        ));
+    }
 }

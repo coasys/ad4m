@@ -307,7 +307,8 @@ export function isTraverseScope(scope: Scope): scope is TraverseScope {
  * // One level deep
  * { comments: true }
  *
- * // Sub-query: only the 5 most-recent comments
+ * // Sub-query: only the 5 most-recent comments of each parent
+ * // (`limit` and `offset` page every parent's relation on its own)
  * { comments: { order: { createdAt: 'DESC' }, limit: 5 } }
  *
  * // Nested eager-load
