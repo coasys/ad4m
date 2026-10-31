@@ -207,7 +207,8 @@ export async function startCluster(opts: CascadeClusterOptions): Promise<Cascade
       // failure.
       const proc = spawn(bin, args, {
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, RUST_LOG: "info" },
+        // Ends with this process, however it ends (see spawnExecutor in utils/utils.ts).
+        env: { ...process.env, RUST_LOG: "info", AD4M_EXIT_WITH_PARENT: "true" },
       });
       spawnedProcs.push(proc);
       try {
