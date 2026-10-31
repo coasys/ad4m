@@ -360,8 +360,60 @@ export class ApiClient {
         this._wsReconnectDelay = Math.min(this._wsReconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
         this._wsReconnectTimer = setTimeout(() => {
             this._wsReconnectTimer = null
+            this._listenForWake(false)
             this._ensureWs()
         }, delay)
+        this._listenForWake(true)
+    }
+
+    /** End the wait for the next dial, if one is pending, without dialling. */
+    private _cancelReconnect(): void {
+        if (this._wsReconnectTimer) {
+            clearTimeout(this._wsReconnectTimer)
+            this._wsReconnectTimer = null
+        }
+        this._listenForWake(false)
+    }
+
+    /**
+     * Dial now if the client is waiting out its reconnect backoff (up to 30 s)
+     * instead of letting the wait run out. For the moments the host knows the
+     * executor may be reachable again: an executor it restarted is up, the
+     * device woke. In a browser the client does this itself on `online` and when
+     * the page becomes visible. Does nothing while a socket is open or
+     * connecting, after `closeAll()` with nothing to reconnect, or once the
+     * executor refused the token.
+     */
+    reconnectNow(): void {
+        if (!this._wsReconnectTimer || this._ws || this._authFailed !== null) return
+        this._cancelReconnect()
+        // The executor is likely back, so a failure now starts the backoff over.
+        this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
+        this._ensureWs()
+    }
+
+    private _wakeListening = false
+    /** `online` always; `visibilitychange` only when the page became visible. */
+    private readonly _onWake = (event: Event): void => {
+        if (event.type === 'visibilitychange' && typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+        this.reconnectNow()
+    }
+
+    /** Listen for `online` and `visibilitychange` exactly while a reconnect
+     *  timer is pending. Outside a browser (no `window`) it registers nothing. */
+    private _listenForWake(on: boolean): void {
+        if (on === this._wakeListening) return
+        const win = typeof window !== 'undefined' ? window : undefined
+        if (typeof win?.addEventListener !== 'function') return
+        const doc = typeof document !== 'undefined' && typeof document.addEventListener === 'function' ? document : undefined
+        this._wakeListening = on
+        if (on) {
+            win.addEventListener('online', this._onWake)
+            doc?.addEventListener('visibilitychange', this._onWake)
+        } else {
+            win.removeEventListener('online', this._onWake)
+            doc?.removeEventListener('visibilitychange', this._onWake)
+        }
     }
 
     // ── RPC call method ─────────────────────────────────────────────────────
@@ -547,10 +599,7 @@ export class ApiClient {
             clearTimeout(this._watchRetryTimer)
             this._watchRetryTimer = null
         }
-        if (this._wsReconnectTimer) {
-            clearTimeout(this._wsReconnectTimer)
-            this._wsReconnectTimer = null
-        }
+        this._cancelReconnect()
         const ws = this._ws
         this._ws = null
         this._wsOpen = null
