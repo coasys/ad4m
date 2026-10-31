@@ -8,7 +8,8 @@ with its own `impl Ad4mDb` block. Child modules can use the private `conn` field
 
 | File | Content |
 |---|---|
-| `endpoints.rs` | The `ai_endpoints` table (AI model servers, key held as models' keys are) and `models.endpoint_id`: `link_models_to_endpoints` gives every remote model the endpoint with its protocol, URL and key (creating one named by the host); `update_endpoint` rewrites the `api_*` columns of the models on it |
+| `endpoints.rs` | The `ai_endpoints` table (AI model servers: URL, key, protocol, capabilities, health). A model (`models`: `id, name, type, endpoint_id, remote_model, native_tools`) names its endpoint; `add_model` refuses an endpoint that does not exist and gives the endpoint the model type's capability |
+| `model_migration.rs` | The one-time move of a `models` table with `api_*` / `local_*` columns: each API model gets the endpoint with its protocol, URL and key (one is created, named by the host), each local model is deleted with one warning line (and its default), the table is rebuilt, `model_status` dropped. An import of an old export goes through the same linking |
 | `session_cutoffs.rs` | The users' session cutoffs (`users.sessions_valid_after`), read by `agent::revoked` |
 | `tasks.rs` | Owner-scoped reads of the `tasks` table: `get_task_owner`, `get_tasks_owned_by` |
 

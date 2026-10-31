@@ -1,7 +1,6 @@
 // Auto-generated from the executor's event table (rust-executor/src/api/events_ws.rs).
 // Do NOT edit manually — regenerate with: pnpm run generate:api-types
 
-import type { AIModelLoadingStatus } from "./AIModelLoadingStatus";
 import type { AgentStatusChangedEvent } from "./AgentStatusChangedEvent";
 import type { AgentUpdatedEvent } from "./AgentUpdatedEvent";
 import type { AiEndpointStatusEvent } from "./AiEndpointStatusEvent";
@@ -43,7 +42,6 @@ export interface EventMap {
   "notification-triggered": NotificationTriggeredEvent;
   "exception-occurred": ExceptionOccurredEvent;
   "transcription-text": TranscriptionTextFilter;
-  "model-loading-status": AIModelLoadingStatus;
   "model-status": ModelStatusEvent;
   "ai-endpoint-status": AiEndpointStatusEvent;
   "query-subscription-update": QuerySubscriptionUpdateEvent;

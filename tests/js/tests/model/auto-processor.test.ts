@@ -26,7 +26,7 @@
 import { expect } from "chai";
 import { Ad4mClient, Link, PerspectiveProxy } from "@coasys/ad4m";
 import type { AutoProcessorEvent, AutoProcessorStep } from "@coasys/ad4m";
-import { startAgent, waitUntil } from "../../helpers/index.js";
+import { addOpenAiShapedLlm, startAgent, waitUntil } from "../../helpers/index.js";
 import { ConversationSubgroup } from "./auto-processor-models.js";
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
@@ -72,11 +72,7 @@ describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
     ad4m = agent.client;
     stopAgent = agent.stop;
 
-    const modelId = await ad4m.ai.addModel({
-      name: "interpretation-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
-      modelType: "LLM",
-    } as any);
+    const modelId = await addOpenAiShapedLlm(ad4m, "interpretation-llm", BASE_URL, MODEL);
     await ad4m.ai.setDefaultModel("LLM", modelId);
   });
 

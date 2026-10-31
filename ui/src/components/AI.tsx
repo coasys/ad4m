@@ -1,9 +1,12 @@
-import { Model } from "@coasys/ad4m/lib/src/ai/AIResolver";
+import type { AIModel, AiEndpoint, ModelType } from "@coasys/ad4m";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import "../index.css";
 import ModelCard from "./ModelCard";
 import ModelModal from "./ModelModal";
+import { kindLabel } from "./aiSetup";
+
+const MODEL_TYPES: ModelType[] = ["LLM", "EMBEDDING", "TRANSCRIPTION", "SPEECH"];
 
 const AI = () => {
   const {
@@ -12,18 +15,25 @@ const AI = () => {
 
   const [models, setModels] = useState<any[]>([]);
   const modelsRef = useRef<any[]>([]);
-  const [selectedModel, setSelectedModel] = useState(null);
+  const [endpoints, setEndpoints] = useState<AiEndpoint[]>([]);
+  const [selectedModel, setSelectedModel] = useState<AIModel | null>(null);
   const [newModelModalOpen, setNewModelModalOpen] = useState(false);
 
   const getData = useCallback(async () => {
     const modelsInDB = await client!.ai.getModels();
     const tasksInDB = await client!.ai.tasks();
-    const defaultLLM = await client!.ai.getDefaultModel("LLM");
+    setEndpoints(await client!.ai.endpoints());
+    const defaults = await Promise.all(
+      MODEL_TYPES.map((type) => client!.ai.getDefaultModel(type))
+    );
+    const defaultIds = new Set(defaults.map((d) => d?.id).filter(Boolean));
     // attach tasks to models
     const modelsWithTasks = modelsInDB.map((model) => {
       const modelWithTasks = { ...model } as any;
-      if (model.id === defaultLLM?.id) {
+      if (defaultIds.has(model.id)) {
         modelWithTasks.default = true;
+      }
+      if (model.modelType === "LLM" && defaultIds.has(model.id)) {
         // find tasks for default model
         const matchingTasks = tasksInDB.filter(
           (task) => task.modelId === "default"
@@ -41,13 +51,22 @@ const AI = () => {
     setModels(modelsWithTasks);
   }, [client]);
 
-  function removeModel(model: Model) {
-    client!.ai.removeModel(model.id);
+  async function removeModel(model: AIModel) {
+    await client!.ai.removeModel(model.id);
     getData();
   }
 
-  function setDefaultModel(model: Model) {
-    client!.ai.setDefaultModel(model.modelType, model.id);
+  async function setDefaultModel(model: AIModel) {
+    await client!.ai.setDefaultModel(model.modelType, model.id);
+    getData();
+  }
+
+  async function removeEndpoint(endpoint: AiEndpoint) {
+    try {
+      await client!.ai.removeEndpoint(endpoint.id);
+    } catch (e) {
+      alert(`${e}`);
+    }
     getData();
   }
 
@@ -85,38 +104,6 @@ const AI = () => {
     if (client) getData();
   }, [client, getData]);
 
-  // update model status every second until all loaded
-  useEffect(() => {
-    let interval = null as any;
-    if (client && models.length) {
-      interval = setInterval(async () => {
-        const allLoaded = !models.find(
-          (model) => !model.status || !model.loaded
-        );
-        if (allLoaded) clearInterval(interval);
-        else {
-          // update each models status
-          const newModels = await Promise.all(
-            modelsRef.current.map(
-              (model) =>
-                new Promise(async (resolve) => {
-                  client.ai
-                    .modelLoadingStatus(model.id)
-                    .then((status) => resolve({ ...model, ...status }))
-                    .catch((error) => {
-                      console.log("model not found: ", error, model.name);
-                      resolve(model);
-                    });
-                })
-            )
-          );
-          setModels(newModels);
-          modelsRef.current = newModels;
-        }
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [client, models]);
 
   return (
     <j-box p="400">
@@ -155,10 +142,31 @@ const AI = () => {
           )}
 
           <j-flex direction="column" gap="400">
+            {endpoints.length > 0 && (
+              <j-box className="box">
+                <j-flex direction="column" gap="300">
+                  <j-text variant="heading-sm" nomargin>
+                    Endpoints
+                  </j-text>
+                  {endpoints.map((endpoint) => (
+                    <j-flex key={endpoint.id} a="center" j="between" gap="300">
+                      <j-text nomargin color="ui-0">
+                        {endpoint.name}: {kindLabel(endpoint.kind)} at {endpoint.baseUrl} (
+                        {endpoint.health.state.toLowerCase()})
+                      </j-text>
+                      <j-button variant="subtle" size="sm" onClick={() => removeEndpoint(endpoint)}>
+                        <j-icon name="trash" size="sm" />
+                      </j-button>
+                    </j-flex>
+                  ))}
+                </j-flex>
+              </j-box>
+            )}
             {models.map((model) => (
               <ModelCard
                 key={model.id}
                 model={model}
+                endpoint={endpoints.find((e) => e.id === model.endpointId)}
                 editModel={() => setSelectedModel(model)}
                 removeModel={() => removeModel(model)}
                 setDefaultModel={() => setDefaultModel(model)}

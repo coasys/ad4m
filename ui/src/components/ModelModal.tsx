@@ -1,398 +1,156 @@
-import { ModelInput } from "@coasys/ad4m/lib/src/ai/AIResolver";
-import { useContext, useEffect, useState, useRef } from "react";
+import {
+  AI_RECOMMENDED_MODELS,
+  type AIModel,
+  type AiEndpoint,
+  type DetectedEndpoint,
+  type DiscoveredModel,
+  type ModelType,
+} from "@coasys/ad4m";
+import { useCallback, useContext, useEffect, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
-import { open } from '@tauri-apps/plugin-dialog';
 import "../index.css";
+import {
+  capabilityOf,
+  endpointFor,
+  ENDPOINT_KINDS,
+  kindLabel,
+  serves,
+} from "./aiSetup";
 
-const AITypes = ["LLM", "EMBEDDING", "TRANSCRIPTION"];
-const llmModels = [
-  "🌐 External API",
-  "✴️ Anthropic API",
-  "🦙 Ollama API",
-  "🤗 Custom Hugging Face Model",
-  "📁 Local File",
-  "deephermes-3-llama-3-8b-Q4",
-  "deephermes-3-llama-3-8b-Q6",
-  "deephermes-3-llama-3-8b-Q8",
-  "Qwen2.5.1-Coder-7B-Instruct",
-  "deepseek_r1_distill_qwen_1_5b",
-  "deepseek_r1_distill_qwen_7b",
-  "deepseek_r1_distill_qwen_14b",
-  "deepseek_r1_distill_llama_8b",
-  "mistral_7b",
-  "mistral_7b_instruct",
-  "mistral_7b_instruct_2",
-  "solar_10_7b",
-  "solar_10_7b_instruct",
-  "llama_7b",
-  "llama_7b_chat",
-  "llama_7b_code",
-  "llama_8b",
-  "llama_8b_chat",
-  "llama_3_1_8b_chat",
-  "llama_13b",
-  "llama_13b_chat",
-  "llama_13b_code",
-  "llama_34b_code",
-  "llama_70b",
-];
-const transcriptionModels = [
-  "whisper_tiny",
-  "whisper_tiny_quantized",
-  "whisper_tiny_en",
-  "whisper_tiny_en_quantized",
-  "whisper_base",
-  "whisper_base_en",
-  "whisper_small",
-  "whisper_small_en",
-  "whisper_medium",
-  "whisper_medium_en",
-  "whisper_medium_en_quantized_distil",
-  "whisper_large",
-  "whisper_large_v2",
-  "whisper_distil_medium_en",
-  "whisper_distil_large_v2",
-  "whisper_distil_large_v3",
-  "whisper_distil_large_v3_quantized",
-  "whisper_large_v3_turbo_quantized"
-];
-const embeddingModels = ["bert"];
+const MODEL_TYPES: ModelType[] = ["LLM", "EMBEDDING", "TRANSCRIPTION", "SPEECH"];
 
-export default function ModelModal(props: { close: () => void; oldModel?: any }) {
+function closeMenu(menuId: string) {
+  const menu = document.getElementById(menuId);
+  const items = menu?.shadowRoot?.querySelector("details");
+  if (items) items.open = false;
+}
+
+/**
+ * Add or edit a model: an upstream model on an endpoint. The endpoint is picked from the
+ * saved ones, from the servers detected on this machine, or entered by hand; the model
+ * from what the endpoint lists (an Ollama endpoint can pull the recommended one).
+ */
+export default function ModelModal(props: { close: () => void; oldModel?: AIModel }) {
   const { close, oldModel } = props;
   const {
     state: { client },
   } = useContext(Ad4minContext);
 
-  const [newModelName, setNewModelName] = useState("");
-  const [newModelNameError, setNewModelNameError] = useState(false);
-  const [newModelType, setNewModelType] = useState("LLM");
-  const [newModels, setNewModels] = useState<any[]>(llmModels);
-  const [newModel, setNewModel] = useState("llama_8b");
-  const [apiUrl, setApiUrl] = useState("https://api.openai.com/v1");
-  const [apiUrlError, setApiUrlError] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [apiKeyError, setApiKeyError] = useState("");
-  const [apiValid, setApiValid] = useState(false);
-  const [apiModelValid, setApiModelValid] = useState(false);
-  const [apiModelError, setApiModelError] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [apiModel, setApiModel] = useState("");
-  const [apiModels, setApiModels] = useState<string[]>([]);
-  const apiUrlRef = useRef("https://api.openai.com/v1");
-  const apiKeyRef = useRef("");
-  // Bumped whenever provider, URL or key changes, so an API check still in
-  // flight for the old configuration cannot apply its result to the new one.
-  const apiCheckRef = useRef(0);
-  const [maxNumCtx, setMaxNumCtx] = useState("");
-  const [maxNumCtxError, setMaxNumCtxError] = useState("");
-  const [useCustomTokenizer, setUseCustomTokenizer] = useState(false);
-  const [customHfModel, setCustomHfModel] = useState({
-    huggingfaceRepo: "",
-    revision: "main",
-    fileName: "",
-    tokenizerSource: {
-      repo: "",
-      revision: "main",
-      fileName: ""
-    }
-  });
-  const [localFile, setLocalFile] = useState({
-    fileName: "",
-    tokenizerSource: {
-      fileName: ""
-    }
-  });
+  const [name, setName] = useState(oldModel?.name ?? "");
+  const [modelType, setModelType] = useState<ModelType>(oldModel?.modelType ?? "LLM");
+  const [endpoints, setEndpoints] = useState<AiEndpoint[]>([]);
+  const [endpointId, setEndpointId] = useState<string | null>(oldModel?.endpointId ?? null);
+  const [remoteModels, setRemoteModels] = useState<DiscoveredModel[]>([]);
+  const [remoteModel, setRemoteModel] = useState(oldModel?.remoteModel ?? "");
+  const [nativeTools, setNativeTools] = useState<boolean | undefined>(
+    oldModel?.nativeTools ?? undefined
+  );
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState("");
 
-  function closeMenu(menuId: string) {
-    const menu = document.getElementById(menuId);
-    const items = menu?.shadowRoot?.querySelector("details");
-    if (items) items.open = false;
-  }
+  const [adding, setAdding] = useState(false);
+  const [detected, setDetected] = useState<DetectedEndpoint[]>([]);
+  const [newKind, setNewKind] = useState(ENDPOINT_KINDS[0]);
+  const [newUrl, setNewUrl] = useState(ENDPOINT_KINDS[0].baseUrl);
+  const [newKey, setNewKey] = useState("");
 
-  // Which flavour of remote API the selected entry is. External speaks the
-  // OpenAI wire format and is checked with browser-side fetches; Anthropic
-  // and Ollama go through the executor's ai.discoverModels, which knows
-  // their native endpoints (and avoids CORS).
-  const isExternalApi = newModel.includes("External API");
-  const isAnthropic = newModel.includes("Anthropic API");
-  const isOllama = newModel.includes("Ollama API");
-  const isRemoteApi = isExternalApi || isAnthropic || isOllama;
+  const endpoint = endpoints.find((e) => e.id === endpointId);
+  const recommended = AI_RECOMMENDED_MODELS.find((m) => m.modelType === modelType)?.ollama;
 
-  function invalidateApiCheck() {
-    apiCheckRef.current += 1;
-    setLoading(false);
-  }
+  const loadEndpoints = useCallback(async () => {
+    if (!client) return;
+    setEndpoints(await client.ai.endpoints());
+  }, [client]);
 
-  function resetApiState(url: string) {
-    setApiUrl(url);
-    apiUrlRef.current = url;
-    // A key entered for one provider must not follow the user to another
-    // provider's endpoint.
-    setApiKey("");
-    apiKeyRef.current = "";
-    setApiValid(false);
-    setApiModelValid(false);
-    setApiModels([]);
-    setApiModel("");
-    setApiKeyError("");
-    setApiUrlError("");
-    setApiModelError("");
-  }
+  useEffect(() => {
+    loadEndpoints();
+  }, [loadEndpoints]);
 
-  // Check URL/key and list models via the executor, for the API types whose
-  // native endpoints the browser cannot (or should not) talk to directly.
-  async function checkApiViaExecutor(apiType: string) {
-    const check = ++apiCheckRef.current;
-    setLoading(true);
-    setApiKeyError("");
-    setApiUrlError("");
+  // The models the chosen endpoint lists, those of the chosen type first.
+  useEffect(() => {
+    if (!client || !endpointId) return;
+    setRemoteModels([]);
+    client.ai
+      .discoverModels({ endpointId })
+      .then((models) => {
+        const wanted = capabilityOf(modelType);
+        setRemoteModels([
+          ...models.filter((m) => m.capabilities.includes(wanted)),
+          ...models.filter((m) => !m.capabilities.includes(wanted)),
+        ]);
+      })
+      .catch((e) => setError(`The endpoint does not list its models: ${e}`));
+  }, [client, endpointId, modelType]);
+
+  async function startAdding() {
+    setAdding(true);
+    setError("");
     try {
-      const models = await client!.ai.discoverModels(
-        apiUrlRef.current,
-        apiKeyRef.current,
-        apiType
-      );
-      if (check !== apiCheckRef.current) return;
-      setApiValid(true);
-      setApiModels(models);
-      setApiModel("");
-    } catch (e: any) {
-      if (check !== apiCheckRef.current) return;
-      setApiValid(false);
-      setApiModels([]);
-      setApiModel("");
-      const message = `${e?.message || e}`;
-      // The Ollama view has no key field, so its errors go under the URL.
-      if (apiType !== "OLLAMA" && /401|403|key/i.test(message)) setApiKeyError(message);
-      else setApiUrlError(message);
+      setDetected(await client!.ai.detectEndpoints());
+    } catch (e) {
+      setError(`${e}`);
     }
-    setLoading(false);
   }
 
-  async function checkApi() {
-    const check = ++apiCheckRef.current;
-    setLoading(true);
-    setApiKeyError("");
-    setApiUrlError("");
-    let valid = false;
+  async function addEndpoint(kind = newKind.kind, baseUrl = newUrl, apiKey = newKey) {
+    setBusy("endpoint");
+    setError("");
     try {
-      const response = await fetch(`${apiUrlRef.current}/models`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${apiKeyRef.current}`,
-          "Content-Type": "application/json",
-        },
-      });
-      if (check !== apiCheckRef.current) return;
-      const { ok, status, statusText } = response;
-      if (ok) valid = true;
-      else {
-        // key invalid
-        setApiKeyError(status === 401 ? "Invalid key" : statusText);
+      const added = await endpointFor(client!, kind, baseUrl, apiKey);
+      await loadEndpoints();
+      setEndpointId(added.id);
+      setAdding(false);
+      if (added.health.state !== "REACHABLE") {
+        setError(
+          `Saved, but the server answers ${added.health.state}` +
+            (added.health.detail ? `: ${added.health.detail}` : "")
+        );
       }
-    } catch {
-      if (check !== apiCheckRef.current) return;
-      // url invalid
-      setApiUrlError("Error connecting to API");
+    } catch (e) {
+      setError(`${e}`);
     }
-    setApiValid(valid);
-
-    if (valid) {
-      // get models
-      setApiModels([]);
-      setApiModel("");
-      setApiModelValid(false);
-      try {
-        const response = await fetch(`${apiUrlRef.current}/models`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${apiKeyRef.current}`,
-            "Content-Type": "application/json",
-          },
-        });
-        if (response.ok) {
-          const body = await response.json();
-          if (check !== apiCheckRef.current) return;
-          const models = body.data.map((e: any) => e.id);
-          setApiModels(models);
-          if (apiUrlRef.current === "https://api.openai.com/v1") setApiModel("gpt-4o");
-        }
-      } catch {}
-    } else {
-      setApiModels([]);
-      setApiModel("");
-    }
-    if (check === apiCheckRef.current) setLoading(false);
+    setBusy(null);
   }
 
-  async function checkModel() {
-    setLoading(true);
-    if (apiModel) {
-      try {
-        const response = await fetch(`${apiUrl}/chat/completions`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: apiModel,
-            messages: [{ role: "user", content: "Hi" }],
-            max_tokens: 5,
-          }),
-        });
-        setLoading(false);
-        const { ok, status, statusText } = response;
-        if (ok) {
-          setApiModelValid(true);
-        } else {
-          if (status === 401) setApiKeyError("Invalid Key");
-          else setApiModelError(statusText);
-          return false;
-        }
-      } catch (e) {
-        setApiModelError(`Error testing API completion: ${e}`);
-      }
-    } else {
-      setApiModelError("Model required");
+  async function pull(model: string) {
+    setBusy("pull");
+    setError("");
+    try {
+      await client!.ai.pullModel(endpointId!, model);
+      setRemoteModel(model);
+      await loadEndpoints();
+      setRemoteModels(await client!.ai.discoverModels({ endpointId: endpointId! }));
+    } catch (e) {
+      setError(`${e}`);
     }
-    setLoading(false);
+    setBusy(null);
   }
 
-  async function saveModel() {
-    setLoading(true);
-    // validate model settings
-    // Optional num_ctx ceiling for Ollama: a positive integer that fits the
-    // executor's u32. Anything else is rejected rather than silently dropped.
-    const cap = maxNumCtx.trim() === "" ? undefined : Number(maxNumCtx);
-    const capValid =
-      cap === undefined || (Number.isSafeInteger(cap) && cap > 0 && cap <= 0xffffffff);
-    if (!newModelName) setNewModelNameError(true);
-    else if (isRemoteApi && !apiModel) {
-      setApiModelError("Model required");
-    } else if (isOllama && !capValid) {
-      setMaxNumCtxError("Must be a whole number between 1 and 4294967295");
-    } else {
-      // create new model
-      const model = {
-        name: newModelName,
-        modelType: newModelType,
-      } as ModelInput;
-      // An edit that leaves the key field empty on the same endpoint keeps the saved
-      // key: the executor keeps it when the update carries no apiKey.
-      const keepSavedKey =
-        !!oldModel?.api?.hasApiKey && apiKey === "" && apiUrl === oldModel.api.baseUrl;
-      const sentApiKey = keepSavedKey ? undefined : apiKey;
-      if (isExternalApi) {
-        model.api = {
-          baseUrl: apiUrl,
-          apiKey: sentApiKey,
-          apiType: "OPEN_AI",
-          model: apiModel,
-        };
-      } else if (isAnthropic) {
-        model.api = {
-          baseUrl: apiUrl,
-          apiKey: sentApiKey,
-          apiType: "ANTHROPIC",
-          model: apiModel,
-        };
-      } else if (isOllama) {
-        model.api = {
-          baseUrl: apiUrl,
-          apiKey: sentApiKey,
-          apiType: "OLLAMA",
-          model: apiModel,
-        };
-        // Optional ceiling for num_ctx — how much VRAM the Ollama host may
-        // spend on KV cache is the operator's call.
-        if (cap !== undefined) model.api.maxNumCtx = cap;
-      } else if (newModel.includes("Custom Hugging Face Model")) {
-        model.local = {
-          fileName: customHfModel.fileName,
-          huggingfaceRepo: customHfModel.huggingfaceRepo,
-          revision: customHfModel.revision,
-          tokenizerSource: useCustomTokenizer ? customHfModel.tokenizerSource : undefined
-        };
-      } else if (newModel.includes("Local File")) {
-        model.local = {
-          fileName: localFile.fileName,
-          tokenizerSource: localFile.tokenizerSource && localFile.tokenizerSource.fileName.length > 0 ? {
-            repo: "",
-            revision: "",
-            fileName: localFile.tokenizerSource.fileName
-          } : undefined
-        };
+  async function save() {
+    if (!name || !endpointId || !remoteModel) {
+      setError("A name, an endpoint and a model are required");
+      return;
+    }
+    setBusy("save");
+    setError("");
+    const input = { name, modelType, endpointId, remoteModel, nativeTools };
+    try {
+      if (oldModel) {
+        await client!.ai.updateModel(oldModel.id, input);
       } else {
-        model.local = {
-          fileName: newModel,
-        };
-      }
-      if (oldModel) client!.ai.updateModel(oldModel.id, model);
-      else {
-        const newModelId = await client!.ai.addModel(model);
-        // if no default LLM set, mark new model as default
-        if (newModelType === "LLM") {
-          const defaultLLM = await client!.ai.getDefaultModel("LLM");
-          if (!defaultLLM) client!.ai.setDefaultModel("LLM", newModelId);
+        const id = await client!.ai.addModel(input);
+        if (!(await client!.ai.getDefaultModel(modelType))) {
+          await client!.ai.setDefaultModel(modelType, id);
         }
       }
       close();
+    } catch (e) {
+      setError(`${e}`);
     }
-    setLoading(false);
+    setBusy(null);
   }
 
-  useEffect(() => {
-    if (oldModel) {
-      setNewModelName(oldModel.name);
-      setNewModelType(oldModel.modelType);
-
-      if (oldModel.modelType === "LLM") {
-        setNewModels(llmModels);
-        if (oldModel.api) {
-          if (oldModel.api.apiType === "ANTHROPIC") setNewModel("✴️ Anthropic API");
-          else if (oldModel.api.apiType === "OLLAMA") setNewModel("🦙 Ollama API");
-          else setNewModel("🌐 External API");
-          setApiUrl(oldModel.api.baseUrl);
-          apiUrlRef.current = oldModel.api.baseUrl;
-          setApiModel(oldModel.api.model);
-          // The saved endpoint passed its check when it was saved. The executor never
-          // returns the key, so it cannot be checked again here: the unchanged settings
-          // save as they are, and any edit to the URL or key asks for a new check.
-          setApiValid(true);
-          setApiModelValid(true);
-          if (oldModel.api.maxNumCtx) setMaxNumCtx(String(oldModel.api.maxNumCtx));
-        } else if (oldModel.local?.huggingfaceRepo) {
-          setNewModel("🤗 Custom Hugging Face Model");
-          setCustomHfModel({
-            huggingfaceRepo: oldModel.local.huggingfaceRepo,
-            revision: oldModel.local.revision || "main",
-            fileName: oldModel.local.fileName,
-            tokenizerSource: oldModel.local.tokenizerSource || {
-              repo: "",
-              revision: "main",
-              fileName: ""
-            }
-          });
-          setUseCustomTokenizer(!!oldModel.local.tokenizerSource);
-        } else {
-          setNewModel(oldModel.local.fileName);
-        }
-      } else if (oldModel.modelType === "EMBEDDING") {
-        setNewModels(embeddingModels);
-        setNewModel(oldModel.local.fileName);
-      } else {
-        setNewModels(transcriptionModels);
-        setNewModel(oldModel.local.fileName || "whisper_small");
-      }
-
-      if (oldModel.api) {
-        setApiUrl(oldModel.api.baseUrl);
-        apiUrlRef.current = oldModel.api.baseUrl;
-      }
-    }
-  }, []);
+  const openAiShaped = endpoint && !["OLLAMA", "ANTHROPIC"].includes(endpoint.kind);
 
   return (
     <j-modal
@@ -402,496 +160,178 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
       }}
     >
       <j-box px="100">
-        <j-flex direction="column" a="center" gap="700">
+        <j-flex direction="column" a="center" gap="600">
           <j-text size="700" color="ui-0">
-            {oldModel ? "Edit" : "Add a new"} model
+            {oldModel ? "Edit" : "Add a"} model
           </j-text>
 
-          <j-flex direction="column" a="center" gap="500">
-            <j-flex gap="400">
-              <j-input
-                size="md"
-                type="text"
-                label="Name"
-                value={newModelName}
-                error={newModelNameError}
-                errortext="Required"
-                onInput={(e: any) => {
-                  setNewModelNameError(false);
-                  setNewModelName(e.target.value);
-                }}
-              />
-              {newModelNameError && (
-                <j-icon name="x-circle" color="danger-500" style={{ marginTop: 26 }} />
-              )}
-            </j-flex>
+          <j-input
+            size="md"
+            type="text"
+            label="Name"
+            value={name}
+            onInput={(e: any) => setName(e.target.value)}
+          />
 
-            {!oldModel && (
-              <j-flex a="center" gap="400">
-                <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                  Type:
-                </j-text>
-                <j-menu style={{ height: 42, zIndex: 3 }}>
-                  <j-menu-group collapsible title={newModelType} id="ai-types">
-                    {AITypes.map((type) => (
+          <j-flex a="center" gap="400">
+            <j-text nomargin color="ui-800">
+              Type:
+            </j-text>
+            <j-menu style={{ zIndex: 3 }}>
+              <j-menu-group collapsible title={modelType} id="model-types">
+                {MODEL_TYPES.map((type) => (
+                  <j-menu-item
+                    key={type}
+                    selected={type === modelType}
+                    onClick={() => {
+                      setModelType(type);
+                      closeMenu("model-types");
+                    }}
+                  >
+                    {type}
+                  </j-menu-item>
+                ))}
+              </j-menu-group>
+            </j-menu>
+          </j-flex>
+
+          <j-flex a="center" gap="400">
+            <j-text nomargin color="ui-800">
+              Endpoint:
+            </j-text>
+            <j-menu style={{ zIndex: 2 }}>
+              <j-menu-group
+                collapsible
+                title={endpoint ? `${endpoint.name} (${kindLabel(endpoint.kind)})` : "None selected"}
+                id="endpoints"
+              >
+                {endpoints.map((e) => (
+                  <j-menu-item
+                    key={e.id}
+                    selected={e.id === endpointId}
+                    onClick={() => {
+                      setEndpointId(e.id);
+                      setRemoteModel("");
+                      closeMenu("endpoints");
+                    }}
+                  >
+                    {e.name} ({kindLabel(e.kind)}, {e.health.state.toLowerCase()})
+                  </j-menu-item>
+                ))}
+              </j-menu-group>
+            </j-menu>
+            <j-button variant="subtle" size="sm" onClick={startAdding}>
+              <j-icon name="plus-lg" size="sm" /> Endpoint
+            </j-button>
+          </j-flex>
+
+          {adding && (
+            <j-box className="box" style={{ width: "100%" }}>
+              <j-flex direction="column" gap="400">
+                {detected.length > 0 && <j-text nomargin>On this machine:</j-text>}
+                {detected.map((d) => (
+                  <j-flex key={d.baseUrl} a="center" j="between" gap="300">
+                    <j-text nomargin>
+                      {kindLabel(d.kind)} at {d.baseUrl}
+                    </j-text>
+                    <j-button
+                      size="sm"
+                      loading={busy === "endpoint"}
+                      onClick={() => addEndpoint(d.kind, d.baseUrl, "")}
+                    >
+                      Use
+                    </j-button>
+                  </j-flex>
+                ))}
+                <j-text nomargin>Or enter one:</j-text>
+                <j-menu style={{ zIndex: 1 }}>
+                  <j-menu-group collapsible title={newKind.label} id="endpoint-kinds">
+                    {ENDPOINT_KINDS.map((k) => (
                       <j-menu-item
-                        selected={newModelType === type}
+                        key={k.kind}
+                        selected={k.kind === newKind.kind}
                         onClick={() => {
-                          setNewModelType(type);
-                          if (type === "LLM") {
-                            setNewModels(llmModels);
-                            setNewModel("llama_8b");
-                          } else if (type === "EMBEDDING") {
-                            setNewModels(embeddingModels);
-                            setNewModel("bert");
-                          } else {
-                            setNewModels(transcriptionModels);
-                            setNewModel("whisper_small");
-                          }
-                          closeMenu("ai-types");
+                          setNewKind(k);
+                          setNewUrl(k.baseUrl);
+                          setNewKey("");
+                          closeMenu("endpoint-kinds");
                         }}
                       >
-                        {type}
+                        {k.label}
                       </j-menu-item>
                     ))}
                   </j-menu-group>
                 </j-menu>
+                <j-input
+                  size="md"
+                  label="URL"
+                  value={newUrl}
+                  onInput={(e: any) => setNewUrl(e.target.value)}
+                />
+                <j-input
+                  size="md"
+                  type="password"
+                  label="API key (if it needs one)"
+                  value={newKey}
+                  onInput={(e: any) => setNewKey(e.target.value)}
+                />
+                <j-button variant="primary" loading={busy === "endpoint"} onClick={() => addEndpoint()}>
+                  Add endpoint
+                </j-button>
               </j-flex>
-            )}
+            </j-box>
+          )}
 
-            <j-flex a="center" gap="400">
-              <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+          {endpoint && (
+            <j-flex a="center" gap="400" wrap>
+              <j-text nomargin color="ui-800">
                 Model:
               </j-text>
-              <j-menu style={{ zIndex: 2 }}>
-                <j-menu-group collapsible title={newModel} id="new-models">
-                  {newModels.map((model) => (
+              <j-menu style={{ zIndex: 1 }}>
+                <j-menu-group collapsible title={remoteModel || "None selected"} id="remote-models">
+                  {remoteModels.map((m) => (
                     <j-menu-item
-                      selected={newModel === model}
+                      key={m.id}
+                      selected={m.id === remoteModel}
                       onClick={() => {
-                        invalidateApiCheck();
-                        setNewModel(model);
-                        if (model.includes("External API"))
-                          resetApiState("https://api.openai.com/v1");
-                        else if (model.includes("Anthropic API"))
-                          resetApiState("https://api.anthropic.com");
-                        else if (model.includes("Ollama API"))
-                          resetApiState("http://localhost:11434");
-                        closeMenu("new-models");
+                        setRemoteModel(m.id);
+                        if (!name) setName(m.id);
+                        closeMenu("remote-models");
                       }}
                     >
-                      {model}
+                      {m.id}
                     </j-menu-item>
                   ))}
                 </j-menu-group>
               </j-menu>
-            </j-flex>
-
-            {isRemoteApi && (
-              <>
-                {isExternalApi && (
-                  <j-flex a="center" gap="400">
-                    <j-button
-                      onClick={() => {
-                        invalidateApiCheck();
-                        setApiUrl("https://api.openai.com/v1");
-                        apiUrlRef.current = "https://api.openai.com/v1";
-                        setApiValid(false);
-                        setApiModelValid(false);
-                        setApiKeyError("");
-                        setApiUrlError("");
-                      }}
-                    >
-                      OpenAI
-                    </j-button>
-                    <j-button
-                      onClick={() => {
-                        invalidateApiCheck();
-                        setApiUrl("http://localhost:11434/v1");
-                        apiUrlRef.current = "http://localhost:11434/v1";
-                        setApiValid(false);
-                        setApiModelValid(false);
-                        setApiKeyError("");
-                        setApiUrlError("");
-                      }}
-                    >
-                      Ollama
-                    </j-button>
-                  </j-flex>
-                )}
-
-                <j-flex a="center" gap="400">
-                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                    API URL:
-                  </j-text>
-                  <j-input
-                    size="md"
-                    type="text"
-                    value={apiUrl}
-                    error={!!apiUrlError}
-                    errortext={apiUrlError}
-                    onInput={(e: any) => {
-                      invalidateApiCheck();
-                      setApiUrl(e.target.value);
-                      apiUrlRef.current = e.target.value;
-                      setApiValid(false);
-                      setApiKeyError("");
-                      setApiUrlError("");
-                    }}
-                    style={{ width: "100%" }}
-                  />
-                  {apiUrlError && <j-icon name="x-circle" color="danger-500" />}
-                  {apiValid && <j-icon name="check-circle" color="success-500" />}
-                </j-flex>
-
-                {!isOllama && (
-                  <j-flex a="center" gap="400">
-                    <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                      API Key:
-                    </j-text>
-                    <j-input
-                      size="md"
-                      type="text"
-                      value={apiKey}
-                      placeholder={
-                        oldModel?.api?.hasApiKey && apiUrl === oldModel.api.baseUrl
-                          ? "Saved key kept unless you enter a new one"
-                          : undefined
-                      }
-                      error={!!apiKeyError}
-                      errortext={apiKeyError}
-                      onInput={(e: any) => {
-                        invalidateApiCheck();
-                        setApiKey(e.target.value);
-                        apiKeyRef.current = e.target.value;
-                        setApiValid(false);
-                        setApiKeyError("");
-                        setApiUrlError("");
-                      }}
-                      style={{ width: "100%" }}
-                    />
-                    {apiKeyError && <j-icon name="x-circle" color="danger-500" />}
-                    {apiValid && <j-icon name="check-circle" color="success-500" />}
-                  </j-flex>
-                )}
-
-                {isOllama && (
-                  <j-flex a="center" gap="400">
-                    <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                      Max context (tokens):
-                    </j-text>
-                    <j-input
-                      size="md"
-                      type="number"
-                      placeholder="131072"
-                      value={maxNumCtx}
-                      error={!!maxNumCtxError}
-                      errortext={maxNumCtxError}
-                      onInput={(e: any) => {
-                        setMaxNumCtx(e.target.value);
-                        setMaxNumCtxError("");
-                      }}
-                      style={{ width: "100%" }}
-                    />
-                    {maxNumCtxError && <j-icon name="x-circle" color="danger-500" />}
-                  </j-flex>
-                )}
-
-                {apiValid && (
-                  <j-flex direction="column" a="center" gap="400">
-                    <j-flex a="center" gap="400">
-                      <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                        API Model:
-                      </j-text>
-                      <j-menu style={{ zIndex: 2 }}>
-                        <j-menu-group
-                          collapsible
-                          title={apiModel || "None selected"}
-                          id="api-models"
-                        >
-                          {apiModels.map((model) => (
-                            <j-menu-item
-                              selected={model === apiModel}
-                              onClick={() => {
-                                setApiModelError("");
-                                setApiModel(model);
-                                closeMenu("api-models");
-                              }}
-                            >
-                              {model}
-                            </j-menu-item>
-                          ))}
-                        </j-menu-group>
-                      </j-menu>
-                      {apiModelError && <j-icon name="x-circle" color="danger-500" />}
-                      {apiModelValid && <j-icon name="check-circle" color="success-500" />}
-                    </j-flex>
-
-                    {apiModelError && (
-                      <j-text color="danger-500" nomargin>
-                        {apiModelError}
-                      </j-text>
-                    )}
-                  </j-flex>
-                )}
-              </>
-            )}
-
-            {newModel.includes("Custom Hugging Face Model") && (
-              <j-flex direction="column" gap="400">
-                <j-text nomargin color="ui-0" size="300">
-                  Note: The model file must be a GGUF file format, which typically includes the tokenizer.
-                </j-text>
-
-                <j-flex a="center" gap="400">
-                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                    Repository:
-                  </j-text>
-                  <j-input
-                    size="md"
-                    type="text"
-                    placeholder="e.g., TheBloke/Llama-2-7B-GGUF"
-                    value={customHfModel.huggingfaceRepo}
-                    onInput={(e: any) => setCustomHfModel({
-                      ...customHfModel,
-                      huggingfaceRepo: e.target.value
-                    })}
-                    style={{ width: "100%" }}
-                  />
-                </j-flex>
-
-                <j-flex a="center" gap="400">
-                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                    Branch/Revision:
-                  </j-text>
-                  <j-input
-                    size="md"
-                    type="text"
-                    placeholder="main"
-                    value={customHfModel.revision}
-                    onInput={(e: any) => setCustomHfModel({
-                      ...customHfModel,
-                      revision: e.target.value
-                    })}
-                    style={{ width: "100%" }}
-                  />
-                </j-flex>
-
-                <j-flex a="center" gap="400">
-                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                    Filename:
-                  </j-text>
-                  <j-input
-                    size="md"
-                    type="text"
-                    placeholder="e.g., llama-2-7b.Q4_K_M.gguf"
-                    value={customHfModel.fileName}
-                    onInput={(e: any) => setCustomHfModel({
-                      ...customHfModel,
-                      fileName: e.target.value
-                    })}
-                    style={{ width: "100%" }}
-                  />
-                </j-flex>
-
-                <j-flex a="center" gap="400">
-                  <j-checkbox
-                    checked={useCustomTokenizer}
-                    onChange={(e: any) => setUseCustomTokenizer(e.target.checked)}
-                  >
-                    Use Custom Tokenizer (Optional)
-                  </j-checkbox>
-                </j-flex>
-
-                {useCustomTokenizer && (
-                  <j-box pl="400">
-                    <j-flex direction="column" gap="400">
-                      <j-flex a="center" gap="400">
-                        <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                          Tokenizer Repo:
-                        </j-text>
-                        <j-input
-                          size="md"
-                          type="text"
-                          placeholder="e.g., TheBloke/Llama-2-7B-GGUF"
-                          value={customHfModel.tokenizerSource.repo}
-                          onInput={(e: any) => setCustomHfModel({
-                            ...customHfModel,
-                            tokenizerSource: {
-                              ...customHfModel.tokenizerSource,
-                              repo: e.target.value
-                            }
-                          })}
-                          style={{ width: "100%" }}
-                        />
-                      </j-flex>
-
-                      <j-flex a="center" gap="400">
-                        <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                          Tokenizer Branch:
-                        </j-text>
-                        <j-input
-                          size="md"
-                          type="text"
-                          placeholder="main"
-                          value={customHfModel.tokenizerSource.revision}
-                          onInput={(e: any) => setCustomHfModel({
-                            ...customHfModel,
-                            tokenizerSource: {
-                              ...customHfModel.tokenizerSource,
-                              revision: e.target.value
-                            }
-                          })}
-                          style={{ width: "100%" }}
-                        />
-                      </j-flex>
-
-                      <j-flex a="center" gap="400">
-                        <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                          Tokenizer File:
-                        </j-text>
-                        <j-input
-                          size="md"
-                          type="text"
-                          placeholder="e.g., tokenizer.json"
-                          value={customHfModel.tokenizerSource.fileName}
-                          onInput={(e: any) => setCustomHfModel({
-                            ...customHfModel,
-                            tokenizerSource: {
-                              ...customHfModel.tokenizerSource,
-                              fileName: e.target.value
-                            }
-                          })}
-                          style={{ width: "100%" }}
-                        />
-                      </j-flex>
-                    </j-flex>
-                  </j-box>
-                )}
-              </j-flex>
-            )}
-
-            {newModel.includes("Local File") && (
-              <j-flex direction="column" gap="400">
-                <j-text nomargin color="ui-0" size="300">
-                  Note: The model file must be a GGUF file format, which typically includes the tokenizer.
-                </j-text>
-
-                <j-flex a="center" gap="400">
-                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                    Model File:
-                  </j-text>
-                  <j-input
-                    size="md"
-                    type="text"
-                    placeholder="Select model file..."
-                    value={localFile.fileName}
-                    readonly
-                    style={{ width: "100%" }}
-                  />
-                  <j-button
-                    onClick={async () => {
-                      const filePath = await open({
-                        filters: [{
-                          name: 'Model Files',
-                          extensions: ['gguf', 'bin']
-                        }]
-                      });
-                      
-                      if (filePath && typeof filePath === 'string') {
-                        setLocalFile({
-                          ...localFile,
-                          fileName: filePath
-                        });
-                      }
-                    }}
-                    variant="ghost"
-                  >
-                    Browse
+              {endpoint.kind === "OLLAMA" &&
+                recommended &&
+                !serves(endpoint.health.servedModels, recommended) && (
+                  <j-button size="sm" loading={busy === "pull"} onClick={() => pull(recommended)}>
+                    Download {recommended}
                   </j-button>
-                </j-flex>
-
-                <j-flex a="center" gap="400">
-                  <j-checkbox
-                    checked={useCustomTokenizer}
-                    onChange={(e: any) => setUseCustomTokenizer(e.target.checked)}
-                  >
-                    Use Custom Tokenizer (Optional)
-                  </j-checkbox>
-                </j-flex>
-
-                {useCustomTokenizer && (
-                  <j-box pl="400">
-                    <j-flex direction="column" gap="400">
-                      <j-flex a="center" gap="400">
-                        <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                          Tokenizer File:
-                        </j-text>
-                        <j-input
-                          size="md"
-                          type="text"
-                          placeholder="Select tokenizer file..."
-                          value={localFile.tokenizerSource?.fileName || ""}
-                          readonly
-                          style={{ width: "100%" }}
-                        />
-                        <j-button
-                          onClick={async () => {
-
-                            const filePath = await open({
-                              filters: [{
-                                name: 'Tokenizer Files',
-                                extensions: ['json']
-                              }]
-                            });
-                            
-                            if (filePath && typeof filePath === 'string') {
-                              setLocalFile({
-                                ...localFile,
-                                tokenizerSource: {
-                                  ...localFile.tokenizerSource,
-                                  fileName: filePath
-                                }
-                              });
-                            }
-                          }}
-                          variant="ghost"
-                        >
-                          Browse
-                        </j-button>
-                      </j-flex>
-                    </j-flex>
-                  </j-box>
                 )}
-              </j-flex>
-            )}
-          </j-flex>
-
-          {isExternalApi && (!apiModelValid || !apiValid) ? (
-            <>
-              {!apiValid ? (
-                <j-button onClick={checkApi} variant="primary" loading={loading}>
-                  Check API
-                </j-button>
-              ) : (
-                <j-button onClick={checkModel} variant="primary" loading={loading}>
-                  Check Model
-                </j-button>
-              )}
-            </>
-          ) : (isAnthropic || isOllama) && !apiValid ? (
-            <j-button
-              onClick={() => checkApiViaExecutor(isAnthropic ? "ANTHROPIC" : "OLLAMA")}
-              variant="primary"
-              loading={loading}
-            >
-              Check API
-            </j-button>
-          ) : (
-            <j-button onClick={saveModel} variant="primary" loading={loading}>
-              Save Model
-            </j-button>
+            </j-flex>
           )}
+
+          {modelType === "LLM" && openAiShaped && (
+            <j-toggle
+              checked={!!nativeTools}
+              onChange={(e: any) => setNativeTools(e.target.checked || undefined)}
+            >
+              The model calls tools natively (the server passes `tools` on)
+            </j-toggle>
+          )}
+
+          {error && (
+            <j-text color="danger-500" style={{ maxWidth: 420 }}>
+              {error}
+            </j-text>
+          )}
+
+          <j-button onClick={save} variant="primary" loading={busy === "save"}>
+            Save model
+          </j-button>
         </j-flex>
       </j-box>
     </j-modal>

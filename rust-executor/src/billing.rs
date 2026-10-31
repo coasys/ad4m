@@ -111,7 +111,7 @@ pub fn get_link_write_rate() -> f64 {
 /// Bill a single AI compute operation using the shared `host_rates` table.
 ///
 /// This is the ONE call site every AI billing path (WS-RPC prompt/embed,
-/// /v1 chat/embeddings, whisper transcription worker) should go through.
+/// /v1 chat/embeddings, transcription) should go through.
 /// It matches the pre-existing transcription-worker pattern:
 ///
 ///   1. Look up the model's `name` (falling back to `model_id` when the
@@ -144,10 +144,10 @@ pub fn bill_ai_operation(
     let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.to_string()))
         .ok()
         .flatten();
-    let endpoint_id = model.as_ref().and_then(|m| m.endpoint_id.clone());
-    let rate_key = model
-        .map(|m| m.name)
-        .unwrap_or_else(|| model_id.to_string());
+    let (rate_key, endpoint_id) = match model {
+        Some(model) => (model.name, Some(model.endpoint_id)),
+        None => (model_id.to_string(), None),
+    };
 
     let rate = Ad4mDb::with_global_instance(|db| db.get_host_rate(&rate_key))
         .ok()

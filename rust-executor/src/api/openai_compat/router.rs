@@ -19,7 +19,7 @@ use crate::api::auth::AppState;
 /// The router is intentionally minimal — every endpoint delegates to a
 /// dedicated handler module so reviewers can audit one phase at a time.
 /// Body limit is bumped on audio routes to accommodate file uploads
-/// (defaults to 2 MiB in axum, which is small for whisper inputs).
+/// (defaults to 2 MiB in axum, which is small for audio files).
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/models", get(models::list_models))

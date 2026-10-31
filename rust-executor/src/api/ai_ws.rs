@@ -13,9 +13,10 @@ use crate::ai_service::providers::http::{
 };
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
+use crate::secret::Secret;
 use crate::types::{
-    AIModelLoadingStatus, AITask, AITaskInput, DetectedEndpoint, EndpointInput, EndpointKind,
-    EndpointView, Model, ModelInput, ModelType, ModelView, RequestContext,
+    AITask, AITaskInput, DetectedEndpoint, DiscoveredModel, EndpointInput, EndpointKind,
+    EndpointView, ModelInput, ModelStatus, ModelType, ModelView, RequestContext,
 };
 use base64::Engine;
 
@@ -52,19 +53,16 @@ async fn list_models(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let models: Vec<ModelView> = Ad4mDb::with_global_instance(|db| db.get_models())
-        .map_err(|e| WsRpcError::internal(e.to_string()))?
-        .iter()
-        .map(Model::view)
-        .collect();
+    let models: Vec<ModelView> =
+        AIService::model_views().map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(models)?)
 }
 
 /// `ai.discoverModels` — what does this endpoint serve, and does this key work?
 ///
-/// Takes the credentials of a model that does not exist yet: an operator is
-/// filling in the form and wants the list to pick from, before there is
-/// anything to list. Answers the provider's own model ids.
+/// Takes a saved endpoint's id, or the kind, URL and key of a server not saved yet: an
+/// operator filling in the form wants the list to pick from before there is anything to
+/// save. Answers the models the server lists, with their capabilities.
 ///
 /// Gated on AI_CREATE rather than AI_READ. It reads nothing of this executor's,
 /// but it makes an outbound request to an arbitrary URL with an
@@ -82,28 +80,21 @@ async fn list_models(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
 /// user sessions: the executor sends a request to a URL the caller chooses, a cleaner
 /// read primitive than `addModel` plus a prompt, needing no model and no completion.
 async fn discover_models(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let base_url = params.require_str("baseUrl")?;
-    let base_url = url::Url::parse(&base_url)
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid baseUrl: {e}")))?;
-
-    // Defaults to OpenAI, which is what every endpoint that is not Anthropic
-    // speaks, and what the field meant before there was a choice.
-    let api_type = match params.get("apiType").and_then(|v| v.as_str()) {
-        Some(raw) => raw
-            .parse::<crate::types::ModelApiType>()
-            .map_err(WsRpcError::bad_request)?,
-        None => crate::types::ModelApiType::OpenAi,
+    let body: AiDiscoverModelsParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    let (kind, base_url, api_key) = match body {
+        AiDiscoverModelsParams::Endpoint { endpoint_id } => {
+            let endpoint = Ad4mDb::with_global_instance(|db| db.get_endpoint(&endpoint_id))
+                .map_err(|e| WsRpcError::internal(e.to_string()))?
+                .ok_or_else(|| WsRpcError::not_found(EndpointNotFound.to_string()))?;
+            (endpoint.kind, endpoint.base_url, endpoint.api_key)
+        }
+        AiDiscoverModelsParams::Server {
+            kind,
+            base_url,
+            api_key,
+        } => (kind, base_url, api_key.unwrap_or_else(|| Secret::new(""))),
     };
-    let kind = match api_type {
-        crate::types::ModelApiType::OpenAi => EndpointKind::OpenAiCompatible,
-        crate::types::ModelApiType::Anthropic => EndpointKind::Anthropic,
-        crate::types::ModelApiType::Ollama => EndpointKind::Ollama,
-    };
-
-    let api_key = params
-        .get("apiKey")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
 
     // A key sent over plain HTTP crosses the network in the clear, and the
     // OpenAI path sends it as a bearer token. Refuse that rather than leak it
@@ -117,13 +108,12 @@ async fn discover_models(params: Value, _ctx: Arc<RequestContext>) -> Result<Val
         return Err(WsRpcError::bad_request(CLEARTEXT_KEY_REFUSAL));
     }
 
-    let models = discover_for(kind, base_url, api_key, DISCOVERY_TIMEOUT)
-        .list_models()
-        .await
-        .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-    let ids: Vec<String> = models.into_iter().map(|model| model.id).collect();
-
-    Ok(serde_json::to_value(ids)?)
+    let models: Vec<DiscoveredModel> =
+        discover_for(kind, base_url, api_key.expose(), DISCOVERY_TIMEOUT)
+            .list_models()
+            .await
+            .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    Ok(serde_json::to_value(models)?)
 }
 
 // ── Endpoints ──
@@ -219,26 +209,13 @@ async fn delete_upstream_model(
     Ok(Value::Bool(true))
 }
 
-/// Refuse a model whose key would cross the network in the clear.
-///
-/// The same rule as discovery, applied where it matters more: discovery sends
-/// a key once, and a saved model sends it with every completion for as long as
-/// the model exists. A base URL that does not parse is left for the service to
-/// reject with its own error.
-///
-/// `AIService::build_remote_client` refuses the same model again. This check
-/// is the one that keeps it out of the database and answers the caller.
-pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRpcError> {
-    let Some(api) = &model.api else {
-        return Ok(());
-    };
-    // No key sent: an update keeps the stored key only for the URL it was set for.
-    if api.api_key.as_ref().is_none_or(|key| key.is_empty()) {
-        return Ok(());
-    }
-    match url::Url::parse(&api.base_url) {
-        Ok(url) if !is_transport_safe(&url) => Err(WsRpcError::bad_request(CLEARTEXT_KEY_REFUSAL)),
-        _ => Ok(()),
+/// The answer to a refused model write: the caller's mistake (an endpoint that does not
+/// exist, an empty remote model, an endpoint that cannot serve the type) is a bad request.
+fn model_error(e: anyhow::Error) -> WsRpcError {
+    if e.downcast_ref::<crate::db::InvalidModel>().is_some() {
+        WsRpcError::bad_request(e.to_string())
+    } else {
+        WsRpcError::internal(format!("{e:#}"))
     }
 }
 
@@ -246,16 +223,12 @@ async fn add_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, Ws
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-    refuse_cleartext_credential(&model)?;
 
     let service = AIService::global_instance()
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let id = service
-        .add_model(model)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let id = service.add_model(model).await.map_err(model_error)?;
 
     Ok(Value::String(id))
 }
@@ -265,19 +238,12 @@ async fn update_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-    refuse_cleartext_credential(&model)?;
 
     let service = AIService::global_instance()
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    service.update_model(id, model).await.map_err(|e| {
-        if let Some(refusal) = e.downcast_ref::<crate::db::ApiKeyNotResent>() {
-            WsRpcError::bad_request(refusal.to_string())
-        } else {
-            WsRpcError::internal(format!("Failed to update model: {:#}", e))
-        }
-    })?;
+    service.update_model(id, model).await.map_err(model_error)?;
 
     Ok(Value::Bool(true))
 }
@@ -329,30 +295,22 @@ async fn get_default_model(params: Value, _ctx: Arc<RequestContext>) -> Result<V
     let model_id = Ad4mDb::with_global_instance(|db| db.get_default_model(model_type))
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let model = if let Some(id) = model_id {
-        Ad4mDb::with_global_instance(|db| db.get_model(id))
-            .map_err(|e| WsRpcError::internal(e.to_string()))?
-    } else {
-        None
+    let model = match model_id {
+        Some(id) => AIService::model_view(&id).map_err(|e| WsRpcError::internal(e.to_string()))?,
+        None => None,
     };
 
-    Ok(serde_json::to_value(model.as_ref().map(Model::view))?)
+    Ok(serde_json::to_value(model)?)
 }
 
-async fn get_model_loading_status(
-    params: Value,
-    _ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    let model = params
-        .opt_str("model")
-        .or_else(|| params.opt_str("modelId"))
-        .ok_or_else(|| WsRpcError::bad_request("model parameter required"))?;
-
-    let status = AIService::model_status(model)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(serde_json::to_value(status).unwrap_or_default())
+/// Where a model stands by its endpoint's last health check.
+async fn get_model_status(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: AiIdParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    let model = AIService::model_view(&body.id)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .ok_or_else(|| WsRpcError::not_found(format!("No model has the id {}", body.id)))?;
+    Ok(serde_json::to_value(model.status)?)
 }
 
 // ── Tasks ──
@@ -525,14 +483,16 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, Vec<ModelView>>("ai.models", list_models)
         .read()
         .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
-    // The provider's own model ids.
-    map.method::<AiDiscoverModelsParams, Vec<String>>("ai.discoverModels", discover_models)
-        .read()
-        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // The models a server lists, with their capabilities.
+    map.method::<AiDiscoverModelsParams, Vec<DiscoveredModel>>(
+        "ai.discoverModels",
+        discover_models,
+    )
+    .read()
+    .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
     // Executor-wide settings: every user's prompts go to the models and keys set here.
     // The new model's id.
     map.method::<AiAddModelParams, String>("ai.addModel", add_model)
-        .long()
         .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
     map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model)
         .guard(Guard::Executor(AI_UPDATE_CAPABILITY.clone()));
@@ -568,12 +528,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
-    map.method::<AiModelLoadingStatusParams, AIModelLoadingStatus>(
-        "ai.modelLoadingStatus",
-        get_model_loading_status,
-    )
-    .read()
-    .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
+    map.method::<AiIdParams, ModelStatus>("ai.modelStatus", get_model_status)
+        .read()
+        .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
     // Tasks belong to the agent whose session created them (`tasks.agent_did`, `NULL` for the
     // main agent); the operator reaches every task, any other session its agent's. The list
     // and the new task follow the caller's agent.
@@ -741,16 +698,20 @@ pub struct AiIdParams {
     pub id: String,
 }
 
+/// A saved endpoint by its id, or a server not saved yet by its kind, URL and key.
 #[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(untagged, deny_unknown_fields)]
 #[ts(export)]
-pub struct AiDiscoverModelsParams {
-    pub base_url: String,
-    /// Parsed leniently (`openai`, `OpenAi`, `OPEN_AI`, ...); defaults to OpenAI.
-    #[ts(optional)]
-    pub api_type: Option<String>,
-    #[ts(optional)]
-    pub api_key: Option<String>,
+pub enum AiDiscoverModelsParams {
+    #[serde(rename_all = "camelCase")]
+    Endpoint { endpoint_id: String },
+    #[serde(rename_all = "camelCase")]
+    Server {
+        kind: EndpointKind,
+        base_url: url::Url,
+        #[ts(optional, as = "Option<String>")]
+        api_key: Option<Secret>,
+    },
 }
 
 #[derive(Deserialize, TS)]
@@ -811,17 +772,6 @@ pub struct AiGetDefaultModelParams {
     pub model_type: ModelType,
 }
 
-/// One of `model` or `modelId` is required; `model` wins when both are set.
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AiModelLoadingStatusParams {
-    #[ts(optional)]
-    pub model: Option<String>,
-    #[ts(optional)]
-    pub model_id: Option<String>,
-}
-
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -851,63 +801,45 @@ pub struct AiTranscriptionCloseParams {
 }
 
 #[cfg(test)]
-mod model_key_tests {
+mod model_view_tests {
     use super::*;
-    use crate::types::{ModelApi, ModelApiInput, ModelApiType};
+    use crate::types::{Endpoint, EndpointHealth, EndpointState};
 
     const KEY: &str = "sk-provider-secret";
 
-    fn remote_model(api_key: &str) -> Model {
-        Model {
-            id: "m1".to_string(),
-            name: "Remote".to_string(),
-            api: Some(ModelApi {
-                base_url: url::Url::parse("https://api.example.org/v1").unwrap(),
-                api_key: api_key.into(),
-                model: "gpt".to_string(),
-                api_type: ModelApiType::OpenAi,
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
-            model_type: ModelType::Llm,
-            endpoint_id: None,
-        }
-    }
-
-    #[test]
-    fn the_view_says_whether_a_key_is_set_and_never_carries_it() {
-        let json = serde_json::to_value(remote_model(KEY).view()).unwrap();
-        assert!(!json.to_string().contains(KEY), "{json}");
-        assert!(json["api"].get("apiKey").is_none(), "{json}");
-        assert_eq!(json["api"]["hasApiKey"], true);
-        assert_eq!(json["api"]["model"], "gpt");
-
-        let keyless = serde_json::to_value(remote_model("").view()).unwrap();
-        assert_eq!(keyless["api"]["hasApiKey"], false);
-    }
-
-    // #1167 stripped the key for user sessions by hand and let the operator and apps read
-    // it. The view now leaves it out for every caller.
-    #[tokio::test]
-    async fn no_session_gets_the_default_models_key() {
+    /// A saved endpoint holding [`KEY`] that has listed `qwen3:8b`, and an LLM on it.
+    fn model_on_a_keyed_endpoint() -> (Endpoint, String) {
         Ad4mDb::init_global_instance(":memory:").unwrap();
+        let mut endpoint = Endpoint::for_test(
+            "openai",
+            EndpointKind::OpenAi,
+            "https://api.example.org",
+            KEY,
+        );
+        endpoint.health = EndpointHealth {
+            state: EndpointState::Reachable,
+            checked_at: Some(1),
+            detail: None,
+            served_models: vec!["qwen3:8b".into()],
+        };
         let id = Ad4mDb::with_global_instance(|db| {
+            db.insert_endpoint(&endpoint)?;
             db.add_model(&ModelInput {
                 name: "Remote".to_string(),
-                api: Some(ModelApiInput {
-                    base_url: "https://api.example.org/v1".to_string(),
-                    api_key: Some(KEY.into()),
-                    model: "gpt".to_string(),
-                    api_type: "OPEN_AI".to_string(),
-                    max_num_ctx: None,
-                    native_tools: None,
-                }),
-                local: None,
                 model_type: ModelType::Llm,
+                endpoint_id: endpoint.id.clone(),
+                remote_model: "qwen3:8b".to_string(),
+                native_tools: Some(true),
             })
         })
         .unwrap();
+        (endpoint, id)
+    }
+
+    // A model names its endpoint and never carries the endpoint's key, for any caller.
+    #[tokio::test]
+    async fn every_session_reads_the_model_with_its_endpoint_and_status_and_no_key() {
+        let (endpoint, id) = model_on_a_keyed_endpoint();
         Ad4mDb::with_global_instance(|db| db.set_default_model(ModelType::Llm, &id)).unwrap();
         let params = serde_json::json!({ "modelType": "LLM" });
         let read = vec![AI_READ_CAPABILITY.clone()];
@@ -923,102 +855,50 @@ mod model_key_tests {
             let model = get_default_model(params.clone(), Arc::new(ctx))
                 .await
                 .unwrap();
-            assert_eq!(model["id"], id.as_str(), "{who}");
+            assert_eq!(
+                model,
+                serde_json::json!({
+                    "id": id,
+                    "name": "Remote",
+                    "modelType": "LLM",
+                    "endpointId": endpoint.id,
+                    "remoteModel": "qwen3:8b",
+                    "nativeTools": true,
+                    "status": { "state": "READY" },
+                }),
+                "{who}"
+            );
             assert!(!model.to_string().contains(KEY), "{who}: {model}");
-            assert_eq!(model["api"]["hasApiKey"], true, "{who}");
         }
     }
 
-    /// The stored model's key, read in place for the assertion.
-    fn stored_key(id: &str) -> String {
-        Ad4mDb::with_global_instance(|db| db.get_model(id.to_string()))
-            .unwrap()
-            .unwrap()
-            .api
-            .unwrap()
-            .api_key
-            .expose()
-            .to_string()
-    }
-
-    fn input(base_url: &str, api_key: Option<&str>) -> ModelInput {
-        ModelInput {
-            name: "Remote".to_string(),
-            api: Some(ModelApiInput {
-                base_url: base_url.to_string(),
-                api_key: api_key.map(Into::into),
-                model: "gpt".to_string(),
-                api_type: "OPEN_AI".to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
-            model_type: ModelType::Llm,
-        }
-    }
-
-    // A client never reads the key back, so an update that leaves it out keeps it. It
-    // goes only to the endpoint it was set for: moving the model needs the key again.
-    #[test]
-    fn an_update_without_a_key_keeps_the_stored_key_for_the_same_endpoint() {
-        Ad4mDb::init_global_instance(":memory:").unwrap();
-        let url = "https://api.example.org/v1";
-        let id = Ad4mDb::with_global_instance(|db| db.add_model(&input(url, Some(KEY)))).unwrap();
-        let update =
-            |model: ModelInput| Ad4mDb::with_global_instance(|db| db.update_model(&id, &model));
-
-        update(input(url, None)).unwrap();
-        assert_eq!(stored_key(&id), KEY);
-
-        let moved = update(input("https://elsewhere.example.org/v1", None)).unwrap_err();
-        assert!(moved.downcast_ref::<crate::db::ApiKeyNotResent>().is_some());
-        assert_eq!(stored_key(&id), KEY, "a refused update changes nothing");
-
-        update(input("https://elsewhere.example.org/v1", Some("sk-new"))).unwrap();
-        assert_eq!(stored_key(&id), "sk-new");
-
-        // An empty key clears it, as before; a keyless model then moves freely.
-        update(input(url, Some(""))).unwrap();
-        assert_eq!(stored_key(&id), "");
-        update(input("https://elsewhere.example.org/v1", None)).unwrap();
-        assert_eq!(stored_key(&id), "");
-    }
-
-    // The refusal reaches the caller as a bad request, through the service's error.
     #[tokio::test]
-    async fn moving_a_keyed_model_without_its_key_is_a_bad_request() {
+    async fn a_models_status_is_its_endpoints_last_check_and_an_unknown_model_is_not_found() {
+        let (_, id) = model_on_a_keyed_endpoint();
+        let ctx = Arc::new(RequestContext::operator_for_test());
+        let status = get_model_status(serde_json::json!({ "id": id }), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(status, serde_json::json!({ "state": "READY" }));
+        let missing = get_model_status(serde_json::json!({ "id": "nope" }), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, 404);
+    }
+
+    #[tokio::test]
+    async fn a_model_on_an_endpoint_that_does_not_exist_is_a_bad_request() {
         Ad4mDb::init_global_instance(":memory:").unwrap();
         AIService::init_global_instance().await.unwrap();
-        let url = "https://api.example.org/v1";
-        let id = Ad4mDb::with_global_instance(|db| db.add_model(&input(url, Some(KEY)))).unwrap();
-
-        let moved = serde_json::to_value(input("https://elsewhere.example.org/v1", None)).unwrap();
-        let err = update_model(
-            serde_json::json!({ "id": id, "model": moved }),
+        let err = add_model(
+            serde_json::json!({ "model": {
+                "name": "m", "modelType": "LLM", "endpointId": "nope", "remoteModel": "r"
+            } }),
             Arc::new(RequestContext::operator_for_test()),
         )
         .await
         .unwrap_err();
         assert_eq!(err.code, 400, "{}", err.message);
-        assert!(err.message.contains("send apiKey again"), "{}", err.message);
-        assert_eq!(stored_key(&id), KEY);
-    }
-
-    #[test]
-    fn a_model_added_without_a_key_has_none() {
-        Ad4mDb::init_global_instance(":memory:").unwrap();
-        let id = Ad4mDb::with_global_instance(|db| {
-            db.add_model(&input("https://api.example.org/v1", None))
-        })
-        .unwrap();
-        assert_eq!(stored_key(&id), "");
-    }
-
-    #[test]
-    fn a_sent_key_never_reaches_a_log_line() {
-        let model = input("https://api.example.org/v1", Some(KEY));
-        assert!(!format!("{model:?}").contains(KEY));
-        assert!(!format!("{:?}", remote_model(KEY)).contains(KEY));
     }
 }
 
@@ -1073,7 +953,9 @@ mod endpoint_guard_tests {
         match method {
             "ai.addEndpoint" => endpoint,
             "ai.updateEndpoint" => json!({ "id": "e1", "endpoint": endpoint }),
-            "ai.updateModel" => json!({ "id": "m1", "model": { "name": "m", "type": "LLM" } }),
+            "ai.updateModel" => json!({ "id": "m1", "model": {
+                "name": "m", "modelType": "LLM", "endpointId": "e1", "remoteModel": "r"
+            } }),
             "ai.setDefaultModel" => json!({ "id": "m1", "modelType": "LLM" }),
             "ai.pullModel" | "ai.deleteUpstreamModel" => {
                 json!({ "endpointId": "e1", "remoteModel": "m" })

@@ -84,17 +84,12 @@ impl CompletionSource for OpenAiCompatBridge {
 
         // The harness always runs in `auto` mode: the model decides per turn
         // whether to call a tool, and an empty `tool_calls` set terminates the
-        // loop. `tool_grammar::build_tool_call_parser` returns `None` for
-        // `Auto` (and `None`), so this path is deliberately unconstrained;
-        // tool calls are recovered from free-form text by `extract_tool_calls`
-        // (XML `<tool_call>`, fenced JSON, bare-JSON, and wrapped array
-        // shapes). Switching to `Required` would preclude the model from
-        // ever emitting a plain-text terminating turn.
-        let constraint: Option<kalosm::language::ArcParser<()>> = None;
-
+        // loop. Tool calls are recovered from free-form text by
+        // `extract_tool_calls` (XML `<tool_call>`, fenced JSON, bare-JSON, and
+        // wrapped array shapes).
         let result = self
             .service
-            .prompt_messages(model_id.to_string(), flat, self.bill_to.clone(), constraint)
+            .prompt_messages(model_id.to_string(), flat, self.bill_to.clone())
             .await?;
 
         // The model's text is either a plain answer or a tool-call block

@@ -742,44 +742,12 @@ pub(crate) fn register_interpretation_task_for_model(
     Ok((task, true))
 }
 
-/// Return a ready-to-prompt interpretation task: register the DB row if absent
-/// (via [`register_interpretation_task`]) AND ensure it is spawned into its LLM
-/// worker, so the caller can immediately `AIService::prompt` it.
-///
-/// The spawn is what makes this async and AIService-dependent. `register_...`
-/// only writes the DB row; a freshly-registered task is invisible to the worker
-/// until the next `set_default_model`/restart `load()` sweep, so its first
-/// `prompt` would fail with "Task not spawned". We spawn it here, but only when
-/// this call actually minted the row — a pre-existing row is already spawned
-/// (boot-time `load()` sweep, or the call that first created it), so re-spawning
-/// would force a redundant local-model warmup on every interpretation run.
-pub async fn ensure_interpretation_task() -> anyhow::Result<AITask> {
-    ensure_interpretation_task_for_model(None).await
-}
-
-/// Per-model variant of [`ensure_interpretation_task`]: register the row for
-/// `model_id` if absent (via [`register_interpretation_task_for_model`]) AND
-/// ensure it is spawned into its LLM worker, so the caller can immediately
-/// `AIService::prompt` it. `None` targets the shared-default row. Spawns only on
-/// the call that minted the row (a pre-existing row is already spawned), avoiding
-/// a redundant local-model warmup on every interpretation run.
-pub async fn ensure_interpretation_task_for_model(
-    model_id: Option<&str>,
-) -> anyhow::Result<AITask> {
-    let (task, created) = register_interpretation_task_for_model(model_id)?;
-    if created {
-        crate::ai_service::AIService::global_instance()
-            .await
-            .map_err(|e| anyhow::anyhow!("ensure_interpretation_task: AIService not ready: {e:#}"))?
-            .spawn_registered_task(task.clone())
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "ensure_interpretation_task: failed to spawn interpretation task: {e:#}"
-                )
-            })?;
-    }
-    Ok(task)
+/// A ready-to-prompt interpretation task for `model_id`: the DB row, registered if absent
+/// (via [`register_interpretation_task_for_model`]). `None` targets the shared-default
+/// row. `AIService::prompt` reads the task from the database, so a row is all a prompt
+/// needs.
+pub fn ensure_interpretation_task_for_model(model_id: Option<&str>) -> anyhow::Result<AITask> {
+    Ok(register_interpretation_task_for_model(model_id)?.0)
 }
 
 #[cfg(test)]

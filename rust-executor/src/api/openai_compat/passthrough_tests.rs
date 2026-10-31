@@ -20,8 +20,8 @@ use crate::billing::test_seam;
 use crate::db::Ad4mDb;
 use crate::secret::Secret;
 use crate::types::{
-    AiCapability, Endpoint, EndpointHealth, EndpointKind, EndpointState, ModelApiInput, ModelInput,
-    ModelType, RequestContext,
+    AiCapability, Endpoint, EndpointHealth, EndpointKind, EndpointState, ModelInput, ModelType,
+    RequestContext,
 };
 
 const USER: &str = "did:key:passthrough-user";
@@ -52,7 +52,7 @@ fn save(endpoint: &Endpoint) {
     Ad4mDb::with_global_instance(|db| db.insert_endpoint(endpoint)).unwrap();
 }
 
-/// A model `name` serving `remote` on `endpoint`, linked to it by its URL and key.
+/// A model `name` serving `remote` on `endpoint`.
 fn model(name: &str, model_type: ModelType, endpoint: &Endpoint, remote: &str) -> String {
     model_with_tools(name, model_type, endpoint, remote, None)
 }
@@ -66,24 +66,12 @@ fn model_with_tools(
 ) -> String {
     let input = ModelInput {
         name: name.into(),
-        api: Some(ModelApiInput {
-            base_url: endpoint.base_url.to_string(),
-            api_key: Some(endpoint.api_key.clone()),
-            model: remote.into(),
-            api_type: endpoint.kind.protocol().to_string(),
-            max_num_ctx: None,
-            native_tools,
-        }),
-        local: None,
         model_type,
+        endpoint_id: endpoint.id.clone(),
+        remote_model: remote.into(),
+        native_tools,
     };
-    let id = Ad4mDb::with_global_instance(|db| db.add_model(&input)).unwrap();
-    let linked = Ad4mDb::with_global_instance(|db| db.get_model(id.clone()))
-        .unwrap()
-        .unwrap()
-        .endpoint_id;
-    assert_eq!(linked.as_deref(), Some(endpoint.id.as_str()));
-    id
+    Ad4mDb::with_global_instance(|db| db.add_model(&input)).unwrap()
 }
 
 fn rate(name: &str, price: f64) {
@@ -604,7 +592,7 @@ fn resolved(kind: EndpointKind, native_tools: Option<bool>) -> Resolved {
         model: Ad4mDb::with_global_instance(|db| db.get_model(id))
             .unwrap()
             .unwrap(),
-        endpoint: Some(upstream),
+        endpoint: upstream,
     }
 }
 
@@ -633,15 +621,6 @@ fn what_is_forwarded_and_what_the_executor_answers() {
 
     let anthropic = resolved(EndpointKind::Anthropic, None);
     assert!(Upstream::of(&anthropic).is_none());
-
-    let local = Resolved {
-        model: openai.model.clone(),
-        endpoint: None,
-    };
-    assert!(
-        Upstream::of(&local).is_none(),
-        "a model without an endpoint runs here"
-    );
 }
 
 #[tokio::test]
@@ -652,7 +631,7 @@ async fn a_model_resolves_by_endpoint_name_and_remote_model() {
     let id = model("qwen", ModelType::Llm, &upstream, "qwen3:8b");
     let found = resolve("ollama/qwen3:8b", ModelType::Llm).await.unwrap();
     assert_eq!(found.model.id, id);
-    assert_eq!(found.endpoint.unwrap().id, upstream.id);
+    assert_eq!(found.endpoint.id, upstream.id);
     assert!(resolve("ollama/other", ModelType::Llm).await.is_err());
 }
 

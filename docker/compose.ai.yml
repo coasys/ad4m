@@ -1,0 +1,51 @@
+# Example: the AD4M executor with its AI served by Ollama (chat, embeddings) and
+# speaches (transcription). The image holds no model weights; the model servers
+# keep theirs in their own volumes.
+#
+#   ADMIN_CREDENTIAL=$(openssl rand -hex 32) AGENT_PASSPHRASE=... \
+#     docker compose -f docker/compose.ai.yml up -d
+#   docker compose -f docker/compose.ai.yml exec ollama ollama pull qwen3:8b
+#   docker compose -f docker/compose.ai.yml exec ollama ollama pull nomic-embed-text
+#
+# speaches fetches a model it does not have when asked to (POST /v1/models/<id> on it).
+# The executor registers both servers as endpoints at start (docker-entrypoint.sh,
+# "AI endpoints from the environment"). The model names are the ones onboarding
+# recommends (core/src/ai/recommendedModels.ts); any model the servers serve works.
+# For a GPU, give the ollama and speaches services one (and use speaches' CUDA image).
+
+services:
+  ad4m:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      ADMIN_CREDENTIAL: ${ADMIN_CREDENTIAL:?set ADMIN_CREDENTIAL}
+      AGENT_PASSPHRASE: ${AGENT_PASSPHRASE:?set AGENT_PASSPHRASE}
+      AD4M_AI_OLLAMA_URL: http://ollama:11434
+      AD4M_AI_LLM_MODEL: qwen3:8b
+      AD4M_AI_EMBEDDING_MODEL: nomic-embed-text
+      AD4M_AI_TRANSCRIPTION_URL: http://speaches:8000
+      AD4M_AI_TRANSCRIPTION_MODEL: Systran/faster-whisper-small
+    ports:
+      - "12000:12000"
+      - "8081:8081"
+    volumes:
+      - ad4m-data:/data
+    depends_on:
+      - ollama
+      - speaches
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    volumes:
+      - speaches-models:/home/ubuntu/.cache/huggingface/hub
+
+volumes:
+  ad4m-data:
+  ollama-models:
+  speaches-models:

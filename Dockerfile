@@ -4,7 +4,6 @@
 #
 # Build args:
 #   INCLUDE_WE=true       — bundle WE web frontend (served on port 8081)
-#   INCLUDE_MODELS=false  — pre-cache default Kalosm AI models (~1.8 GB)
 #   RUN_HOLOCHAIN=true    — include Holochain conductor (false = standalone mode)
 # =============================================================================
 
@@ -12,7 +11,6 @@ ARG RUST_VERSION=1.92
 ARG NODE_MAJOR=24
 ARG GO_VERSION=1.24.6
 ARG INCLUDE_WE=true
-ARG INCLUDE_MODELS=false
 
 # =============================================================================
 # Stage 1: Builder
@@ -236,7 +234,7 @@ RUN rm -rf /home/builder/deno-local /home/builder/rusty_v8-local \
 # ── Generate Docker bootstrap seed ────────────────────────────────────
 # Local bootstrap languages replace Holochain-backed ones for standalone mode.
 # docker/ is copied here (not with the source tree above) so that changes
-# to generate-seed.mjs or download-models.sh don't bust the Rust cache.
+# to generate-seed.mjs don't bust the Rust cache.
 COPY --chown=builder:builder docker/ ./docker/
 RUN node docker/generate-seed.mjs docker/bootstrap-languages docker/seed-output
 
@@ -325,28 +323,6 @@ RUN mkdir -p /flux-dist && \
     fi
 
 # =============================================================================
-# Stage 2b: Kalosm model pre-cache (conditional)
-# =============================================================================
-FROM ubuntu:24.04 AS model-fetcher
-
-ARG INCLUDE_MODELS
-
-RUN if [ "${INCLUDE_MODELS}" != "true" ]; then \
-      mkdir -p /models && exit 0; \
-    fi && \
-    apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY docker/download-models.sh /tmp/download-models.sh
-RUN chmod +x /tmp/download-models.sh && \
-    if [ "${INCLUDE_MODELS}" = "true" ]; then \
-      /tmp/download-models.sh /models; \
-    else \
-      mkdir -p /models; \
-    fi
-
-# =============================================================================
 # Stage 3: Runtime
 # =============================================================================
 FROM ubuntu:24.04 AS runtime
@@ -395,9 +371,6 @@ COPY --from=we-builder /we-dist/ /opt/ad4m/we-dist/
 
 # Flux app (served at /apps/flux/ alongside WE; empty dir if INCLUDE_WE=false)
 COPY --from=we-builder /flux-dist/ /opt/ad4m/flux-dist/
-
-# Pre-cached Kalosm models (empty dir if INCLUDE_MODELS=false)
-COPY --from=model-fetcher /models/ /opt/ad4m/models/
 
 RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data \
     && chown -R ad4m:ad4m /opt/ad4m/we-dist/ \

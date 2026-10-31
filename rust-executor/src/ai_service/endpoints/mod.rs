@@ -108,7 +108,7 @@ async fn probe(endpoint: &mut Endpoint, capabilities: Option<Vec<crate::types::A
     endpoint.health = health_of(listing);
 }
 
-/// Refuses a key that would cross the network in the clear (the rule of `ai.addModel`).
+/// Refuses a key that would cross the network in the clear (the rule of `ai.discoverModels`).
 fn refuse_cleartext_key(endpoint: &Endpoint) -> Result<()> {
     if !endpoint.api_key.is_empty() && !is_transport_safe(&endpoint.base_url) {
         return Err(InvalidEndpoint(CLEARTEXT_KEY_REFUSAL.to_string()).into());

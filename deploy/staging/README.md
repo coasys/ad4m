@@ -67,14 +67,11 @@ between the stop and the start fails (a full disk during the snapshot, say),
 the build that ran before is started again. A commit that failed to build or
 failed that check is not tried again until `staging` moves on.
 
-The build is the CircleCI build job plus `--features cuda` on
-`cargo build --release` in `cli`. The in-process candle models need that
-feature; CircleCI does not pass it. The link adds an rpath to
-`${AD4M_STAGING_CUDA_ROOT:-/usr/local/cuda-12.8}/lib64`, because cudarc links
-`libcudart` and does not set one, and that library is not on the default
-linker path. cudarc 0.13.9 accepts 12.8 and rejects 13.0 (`/usr/local/cuda`
-on this host). It reads `nvcc` from `PATH`, so the build prepends
-`$CUDA_ROOT/bin`.
+The build is the CircleCI build job: `cargo build --release` in `cli`, no
+features. The executor runs no models in-process. Its AI goes to model servers
+that run as their own services on the host (Ollama for chat and embeddings, an
+OpenAI-shaped transcription server such as speaches); the `ai_endpoints`,
+`ai_models` and `ai_defaults` keys of `executor-config.json` point at them.
 
 Anyone who can merge to `staging` can run code on this box as `marvin`.
 `staging` is protected (one approving review) for that reason. As of this

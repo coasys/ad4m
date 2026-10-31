@@ -40,8 +40,8 @@ use crate::types::{AiCapability, DiscoveredModel, EndpointKind};
 /// (~75K) plus conversation history with room to spare.
 ///
 /// This is only the fallback — how much VRAM to spend on KV cache is the
-/// Ollama admin's call, so a model entry can override it via
-/// [`ModelApi::max_num_ctx`](crate::types::ModelApi::max_num_ctx).
+/// Ollama admin's call, so an endpoint can override it via
+/// [`Endpoint::max_num_ctx`](crate::types::Endpoint::max_num_ctx).
 const DEFAULT_MAX_NUM_CTX: u32 = 131_072;
 
 /// Fallback if `/api/show` cannot determine the model's native window.

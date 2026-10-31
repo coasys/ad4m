@@ -34,7 +34,6 @@
 //! | `notification-triggered`      | `notification` + `perspectiveUuid` | the notification owner's DID | Notification triggered |
 //! | `exception-occurred`          | `exception`   | approval requests: the agent asked, AGENT_PERMIT; else everyone | Exception occurred |
 //! | `transcription-text`          | (inline)      | the stream owner's DID | AI transcription text                |
-//! | `model-loading-status`        | (inline)      | everyone               | AI model loading status              |
 //! | `model-status`                | (inline)      | everyone               | An upstream model's status, e.g. `ai.pullModel` progress |
 //! | `ai-endpoint-status`          | (inline)      | the main agent's DID   | An AI endpoint's health changed      |
 //! | `query-subscription-update`   | (inline)      | the subscriber among the owners, on its own connection (passes `events.watch`) | Live query delta update, or `{ lagged: true }` |
@@ -59,8 +58,8 @@ use crate::events::{Event, Topic};
 use crate::pubsub::get_global_pubsub;
 
 use crate::types::{
-    AIModelLoadingStatus, Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo,
-    NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveEvent, PerspectiveLinkEvent,
+    Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo, NeighbourhoodSignalFilter,
+    NotificationTriggeredEvent, PerspectiveEvent, PerspectiveLinkEvent,
     PerspectiveLinkUpdatedEvent, PerspectiveRemovedEvent, PerspectiveStateFilter,
     QuerySubscriptionUpdateEvent, TranscriptionTextFilter,
 };
@@ -127,7 +126,6 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<NotificationTriggeredEvent>(RuntimeNotificationTriggered, true),
         EventSpec::of::<ExceptionOccurredEvent>(ExceptionOccurred, false),
         EventSpec::of::<TranscriptionTextFilter>(AiTranscriptionText, false),
-        EventSpec::of::<AIModelLoadingStatus>(AiModelLoadingStatus, false),
         EventSpec::of::<crate::types::ModelStatusEvent>(AiModelStatus, false),
         EventSpec::of::<crate::types::AiEndpointStatusEvent>(AiEndpointStatus, false),
         EventSpec::of::<QuerySubscriptionUpdateEvent>(PerspectiveQuerySubscription, true),
@@ -258,7 +256,6 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::NeighbourhoodSignal
         | Topic::RuntimeNotificationTriggered
         | Topic::AiTranscriptionText
-        | Topic::AiModelLoadingStatus
         | Topic::AiModelStatus
         | Topic::AiEndpointStatus
         | Topic::PerspectiveQuerySubscription
@@ -698,11 +695,11 @@ mod audience_matrix_tests {
     }
 
     /// Publishes `payload` as a fence that reaches every stream of [`open_all`]: as
-    /// `model-loading-status` (AI_READ) and as `link-added` on P (the P reader's only
+    /// `model-status` (AI_READ) and as `link-added` on P (the P reader's only
     /// capability). A stream stops reading at the first one it gets.
     async fn publish_fence(payload: serde_json::Value) {
         let pubsub = get_global_pubsub().await;
-        let model = Event::new(Topic::AiModelLoadingStatus, Audience::Everyone, &payload);
+        let model = Event::new(Topic::AiModelStatus, Audience::Everyone, &payload);
         pubsub.publish_event(model);
         let link = Event::new(Topic::LinkAdded, Audience::Everyone, &payload).for_perspective(P);
         pubsub.publish_event(link);
@@ -752,7 +749,7 @@ mod audience_matrix_tests {
             // The AI app holds AI_READ; the P reader and anonymous callers do not.
             (
                 "everyone".into(),
-                event(Topic::AiModelLoadingStatus, Audience::Everyone),
+                event(Topic::AiModelStatus, Audience::Everyone),
                 vec![
                     "operator",
                     "app",
@@ -1816,7 +1813,7 @@ mod audience_matrix_tests {
             Arc::new(app("expired", vec![AI_READ_CAPABILITY.clone()]).expiring_at(an_hour_ago));
         let mut stream = open(expired).await;
         get_global_pubsub().await.publish_event(Event::new(
-            Topic::AiModelLoadingStatus,
+            Topic::AiModelStatus,
             Audience::Everyone,
             json_case("expired"),
         ));
@@ -2068,7 +2065,7 @@ mod token_expiry_tests {
         let all = event_interest::watching_all();
         let mut stream = build_event_stream(Arc::new(session), all, None).await;
         get_global_pubsub().await.publish_event(Event::new(
-            Topic::AiModelLoadingStatus,
+            Topic::AiModelStatus,
             crate::events::Audience::Everyone,
             serde_json::json!({ "model": "m", "status": "loading" }),
         ));
@@ -2202,10 +2199,6 @@ mod event_spec_tests {
             (
                 Topic::AiTranscriptionText,
                 serde_json::to_value(TranscriptionTextFilter::default()),
-            ),
-            (
-                Topic::AiModelLoadingStatus,
-                serde_json::to_value(AIModelLoadingStatus::default()),
             ),
             (
                 Topic::AiModelStatus,

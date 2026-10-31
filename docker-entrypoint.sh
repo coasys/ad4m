@@ -66,19 +66,6 @@ if [ -f /opt/ad4m/language-language-kv/address.txt ]; then
     fi
 fi
 
-# ── Pre-populate Kalosm model cache ────────────────────────────────────────
-# If the Docker image includes pre-cached models (INCLUDE_MODELS=true at
-# build time), copy them into the kalosm cache directory so the executor
-# finds them on disk and skips network downloads.
-KALOSM_CACHE="${HOME}/.local/share/kalosm/cache"
-if [ -d /opt/ad4m/models ] && [ "$(ls -A /opt/ad4m/models 2>/dev/null)" ]; then
-    if [ ! -d "${KALOSM_CACHE}" ]; then
-        echo "Pre-populating Kalosm model cache..."
-        mkdir -p "${KALOSM_CACHE}"
-        cp -r /opt/ad4m/models/* "${KALOSM_CACHE}/"
-    fi
-fi
-
 # ── Build executor args ─────────────────────────────────────────────────────
 # The executor reads the credential from the environment: a flag value would stay
 # visible in its process arguments (`ps`) for as long as it runs.
@@ -290,10 +277,17 @@ stamp_bootstrap_language_authors() {
     echo "Stamped bootstrap language meta authors as ${did}"
 }
 
-# ── AI model auto-registration ─────────────────────────────────────────────
-# When pre-cached models exist (INCLUDE_MODELS=true at build time), register
-# them with the executor via WebSocket RPC so Flux transcription and
-# summarisation work out of the box.
+# ── AI endpoints from the environment ─────────────────────────────────────────
+# The executor runs no models itself: its AI goes to model servers. When the
+# variables below are set, register those servers as endpoints and their models,
+# and make each the default of its type when the type has none. Idempotent by
+# name, so a restart registers nothing twice. See docker/compose.ai.yml.
+#
+#   AD4M_AI_OLLAMA_URL               Ollama, for chat and embeddings (http://ollama:11434)
+#   AD4M_AI_LLM_MODEL                chat model on it, by its Ollama name
+#   AD4M_AI_EMBEDDING_MODEL          embedding model on it, by its Ollama name
+#   AD4M_AI_TRANSCRIPTION_URL        OpenAI-shaped transcription server (http://speaches:8000)
+#   AD4M_AI_TRANSCRIPTION_MODEL      model on it, by the id the server knows it by
 ws_rpc() {
     local msg_type="$1" params="$2" msg_id="${3:-1}"
     # Percent-encode the credential for the query string. Axum's Query
@@ -305,83 +299,78 @@ ws_rpc() {
         | websocat -n1 "ws://localhost:12000/api/v1/ws?token=${encoded_token}" 2>/dev/null
 }
 
+# Answers the id of the endpoint named $1, registering it (kind $2, URL $3) first
+# when there is none. Empty on failure.
+ensure_ai_endpoint() {
+    local name="$1" kind="$2" url="$3" id
+    id=$(ws_rpc "ai.endpoints" "{}" "list-endpoints" \
+        | jq -r --arg n "${name}" '.result[]? | select(.name == $n) | .id')
+    if [ -z "${id}" ]; then
+        id=$(ws_rpc "ai.addEndpoint" \
+            "$(jq -cn --arg n "${name}" --arg k "${kind}" --arg u "${url}" \
+                '{name: $n, kind: $k, baseUrl: $u}')" "add-endpoint" \
+            | jq -r '.result.id // empty')
+        [ -n "${id}" ] && echo "  Registered AI endpoint ${name} (${url})" >&2
+    fi
+    echo "${id}"
+}
+
+# Registers model $1 of type $2 as $4 on endpoint $3, unless a model has that
+# name, and makes it the default of its type when there is none.
+ensure_ai_model() {
+    local name="$1" type="$2" endpoint_id="$3" remote="$4" id
+    id=$(ws_rpc "ai.models" "{}" "list-models" \
+        | jq -r --arg n "${name}" '.result[]? | select(.name == $n) | .id')
+    if [ -z "${id}" ]; then
+        id=$(ws_rpc "ai.addModel" \
+            "$(jq -cn --arg n "${name}" --arg t "${type}" --arg e "${endpoint_id}" --arg r "${remote}" \
+                '{model: {name: $n, modelType: $t, endpointId: $e, remoteModel: $r}}')" "add-model" \
+            | jq -r '.result // empty')
+        if [ -z "${id}" ]; then
+            echo "  WARNING: failed to register AI model ${name}." >&2
+            return
+        fi
+        echo "  Registered ${type} model ${name} (${remote})"
+    fi
+    if ws_rpc "ai.getDefaultModel" "{\"modelType\":\"${type}\"}" "get-default" \
+        | jq -e '.result == null' >/dev/null 2>&1; then
+        ws_rpc "ai.setDefaultModel" "{\"id\":\"${id}\",\"modelType\":\"${type}\"}" "set-default" >/dev/null
+        echo "  ${name} is the default ${type} model."
+    fi
+}
+
 setup_ai_models() {
-    if [ -z "$(ls -A "${KALOSM_CACHE}" 2>/dev/null)" ]; then
+    if [ -z "${AD4M_AI_OLLAMA_URL:-}" ] && [ -z "${AD4M_AI_TRANSCRIPTION_URL:-}" ]; then
         return
     fi
     if ! command -v websocat >/dev/null 2>&1; then
-        echo "WARNING: websocat not found, skipping AI model registration." >&2
+        echo "WARNING: websocat not found, skipping AI endpoint registration." >&2
         return
     fi
 
-    echo "Registering AI models..."
-
-    local models_response
-    models_response=$(ws_rpc "ai.models" "{}" "list-models")
-    if [ -z "${models_response}" ]; then
-        echo "WARNING: could not query AI models." >&2
-        return
-    fi
-
-    # Register Whisper (transcription) if not already present
-    if ! echo "${models_response}" | jq -e '.result[] | select(.name == "Whisper")' >/dev/null 2>&1; then
-        local whisper_result whisper_id
-        whisper_result=$(ws_rpc "ai.addModel" \
-            '{"model":{"name":"Whisper","type":"TRANSCRIPTION","local":{"fileName":"whisper_small"}}}' \
-            "add-whisper")
-        whisper_id=$(echo "${whisper_result}" | jq -r '.result // empty')
-        if [ -n "${whisper_id}" ]; then
-            echo "  Registered transcription model: Whisper (${whisper_id})"
+    echo "Registering AI endpoints..."
+    if [ -n "${AD4M_AI_OLLAMA_URL:-}" ]; then
+        local ollama_id
+        ollama_id=$(ensure_ai_endpoint "ollama" "OLLAMA" "${AD4M_AI_OLLAMA_URL}")
+        if [ -z "${ollama_id}" ]; then
+            echo "  WARNING: failed to register the Ollama endpoint." >&2
         else
-            echo "  WARNING: failed to register Whisper model." >&2
-        fi
-    else
-        echo "  Whisper model already registered."
-    fi
-
-    # Register Whisper tiny quantized (fast preview transcription) if not already present
-    if ! echo "${models_response}" | jq -e '.result[] | select(.name == "Whisper tiny quantized")' >/dev/null 2>&1; then
-        local whisper_tiny_result whisper_tiny_id
-        whisper_tiny_result=$(ws_rpc "ai.addModel" \
-            '{"model":{"name":"Whisper tiny quantized","type":"TRANSCRIPTION","local":{"fileName":"whisper_tiny_quantized"}}}' \
-            "add-whisper-tiny")
-        whisper_tiny_id=$(echo "${whisper_tiny_result}" | jq -r '.result // empty')
-        if [ -n "${whisper_tiny_id}" ]; then
-            echo "  Registered transcription model: Whisper tiny quantized (${whisper_tiny_id})"
-        else
-            echo "  WARNING: failed to register Whisper tiny quantized model." >&2
-        fi
-    else
-        echo "  Whisper tiny quantized model already registered."
-    fi
-
-    # Register TinyLlama (LLM) if no LLM model exists
-    local llm_id=""
-    if echo "${models_response}" | jq -e '.result[] | select(.modelType == "LLM")' >/dev/null 2>&1; then
-        llm_id=$(echo "${models_response}" | jq -r '[.result[] | select(.modelType == "LLM")][0].id')
-        echo "  LLM model already registered (${llm_id})."
-    else
-        local llm_result
-        llm_result=$(ws_rpc "ai.addModel" \
-            '{"model":{"name":"TinyLlama","type":"LLM","local":{"fileName":"tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf","huggingfaceRepo":"TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF","tokenizerSource":{"repo":"hf-internal-testing/llama-tokenizer","revision":"main","fileName":"tokenizer.json"}}}}' \
-            "add-llm")
-        llm_id=$(echo "${llm_result}" | jq -r '.result // empty')
-        if [ -n "${llm_id}" ]; then
-            echo "  Registered LLM model: TinyLlama (${llm_id})"
-        else
-            echo "  WARNING: failed to register TinyLlama model." >&2
+            [ -n "${AD4M_AI_LLM_MODEL:-}" ] \
+                && ensure_ai_model "${AD4M_AI_LLM_MODEL}" "LLM" "${ollama_id}" "${AD4M_AI_LLM_MODEL}"
+            [ -n "${AD4M_AI_EMBEDDING_MODEL:-}" ] \
+                && ensure_ai_model "${AD4M_AI_EMBEDDING_MODEL}" "EMBEDDING" "${ollama_id}" "${AD4M_AI_EMBEDDING_MODEL}"
         fi
     fi
-
-    # Set default LLM if none configured
-    if [ -n "${llm_id}" ]; then
-        local default_response
-        default_response=$(ws_rpc "ai.getDefaultModel" '{"modelType":"LLM"}' "get-default")
-        if echo "${default_response}" | jq -e '.result == null' >/dev/null 2>&1; then
-            ws_rpc "ai.setDefaultModel" "{\"id\":\"${llm_id}\",\"modelType\":\"LLM\"}" "set-default" >/dev/null
-            echo "  Set TinyLlama as default LLM."
+    if [ -n "${AD4M_AI_TRANSCRIPTION_URL:-}" ]; then
+        local stt_id
+        stt_id=$(ensure_ai_endpoint "transcription" "OPEN_AI_AUDIO" "${AD4M_AI_TRANSCRIPTION_URL}")
+        if [ -z "${stt_id}" ]; then
+            echo "  WARNING: failed to register the transcription endpoint." >&2
+        elif [ -n "${AD4M_AI_TRANSCRIPTION_MODEL:-}" ]; then
+            ensure_ai_model "${AD4M_AI_TRANSCRIPTION_MODEL}" "TRANSCRIPTION" "${stt_id}" "${AD4M_AI_TRANSCRIPTION_MODEL}"
         fi
     fi
+    return 0
 }
 
 # ── Global discovery space (create on first boot, inject URL into WE) ───

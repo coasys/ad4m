@@ -1,7 +1,7 @@
 //! `/v1/chat/completions` for a model whose provider carries tools as data.
 //!
 //! [`super::chat`] renders tools into a `<tools>` system prompt and recovers
-//! calls from the reply text, which is the only option for a local model. A
+//! calls from the reply text, for a model that does not take tools as data. A
 //! provider with native tool calling (see
 //! [`crate::ai_service::providers::api_type_supports_native_tools`]) is handed
 //! the definitions instead and answers with structured calls, through
@@ -17,14 +17,10 @@
 //! full and framed as SSE afterwards — which is also what the injected path
 //! does whenever tools are active, so a client sees no difference in shape.
 //!
-//! `tool_choice: "required"` and a named function are not enforced on this
-//! path. They are not enforced for a remote model on the injected path either:
-//! the decoding constraint that implements them only reaches local models.
-//! `parallel_tool_calls: false` is not passed on either, for the same reason:
-//! it reaches [`super::tool_grammar::build_tool_call_parser`] on the injected
-//! path, and that constraint binds only for [`crate::ai_service::LlmModel::Local`].
-//! Wiring either one through means a provider-level request field, not a change
-//! here.
+//! `tool_choice: "required"`, a named function and `parallel_tool_calls: false` are not
+//! enforced on this path, nor on the injected one. A model on an OpenAI-shaped endpoint
+//! that takes tools natively gets the request as written through the `/v1` passthrough,
+//! fields included; wiring them through here means a provider-level request field.
 
 use std::convert::Infallible;
 
@@ -289,8 +285,8 @@ pub(super) fn reply_chunks(
 /// as an object, but `ContentBlock::input` is `#[serde(default)]`, so a block
 /// that arrives without one reads as `Value::Null` and would go out as
 /// `"null"`. Ollama is the weaker guarantee of the two: `extract_tool_calls`
-/// copies `arguments` verbatim out of whatever a local model wrote, and no
-/// grammar constrains it to an object on the way.
+/// copies `arguments` verbatim out of whatever the model wrote, and nothing
+/// constrains it to an object on the way.
 ///
 /// So a value that is not an object goes under `_raw`, as it does coming the
 /// other way in `harness_bridge::to_provider_call`, and for the same reason:

@@ -1,12 +1,18 @@
 import {ApiClient, CallOptions } from '../apiClient';
 import base64js from 'base64-js';
 import pako from 'pako'
-import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
-import { ModelInput, Model, ModelType } from "./AITypes"
-import type { ModelInput as ModelInputData } from "../generated/api/ModelInput";
-import type { AiEndpoint } from "../generated/api/AiEndpoint";
-import type { AiEndpointInput } from "../generated/api/AiEndpointInput";
-import type { DetectedEndpoint } from "../generated/api/DetectedEndpoint";
+import { AITask, AITaskInput } from "./Tasks";
+import type {
+    AiDiscoverModelsParams,
+    AiEndpoint,
+    AiEndpointInput,
+    DetectedEndpoint,
+    DiscoveredModel,
+    Model,
+    ModelInput,
+    ModelStatus,
+    ModelType,
+} from "./AITypes";
 
 export class AIClient {
     #apiClient: ApiClient;
@@ -16,29 +22,21 @@ export class AIClient {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     }
 
-    /** The executor names the model type `type`. */
-    private serializeModelInput({ modelType, ...model }: ModelInput): ModelInputData {
-        return { ...model, type: modelType };
-    }
-
+    /** Every model, each on its endpoint, with where it stands by the endpoint's last check. */
     async getModels(): Promise<Model[]> {
         return this.#apiClient.call('ai.models', {});
     }
 
     /**
-     * Ask a remote endpoint which models it serves, before adding one.
+     * The models a server lists, with their capabilities: a saved endpoint by
+     * `{ endpointId }`, or a server not saved yet by `{ kind, baseUrl, apiKey? }`.
      *
-     * Takes the credentials of a model that does not exist yet — a settings
-     * form is being filled in and wants the list to pick from. Rejects when
-     * the endpoint is unreachable or the key is refused, which makes this the
-     * credential check too: without it a bad key surfaces later as a failed
-     * completion carrying an error from a different layer.
-     *
-     * `apiType` defaults to the OpenAI shape, which is what every endpoint
-     * that is not Anthropic speaks.
+     * Rejects when the server is unreachable or the key is refused, which makes this the
+     * credential check too: without it a bad key surfaces later as a failed completion
+     * carrying an error from a different layer.
      */
-    async discoverModels(baseUrl: string, apiKey?: string, apiType?: string): Promise<string[]> {
-        return this.#apiClient.call('ai.discoverModels', { baseUrl, apiKey, apiType });
+    async discoverModels(params: AiDiscoverModelsParams): Promise<DiscoveredModel[]> {
+        return this.#apiClient.call('ai.discoverModels', params);
     }
 
     /**
@@ -90,12 +88,17 @@ export class AIClient {
         return this.#apiClient.call('ai.deleteUpstreamModel', { endpointId, remoteModel });
     }
 
+    /**
+     * Register an upstream model on an endpoint, by the id the endpoint knows it by. Refused
+     * when the endpoint does not exist or cannot serve the type (embeddings on Anthropic).
+     * Answers the new model's id.
+     */
     async addModel(model: ModelInput, options?: CallOptions): Promise<string> {
-        return this.#apiClient.call('ai.addModel', { model: this.serializeModelInput(model) }, options);
+        return this.#apiClient.call('ai.addModel', { model }, options);
     }
 
     async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
-        return this.#apiClient.call('ai.updateModel', { id: modelId, model: this.serializeModelInput(model) });
+        return this.#apiClient.call('ai.updateModel', { id: modelId, model });
     }
 
     async removeModel(modelId: string): Promise<boolean> {
@@ -106,7 +109,7 @@ export class AIClient {
         return this.#apiClient.call('ai.setDefaultModel', { id: modelId, modelType });
     }
 
-    async getDefaultModel(modelType: ModelType): Promise<Model> {
+    async getDefaultModel(modelType: ModelType): Promise<Model | null> {
         return this.#apiClient.call('ai.getDefaultModel', { modelType });
     }
 
@@ -138,8 +141,9 @@ export class AIClient {
         });
     }
 
-    async modelLoadingStatus(model: string): Promise<AIModelLoadingStatus> {
-        return this.#apiClient.call('ai.modelLoadingStatus', { model });
+    /** Where a model stands by its endpoint's last health check (`READY`, `MISSING`, ...). */
+    async modelStatus(modelId: string): Promise<ModelStatus> {
+        return this.#apiClient.call('ai.modelStatus', { id: modelId });
     }
 
     async prompt(taskId: string, prompt: string, options?: CallOptions): Promise<string> {
