@@ -123,8 +123,22 @@ fn wait_until_ready(ready: &mpsc::Receiver<()>) {
 /// Starts an executor, waits until its API listens, then closes the read end of its stdout, as a
 /// launcher that died would have.
 fn start_with_stdout_reader_gone(name: &str) -> Executor {
+    start(name, false)
+}
+
+/// As `start_with_stdout_reader_gone`; with `sighup_ignored` the executor starts with SIGHUP
+/// ignored, as `nohup` starts it (`sh` sets it, `exec` keeps the PID and the disposition).
+fn start(name: &str, sighup_ignored: bool) -> Executor {
     let data_path = fresh_data_path(name);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ad4m-executor"))
+    let mut command = if sighup_ignored {
+        let mut sh = Command::new("sh");
+        sh.args(["-c", r#"trap '' HUP; exec "$@""#, "sh"]);
+        sh.arg(env!("CARGO_BIN_EXE_ad4m-executor"));
+        sh
+    } else {
+        Command::new(env!("CARGO_BIN_EXE_ad4m-executor"))
+    };
+    let mut child = command
         .args(run_args(&data_path))
         // Readiness is an info line: an inherited RUST_LOG=warn would hide it.
         .env("RUST_LOG", "rust_executor=info")
@@ -214,6 +228,28 @@ fn sigint_ends_an_executor_whose_launcher_is_gone() {
 #[test]
 fn sighup_ends_an_executor_whose_launcher_is_gone() {
     assert_signal_ends_it_gracefully("hup", "HUP");
+}
+
+/// `nohup ad4m-executor run &` must survive the terminal closing: an executor started with SIGHUP
+/// ignored keeps it ignored, and still shuts down on SIGTERM.
+#[test]
+fn sighup_leaves_an_executor_started_under_nohup_running() {
+    let mut executor = start("nohup", true);
+    signal(executor.child.id(), "HUP");
+    assert!(
+        exit_within(&mut executor.child, Duration::from_secs(3)).is_none(),
+        "an executor started with SIGHUP ignored ended on SIGHUP"
+    );
+    signal(executor.child.id(), "TERM");
+    assert!(
+        exit_within(&mut executor.child, EXIT_WITHIN).is_some(),
+        "the executor was still running {EXIT_WITHIN:?} after SIGTERM"
+    );
+    executor.reader.take().unwrap().join().unwrap();
+    assert!(
+        executor.shut_down.load(Ordering::SeqCst),
+        "SIGTERM ended the executor without its graceful shutdown"
+    );
 }
 
 /// Written by the executor at startup and removed only by its graceful shutdown.
