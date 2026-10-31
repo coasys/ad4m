@@ -861,27 +861,33 @@ pub(super) async fn execute_model_query_inner(
     // A property in neither is never resolved: it keeps its hydrated value and is stripped.
     let read_before_window = read_before_window(query_input);
     let returned_keys = returned(query_input);
+    let is_returned = |name: &str| {
+        returned_keys
+            .as_ref()
+            .is_none_or(|keep| keep.iter().any(|k| k == name))
+    };
     resolve_language_transforms(shape, &mut instances, |name| {
         read_before_window.contains(name)
     })
     .await?;
 
-    // Resolve reverse relations
-    let reverse_rels: Vec<(String, String, bool)> = shape
+    // Reverse relations are a store read each, so by the same rule: what the filter and sort read
+    // for every row, here; what the query returns and they did not read, for the page only, after
+    // the window; the rest never.
+    let (reverse_before_window, reverse_on_page): (Vec<_>, Vec<_>) = shape
         .properties
         .iter()
         .filter(|p| p.direction.as_deref() == Some("reverse"))
+        .filter(|p| read_before_window.contains(&p.name) || is_returned(&p.name))
         .map(|p| (p.name.clone(), p.predicate.clone(), p.is_scalar_relation))
-        .collect();
-    if !reverse_rels.is_empty() && !instances.is_empty() {
-        resolve_reverse_relations(
-            store,
-            &mut instances,
-            &reverse_rels,
-            query_input.link_status.as_ref(),
-            query_input.include_unverified,
-        )?;
-    }
+        .partition(|(name, _, _)| read_before_window.contains(name));
+    resolve_reverse_relations(
+        store,
+        &mut instances,
+        &reverse_before_window,
+        query_input.link_status.as_ref(),
+        query_input.include_unverified,
+    )?;
 
     // Apply post-hydration where-clause filters
     if let Some(ref where_clause) = query_input.where_clause {
@@ -996,21 +1002,28 @@ pub(super) async fn execute_model_query_inner(
     // The language-backed values the filter and sort did not read, for the page only, and of
     // those only what the query hands back: the strip below drops the rest.
     resolve_language_transforms(shape, &mut paginated, |name| {
-        !read_before_window.contains(name)
-            && returned_keys
-                .as_ref()
-                .is_none_or(|keep| keep.iter().any(|k| k == name))
+        !read_before_window.contains(name) && is_returned(name)
     })
     .await?;
 
-    // Evaluate property/relation getters (post-pagination)
+    // The reverse relations the filter and sort did not read, for the page only.
+    resolve_reverse_relations(
+        store,
+        &mut paginated,
+        &reverse_on_page,
+        query_input.link_status.as_ref(),
+        query_input.include_unverified,
+    )?;
+
+    // Evaluate property/relation getters (post-pagination), only for what the query returns: they
+    // run after the filter and sort, so those never read a getter's value.
     if !paginated.is_empty() {
         let deep_query = query_input.deep_query.unwrap_or(true);
         evaluate_getters(
             store,
             &mut paginated,
             shape,
-            query_input.include.as_ref(),
+            returned_keys.as_deref(),
             deep_query,
             query_input.link_status.as_ref(),
             query_input.include_unverified,
