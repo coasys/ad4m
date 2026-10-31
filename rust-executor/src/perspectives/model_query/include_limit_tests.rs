@@ -340,6 +340,48 @@ async fn an_include_where_filters_before_the_per_parent_limit() {
     );
 }
 
+/// A `where` the store cannot evaluate (a bare `author` is matched after
+/// hydration) must not let the store cut each parent's rows first: the cut
+/// would keep rows the filter then drops, and leave the parent short.
+#[tokio::test]
+async fn an_include_where_matched_after_hydration_is_not_cut_in_the_store() {
+    let store = store_with_two_posts();
+    for (p, post) in ["we://post/1", "we://post/2"].iter().enumerate() {
+        let c = comment(p + 1, 0);
+        let ts = 1_700_000_000_001 + (p as u64) * 100;
+        for (s, pred, t) in [
+            (c.as_str(), "we://cflag", "we://comment"),
+            (*post, "we://comment", c.as_str()),
+        ] {
+            let mut l = link(s, pred, t, ts);
+            l.author = "did:key:other".to_string();
+            store.add_link(&l).unwrap();
+        }
+    }
+    let got = included(
+        &store,
+        "comments",
+        ModelQueryInput {
+            limit: Some(1),
+            order: latest_first(),
+            where_clause: Some(std::collections::BTreeMap::from([(
+                "author".to_string(),
+                super::types::WhereCondition::String("did:key:other".to_string()),
+            )])),
+            ..Default::default()
+        },
+    )
+    .await;
+    // Each post's latest comment is by test123; the only match is its oldest.
+    assert_eq!(
+        got,
+        expect([
+            ("we://post/1", vec![comment(1, 0)]),
+            ("we://post/2", vec![comment(2, 0)]),
+        ])
+    );
+}
+
 /// Without `limit` / `offset` every parent keeps every related row, in the
 /// relation's link order.
 #[tokio::test]
