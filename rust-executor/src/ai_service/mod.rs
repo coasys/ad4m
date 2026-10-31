@@ -53,6 +53,17 @@ pub struct EmbedResult {
     pub token_count: usize,
 }
 
+/// The vectors of a batch, in input order, and the input tokens billed for it: the
+/// upstream's count when it reports one, else the estimate.
+pub struct EmbedBatch {
+    pub vectors: Vec<Vec<f32>>,
+    pub token_count: usize,
+}
+
+/// The Bert a fresh executor loads when no model is registered. Not a database row.
+const AUTO_BERT_ID: &str = "bert-id";
+const AUTO_BERT_NAME: &str = "bert";
+
 /// Rough token count estimation (~4 chars per token for English text).
 /// Used by the Kalosum backend to populate PromptResult/EmbedResult.
 /// Will be replaced by exact counts when Ollama is integrated.
@@ -151,7 +162,8 @@ impl TranscriptionSession {
 
 #[derive(Clone)]
 pub struct AIService {
-    embedding_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<EmbeddingRequest>>>>,
+    /// What embeds for each embedding model, keyed by model id.
+    embedding_channel: Arc<Mutex<HashMap<String, Embedder>>>,
     llm_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<LLMTaskRequest>>>>,
     transcription_streams: TranscriptionStreams,
     /// Shared Whisper models - ONE model per size, shared across ALL streams using that size
@@ -162,8 +174,21 @@ pub struct AIService {
 }
 
 struct EmbeddingRequest {
-    pub prompt: String,
-    pub result_sender: oneshot::Sender<Result<Vec<f32>>>,
+    pub texts: Vec<String>,
+    pub result_sender: oneshot::Sender<Result<Vec<Vec<f32>>>>,
+}
+
+/// What embeds for one model.
+#[derive(Clone)]
+enum Embedder {
+    /// Bert on its own thread: a model without an endpoint.
+    Bert(mpsc::UnboundedSender<EmbeddingRequest>),
+    /// `remote_model` on the endpoint that serves the model.
+    Remote {
+        client: Arc<dyn providers::embed::RemoteEmbed>,
+        remote_model: String,
+        endpoint: Box<crate::types::Endpoint>,
+    },
 }
 
 #[allow(dead_code)]
@@ -519,8 +544,8 @@ impl AIService {
             // No models configured — auto-load Bert for embedding support
             futures.push(Box::pin(
                 self.init_model(Model {
-                    id: "bert-id".to_string(),
-                    name: "bert".to_string(),
+                    id: AUTO_BERT_ID.to_string(),
+                    name: AUTO_BERT_NAME.to_string(),
                     model_type: ModelType::Embedding,
                     local: Some(LocalModel {
                         file_name: "bert".to_string(),
@@ -573,8 +598,10 @@ impl AIService {
     async fn init_model(&self, model: crate::types::Model) -> Result<()> {
         match model.model_type {
             ModelType::Llm => self.spawn_llm_model(model, None).await?,
-            ModelType::Embedding => self.spawn_embedding_model(model).await,
+            ModelType::Embedding => self.spawn_embedding_model(model).await?,
             ModelType::Transcription => Self::load_transcriber_model(&model).await,
+            // Nothing to load: a speech request goes to the model's endpoint as it comes.
+            ModelType::Speech => {}
         };
         Ok(())
     }
@@ -1856,104 +1883,172 @@ impl AIService {
     // Embedding
     // -------------------------------------
 
-    async fn spawn_embedding_model(&self, model_config: crate::types::Model) {
-        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
-        let model_name = model_config.name.clone();
-        thread::spawn({
-            let model_id = model_config.id.clone();
-            move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-
-                let model = rt
-                    .block_on(async {
-                        publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
-
-                        let bert = Bert::builder()
-                            .with_device(Self::new_candle_device())
-                            .build_with_loading_handler({
-                                let model_id = model_id.clone();
-                                move |progress| {
-                                    tokio::spawn(handle_progress(model_id.clone(), progress));
-                                }
-                            })
-                            .await;
-
-                        publish_model_status(model_id.clone(), 100.0, "Loaded", true, false).await;
-
-                        bert
-                    })
-                    .expect("couldn't build Bert model");
-
-                // Block on the channel — zero CPU while idle.
-                loop {
-                    match rt.block_on(bert_rx.recv()) {
-                        None => break,
-                        Some(request) => {
-                            let result: Result<Vec<f32>> = rt
-                                .block_on(async { model.embed(request.prompt).await })
-                                .map(|tensor| tensor.to_vec())
-                                .map_err(|bert_error| anyhow!(bert_error));
-                            let _ = request.result_sender.send(result);
-                        }
-                    }
-                }
-            }
-        });
-
+    /// Make `model` ready to embed, replacing what embedded for it before: the client of
+    /// its endpoint when it has one, else Bert on its own thread.
+    async fn spawn_embedding_model(&self, model_config: crate::types::Model) -> Result<()> {
+        let endpoint = match &model_config.endpoint_id {
+            Some(id) => Ad4mDb::with_global_instance(|db| db.get_endpoint(id))?,
+            None => None,
+        };
+        let embedder = match (endpoint, &model_config.api) {
+            (Some(endpoint), Some(api)) => Embedder::Remote {
+                client: Arc::from(providers::embed::embed_client(&endpoint)?),
+                remote_model: api.model.clone(),
+                endpoint: Box::new(endpoint),
+            },
+            _ => Embedder::Bert(Self::spawn_bert(model_config.id.clone())),
+        };
         self.embedding_channel
             .lock()
             .await
-            .insert(model_name, bert_tx);
+            .insert(model_config.id, embedder);
+        Ok(())
     }
 
+    /// Bert on its own thread, embedding each request's texts in order.
+    fn spawn_bert(model_id: String) -> mpsc::UnboundedSender<EmbeddingRequest> {
+        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
+        thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+
+            let model = rt
+                .block_on(async {
+                    publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
+
+                    let bert = Bert::builder()
+                        .with_device(Self::new_candle_device())
+                        .build_with_loading_handler({
+                            let model_id = model_id.clone();
+                            move |progress| {
+                                tokio::spawn(handle_progress(model_id.clone(), progress));
+                            }
+                        })
+                        .await;
+
+                    publish_model_status(model_id.clone(), 100.0, "Loaded", true, false).await;
+
+                    bert
+                })
+                .expect("couldn't build Bert model");
+
+            // Block on the channel — zero CPU while idle. Ends when the sender is dropped.
+            while let Some(request) = rt.block_on(bert_rx.recv()) {
+                let result: Result<Vec<Vec<f32>>> = rt.block_on(async {
+                    let mut vectors = Vec::with_capacity(request.texts.len());
+                    for text in request.texts {
+                        vectors.push(model.embed(text).await.map_err(|e| anyhow!(e))?.to_vec());
+                    }
+                    Ok(vectors)
+                });
+                let _ = request.result_sender.send(result);
+            }
+        });
+        bert_tx
+    }
+
+    /// Embed one text. See [`Self::embed_batch`].
     pub async fn embed(
         &self,
-        model_id: String,
+        model: String,
         text: String,
         bill_to: Option<String>,
     ) -> Result<EmbedResult> {
-        let token_count = estimate_token_count(&text);
-        let text_chars = text.chars().count();
-        // Per-call embed lines are debug: both real callers (dedup +
-        // openai_compat/embeddings) loop one embed() per input, so a
-        // batch of N would double N info lines. Batch-level info is
-        // emitted by the caller. See rust-executor/LOGGING.md.
+        let batch = self.embed_batch(&model, vec![text], bill_to).await?;
+        Ok(EmbedResult {
+            embeddings: batch.vectors.into_iter().next().unwrap_or_default(),
+            token_count: batch.token_count,
+        })
+    }
+
+    /// The id of the embedding model `requested` names: a model's id, else the name of an
+    /// embedding model, else the Bert a fresh executor loads.
+    fn embedding_model_id(requested: &str) -> Result<String> {
+        let models = Ad4mDb::with_global_instance(|db| db.get_models())?;
+        let found = models.iter().find(|m| m.id == requested).or_else(|| {
+            models
+                .iter()
+                .find(|m| m.name == requested && m.model_type == ModelType::Embedding)
+        });
+        Ok(match found {
+            Some(model) => model.id.clone(),
+            None if requested == AUTO_BERT_NAME => AUTO_BERT_ID.to_string(),
+            None => requested.to_string(),
+        })
+    }
+
+    /// Embed `texts` with the embedding model `model` (an id or a name), in one request to
+    /// its endpoint, and bill `bill_to` for the input tokens.
+    pub async fn embed_batch(
+        &self,
+        model: &str,
+        texts: Vec<String>,
+        bill_to: Option<String>,
+    ) -> Result<EmbedBatch> {
+        let model_id = Self::embedding_model_id(model)?;
+        let estimate: usize = texts.iter().map(|t| estimate_token_count(t)).sum();
         log::debug!(
-            "🤖 embed start model={} chars={} tokens_in={}",
+            "🤖 embed start model={} n={} tokens_in={}",
             model_id,
-            text_chars,
-            token_count
+            texts.len(),
+            estimate
         );
         let started = std::time::Instant::now();
-        let (result_sender, rx) = oneshot::channel();
-        let embedding_channel = self.embedding_channel.lock().await;
-        if let Some(sender) = embedding_channel.get(&model_id) {
-            sender.send(EmbeddingRequest {
-                prompt: text,
-                result_sender,
-            })?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Model '{}' not found in embedding channel. We have: {}",
-                model_id,
-                embedding_channel.keys().join(",")
-            ));
-        }
-
-        let embeddings = rx.await??;
+        let embedder = {
+            let embedders = self.embedding_channel.lock().await;
+            embedders.get(&model_id).cloned().ok_or_else(|| {
+                anyhow!(
+                    "Model '{}' not found in embedding channel. We have: {}",
+                    model,
+                    embedders.keys().join(",")
+                )
+            })?
+        };
+        let count = texts.len();
+        let (vectors, token_count) = match embedder {
+            Embedder::Bert(sender) => {
+                let (result_sender, rx) = oneshot::channel();
+                sender
+                    .send(EmbeddingRequest {
+                        texts,
+                        result_sender,
+                    })
+                    .map_err(|_| anyhow!("The embedding model {model_id} stopped"))?;
+                (rx.await??, estimate)
+            }
+            Embedder::Remote {
+                client,
+                remote_model,
+                endpoint,
+            } => {
+                let timeout =
+                    endpoints::request_timeout(&endpoint, providers::embed::EMBED_TIMEOUT);
+                let call = async {
+                    let _slot = endpoints::request_slot(&endpoint).await;
+                    client.embed(&remote_model, &texts).await
+                };
+                let reply = tokio::time::timeout(timeout, call).await.map_err(|_| {
+                    providers::http::UpstreamUnreachable {
+                        url: endpoint.base_url.to_string(),
+                        timed_out: true,
+                        detail: format!("no answer within {}s", timeout.as_secs()),
+                    }
+                })??;
+                let tokens = reply.prompt_tokens.map_or(estimate, |n| n as usize);
+                (reply.vectors, tokens)
+            }
+        };
         log::debug!(
-            "✅ 🤖 embed done model={} latency={}ms tokens_in={} dims={}",
+            "✅ 🤖 embed done model={} n={} latency={}ms tokens_in={}",
             model_id,
+            count,
             started.elapsed().as_millis(),
-            token_count,
-            embeddings.len()
+            token_count
         );
 
-        // Bill via the shared host_rates helper.
         Self::bill_embed_if_authed(bill_to.as_deref(), &model_id, token_count);
 
-        Ok(EmbedResult {
-            embeddings,
+        Ok(EmbedBatch {
+            vectors,
             token_count,
         })
     }
@@ -2394,12 +2489,11 @@ impl AIService {
                     self.spawn_task(task).await?;
                 }
             }
-            ModelType::Embedding => {
-                // TODO: Handle embedding model updates
-            }
+            ModelType::Embedding => self.spawn_embedding_model(updated_model).await?,
             ModelType::Transcription => {
                 Self::load_transcriber_model(&updated_model).await;
             }
+            ModelType::Speech => {}
         }
 
         Ok(())
@@ -2437,11 +2531,13 @@ impl AIService {
                 }
             }
             ModelType::Embedding => {
-                // TODO: Handle embedding model removal
+                // Dropping the sender ends a Bert thread.
+                self.embedding_channel.lock().await.remove(&model_id);
             }
             ModelType::Transcription => {
                 // TODO: Handle transcription model removal
             }
+            ModelType::Speech => {}
         }
 
         // Remove the model from the database
@@ -2974,6 +3070,7 @@ mod remote_stream_tests {
                     url: "http://upstream/v1/audio/transcriptions".into(),
                     status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                     body: "boom".into(),
+                    retry_after: None,
                 }
                 .into());
             }

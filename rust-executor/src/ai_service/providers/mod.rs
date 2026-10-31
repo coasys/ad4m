@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 pub mod anthropic;
 pub mod audio;
 pub mod discovery;
+pub mod embed;
 pub mod http;
 pub mod ollama;
 pub mod openai;

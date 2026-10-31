@@ -197,7 +197,7 @@ impl OllamaChat {
 }
 
 /// The Ollama root: the base URL without a trailing slash or an OpenAI-compat `/v1`.
-fn ollama_root(base_url: &Url) -> String {
+pub(super) fn ollama_root(base_url: &Url) -> String {
     let trimmed = base_url.as_str().trim_end_matches('/');
     trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_string()
 }
@@ -330,10 +330,10 @@ pub async fn pull_model(
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach {url}: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(super::http::UpstreamStatus { url, status, body }.into());
+    if !response.status().is_success() {
+        return Err(super::http::UpstreamStatus::read(response, &url, "")
+            .await
+            .into());
     }
 
     let mut stream = response.bytes_stream();
@@ -374,10 +374,10 @@ pub async fn delete_model(base_url: &Url, model: &str) -> Result<()> {
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach {url}: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(super::http::UpstreamStatus { url, status, body }.into());
+    if !response.status().is_success() {
+        return Err(super::http::UpstreamStatus::read(response, &url, "")
+            .await
+            .into());
     }
     Ok(())
 }

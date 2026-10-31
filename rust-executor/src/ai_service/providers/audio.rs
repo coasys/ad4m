@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::time::Duration;
 use url::Url;
 
-use super::http::{credentialed_http, is_transport_safe, scrub, versioned_endpoint};
+use super::http::{credentialed_http, is_transport_safe, versioned_endpoint};
 use super::http::{UpstreamStatus, CLEARTEXT_KEY_REFUSAL};
 use crate::types::{Endpoint, ModelApiType};
 
@@ -117,6 +117,13 @@ impl RemoteTranscribe for OpenAiTranscribe {
             anyhow::Error::new(e).context(format!("Could not reach {}", self.endpoint))
         })?;
         let status = response.status();
+        if !status.is_success() {
+            return Err(
+                UpstreamStatus::read(response, &self.endpoint, &self.api_key)
+                    .await
+                    .into(),
+            );
+        }
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -131,14 +138,6 @@ impl RemoteTranscribe for OpenAiTranscribe {
                     .context(format!("Could not read the answer of {}", self.endpoint))
             })?
             .to_vec();
-        if !status.is_success() {
-            return Err(UpstreamStatus {
-                url: self.endpoint.clone(),
-                status,
-                body: scrub(&String::from_utf8_lossy(&body), &self.api_key),
-            }
-            .into());
-        }
         let text = transcript_of(&body, &content_type)
             .map_err(|e| anyhow!("Could not read the answer of {}: {e}", self.endpoint))?;
         Ok(TranscribeReply {
@@ -254,6 +253,8 @@ mod tests {
             api_key: Secret::new(key),
             capabilities: vec![],
             max_num_ctx: None,
+            request_timeout_secs: None,
+            max_concurrent: None,
             health: EndpointHealth::default(),
         }
     }

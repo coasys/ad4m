@@ -6,4 +6,13 @@ import type { EndpointKind } from "./EndpointKind";
 /**
  * An endpoint as RPC results show it.
  */
-export type AiEndpoint = { id: string, name: string, kind: EndpointKind, baseUrl: string, hasApiKey: boolean, capabilities: Array<AiCapability>, maxNumCtx?: number | null, health: EndpointHealth, };
+export type AiEndpoint = { id: string, name: string, kind: EndpointKind, baseUrl: string, hasApiKey: boolean, capabilities: Array<AiCapability>, maxNumCtx?: number | null, 
+/**
+ * How long a `/v1` request to this endpoint may take, queueing included. Unset: 300 s
+ * for chat, 60 s for embeddings, 120 s for speech.
+ */
+requestTimeoutSecs?: number | null, 
+/**
+ * At most this many requests to this endpoint at once; the rest queue. Unset: no limit.
+ */
+maxConcurrent?: number | null, health: EndpointHealth, };

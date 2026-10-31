@@ -33,22 +33,30 @@ pub struct ModelListResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ModelInfo {
+    /// The model's name: what a client sends as `model`.
     pub id: String,
-    pub object: &'static str,   // "model"
-    pub created: i64,           // unix epoch seconds (we report 0 for static models)
-    pub owned_by: &'static str, // "ad4m"
+    pub object: &'static str, // "model"
+    pub created: i64,         // unix epoch seconds
+    /// The name of the endpoint that serves it; `ad4m` for a model the executor runs.
+    pub owned_by: String,
     /// AD4M-specific extension fields.  Tools that don't know about them
-    /// ignore them; the proposal's spec carries `ad4m.model_type` here.
+    /// ignore them.
     #[serde(rename = "ad4m")]
     pub extensions: ModelExtensions,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelExtensions {
-    pub model_type: String, // "llm" | "embedding" | "transcription" | "tts"
-    pub name: String,
+    pub model_type: crate::types::ModelType,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend: Option<String>, // "local" | "remote" | "passthrough"
+    pub endpoint_id: Option<String>,
+    /// The id the endpoint knows the model by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_model: Option<String>,
+    /// From the endpoint's last health check; absent before the first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<crate::types::ModelStatus>,
 }
 
 // ---------------------------------------------------------------------------
