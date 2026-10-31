@@ -913,6 +913,8 @@ const recipes = await Recipe.query(perspective)
 
 The sub-query accepts: `where`, `order`, `limit`, `offset`, `include`, and `properties`.
 
+`limit` and `offset` apply to **each parent** on its own: `include: { comments: { limit: 5 } }` on a page of twenty recipes gives every recipe its own five comments (chosen by the include's `order`, or oldest first without one). A comment linked from two recipes counts toward each. A `polymorphic` include refuses both.
+
 ### Sparse Fieldsets with `properties`
 
 Only hydrate specific properties to avoid unnecessary work (especially useful for properties with non-literal `resolveLanguage` that trigger network calls):

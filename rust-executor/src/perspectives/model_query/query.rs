@@ -193,6 +193,72 @@ pub(super) fn walk_order(query: &ModelQueryInput) -> Option<HashMap<String, usiz
     Some(positions)
 }
 
+/// Whether the store can sort by `query`'s whole `order`, so that a window or a
+/// per-anchor limit cut in the store keeps the rows the caller asked for.
+///
+/// A single order key is pushable to SPARQL when it is:
+///   - a reifier-timestamp synonym (`timestamp`/`createdAt`/`updatedAt`),
+///   - a scalar property on the entry shape,
+///   - a `$`-prefixed projection count key whose `from` relation exists, or
+///   - a dotted relation-property path (`relName.propName`) where the
+///     relation exists in the shape's include_relations and the named
+///     property exists as a scalar on the target shape.
+///
+/// Anything else (or more than one key) falls back to the post-hydration
+/// Rust sort. No `order` is pushable: the store sorts by timestamp.
+pub(super) fn order_fully_pushable(
+    query_input: &ModelQueryInput,
+    shape: &ModelShape,
+    resolver: &dyn ShapeResolver,
+) -> bool {
+    match &query_input.order {
+        None => true,
+        Some(order) => {
+            order.len() == 1 && {
+                let name = &order[0].0;
+                if name == "timestamp" || name == "createdAt" || name == "updatedAt" {
+                    true
+                } else if shape
+                    .properties
+                    .iter()
+                    .any(|p| p.name == *name && !p.is_collection && !p.predicate.is_empty())
+                {
+                    true
+                } else if name.starts_with('$') {
+                    query_input
+                        .projections
+                        .as_ref()
+                        .and_then(|projs| projs.get(name.as_str()))
+                        .map(|proj| {
+                            proj.count
+                                && shape
+                                    .properties
+                                    .iter()
+                                    .any(|p| p.name == proj.from && !p.predicate.is_empty())
+                        })
+                        .unwrap_or(false)
+                } else if let Some(dot_pos) = name.find('.') {
+                    let rel_name = &name[..dot_pos];
+                    let prop_name = &name[dot_pos + 1..];
+                    shape
+                        .include_relations
+                        .iter()
+                        .find(|r| r.name == rel_name && !r.predicate.is_empty())
+                        .and_then(|rel| resolver.get_shape(&rel.target_class_name).ok())
+                        .map(|target_shape| {
+                            target_shape.properties.iter().any(|p| {
+                                p.name == prop_name && !p.is_collection && !p.predicate.is_empty()
+                            })
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
 /// Keep the first `n` rows of each anchor, discarding the rest.
 ///
 /// SPARQL cannot say this: it has no window functions and its sub-SELECTs are uncorrelated, so
@@ -502,66 +568,7 @@ pub(super) async fn execute_model_query_inner(
     }
 
     // Full pipeline.
-    //
-    // A single order key is pushable to SPARQL when it is:
-    //   - a reifier-timestamp synonym (`timestamp`/`createdAt`/`updatedAt`),
-    //   - a scalar property on the entry shape,
-    //   - a `$`-prefixed projection count key whose `from` relation exists, or
-    //   - a dotted relation-property path (`relName.propName`) where the
-    //     relation exists in the shape's include_relations and the named
-    //     property exists as a scalar on the target shape.
-    // Anything else (or more than one key) falls back to the post-hydration
-    // Rust sort.
-    let order_fully_pushable = {
-        match &query_input.order {
-            None => true,
-            Some(order) => {
-                order.len() == 1 && {
-                    let name = &order[0].0;
-                    if name == "timestamp" || name == "createdAt" || name == "updatedAt" {
-                        true
-                    } else if shape
-                        .properties
-                        .iter()
-                        .any(|p| p.name == *name && !p.is_collection && !p.predicate.is_empty())
-                    {
-                        true
-                    } else if name.starts_with('$') {
-                        query_input
-                            .projections
-                            .as_ref()
-                            .and_then(|projs| projs.get(name.as_str()))
-                            .map(|proj| {
-                                proj.count
-                                    && shape
-                                        .properties
-                                        .iter()
-                                        .any(|p| p.name == proj.from && !p.predicate.is_empty())
-                            })
-                            .unwrap_or(false)
-                    } else if let Some(dot_pos) = name.find('.') {
-                        let rel_name = &name[..dot_pos];
-                        let prop_name = &name[dot_pos + 1..];
-                        shape
-                            .include_relations
-                            .iter()
-                            .find(|r| r.name == rel_name && !r.predicate.is_empty())
-                            .and_then(|rel| resolver.get_shape(&rel.target_class_name).ok())
-                            .map(|target_shape| {
-                                target_shape.properties.iter().any(|p| {
-                                    p.name == prop_name
-                                        && !p.is_collection
-                                        && !p.predicate.is_empty()
-                                })
-                            })
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    }
-                }
-            }
-        }
-    };
+    let order_fully_pushable = order_fully_pushable(query_input, shape, resolver);
     let can_push_pagination =
         all_where_pushable(query_input, shape, Some(resolver)) && order_fully_pushable;
 
