@@ -14,7 +14,7 @@
 //! [`KelCache::reset`] (`identity.resetLog`) is the one way a held log leaves: the operator
 //! drops this executor's copy, and the next read takes the store's branch.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -79,12 +79,17 @@ struct KeyMapInner {
     logs: HashMap<String, Arc<TrustedLog>>,
     /// Keys no log lists, with when the store said so.
     no_log: HashMap<String, Instant>,
+    /// The SCIDs of local identities (a row in `identity_agents`): the bound never drops them.
+    pinned: HashSet<String>,
 }
 
 /// The key map: what every trusted log in the cache says, readable without `await`, so the
 /// link check reads the same answer wherever it runs. The cache feeds it (each accepted head,
 /// each read of a trusted log); the resolver adds the store's "no log" answers. A key never
 /// leaves its log, so a listing stays for good (within the bound).
+///
+/// The logs of local identities are pinned ([`KeyMap::pin`]): the bound never drops them, so
+/// the anchor of a link a local agent signs ([`super::anchor_for`]) is always here to read.
 #[derive(Default)]
 pub struct KeyMap {
     inner: StdMutex<KeyMapInner>,
@@ -126,8 +131,11 @@ impl KeyMap {
             return;
         };
         if inner.logs.len() >= KEY_MAP_BOUND && !inner.logs.contains_key(scid) {
-            inner.logs.clear();
-            inner.keys.clear();
+            let KeyMapInner {
+                keys, logs, pinned, ..
+            } = &mut *inner;
+            logs.retain(|held, _| pinned.contains(held));
+            keys.retain(|_, held| pinned.contains(held));
         }
         let trusted = log.trusted;
         for record in log.state.masters.iter().chain(log.state.keys.values()) {
@@ -179,7 +187,16 @@ impl KeyMap {
             .unwrap_or_default()
     }
 
-    /// Drops the log of `scid` and its keys (`identity.resetLog`).
+    /// Keeps the log of the local identity `scid` through the bound, from now on (an agent of
+    /// this executor speaks for it). The pin outlives [`KeyMap::forget`].
+    pub fn pin(&self, scid: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.pinned.insert(scid.to_string());
+        }
+    }
+
+    /// Drops the log of `scid` and its keys (`identity.resetLog`). A pin stays: the next
+    /// accepted head of the log puts it back for good.
     pub fn forget(&self, scid: &str) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.logs.remove(scid);
@@ -393,6 +410,15 @@ impl KelCache {
                 });
             }
         }
+    }
+
+    /// Pins the local identity `scid` in the key map ([`KeyMap::pin`]) and loads its trusted
+    /// log there, so a link its agents sign carries its anchor with no read of the cache. At
+    /// startup for every bound identity, and when an agent binds to one. `Ok(false)`: the
+    /// cache holds no trusted log of it yet; its next accepted head puts it in the map.
+    pub async fn keep_local(&self, scid: &str) -> Result<bool, CacheError> {
+        self.key_map.pin(scid);
+        Ok(self.trusted(scid).await?.is_some())
     }
 
     /// Whether `identity.storeKeys` names at least one key: without one the cache accepts no
@@ -848,6 +874,15 @@ pub(crate) mod tests {
         KelCache::with(store, meta, store_keys, Arc::new(KeyMap::new())).unwrap()
     }
 
+    /// A cache on the database file at `path`, as [`KelCache::open`] but with a key map of its
+    /// own: a new one is what a restart of the executor sees.
+    pub(crate) fn on_file(path: &Path, store_keys: Vec<String>) -> KelCache {
+        let store = SqliteChainStore::open(path).unwrap();
+        let meta = Connection::open(path).unwrap();
+        meta.busy_timeout(Duration::from_secs(5)).unwrap();
+        KelCache::with(store, meta, store_keys, Arc::new(KeyMap::new())).unwrap()
+    }
+
     /// The store key [`FakeStore`] signs its heads with.
     pub(crate) fn store_key() -> TestStoreKey {
         TestStoreKey::new(9)
@@ -1145,6 +1180,70 @@ pub(crate) mod tests {
             cache.key_map().lookup(&device),
             KeyLookup::Unknown
         ));
+    }
+
+    /// Past the bound the key map starts over, but keeps the logs (and keys) of the pinned
+    /// local identities; a reset drops a pinned log, not its pin.
+    #[test]
+    fn the_bound_keeps_pinned_logs_and_drops_the_others() {
+        let local = TestLog::new(3);
+        let other = TestLog::new(4);
+        let map = KeyMap::new();
+        let trusted = |log: &TestLog| TrustedLog {
+            state: log.chain().state().clone(),
+            trusted: 0,
+        };
+        map.pin(&local.scid());
+        map.publish(&local.scid(), trusted(&local));
+        map.publish(&other.scid(), trusted(&other));
+        let fill = |map: &KeyMap| {
+            let filler = TestLog::new(5).chain().state().clone();
+            for i in 0..KEY_MAP_BOUND {
+                map.publish(
+                    &format!("QmFiller{i}"),
+                    TrustedLog {
+                        state: filler.clone(),
+                        trusted: 0,
+                    },
+                );
+            }
+        };
+        fill(&map);
+        assert!(map.log(&local.scid()).is_some(), "the pinned log stays");
+        assert!(matches!(
+            map.lookup(&local.device.key()),
+            KeyLookup::Listed { scid, .. } if scid == local.scid()
+        ));
+        assert!(map.log(&other.scid()).is_none(), "an unpinned log goes");
+        assert!(matches!(
+            map.lookup(&other.device.key()),
+            KeyLookup::Unknown
+        ));
+
+        map.forget(&local.scid());
+        assert!(map.log(&local.scid()).is_none());
+        map.publish(&local.scid(), trusted(&local));
+        fill(&map);
+        assert!(map.log(&local.scid()).is_some(), "the pin outlives a reset");
+    }
+
+    /// `keep_local` pins the identity and puts its trusted log in the key map.
+    #[tokio::test]
+    async fn keep_local_pins_and_loads_the_trusted_log() {
+        let log = TestLog::new(6);
+        let cache = trusting();
+        assert!(!cache.keep_local(&log.scid()).await.unwrap(), "no log yet");
+        accept_signed(&cache, &log.events).await;
+        cache.key_map().forget(&log.scid());
+        assert!(cache.keep_local(&log.scid()).await.unwrap());
+        assert_eq!(cache.key_map().log(&log.scid()).unwrap().trusted, 0);
+        assert!(cache
+            .key_map()
+            .inner
+            .lock()
+            .unwrap()
+            .pinned
+            .contains(&log.scid()));
     }
 
     #[tokio::test]

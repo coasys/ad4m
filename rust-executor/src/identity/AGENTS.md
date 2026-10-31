@@ -138,6 +138,11 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   `coasys:link` `{data, timestamp, anchor}` (`signatures::anchored_signing_bytes`), the
   timestamp as the link carries it. A link without an anchor signs the old bytes. The anchor
   is in the proof on the wire and in the link store (`ad4m://ontology/proofAnchor`).
+  Signing is synchronous: the anchor comes from the key map, with no I/O. The logs of local
+  identities (rows in `identity_agents`) are loaded at start (`load_local_identities`, before
+  the API and perspectives) and on each binding (`KelCache::keep_local`), and are pinned
+  (`KeyMap::pin`), so the map's bound never drops them; a link signed after a newer head is
+  accepted carries the new anchor.
 - **One check.** `signatures::verify`, `LinkExpression::check` and
   `DecoratedLinkExpression::check` all go to `identity::check_signed`: the signature over the
   bytes the proof names, then `verdict::judge` on what the key map holds. The check does no

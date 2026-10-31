@@ -398,11 +398,13 @@ pub fn create_signed_expression_anchored<T: Serialize>(
 
 /// Signs a link for `context`, anchored at the trusted head of the agent's identity's log when
 /// the agent is bound to one ([`crate::identity::anchor_for`]); without an anchor otherwise.
-pub async fn create_signed_link(
+/// Synchronous: the anchor comes from the key map, where the local identities' logs are loaded
+/// at start and replaced by each accepted head.
+pub fn create_signed_link(
     link: crate::types::Link,
     context: &AgentContext,
 ) -> Result<Expression<crate::types::Link>, AnyError> {
-    let anchor = crate::identity::anchor_for(&did_for_context(context)?).await;
+    let anchor = crate::identity::anchor_for(&did_for_context(context)?);
     create_signed_expression_anchored(link, context, anchor)
 }
 

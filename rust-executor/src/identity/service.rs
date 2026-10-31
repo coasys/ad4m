@@ -325,6 +325,9 @@ impl IdentityService {
             let bound_before = db(|db| db.agent_identity(&agent_did))?.is_some();
             db(|db| db.set_agent_identity(&agent_did, scid, now()))
                 .map_err(|e| error(409, format!("identity-exists: {}", e.message)))?;
+            // A local identity now: its log stays in the key map, so the agent's links carry
+            // their anchor ([`super::anchor_for`]).
+            self.cache.keep_local(scid).await.map_err(cache_error)?;
             // The main agent's status gains its identity (a managed agent's status event names
             // the main agent's, so only the main agent's changes here).
             if agent.is_main_agent() {

@@ -1911,7 +1911,7 @@ impl PerspectiveInstance {
             crate::billing::check_compute_credits(agent_did)?;
         }
         link.validate()?;
-        let link_expr: LinkExpression = create_signed_link(link.normalize(), context).await?.into();
+        let link_expr: LinkExpression = create_signed_link(link.normalize(), context)?.into();
         let result = self
             .add_link_expression(link_expr, status, batch_id)
             .await?;
@@ -2125,7 +2125,7 @@ impl PerspectiveInstance {
             link.validate()?;
         }
         check_consensus_rule_links(&links)?;
-        let anchor = crate::identity::anchor_for(&did_for_context(context)?).await;
+        let anchor = crate::identity::anchor_for(&did_for_context(context)?);
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
             .map(|l| {
@@ -2220,7 +2220,7 @@ impl PerspectiveInstance {
             link.validate()?;
         }
         check_consensus_rule_links(&addition_links)?;
-        let anchor = crate::identity::anchor_for(&did_for_context(context)?).await;
+        let anchor = crate::identity::anchor_for(&did_for_context(context)?);
         let additions = addition_links
             .into_iter()
             .map(|l| create_signed_expression_anchored(l.normalize(), context, anchor))
@@ -2379,7 +2379,7 @@ impl PerspectiveInstance {
 
         check_consensus_rule_links([&new_link])?;
         let new_link_expression =
-            LinkExpression::from(create_signed_link(new_link.normalize(), context).await?);
+            LinkExpression::from(create_signed_link(new_link.normalize(), context)?);
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;

@@ -114,7 +114,7 @@ impl PerspectiveInstance {
         let mut persist_diff = PerspectiveDiff::empty();
 
         // Process additions
-        let anchor = crate::identity::anchor_for(&did_for_context(context)?).await;
+        let anchor = crate::identity::anchor_for(&did_for_context(context)?);
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
             let signed_expr =
