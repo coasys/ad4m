@@ -347,6 +347,24 @@ describe('Ad4mConnect', () => {
       expect(conn.token).toBe('saved-jwt');
     });
 
+    it('keeps trying through a server error while the executor starts, keeping the token', async () => {
+      setLocal('ad4m-token', 'saved-jwt');
+      setLocal('ad4m-url', 'http://localhost:12000');
+      mockAgent.status.mockClear();
+      mockAgent.status
+        .mockRejectedValueOnce(new RpcError(500, 'conductor not ready'))
+        .mockResolvedValueOnce(agentStatus({ isInitialized: true, isUnlocked: true }));
+      mockAgent.isLocked.mockRejectedValueOnce(new RpcError(500, 'conductor not ready'));
+      const conn = new Ad4mConnect(defaultOptions);
+      const authStates: string[] = [];
+      conn.addEventListener('authstatechange', (e: any) => authStates.push(e.detail));
+      const client = await conn.connectWhenReachable({ initialDelayMs: 1, maxDelayMs: 2 });
+      expect(client).toBe(conn.ad4mClient);
+      expect(mockAgent.status).toHaveBeenCalledTimes(2);
+      expect(authStates).toEqual(['authenticated']);
+      expect(conn.token).toBe('saved-jwt');
+    });
+
     it('resolves undefined at once in embedded mode, without connecting', async () => {
       setLocal('ad4m-token', 'saved-jwt');
       const { checkConnection, isEmbedded } = await import('./utils');

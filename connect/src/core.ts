@@ -236,10 +236,12 @@ export default class Ad4mConnect extends EventTarget {
       return undefined;
     }
     // A background try has nothing to report until the executor answers about the token: a
-    // reading without an RPC answer (not ready yet, a timeout) is tried again, rather than
-    // leaving the user on the connection screen with a token that still works. An RPC refusal
-    // (a dead token, or one that lacks the capabilities) is an answer, and retrying won't change it.
-    if (retry && auth.state === 'unauthenticated' && auth.error?.name !== 'RpcError') {
+    // reading without a refusal (not ready yet: a timeout, or a 5xx such as "conductor not ready")
+    // is tried again, rather than leaving the user on the connection screen with a token that
+    // still works. A refusal (4xx: a dead token, or one that lacks the capabilities) is an answer,
+    // and retrying won't change it.
+    const refused = auth.error?.name === 'RpcError' && auth.error.status >= 400 && auth.error.status < 500;
+    if (retry && auth.state === 'unauthenticated' && !refused) {
       session.client.close();
       throw auth.error ?? new Error('the executor has not answered about the session yet');
     }
