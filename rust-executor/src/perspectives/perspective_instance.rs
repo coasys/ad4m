@@ -1394,10 +1394,12 @@ impl PerspectiveInstance {
                     // One diff the language refuses must not hold back the
                     // diffs behind it. Send the oldest alone: if it goes
                     // through, the next tick sends the rest. If the language
-                    // refuses it but takes the rest, it refuses that diff for
-                    // good: drop it, since sending it after the rest would
-                    // reorder it behind newer diffs. If it takes neither, it
-                    // is down: keep the batch and back off.
+                    // fails it but takes the rest, park it: keep its row, out
+                    // of the queue. A failure alone does not prove a permanent
+                    // refusal, so it is not deleted; it is not sent again
+                    // either, since that would reorder it behind newer diffs.
+                    // If it takes neither, it is down: keep the batch and back
+                    // off.
                     Err(e) if pending_ids.len() > 1 => {
                         let (oldest, oldest_ids) = Ad4mDb::with_global_instance(|db| {
                             db.get_pending_diffs(&uuid, Some(1))
@@ -1419,13 +1421,19 @@ impl PerspectiveInstance {
                                     )));
                                 }
                                 log::error!(
-                                    "💾 perspective {}: the link language refused a diff and accepted the {} after it; dropped it, its links stay local only: {:#}\n{:?}",
+                                    "💾 perspective {}: the link language failed pending diff {:?} and accepted the {} after it; parked it (kept, no longer sent), its links stay local only: {:#}",
                                     uuid,
+                                    oldest_ids,
                                     pending_ids.len() - 1,
-                                    refusal,
-                                    oldest
+                                    refusal
                                 );
+                                Ad4mDb::with_global_instance(|db| {
+                                    db.park_pending_diffs(&uuid, oldest_ids.clone())
+                                })?;
                                 pending_ids
+                                    .into_iter()
+                                    .filter(|id| !oldest_ids.contains(id))
+                                    .collect()
                             }
                         }
                     }
