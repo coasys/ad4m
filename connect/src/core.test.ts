@@ -215,6 +215,39 @@ describe('Ad4mConnect', () => {
       await expect(result).resolves.toBeUndefined();
       expect(checkConnection).not.toHaveBeenCalled();
     });
+
+    it('stops once the user picks another node, so the stored token never goes to it', async () => {
+      setLocal('ad4m-token', 'saved-jwt');
+      setLocal('ad4m-url', 'http://localhost:12000');
+      const { checkConnection } = await import('./utils');
+      (checkConnection as any).mockClear();
+      vi.mocked(Ad4mClient).mockClear();
+      const conn = new Ad4mConnect(defaultOptions);
+      const result = conn.connectWhenReachable({ initialDelayMs: 1 });
+      // The host browser points the element at a hosting node and persists it before the retry's
+      // next try (`proceedToAuth` in web.ts).
+      conn.url = 'https://other-host.example';
+      setLocal('ad4m-url', 'https://other-host.example');
+      await expect(result).resolves.toBeUndefined();
+      expect(checkConnection).not.toHaveBeenCalled();
+      expect(vi.mocked(Ad4mClient).mock.calls.filter(([, token]) => token === 'saved-jwt')).toEqual([]);
+    });
+
+    it('leaves no abort listener behind per try', async () => {
+      setLocal('ad4m-token', 'saved-jwt');
+      const { checkConnection } = await import('./utils');
+      (checkConnection as any).mockClear();
+      (checkConnection as any)
+        .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+        .mockRejectedValueOnce(new Error('ECONNREFUSED'));
+      const controller = new AbortController();
+      const add = vi.spyOn(controller.signal, 'addEventListener');
+      const remove = vi.spyOn(controller.signal, 'removeEventListener');
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connectWhenReachable({ signal: controller.signal, initialDelayMs: 1, maxDelayMs: 2 });
+      expect(add).toHaveBeenCalledTimes(3);
+      expect(remove).toHaveBeenCalledTimes(3);
+    });
   });
 
   describe('connect() — round trips', () => {

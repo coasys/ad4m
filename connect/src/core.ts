@@ -224,17 +224,24 @@ export default class Ad4mConnect extends EventTarget {
    * when the app loaded: restarting, or redeploying. Without it the first failure left the user
    * on the connection screen, looking logged out, until they reloaded the page. Waits
    * `initialDelayMs` before the first try, doubling up to `maxDelayMs`. Resolves with the client
-   * once connected, or `undefined` when `signal` aborts or the token is gone.
+   * once connected, or `undefined` when `signal` aborts, the token is gone, or `url` changed: the
+   * user picked another node, and the stored token is not for it.
    */
   async connectWhenReachable(
     { signal, initialDelayMs = 2_000, maxDelayMs = 30_000 }: { signal?: AbortSignal; initialDelayMs?: number; maxDelayMs?: number } = {},
   ): Promise<Ad4mClient | undefined> {
+    const url = this.url;
     for (let delay = initialDelayMs; ; delay = Math.min(delay * 2, maxDelayMs)) {
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, delay);
-        signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+        const done = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', done);
+          resolve();
+        };
+        const timer = setTimeout(done, delay);
+        signal?.addEventListener('abort', done, { once: true });
       });
-      if (signal?.aborted || !this.token) return undefined;
+      if (signal?.aborted || !this.token || this.url !== url) return undefined;
       try {
         return await this.connect();
       } catch {
