@@ -161,7 +161,7 @@ export async function leaseNet(
         filter(ports);
       } catch (e) {
         clear();
-        throw new Error(`could not impair ports ${ports.join(", ")} on ${iface}: ${(e as Error).message}`);
+        throw new Error(`could not impair ports ${describePorts(ports)} on ${iface}: ${(e as Error).message}`);
       }
     },
     extend(ports) {
@@ -170,7 +170,7 @@ export async function leaseNet(
         filter(ports);
       } catch (e) {
         clear();
-        throw new Error(`could not add ports ${ports.join(", ")} to the impairment on ${iface}: ${(e as Error).message}`);
+        throw new Error(`could not add ports ${describePorts(ports)} to the impairment on ${iface}: ${(e as Error).message}`);
       }
     },
     clear,
@@ -182,6 +182,11 @@ export async function leaseNet(
       await exited;
     },
   };
+}
+
+/** `ports` for an error message: a number as it is, a socket as `protocol/port`. */
+function describePorts(ports: (number | SocketPort)[]): string {
+  return ports.map((p) => (typeof p === "number" ? String(p) : `${p.protocol}/${p.port}`)).join(", ");
 }
 
 /**

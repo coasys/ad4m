@@ -23,17 +23,27 @@ export interface WakerSubscription {
   className?: string;
   /**
    * A mention subscription's terms (profile names and the DID), from
-   * `get_mention_waker_config`. The query matches text by substring, so a
-   * record found only through its text wakes only when the text holds one of
+   * `get_mention_waker_config`. The text query matches by substring, so a
+   * record found through its text wakes only when the text holds one of
    * these as a whole word ({@link holdsAWholeWordTerm}).
    */
   terms?: string[];
   /**
    * A mention subscription's agent DID, from `get_mention_waker_config`. A
-   * record whose TextContent `mentions` links it, in a verified link another
-   * agent wrote, wakes whatever its text says ({@link mentionOf}).
+   * record whose `mentions` links it, in a verified link another agent wrote,
+   * wakes whatever its text says ({@link mentionOf}).
    */
   did?: string;
+  /**
+   * A mention subscription's second query, a model query (JSON) over
+   * `mentionClass`, from `get_mention_waker_config`: every record whose
+   * `mentions` relation links the agent's DID, with text or without (a WE
+   * post's root). It runs beside `query` under the same id, so a record both
+   * find wakes once, through the query that reports it first.
+   */
+  mentionQuery?: string;
+  /** The class `mentionQuery` reads: the built-in `ad4m://Mentioning`. */
+  mentionClass?: string;
   neighbourhood?: string;
 }
 
@@ -163,9 +173,9 @@ export interface MentionMessage {
    */
   ancestors: string[];
   /**
-   * The DID that signed the link the mention is in: the mention link to the agent's DID when
-   * the record mentions it through TextContent's `mentions`, else the text link whose own text
-   * names it. Only that link is theirs; the record's other links may be someone else's.
+   * The DID that signed the link of the path that woke the agent (`via`): the mention link to
+   * its DID, or the text link whose own text names it. Only that link is theirs; the record's
+   * other links may be someone else's.
    */
   author?: string;
   /** That link's timestamp, ISO 8601. */
@@ -176,9 +186,10 @@ export interface MentionMessage {
    */
   verified: boolean;
   /**
-   * How the record mentions the agent: `"mentions"`, a mention link to its DID; `"text"`, its
-   * name or DID as a whole word in the text, with no such link. A text match is the agent's
-   * name used as a word, which need not address it ("the data shows" for an agent named Data).
+   * The query that reported the record first: `"mentions"`, a mention link to the agent's DID
+   * (Mentioning's `mentions`); `"text"`, its name or DID as a whole word in the text (a mention
+   * link may also exist). A text match is the agent's name used as a word, which need not
+   * address it ("the data shows" for an agent named Data).
    */
   via?: "mentions" | "text";
 }
@@ -248,20 +259,22 @@ function textOf(target: unknown): string | undefined {
 }
 
 /**
- * Whether a row of the executor's mention query (a model query over TextContent, #1557)
- * mentions the subscription's agent, and the provenance of the link it does so in; `null`
- * when it does not.
+ * Whether a row of one of the mention subscription's two model queries mentions the
+ * subscription's agent, and the provenance of the link it does so in; `null` when it does not.
  *
- * - Through `mentions`: a verified link to the agent's DID that another agent wrote, in the
- *   row's `__links.mentions`. It wakes whatever the text says: WE's chip label may run into
- *   the next word ("@Datai have…"). Its provenance is that link's (the newest such).
- * - Through the text alone: the query matched a substring, so the text must hold a term as a
- *   whole word ({@link holdsAWholeWordTerm}), and so must the text of a verified link another
- *   agent wrote, in `__links.text`. Its provenance is that link's (the newest such). The row's
- *   `text` is the newest text link's, whoever wrote it, so it does not say whose words they are.
+ * - A row of the query over Mentioning: a verified link to the agent's DID that another agent
+ *   wrote, in the row's `__links.mentions`. It wakes whatever the record's text says, or
+ *   whether it has any: WE's chip label may run into the next word ("@Datai have…"), and a WE
+ *   post's mention sits on its root, which has no text. Its provenance is that link's (the
+ *   newest such).
+ * - A row of the query over TextContent: the query matched a substring, so the text must hold
+ *   a term as a whole word ({@link holdsAWholeWordTerm}), and so must the text of a verified
+ *   link another agent wrote, in `__links.text`. Its provenance is that link's (the newest
+ *   such). The row's `text` is the newest text link's, whoever wrote it, so it does not say
+ *   whose words they are.
  *
- * A record that matches both is one row, so it wakes once, through `mentions`. `via` says
- * which path it was.
+ * `via` says which it was. A record both queries find wakes once, through the query that
+ * reports it first ({@link WakerSubscriptionManager}).
  */
 export function mentionOf(
   row: any,
@@ -322,8 +335,11 @@ export interface WakerSubscriptionManagerOptions {
   /** Optional: provide QuerySubscriptionProxy class directly (avoids require("@coasys/ad4m") at runtime). */
   QuerySubscriptionProxy?: any;
   /** How long to wait before re-attempting a subscription the executor rejected
-   *  (default 30000). 0 disables re-attempts. */
+   *  (default 30000). 0 disables re-attempts. Each re-attempt round that still
+   *  leaves something pending doubles the wait, up to `maxRetryPendingMs`. */
   retryPendingMs?: number;
+  /** Longest wait between two re-attempt rounds (default 300000). */
+  maxRetryPendingMs?: number;
   /**
    * How long the executor gets to answer the subscribe handshake before the
    * attempt is abandoned and queued for re-attempt (default 15000). 0 removes
@@ -394,11 +410,24 @@ export class WakerSubscriptionManager {
   private subscribeTimeoutMs: number;
   private retryWakeMs: number;
 
-  private proxies = new Map<string, any>();
+  /** Per subscription its proxies: one, or a mention subscription's text and mention queries. */
+  private proxies = new Map<string, any[]>();
   private activeSubscriptions = new Map<string, WakerSubscription>();
   /** Subscriptions the executor rejected, waiting to be re-attempted. */
   private pendingSubscriptions = new Map<string, WakerSubscription>();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private maxRetryPendingMs: number;
+  /** Re-attempt rounds in a row that left something pending, for the backoff. */
+  private retryRounds = 0;
+  /**
+   * Subscriptions that were active until one of their live queries lost its
+   * executor subscription (a reconnect, a failed resync) and failed to open it
+   * again, with the proxies still re-opening. The query retries on its own,
+   * with backoff, so the manager does not subscribe them again; it reports
+   * them as pending instead of active until every proxy is open again, and
+   * keeps persisting them so a restart restores them (#1595).
+   */
+  private reopening = new Map<string, { sub: WakerSubscription; proxies: Set<any> }>();
   /**
    * Cancellation tokens for in-flight `subscribe()` calls.
    *
@@ -440,6 +469,7 @@ export class WakerSubscriptionManager {
     this.QuerySubscriptionProxyCtor = options.QuerySubscriptionProxy ?? null;
     this.previousSeenMessages = options.previousSeenMessages ?? {};
     this.retryPendingMs = options.retryPendingMs ?? 30000;
+    this.maxRetryPendingMs = Math.max(this.retryPendingMs, options.maxRetryPendingMs ?? 300000);
     this.subscribeTimeoutMs = options.subscribeTimeoutMs ?? 15000;
     this.retryWakeMs = options.retryWakeMs ?? 5000;
   }
@@ -461,20 +491,25 @@ export class WakerSubscriptionManager {
    * If a subscription with the same id already exists, it is disposed first.
    */
   async subscribe(sub: WakerSubscription): Promise<void> {
-    // Dispose existing subscription with same id if any
-    this.dispose(sub.id, false);
+    // Dispose existing subscription with same id if any. Not `dispose()`: a
+    // re-attempt must not start the backoff over.
+    this.release(sub.id, false);
     const token = this.beginAttempt(sub.id);
 
     if (!this.QuerySubscriptionProxyCtor) {
       throw new Error("WakerSubscriptionManager: QuerySubscriptionProxy must be provided via constructor options");
     }
     const QuerySubscriptionProxy = this.QuerySubscriptionProxyCtor;
-    if (sub.type === "mention" && (!sub.className || !sub.terms?.length || !sub.did)) {
-      // The rows are TextContent's: without terms the whole-word check cannot
-      // run, so every substring ("metadata" for "data") would wake the agent;
-      // without the DID no mention link can be told to be the agent's.
+    if (
+      sub.type === "mention" &&
+      (!sub.className || !sub.terms?.length || !sub.did || !sub.mentionQuery || !sub.mentionClass)
+    ) {
+      // Without terms the whole-word check cannot run, so every substring
+      // ("metadata" for "data") would wake the agent; without the DID no link
+      // can be told to be someone else's; without the mention query a mention
+      // link on a record with no text (a WE post's root) never wakes it.
       throw new Error(
-        `Waker subscription ${sub.id}: a mention subscription needs its TextContent class, terms and DID (get_mention_waker_config returns them)`,
+        `Waker subscription ${sub.id}: a mention subscription needs its TextContent class, terms, DID and Mentioning query (get_mention_waker_config returns them)`,
       );
     }
 
@@ -482,15 +517,30 @@ export class WakerSubscriptionManager {
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
     );
     this.logger.info(`[waker] ${sub.id}: ${sub.className ? `model query over ${sub.className}` : "SPARQL query"}:\n${sub.query}`);
+    if (sub.mentionQuery) {
+      this.logger.info(`[waker] ${sub.id}: model query over ${sub.mentionClass}:\n${sub.mentionQuery}`);
+    }
 
     const proxy = sub.className
       ? new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient, sub.className)
       : new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient);
+    const mentionProxy = sub.mentionQuery
+      ? new QuerySubscriptionProxy(sub.perspective, sub.mentionQuery, this.perspectiveClient, sub.mentionClass)
+      : undefined;
+    const proxies = mentionProxy ? [proxy, mentionProxy] : [proxy];
+    // `cancelOpening`: a handshake given up on must not keep the executor
+    // computing a first result nobody reads; abandoned ones piled up into
+    // hundreds of busy executor threads on staging (#1595).
+    const disposeProxies = () => {
+      for (const p of proxies) {
+        try { p.dispose({ cancelOpening: true }); } catch {}
+      }
+    };
     // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
     // rejects this promise internally when subscribe() fails, and if nobody catches
     // it before the next microtask it crashes the process.
-    if (proxy.initialized && typeof proxy.initialized.catch === "function") {
-      proxy.initialized.catch(() => {});
+    for (const p of proxies) {
+      if (p.initialized && typeof p.initialized.catch === "function") p.initialized.catch(() => {});
     }
     // One deadline for the whole handshake: `proxy.subscribe()` and the
     // `initialized` promise it resolves share the budget, so a hang in either
@@ -506,18 +556,18 @@ export class WakerSubscriptionManager {
           )
         : step;
     try {
-      await bounded(proxy.subscribe(), "subscribe handshake");
+      await bounded(Promise.all(proxies.map((p) => p.subscribe())), "subscribe handshake");
       if (this.isStale(sub.id, token)) {
-        try { proxy.dispose(); } catch {}
+        disposeProxies();
         return;
       }
-      await bounded(proxy.initialized, "subscription initialization");
+      await bounded(Promise.all(proxies.map((p) => p.initialized)), "subscription initialization");
     } catch (err: any) {
       const msg = err?.message ?? String(err);
       this.logger.warn(
         `[waker] ${sub.id}: subscription failed — ${msg}`,
       );
-      try { proxy.dispose(); } catch {}
+      disposeProxies();
       // A dispose that landed mid-attempt wins: don't re-queue something the
       // caller has since asked us to forget.
       if (this.isStale(sub.id, token)) return;
@@ -538,15 +588,16 @@ export class WakerSubscriptionManager {
       throw new Error(
         `Waker subscription ${sub.id} failed: ${msg}${hintFor(msg)}` +
           (this.retryPendingMs > 0
-            ? `. Not listening yet — re-attempting every ${Math.round(this.retryPendingMs / 1000)}s; check ad4m_list_waker_subscriptions.`
+            ? `. Not listening yet — re-attempting within ${Math.round(this.retryCeiling() / 1000)}s, then less often (at most every ${Math.round(this.maxRetryPendingMs / 1000)}s); check ad4m_list_waker_subscriptions.`
             : ""),
       );
     }
     if (this.isStale(sub.id, token)) {
-      try { proxy.dispose(); } catch {}
+      disposeProxies();
       return;
     }
     this.pendingSubscriptions.delete(sub.id);
+    if (this.pendingSubscriptions.size === 0) this.retryRounds = 0;
     this.logger.info(`[waker] ${sub.id}: subscription initialized successfully`);
 
     // Seed from persisted seen messages so we don't re-wake after restart
@@ -560,9 +611,10 @@ export class WakerSubscriptionManager {
 
     // `opening` is the result the subscription holds when it opens (`proxy.result`): `onResult`
     // only reports later changes, so this is the one chance to see what was written meanwhile.
-    const handleResult = async (result: any, opening = false) => {
+    // `of`: the query the result is from, for the log (a mention subscription has two).
+    const handleResult = async (result: any, opening = false, of = "") => {
       this.logger.info(
-        `[waker] ${sub.id}: ${opening ? "opening result" : "onResult fired"} — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
+        `[waker] ${sub.id}: ${opening ? "opening result" : "onResult fired"}${of} — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
       );
 
       // A model subscription delivers `{ instances }`, SPARQL an array of
@@ -577,8 +629,9 @@ export class WakerSubscriptionManager {
       }
 
       if (sub.type === "mention") {
-        // For mention subscriptions: track seen record ids.
-        // Only wake for records we haven't seen before.
+        // For mention subscriptions: track seen record ids, across both queries, and wake only
+        // for records not seen before, so a record both find wakes once, through the query that
+        // reports it first.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
         const provenance = new Map<string, MentionProvenance>();
@@ -586,10 +639,10 @@ export class WakerSubscriptionManager {
         for (const item of rows as any[]) {
           const address = item?.id;
           if (typeof address !== "string" || !address || currentSeen.has(address)) continue;
-          // Through `mentions` as it is; through the text alone, a whole word only.
+          // A mention link as it is; the text, a whole word only.
           const mention = mentionOf(item, sub);
           if (!mention) {
-            this.logger.debug(`[waker] ${sub.id}: ${address} has no mention link and no term as a whole word, skipping`);
+            this.logger.debug(`[waker] ${sub.id}: ${address} has no verified mention link and no term as a whole word, skipping`);
             continue;
           }
           currentSeen.add(address);
@@ -661,18 +714,24 @@ export class WakerSubscriptionManager {
       }
     };
     proxy.onResult((result: any) => handleResult(result));
+    mentionProxy?.onResult((result: any) => handleResult(result, false, " (mention query)"));
+    for (const p of proxies) {
+      p.onStatus?.((status: any) => this.onReopenStatus(sub, proxies, p, status));
+    }
 
     if (this.isStale(sub.id, token)) {
-      try { proxy.dispose(); } catch {}
+      disposeProxies();
       return;
     }
-    this.proxies.set(sub.id, proxy);
+    this.proxies.set(sub.id, proxies);
     this.activeSubscriptions.set(sub.id, sub);
     // After a restart this wakes on mentions written while the waker was down; on a new
-    // subscription it records the existing ones as history.
-    if (proxy.result !== undefined) {
+    // subscription it records the existing ones as history. The mention query's first, so a
+    // record both hold wakes through its mention link.
+    for (const [p, of] of [[mentionProxy, " (mention query)"], [proxy, ""]] as const) {
+      if (p?.result === undefined) continue;
       try {
-        await handleResult(proxy.result, true);
+        await handleResult(p.result, true, of);
       } catch (e: any) {
         this.logger.warn(`[waker] ${sub.id}: reading the opening result failed: ${e?.message ?? e}`);
       }
@@ -684,14 +743,60 @@ export class WakerSubscriptionManager {
     );
   }
 
+  /**
+   * A proxy of `sub` failed to re-open its live query, or re-opened it after
+   * failing. `sub` counts as active again once none of its proxies is still
+   * re-opening. `proxies` tells a status of a replaced subscription apart.
+   */
+  private onReopenStatus(sub: WakerSubscription, proxies: any[], proxy: any, status: any): void {
+    if (this.proxies.get(sub.id) !== proxies) return;
+    if (status?.state === "reopening") {
+      const entry = this.reopening.get(sub.id) ?? { sub, proxies: new Set<any>() };
+      entry.proxies.add(proxy);
+      if (!this.reopening.has(sub.id)) {
+        this.reopening.set(sub.id, entry);
+        this.activeSubscriptions.delete(sub.id);
+        this.logger.warn(
+          `[waker] ${sub.id}: live query lost after a reconnect and could not be re-opened (${status.error?.message ?? status.error}); not listening, retrying in ${Math.round((status.retryInMs ?? 0) / 1000)}s`,
+        );
+      }
+      return;
+    }
+    if (status?.state !== "open") return;
+    const entry = this.reopening.get(sub.id);
+    if (!entry) return;
+    entry.proxies.delete(proxy);
+    if (entry.proxies.size > 0) return;
+    this.reopening.delete(sub.id);
+    this.activeSubscriptions.set(sub.id, sub);
+    this.logger.info(`[waker] ${sub.id}: live query re-opened, listening again`);
+    // Wakes held back while it was not active go out now, not with the next mention.
+    if (this.undelivered.get(sub.id)?.size) this.scheduleMentionWake(sub, proxy.result, this.debounceMs);
+  }
+
+  /** The wait before the next re-attempt round: `retryPendingMs` doubled per
+   *  round in a row that left something pending, capped at
+   *  `maxRetryPendingMs`, and between half and all of that, so wakers of a
+   *  restarted executor do not all retry at once. */
+  private nextRetryDelay(): number {
+    const ceiling = this.retryCeiling();
+    return ceiling / 2 + Math.random() * (ceiling / 2);
+  }
+
+  /** The longest the next re-attempt round waits. */
+  private retryCeiling(): number {
+    return Math.min(this.retryPendingMs * 2 ** this.retryRounds, this.maxRetryPendingMs);
+  }
+
   /** Arm the re-attempt timer if pending subscriptions are waiting. */
   private scheduleRetry(): void {
     if (this.retryPendingMs <= 0) return;
     if (this.retryTimer || this.pendingSubscriptions.size === 0) return;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
+      this.retryRounds++;
       void this.retryPending();
-    }, this.retryPendingMs);
+    }, this.nextRetryDelay());
     if (typeof this.retryTimer.unref === "function") this.retryTimer.unref();
   }
 
@@ -726,9 +831,14 @@ export class WakerSubscriptionManager {
     }
   }
 
-  /** Subscriptions that were rejected and are waiting to be re-attempted. */
+  /** Subscriptions that are not listening and are being re-attempted: the
+   *  ones the executor rejected, and active ones whose live query is
+   *  re-opening after a reconnect. */
   getPending(): WakerSubscription[] {
-    return Array.from(this.pendingSubscriptions.values());
+    return [
+      ...this.pendingSubscriptions.values(),
+      ...Array.from(this.reopening.values(), (entry) => entry.sub),
+    ];
   }
 
   /**
@@ -736,17 +846,24 @@ export class WakerSubscriptionManager {
    * @param persist — if false, skip calling onPersist (used during batch cleanup).
    */
   dispose(id: string, persist = true): void {
+    this.release(id, persist);
+    if (this.pendingSubscriptions.size === 0) this.retryRounds = 0;
+  }
+
+  /** Drop everything held for `id`, as `dispose()` does, but leave the
+   *  re-attempt backoff as it is. */
+  private release(id: string, persist: boolean): void {
     // Invalidate any subscribe() for this id that is still awaiting.
     this.generations.set(id, (this.generations.get(id) ?? 0) + 1);
-    const proxy = this.proxies.get(id);
-    if (proxy) {
+    for (const proxy of this.proxies.get(id) ?? []) {
       try {
-        proxy.dispose();
+        proxy.dispose({ cancelOpening: true });
       } catch {
         /* ignore */
       }
-      this.proxies.delete(id);
     }
+    this.proxies.delete(id);
+    this.reopening.delete(id);
     const timer = this.debounceTimers.get(id);
     if (timer) {
       clearTimeout(timer);
@@ -821,6 +938,8 @@ export class WakerSubscriptionManager {
       this.dispose(id, false);
     }
     this.pendingSubscriptions.clear();
+    this.reopening.clear();
+    this.retryRounds = 0;
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
@@ -882,7 +1001,9 @@ export class WakerSubscriptionManager {
       for (const [id, set] of this.delivered) {
         seen[id] = Array.from(set);
       }
-      this.onPersist(this.getActive(), seen);
+      // A subscription that is re-opening was enrolled and is coming back: a
+      // restart in the meantime must restore it.
+      this.onPersist([...this.getActive(), ...Array.from(this.reopening.values(), (entry) => entry.sub)], seen);
     }
   }
 }

@@ -10,15 +10,15 @@ const ALLIANCE_DNA_URL: &str =
 /// manifest, which `src/tool_bundles/builtin.rs` compiles in. To take a new release, set the
 /// version, and the two hashes to the ones in that release's `SHA256SUMS`
 /// (https://github.com/coasys/we/releases/tag/agent-tools-v<version>).
-const WE_AGENT_TOOLS_VERSION: &str = "0.1.0";
+const WE_AGENT_TOOLS_VERSION: &str = "0.2.0";
 const WE_AGENT_TOOLS_FILES: [(&str, &str); 2] = [
     (
         "agent-tools.bundle.js",
-        "ae09a614ba81c07bb24efb11b9c8eae5eea77c9aae72ffc8ae5cd2010beb6991",
+        "9e08d496a84e98314c022c943b4dfabbbd6f3987e388153fcd9db486eb9fb272",
     ),
     (
         "agent-tools.json",
-        "0242631b63b0017fac731e4632316d188129d3d1f21e48e61d720de503743537",
+        "bdd7505f85c73912dabbc04a69b9b746849e7e29f261706a250ecc3e5d69cf26",
     ),
 ];
 

@@ -23,6 +23,7 @@ import { e13Mesh } from "../helpers/sfu/e2e/scenarios/e13-mesh.js";
 import { e14AdvertisedAddress } from "../helpers/sfu/e2e/scenarios/e14-advertised-address.js";
 import { e15OneDropout } from "../helpers/sfu/e2e/scenarios/e15-one-dropout.js";
 import { e16SwitchTopology } from "../helpers/sfu/e2e/scenarios/e16-switch-topology.js";
+import { e17NetworkSwitch } from "../helpers/sfu/e2e/scenarios/e17-network-switch.js";
 
 /**
  * Calls end to end: managed users in real neighbourhoods, each calling
@@ -127,4 +128,5 @@ describe("SFU: end to end through the SDK", function () {
   sfuScenario(e14AdvertisedAddress, 600_000);
   sfuScenario(e15OneDropout, 600_000);
   sfuScenario(e16SwitchTopology, 600_000);
+  sfuScenario(e17NetworkSwitch, 600_000);
 });
