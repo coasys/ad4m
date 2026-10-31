@@ -8,4 +8,9 @@ fromDate?: string,
 /**
  * RFC 3339 timestamp; an unparsable value is ignored.
  */
-untilDate?: string, limit?: number, };
+untilDate?: string, limit?: number, 
+/**
+ * The read leaves out links whose verdict is `invalid`; `true` returns them too,
+ * each with its verdict.
+ */
+includeUnverified?: boolean, };

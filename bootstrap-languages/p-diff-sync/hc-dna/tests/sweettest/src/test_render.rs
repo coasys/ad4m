@@ -119,7 +119,72 @@ async fn test_render_after_sync() {
     let bob_render_after: Perspective = call_zome(&conductors[1], bob_cell, "render", ()).await;
     assert_eq!(bob_render_after.links.len(), 3, "Bob should see 3 links after sync");
 
-    for conductor in conductors.iter_mut() {
+    for mut conductor in conductors.into_inner() {
+        conductor.shutdown().await;
+    }
+}
+
+/// An anchored link committed by Alice comes back to Bob with its proof's `anchor`.
+///
+/// Alice sends the link the way the executor does (JSON with `proof.anchor`), and the test
+/// reads Bob's render as JSON, so it pins the wire field and not only the Rust type.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_anchored_link_syncs_with_its_anchor() {
+    let (mut conductors, cells) = setup_conductors(2, false).await;
+    let alice_cell = &cells[0];
+    let bob_cell = &cells[1];
+
+    create_did_link(&conductors[0], alice_cell, "did:test:alice").await;
+    create_did_link(&conductors[1], bob_cell, "did:test:bob").await;
+
+    let link = serde_json::json!({
+        "author": "did:test:alice",
+        "data": { "source": "ad4m://self", "predicate": "ad4m://has", "target": "literal://string:anchored" },
+        "timestamp": "2026-10-30T00:00:00.000Z",
+        "proof": { "key": "did:test:alice#key", "signature": "abcd", "anchor": 7 },
+    });
+    let alice_rev: ActionHash = call_zome(
+        &conductors[0],
+        alice_cell,
+        "commit",
+        serde_json::json!({ "diff": { "additions": [link], "removals": [] }, "my_did": "did:test:alice" }),
+    )
+    .await;
+
+    let alice_render: serde_json::Value = call_zome(&conductors[0], alice_cell, "render", ()).await;
+    assert_eq!(alice_render["links"][0]["proof"]["anchor"], 7, "Alice's render keeps the anchor");
+
+    conductors.exchange_peer_info().await;
+    await_consistency(10000).await;
+
+    let mut synced = false;
+    for _attempt in 1..=10 {
+        let pulled = call_zome_fallible::<_, perspective_diff_sync_integrity::PullResult>(
+            &conductors[1],
+            bob_cell,
+            "pull",
+            serde_json::json!({ "hash": alice_rev, "is_scribe": false }),
+        )
+        .await;
+        if pulled.is_ok() {
+            let bob_rev: Option<ActionHash> =
+                call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
+            if bob_rev.is_some() {
+                synced = true;
+                break;
+            }
+        }
+        await_consistency(2000).await;
+    }
+    assert!(synced, "Bob should pull Alice's revision");
+
+    let bob_render: serde_json::Value = call_zome(&conductors[1], bob_cell, "render", ()).await;
+    let links = bob_render["links"].as_array().expect("render returns links");
+    assert_eq!(links.len(), 1, "Bob sees Alice's link");
+    assert_eq!(links[0]["proof"]["anchor"], 7, "Bob's copy keeps the anchor");
+    assert_eq!(links[0]["proof"]["signature"], "abcd");
+
+    for mut conductor in conductors.into_inner() {
         conductor.shutdown().await;
     }
 }

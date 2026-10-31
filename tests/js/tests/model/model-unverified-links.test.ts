@@ -143,13 +143,13 @@ describe("Ad4mModel — unverified links are withheld by default", function () {
     } as LinkExpression;
     await perspective.addLinkExpression(forged);
 
-    // Precondition: the forged link is in the store, and marked invalid.
+    // Precondition: a display read hides the forged link (its verdict is
+    // invalid). The `includeUnverified` tests below read it from the store.
     const nameLinks = await perspective.get(
       new LinkQuery({ source: recipeId, predicate: "uvr://name" })
     );
-    const stored = nameLinks.find((l) => l.data.target.includes("forged"));
-    expect(stored, "the forged link must be stored").to.exist;
-    expect(stored!.proof.valid, "the forged link must not verify").to.not.equal(true);
+    const shown = nameLinks.find((l) => l.data.target.includes("forged"));
+    expect(shown, "perspective.get hides the forged link").to.not.exist;
   });
 
   after(async () => {

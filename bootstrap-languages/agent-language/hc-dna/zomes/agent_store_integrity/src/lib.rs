@@ -8,10 +8,14 @@ pub struct Link {
     pub predicate: Option<String>,
 }
 
+/// An expression's proof. `anchor` is the key-log position an anchored profile link was signed
+/// at; an entry written before anchors existed reads with `None`, and `None` is not written.
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug, PartialEq)]
 pub struct ExpressionProof {
     pub signature: String,
     pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]

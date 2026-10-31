@@ -54,6 +54,7 @@ ignored, and the error names the key by its path, e.g.
 | `sfu_public_addr` | string (IP) | the STUN probe's address | `--sfu-public-addr` / `AD4M_SFU_PUBLIC_ADDR` |
 | `sfu_stun_server` | string (`host:port`) | no probe | `--sfu-stun-server` / `AD4M_SFU_STUN_SERVER` |
 | `log_config` | object: crate → level | see below | `RUST_LOG` overrides it |
+| `log_dir` | string (folder) | stdout | `--log-dir` / `AD4M_LOG_DIR` |
 | `multi_user_config.enabled` | bool | `false` | `--enable-multi-user` / `AD4M_ENABLE_MULTI_USER` |
 | `multi_user_config.tls_config` | object or `null` | no TLS | see below |
 | `multi_user_config.smtp_config` | object or `null` | no email | see below |
@@ -129,7 +130,7 @@ Settings with no config key are flags only, each with its
 `--hc-use-bootstrap`, `--hc-use-local-proxy`, `--hc-use-mdns`,
 `--hc-use-proxy`, `--hc-proxy-url`, `--hc-bootstrap-url`, `--hc-relay-url`,
 `--log-holochain-metrics`, `--dynamic-class-tools`, `--pid-file`,
-`--insecure-no-admin-credential`.
+`--watch-stdin`, `--custody-channel`, `--insecure-no-admin-credential`.
 The variable name is the flag in upper case with `-` as `_`, prefixed with
 `AD4M_`: `--hc-relay-url` reads `AD4M_HC_RELAY_URL`.
 
@@ -139,6 +140,73 @@ whitespace`), and so does such a flag value.
 Neither is laid over the file: `AD4M_APP_DATA_PATH=${DATA_DIR}` with
 `DATA_DIR` unset would otherwise put the data directory under the working
 directory. Unset the variable to use the file's value.
+
+## Changing the file while the executor runs
+
+`runtime.config` (operator) returns the file's values, every key with its
+class, and `restartPending`. `runtime.setConfig { set, unset }` (operator)
+writes keys to the file the executor started with; without `--config` it
+answers 409 `no-config-file`. It writes a temporary file in the same folder,
+mode 0600, then renames it over the file, and keeps the keys it does not
+change. Every written key takes effect at the next start
+(`restartPending: true`); `runtime.restart` answers, then exits 75 so the
+supervisor starts the executor again. The answer lists each key it did not
+write, with a reason:
+
+| Reason | When |
+|---|---|
+| `local-only` | a `machine` key from a caller that is not the operator on this machine (the admin credential on a loopback listener) |
+| `pinned-by-config` | a flag or an `AD4M_*` variable sets the key at this start, so a write would not take effect |
+| `invalid` | the value would stop the next start, or the key's validator refused it (`detail` says why) |
+| `unknown-key` | no such key |
+
+`restart` keys: `mcp_enabled`, `mcp_port`, `log_config`,
+`auto_permit_cap_requests`. Every other key is a `machine` key: paths,
+listeners, ports, `multi_user_config`, `identity`, `log_dir`. A write
+publishes `config-changed` to the operator.
+
+## Running under a supervisor
+
+A supervisor (the desktop app, systemd, a host) reads the exit code:
+
+| Code | Meaning | What the supervisor does |
+|---|---|---|
+| 0 | stopped: `runtime.quit`, SIGTERM, SIGINT, or stdin closed with `--watch-stdin true` | nothing |
+| 75 | `runtime.restart` | start the executor again with the same arguments |
+| 78 | the config or a flag is refused (also `--custody-channel` with multi-user mode) | do not retry: it fails the same way |
+| 79 | another executor holds this data folder (`<app_data_path>/executor.lock`) | report it |
+| 80 | the API port does not bind | pick another port and start again |
+| other, or a signal | a crash | restart with a delay |
+
+- **Readiness**: `GET /health` answers `{"status":"ok"}` once the API
+  listens, the last step of a start.
+- **`--watch-stdin true`**: the executor stops gracefully when its stdin
+  reaches its end. The supervisor holds the pipe's write end and never
+  writes, so the executor never outlives the supervisor.
+- **The admin credential**: pass it in the environment
+  (`AD4M_ADMIN_CREDENTIAL`, or `AD4M_ADMIN_CREDENTIAL_FILE`), never on the
+  command line, and give a new one at each start.
+- **`--log-dir <folder>`** (`log_dir`): the log goes to
+  `<folder>/executor-0.log`; the five newest runs stay (`executor-1.log` is
+  the run before), and a file stops at 50 MiB. `runtime.logTail { lines }`
+  (operator, at most 2000) returns its newest lines.
+- **`--custody-channel`**: this executor serves the custody channel
+  (`identity.custodyStatus`) to the admin credential on a loopback listener
+  only. Multi-user mode refuses it: `run` exits 78, and
+  `user.setMultiUserEnabled(true)` answers 403.
+- **Local only**: `runtime.quit`, `agent.unlock`, `identity.rekey` and
+  `identity.custodyStatus`, and the `machine` keys of `runtime.setConfig`,
+  answer only the operator on a loopback listener; any other caller gets 403
+  `local-only`. A listener is loopback by the address it binds, not by the
+  address a caller connects from: on `--localhost false` without TLS the
+  executor binds 0.0.0.0, has no loopback listener, and these calls answer
+  no one.
+- **`ad4m-executor rekey`**: gives the executor a new main wallet key, so a
+  revoked server links again. Run it on the server itself: it calls
+  `identity.rekey` on a loopback address with the admin credential from
+  `AD4M_ADMIN_CREDENTIAL_FILE` (or `--admin-credential`,
+  `AD4M_ADMIN_CREDENTIAL`). Tokens signed with the old key stop working, so
+  apps ask for access again.
 
 ## Secrets
 

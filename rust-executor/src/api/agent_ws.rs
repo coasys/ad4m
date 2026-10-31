@@ -56,6 +56,7 @@ fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLin
         proof: ExpressionProof {
             key: lei.proof.key.clone().unwrap_or_default(),
             signature: lei.proof.signature.clone().unwrap_or_default(),
+            anchor: lei.proof.anchor,
         },
         status: lei.status.clone(),
     };
@@ -953,14 +954,15 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
         .long()
         .guard(Guard::Executor(AGENT_CREATE_CAPABILITY.clone()));
-    // Always fails (not implemented); the result type is the SDK's `AgentStatus`. Users get
-    // the 501 too.
+    // Always fails (not implemented); the result type is the SDK's `AgentStatus`.
     map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent)
         .guard(Guard::Cap(AGENT_CREATE_CAPABILITY.clone()));
     map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent)
         .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
+    // The passphrase that opens the executor's own key is typed only on this machine.
     map.method::<UnlockAgentRequest, AgentStatus>("agent.unlock", unlock_agent)
         .long()
+        .local_only()
         .guard(Guard::Executor(AGENT_SIGN_CAPABILITY.clone()));
     map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message)
         .guard(Guard::Cap(AGENT_SIGN_CAPABILITY.clone()));
@@ -1100,6 +1102,7 @@ mod tests {
                 signature: Some(signature.to_string()),
                 valid: claimed_valid,
                 invalid: claimed_valid.map(|v| !v),
+                anchor: None,
             },
             status: None,
         }

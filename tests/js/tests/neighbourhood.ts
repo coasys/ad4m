@@ -526,6 +526,9 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     const testPerspective = new Perspective([link])
                     await aliceNH!.setOnlineStatus(testPerspective)
                     await bobNH!.setOnlineStatus(testPerspective)
+                    // "sig" by "key" is no signature: the receiver judges the link
+                    // invalid and says why.
+                    link.verdict = { kind: "invalid", reason: "badSignature" };
 
                     // Both sides need to see the peer's status. Polling avoids
                     // racing propagation (fixed sleep here was Holochain-tuned).
@@ -567,6 +570,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     expect(bobOnline2[0].status.data.links[0].data.source).to.equal("test://source")
                     expect(bobOnline2[0].status.data.links[0].data.target).to.equal("test://target")
                     expect(bobOnline2[0].status.data.links[0].proof.valid).to.be.true
+                    expect(bobOnline2[0].status.data.links[0].verdict).to.deep.equal({ kind: "valid" })
                     // TODO: Signature check for the whole perspective is broken
                     // Got to fix that and add back this assertion
                     //expect(bobOnline2[0].status.proof.valid).to.be.true
@@ -611,6 +615,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                     link.proof.invalid = true;
                     link.proof.valid = false;
+                    link.verdict = { kind: "invalid", reason: "badSignature" };
                     //@ts-ignore
                     expect(bobData.data.links).to.deep.equal(aliceSignal.links)
 

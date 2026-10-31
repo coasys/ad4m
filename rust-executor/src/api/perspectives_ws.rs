@@ -295,13 +295,14 @@ async fn get_perspective_handler(
 async fn get_snapshot(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
     let links = perspective
-        .get_links(&LinkQuery {
+        .get_links_shown(&LinkQuery {
             source: None,
             target: None,
             predicate: None,
             from_date: None,
             until_date: None,
             limit: None,
+            include_unverified: None,
         })
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -333,10 +334,11 @@ async fn query_links(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
             .get("limit")
             .and_then(|v| v.as_i64())
             .map(|v| v as i32),
+        include_unverified: params.get("includeUnverified").and_then(|v| v.as_bool()),
     };
 
     let links = perspective
-        .get_links(&query)
+        .get_links_shown(&query)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(links)?)
@@ -2698,6 +2700,10 @@ pub struct PerspectiveQueryLinksParams {
     pub until_date: Option<String>,
     #[ts(optional, type = "number")]
     pub limit: Option<i64>,
+    /// The read leaves out links whose verdict is `invalid`; `true` returns them too,
+    /// each with its verdict.
+    #[ts(optional)]
+    pub include_unverified: Option<bool>,
 }
 
 #[derive(Deserialize, TS)]

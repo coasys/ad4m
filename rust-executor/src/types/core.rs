@@ -24,6 +24,12 @@ pub struct Expression<T> {
 pub struct ExpressionProof {
     pub key: String,
     pub signature: String,
+    /// One seq of the log that lists the signer's key: the head seq the signer knew. With it,
+    /// the signature covers `coasys:link` `{data, timestamp, anchor}`; without it, the old
+    /// signed bytes (a device-only key, or a link made before key logs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number", optional)]
+    pub anchor: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
@@ -39,24 +45,46 @@ pub struct VerifiedExpression<T> {
 pub struct DecoratedExpressionProof {
     pub key: String,
     pub signature: String,
+    /// `true` only when the link counts for logic reads (its verdict is `valid`).
     pub valid: Option<bool>,
     pub invalid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number", optional)]
+    pub anchor: Option<u64>,
+}
+
+impl ExpressionProof {
+    /// This proof with the verdict `valid` (`true`: the expression counts).
+    pub fn decorated(&self, valid: bool) -> DecoratedExpressionProof {
+        DecoratedExpressionProof {
+            key: self.key.clone(),
+            signature: self.signature.clone(),
+            valid: Some(valid),
+            invalid: Some(!valid),
+            anchor: self.anchor,
+        }
+    }
+}
+
+impl DecoratedExpressionProof {
+    /// The signed part of this proof, without the verdict.
+    pub fn plain(&self) -> ExpressionProof {
+        ExpressionProof {
+            key: self.key.clone(),
+            signature: self.signature.clone(),
+            anchor: self.anchor,
+        }
+    }
 }
 
 impl<T: Serialize> From<Expression<T>> for VerifiedExpression<T> {
     fn from(expr: Expression<T>) -> Self {
         let valid = verify_or_false(&expr, "VerifiedExpression::from");
-        let invalid = !valid;
         VerifiedExpression {
+            proof: expr.proof.decorated(valid),
             author: expr.author,
             timestamp: expr.timestamp,
             data: expr.data,
-            proof: DecoratedExpressionProof {
-                key: expr.proof.key,
-                signature: expr.proof.signature,
-                valid: Some(valid),
-                invalid: Some(invalid),
-            },
         }
     }
 }
@@ -167,6 +195,7 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
             proof: ExpressionProof {
                 key: input.proof.key.ok_or(anyhow!("Key is required"))?,
                 signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
+                anchor: input.proof.anchor,
             },
             status: input.status,
         })
@@ -190,21 +219,26 @@ impl LinkExpression {
         }
     }
 
-    /// Derive the signature verdict for this link — the same recipe as
-    /// [`DecoratedLinkExpression::compute_proof_valid`], for the plain form
-    /// whose proof carries no verdict field at all. Code that hands links
-    /// across a trust boundary carries `LinkExpression` precisely so a
-    /// verdict cannot travel with them; the receiving side calls this instead
-    /// of believing anyone. Normalizing `data` first is not optional: the
-    /// signature was produced over the normalized link.
+    /// Derive the verdict for this link (`true` only when it counts) — the same recipe as
+    /// [`DecoratedLinkExpression::compute_proof_valid`], for the plain form whose proof
+    /// carries no verdict field at all. Code that hands links across a trust boundary carries
+    /// `LinkExpression` precisely so a verdict cannot travel with them; the receiving side
+    /// calls this instead of believing anyone.
     pub fn compute_proof_valid(&self) -> bool {
+        self.check().verdict.counts()
+    }
+
+    /// The verdict of this link and its person ([`crate::identity::check_signed`]).
+    /// Normalizing `data` first is not optional: the signature was produced over the
+    /// normalized link.
+    pub fn check(&self) -> crate::identity::resolver::CheckedLink {
         let link_expr = Expression::<Link> {
             author: self.author.clone(),
             timestamp: self.timestamp.clone(),
             data: self.data.normalize(),
             proof: self.proof.clone(),
         };
-        verify_or_false(&link_expr, "LinkExpression::compute_proof_valid")
+        crate::identity::check_signed(&link_expr)
     }
 }
 
@@ -241,37 +275,52 @@ pub struct DecoratedLinkExpression {
     pub proof: DecoratedExpressionProof,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<LinkStatus>,
+    /// The link's verdict, as this executor judged it. Logic reads count only `valid`;
+    /// display reads show `cantCheck` and `flagged` with it and never return `invalid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub verdict: Option<crate::identity::verdict::LinkVerdict>,
+    /// The `did:scid` the signer's key speaks for (a bot key: its owner), derived from the
+    /// signer and the anchor; only on a `valid` link whose signer a log lists. The link itself
+    /// never carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub person: Option<String>,
 }
 
 impl DecoratedLinkExpression {
-    /// Derive the signature verdict for this link, without touching
-    /// `self.proof.valid`.
+    /// Derive the verdict for this link, without touching `self.proof.valid`: `true` only
+    /// when it counts ([`DecoratedLinkExpression::check`]).
     ///
-    /// `proof.valid` is a *read view* over the signature, not a stored fact, so
-    /// every place that needs the verdict recomputes it from here rather than
-    /// trusting a value someone handed along. Normalizing `data` first is not
-    /// optional: the signature was produced over the normalized link, so
-    /// verifying the raw form reports a valid link as invalid.
-    ///
-    /// A verification error counts as "not verified" — see
-    /// [`verify_or_false`](crate::agent::signatures::verify_or_false).
+    /// `proof.valid` is a *read view* over the signature and the signer's log, not a stored
+    /// fact, so every place that needs the verdict recomputes it from here rather than
+    /// trusting a value someone handed along.
     pub fn compute_proof_valid(&self) -> bool {
+        self.check().verdict.counts()
+    }
+
+    /// The verdict of this link and its person, from the signature and the executor's key map
+    /// ([`crate::identity::check_signed`]). Normalizing `data` first is not optional: the
+    /// signature was produced over the normalized link, so verifying the raw form reports a
+    /// valid link as invalid.
+    pub fn check(&self) -> crate::identity::resolver::CheckedLink {
         let link_expr = Expression::<Link> {
             author: self.author.clone(),
             timestamp: self.timestamp.clone(),
             data: self.data.normalize(),
-            proof: ExpressionProof {
-                key: self.proof.key.clone(),
-                signature: self.proof.signature.clone(),
-            },
+            proof: self.proof.plain(),
         };
-        verify_or_false(&link_expr, "DecoratedLinkExpression::compute_proof_valid")
+        crate::identity::check_signed(&link_expr)
     }
 
+    /// Sets `proof.valid`, the verdict and the person from [`DecoratedLinkExpression::check`].
     pub fn verify_signature(&mut self) {
-        let valid = self.compute_proof_valid();
+        let checked = self.check();
+        let valid = checked.verdict.counts();
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);
+        self.verdict = Some(checked.verdict);
+        self.person = checked.person;
     }
 }
 
@@ -279,13 +328,15 @@ impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
     fn from((expr, status): (LinkExpression, LinkStatus)) -> Self {
         let mut expr: Expression<Link> = expr.into();
         expr.data = expr.data.normalize();
-        let verified_expr: VerifiedExpression<Link> = expr.into();
+        let checked = crate::identity::check_signed(&expr);
         DecoratedLinkExpression {
-            author: verified_expr.author,
-            timestamp: verified_expr.timestamp,
-            data: verified_expr.data,
-            proof: verified_expr.proof,
+            proof: expr.proof.decorated(checked.verdict.counts()),
+            author: expr.author,
+            timestamp: expr.timestamp,
+            data: expr.data,
             status: Some(status),
+            verdict: Some(checked.verdict),
+            person: checked.person,
         }
     }
 }
@@ -296,10 +347,7 @@ impl From<DecoratedLinkExpression> for LinkExpression {
             author: decorated.author,
             timestamp: decorated.timestamp,
             data: decorated.data.normalize(),
-            proof: ExpressionProof {
-                key: decorated.proof.key,
-                signature: decorated.proof.signature,
-            },
+            proof: decorated.proof.plain(),
             status: decorated.status,
         }
     }

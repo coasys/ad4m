@@ -47,13 +47,37 @@ async fn get_runtime_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<V
     Ok(serde_json::to_value(info)?)
 }
 
-async fn quit_runtime(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    tokio::spawn(async {
+/// Answers `true`, then starts the graceful stop with `reason` once the answer is on its way.
+fn stop_after_answer(reason: crate::exit::ExitReason) -> Result<Value, WsRpcError> {
+    tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        std::process::exit(0);
+        crate::exit::request_shutdown(reason);
     });
-
     Ok(Value::Bool(true))
+}
+
+/// `runtime.quit`: stop, exit 0.
+async fn quit_runtime(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    stop_after_answer(crate::exit::ExitReason::Stopped)
+}
+
+/// `runtime.restart`: stop, exit 75; the supervisor starts the executor again.
+async fn restart_runtime(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    stop_after_answer(crate::exit::ExitReason::RestartRequested)
+}
+
+/// `runtime.logTail { lines }`: the newest lines of this run's log file (at most 2000).
+async fn log_tail(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: LogTailParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let dir = crate::log_files::log_dir().ok_or_else(|| {
+        WsRpcError::conflict(
+            "no-log-file: this executor logs to stdout; start it with --log-dir to read its log",
+        )
+    })?;
+    let lines = crate::log_files::tail(dir, body.lines as usize)
+        .map_err(|e| WsRpcError::internal(format!("Cannot read the log file: {e}")))?;
+    Ok(serde_json::to_value(LogTail { lines })?)
 }
 
 async fn set_status(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -141,6 +165,7 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
                     from_date: None,
                     until_date: None,
                     limit: None,
+                    include_unverified: None,
                 })
                 .await
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -711,8 +736,16 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, RuntimeInfo>("runtime.info", get_runtime_info)
         .read()
         .guard(Guard::Open);
+    // A stop from elsewhere would leave the machine with no executor until someone is at it.
     map.method::<NoParams, bool>("runtime.quit", quit_runtime)
+        .local_only()
         .guard(Guard::Executor(RUNTIME_QUIT_CAPABILITY.clone()));
+    // Answers, then exits 75: the supervisor (the desktop app, systemd) starts it again.
+    map.method::<NoParams, bool>("runtime.restart", restart_runtime)
+        .guard(Guard::Operator);
+    map.method::<LogTailParams, LogTail>("runtime.logTail", log_tail)
+        .read()
+        .guard(Guard::Operator);
     // Always errors: status updates have no implementation yet. The contract
     // is the SDK's call.
     map.method::<SetStatusRequest, bool>("runtime.setStatus", set_status)
@@ -898,6 +931,21 @@ pub struct RuntimeUnytWalletHistoryParams {
 pub struct RuntimeUnytSendHotParams {
     pub recipient: String,
     pub amount: String,
+}
+
+/// `runtime.logTail` params.
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct LogTailParams {
+    /// How many of the newest lines; at most 2000 are returned.
+    pub lines: u32,
+}
+
+/// `runtime.logTail` result: the newest lines of this run's log file, oldest first.
+#[derive(serde::Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LogTail {
+    pub lines: Vec<String>,
 }
 
 #[derive(Deserialize, TS)]

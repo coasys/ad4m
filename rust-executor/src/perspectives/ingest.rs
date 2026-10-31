@@ -10,9 +10,9 @@
 //!
 //! ```text
 //! link language ─► dedup ─► retain_ingestible ─► add/remove_remote_link ─► prolog / pubsub
-//!                           └ addition: proof     └ addition or removal: link not
-//!                             verifies against      stored as Local (checked and
-//!                             its author            written under one store lock)
+//!                           └ addition: verdict   └ addition or removal: link not
+//!                             not `invalid`         stored as Local (checked and
+//!                                                   written under one store lock)
 //! ```
 //!
 //! Removals of Shared links are not checked for authority here.
@@ -21,25 +21,32 @@ use super::monotonic::RetractionEffects;
 use super::perspective_instance::PerspectiveInstance;
 #[cfg(doc)]
 use super::sparql_store::SparqlStore;
+use crate::identity::verdict::LinkVerdict;
 use crate::types::{LinkExpression, PerspectiveDiff};
 use deno_core::error::AnyError;
 use std::sync::PoisonError;
 
-/// Drop from a remote diff every addition whose proof does not verify
-/// against its own `author`.
+/// Drop from a remote diff every addition whose verdict is `invalid`: its
+/// proof does not verify against its own `author`, or the signer's key log
+/// rules the key out. A `cantCheck` link stays (its signer's log is not
+/// known yet; the store re-checks it once it is), and so does a `flagged`
+/// one: both are stored with that verdict, and logic reads count neither.
+/// The caller fills the key map first ([`crate::identity::prepare_link_signers`]).
 pub(crate) fn retain_ingestible(additions: &mut Vec<LinkExpression>) {
     additions.retain(|link| {
-        let valid = link.compute_proof_valid();
-        if !valid {
+        let verdict = link.check().verdict;
+        let invalid = matches!(verdict, LinkVerdict::Invalid(_));
+        if invalid {
             log::warn!(
-                "Dropping remote link whose proof does not verify against its author {}: {} -[{}]-> {}",
-                link.author,
+                "Dropping remote link whose verdict is {}: {} -[{}]-> {} by {}",
+                verdict.stored(),
                 link.data.source,
                 link.data.predicate.as_deref().unwrap_or(""),
-                link.data.target
+                link.data.target,
+                link.author
             );
         }
-        valid
+        !invalid
     });
 }
 

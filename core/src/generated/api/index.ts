@@ -31,8 +31,10 @@ export type { GetSubjectDataRequest } from "./GetSubjectDataRequest";
 export type { HostRate } from "./HostRate";
 export type { ImportAgentRequest } from "./ImportAgentRequest";
 export type { ImportRequest } from "./ImportRequest";
+export type { InvalidReason } from "./InvalidReason";
 export type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
 export type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesRequest";
+export type { LinkVerdict } from "./LinkVerdict";
 export type { LockAgentRequest } from "./LockAgentRequest";
 export type { OpenLinkRequest } from "./OpenLinkRequest";
 export type { PermitCapabilityRequest } from "./PermitCapabilityRequest";
@@ -60,6 +62,19 @@ export type { UpdateLinkRequest } from "./UpdateLinkRequest";
 export type { UpdatePerspectiveRequest } from "./UpdatePerspectiveRequest";
 export type { VerifySignatureRequest } from "./VerifySignatureRequest";
 export type { WriteSettingsRequest } from "./WriteSettingsRequest";
+// The run contract: the executor's log and its config file (runtime.logTail, runtime.config,
+// runtime.setConfig, config-changed).
+export type { ConfigChanged } from "./ConfigChanged";
+export type { ConfigKeyInfo } from "./ConfigKeyInfo";
+export type { ConfigRefusal } from "./ConfigRefusal";
+export type { KeyClass } from "./KeyClass";
+export type { LogTail } from "./LogTail";
+export type { LogTailParams } from "./LogTailParams";
+export type { Pinned } from "./Pinned";
+export type { RefusalReason } from "./RefusalReason";
+export type { RuntimeConfig } from "./RuntimeConfig";
+export type { SetConfigParams } from "./SetConfigParams";
+export type { SetConfigResult } from "./SetConfigResult";
 // The identity calls (identity.*) and agent.get's answer.
 export type { AgentWithIdentity } from "./AgentWithIdentity";
 export type { BotView } from "./BotView";
@@ -67,6 +82,7 @@ export type { ClaimOfferParams } from "./ClaimOfferParams";
 export type { ClaimOfferResult } from "./ClaimOfferResult";
 export type { ClaimView } from "./ClaimView";
 export type { CosignInceptParams } from "./CosignInceptParams";
+export type { DeviceKeys } from "./DeviceKeys";
 export type { DeviceView } from "./DeviceView";
 export type { DidBotScope } from "./DidBotScope";
 export type { DidDocument } from "./DidDocument";

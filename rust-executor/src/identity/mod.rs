@@ -10,24 +10,30 @@
 pub mod backend;
 pub mod cache;
 pub mod claim;
+pub mod custody;
 pub mod device;
 pub mod head;
 pub mod operator;
 pub mod person;
+pub mod rekey;
 pub mod resolver;
 pub mod service;
 pub mod src_fetch;
 pub mod types;
+pub mod verdict;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use crate::api::ws_handler::WsRpcError;
 use crate::events::{Audience, Event, Topic};
+use crate::types::{Expression, LinkExpression};
 use backend::AgentLanguageBackend;
 use cache::{CacheError, KelCache};
 pub use resolver::verify_expression;
-use resolver::Resolver;
+use resolver::{CheckedLink, Resolver};
 use service::IdentityService;
 use types::IdentityForkEvent;
 
@@ -75,10 +81,155 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         store_url: settings.store_url.clone(),
         resolver: Arc::new(resolver),
     };
-    if SERVICE.set(Arc::new(service)).is_err() {
+    let service = Arc::new(service);
+    if SERVICE.set(service.clone()).is_err() {
         log::warn!("identity: the module was started twice; keeping the first");
+        return Ok(());
+    }
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(run_recheck(service));
+        }
+        Err(_) => log::error!("identity: no runtime for the re-check of links"),
     }
     Ok(())
+}
+
+/// How often links whose signer's log could not be read are checked again.
+pub const RECHECK_EVERY: Duration = Duration::from_secs(60);
+
+/// The re-check of stored links: the links of each key whose verdict the cache changed (a
+/// revocation, a key a log lists for the first time), and every [`RECHECK_EVERY`] the links
+/// that could not be checked. Each re-check judges a link again from the key map and rewrites
+/// it only when its verdict or person changed, so it is idempotent.
+async fn run_recheck(service: Arc<IdentityService>) {
+    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+    let mut changes = service.cache.subscribe();
+    let mut tick = tokio::time::interval(RECHECK_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            change = changes.recv() => {
+                let mut signers = BTreeSet::new();
+                match change {
+                    Ok(change) => {
+                        signers.insert(format!("did:key:{}", change.key));
+                        loop {
+                            match changes.try_recv() {
+                                Ok(change) => {
+                                    signers.insert(format!("did:key:{}", change.key));
+                                }
+                                Err(TryRecvError::Lagged(_)) => {
+                                    signers.extend(listed_signers(&service));
+                                }
+                                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+                            }
+                        }
+                    }
+                    // Changes were missed: every key the map lists.
+                    Err(RecvError::Lagged(_)) => signers.extend(listed_signers(&service)),
+                    Err(RecvError::Closed) => return,
+                }
+                crate::perspectives::recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                    .await;
+            }
+            _ = tick.tick() => {
+                crate::perspectives::recheck_links(&crate::perspectives::Recheck::CantCheck).await;
+            }
+        }
+    }
+}
+
+fn listed_signers(service: &IdentityService) -> Vec<String> {
+    service
+        .cache
+        .key_map()
+        .listed_keys()
+        .into_iter()
+        .map(|key| format!("did:key:{key}"))
+        .collect()
+}
+
+/// The verdict of a signed expression (a link) and its person, from the executor's key map,
+/// with no I/O ([`resolver::check_signed_with`]). No space order is known here: a link signed
+/// before its key's revocation counts.
+pub fn check_signed<T: serde::Serialize>(expr: &Expression<T>) -> CheckedLink {
+    resolver::check_signed_with(expr, &cache::global_key_map(), None, service::now())
+}
+
+/// Fills the key map for the signers of `links` before they are checked and stored: the key
+/// index and the logs it names, through the agent language. Does nothing before [`init`].
+pub async fn prepare_link_signers(links: &[LinkExpression]) {
+    let Some(service) = SERVICE.get() else {
+        return;
+    };
+    let signers: Vec<(String, Option<u64>)> = links
+        .iter()
+        .map(|l| (l.author.clone(), l.proof.anchor))
+        .collect();
+    service.resolver.prepare(&signers).await;
+}
+
+/// The anchor of a link that the local agent `agent_did` signs now: the trusted seq of its
+/// identity's log, when the agent is bound to an identity (`identity_agents`) and that log
+/// lists its key as a device key up to that seq. `None` otherwise: the link carries no anchor.
+///
+/// Read from the key map, with no I/O: the logs of local identities are loaded at start
+/// ([`load_local_identities`]) and never leave the map, and each accepted head replaces its
+/// log there, so a link signed after a newer head is accepted carries the new anchor.
+pub fn anchor_for(agent_did: &str) -> Option<u64> {
+    let service = SERVICE.get()?;
+    let scid = {
+        let db = crate::db::Ad4mDb::global_instance();
+        let db = db.lock().ok()?;
+        db.as_ref()?.agent_identity(agent_did).ok().flatten()?
+    };
+    anchor_in(service.cache.key_map(), agent_did, &scid)
+}
+
+/// [`anchor_for`] of `agent_did` bound to `scid`, from `key_map`.
+fn anchor_in(key_map: &cache::KeyMap, agent_did: &str, scid: &str) -> Option<u64> {
+    let log = key_map.log(scid)?;
+    let key = resolver::multikey_of(agent_did)?;
+    let id = log.state.device_key_id_of(&key.to_string())?;
+    log.state
+        .keys
+        .get(id)
+        .is_some_and(|r| r.added <= log.trusted)
+        .then_some(log.trusted)
+}
+
+/// Loads the trusted log of every identity a local agent speaks for into the key map and pins
+/// it there ([`KelCache::keep_local`]), so [`anchor_for`] knows it from the first link. Called
+/// once at startup, after [`init`] and before the API and the perspectives start. A log that
+/// cannot be read is logged and skipped: links then carry no anchor until its next accepted
+/// head.
+pub async fn load_local_identities() {
+    let Some(service) = SERVICE.get() else {
+        return;
+    };
+    let scids = match crate::db::Ad4mDb::with_global_instance(|db| db.local_identities()) {
+        Ok(scids) => scids,
+        Err(e) => {
+            log::warn!("identity: could not read the local identities: {e}");
+            return;
+        }
+    };
+    keep_local_all(&service.cache, &scids).await;
+}
+
+async fn keep_local_all(cache: &KelCache, scids: &[String]) {
+    for scid in scids {
+        match cache.keep_local(scid).await {
+            Ok(true) => {}
+            Ok(false) => log::warn!(
+                "identity: no trusted log of the local identity {scid} yet; its links carry no anchor until its next accepted head"
+            ),
+            Err(e) => log::warn!(
+                "identity: the log of the local identity {scid} is unreadable ({e}); its links carry no anchor until its next accepted head"
+            ),
+        }
+    }
 }
 
 /// The module, once [`init`] ran.
@@ -191,6 +342,83 @@ pub fn settings_from_config() -> IdentitySettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ad4m_identity_core::build::Signer;
+    use cache::tests::{accept_signed, on_file, store_key, trusting, TestLog};
+
+    fn agent_of(log: &TestLog) -> String {
+        format!("did:key:{}", log.device.key())
+    }
+
+    /// Adds a second device key to `log` at the next seq; the agent's d1 stays.
+    fn add_device(log: &mut TestLog, seed: u8) {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 4_000_000_000,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+    }
+
+    /// The anchor of a bound agent is its log's trusted seq, read from the key map with no
+    /// `await`; after a newer head is accepted, a link signed then carries the new seq.
+    #[tokio::test]
+    async fn the_anchor_is_the_trusted_seq_and_follows_a_newer_head() {
+        let mut log = TestLog::new(61);
+        let cache = trusting();
+        let agent = agent_of(&log);
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), None);
+        accept_signed(&cache, &log.events).await;
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), Some(0));
+
+        add_device(&mut log, 62);
+        // Events with no store head move nothing.
+        cache.ingest(&log.scid(), &log.events[1..]).await.unwrap();
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), Some(0));
+        accept_signed(&cache, &log.events).await;
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), Some(1));
+    }
+
+    /// A key the log lists only as its master, or not at all, signs with no anchor.
+    #[tokio::test]
+    async fn only_a_listed_device_key_gets_an_anchor() {
+        let log = TestLog::new(63);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        let master = format!("did:key:{}", log.master.key());
+        assert_eq!(anchor_in(cache.key_map(), &master, &log.scid()), None);
+        let stranger = format!("did:key:{}", TestLog::new(64).device.key());
+        assert_eq!(anchor_in(cache.key_map(), &stranger, &log.scid()), None);
+    }
+
+    /// After a restart the key map is empty; the startup load puts every local identity's
+    /// trusted log there, so the anchor is known with no read by the signer. A log that cannot
+    /// be loaded is skipped.
+    #[tokio::test]
+    async fn the_startup_load_makes_the_anchor_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        let log = TestLog::new(65);
+        {
+            let cache = on_file(&path, vec![store_key().multikey()]);
+            accept_signed(&cache, &log.events).await;
+        }
+        let cache = on_file(&path, vec![store_key().multikey()]);
+        let agent = agent_of(&log);
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), None);
+        let unknown = TestLog::new(66).scid();
+        keep_local_all(&cache, &[unknown, log.scid()]).await;
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), Some(0));
+    }
 
     #[test]
     fn the_store_url_reaches_the_agent_languages_settings_and_keeps_the_others() {

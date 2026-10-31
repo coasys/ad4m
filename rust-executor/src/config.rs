@@ -33,6 +33,17 @@ pub fn auto_permit_cap_requests() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether this executor serves the custody channel (`--custody-channel`). `false` without a
+/// global config, so a check on it fails closed. Never panics.
+pub fn custody_channel_on() -> bool {
+    GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|config| config.custody_channel)
+        .unwrap_or(false)
+}
+
 /// Get a clone of the global Ad4mConfig.
 /// Recovers from a poisoned mutex (see `set_global_config` for rationale).
 pub fn get_global_config() -> Ad4mConfig {
@@ -129,6 +140,28 @@ pub struct Ad4mConfig {
     pub dynamic_class_tools: Option<bool>,
     /// Path to write PID file (for test harness cleanup)
     pub pid_file: Option<String>,
+    /// Stop gracefully (exit 0) when stdin reaches its end: a supervisor holds the pipe open,
+    /// so the executor never outlives it (`--watch-stdin`).
+    pub watch_stdin: Option<bool>,
+    /// This executor serves the custody channel: the desktop app's custody service takes a
+    /// master key that arrived sealed to this computer from it, with the admin credential on a
+    /// loopback listener (`--custody-channel`). Never together with multi-user mode
+    /// ([`refuse_custody_channel_with_multi_user`]).
+    pub custody_channel: Option<bool>,
+    /// The folder of the executor's own rotated log files (`--log-dir`). Unset: stdout.
+    pub log_dir: Option<String>,
+    /// The config file the executor started with (`--config`): the file `runtime.setConfig`
+    /// writes. Unset: no file, and `runtime.setConfig` answers 409.
+    pub config_file: Option<PathBuf>,
+    /// The config file's keys that a flag or an environment variable overrides at this start:
+    /// a write to the file would not take effect while the override stays.
+    #[serde(default)]
+    pub pinned_config_keys: Vec<String>,
+    /// What the flags and environment variables of this start lay over the config file: the
+    /// value of each pinned key. `runtime.setConfig` checks a written file with them, as the
+    /// next start reads it. The file's shape, so no secret.
+    #[serde(default)]
+    pub config_overrides: serde_json::Map<String, serde_json::Value>,
     /// Local DID for this SFU node in a cascade cluster.  Required if
     /// any cascade options are set; otherwise the SFU runs single-node.
     pub sfu_local_did: Option<String>,
@@ -212,6 +245,14 @@ impl Ad4mConfig {
         }
     }
 
+    /// The data folder: `app_data_path`, else the default `prepare` fills in.
+    pub fn data_folder(&self) -> PathBuf {
+        self.app_data_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(utils::ad4m_data_directory)
+    }
+
     pub fn prepare(&mut self) {
         // An empty credential is no credential: an empty environment variable
         // (a compose `${VAR}` with `VAR` unset) must not become a credential
@@ -265,7 +306,7 @@ impl Ad4mConfig {
 
         if self.app_data_path.is_none() {
             self.app_data_path = Some(
-                utils::ad4m_data_directory()
+                self.data_folder()
                     .into_os_string()
                     .into_string()
                     .expect("Could not convert data path to string"),
@@ -403,6 +444,26 @@ pub fn refuse_multi_user_from_db(
     Ok(())
 }
 
+/// The custody channel and multi-user mode never run together: the channel hands a master key
+/// to whoever holds the admin credential, and on a multi-user executor that is a host, not the
+/// person whose key it is. The one place of this rule: the CLI (exit 78), `run` (with the mode
+/// read from the database) and `user.setMultiUserEnabled` all call it.
+pub fn refuse_custody_channel_with_multi_user(
+    custody_channel: bool,
+    multi_user_on: bool,
+) -> Result<(), String> {
+    if custody_channel && multi_user_on {
+        return Err(CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR.to_string());
+    }
+    Ok(())
+}
+
+/// Why an executor refuses the custody channel with multi-user mode.
+pub const CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR: &str =
+    "Refusing the custody channel with multi-user mode: the channel gives a master key to the \
+     holder of the admin credential, which on a multi-user executor is not the key's owner. \
+     Start without --custody-channel, or turn multi-user mode off.";
+
 /// Why `run` refused to start; names both ways out.
 pub const NO_ADMIN_CREDENTIAL_ERROR: &str =
     "Refusing to start: no admin credential is set, and without one every caller \
@@ -538,6 +599,12 @@ impl Ad4mConfig {
             mcp_port: None,
             dynamic_class_tools: None,
             pid_file: None,
+            watch_stdin: None,
+            custody_channel: None,
+            log_dir: None,
+            config_file: None,
+            pinned_config_keys: Vec::new(),
+            config_overrides: serde_json::Map::new(),
             sfu_local_did: None,
             sfu_max_participants_per_node: None,
             sfu_cascade_listen: None,
@@ -666,6 +733,18 @@ mod tests {
         };
         assert!(single_user.check_admin_credential().is_ok());
         assert!(MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR.contains("--admin-credential"));
+    }
+
+    /// The custody channel refuses multi-user mode, whichever came first; each alone passes.
+    #[test]
+    fn the_custody_channel_refuses_multi_user_mode() {
+        assert_eq!(
+            refuse_custody_channel_with_multi_user(true, true).unwrap_err(),
+            CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR
+        );
+        assert!(refuse_custody_channel_with_multi_user(true, false).is_ok());
+        assert!(refuse_custody_channel_with_multi_user(false, true).is_ok());
+        assert!(refuse_custody_channel_with_multi_user(false, false).is_ok());
     }
 
     /// Both startup gates for multi-user mode, as `run()` applies them: the start flag

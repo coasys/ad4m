@@ -43,6 +43,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, echo: p }),
     'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, fork: null }),
     'identity.devices': [],
+    'identity.rekey': { sign: 'did:key:z6MkNew', enc: 'z6LSNew' },
+    'identity.custodyStatus': { sign: 'did:key:z6MkTest', enc: 'z6LSTest' },
     'identity.resolve': (p: Record<string, unknown>) => ({
         didDocument: { '@context': ['https://www.w3.org/ns/did/v1'], id: p.didUrl, controller: p.didUrl, verificationMethod: [], authentication: [], assertionMethod: [], keyAgreement: [], capabilityInvocation: [] },
         didDocumentMetadata: { versionId: '2', deactivated: false },
@@ -211,6 +213,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.addHcAgentInfos': true,
     'runtime.networkMetrics': 'metrics-data',
     'runtime.restartHolochain': true,
+    'runtime.restart': true,
+    'runtime.logTail': (p: Record<string, unknown>) => ({ lines: [`asked ${p.lines}`] }),
+    'runtime.config': { values: { mcp_port: 3001 }, keys: [{ key: 'mcp_port', class: 'restart' }, { key: 'port', class: 'machine', pinned: 'config' }], restartPending: false, file: '/data/adam/config.json' },
+    'runtime.setConfig': (p: Record<string, unknown>) => ({ restartPending: true, refused: p.unset ? [{ key: 'port', reason: 'local-only' }] : [] }),
     'runtime.verifySignature': true,
     'runtime.exportData': true,
     'runtime.importData': { success: true, count: 5 },
@@ -1242,6 +1248,33 @@ describe('RuntimeClient', () => {
         const result = await ad4m.runtime.restartHolochain();
         expect(result).toBe(true);
     });
+
+    test('restart() calls runtime.restart', async () => {
+        expect(await ad4m.runtime.restart()).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.restart');
+    });
+
+    test('logTail() sends the number of lines', async () => {
+        const tail = await ad4m.runtime.logTail(20);
+        expect(lastRpcCall!.params).toMatchObject({ lines: 20 });
+        expect(tail.lines).toEqual(['asked 20']);
+    });
+
+    test('config() returns the keys with their classes', async () => {
+        const config = await ad4m.runtime.config();
+        expect(lastRpcCall!.type).toBe('runtime.config');
+        expect(config.keys.find(k => k.key === 'port')?.class).toBe('machine');
+        expect(config.keys.find(k => k.key === 'port')?.pinned).toBe('config');
+        expect(config.file).toBe('/data/adam/config.json');
+    });
+
+    test('setConfig() sends set and unset and returns the refusals', async () => {
+        const result = await ad4m.runtime.setConfig({ mcp_port: 3005 }, ['port']);
+        expect(lastRpcCall!.type).toBe('runtime.setConfig');
+        expect(lastRpcCall!.params).toMatchObject({ set: { mcp_port: 3005 }, unset: ['port'] });
+        expect(result.restartPending).toBe(true);
+        expect(result.refused).toEqual([{ key: 'port', reason: 'local-only' }]);
+    });
 });
 
 // ===================== IDENTITY TESTS =====================
@@ -1282,6 +1315,18 @@ describe('IdentityClient', () => {
         expect(lastRpcCall!.type).toBe('identity.resolve');
         expect(lastRpcCall!.params.didUrl).toBe('did:key:z6MkTest');
         expect(lastRpcCall!.params.fresh).toBeUndefined();
+    });
+
+    test('rekey() calls identity.rekey and returns the new device keys', async () => {
+        const keys = await ad4m.identity.rekey();
+        expect(lastRpcCall!.type).toBe('identity.rekey');
+        expect(keys).toEqual({ sign: 'did:key:z6MkNew', enc: 'z6LSNew' });
+    });
+
+    test('custodyStatus() calls identity.custodyStatus', async () => {
+        const keys = await ad4m.identity.custodyStatus();
+        expect(lastRpcCall!.type).toBe('identity.custodyStatus');
+        expect(keys.enc).toBe('z6LSTest');
     });
 
     test('agent.status() carries the identity beside the device did', async () => {

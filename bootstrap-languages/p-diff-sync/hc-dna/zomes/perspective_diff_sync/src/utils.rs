@@ -41,6 +41,7 @@ pub fn create_link_expression(source: &str, target: &str) -> LinkExpression {
         proof: ExpressionProof {
             signature: String::from("sig"),
             key: String::from("key"),
+            anchor: None,
         },
     }
 }
