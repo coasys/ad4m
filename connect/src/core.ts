@@ -1,4 +1,4 @@
-import { isEmbedded, setLocal, getLocal, removeLocal, checkConnection, wsUrlToHttpBase } from './utils';
+import { isEmbedded, setLocal, getLocal, removeLocal, checkConnection, wsUrlToHttpBase, adoptStoredSession } from './utils';
 import { PostMessageWebSocket } from './PostMessageWebSocket';
 import { makePostMessageFetch } from './PostMessageFetch';
 import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
@@ -99,6 +99,9 @@ export default class Ad4mConnect extends EventTarget {
     autoBind(this);
   
     this.options = options;
+    // A session an earlier version of this package stored is still the user's: read it, rather
+    // than asking them to log in again because the app was redeployed with a newer version.
+    adoptStoredSession();
     this.port = options.port || parseInt(getLocal("ad4m-port")) || DEFAULT_PORT
     this.url = options.url || getLocal("ad4m-url") || `http://localhost:${this.port}`;
     this.token = getLocal("ad4m-token") || '';
@@ -214,6 +217,30 @@ export default class Ad4mConnect extends EventTarget {
     this.adoptClient(session.client);
     this.applyAuth(auth);
     return this.ad4mClient;
+  }
+
+  /**
+   * `connect()` again until the node answers, for a stored session whose node was unreachable
+   * when the app loaded: restarting, or redeploying. Without it the first failure left the user
+   * on the connection screen, looking logged out, until they reloaded the page. Waits
+   * `initialDelayMs` before the first try, doubling up to `maxDelayMs`. Resolves with the client
+   * once connected, or `undefined` when `signal` aborts or the token is gone.
+   */
+  async connectWhenReachable(
+    { signal, initialDelayMs = 2_000, maxDelayMs = 30_000 }: { signal?: AbortSignal; initialDelayMs?: number; maxDelayMs?: number } = {},
+  ): Promise<Ad4mClient | undefined> {
+    for (let delay = initialDelayMs; ; delay = Math.min(delay * 2, maxDelayMs)) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, delay);
+        signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+      });
+      if (signal?.aborted || !this.token) return undefined;
+      try {
+        return await this.connect();
+      } catch {
+        // Still unreachable: `connect` has reported it as a connection error.
+      }
+    }
   }
 
   /** Make this client the connection, closing the one it replaces. */

@@ -114,6 +114,15 @@ describe('Ad4mConnect', () => {
       expect(conn.token).toBe('saved-jwt');
     });
 
+    it('restores the session an earlier version stored, so an upgrade does not log the user out', () => {
+      localStorage.setItem('0.0.1/ad4m-token', 'old-version-jwt');
+      localStorage.setItem('0.0.1/ad4m-url', 'https://node.example:12000');
+      const conn = new Ad4mConnect(defaultOptions);
+      expect(conn.token).toBe('old-version-jwt');
+      expect(conn.url).toBe('https://node.example:12000');
+      expect(getLocal('ad4m-token')).toBe('old-version-jwt');
+    });
+
     it('restores URL from localStorage', () => {
       setLocal('ad4m-url', 'http://saved:9999');
       const conn = new Ad4mConnect(defaultOptions);
@@ -176,6 +185,35 @@ describe('Ad4mConnect', () => {
       const conn = new Ad4mConnect(defaultOptions);
       await expect(conn.connect()).rejects.toThrow('ECONNREFUSED');
       expect(conn.connectionState).toBe('error');
+    });
+  });
+
+  describe('connectWhenReachable()', () => {
+    it('keeps trying a stored session until its node answers, then authenticates', async () => {
+      setLocal('ad4m-token', 'saved-jwt');
+      const { checkConnection } = await import('./utils');
+      (checkConnection as any).mockClear();
+      (checkConnection as any)
+        .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+        .mockRejectedValueOnce(new Error('ECONNREFUSED'));
+      const conn = new Ad4mConnect(defaultOptions);
+      const client = await conn.connectWhenReachable({ initialDelayMs: 1, maxDelayMs: 2 });
+      expect(checkConnection).toHaveBeenCalledTimes(3);
+      expect(client).toBe(conn.ad4mClient);
+      expect(conn.authState).toBe('authenticated');
+      expect(conn.token).toBe('saved-jwt');
+    });
+
+    it('stops when aborted, without connecting', async () => {
+      setLocal('ad4m-token', 'saved-jwt');
+      const { checkConnection } = await import('./utils');
+      (checkConnection as any).mockClear();
+      const conn = new Ad4mConnect(defaultOptions);
+      const controller = new AbortController();
+      const result = conn.connectWhenReachable({ signal: controller.signal, initialDelayMs: 60_000 });
+      controller.abort();
+      await expect(result).resolves.toBeUndefined();
+      expect(checkConnection).not.toHaveBeenCalled();
     });
   });
 

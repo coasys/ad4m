@@ -28,6 +28,37 @@ export function removeLocal(key: string): void {
   if (localStorageSupported()) localStorage.removeItem(`${version}/${key}`);
 }
 
+/** The keys that make up a stored session. They move together, from one version's prefix. */
+const SESSION_KEYS = ["ad4m-token", "ad4m-url", "ad4m-port", "ad4m-last-host"];
+
+/**
+ * Carry a session stored by another version of this package over to this version's keys.
+ *
+ * Every key is stored under `${version}/`, so upgrading the package (an app redeploy) used to
+ * leave the stored token under the old prefix, unread: the user had to log in again although the
+ * executor still accepted the token. When this version holds no token, the session of the newest
+ * other version that holds one is copied over. The token is not checked here; a refused one is
+ * dropped by `checkAuth` as before. Answers whether a session was carried over.
+ */
+export function adoptStoredSession(): boolean {
+  if (!localStorageSupported() || localStorage.getItem(`${version}/ad4m-token`)) return false;
+  const suffix = "/ad4m-token";
+  let newest: string | null = null;
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key?.endsWith(suffix) || !localStorage.getItem(key)) continue;
+    const prefix = key.slice(0, key.length - suffix.length);
+    if (prefix === version) continue;
+    if (newest === null || newest.localeCompare(prefix, undefined, { numeric: true }) < 0) newest = prefix;
+  }
+  if (newest === null) return false;
+  for (const name of SESSION_KEYS) {
+    const value = localStorage.getItem(`${newest}/${name}`);
+    if (value !== null) localStorage.setItem(`${version}/${name}`, value);
+  }
+  return true;
+}
+
 /** Convert a WebSocket URL to an HTTP base URL. */
 export function wsUrlToHttpBase(wsUrl: string): string {
   return wsUrl.replace(/^ws(s?):\/\//, (_, s) => `http${s}://`);

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { wsUrlToHttpBase, getInitials, getHue, checkConnection, isEmbedded, setLocal, getLocal, removeLocal } from './utils';
+import { wsUrlToHttpBase, getInitials, getHue, checkConnection, isEmbedded, setLocal, getLocal, removeLocal, adoptStoredSession } from './utils';
 
 describe('wsUrlToHttpBase', () => {
   it('converts ws:// to http://', () => {
@@ -113,6 +113,38 @@ describe('localStorage helpers', () => {
     setLocal('ad4m-token', 'x');
     removeLocal('ad4m-token');
     expect(getLocal('ad4m-token')).toBeNull();
+  });
+});
+
+describe('adoptStoredSession', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('carries the newest other version\'s session over, its keys together', () => {
+    localStorage.setItem('0.9.0/ad4m-token', 'older');
+    localStorage.setItem('0.9.0/ad4m-url', 'http://older:1');
+    localStorage.setItem('0.10.0/ad4m-token', 'newer');
+    localStorage.setItem('0.10.0/ad4m-url', 'http://newer:2');
+    localStorage.setItem('0.10.0/ad4m-port', '2');
+    expect(adoptStoredSession()).toBe(true);
+    expect(getLocal('ad4m-token')).toBe('newer');
+    expect(getLocal('ad4m-url')).toBe('http://newer:2');
+    expect(getLocal('ad4m-port')).toBe('2');
+  });
+
+  it('leaves a session this version stored alone', () => {
+    setLocal('ad4m-token', 'current');
+    localStorage.setItem('0.0.1/ad4m-token', 'old');
+    expect(adoptStoredSession()).toBe(false);
+    expect(getLocal('ad4m-token')).toBe('current');
+  });
+
+  it('carries nothing over when no version holds a token', () => {
+    localStorage.setItem('0.0.1/ad4m-token', '');
+    localStorage.setItem('0.0.1/ad4m-url', 'http://x:1');
+    expect(adoptStoredSession()).toBe(false);
+    expect(getLocal('ad4m-url')).toBeNull();
   });
 });
 
