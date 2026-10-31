@@ -695,6 +695,23 @@ pub struct ModelApi {
     pub api_type: ModelApiType,
     /// See [`ModelApiView::max_num_ctx`].
     pub max_num_ctx: Option<u32>,
+    /// See [`ModelApiView::native_tools`].
+    pub native_tools: Option<bool>,
+}
+
+impl ModelApi {
+    /// Whether a prompt with tools reaches this model as tool definitions. Otherwise the
+    /// caller renders the tools into the prompt and reads the calls back from the text.
+    ///
+    /// Anthropic and Ollama take tools by default. An OpenAI-shaped server takes them only
+    /// when the model says so: llama-server, vLLM and the hosted clones differ per model
+    /// and per server flag, and a server that ignores `tools` answers in prose.
+    pub fn uses_native_tools(&self) -> bool {
+        crate::ai_service::providers::api_type_supports_native_tools(&self.api_type)
+            && self
+                .native_tools
+                .unwrap_or(self.api_type != ModelApiType::OpenAi)
+    }
 }
 
 /// A remote model's endpoint as RPC results show it: whether a provider key is set,
@@ -716,6 +733,10 @@ pub struct ModelApiView {
     /// default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_num_ctx: Option<u32>,
+    /// Whether prompts with tools send them as tool definitions. Unset: yes for Anthropic
+    /// and Ollama, no for an OpenAI-shaped server (see [`ModelApi::uses_native_tools`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_tools: Option<bool>,
 }
 
 impl From<&ModelApi> for ModelApiView {
@@ -726,6 +747,7 @@ impl From<&ModelApi> for ModelApiView {
             model: api.model.clone(),
             api_type: api.api_type.clone(),
             max_num_ctx: api.max_num_ctx,
+            native_tools: api.native_tools,
         }
     }
 }
@@ -780,6 +802,9 @@ pub struct Model {
     pub api: Option<ModelApi>,
     pub local: Option<LocalModel>,
     pub model_type: ModelType,
+    /// The registered endpoint that serves `api`, linked by its URL, key and protocol
+    /// (`Ad4mDb::link_models_to_endpoints`). `None` for a local model.
+    pub endpoint_id: Option<String>,
 }
 
 impl Model {
@@ -792,6 +817,7 @@ impl Model {
             api: self.api.as_ref().map(ModelApiView::from),
             local: self.local.clone(),
             model_type: self.model_type.clone(),
+            endpoint_id: self.endpoint_id.clone(),
         }
     }
 }
@@ -808,6 +834,214 @@ pub struct ModelView {
     pub local: Option<LocalModel>,
     #[serde(rename = "modelType")]
     pub model_type: ModelType,
+    /// The endpoint that serves `api`. `None` for a local model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_id: Option<String>,
+}
+
+/// What an endpoint is, for discovery and health. The chat wire protocol is
+/// [`EndpointKind::protocol`]: llama-server, vLLM, speaches and OpenAI speak the same one
+/// and differ only in how they list models.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EndpointKind {
+    /// `/api/tags`, `/api/show`, `/api/pull`, `/api/delete`, native `/api/chat`.
+    Ollama,
+    /// `/v1/models`, `/props`.
+    LlamaServer,
+    /// `/v1/models`.
+    Vllm,
+    /// api.openai.com and its clones (Groq, OpenRouter, Gemini compat).
+    OpenAi,
+    Anthropic,
+    /// speaches, a Parakeet wrapper, whisper.cpp with `--inference-path`.
+    OpenAiAudio,
+    /// Anything else that answers `/v1/models`.
+    OpenAiCompatible,
+}
+
+impl EndpointKind {
+    /// The chat wire protocol. Only Ollama and Anthropic are not OpenAI-shaped.
+    pub fn protocol(&self) -> ModelApiType {
+        match self {
+            EndpointKind::Ollama => ModelApiType::Ollama,
+            EndpointKind::Anthropic => ModelApiType::Anthropic,
+            EndpointKind::LlamaServer
+            | EndpointKind::Vllm
+            | EndpointKind::OpenAi
+            | EndpointKind::OpenAiAudio
+            | EndpointKind::OpenAiCompatible => ModelApiType::OpenAi,
+        }
+    }
+
+    /// What an endpoint of this kind serves when its models say nothing more (plan §3.3).
+    pub fn default_capabilities(&self) -> Vec<AiCapability> {
+        use AiCapability::*;
+        match self {
+            EndpointKind::OpenAi => vec![Chat, Embeddings, Transcription, Speech],
+            EndpointKind::Ollama => vec![Chat, Embeddings],
+            EndpointKind::OpenAiAudio => vec![Transcription],
+            EndpointKind::Anthropic
+            | EndpointKind::LlamaServer
+            | EndpointKind::Vllm
+            | EndpointKind::OpenAiCompatible => vec![Chat],
+        }
+    }
+}
+
+/// What an endpoint or one of its models can do.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum AiCapability {
+    Chat,
+    Embeddings,
+    Transcription,
+    Speech,
+}
+
+impl From<&ModelType> for AiCapability {
+    fn from(model_type: &ModelType) -> Self {
+        match model_type {
+            ModelType::Llm => AiCapability::Chat,
+            ModelType::Embedding => AiCapability::Embeddings,
+            ModelType::Transcription => AiCapability::Transcription,
+        }
+    }
+}
+
+/// An upstream model server, as the executor stores and uses it. Not serialisable: it
+/// holds the key. RPC results and events carry [`EndpointView`].
+#[derive(Debug, Clone)]
+pub struct Endpoint {
+    pub id: String,
+    pub name: String,
+    pub kind: EndpointKind,
+    pub base_url: Url,
+    /// Empty: no key.
+    pub api_key: Secret,
+    /// Probed when added without any, else the operator's. Health checks never change it.
+    pub capabilities: Vec<AiCapability>,
+    /// Ceiling for Ollama's `num_ctx`; copied to the models it serves.
+    pub max_num_ctx: Option<u32>,
+    pub health: EndpointHealth,
+}
+
+impl Endpoint {
+    /// The endpoint as a client sees it: whether a key is set, never the key.
+    pub fn view(&self) -> EndpointView {
+        EndpointView {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            kind: self.kind,
+            base_url: self.base_url.clone(),
+            has_api_key: !self.api_key.is_empty(),
+            capabilities: self.capabilities.clone(),
+            max_num_ctx: self.max_num_ctx,
+            health: self.health.clone(),
+        }
+    }
+}
+
+/// An endpoint as RPC results show it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "AiEndpoint")]
+pub struct EndpointView {
+    pub id: String,
+    pub name: String,
+    pub kind: EndpointKind,
+    pub base_url: Url,
+    pub has_api_key: bool,
+    pub capabilities: Vec<AiCapability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_num_ctx: Option<u32>,
+    pub health: EndpointHealth,
+}
+
+/// The last health check of an endpoint.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointHealth {
+    pub state: EndpointState,
+    /// Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number")]
+    pub checked_at: Option<i64>,
+    /// The upstream's reason, with the endpoint's key scrubbed out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The model ids the last check listed.
+    pub served_models: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, TS)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EndpointState {
+    #[default]
+    Unknown,
+    Reachable,
+    Unauthorized,
+    Unreachable,
+}
+
+/// A server found on a loopback port by `ai.detectEndpoints`. Nothing is saved.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedEndpoint {
+    pub kind: EndpointKind,
+    pub base_url: Url,
+    pub capabilities: Vec<AiCapability>,
+    pub served_models: Vec<String>,
+}
+
+/// One model an endpoint lists.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredModel {
+    pub id: String,
+    /// What the endpoint says the model does, or a guess from its id where it says nothing.
+    pub capabilities: Vec<AiCapability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+}
+
+/// Where an upstream model stands.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelStatus {
+    pub state: ModelState,
+    /// 0..100, only while `PULLING`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ModelState {
+    Ready,
+    Missing,
+    Pulling,
+    EndpointDown,
+}
+
+/// The `model-status` event: an upstream model on one endpoint, e.g. while `ai.pullModel`
+/// downloads it. A model row names it by its `endpointId` and `api.model`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelStatusEvent {
+    pub endpoint_id: String,
+    pub remote_model: String,
+    pub status: ModelStatus,
+}
+
+/// The `ai-endpoint-status` event: an endpoint's health changed.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AiEndpointStatusEvent {
+    pub endpoint_id: String,
+    pub health: EndpointHealth,
 }
 
 // Internal User struct - NOT exposed via REST API

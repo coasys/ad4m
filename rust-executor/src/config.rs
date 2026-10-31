@@ -162,6 +162,9 @@ pub struct Ad4mConfig {
     /// DID of the cascade node that takes redirected joins first. Unset:
     /// the least-loaded node.
     pub sfu_preferred_node: Option<String>,
+    /// The config file's `ai_endpoints`, `ai_models` and `ai_defaults`, applied at
+    /// startup (`ai_service::endpoints::config::apply`).
+    pub ai_settings: Option<crate::ai_service::endpoints::config::AiSettings>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -538,6 +541,7 @@ impl Ad4mConfig {
             sfu_udp_port: None,
             sfu_public_addr: None,
             sfu_preferred_node: None,
+            ai_settings: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,

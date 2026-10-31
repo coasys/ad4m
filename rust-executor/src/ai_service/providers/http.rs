@@ -25,9 +25,6 @@ pub(crate) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// The timeout is a parameter rather than something a caller may add, because
 /// reqwest's default is none at all.
-///
-/// The OpenAI chat path is not built here: `chat_gpt_lib_rs` owns its client.
-/// It sends the key as a bearer token, which is the header reqwest does strip.
 pub(crate) fn credentialed_http(timeout: Duration) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -64,6 +61,58 @@ pub(crate) fn model_ids_from_data(json: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// An upstream answered with an error status. `body` is its reason, with the key scrubbed
+/// out: an upstream may echo the credential it refused.
+#[derive(Debug)]
+pub struct UpstreamStatus {
+    pub url: String,
+    pub status: reqwest::StatusCode,
+    pub body: String,
+}
+
+impl std::fmt::Display for UpstreamStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} answered {}: {}", self.url, self.status, self.body)
+    }
+}
+
+impl std::error::Error for UpstreamStatus {}
+
+/// `text` with every occurrence of `api_key` replaced by `<redacted>`.
+pub(crate) fn scrub(text: &str, api_key: &str) -> String {
+    if api_key.is_empty() {
+        text.to_string()
+    } else {
+        text.replace(api_key, crate::config_file::REDACTED)
+    }
+}
+
+/// Send `request` to `url` and read the JSON answer. A failure names the URL and carries
+/// the upstream's reason ([`UpstreamStatus`] for an error status), never `api_key`.
+pub(crate) async fn fetch_json(
+    request: reqwest::RequestBuilder,
+    url: &str,
+    api_key: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let response = request.send().await.map_err(|e| {
+        anyhow::anyhow!("Could not reach {url}: {}", scrub(&e.to_string(), api_key))
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(UpstreamStatus {
+            url: url.to_string(),
+            status,
+            body: scrub(&body, api_key),
+        }
+        .into());
+    }
+    response
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Could not read the answer of {url}: {e}"))
 }
 
 /// What an operator is told when [`is_transport_safe`] refuses their key.
@@ -194,6 +243,33 @@ mod tests {
 
     fn safe(url: &str) -> bool {
         is_transport_safe(&url::Url::parse(url).expect("parses"))
+    }
+
+    #[tokio::test]
+    async fn an_upstream_that_echoes_the_key_has_it_scrubbed_from_the_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/models")
+            .with_status(401)
+            .with_body(r#"{"error":"bad key sk-echoed-123"}"#)
+            .create_async()
+            .await;
+        let url = format!("{}/v1/models", server.url());
+        let request = credentialed_http(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(&url);
+
+        let error = fetch_json(request, &url, "sk-echoed-123")
+            .await
+            .unwrap_err();
+
+        let status = error
+            .downcast_ref::<UpstreamStatus>()
+            .expect("a status error");
+        assert_eq!(status.status.as_u16(), 401);
+        assert!(!error.to_string().contains("sk-echoed-123"), "{error}");
+        assert!(error.to_string().contains("bad key <redacted>"), "{error}");
     }
 
     #[test]

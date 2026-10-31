@@ -74,6 +74,10 @@ const SKIPPED: &[(&str, &str)] = &[
         "calls the provider at baseUrl over the network",
     ),
     (
+        "ai.detectEndpoints",
+        "probes this machine's loopback ports, where unrelated servers may answer",
+    ),
+    (
         "perspective.queryProlog",
         "starts a Scryer engine, which aborts in debug builds",
     ),
@@ -310,15 +314,24 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
 
     // Seeded while the streams listen: seeding publishes the events that leaked before.
     let provider_key = format!("sk-leak-provider-key-{}", id());
+    // The model's upstream refuses the key and echoes it back, as some providers do.
+    let mut upstream = mockito::Server::new_async().await;
+    upstream
+        .mock("GET", "/v1/models")
+        .with_status(401)
+        .with_body(format!(r#"{{"error":"invalid key {provider_key}"}}"#))
+        .create_async()
+        .await;
     let model_id = Ad4mDb::with_global_instance(|db| {
         let id = db.add_model(&ModelInput {
             name: "Leak test model".to_string(),
             api: Some(ModelApiInput {
-                base_url: "https://api.example.org/v1".to_string(),
+                base_url: format!("{}/v1", upstream.url()),
                 api_key: Some(provider_key.clone().into()),
                 model: "leak-model".to_string(),
                 api_type: "OpenAi".to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Llm,
@@ -327,6 +340,18 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
         crate::db::Ad4mDbResult::Ok(id)
     })
     .unwrap();
+    // The model's endpoint, checked as the health loop does: the refusal, with the echoed
+    // key, is its stored health and an `ai-endpoint-status` event.
+    let endpoint = Ad4mDb::with_global_instance(|db| {
+        let endpoint_id = db.get_model(model_id.clone())?.and_then(|m| m.endpoint_id);
+        db.get_endpoint(&endpoint_id.expect("the model has an endpoint"))
+    })
+    .unwrap()
+    .expect("the model's endpoint");
+    let health = crate::ai_service::endpoints::check_health(&endpoint)
+        .await
+        .unwrap();
+    assert_eq!(health.state, crate::types::EndpointState::Unauthorized);
     // Loads the model as start-up does: its loading-status events reach the streams.
     crate::ai_service::AIService::init_global_instance()
         .await
@@ -516,6 +541,18 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
         models.contains(&model_id) && models.contains(r#""hasApiKey":true"#),
         "{models}"
     );
+    let endpoints = operator_answer("ai.endpoints");
+    assert!(
+        endpoints.contains(&endpoint.id)
+            && endpoints.contains(r#""hasApiKey":true"#)
+            && endpoints.contains("invalid key <redacted>"),
+        "{endpoints}"
+    );
+    assert!(operator_events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| e.contains("ai-endpoint-status") && e.contains(&endpoint.id)));
     let users = operator_answer("user.list");
     assert!(users.contains(&user_email), "{users}");
     let operator_events = operator_events.lock().unwrap();

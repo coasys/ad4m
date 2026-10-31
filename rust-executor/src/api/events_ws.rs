@@ -35,6 +35,8 @@
 //! | `exception-occurred`          | `exception`   | approval requests: the agent asked, AGENT_PERMIT; else everyone | Exception occurred |
 //! | `transcription-text`          | (inline)      | the stream owner's DID | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | everyone               | AI model loading status              |
+//! | `model-status`                | (inline)      | everyone               | An upstream model's status, e.g. `ai.pullModel` progress |
+//! | `ai-endpoint-status`          | (inline)      | the main agent's DID   | An AI endpoint's health changed      |
 //! | `query-subscription-update`   | (inline)      | the subscriber among the owners, on its own connection (passes `events.watch`) | Live query delta update, or `{ lagged: true }` |
 //! | `auto-processor-event`        | (inline)      | the pass owner, if it reads the perspective | Auto-processor pass step signal |
 //! | `auto-processor-neighbourhood-state` | (inline) | owners                | Coarse-grained neighbourhood view of "someone is auto-processing" |
@@ -126,6 +128,8 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<ExceptionOccurredEvent>(ExceptionOccurred, false),
         EventSpec::of::<TranscriptionTextFilter>(AiTranscriptionText, false),
         EventSpec::of::<AIModelLoadingStatus>(AiModelLoadingStatus, false),
+        EventSpec::of::<crate::types::ModelStatusEvent>(AiModelStatus, false),
+        EventSpec::of::<crate::types::AiEndpointStatusEvent>(AiEndpointStatus, false),
         EventSpec::of::<QuerySubscriptionUpdateEvent>(PerspectiveQuerySubscription, true),
         EventSpec::of::<AutoProcessorEvent>(AutoProcessorEvent, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AutoProcessorNeighbourhoodState, true),
@@ -255,6 +259,8 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::RuntimeNotificationTriggered
         | Topic::AiTranscriptionText
         | Topic::AiModelLoadingStatus
+        | Topic::AiModelStatus
+        | Topic::AiEndpointStatus
         | Topic::PerspectiveQuerySubscription
         | Topic::AutoProcessorEvent
         | Topic::AutoProcessorNeighbourhoodState
@@ -2200,6 +2206,25 @@ mod event_spec_tests {
             (
                 Topic::AiModelLoadingStatus,
                 serde_json::to_value(AIModelLoadingStatus::default()),
+            ),
+            (
+                Topic::AiModelStatus,
+                serde_json::to_value(crate::types::ModelStatusEvent {
+                    endpoint_id: "e".into(),
+                    remote_model: "m".into(),
+                    status: crate::types::ModelStatus {
+                        state: crate::types::ModelState::Pulling,
+                        progress: Some(1.0),
+                        detail: None,
+                    },
+                }),
+            ),
+            (
+                Topic::AiEndpointStatus,
+                serde_json::to_value(crate::types::AiEndpointStatusEvent {
+                    endpoint_id: "e".into(),
+                    health: Default::default(),
+                }),
             ),
             (
                 Topic::SfuCallRenegotiationOffer,

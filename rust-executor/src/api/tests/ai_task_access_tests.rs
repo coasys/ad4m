@@ -37,6 +37,7 @@ async fn serve_unreachable_llm() -> String {
                 model: "isolation-test".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
         })
     })
