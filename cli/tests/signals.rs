@@ -108,6 +108,8 @@ fn start_with_stdout_reader_gone(name: &str) -> Executor {
     let data_path = fresh_data_path(name);
     let mut child = Command::new(env!("CARGO_BIN_EXE_ad4m-executor"))
         .args(run_args(&data_path))
+        // Readiness is an info line: an inherited RUST_LOG=warn would hide it.
+        .env("RUST_LOG", "rust_executor=info")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -192,6 +194,7 @@ fn exit_with_parent_ends_the_executor_once_its_launcher_is_killed() {
         .arg(env!("CARGO_BIN_EXE_ad4m-executor"))
         .args(run_args(&data_path))
         .env("AD4M_EXIT_WITH_PARENT", "true")
+        .env("RUST_LOG", "rust_executor=info")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
