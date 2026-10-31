@@ -963,6 +963,11 @@ pub struct EndpointInput {
     /// Left out: probed from the models the endpoint lists.
     pub capabilities: Option<Vec<crate::types::AiCapability>>,
     pub max_num_ctx: Option<u32>,
+    /// How long one `/v1` request to the endpoint may take, queueing included. Left out:
+    /// the route's default.
+    pub request_timeout_secs: Option<u32>,
+    /// At most this many requests to the endpoint at once, at least 1. Left out: no limit.
+    pub max_concurrent: Option<u32>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]

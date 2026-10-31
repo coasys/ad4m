@@ -132,10 +132,15 @@ an unknown endpoint or model name) is skipped with a warning. `kind` is one
 of `OLLAMA`, `LLAMA_SERVER`, `VLLM`, `OPEN_AI`, `ANTHROPIC`,
 `OPEN_AI_AUDIO`, `OPEN_AI_COMPATIBLE`; `capabilities` (`chat`,
 `embeddings`, `transcription`, `speech`) defaults to the kind's.
+`request_timeout_secs` bounds one `/v1` request to the endpoint, queueing
+included (default 300 for chat, 60 for embeddings, 120 for speech);
+`max_concurrent` lets at most that many requests through at once, the rest
+wait (default: no limit). A `model_type` is `LLM`, `EMBEDDING`,
+`TRANSCRIPTION` or `SPEECH`.
 
 ```json
 { "ai_endpoints": [
-    { "name": "ollama", "kind": "OLLAMA", "base_url": "http://127.0.0.1:11434", "max_num_ctx": 32768 },
+    { "name": "ollama", "kind": "OLLAMA", "base_url": "http://127.0.0.1:11434", "max_num_ctx": 32768, "max_concurrent": 2 },
     { "name": "openai", "kind": "OPEN_AI", "base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY" }
   ],
   "ai_models": [

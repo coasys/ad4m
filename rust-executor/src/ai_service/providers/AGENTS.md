@@ -1,7 +1,8 @@
 # ai_service/providers/ — agent guide
 
-Remote model servers behind two traits: `RemoteChat` (one client per model) and
-`discovery::Discover` (one listing per endpoint). Local (candle/kalosm) models do not come
+Remote model servers behind three traits: `RemoteChat` (one client per model),
+`embed::RemoteEmbed` (one client per embedding model) and `discovery::Discover` (one
+listing per endpoint). Local (candle/kalosm) models do not come
 through here — `LlmModel::Local` is a different thing entirely.
 
 ## Files
@@ -9,6 +10,7 @@ through here — `LlmModel::Local` is a different thing entirely.
 | File | Content |
 |---|---|
 | `mod.rs` | `RemoteChat` trait, the neutral `ChatRole`/`ChatTurn`/`ChatRequest`/`ChatReply`/`ChatUsage`/`ToolSpec`/`ToolCall` types, and `api_type_supports_native_tools`. No wire format. |
+| `embed.rs` | `RemoteEmbed`, `embed_client(endpoint)`: OpenAI-shaped `POST /v1/embeddings`, Ollama native `POST /api/embed`; one request per batch, order kept, the upstream's token count when reported. None for Anthropic. |
 | `discovery.rs` | `Discover` (list models; health = the listing, classified), `discover_for(kind, …)`, capability guesses per model id, `PROBE_TIMEOUT`. |
 | `http.rs` | Sending a credential over HTTP: `credentialed_http` (no redirects, a timeout), `is_transport_safe`, `fetch_json` + `UpstreamStatus` (error status with the key scrubbed), and the endpoint helpers the providers share. |
 | `openai.rs` | OpenAI-shaped HTTP on `reqwest`: OpenAI, Groq, OpenRouter, Google compat, Ollama `/v1`, vLLM, llama-server. `tools`, `tool_choice`, `response_format`, SSE with tool-call assembly and `usage`. `OpenAiDiscover` for every OpenAI-shaped kind. |
@@ -30,6 +32,9 @@ through here — `LlmModel::Local` is a different thing entirely.
 - One instance per configured model or endpoint: a connection pool is fine, per-request state is not.
 - Every client that sends a key is built from `http::credentialed_http`.
 - No error carries a key: an upstream body goes through `http::scrub` (`fetch_json` does it).
+- An upstream failure is typed: `http::UpstreamStatus` (it answered an error status, with
+  its `Retry-After`) or `http::UpstreamUnreachable` (no connection, or no answer in time).
+  `/v1` maps them to the client's status (`OpenAIError::from_upstream`).
 - A client answering `supports_native_tools() == false` refuses a request
   carrying tools rather than dropping them. A provider that does not translate
   `tool_choice` / `response_format` refuses a request carrying them

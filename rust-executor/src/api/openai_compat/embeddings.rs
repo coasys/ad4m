@@ -5,18 +5,22 @@
 //! AD4M-native clients that consume it for bandwidth reasons.  External
 //! SDKs (`openai`, LangChain, …) expect plain JSON numbers and that's
 //! what they get here.
+//!
+//! The batch is one call to [`AIService::embed_batch`], as `ai.embed` and semantic dedup
+//! make it: one request to the model's endpoint, or the local Bert of a model without one.
 
 use axum::Json;
 
 use super::errors::OpenAIJson;
 
 use super::errors::{OpenAIError, OpenAIResult};
-use super::model_selector::resolve_model;
+use super::model_selector::resolve;
+use super::passthrough::upstream_failure;
 use super::types::{EmbeddingItem, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage};
 use crate::agent::capabilities::AI_PROMPT_CAPABILITY;
 use crate::ai_service::AIService;
 use crate::billing::check_compute_credits;
-use crate::types::{ModelType, RequestContext};
+use crate::types::{EndpointKind, ModelType, RequestContext};
 
 pub async fn embeddings(
     auth: RequestContext,
@@ -33,8 +37,15 @@ pub async fn embeddings(
         }
     }
 
-    let model_id = resolve_model(&req.model, ModelType::Embedding).await?;
-    let model_id_response = req.model.clone();
+    let resolved = resolve(&req.model, ModelType::Embedding).await?;
+    if let Some(endpoint) = &resolved.endpoint {
+        if endpoint.kind == EndpointKind::Anthropic {
+            return Err(OpenAIError::model_not_supported(format!(
+                "Model '{}' is on an Anthropic endpoint, which serves no embeddings",
+                req.model
+            )));
+        }
+    }
     let inputs = req.input.into_vec();
 
     if let Some(agent_did) = auth.user_did() {
@@ -46,37 +57,44 @@ pub async fn embeddings(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
-    let mut data: Vec<EmbeddingItem> = Vec::with_capacity(inputs.len());
-    let mut total_tokens: u64 = 0;
     let batch_started = std::time::Instant::now();
     let batch_n = inputs.len();
-
-    for (index, text) in inputs.into_iter().enumerate() {
-        let result = service
-            .embed(model_id.clone(), text, auth.user_did().map(str::to_string))
-            .await
-            .map_err(|e| OpenAIError::internal(e.to_string()))?;
-        total_tokens += result.token_count as u64;
-        data.push(EmbeddingItem {
-            object: "embedding",
-            index,
-            embedding: result.embeddings,
-        });
-    }
-    // Batch-level info replaces the per-call info in AIService::embed (now
-    // debug). See rust-executor/LOGGING.md.
+    let batch = service
+        .embed_batch(
+            &resolved.model.id,
+            inputs,
+            auth.user_did().map(str::to_string),
+        )
+        .await
+        .map_err(|e| match &resolved.endpoint {
+            Some(endpoint) => {
+                upstream_failure(endpoint, resolved.remote_model().unwrap_or_default(), e)
+            }
+            None => OpenAIError::internal(e.to_string()),
+        })?;
+    // One info line per batch; see rust-executor/LOGGING.md.
     log::info!(
         "🤖 embed batch model={} n={} tokens_in={} latency_total={}ms (openai-compat)",
-        model_id,
+        resolved.model.name,
         batch_n,
-        total_tokens,
+        batch.token_count,
         batch_started.elapsed().as_millis()
     );
 
+    let total_tokens = batch.token_count as u64;
     Ok(Json(EmbeddingResponse {
         object: "list",
-        data,
-        model: model_id_response,
+        data: batch
+            .vectors
+            .into_iter()
+            .enumerate()
+            .map(|(index, embedding)| EmbeddingItem {
+                object: "embedding",
+                index,
+                embedding,
+            })
+            .collect(),
+        model: req.model,
         usage: EmbeddingUsage {
             prompt_tokens: total_tokens,
             total_tokens,
