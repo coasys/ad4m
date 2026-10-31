@@ -9987,3 +9987,38 @@ async fn an_empty_page_after_an_offset_still_counts() {
     );
     assert!(counted, "an empty page after an offset must run the COUNT");
 }
+
+/// A per-anchor limit slices the id phase in the executor, so its window is not pushed and its
+/// short page says nothing about the total: the store's count stays, "1 shown of 3 under root".
+#[tokio::test]
+async fn a_short_page_sliced_per_anchor_keeps_the_stores_count() {
+    let store = comment_tree_store();
+    let result = fixture_query_from_json(
+        &store,
+        "Comment",
+        &ModelQueryInput {
+            parent: Some(traverse_scope(
+                &["we://root"],
+                false,
+                ScopeDirection::Out,
+                Some(1),
+            )),
+            order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        COMMENT_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["we://c1"], "one per anchor, oldest first");
+    assert_eq!(
+        result.total_count, 3,
+        "the page is short because of the slice, not because the scope ran out"
+    );
+}
