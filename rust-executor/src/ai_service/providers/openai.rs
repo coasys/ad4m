@@ -63,15 +63,12 @@ impl OpenAiChat {
                 super::http::scrub(&e.to_string(), &self.api_key)
             )
         })?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(super::http::UpstreamStatus {
-                url: self.endpoint.clone(),
-                status,
-                body: super::http::scrub(&body, &self.api_key),
-            }
-            .into());
+        if !response.status().is_success() {
+            return Err(
+                super::http::UpstreamStatus::read(response, &self.endpoint, &self.api_key)
+                    .await
+                    .into(),
+            );
         }
         Ok(response)
     }

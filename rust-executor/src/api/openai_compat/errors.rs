@@ -26,6 +26,10 @@ pub struct OpenAIError {
     #[serde(skip)]
     pub status: StatusCode,
     pub error: OpenAIErrorBody,
+    /// Sent as `Retry-After`: an upstream's, passed on with its 429. Boxed: every handler
+    /// returns this error, so it stays small.
+    #[serde(skip)]
+    pub retry_after: Option<Box<str>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,6 +56,7 @@ impl OpenAIError {
                 param: None,
                 code: code.map(|s| s.to_string()),
             },
+            retry_after: None,
         }
     }
 
@@ -119,15 +124,112 @@ impl OpenAIError {
             Some("not_implemented"),
         )
     }
+
+    /// The request names a model whose endpoint cannot serve this route.
+    pub fn model_not_supported(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            message,
+            "invalid_request_error",
+            Some("model_not_supported"),
+        )
+    }
+
+    fn upstream_failure(status: StatusCode, message: &str, kind: &str) -> Self {
+        Self::new(status, message, kind, Some(kind))
+    }
+
+    /// The client's view of a failure of the model's endpoint (plan §5.4). The messages
+    /// name no URL (a user does not read endpoints), and an upstream 401 or 403 is never
+    /// passed on: the client's own token was fine.
+    pub fn from_upstream(error: &anyhow::Error) -> Self {
+        use crate::ai_service::providers::http::{UpstreamStatus, UpstreamUnreachable};
+        if let Some(unreachable) = error.downcast_ref::<UpstreamUnreachable>() {
+            return if unreachable.timed_out {
+                Self::upstream_failure(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "The model's endpoint did not answer in time",
+                    "upstream_timeout",
+                )
+            } else {
+                Self::upstream_failure(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The model's endpoint could not be reached",
+                    "upstream_unavailable",
+                )
+            };
+        }
+        let Some(answered) = error.downcast_ref::<UpstreamStatus>() else {
+            return Self::internal(error.to_string());
+        };
+        let reason = upstream_reason(&answered.body);
+        match answered.status.as_u16() {
+            401 | 403 => Self::upstream_failure(
+                StatusCode::BAD_GATEWAY,
+                "The model's endpoint refused this executor's credentials",
+                "upstream_auth",
+            ),
+            404 => Self::new(
+                StatusCode::NOT_FOUND,
+                reason,
+                "invalid_request_error",
+                Some("model_not_found"),
+            ),
+            400 | 422 => Self::new(
+                StatusCode::from_u16(answered.status.as_u16()).unwrap_or(StatusCode::BAD_REQUEST),
+                reason,
+                "invalid_request_error",
+                Some("invalid_request"),
+            ),
+            429 => Self {
+                retry_after: answered.retry_after.as_deref().map(Box::from),
+                ..Self::upstream_failure(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &reason,
+                    "rate_limit_exceeded",
+                )
+            },
+            status => Self::upstream_failure(
+                StatusCode::BAD_GATEWAY,
+                &format!("The model's endpoint answered {status}"),
+                "upstream_error",
+            ),
+        }
+    }
+}
+
+/// The reason in an upstream's error body (already scrubbed of its key): OpenAI's
+/// `error.message`, a bare `error` or FastAPI's `detail` string, else the body.
+fn upstream_reason(body: &str) -> String {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(body).ok();
+    parsed
+        .as_ref()
+        .and_then(|json| {
+            json.pointer("/error/message")
+                .or_else(|| json.get("error"))
+                .or_else(|| json.get("detail"))
+                .and_then(|reason| reason.as_str())
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| body.to_string())
 }
 
 impl IntoResponse for OpenAIError {
     fn into_response(self) -> Response {
-        (
+        let mut response = (
             self.status,
             Json(serde_json::json!({ "error": self.error })),
         )
-            .into_response()
+            .into_response();
+        if let Some(value) = self
+            .retry_after
+            .and_then(|value| axum::http::HeaderValue::from_str(&value).ok())
+        {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        response
     }
 }
 

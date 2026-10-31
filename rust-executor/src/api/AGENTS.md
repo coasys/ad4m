@@ -545,14 +545,25 @@ them against those two guards.
 
 ## openai_compat/
 
-Self-contained wire translation over `AIService`. Exception: `harness_bridge.rs` +
+Wire translation over `AIService`, and an aggregator over the AI endpoints:
+`model_selector::resolve` gives `(Model, Option<Endpoint>)` (id, name, `default`,
+`<endpoint name>/<remote model>`). `passthrough.rs` forwards chat and text completions
+and speech to a model's endpoint as the client wrote them (only `model` rewritten, SSE
+passed event by event, billed from upstream `usage`), unless the endpoint is Anthropic
+or the request has active tools the model does not take as definitions: those, and
+models without an endpoint, the executor answers. Upstream failures map per plan §5.4
+(`OpenAIError::from_upstream`); messages name no URL. Embeddings go through
+`AIService::embed_batch`. `GET /v1/models` lists model rows by name, not upstream lists.
+Exception: `harness_bridge.rs` +
 `tool_grammar.rs` are the interpretation harness's `CompletionSource` and tool
 grammar, used by `perspectives/interpretation/run.rs`. They move to `agentic/`
 (spec item 7); don't add more non-wire code here.
 
 ## Tests
 
-`tests/` (`types_tests.rs`, `shacl_ws_tests.rs`) and `openai_compat/tests.rs`.
+`tests/` (`types_tests.rs`, `shacl_ws_tests.rs`), `openai_compat/tests.rs` and
+`openai_compat/passthrough_tests.rs` (handlers against `mockito` upstreams, as a managed
+user so billing is observable through `billing::test_seam`).
 `tests/multi_user.rs` starts a multi-user executor and opens sessions from tokens the executor
 signs,
 as the WS upgrade does; the `*_access_tests.rs` files drive `build_handler_map().dispatch` as

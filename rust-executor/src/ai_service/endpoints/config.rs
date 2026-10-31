@@ -30,6 +30,11 @@ pub struct AiEndpointSetting {
     pub capabilities: Option<Vec<AiCapability>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_num_ctx: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u32>,
+    /// Unset: no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
 }
 
 /// One `ai_models` entry: `remote_model` on the endpoint named `endpoint`.
@@ -122,6 +127,8 @@ fn apply_endpoint(
             .or_else(|| existing.as_ref().map(|e| e.capabilities.clone()))
             .unwrap_or_else(|| setting.kind.default_capabilities()),
         max_num_ctx: setting.max_num_ctx,
+        request_timeout_secs: setting.request_timeout_secs,
+        max_concurrent: setting.max_concurrent,
         health: existing
             .as_ref()
             .map(|e| e.health.clone())
@@ -140,6 +147,8 @@ fn same_settings(stored: &Endpoint, wanted: &Endpoint) -> bool {
         && stored.api_key.expose_for_compare(wanted.api_key.expose())
         && stored.capabilities == wanted.capabilities
         && stored.max_num_ctx == wanted.max_num_ctx
+        && stored.request_timeout_secs == wanted.request_timeout_secs
+        && stored.max_concurrent == wanted.max_concurrent
 }
 
 fn apply_model(setting: &AiModelSetting) -> anyhow::Result<()> {

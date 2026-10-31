@@ -143,6 +143,7 @@ mod tests {
                 url: "http://h/v1/models".into(),
                 status: reqwest::StatusCode::from_u16(code).unwrap(),
                 body: "no".into(),
+                retry_after: None,
             })
         };
         assert_eq!(

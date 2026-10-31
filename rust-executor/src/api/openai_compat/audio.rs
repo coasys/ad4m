@@ -14,25 +14,23 @@
 //! (matches the proposal — full container support via `symphonia` is
 //! scoped to a follow-up to keep the dependency surface lean).
 //!
-//! ## TTS (Phase 4)
+//! ## TTS
 //!
-//! `audio/speech` forwards the request to a remote OpenAI-compatible
-//! upstream configured via a TTS-typed `Model` registration — see
-//! [`super::tts_passthrough`] for the HTTP client.  A local Kokoro
-//! backend is in the design but not in this PR; the proposal allows
-//! passthrough as a valid Phase-4 deliverable.
+//! `audio/speech` resolves a `SPEECH` model and forwards the request to its
+//! endpoint, which must have the speech capability, with that endpoint's key
+//! only ([`super::passthrough`]).
 
 use axum::{extract::Multipart, http::header, response::IntoResponse, response::Response, Json};
 
 use super::billing_amounts;
 use super::errors::{OpenAIError, OpenAIJson, OpenAIResult};
-use super::model_selector::resolve_model;
-use super::tts_passthrough;
+use super::model_selector::{resolve, resolve_model};
+use super::passthrough::{self, Upstream};
 use super::types::{SpeechRequest, TranscriptionResponse};
 use crate::agent::capabilities::{AI_PROMPT_CAPABILITY, AI_TRANSCRIBE_CAPABILITY};
 use crate::ai_service::AIService;
 use crate::billing::{bill_compute, check_compute_credits};
-use crate::types::{ModelType, RequestContext};
+use crate::types::{AiCapability, ModelType, RequestContext};
 
 pub async fn transcriptions(
     auth: RequestContext,
@@ -114,10 +112,27 @@ pub async fn transcriptions(
 
 pub async fn speech(
     auth: RequestContext,
-    OpenAIJson(req): OpenAIJson<SpeechRequest>,
+    OpenAIJson(body): OpenAIJson<serde_json::Value>,
 ) -> Result<Response, OpenAIError> {
     auth.require(&AI_PROMPT_CAPABILITY)
         .map_err(OpenAIError::forbidden)?;
+
+    let req: SpeechRequest = serde_json::from_value(body.clone())
+        .map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
+    let resolved = resolve(&req.model, ModelType::Speech).await?;
+    let upstream = Upstream::of(&resolved)
+        .filter(|upstream| {
+            upstream
+                .endpoint
+                .capabilities
+                .contains(&AiCapability::Speech)
+        })
+        .ok_or_else(|| {
+            OpenAIError::model_not_supported(format!(
+                "Model '{}' is not on an endpoint that serves speech",
+                req.model
+            ))
+        })?;
 
     if let Some(agent_did) = auth.user_did() {
         check_compute_credits(agent_did)
@@ -126,35 +141,7 @@ pub async fn speech(
         bill_compute(agent_did, amount, "ai_tts", Some("v1/audio/speech"))?;
     }
 
-    let response_format = req
-        .response_format
-        .clone()
-        .unwrap_or_else(|| "mp3".to_string());
-    let audio = tts_passthrough::synthesize(&req)
-        .await
-        .map_err(|e| match e {
-            tts_passthrough::TtsPassthroughError::NotConfigured => OpenAIError::not_implemented(
-                "No TTS backend is configured on this executor. \
-                 Register a TTS upstream via the AD4M config or wait for the local Kokoro backend.",
-            ),
-            tts_passthrough::TtsPassthroughError::Upstream(msg) => {
-                OpenAIError::internal(format!("Upstream TTS error: {msg}"))
-            }
-        })?;
-
-    let content_type = match response_format.as_str() {
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "opus" => "audio/opus",
-        "flac" => "audio/flac",
-        "pcm" => "application/octet-stream",
-        _ => "application/octet-stream",
-    };
-    Response::builder()
-        .status(200)
-        .header(header::CONTENT_TYPE, content_type)
-        .body(audio.into())
-        .map_err(|e| OpenAIError::internal(format!("Response build error: {e}")))
+    passthrough::forward_speech(upstream, body).await
 }
 
 /// Decode an uploaded audio file to 16 kHz mono `f32` samples.

@@ -18,6 +18,10 @@
 //!
 //! A model whose provider carries tools as data skips all of that and goes
 //! through [`super::native_tools`] instead.
+//!
+//! A model on an OpenAI-shaped endpoint (Ollama included) is not answered here at
+//! all: the request goes to the endpoint as it is ([`super::passthrough`]), unless it
+//! carries tools the model does not take as definitions.
 
 use std::convert::Infallible;
 use std::time::SystemTime;
@@ -30,9 +34,10 @@ use futures::Stream;
 use kalosm::language::ArcParser;
 use uuid::Uuid;
 
-use super::errors::{OpenAIError, OpenAIJson, OpenAIResult};
-use super::model_selector::resolve_model;
+use super::errors::{OpenAIError, OpenAIJson};
+use super::model_selector::resolve;
 use super::native_tools;
+use super::passthrough::{self, Route, Upstream};
 use super::tool_grammar::{self, ExtractedToolCall, ToolChoice};
 use super::types::{
     ChatChoice, ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
@@ -50,13 +55,19 @@ use crate::types::{ModelType, RequestContext};
 /// and non-streaming responses.
 pub async fn chat_completions(
     auth: RequestContext,
-    OpenAIJson(req): OpenAIJson<ChatCompletionRequest>,
+    OpenAIJson(body): OpenAIJson<serde_json::Value>,
 ) -> Result<axum::response::Response, OpenAIError> {
     auth.require(&AI_PROMPT_CAPABILITY)
         .map_err(OpenAIError::forbidden)?;
 
-    // Resolve the OpenAI `model` string to an AD4M model_id.
-    let model_id = resolve_model(&req.model, ModelType::Llm).await?;
+    let resolved = resolve(requested_model(&body), ModelType::Llm).await?;
+    if let Some(upstream) = Upstream::for_chat(&resolved, &body) {
+        return passthrough::forward_completion(&auth, upstream, Route::ChatCompletions, body)
+            .await;
+    }
+    let req: ChatCompletionRequest =
+        serde_json::from_value(body).map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
+    let model_id = resolved.model.id;
 
     let tools: Vec<ToolDef> = req.tools.clone().unwrap_or_default();
     let has_tools = !tools.is_empty();
@@ -129,12 +140,18 @@ pub async fn chat_completions(
 /// the legacy endpoint.
 pub async fn completions(
     auth: RequestContext,
-    OpenAIJson(req): OpenAIJson<CompletionRequest>,
-) -> OpenAIResult<Json<CompletionResponse>> {
+    OpenAIJson(body): OpenAIJson<serde_json::Value>,
+) -> Result<axum::response::Response, OpenAIError> {
     auth.require(&AI_PROMPT_CAPABILITY)
         .map_err(OpenAIError::forbidden)?;
 
-    let model_id = resolve_model(&req.model, ModelType::Llm).await?;
+    let resolved = resolve(requested_model(&body), ModelType::Llm).await?;
+    if let Some(upstream) = Upstream::of(&resolved) {
+        return passthrough::forward_completion(&auth, upstream, Route::Completions, body).await;
+    }
+    let req: CompletionRequest =
+        serde_json::from_value(body).map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
+    let model_id = resolved.model.id;
     let prompt = req
         .prompt
         .into_single()
@@ -177,7 +194,15 @@ pub async fn completions(
             completion_tokens: result.completion_tokens as u64,
             total_tokens: (result.prompt_tokens + result.completion_tokens) as u64,
         },
-    }))
+    })
+    .into_response())
+}
+
+/// The request's `model`; empty when it names none, which resolving refuses.
+fn requested_model(body: &serde_json::Value) -> &str {
+    body.get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
 }
 
 async fn chat_oneshot(

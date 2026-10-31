@@ -41,11 +41,18 @@ pub(super) fn create_table(conn: &Connection) -> Result<(), rusqlite::Error> {
             max_num_ctx INTEGER,
             health TEXT
         )",
-    )
+    )?;
+    // Added after the table first shipped; appended so `ENDPOINT_COLUMNS` reads both shapes.
+    for column in ["request_timeout_secs INTEGER", "max_concurrent INTEGER"] {
+        match conn.execute(&format!("ALTER TABLE ai_endpoints ADD COLUMN {column}"), []) {
+            Err(e) if !e.to_string().contains("duplicate column name") => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
-const ENDPOINT_COLUMNS: &str =
-    "id, name, kind, base_url, api_key, capabilities, max_num_ctx, health";
+const ENDPOINT_COLUMNS: &str = "id, name, kind, base_url, api_key, capabilities, max_num_ctx, health, request_timeout_secs, max_concurrent";
 
 fn json_err(column: usize, error: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(error))
@@ -67,6 +74,8 @@ fn endpoint_from_row(row: &rusqlite::Row) -> rusqlite::Result<Endpoint> {
         api_key: Secret::new(row.get::<_, Option<String>>(4)?.unwrap_or_default()),
         capabilities: serde_json::from_str(&capabilities).map_err(|e| json_err(5, e))?,
         max_num_ctx: row.get(6)?,
+        request_timeout_secs: row.get(8)?,
+        max_concurrent: row.get(9)?,
         health: match health {
             Some(health) => serde_json::from_str(&health).map_err(|e| json_err(7, e))?,
             None => EndpointHealth::default(),
@@ -129,10 +138,16 @@ impl Ad4mDb {
             .optional()?)
     }
 
-    /// Refuses `endpoint` when another one has its name, or the same protocol, URL and key:
-    /// a model links to the endpoint its `api` names, so two such endpoints could not be
-    /// told apart.
-    fn refuse_duplicate(&self, endpoint: &Endpoint) -> Ad4mDbResult<()> {
+    /// Refuses `endpoint` when another one has its name, or the same protocol, URL and key
+    /// (a model links to the endpoint its `api` names, so two such endpoints could not be
+    /// told apart), and a concurrency cap of 0, which would let no request through.
+    fn refuse_invalid(&self, endpoint: &Endpoint) -> Ad4mDbResult<()> {
+        if endpoint.max_concurrent == Some(0) {
+            return Err(InvalidEndpoint(
+                "maxConcurrent is at least 1; leave it out for no limit".into(),
+            )
+            .into());
+        }
         for other in self.get_endpoints()? {
             if other.id == endpoint.id {
                 continue;
@@ -159,9 +174,9 @@ impl Ad4mDb {
     }
 
     pub fn insert_endpoint(&self, endpoint: &Endpoint) -> Ad4mDbResult<()> {
-        self.refuse_duplicate(endpoint)?;
+        self.refuse_invalid(endpoint)?;
         self.conn.execute(
-            &format!("INSERT INTO ai_endpoints ({ENDPOINT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"),
+            &format!("INSERT INTO ai_endpoints ({ENDPOINT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
             params![
                 endpoint.id,
                 endpoint.name,
@@ -172,6 +187,8 @@ impl Ad4mDb {
                 serde_json::to_string(&endpoint.capabilities)?,
                 endpoint.max_num_ctx,
                 serde_json::to_string(&endpoint.health)?,
+                endpoint.request_timeout_secs,
+                endpoint.max_concurrent,
             ],
         )?;
         Ok(())
@@ -181,10 +198,11 @@ impl Ad4mDb {
     /// ceiling over the models it serves. Answers those models' ids: their clients have to
     /// be built again.
     pub fn update_endpoint(&self, endpoint: &Endpoint) -> Ad4mDbResult<Vec<String>> {
-        self.refuse_duplicate(endpoint)?;
+        self.refuse_invalid(endpoint)?;
         self.conn.execute(
             "UPDATE ai_endpoints SET name = ?2, kind = ?3, base_url = ?4, api_key = ?5,
-                capabilities = ?6, max_num_ctx = ?7, health = ?8
+                capabilities = ?6, max_num_ctx = ?7, health = ?8, request_timeout_secs = ?9,
+                max_concurrent = ?10
              WHERE id = ?1",
             params![
                 endpoint.id,
@@ -195,6 +213,8 @@ impl Ad4mDb {
                 serde_json::to_string(&endpoint.capabilities)?,
                 endpoint.max_num_ctx,
                 serde_json::to_string(&endpoint.health)?,
+                endpoint.request_timeout_secs,
+                endpoint.max_concurrent,
             ],
         )?;
         self.conn.execute(
@@ -333,6 +353,8 @@ impl Ad4mDb {
                         api_key: Secret::new(api_key),
                         capabilities: vec![capability],
                         max_num_ctx,
+                        request_timeout_secs: None,
+                        max_concurrent: None,
                         health: EndpointHealth::default(),
                     };
                     self.insert_endpoint(&endpoint)?;
@@ -366,6 +388,8 @@ mod tests {
             api_key: Secret::new(key),
             capabilities: vec![AiCapability::Chat],
             max_num_ctx: Some(8192),
+            request_timeout_secs: Some(90),
+            max_concurrent: Some(2),
             health: EndpointHealth::default(),
         }
     }
@@ -405,6 +429,8 @@ mod tests {
         assert!(read.api_key.expose_for_compare("sk-1"));
         assert_eq!(read.capabilities, vec![AiCapability::Chat]);
         assert_eq!(read.max_num_ctx, Some(8192));
+        assert_eq!(read.request_timeout_secs, Some(90));
+        assert_eq!(read.max_concurrent, Some(2));
         assert_eq!(read.health, stored.health);
         assert_eq!(
             db.get_endpoint_by_name("local").unwrap().unwrap().id,
@@ -431,6 +457,15 @@ mod tests {
         // Another key on the same URL is another account: allowed.
         db.insert_endpoint(&endpoint("c", "http://127.0.0.1:9931", "k2"))
             .unwrap();
+    }
+
+    #[test]
+    fn a_concurrency_cap_of_zero_is_refused() {
+        let db = db();
+        let mut capped = endpoint("a", "http://127.0.0.1:9931", "");
+        capped.max_concurrent = Some(0);
+        let refused = db.insert_endpoint(&capped).unwrap_err();
+        assert!(refused.downcast_ref::<InvalidEndpoint>().is_some());
     }
 
     // Plan §8.1 step 2: rows that share protocol, URL and key share one endpoint; a
