@@ -3,6 +3,7 @@
 //! record answered by two classes is returned.
 
 use super::*;
+use crate::perspectives::model_query::page_before_resolve_tests::{file_type, FileLanguage};
 use crate::perspectives::model_query::shape::parse_shape_from_json;
 use crate::perspectives::model_query::test_helpers::StaticShapeResolver;
 use crate::perspectives::sparql_store::SparqlStore;
@@ -258,6 +259,46 @@ async fn union_pages_by_timestamp_when_no_order_is_given() {
     assert_eq!(result.total_count, 3);
 }
 
+/// With no order the union pages on the creation time a page of one class
+/// sorts on (the earliest link of the class's conformance probe, here the
+/// flag), also for a record that got a property before its flag: the id phase
+/// reads that time from the store, where the union used to read it off the
+/// hydrated row.
+#[tokio::test]
+async fn union_pages_on_the_creation_time_a_single_class_page_sorts_on() {
+    let (store, resolver) = task_and_note();
+    // `t_late`'s status predates its flag; `t_mid`'s links all share one time.
+    add(&store, "app://t_late", "app://flag", "app://task", "30");
+    add(
+        &store,
+        "app://t_late",
+        "app://status",
+        "literal:string:open",
+        "5",
+    );
+    task(&store, "app://t_mid", None, "open", "20");
+
+    let single = execute_model_query_inner(
+        &store,
+        resolver.get_shape("Task").unwrap().as_ref(),
+        &query(serde_json::json!({"limit": 2})),
+        &resolver,
+        0,
+    )
+    .await
+    .unwrap();
+    let union = execute_union_query(
+        &store,
+        &classes(&["Task", "Note"]),
+        &query(serde_json::json!({"limit": 2})),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ids(&single), vec!["app://t_mid", "app://t_late"]);
+    assert_eq!(ids(&union), ids(&single));
+}
+
 /// What has no single meaning over several classes is refused, not approximated.
 #[tokio::test]
 async fn union_refuses_per_anchor_slicing_and_relation_order_keys() {
@@ -345,4 +386,209 @@ async fn union_reads_a_class_named_twice_once() {
         .unwrap();
     assert_eq!(ids(&result), vec!["app://t1", "app://n2"]);
     assert_eq!(result.total_count, 2);
+}
+
+/// Record `i` of [`posts_and_clips`].
+fn item(i: usize) -> String {
+    format!("item://{i:05}")
+}
+
+/// Record `i`'s rank: none on every fifth record, so a page can reach the
+/// rows without one.
+fn rank_of(i: usize) -> Option<usize> {
+    (!i.is_multiple_of(5)).then_some((i * 7) % 13)
+}
+
+/// `n` records, `Post` when `i` is even and `Clip` when odd, created in `i`
+/// order, each with a rank ([`rank_of`]) and a file on `files`. The file is
+/// language-backed, so every row hydrated with it is one `expressionGet`:
+/// `files.gets()` counts the rows a read hydrated.
+fn posts_and_clips(n: usize, files: &FileLanguage) -> (SparqlStore, StaticShapeResolver) {
+    let store = SparqlStore::new(None).unwrap();
+    for uri in ["app://models/Post", "app://models/Clip"] {
+        add(&store, uri, "rdf://type", "ad4m://SubjectClass", "1");
+    }
+    for i in 0..n {
+        let (id, ts) = (item(i), format!("{}", 1_700_000_000_000u64 + i as u64));
+        let kind = format!("item://{}", class_of(i));
+        add(&store, &id, "item://type", &kind, &ts);
+        if let Some(rank) = rank_of(i) {
+            add(
+                &store,
+                &id,
+                "item://rank",
+                &format!("literal:number:{rank}"),
+                &ts,
+            );
+        }
+        add(
+            &store,
+            &id,
+            "item://file",
+            &format!("{}://f{i}", files.address()),
+            &ts,
+        );
+    }
+    let resolver = StaticShapeResolver::new();
+    for (class, kind) in [("Post", "item://Post"), ("Clip", "item://Clip")] {
+        let shape = format!(
+            r#"{{"className":"{class}","properties":{{
+                "type":{{"predicate":"item://type","required":true,"flag":true,"initial":"{kind}"}},
+                "rank":{{"predicate":"item://rank"}},
+                "file":{{"predicate":"item://file","resolveLanguage":"{}"}}
+            }},"relations":{{}}}}"#,
+            files.address()
+        );
+        resolver.register(class, parse_shape_from_json(&shape, class).unwrap());
+    }
+    (store, resolver)
+}
+
+/// The class record `i` is read as in [`posts_and_clips`].
+fn class_of(i: usize) -> &'static str {
+    if i.is_multiple_of(2) {
+        "Post"
+    } else {
+        "Clip"
+    }
+}
+
+/// A page of a union is read from the members' ids and sort values, and only
+/// the page's records are hydrated (PERF-29): before, every row of every class
+/// was hydrated to be sorted, and the page a second time. Each read also
+/// returns what the hydrate-everything union returned: rows in order (ties and
+/// rows without the key by id, those last both ways), classes, files, totals.
+#[tokio::test]
+async fn union_hydrates_only_the_page() {
+    let files = FileLanguage::serve(std::time::Duration::ZERO).await;
+    let n = 60;
+    let (store, resolver) = posts_and_clips(n, &files);
+    let union = classes(&["Post", "Clip"]);
+
+    // The rows the union pages through for `order: {rank: dir}`: ranked rows by
+    // rank, then id; unranked rows after them, by id.
+    let by_rank = |dir: &str| -> Vec<usize> {
+        let mut ranked: Vec<usize> = (0..n).filter(|&i| rank_of(i).is_some()).collect();
+        ranked.sort_by(|&a, &b| {
+            let c = rank_of(a).cmp(&rank_of(b));
+            if dir == "DESC" { c.reverse() } else { c }.then(a.cmp(&b))
+        });
+        ranked.extend((0..n).filter(|&i| rank_of(i).is_none()));
+        ranked
+    };
+    let cases: Vec<(serde_json::Value, Vec<usize>)> = vec![
+        // No order: creation time.
+        (
+            serde_json::json!({"limit": 5, "offset": 3}),
+            (3..8).collect(),
+        ),
+        (
+            serde_json::json!({"order": {"rank": "DESC"}, "limit": 4, "offset": 2}),
+            by_rank("DESC")[2..6].to_vec(),
+        ),
+        // Across the last ranked rows into the unranked ones.
+        (
+            serde_json::json!({"order": {"rank": "ASC"}, "limit": 4, "offset": 46}),
+            by_rank("ASC")[46..50].to_vec(),
+        ),
+    ];
+    for (q, expected) in cases {
+        let before = files.gets();
+        let result = execute_union_query(&store, &union, &query(q.clone()), &resolver)
+            .await
+            .unwrap();
+        let want: Vec<String> = expected.iter().map(|&i| item(i)).collect();
+        assert_eq!(ids(&result), want, "{q}");
+        assert_eq!(result.total_count, n, "{q}: totalCount is the whole union");
+        for (row, &i) in result.instances.iter().zip(&expected) {
+            assert_eq!(row["__subjectClass"], class_of(i), "{q}: {row}");
+            assert_eq!(row["__subjectClasses"], serde_json::json!([class_of(i)]));
+            assert_eq!(
+                row["file"],
+                serde_json::json!(format!("data:{};base64,{i}", file_type(i))),
+                "{q}: {row}"
+            );
+        }
+        assert_eq!(
+            files.gets() - before,
+            expected.len(),
+            "{q}: hydrated rows off the page"
+        );
+    }
+
+    // A count hydrates nothing.
+    let before = files.gets();
+    let count = execute_union_query(
+        &store,
+        &union,
+        &query(serde_json::json!({"limit": 0})),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert!(count.instances.is_empty());
+    assert_eq!(count.total_count, n);
+    assert_eq!(files.gets() - before, 0, "a count hydrated rows");
+    files.stop().await;
+}
+
+/// A record both classes return is read once, as `preferClasses` picks, also
+/// when the page is cut before anything is hydrated; and a `where` the store
+/// cannot answer still filters its class's rows (that class is hydrated whole
+/// to be filtered, the others are not).
+#[tokio::test]
+async fn union_page_classifies_a_two_class_record_and_filters_after_hydration() {
+    let files = FileLanguage::serve(std::time::Duration::ZERO).await;
+    let n = 20;
+    let (store, resolver) = posts_and_clips(n, &files);
+    // Record 4 is a Post; make it a Clip too.
+    add(
+        &store,
+        &item(4),
+        "item://type",
+        "item://Clip",
+        "1700000000004",
+    );
+    let union = classes(&["Post", "Clip"]);
+    // Without `preferClasses` the tie between unrelated classes breaks
+    // alphabetically, as `subject_classes_of` ranks it.
+    for (prefer, class) in [(None, "Clip"), (Some("Post"), "Post")] {
+        let mut q = serde_json::json!({"limit": 3, "offset": 3});
+        if let Some(p) = prefer {
+            q["preferClasses"] = serde_json::json!([p]);
+        }
+        let result = execute_union_query(&store, &union, &query(q.clone()), &resolver)
+            .await
+            .unwrap();
+        assert_eq!(ids(&result), vec![item(3), item(4), item(5)], "{q}");
+        assert_eq!(
+            result.total_count, n,
+            "{q}: the two-class record counts once"
+        );
+        assert_eq!(result.instances[1]["__subjectClass"], class, "{q}");
+        let mut all: Vec<&str> = result.instances[1]["__subjectClasses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        all.sort();
+        assert_eq!(all, vec!["Clip", "Post"], "{q}");
+    }
+
+    // `timestamp` is matched after hydration.
+    let q = serde_json::json!({
+        "where": {"timestamp": {"gt": 1_700_000_000_010u64}},
+        "order": {"rank": "ASC"},
+        "limit": 3,
+    });
+    let result = execute_union_query(&store, &union, &query(q), &resolver)
+        .await
+        .unwrap();
+    let mut expected: Vec<usize> = (11..n).filter(|&i| rank_of(i).is_some()).collect();
+    expected.sort_by_key(|&i| (rank_of(i), i));
+    let want: Vec<String> = expected[..3].iter().map(|&i| item(i)).collect();
+    assert_eq!(ids(&result), want);
+    assert_eq!(result.total_count, (11..n).count());
+    files.stop().await;
 }
