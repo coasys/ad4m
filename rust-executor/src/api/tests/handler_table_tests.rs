@@ -262,6 +262,7 @@ fn render_guard(guard: &Guard) -> String {
 pub(crate) fn render_guard_table(map: &HandlerMap) -> String {
     let guards = map.guards();
     let or_null = map.or_null_methods();
+    let local_only = map.local_only_methods();
     let kind = |guard: Option<&Guard>| match guard {
         Some(Guard::Open) => "Open",
         Some(Guard::Operator) => "Operator",
@@ -282,13 +283,14 @@ pub(crate) fn render_guard_table(map: &HandlerMap) -> String {
     counts.sort();
     let mut out = format!("{GUARD_TABLE_START}\n\n");
     out.push_str(&format!(
-        "{} methods: {}.\n\n",
+        "{} methods: {}. Local only (the operator on this machine): {}.\n\n",
         guards.len(),
         counts
             .iter()
             .map(|(k, n)| format!("{k} {n}"))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        local_only.len()
     ));
     out.push_str("| Method | Guard |\n|---|---|\n");
     for (name, guard) in guards {
@@ -298,7 +300,12 @@ pub(crate) fn render_guard_table(map: &HandlerMap) -> String {
         } else {
             ""
         };
-        out.push_str(&format!("| `{name}` | {rendered}{null} |\n"));
+        let local = if local_only.contains(&name) {
+            ", local only"
+        } else {
+            ""
+        };
+        out.push_str(&format!("| `{name}` | {rendered}{null}{local} |\n"));
     }
     out.push('\n');
     out.push_str(GUARD_TABLE_END);

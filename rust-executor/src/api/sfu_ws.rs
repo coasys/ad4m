@@ -71,7 +71,6 @@ fn parse<P: DeserializeOwned>(params: Value) -> Result<P, WsRpcError> {
 fn caller_did(ctx: &RequestContext) -> Result<String, WsRpcError> {
     ctx.session
         .acts_as_did()
-        .map(str::to_string)
         .ok_or_else(|| WsRpcError::unauthorized("Caller DID not resolved"))
 }
 

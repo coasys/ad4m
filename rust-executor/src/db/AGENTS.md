@@ -9,6 +9,7 @@ with its own `impl Ad4mDb` block. Child modules can use the private `conn` field
 | File | Content |
 |---|---|
 | `session_cutoffs.rs` | The users' session cutoffs (`users.sessions_valid_after`), read by `agent::revoked` |
+| `rekey.rs` | The rows `identity.rekey` moves to the main agent's new DID: notification owners; and the claims the old key made, which it forgets |
 | `tasks.rs` | Owner-scoped reads of the `tasks` table: `get_task_owner`, `get_tasks_owned_by` |
 
 Task CRUD (`add_task`, `get_task`, `get_tasks`, `update_task`, `remove_task`) and every

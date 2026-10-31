@@ -49,6 +49,13 @@ impl WsRpcError {
             message: msg.into(),
         }
     }
+    /// 409: the call does not fit the executor's state (`no-config-file`, `no-log-file`).
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            code: 409,
+            message: msg.into(),
+        }
+    }
     pub fn too_many_requests(msg: impl Into<String>) -> Self {
         Self {
             code: 429,
@@ -259,6 +266,8 @@ struct Entry {
     guard: Option<Guard>,
     /// [`MethodFlags::or_null`]: answer `null` where the method would answer 404.
     or_null: bool,
+    /// [`MethodFlags::local_only`]: only the operator on this machine may call it.
+    local_only: bool,
 }
 
 /// Returned by [`HandlerMap::method`] to mark a method `read` or `long` and to set its
@@ -292,6 +301,27 @@ impl MethodFlags<'_> {
             entry: Some(entry),
         }
     }
+
+    /// Only the operator on this machine may call the method: the admin credential, or no token
+    /// on an executor without one, on a loopback listener
+    /// ([`Session::is_operator_on_this_machine`]). The dispatcher checks it after the guard;
+    /// every other caller, a grant with every capability and the admin credential on a
+    /// network listener included, gets 403 [`super::guards::LOCAL_ONLY`]. For calls that
+    /// replace, open or use the executor's own keys, files or process.
+    ///
+    /// [`Session::is_operator_on_this_machine`]: crate::agent::session::Session::is_operator_on_this_machine
+    pub fn local_only(self) -> Self {
+        let name = &self.spec.name;
+        let entry = self
+            .entry
+            .unwrap_or_else(|| panic!("'{name}' is not dispatched through the map: no local_only"));
+        entry.local_only = true;
+        MethodFlags {
+            spec: self.spec,
+            entry: Some(entry),
+        }
+    }
+
     /// Who may call the method. The dispatcher runs the guard after the params deserialize
     /// and before the handler.
     pub fn guard(self, guard: Guard) -> Self {
@@ -362,6 +392,7 @@ impl HandlerMap {
             result: check::<R>,
             guard: None,
             or_null: false,
+            local_only: false,
         });
         MethodFlags {
             spec: push_spec::<P, R>(&mut self.specs, name),
@@ -401,6 +432,18 @@ impl HandlerMap {
             .handlers
             .iter()
             .filter(|(_, entry)| entry.or_null)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The methods flagged [`MethodFlags::local_only`], sorted by name.
+    pub fn local_only_methods(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .handlers
+            .iter()
+            .filter(|(_, entry)| entry.local_only)
             .map(|(name, _)| name.as_str())
             .collect();
         names.sort();
@@ -467,7 +510,13 @@ impl HandlerMap {
             WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
         })?;
         match &entry.guard {
-            Some(guard) => guard.admit(msg_type, params, ctx).await,
+            Some(guard) => {
+                guard.admit(msg_type, params, ctx).await?;
+                if entry.local_only && !ctx.session.is_operator_on_this_machine() {
+                    return Err(WsRpcError::forbidden(super::guards::LOCAL_ONLY));
+                }
+                Ok(())
+            }
             // `require_guards` stops a map with such a method at start-up; a map built
             // without it still refuses the call.
             None => Err(WsRpcError::internal(format!(
@@ -512,6 +561,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::perspectives_ws::register_ws_handlers(&mut map);
     super::agent_session_ws::register_ws_handlers(&mut map);
     super::runtime_ws::register_ws_handlers(&mut map);
+    super::config_ws::register_ws_handlers(&mut map);
     super::languages_ws::register_ws_handlers(&mut map);
     super::expressions_ws::register_ws_handlers(&mut map);
     super::ai_ws::register_ws_handlers(&mut map);
