@@ -193,6 +193,9 @@ export class ApiClient {
     private _ensureWs(): void {
         if (this._ws) return
         if (this._authFailed !== null) throw new RpcError(401, this._authFailed)
+        // A dial ends any wait for one: a call or subscriber that dials during the backoff
+        // leaves no timer behind to swallow the retry after this socket's own drop.
+        this._cancelReconnect()
         const WsImpl = this._webSocketImpl ?? globalThis.WebSocket
         const ws = new WsImpl(this._getWsUrl())
         this._ws = ws

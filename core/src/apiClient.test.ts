@@ -651,6 +651,16 @@ describe('ApiClient.reconnectNow', () => {
         expect(TestSocket.instances).toHaveLength(dialling)
     })
 
+    it('ends the wait when a call dials during the backoff, so that socket retries from 500 ms', () => {
+        backOff(5) // waiting 8 s
+        call('agent.status').catch(() => {})
+        const dialled = TestSocket.instances.length - 1
+        socket(dialled).open()
+        socket(dialled).drop()
+        jest.advanceTimersByTime(500)
+        expect(TestSocket.instances).toHaveLength(dialled + 2)
+    })
+
     it('does nothing once the executor refused the token', () => {
         open()
         socket(0).open()
@@ -667,9 +677,21 @@ describe('ApiClient.reconnectNow', () => {
         expect(TestSocket.instances).toHaveLength(before)
     })
 
-    it('is on Ad4mClient', () => {
+    it('dials through Ad4mClient.reconnectNow', () => {
         const { Ad4mClient } = require('./Ad4mClient')
-        expect(typeof Ad4mClient.prototype.reconnectNow).toBe('function')
+        const facade = new Ad4mClient(url, undefined, {
+            webSocketImpl: TestSocket as unknown as new (url: string) => WebSocket,
+        })
+        try {
+            facade.on('agent-updated', () => {})
+            const first = TestSocket.instances.length - 1
+            socket(first).open()
+            socket(first).drop()
+            facade.reconnectNow()
+            expect(TestSocket.instances).toHaveLength(first + 2)
+        } finally {
+            facade.close()
+        }
     })
 
     describe('in a browser', () => {
