@@ -22,8 +22,8 @@ use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
 use crate::secret::Secret;
 use crate::types::{
-    AiEndpointStatusEvent, Endpoint, EndpointHealth, EndpointInput, EndpointKind, EndpointView,
-    ModelState, ModelStatus, ModelStatusEvent,
+    AiEndpointStatusEvent, Endpoint, EndpointHealth, EndpointInput, EndpointKind, EndpointState,
+    EndpointView, ModelState, ModelStatus, ModelStatusEvent,
 };
 
 pub mod config;
@@ -158,14 +158,25 @@ pub(crate) async fn publish_model_status(
 
 /// Check `endpoint` now: store the health, and publish it when it changed.
 pub async fn check_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
-    let health = discover_for(
-        endpoint.kind,
-        endpoint.base_url.clone(),
-        endpoint.api_key.expose(),
-        PROBE_TIMEOUT,
-    )
-    .health()
-    .await;
+    // Add and update refuse such an endpoint, but a migrated or imported one can hold a
+    // key for a plain-HTTP remote host: probing it would send the key in the clear.
+    let health = if refuse_cleartext_key(endpoint).is_err() {
+        EndpointHealth {
+            state: EndpointState::Unreachable,
+            checked_at: Some(chrono::Utc::now().timestamp_millis()),
+            detail: Some(CLEARTEXT_KEY_REFUSAL.to_string()),
+            served_models: Vec::new(),
+        }
+    } else {
+        discover_for(
+            endpoint.kind,
+            endpoint.base_url.clone(),
+            endpoint.api_key.expose(),
+            PROBE_TIMEOUT,
+        )
+        .health()
+        .await
+    };
     Ad4mDb::with_global_instance(|db| db.set_endpoint_health(&endpoint.id, &health))?;
     let changed = health.state != endpoint.health.state
         || health.served_models != endpoint.health.served_models
@@ -354,7 +365,7 @@ impl AIService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AiCapability, EndpointState};
+    use crate::types::AiCapability;
 
     fn input(name: &str, url: &str, key: Option<&str>) -> EndpointInput {
         EndpointInput {
@@ -423,6 +434,26 @@ mod tests {
             .unwrap_err();
         assert!(error.downcast_ref::<InvalidEndpoint>().is_some(), "{error}");
         assert!(AIService::endpoints().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_health_check_sends_no_key_over_plain_http_to_a_remote_host() {
+        // Add and update refuse such an endpoint, but the migration from model-owned
+        // connections or an import stores one as it was.
+        let service = service().await;
+        service
+            .add_endpoint(input("legacy", "http://127.0.0.1:1", Some("sk-legacy")))
+            .await
+            .unwrap();
+        let mut endpoint = Ad4mDb::with_global_instance(|db| db.get_endpoint_by_name("legacy"))
+            .unwrap()
+            .unwrap();
+        endpoint.base_url = url::Url::parse("http://203.0.113.9:8000/v1").unwrap();
+
+        let health = check_health(&endpoint).await.unwrap();
+
+        assert_eq!(health.state, EndpointState::Unreachable);
+        assert_eq!(health.detail.as_deref(), Some(CLEARTEXT_KEY_REFUSAL));
     }
 
     #[tokio::test]

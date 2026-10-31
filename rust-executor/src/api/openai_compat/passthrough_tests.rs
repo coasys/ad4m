@@ -12,7 +12,9 @@ use super::errors::OpenAIJson;
 use super::model_selector::{resolve, Resolved};
 use super::passthrough::Upstream;
 use super::{audio, chat, embeddings, models};
-use crate::agent::capabilities::{AI_PROMPT_CAPABILITY, AI_READ_CAPABILITY};
+use crate::agent::capabilities::{
+    AI_PROMPT_CAPABILITY, AI_READ_CAPABILITY, AI_TRANSCRIBE_CAPABILITY,
+};
 use crate::agent::session::{Principal, Session};
 use crate::agent::AgentContext;
 use crate::ai_service::estimate_token_count;
@@ -851,4 +853,104 @@ async fn speech_goes_to_the_speech_endpoint_with_its_key_only() {
         body_json(refused).await["error"]["code"],
         "model_not_supported"
     );
+}
+
+/// Paid hosting, and `USER` has no credits left.
+fn user_without_credits() {
+    Ad4mDb::with_global_instance(|db| {
+        db.set_free_hosting_enabled(false)?;
+        db.add_user("broke@example.org", USER, "password")
+    })
+    .unwrap();
+}
+
+fn transcriber() -> RequestContext {
+    RequestContext::for_session(
+        Session::for_test(Principal::Agent(AgentContext::managed(USER.into())))
+            .with_caps(vec![AI_TRANSCRIBE_CAPABILITY.clone()]),
+    )
+}
+
+/// A `/v1/audio/transcriptions` form for `model` with a few bytes of WAV.
+async fn transcription_form(model: &str) -> axum::extract::Multipart {
+    use axum::extract::FromRequest;
+    let boundary = "passthrough-test-boundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\
+         Content-Type: audio/wav\r\n\r\nRIFFaudio\r\n--{boundary}--\r\n"
+    );
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    axum::extract::Multipart::from_request(request, &())
+        .await
+        .unwrap()
+}
+
+/// A transcription model `stt` on an audio endpoint at `server`.
+fn transcription_model(server: &mockito::ServerGuard) {
+    let speaches = endpoint("speaches", EndpointKind::OpenAiAudio, &server.url(), "");
+    save(&speaches);
+    model(
+        "stt",
+        ModelType::Transcription,
+        &speaches,
+        "faster-whisper-small",
+    );
+}
+
+#[tokio::test]
+async fn a_user_without_credits_reaches_no_endpoint() {
+    fresh();
+    user_without_credits();
+    let mut server = mockito::Server::new_async().await;
+    let upstream = server
+        .mock("POST", Matcher::Any)
+        .expect(0)
+        .create_async()
+        .await;
+    openai_model(&server, "sk-upstream").await;
+    transcription_model(&server);
+
+    let chat = chat(user(), json!({ "model": "chat", "messages": hello() })).await;
+    assert_eq!(chat.status(), 429);
+    assert_eq!(body_json(chat).await["error"]["code"], "insufficient_quota");
+
+    let transcription = audio::transcriptions(transcriber(), transcription_form("stt").await)
+        .await
+        .into_response();
+    assert_eq!(transcription.status(), 429);
+    upstream.assert_async().await;
+    assert!(test_seam::calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_users_transcription_is_billed_to_the_user_by_its_words() {
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("POST", "/v1/audio/transcriptions")
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"text":"one two three"}"#)
+        .create_async()
+        .await;
+    transcription_model(&server);
+    rate("stt", 0.5);
+
+    let response = audio::transcriptions(transcriber(), transcription_form("stt").await)
+        .await
+        .into_response();
+
+    assert_eq!(response.status(), 200);
+    let calls = test_seam::calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].agent_did, USER);
+    assert_eq!(calls[0].operation, concat!("ai_", "transcription"));
+    assert_eq!(calls[0].amount, 1.5, "3 words at 0.5");
 }
