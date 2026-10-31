@@ -29,7 +29,7 @@ describe('QuerySubscriptionProxy', () => {
     await expect(subscription.initialized).resolves.toBe(true);
     expect(subscription.result).toEqual([{ s: 'a' }]);
     expect(subscription.id).toBe('sub-1');
-    expect(client.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT * WHERE { ?s ?p ?o }');
+    expect(client.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT * WHERE { ?s ?p ?o }', { signal: expect.any(AbortSignal) });
   });
 
   it('opens a model query over a class when given one', async () => {
@@ -38,7 +38,7 @@ describe('QuerySubscriptionProxy', () => {
     client.modelSubscribe = modelSubscribe;
     const subscription = new QuerySubscriptionProxy('perspective-1', '{"limit":1}', client, 'ad4m://TextContent');
     await subscription.subscribe();
-    expect(modelSubscribe).toHaveBeenCalledWith('perspective-1', 'ad4m://TextContent', '{"limit":1}');
+    expect(modelSubscribe).toHaveBeenCalledWith('perspective-1', 'ad4m://TextContent', '{"limit":1}', { signal: expect.any(AbortSignal) });
     expect(client.subscribeQuery).not.toHaveBeenCalled();
     expect(subscription.result).toEqual({ instances: [{ id: 'a' }], totalCount: 1 });
   });
@@ -63,6 +63,28 @@ describe('QuerySubscriptionProxy', () => {
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', record);
+    }
+  });
+
+  it('perspective.subscribeQuery leaves nothing re-opening when the first subscribe fails', async () => {
+    const reconnects = new Set<() => void>();
+    const subscribeQuery = jest.fn().mockRejectedValue(new Error('Prolog live queries are not supported'));
+    const client = {
+      subscribeQuery,
+      onQueryUpdate: () => () => {},
+      onReconnect: (cb: () => void) => { reconnects.add(cb); return () => reconnects.delete(cb); },
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    } as any;
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(createProxy(client).subscribeQuery('a Prolog query')).rejects.toThrow('not supported');
+      // The caller never got a proxy to dispose: a reconnect must not open the query again.
+      for (const reconnect of [...reconnects]) reconnect();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(subscribeQuery).toHaveBeenCalledTimes(1);
+      expect(reconnects.size).toBe(0);
+    } finally {
+      errors.mockRestore();
     }
   });
 });
