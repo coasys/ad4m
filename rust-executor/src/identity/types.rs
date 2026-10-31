@@ -540,6 +540,202 @@ pub struct DidBotScope {
     pub expires: u64,
 }
 
+// ---------------------------------------------------------------------------------------------
+// Key sessions (`user.sessionChallenge`, `user.loginWithKey`, `user.renewSession`, ...)
+// ---------------------------------------------------------------------------------------------
+
+/// What a key statement asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyPurpose {
+    /// A new session.
+    Login,
+    /// One more hour for the session's grant that `grant` names.
+    Renew,
+}
+
+/// The app a key statement is signed for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum SessionClient {
+    /// A native app that signed with its own device key (a desktop or phone shell).
+    Native,
+    /// A web page that signed through the auth domain. Not accepted yet: a web login answers a
+    /// one-time code, which this executor does not issue.
+    Web { origin: String },
+}
+
+/// A statement a device key signs to log in to one executor, or to renew a session there. The
+/// signed bytes are `signing_bytes("coasys:session", statement)`: JCS of the statement (absent
+/// optional fields left out, never `null`), with `"domain": "coasys:session"` added.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KeyStatement {
+    /// `1`.
+    pub v: u8,
+    pub purpose: KeyPurpose,
+    /// The identity the key belongs to: `did:scid:coasys:1:…`.
+    pub scid: String,
+    /// The signing device key, a multikey (`z6Mk…`).
+    pub key: String,
+    /// The audience: the executor's DID, from `user.sessionChallenge`.
+    pub executor: String,
+    /// The challenge from `user.sessionChallenge`.
+    pub challenge: String,
+    pub client: SessionClient,
+    /// PKCE for a web login; a native statement carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub code_challenge: Option<String>,
+    /// The grant id a `renew` statement renews; a `login` statement carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub grant: Option<String>,
+    /// Unix seconds; within 120 s of the executor's clock.
+    #[ts(type = "number")]
+    pub issued_at: u64,
+}
+
+/// A key statement with its signature (multibase base58btc, as a proof value).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedKeyStatement {
+    pub statement: KeyStatement,
+    pub sig: String,
+}
+
+/// `user.sessionChallenge`: a one-use challenge for a key statement, and the executor's DID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionChallenge {
+    /// 32 random bytes, base64url without padding.
+    pub challenge: String,
+    /// The audience a statement names: the DID of the executor's token signing key.
+    pub executor: String,
+    /// Unix seconds by the executor's clock; a statement's `issuedAt` may follow it.
+    #[ts(type = "number")]
+    pub expires_at: u64,
+}
+
+/// `user.loginWithKey` params.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginWithKeyParams {
+    pub proof: SignedKeyStatement,
+    /// The app the session is for: its name and the capabilities it asks for. The operator
+    /// role holds every capability whatever it asks.
+    pub app: crate::types::AuthInfoInput,
+}
+
+/// The role of a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionRole {
+    /// The operator: the admin credential, the loopback caller, or a key login of the operator
+    /// record's identity.
+    Operator,
+    /// A session on a managed agent.
+    Tenant,
+    /// A grant on the main agent.
+    App,
+    Anonymous,
+}
+
+/// `user.loginWithKey`: the session a key login opened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct KeySessionResult {
+    pub token: String,
+    #[ts(type = "number")]
+    pub expires_at: u64,
+    pub grant_id: String,
+    pub role: SessionRole,
+    /// The DID of the agent the session acts as.
+    pub did: String,
+    /// The identity that logged in.
+    pub scid: String,
+}
+
+/// `user.renewSession` params: a `renew` statement naming the caller's grant.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RenewSessionParams {
+    pub proof: SignedKeyStatement,
+}
+
+/// `user.renewSession`: a token for the same grant (the same id), and its new expiry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RenewedSession {
+    pub token: String,
+    #[ts(type = "number")]
+    pub expires_at: u64,
+}
+
+/// `user.currentSession`: the caller's own session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    pub role: SessionRole,
+    /// The DID of the agent the session acts as.
+    pub did: Option<String>,
+    /// The identity of a key login.
+    pub scid: Option<String>,
+    /// The key id of a key login's device key in its log.
+    pub key_id: Option<String>,
+    pub grant_id: Option<String>,
+    #[ts(type = "number | null")]
+    pub expires_at: Option<u64>,
+    /// `credential`, `loopback` or `key`, for the operator.
+    pub operator_source: Option<String>,
+}
+
+/// `user.endAllSessions` params.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct EndAllSessionsParams {
+    /// Keep the caller's own grant.
+    pub keep_current: bool,
+    /// End only grants made before this (Unix seconds).
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub before: Option<u64>,
+}
+
+/// `user.endAllSessions`: how many active grants ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct EndedSessions {
+    pub ended: u32,
+}
+
+/// A key statement for the executor's own device key to sign: `scid` and `key` are the main
+/// agent's identity and device key, which the executor fills in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UnsignedKeyStatement {
+    pub v: u8,
+    pub purpose: KeyPurpose,
+    pub executor: String,
+    pub challenge: String,
+    pub client: SessionClient,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub code_challenge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub grant: Option<String>,
+    #[ts(type = "number")]
+    pub issued_at: u64,
+}
+
+/// `agent.signSessionStatement` params.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SignSessionStatementParams {
+    pub statement: UnsignedKeyStatement,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

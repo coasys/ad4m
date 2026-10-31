@@ -642,7 +642,32 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "offer": "coasys:offer:1:x" }),
     ),
     ("identity.joinStatus", || json!({ "offerId": "o" })),
+    // Key sessions.
+    (
+        "user.loginWithKey",
+        || json!({ "proof": signed_key_statement("login"), "app": { "appName": "a", "appDesc": "", "appDomain": "" } }),
+    ),
+    (
+        "user.renewSession",
+        || json!({ "proof": signed_key_statement("renew") }),
+    ),
+    ("user.endAllSessions", || json!({ "keepCurrent": true })),
+    (
+        "agent.signSessionStatement",
+        || json!({ "statement": { "v": 1, "purpose": "login", "executor": "did:key:z6Mk", "challenge": "c", "client": { "kind": "native" }, "issuedAt": 1 } }),
+    ),
 ];
+
+fn signed_key_statement(purpose: &str) -> Value {
+    json!({
+        "statement": {
+            "v": 1, "purpose": purpose, "scid": "did:scid:coasys:1:Qm", "key": "z6Mk",
+            "executor": "did:key:z6Mk", "challenge": "c", "client": { "kind": "native" },
+            "issuedAt": 1,
+        },
+        "sig": "z",
+    })
+}
 
 fn signed_offer() -> Value {
     json!({
@@ -1081,7 +1106,8 @@ async fn only_the_operator_binds_the_main_agent_to_an_identity() {
 
 /// `Guard::Cap` checks the capability alone, so a caller without a token reaches exactly the
 /// methods whose capability is in the anonymous set (and the `Open` ones): asking for a
-/// capability, redeeming it, signing up, logging in, verifying an email.
+/// capability, redeeming it, signing up, logging in (by password or by a device key), verifying
+/// an email.
 #[test]
 fn anonymous_callers_reach_only_the_anonymous_capabilitys_methods() {
     let map = build_handler_map();
@@ -1100,8 +1126,10 @@ fn anonymous_callers_reach_only_the_anonymous_capabilitys_methods() {
             "agent.requestCapability",
             "user.create",
             "user.login",
+            "user.loginWithKey",
             "user.multiUserEnabled",
             "user.requestVerification",
+            "user.sessionChallenge",
             "user.verifyEmail",
         ]
     );
@@ -1120,6 +1148,7 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
     assert_eq!(
         operator_methods,
         vec![
+            "agent.signSessionStatement",
             "identity.claimOffer",
             "identity.resetLog",
             "runtime.grantNotification",
@@ -1437,7 +1466,10 @@ fn only_methods_that_check_no_capability_are_open() {
             "runtime.freeHostingEnabled",
             "runtime.info",
             "runtime.tlsDomain",
+            "user.currentSession",
+            "user.endAllSessions",
             "user.logout",
+            "user.renewSession",
         ]
     );
 }

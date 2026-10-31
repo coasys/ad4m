@@ -54,6 +54,29 @@ pub enum Principal {
     Anonymous,
 }
 
+/// Where an operator session's role comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperatorSource {
+    /// The admin credential.
+    Credential,
+    /// No token on a loopback listener of an executor without an admin credential (#1059).
+    Loopback,
+    /// A grant with the operator role, from a login with a device key of the operator record's
+    /// identity.
+    Key,
+}
+
+impl OperatorSource {
+    /// The wire name (`user.currentSession`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OperatorSource::Credential => "credential",
+            OperatorSource::Loopback => "loopback",
+            OperatorSource::Key => "key",
+        }
+    }
+}
+
 /// Why a token opens no session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthError {
@@ -115,6 +138,8 @@ pub struct Session {
     /// The DID of the agent the session acts as. A grant's is set at open; the main agent's
     /// is read once it exists for the operator (a socket can open before `agent.generate()`).
     did: OnceLock<String>,
+    /// Where the operator role comes from; `None` unless the principal is the operator.
+    operator_source: Option<OperatorSource>,
 }
 
 impl Session {
@@ -125,10 +150,15 @@ impl Session {
         reach: ListenerReach,
     ) -> Result<Session, AuthError> {
         if is_admin_credential_token_on(token, admin_credential, reach) {
-            return Ok(Session::without_token(
-                Principal::Operator,
-                vec![ALL_CAPABILITY.clone()],
-            ));
+            let source = if token.is_empty() {
+                OperatorSource::Loopback
+            } else {
+                OperatorSource::Credential
+            };
+            return Ok(Session {
+                operator_source: Some(source),
+                ..Session::without_token(Principal::Operator, vec![ALL_CAPABILITY.clone()])
+            });
         }
         if token.is_empty() {
             return Ok(Session::without_token(
@@ -153,6 +183,17 @@ impl Session {
         })?;
 
         let grant = grant_for(&claims)?;
+        if grant.is_operator() {
+            // The operator role a key login carries: the operator, within the grant, so it
+            // ends when the grant does.
+            return Ok(Session {
+                principal: Principal::Operator,
+                caps: vec![ALL_CAPABILITY.clone()],
+                grant: Some(grant),
+                did: OnceLock::new(),
+                operator_source: Some(OperatorSource::Key),
+            });
+        }
         let did = OnceLock::new();
         match grant.agent.managed_did() {
             Some(agent_did) => {
@@ -168,6 +209,7 @@ impl Session {
             caps: grant.caps.clone(),
             grant: Some(grant),
             did,
+            operator_source: None,
         })
     }
 
@@ -178,6 +220,7 @@ impl Session {
             caps,
             grant: None,
             did: OnceLock::new(),
+            operator_source: None,
         }
     }
 
@@ -221,22 +264,29 @@ impl Session {
         }
     }
 
-    /// Completes when the session stops holding: its grant ends or its token expires, so an
-    /// idle socket closes at expiry as it does at a revocation. Never for the operator and
-    /// anonymous callers.
+    /// Completes when the session stops holding: its grant ends or expires, so an idle socket
+    /// closes at expiry as it does at a revocation. It watches the grant's expiry, not the
+    /// token's: a renewal moves the expiry, and the socket stays open. Never for the admin
+    /// credential, the loopback operator and anonymous callers.
     pub fn over(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
         let grant = self.grant.clone();
         async move {
             let Some(grant) = grant else {
                 return std::future::pending().await;
             };
-            let expired = grant
-                .expires_at
-                .saturating_add(TOKEN_EXPIRY_LEEWAY_SECONDS + 1);
-            let wait = std::time::Duration::from_secs(expired.saturating_sub(super::grants::now()));
-            tokio::select! {
-                _ = grant.ended.cancelled() => {}
-                _ = tokio::time::sleep(wait) => {}
+            loop {
+                let expired = grant
+                    .expires_at()
+                    .saturating_add(TOKEN_EXPIRY_LEEWAY_SECONDS + 1);
+                let now = super::grants::now();
+                if now >= expired {
+                    return;
+                }
+                let wait = std::time::Duration::from_secs(expired - now);
+                tokio::select! {
+                    _ = grant.ended.cancelled() => return,
+                    _ = tokio::time::sleep(wait) => {}
+                }
             }
         }
     }
@@ -266,12 +316,28 @@ impl Session {
         self.caps.clone()
     }
 
-    /// The grant the session acts within. `None` for the operator and anonymous callers.
+    /// The grant the session acts within. `None` for the admin credential, the loopback
+    /// operator and anonymous callers; an operator from a key login has its grant.
     pub fn grant(&self) -> Option<&Arc<LiveGrant>> {
         self.grant.as_ref()
     }
 
-    /// A user session's grant: what `user.logout` revokes.
+    /// Where the operator role comes from; `None` unless [`Session::is_operator`].
+    pub fn operator_source(&self) -> Option<OperatorSource> {
+        self.operator_source
+    }
+
+    /// The device key behind the session's grant, when a key login made it.
+    pub fn key_binding(&self) -> Option<&super::grants::KeyBinding> {
+        self.grant.as_ref().and_then(|g| g.key.as_ref())
+    }
+
+    /// The id of the session's grant.
+    pub fn grant_id(&self) -> Option<&TokenId> {
+        self.grant.as_ref().map(|g| &g.id)
+    }
+
+    /// A user session's grant: what `user.revokeAllSessions` reads.
     pub fn user_grant(&self) -> Option<&Arc<LiveGrant>> {
         match &self.principal {
             Principal::Agent(AgentContext::Managed { .. }) => self.grant.as_ref(),
@@ -373,8 +439,11 @@ impl Session {
             ))),
             _ => None,
         };
+        let operator_source =
+            (principal == Principal::Operator).then_some(OperatorSource::Credential);
         Session {
             grant,
+            operator_source,
             ..Session::without_token(principal, caps)
         }
     }
@@ -607,7 +676,7 @@ mod resolution_tests {
                 "a user never holds every capability"
             );
             assert!(
-                session.grant().is_some_and(|g| g.expires_at > 0),
+                session.grant().is_some_and(|g| g.expires_at() > 0),
                 "a user token expires"
             );
             assert!(session.check().is_ok());

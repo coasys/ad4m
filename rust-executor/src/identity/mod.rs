@@ -12,6 +12,7 @@ pub mod cache;
 pub mod claim;
 pub mod device;
 pub mod head;
+pub mod key_login;
 pub mod operator;
 pub mod person;
 pub mod resolver;
@@ -78,6 +79,7 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         cache,
         store_url: settings.store_url.clone(),
         resolver: Arc::new(resolver),
+        challenges: Default::default(),
     };
     let service = Arc::new(service);
     if SERVICE.set(service.clone()).is_err() {
@@ -86,9 +88,10 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
     }
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
-            handle.spawn(run_recheck(service));
+            handle.spawn(run_recheck(service.clone()));
+            handle.spawn(key_login::run_key_session_watch(service));
         }
-        Err(_) => log::error!("identity: no runtime for the re-check of links"),
+        Err(_) => log::error!("identity: no runtime for the re-check of links and key sessions"),
     }
     Ok(())
 }

@@ -15,7 +15,8 @@ REST/WS shim. Split plan: spec item 6.
 
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
-handlers), `runtime`, `users`, and `agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
+handlers), `runtime`, `users`, `identity`, `key_login` (login with a device key and the calls of
+key sessions; the work is in `identity::key_login`), and `agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
@@ -113,7 +114,14 @@ access check: a call that fails both gets the access answer.
 
 Notes on some methods:
 
-- `Open` handlers check the session's principal (`user.logout`). `user.revokeAllSessions` is
+- `Open` handlers check the session's principal: `user.logout` revokes the caller's own grant
+  (any session a token opened, a key session's operator role included; 400 without a grant),
+  `user.renewSession` needs a key-bound grant, `user.endAllSessions` a key-bound session or a
+  session on a managed agent, `user.currentSession` answers every caller.
+  `user.sessionChallenge` and `user.loginWithKey` are `Cap(agent:AUTHENTICATE)`, which the
+  anonymous set holds in single-user mode too. `agent.signSessionStatement` is `Operator`, and
+  its handler refuses an operator from a key login (`local-only`): only the admin credential or
+  the loopback caller signs as this device. `user.revokeAllSessions` is
   `Cap(agent:UPDATE)`, as `agent.removeApp`: since #1399 an app a user approved acts as the
   user's agent too; its handler checks the principal for a named user.
 - `Operator`: `runtime.importData` writes rows as they are in the file, granted notifications
@@ -144,7 +152,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-205 methods: Cap 79, Executor 33, Open 5, Operator 18, Owns 68, UserOrOperator 2.
+211 methods: Cap 81, Executor 33, Open 8, Operator 19, Owns 68, UserOrOperator 2.
 
 | Method | Guard |
 |---|---|
@@ -169,6 +177,7 @@ the guard checked:
 | `agent.requestCapability` | `Cap(agent:AUTHENTICATE)` |
 | `agent.revokeToken` | `Owns(Grant token, agent:UPDATE)` |
 | `agent.sign` | `Cap(agent:SIGN)` |
+| `agent.signSessionStatement` | `Operator` |
 | `agent.status` | `Cap(agent:READ)` |
 | `agent.unlock` | `Executor(agent:SIGN)` |
 | `agent.updateProfile` | `Cap(agent:UPDATE)` |
@@ -342,14 +351,19 @@ the guard checked:
 | `sfu.stopRoom` | `Cap(neighbourhood:UPDATE)` |
 | `user.create` | `Cap(runtime.user_management:CREATE)` |
 | `user.credits` | `Operator` |
+| `user.currentSession` | `Open` |
 | `user.emailTest` | `Executor(*:*)` |
+| `user.endAllSessions` | `Open` |
 | `user.freeAccess` | `Operator` |
 | `user.list` | `Executor(runtime.user_management:READ)` |
 | `user.login` | `Cap(runtime.user_management:LOGIN)` |
+| `user.loginWithKey` | `Cap(agent:AUTHENTICATE)` |
 | `user.logout` | `Open` |
 | `user.multiUserEnabled` | `Cap(runtime.user_management[enabled]:READ)` |
+| `user.renewSession` | `Open` |
 | `user.requestVerification` | `Cap(runtime.user_management:VERIFY)` |
 | `user.revokeAllSessions` | `Cap(agent:UPDATE)` |
+| `user.sessionChallenge` | `Cap(agent:AUTHENTICATE)` |
 | `user.setMultiUserEnabled` | `Operator` |
 | `user.verifyEmail` | `Cap(runtime.user_management:VERIFY)` |
 | `user.wallet` | `Executor(runtime.user_management:READ)` |

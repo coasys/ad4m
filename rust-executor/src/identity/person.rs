@@ -234,6 +234,7 @@ mod tests {
                 backend,
                 cache,
                 store_url: None,
+                challenges: Default::default(),
             };
             World {
                 service,
