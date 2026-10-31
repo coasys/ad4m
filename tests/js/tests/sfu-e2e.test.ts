@@ -21,6 +21,7 @@ import { e11Outsider } from "../helpers/sfu/e2e/scenarios/e11-outsider.js";
 import { e12Topology } from "../helpers/sfu/e2e/scenarios/e12-topology.js";
 import { e13Mesh } from "../helpers/sfu/e2e/scenarios/e13-mesh.js";
 import { e14AdvertisedAddress } from "../helpers/sfu/e2e/scenarios/e14-advertised-address.js";
+import { e17NetworkSwitch } from "../helpers/sfu/e2e/scenarios/e17-network-switch.js";
 import { e19TabOpensSpace } from "../helpers/sfu/e2e/scenarios/e19-tab-opens-space.js";
 import { e20TabTakesOver } from "../helpers/sfu/e2e/scenarios/e20-tab-takes-over.js";
 import { e21TabGivesUp } from "../helpers/sfu/e2e/scenarios/e21-tab-gives-up.js";
@@ -134,6 +135,7 @@ describe("SFU: end to end through the SDK", function () {
   scenario(e12Topology, 900_000);
   scenario(e13Mesh, 900_000);
   scenario(e14AdvertisedAddress, 600_000);
+  scenario(e17NetworkSwitch, 600_000);
   scenario(e19TabOpensSpace, 600_000);
   scenario(e20TabTakesOver, 600_000);
   scenario(e21TabGivesUp, 600_000);
