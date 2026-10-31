@@ -6,12 +6,17 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
-use crate::ai_service::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
+use crate::ai_service::endpoints::EndpointNotFound;
+use crate::ai_service::providers::discovery::discover_for;
+use crate::ai_service::providers::http::{
+    is_transport_safe, CLEARTEXT_KEY_REFUSAL, DISCOVERY_TIMEOUT,
+};
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
 use crate::types::{
-    AIModelLoadingStatus, AITask, AITaskInput, Model, ModelInput, ModelType, ModelView,
-    RequestContext, VoiceActivityParamsInput,
+    AIModelLoadingStatus, AITask, AITaskInput, DetectedEndpoint, EndpointInput, EndpointKind,
+    EndpointView, Model, ModelInput, ModelType, ModelView, RequestContext,
+    VoiceActivityParamsInput,
 };
 use base64::Engine;
 
@@ -67,8 +72,8 @@ async fn list_models(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
 /// arbitrary key, which is the same authority adding a model carries and more
 /// than reading the models already configured.
 ///
-/// That includes the failure body. `list_models` puts the upstream response
-/// verbatim into its error, so a caller can point `baseUrl` at a host this
+/// That includes the failure body. The listing puts the upstream response
+/// into its error (key scrubbed), so a caller can point `baseUrl` at a host this
 /// executor can reach and read what it answers. Deliberate, on two grounds: a
 /// holder of AI_CREATE can already name an arbitrary URL and send it
 /// credentials, so this widens reach and not authority; and the body is the
@@ -90,6 +95,11 @@ async fn discover_models(params: Value, _ctx: Arc<RequestContext>) -> Result<Val
             .map_err(WsRpcError::bad_request)?,
         None => crate::types::ModelApiType::OpenAi,
     };
+    let kind = match api_type {
+        crate::types::ModelApiType::OpenAi => EndpointKind::OpenAiCompatible,
+        crate::types::ModelApiType::Anthropic => EndpointKind::Anthropic,
+        crate::types::ModelApiType::Ollama => EndpointKind::Ollama,
+    };
 
     let api_key = params
         .get("apiKey")
@@ -108,11 +118,106 @@ async fn discover_models(params: Value, _ctx: Arc<RequestContext>) -> Result<Val
         return Err(WsRpcError::bad_request(CLEARTEXT_KEY_REFUSAL));
     }
 
-    let models = crate::ai_service::providers::list_models(&api_type, api_key, base_url)
+    let models = discover_for(kind, base_url, api_key, DISCOVERY_TIMEOUT)
+        .list_models()
         .await
         .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    let ids: Vec<String> = models.into_iter().map(|model| model.id).collect();
 
-    Ok(serde_json::to_value(models)?)
+    Ok(serde_json::to_value(ids)?)
+}
+
+// ── Endpoints ──
+
+/// The answer to a failed endpoint call: the caller's mistake (a refused write, a key not
+/// sent again, a key over plain HTTP) is a bad request, a missing endpoint 404.
+fn endpoint_error(e: anyhow::Error) -> WsRpcError {
+    if e.downcast_ref::<crate::db::InvalidEndpoint>().is_some()
+        || e.downcast_ref::<crate::db::ApiKeyNotResent>().is_some()
+        || e.downcast_ref::<crate::ai_service::providers::http::UpstreamStatus>()
+            .is_some()
+    {
+        WsRpcError::bad_request(e.to_string())
+    } else if e.downcast_ref::<EndpointNotFound>().is_some() {
+        WsRpcError::not_found(e.to_string())
+    } else {
+        WsRpcError::internal(format!("{e:#}"))
+    }
+}
+
+async fn service() -> Result<AIService, WsRpcError> {
+    AIService::global_instance()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))
+}
+
+async fn list_endpoints(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let endpoints = AIService::endpoints().map_err(endpoint_error)?;
+    Ok(serde_json::to_value(endpoints)?)
+}
+
+async fn add_endpoint(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let input: EndpointInput = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    let endpoint = service()
+        .await?
+        .add_endpoint(input)
+        .await
+        .map_err(endpoint_error)?;
+    Ok(serde_json::to_value(endpoint)?)
+}
+
+async fn update_endpoint(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: AiUpdateEndpointParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    let endpoint = service()
+        .await?
+        .update_endpoint(&body.id, body.endpoint)
+        .await
+        .map_err(endpoint_error)?;
+    Ok(serde_json::to_value(endpoint)?)
+}
+
+async fn remove_endpoint(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: AiRemoveEndpointParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    service()
+        .await?
+        .remove_endpoint(&body.id, body.cascade.unwrap_or(false))
+        .await
+        .map_err(endpoint_error)?;
+    Ok(Value::Bool(true))
+}
+
+/// Probes this machine's loopback ports for model servers. Saves nothing.
+async fn detect_endpoints(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let detected = crate::ai_service::endpoints::detect::detect_endpoints().await;
+    Ok(serde_json::to_value(detected)?)
+}
+
+async fn pull_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: AiUpstreamModelParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    service()
+        .await?
+        .pull_model(&body.endpoint_id, &body.remote_model)
+        .await
+        .map_err(endpoint_error)?;
+    Ok(Value::Bool(true))
+}
+
+async fn delete_upstream_model(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let body: AiUpstreamModelParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    service()
+        .await?
+        .delete_upstream_model(&body.endpoint_id, &body.remote_model)
+        .await
+        .map_err(endpoint_error)?;
+    Ok(Value::Bool(true))
 }
 
 /// Refuse a model whose key would cross the network in the clear.
@@ -431,11 +536,33 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .long()
         .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
     map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model)
-        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AI_UPDATE_CAPABILITY.clone()));
     map.method::<AiIdParams, bool>("ai.removeModel", remove_model)
-        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AI_DELETE_CAPABILITY.clone()));
     map.method::<AiSetDefaultModelParams, bool>("ai.setDefaultModel", set_default_model)
+        .guard(Guard::Executor(AI_UPDATE_CAPABILITY.clone()));
+    // The upstream servers, with their URLs and health: the operator's view (users read
+    // `ai.models`). Keys never leave: `hasApiKey` says whether one is set.
+    map.method::<NoParams, Vec<EndpointView>>("ai.endpoints", list_endpoints)
+        .read()
+        .guard(Guard::Executor(AI_READ_CAPABILITY.clone()));
+    // Probed once before it saves.
+    map.method::<EndpointInput, EndpointView>("ai.addEndpoint", add_endpoint)
         .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    map.method::<AiUpdateEndpointParams, EndpointView>("ai.updateEndpoint", update_endpoint)
+        .guard(Guard::Executor(AI_UPDATE_CAPABILITY.clone()));
+    map.method::<AiRemoveEndpointParams, bool>("ai.removeEndpoint", remove_endpoint)
+        .guard(Guard::Executor(AI_DELETE_CAPABILITY.clone()));
+    // Requests to this machine's loopback ports; saves nothing.
+    map.method::<NoParams, Vec<DetectedEndpoint>>("ai.detectEndpoints", detect_endpoints)
+        .read()
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // Ollama only. Progress goes out as `model-status`.
+    map.method::<AiUpstreamModelParams, bool>("ai.pullModel", pull_model)
+        .long()
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    map.method::<AiUpstreamModelParams, bool>("ai.deleteUpstreamModel", delete_upstream_model)
+        .guard(Guard::Executor(AI_DELETE_CAPABILITY.clone()));
     map.method::<AiGetDefaultModelParams, Option<ModelView>>(
         "ai.getDefaultModel",
         get_default_model,
@@ -626,6 +753,34 @@ pub struct AiDiscoverModelsParams {
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+pub struct AiUpdateEndpointParams {
+    pub id: String,
+    pub endpoint: EndpointInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiRemoveEndpointParams {
+    pub id: String,
+    /// Remove the models that run on the endpoint too. Without it, a removal is refused
+    /// while any does.
+    #[ts(optional)]
+    pub cascade: Option<bool>,
+}
+
+/// A model on an Ollama endpoint, by the id Ollama knows it by.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiUpstreamModelParams {
+    pub endpoint_id: String,
+    pub remote_model: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct AiAddModelParams {
     pub model: ModelInput,
 }
@@ -711,9 +866,11 @@ mod model_key_tests {
                 model: "gpt".to_string(),
                 api_type: ModelApiType::OpenAi,
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Llm,
+            endpoint_id: None,
         }
     }
 
@@ -743,6 +900,7 @@ mod model_key_tests {
                     model: "gpt".to_string(),
                     api_type: "OPEN_AI".to_string(),
                     max_num_ctx: None,
+                    native_tools: None,
                 }),
                 local: None,
                 model_type: ModelType::Llm,
@@ -791,6 +949,7 @@ mod model_key_tests {
                 model: "gpt".to_string(),
                 api_type: "OPEN_AI".to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Llm,
@@ -898,5 +1057,69 @@ mod compute_credit_tests {
         assert_eq!(results.0.unwrap_err().code, 403, "a user without credits");
         assert!(results.1.is_ok(), "a user with credits");
         assert!(results.2.is_ok(), "a caller without a user pays nothing");
+    }
+}
+
+#[cfg(test)]
+mod endpoint_guard_tests {
+    use super::*;
+    use crate::api::ws_handler::build_handler_map;
+    use serde_json::json;
+
+    fn params(method: &str) -> Value {
+        let endpoint =
+            json!({ "name": "e", "kind": "OLLAMA", "baseUrl": "http://127.0.0.1:11434" });
+        match method {
+            "ai.addEndpoint" => endpoint,
+            "ai.updateEndpoint" => json!({ "id": "e1", "endpoint": endpoint }),
+            "ai.updateModel" => json!({ "id": "m1", "model": { "name": "m", "type": "LLM" } }),
+            "ai.setDefaultModel" => json!({ "id": "m1", "modelType": "LLM" }),
+            "ai.pullModel" | "ai.deleteUpstreamModel" => {
+                json!({ "endpointId": "e1", "remoteModel": "m" })
+            }
+            "ai.endpoints" | "ai.detectEndpoints" => json!({}),
+            _ => json!({ "id": "e1" }),
+        }
+    }
+
+    /// Who passes each endpoint and model-admin method: an app on the main agent holding
+    /// what a user token holds by default (AI READ, CREATE, PROMPT, TRANSCRIBE: no UPDATE
+    /// or DELETE), and a user session holding every AI capability.
+    #[tokio::test]
+    async fn rewrites_and_removals_need_update_and_delete_and_users_are_refused_all() {
+        let map = build_handler_map();
+        let app = RequestContext::app_for_test(get_user_default_capabilities());
+        let user =
+            RequestContext::user_for_test("did:key:ai-admin-user", vec![AI_ALL_CAPABILITY.clone()]);
+
+        let app_passes = [
+            ("ai.endpoints", true),
+            ("ai.addEndpoint", true),
+            ("ai.detectEndpoints", true),
+            ("ai.pullModel", true),
+            ("ai.updateEndpoint", false),
+            ("ai.removeEndpoint", false),
+            ("ai.deleteUpstreamModel", false),
+            ("ai.updateModel", false),
+            ("ai.removeModel", false),
+            ("ai.setDefaultModel", false),
+        ];
+        for (method, passes) in app_passes {
+            let app_answer = map.admit(method, &params(method), &app).await;
+            assert_eq!(
+                app_answer.is_ok(),
+                passes,
+                "{method} as an app: {app_answer:?}"
+            );
+            if let Err(refused) = app_answer {
+                assert_eq!(refused.code, 403, "{method}");
+            }
+            let user_answer = map.admit(method, &params(method), &user).await;
+            assert_eq!(
+                user_answer.map_err(|e| e.code),
+                Err(403),
+                "{method} as a user: endpoints are the operator's"
+            );
+        }
     }
 }

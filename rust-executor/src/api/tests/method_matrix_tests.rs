@@ -272,6 +272,23 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "id": "m1", "model": { "name": "m", "type": "LLM" } }),
     ),
     ("ai.removeModel", || json!({ "id": "m1" })),
+    (
+        "ai.addEndpoint",
+        || json!({ "name": "e", "kind": "OLLAMA", "baseUrl": "http://127.0.0.1:11434" }),
+    ),
+    (
+        "ai.updateEndpoint",
+        || json!({ "id": "e1", "endpoint": { "name": "e", "kind": "VLLM", "baseUrl": "http://127.0.0.1:8000" } }),
+    ),
+    ("ai.removeEndpoint", || json!({ "id": "e1" })),
+    (
+        "ai.pullModel",
+        || json!({ "endpointId": "e1", "remoteModel": "qwen3:8b" }),
+    ),
+    (
+        "ai.deleteUpstreamModel",
+        || json!({ "endpointId": "e1", "remoteModel": "qwen3:8b" }),
+    ),
     ("ai.getDefaultModel", || json!({ "modelType": "LLM" })),
     ("ai.addTask", || json!({ "task": ai_task() })),
     ("ai.updateTask", || {

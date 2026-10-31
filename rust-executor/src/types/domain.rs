@@ -943,6 +943,26 @@ pub struct ModelApiInput {
     /// Optional ceiling for the provider's context window, in tokens.
     /// See [`crate::types::ModelApi::max_num_ctx`].
     pub max_num_ctx: Option<u32>,
+    /// See [`crate::types::ModelApiView::native_tools`].
+    pub native_tools: Option<bool>,
+}
+
+/// An endpoint to add, or the new settings of one (`ai.addEndpoint`, `ai.updateEndpoint`).
+#[derive(Debug, Deserialize, Clone, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "AiEndpointInput", optional_fields)]
+pub struct EndpointInput {
+    pub name: String,
+    pub kind: crate::types::EndpointKind,
+    pub base_url: url::Url,
+    /// The provider key. Left out on add: no key. Left out on update: the stored key stays,
+    /// and the update is refused if `baseUrl` changes too, because a key goes only to the
+    /// endpoint it was set for. Empty: no key. Never serialised back out.
+    #[ts(as = "Option<String>")]
+    pub api_key: Option<Secret>,
+    /// Left out: probed from the models the endpoint lists.
+    pub capabilities: Option<Vec<crate::types::AiCapability>>,
+    pub max_num_ctx: Option<u32>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]

@@ -4,6 +4,9 @@ import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
 import { ModelInput, Model, ModelType } from "./AITypes"
 import type { ModelInput as ModelInputData } from "../generated/api/ModelInput";
+import type { AiEndpoint } from "../generated/api/AiEndpoint";
+import type { AiEndpointInput } from "../generated/api/AiEndpointInput";
+import type { DetectedEndpoint } from "../generated/api/DetectedEndpoint";
 
 export class AIClient {
     #apiClient: ApiClient;
@@ -36,6 +39,55 @@ export class AIClient {
      */
     async discoverModels(baseUrl: string, apiKey?: string, apiType?: string): Promise<string[]> {
         return this.#apiClient.call('ai.discoverModels', { baseUrl, apiKey, apiType });
+    }
+
+    /**
+     * The upstream model servers this executor uses, with their health. Operator only:
+     * a managed user's session is refused. Keys never come back: `hasApiKey` says
+     * whether one is set.
+     */
+    async endpoints(): Promise<AiEndpoint[]> {
+        return this.#apiClient.call('ai.endpoints', {});
+    }
+
+    /**
+     * Register an upstream server. The executor lists its models once first: the answer
+     * carries the endpoint's health, and its capabilities when `capabilities` is left out.
+     * It saves an endpoint that does not answer yet.
+     */
+    async addEndpoint(endpoint: AiEndpointInput): Promise<AiEndpoint> {
+        return this.#apiClient.call('ai.addEndpoint', endpoint);
+    }
+
+    /**
+     * Replace an endpoint's settings. Without `apiKey` the stored key stays, and the update
+     * is refused if `baseUrl` changes too. The models on the endpoint follow it.
+     */
+    async updateEndpoint(id: string, endpoint: AiEndpointInput): Promise<AiEndpoint> {
+        return this.#apiClient.call('ai.updateEndpoint', { id, endpoint });
+    }
+
+    /** Remove an endpoint. Refused while models run on it, unless `cascade` removes them too. */
+    async removeEndpoint(id: string, cascade?: boolean): Promise<boolean> {
+        return this.#apiClient.call('ai.removeEndpoint', { id, cascade });
+    }
+
+    /** Model servers running on the executor's machine (loopback ports). Nothing is saved. */
+    async detectEndpoints(): Promise<DetectedEndpoint[]> {
+        return this.#apiClient.call('ai.detectEndpoints', {});
+    }
+
+    /**
+     * Pull a model onto an Ollama endpoint. Resolves when the pull is done; progress
+     * arrives as `model-status` events.
+     */
+    async pullModel(endpointId: string, remoteModel: string, options?: CallOptions): Promise<boolean> {
+        return this.#apiClient.call('ai.pullModel', { endpointId, remoteModel }, options);
+    }
+
+    /** Delete a model from an Ollama endpoint. Refused while a model uses it. */
+    async deleteUpstreamModel(endpointId: string, remoteModel: string): Promise<boolean> {
+        return this.#apiClient.call('ai.deleteUpstreamModel', { endpointId, remoteModel });
     }
 
     async addModel(model: ModelInput, options?: CallOptions): Promise<string> {

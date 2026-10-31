@@ -377,6 +377,7 @@ async fn the_default_model_never_shows_its_key() {
                 model: "gpt".to_string(),
                 api_type: "OpenAi".to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Llm,
