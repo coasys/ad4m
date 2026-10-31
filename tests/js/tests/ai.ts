@@ -557,19 +557,10 @@ export default function aiTests(testContext: TestContext) {
                 const audioData = await convertAudioToPCM('../transcription_test.m4a');
                 let transcribedText = '';
 
-                // These should be the default parameters
-                const customParams = {
-                    startThreshold: 0.3,
-                    startWindow: 150,
-                    endThreshold: 0.2,
-                    endWindow: 300,
-                    timeBeforeSpeech: 100
-                };
-
                 const streamId = await ad4mClient.ai.openTranscriptionStream("Whisper", (text) => {
                     console.log("Received transcription:", text);
                     transcribedText += text;
-                }, customParams);
+                });
 
                 // Type assertion for the feedTranscriptionStream function with unknown intermediate
                 const feedStream = (ad4mClient.ai.feedTranscriptionStream.bind(ad4mClient.ai) as unknown) as (streamIds: string | string[], audio: number[]) => Promise<void>;
@@ -590,82 +581,22 @@ export default function aiTests(testContext: TestContext) {
                 console.log("Final transcription:", transcribedText);
             });
 
-            it.skip('can do fast (word-by-word) audio transcription', async() => {
-                const ad4mClient = testContext.ad4mClient!;
-                const audioData = await convertAudioToPCM('../transcription_test.m4a');
-                let transcribedWords: string[] = [];
-
-                // Configure parameters for word-by-word detection
-                // Use very short end window and low thresholds to separate words
-                const wordByWordParams = {
-                    startThreshold: 0.25,        // Lower threshold to detect softer speech
-                    startWindow: 100,            // Quick start detection
-                    endThreshold: 0.15,          // Lower threshold to detect end of words
-                    endWindow: 100,             // Short pause between words (100ms)
-                    timeBeforeSpeech: 20        // Include minimal context before speech
-                };
-
-                const streamId = await ad4mClient.ai.openTranscriptionStream("Whisper", (text) => {
-                    console.log("Received word:", text);
-                    if (text.trim()) {  // Only add non-empty text
-                        transcribedWords.push(text.trim());
-                    }
-                }, wordByWordParams);
-
-                // Type assertion for the feedTranscriptionStream function with unknown intermediate
-                const feedStream = (ad4mClient.ai.feedTranscriptionStream.bind(ad4mClient.ai) as unknown) as (streamIds: string | string[], audio: number[]) => Promise<void>;
-                await streamAudioData(audioData, streamId, feedStream);
-
-                try {
-                    await ad4mClient.ai.closeTranscriptionStream(streamId);
-                } catch(e) {
-                    console.log("Error trying to close TranscriptionStream:", e);
-                }
-
-                await waitForTranscription(() => transcribedWords.length > 0);
-                
-                // Assertions
-                expect(transcribedWords).to.be.an('array');
-                expect(transcribedWords.length).to.be.greaterThan(1);
-                expect(transcribedWords.join(' ')).to.include("If you can read this, transcription is working");
-
-                console.log("Transcribed words:", transcribedWords);
-            });
-
             it.skip('can do fast and accurate transcription simultaneously', async() => {
                 const ad4mClient = testContext.ad4mClient!;
                 const audioData = await convertAudioToPCM('../transcription_test.m4a');
                 let fastTranscription = '';
                 let accurateTranscription = '';
 
-                // Configure parameters for word-by-word detection (fast)
-                const fastParams = {
-                    startThreshold: 0.25,
-                    startWindow: 100,
-                    endThreshold: 0.15,
-                    endWindow: 100,
-                    timeBeforeSpeech: 20
-                };
-
-                // Configure parameters for accurate transcription
-                const accurateParams = {
-                    startThreshold: 0.3,
-                    startWindow: 150,
-                    endThreshold: 0.2,
-                    endWindow: 500,
-                    timeBeforeSpeech: 100
-                };
-
-                // Open two streams with different parameters
+                // Open two streams on different models
                 const fastStreamId = await ad4mClient.ai.openTranscriptionStream("whisper_tiny", (text) => {
                     console.log("Received fast transcription:", text);
                     fastTranscription += text;
-                }, fastParams);
+                });
 
                 const accurateStreamId = await ad4mClient.ai.openTranscriptionStream("whisper_small", (text) => {
                     console.log("Received accurate transcription:", text);
                     accurateTranscription += text;
-                }, accurateParams);
+                });
 
                 // Feed audio to both streams simultaneously
                 const feedStream = (ad4mClient.ai.feedTranscriptionStream.bind(ad4mClient.ai) as unknown) as (streamIds: string | string[], audio: number[]) => Promise<void>;

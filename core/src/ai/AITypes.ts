@@ -74,10 +74,3 @@ export class ModelInput {
     modelType: ModelType;
 }
 
-export class VoiceActivityParamsInput {
-    startThreshold?: number;
-    startWindow?: number;
-    endThreshold?: number;
-    endWindow?: number;
-    timeBeforeSpeech?: number;
-}

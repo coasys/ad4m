@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 pub mod anthropic;
+pub mod audio;
 pub mod discovery;
 pub mod http;
 pub mod ollama;

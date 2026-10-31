@@ -12,7 +12,7 @@
 //! * `POST /v1/chat/completions`     — stateless chat, with optional SSE streaming
 //! * `POST /v1/completions`          — legacy text-completion shim
 //! * `POST /v1/embeddings`           — raw `f32` arrays (no zlib+b64)
-//! * `POST /v1/audio/transcriptions` — batch multipart whisper
+//! * `POST /v1/audio/transcriptions` — multipart passthrough to the model's endpoint
 //! * `POST /v1/audio/speech`         — TTS (remote OpenAI-compatible
 //!                                     passthrough; local TTS backend is
 //!                                     scoped to a follow-up)

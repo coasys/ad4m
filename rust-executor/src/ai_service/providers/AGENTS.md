@@ -1,7 +1,8 @@
 # ai_service/providers/ — agent guide
 
-Remote model servers behind two traits: `RemoteChat` (one client per model) and
-`discovery::Discover` (one listing per endpoint). Local (candle/kalosm) models do not come
+Remote model servers behind three traits: `RemoteChat` (one client per model),
+`audio::RemoteTranscribe` (speech to text) and `discovery::Discover` (one listing per
+endpoint). Local (candle/kalosm) models do not come
 through here — `LlmModel::Local` is a different thing entirely.
 
 ## Files
@@ -13,6 +14,7 @@ through here — `LlmModel::Local` is a different thing entirely.
 | `http.rs` | Sending a credential over HTTP: `credentialed_http` (no redirects, a timeout), `is_transport_safe`, `fetch_json` + `UpstreamStatus` (error status with the key scrubbed), and the endpoint helpers the providers share. |
 | `openai.rs` | OpenAI-shaped HTTP on `reqwest`: OpenAI, Groq, OpenRouter, Google compat, Ollama `/v1`, vLLM, llama-server. `tools`, `tool_choice`, `response_format`, SSE with tool-call assembly and `usage`. `OpenAiDiscover` for every OpenAI-shaped kind. |
 | `anthropic.rs` | Messages API on `reqwest`: prompt caching, SSE streaming, native `tool_use`/`tool_result`. `AnthropicDiscover`. |
+| `audio.rs` | `RemoteTranscribe`, `OpenAiTranscribe`: `POST /v1/audio/transcriptions` multipart, one file per call, extra form fields passed as given; the answer's body and content type kept for a passthrough, its transcript parsed. `TranscribeFailure` classifies a failure in words with no URL or key. Built per stream or per request from the endpoint (`for_endpoint`: OpenAI-shaped kinds only, no key in the clear). |
 | `ollama.rs` | Ollama native `/api/chat`: native tools, `num_ctx`, ndjson streaming. `OllamaDiscover` (`/api/tags` + `/api/show` capabilities), `pull_model` (ndjson progress), `delete_model`. |
 | `anthropic_e2e.rs` | `#[ignore]`d tests against the real API; need `ANTHROPIC_API_KEY` and cost money. |
 
