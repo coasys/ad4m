@@ -284,9 +284,12 @@ pub(crate) fn try_extract_content_tool_call(
     // Unwrap a single-element array wrapper. `arr.len() == 1` is EXACT on
     // purpose: a 2+ element array must fall through as an array and decline,
     // never "first element wins". Do not relax this to `arr.first()` — see
-    // `extract_two_element_array_must_not_take_first_element`. Picking an
-    // element from a multi-element array is #1069's decision to make
-    // explicitly, not something a refactor should introduce silently.
+    // `extract_two_element_array_must_not_take_first_element`. #1069 took
+    // multi-element arrays upstream instead: on the injected path
+    // `tool_grammar::extract_tool_calls` returns every element, so such a
+    // reply arrives here with `tool_calls[]` already filled and skips this
+    // fallback. What reaches it is content beside an empty native
+    // `tool_calls[]`, where one block is all the four guards vouch for.
     let json = match json {
         Value::Array(mut arr) if arr.len() == 1 => arr.remove(0),
         v => v,
@@ -1198,11 +1201,12 @@ mod tests {
         // becomes the array itself, and `get("name")` is `None` → NoCandidate.
         //
         // That is an implementation detail of serde_json, not an assertion.
-        // An `if let Some(first) = arr.first()` refactor — the obvious shape
-        // for #1069 — would silently turn this into first-element-wins, i.e.
-        // let a model (or an injection) smuggle a second call past the
-        // "exactly one call" rule by hiding it behind a decoy. Pin it here so
-        // #1069 has to change this test on purpose.
+        // An `if let Some(first) = arr.first()` refactor would silently turn
+        // this into first-element-wins, i.e. let a model (or an injection)
+        // smuggle a second call past the "exactly one call" rule by hiding it
+        // behind a decoy. #1069 left this fallback strict and accepted n-element
+        // arrays in `tool_grammar::extract_tool_calls` instead, so the guard
+        // still stands.
         let tools = vec![ToolSchema {
             name: "my_tool".into(),
             description: "".into(),
