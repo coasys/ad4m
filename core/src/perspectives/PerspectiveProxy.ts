@@ -1535,15 +1535,11 @@ export class PerspectiveProxy {
     async stringOrTemplateObjectToSubjectClassName<T>(subjectClass: T): Promise<string> {
         if(typeof subjectClass === "string")
             return subjectClass
-        else {
-            let subjectClasses = await this.subjectClassesByTemplate(subjectClass as object)
-            if(subjectClasses[0]) {
-                return subjectClasses[0]
-            } else {
-                //@ts-ignore
-                return subjectClass.className
-            }
-        }
+        // The @Model decorator names the class, as in createSubject: no lookup.
+        // Only an undecorated object is matched by its properties.
+        const obj = subjectClass as any;
+        return obj.className || obj.constructor?.className || obj.constructor?.prototype?.className
+            || (await this.subjectClassesByTemplate(obj))[0]
     }
 
     /**
