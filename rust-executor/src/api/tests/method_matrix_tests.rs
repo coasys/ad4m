@@ -578,6 +578,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("sfu.startRoom", sfu_room),
     ("sfu.stopRoom", sfu_room),
     ("sfu.callLeave", sfu_room),
+    ("sfu.callRestartIce", sfu_room),
     (
         "sfu.callJoin",
         || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}" }),
