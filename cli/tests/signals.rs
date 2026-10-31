@@ -11,10 +11,14 @@ use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const READY: &str = "API server starting on http://127.0.0.1:";
+/// The graceful shutdown's last line: the cleanup ran to its end.
+const SHUT_DOWN: &str = "Graceful shutdown complete, exiting.";
 const STARTUP: Duration = Duration::from_secs(120);
 /// How long the executor may take to end. Callers escalate to SIGKILL after 5 s (tests/js SFU
 /// harness) or 10 s (tests/js `gracefulShutdown`, WE's `stopProcess`).
@@ -23,6 +27,10 @@ const EXIT_WITHIN: Duration = Duration::from_secs(10);
 struct Executor {
     child: Child,
     data_path: PathBuf,
+    /// Set once the log shows the graceful shutdown's last line.
+    shut_down: Arc<AtomicBool>,
+    /// Drains stderr; ends at the process's exit, once every line is read.
+    reader: Option<JoinHandle<()>>,
 }
 
 impl Drop for Executor {
@@ -84,10 +92,13 @@ fn run_args(data_path: &Path) -> Vec<String> {
     args
 }
 
-/// Waits for the API line in the log (stderr), and keeps draining it.
-fn wait_until_ready(stderr: ChildStderr) {
+/// Drains the log (stderr) on a thread, noting the shutdown's last line, and waits for the API
+/// line. Returns that note and the thread, which ends once the process exited and its log is read.
+fn read_log(stderr: ChildStderr) -> (mpsc::Receiver<()>, Arc<AtomicBool>, JoinHandle<()>) {
     let (ready_tx, ready_rx) = mpsc::channel();
-    std::thread::spawn(move || {
+    let shut_down = Arc::new(AtomicBool::new(false));
+    let seen = shut_down.clone();
+    let reader = std::thread::spawn(move || {
         let mut ready_tx = Some(ready_tx);
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             if line.contains(READY) {
@@ -95,9 +106,16 @@ fn wait_until_ready(stderr: ChildStderr) {
                     let _ = tx.send(());
                 }
             }
+            if line.contains(SHUT_DOWN) {
+                seen.store(true, Ordering::SeqCst);
+            }
         }
     });
-    ready_rx
+    (ready_rx, shut_down, reader)
+}
+
+fn wait_until_ready(ready: &mpsc::Receiver<()>) {
+    ready
         .recv_timeout(STARTUP)
         .expect("the executor's API listens");
 }
@@ -115,10 +133,15 @@ fn start_with_stdout_reader_gone(name: &str) -> Executor {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ad4m-executor starts");
-    let stderr = child.stderr.take().unwrap();
+    let (ready, shut_down, reader) = read_log(child.stderr.take().unwrap());
     // Built before the wait, so a startup that times out still kills the process.
-    let mut executor = Executor { child, data_path };
-    wait_until_ready(stderr);
+    let mut executor = Executor {
+        child,
+        data_path,
+        shut_down,
+        reader: Some(reader),
+    };
+    wait_until_ready(&ready);
     drop(executor.child.stdout.take());
     executor
 }
@@ -156,7 +179,11 @@ fn exit_within(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
     None
 }
 
-fn assert_signal_ends_it(name: &str, sig: &str) {
+/// Sends the signal and expects the executor to end through its graceful shutdown: its log shows
+/// the shutdown's last line. Neither the deadline that ends a cleanup that hangs, nor the signal's
+/// default action (no handler), writes it. A rare crash inside `exit` after it still passes: the
+/// cleanup had finished.
+fn assert_signal_ends_it_gracefully(name: &str, sig: &str) {
     let mut executor = start_with_stdout_reader_gone(name);
     signal(executor.child.id(), sig);
     let status = exit_within(&mut executor.child, EXIT_WITHIN);
@@ -164,22 +191,29 @@ fn assert_signal_ends_it(name: &str, sig: &str) {
         status.is_some(),
         "the executor was still running {EXIT_WITHIN:?} after SIG{sig}"
     );
+    // The reader ends once the exited process's stderr is drained.
+    executor.reader.take().unwrap().join().unwrap();
+    assert!(
+        executor.shut_down.load(Ordering::SeqCst),
+        "SIG{sig} ended the executor ({:?}) without its graceful shutdown",
+        status.unwrap()
+    );
 }
 
 #[test]
 fn sigterm_ends_an_executor_whose_launcher_is_gone() {
-    assert_signal_ends_it("term", "TERM");
+    assert_signal_ends_it_gracefully("term", "TERM");
 }
 
 #[test]
 fn sigint_ends_an_executor_whose_launcher_is_gone() {
-    assert_signal_ends_it("int", "INT");
+    assert_signal_ends_it_gracefully("int", "INT");
 }
 
 /// A closed terminal sends SIGHUP.
 #[test]
 fn sighup_ends_an_executor_whose_launcher_is_gone() {
-    assert_signal_ends_it("hup", "HUP");
+    assert_signal_ends_it_gracefully("hup", "HUP");
 }
 
 /// Written by the executor at startup and removed only by its graceful shutdown.
@@ -218,7 +252,8 @@ fn start_under_sh(name: &str, exit_with_parent: bool) -> (Child, Orphan, BufRead
         pid: pid.trim().parse().expect("sh prints the executor's PID"),
         data_path,
     };
-    wait_until_ready(launcher.stderr.take().unwrap());
+    let (ready, _, _) = read_log(launcher.stderr.take().unwrap());
+    wait_until_ready(&ready);
     (launcher, executor, stdout)
 }
 
