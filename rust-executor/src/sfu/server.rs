@@ -706,13 +706,14 @@ impl SfuServer {
                         // receive data channel messages too.
                         let payload = crate::sfu::types::SfuDataMessage::new(
                             origin_did.clone(),
+                            participant_id.to_string(),
                             origin_room.neighbourhood_url.clone(),
                             origin_room.room_name.clone(),
                             channel_label.clone(),
                             binary,
                             &data,
                         );
-                        let recipients = data_recipients(&peers, &origin_room, &origin_did);
+                        let recipients = data_recipients(&peers, &origin_room, &participant_id);
                         crate::pubsub::get_global_pubsub_sync()
                             .publish_event(crate::events::Event::sfu_data(&payload, recipients));
                     }
@@ -795,7 +796,8 @@ impl SfuServer {
             let mut tracks_opened: Vec<(ParticipantId, Mid, MediaKind)> = Vec::new();
             let mut keyframe_requests: Vec<(ParticipantId, KeyframeRequest)> = Vec::new();
             // Data channel messages, published once the poll loop no longer borrows `peers`.
-            let mut data_received: Vec<crate::sfu::types::SfuDataMessage> = Vec::new();
+            let mut data_received: Vec<(ParticipantId, crate::sfu::types::SfuDataMessage)> =
+                Vec::new();
 
             for (pid, peer) in peers.iter_mut() {
                 loop {
@@ -862,13 +864,14 @@ impl SfuServer {
                                     // the room's agents, as `sfu-data`.
                                     let payload = crate::sfu::types::SfuDataMessage::new(
                                         origin_did,
+                                        pid.to_string(),
                                         origin_room.neighbourhood_url,
                                         origin_room.room_name,
                                         label,
                                         relay_binary,
                                         &relay_data,
                                     );
-                                    data_received.push(payload);
+                                    data_received.push((pid.clone(), payload));
                                 }
                             }
                             Event::ChannelClose(cid) => {
@@ -889,9 +892,9 @@ impl SfuServer {
 
             if !data_received.is_empty() {
                 let pubsub = crate::pubsub::get_global_pubsub_sync();
-                for payload in data_received {
+                for (sender, payload) in data_received {
                     let room = RoomId::new(&payload.neighbourhood_url, &payload.room_name);
-                    let recipients = data_recipients(&peers, &room, &payload.sender_did);
+                    let recipients = data_recipients(&peers, &room, &sender);
                     pubsub.publish_event(crate::events::Event::sfu_data(&payload, recipients));
                 }
             }
@@ -1127,6 +1130,7 @@ impl SfuServer {
                         let did = pid_to_did.get(origin_pid)?;
                         Some(crate::sfu::TrackMapEntry {
                             mid: new_mid.to_string(),
+                            participant_id: origin_pid.to_string(),
                             agent_did: did.clone(),
                             media_kind: if kind.is_audio() {
                                 "audio".to_string()
@@ -1173,6 +1177,7 @@ impl SfuServer {
                 } else {
                     let payload = crate::sfu::SfuCallRenegotiationOffer {
                         target_did: target_peer.agent_did.clone(),
+                        participant_id: target_pid.to_string(),
                         neighbourhood_url: room_id.neighbourhood_url.clone(),
                         room_name: room_id.room_name.clone(),
                         sdp_offer: sdp_offer_json,
@@ -1347,8 +1352,9 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
     let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
         .iter()
         .map(
-            |(new_mid, _, _, kind, agent_did)| crate::sfu::TrackMapEntry {
+            |(new_mid, origin_pid, _, kind, agent_did)| crate::sfu::TrackMapEntry {
                 mid: new_mid.to_string(),
+                participant_id: origin_pid.to_string(),
                 agent_did: agent_did.clone(),
                 media_kind: if kind.is_audio() {
                     "audio".to_string()
@@ -1373,17 +1379,19 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
     Some((sdp_offer_json, track_mapping))
 }
 
-/// The agents that get a data channel message `sender` sent in `room`: the agent of every
-/// client peer in that room on this executor but the sender, which has what it sent. Pipe
-/// peers stand for other SFU nodes, not agents, so none of them is in it.
+/// The agents that get a data channel message the session `sender` sent in `room`: the agent
+/// of every other client peer in that room on this executor. The sender's own agent is in it
+/// only when it is in the call on another device too; the sending session drops its own
+/// message by `senderParticipantId`. Pipe peers stand for other SFU nodes, not agents, so
+/// none of them is in it.
 fn data_recipients(
     peers: &HashMap<ParticipantId, SfuPeer>,
     room: &RoomId,
-    sender: &str,
+    sender: &ParticipantId,
 ) -> Vec<String> {
     let mut dids: Vec<String> = peers
         .values()
-        .filter(|p| !p.is_pipe && p.room_id == *room && p.agent_did != sender)
+        .filter(|p| !p.is_pipe && p.room_id == *room && p.id != *sender)
         .map(|p| p.agent_did.clone())
         .collect();
     dids.sort();
@@ -1410,6 +1418,7 @@ fn publish_renegotiation_offer(
     } else {
         let payload = crate::sfu::SfuCallRenegotiationOffer {
             target_did: peer.agent_did.clone(),
+            participant_id: pid.to_string(),
             neighbourhood_url: peer.room_id.neighbourhood_url.clone(),
             room_name: peer.room_id.room_name.clone(),
             sdp_offer: sdp_offer_json,

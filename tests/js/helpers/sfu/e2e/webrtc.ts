@@ -22,6 +22,14 @@ import { wrtc } from "./media.js";
 /** The peer connections this process holds open. */
 const open = new Set<RTCPeerConnection>();
 
+/** The next offer a connection of this process creates fails (`failNextOffer`). */
+let offerFails = false;
+
+/** Make the next `createOffer` in this process fail, as one a browser cannot make. */
+export function failNextOffer(): void {
+  offerFails = true;
+}
+
 /**
  * Where this process's media goes: for each open connection, the remote
  * address (`ip:port`) of its selected candidate pair, read from WebRTC's own
@@ -49,6 +57,7 @@ export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPee
   const addCandidate = pc.addIceCandidate.bind(pc);
   const closeNative = pc.close.bind(pc);
   const restartIce = pc.restartIce.bind(pc);
+  const createOffer = pc.createOffer.bind(pc);
 
   let operations: Promise<unknown> = Promise.resolve();
   const chain = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -75,6 +84,11 @@ export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPee
       return setRemote(description);
     }));
   pc.addIceCandidate = guarded((candidate: RTCIceCandidateInit) => chain(() => addCandidate(candidate)));
+  pc.createOffer = ((options?: RTCOfferOptions) => {
+    if (!offerFails) return createOffer(options);
+    offerFails = false;
+    return Promise.reject(new Error("OperationError: the offer could not be created"));
+  }) as RTCPeerConnection["createOffer"];
   pc.restartIce = () => {
     if (!closed) restartIce();
   };

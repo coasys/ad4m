@@ -1042,19 +1042,19 @@ describe('NeighbourhoodClient', () => {
         expect(ws.rpc[0].params).toEqual({ 'sfu-call-renegotiation-offer': null, 'sfu-data': null, 'sfu-migrate': null });
 
         const room = { neighbourhoodUrl: 'neighbourhood://n', roomName: 'r' };
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', ...room, sdpOffer: '{}' }));
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', ...room, sdpOffer: '{"x":1}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', participantId: 'P2', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{"x":1}' }));
         ws.emit(event('sfu-migrate', { targetDid: 'did:me', ...room, migrateToDid: 'did:node' }));
-        const message = { senderDid: 'did:other', ...room, channelLabel: 'chat', binary: false, data: 'hi' };
+        const message = { senderDid: 'did:other', senderParticipantId: 'P2', ...room, channelLabel: 'chat', binary: false, data: 'hi' };
         ws.emit(event('sfu-data', message));
 
         expect(offers).toHaveBeenCalledTimes(1);
-        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
+        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
         expect(migrations).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, migrateToDid: 'did:node' });
         expect(data).toHaveBeenCalledWith(expect.objectContaining(message));
 
         releaseOffers();
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{}' }));
         expect(offers).toHaveBeenCalledTimes(1);
     });
 });

@@ -13,6 +13,10 @@ export interface JoinOptions {
   tones: number[];
   /** The camera's size, or null for no camera. */
   video: Size | null;
+  /** The device this client calls from; unset, the SDK's own (one per process here). */
+  deviceId?: string;
+  /** The join fails before it reaches the executor, as one whose offer cannot be made. */
+  failOffer?: boolean;
 }
 
 export interface Size {
@@ -22,6 +26,8 @@ export interface Size {
 
 export type Command =
   | { kind: "join"; options: JoinOptions }
+  /** Create the session, as a tab that shows the space, without joining the call. */
+  | { kind: "open"; options: JoinOptions }
   | { kind: "rejoin" }
   | { kind: "leave" }
   | { kind: "mute"; media: "audio" | "video" }
@@ -59,6 +65,10 @@ export interface Snapshot {
   departures: number;
   /** Media per remote DID, as the SDK attributed it. */
   remotes: Record<string, Remote>;
+  /** Media per remote participant (one per session: an agent on two devices is two). */
+  sessions: (Remote & { agentDid: string })[];
+  /** The session said another session of this agent on this device took the call over. */
+  replaced: boolean;
   data: { from: string; label: string; data: string; binary: boolean }[];
   errors: string[];
   peerStates: Record<string, string>;
