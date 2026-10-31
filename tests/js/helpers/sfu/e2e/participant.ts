@@ -52,6 +52,11 @@ export class Participant {
     return this.user.did;
   }
 
+  /** The participant process's pid: whose sockets an impairment of this participant alone cuts. */
+  get pid(): number {
+    return this.proc.pid!;
+  }
+
   /** The process died of a signal nobody sent: the libwebrtc binding crashed. */
   get crashed(): boolean {
     return !this.killed && this.exit?.signal != null;
