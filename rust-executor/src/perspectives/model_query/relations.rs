@@ -178,7 +178,12 @@ pub(super) async fn resolve_includes_recursive(
         if rel.direction == "reverse" {
             resolve_reverse_include(store, instances, rel, &sub_query, resolver, depth).await?;
         } else {
-            let links = links_are_the_relation(shape, rel);
+            // The scope guards the parent's links with the sub-query's link
+            // guard, where the members were read with the parent's: the two
+            // reach the same rows only when the sub-query keeps the parent's.
+            let links = links_are_the_relation(shape, rel)
+                && sub_query.link_status.as_ref() == link_status
+                && sub_query.include_unverified == include_unverified;
             resolve_forward_include(store, instances, rel, links, &sub_query, resolver, depth)
                 .await?;
         }
@@ -416,7 +421,9 @@ async fn hydrate_polymorphic(
 /// also applied by the include's own query). False for a getter of the model
 /// author's own, a relation `where`, and a `local` relation (read from Local
 /// links only, which the scope's link guard does not know of): each of those
-/// lists something other than the links.
+/// lists something other than the links. False too for a to-one relation:
+/// hydration keeps its latest link only, where the scope reaches every target
+/// the predicate ever linked.
 fn links_are_the_relation(shape: &ModelShape, rel: &ShapeRelation) -> bool {
     let Some(prop) = shape.properties.iter().find(|p| p.name == rel.name) else {
         return false;
@@ -425,7 +432,7 @@ fn links_are_the_relation(shape: &ModelShape, rel: &ShapeRelation) -> bool {
         None => true,
         Some(getter) => super::getters::is_generated_relation_getter(getter, &rel.predicate),
     };
-    getter_lists_links && prop.where_filter.is_none() && !prop.local
+    getter_lists_links && prop.where_filter.is_none() && !prop.local && !prop.is_scalar_relation
 }
 
 /// An include's `limit` / `offset`, read per parent.
@@ -1011,6 +1018,11 @@ mod per_parent_tests {
             r#"{ "predicate": "we://comment", "kind": "hasMany", "targetClassName": "Comment", "local": true }"#,
         );
         assert!(!links_are_the_relation(&local, comments_relation(&local)));
+
+        let to_one = post(
+            r#"{ "predicate": "we://comment", "kind": "hasOne", "maxCount": 1, "targetClassName": "Comment" }"#,
+        );
+        assert!(!links_are_the_relation(&to_one, comments_relation(&to_one)));
     }
 
     fn plan(sub_query: ModelQueryInput, links: bool) -> ModelQueryInput {

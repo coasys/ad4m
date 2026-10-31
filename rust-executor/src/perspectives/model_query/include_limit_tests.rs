@@ -382,6 +382,107 @@ async fn an_include_where_matched_after_hydration_is_not_cut_in_the_store() {
     );
 }
 
+/// A to-one relation holds its latest link, and a `limit` on its include does
+/// not change which record that is: the per-parent scope would reach every
+/// target the predicate ever linked and keep the oldest.
+#[tokio::test]
+async fn a_limit_on_a_to_one_include_keeps_the_relations_value() {
+    let store = store_with_two_posts();
+    store
+        .add_link(&link(
+            "we://post/1",
+            "we://pinned",
+            &comment(1, 1),
+            1_700_000_000_500,
+        ))
+        .unwrap();
+    store
+        .add_link(&link(
+            "we://post/1",
+            "we://pinned",
+            &comment(1, 3),
+            1_700_000_000_600,
+        ))
+        .unwrap();
+    let shape = POST_SHAPE.replace(
+        r#""relations": {"#,
+        r#""relations": {
+        "pinned": { "predicate": "we://pinned", "kind": "hasOne", "maxCount": 1, "targetClassName": "Comment" },"#,
+    );
+    let (resolver, post_shape) = StaticShapeResolver::from_json("Post", &shape).unwrap();
+    resolver.register(
+        "Comment",
+        parse_shape_from_json(COMMENT_SHAPE, "Comment").unwrap(),
+    );
+    let mut pinned = Vec::new();
+    for sub in [
+        IncludeValue::Bool(true),
+        IncludeValue::SubQuery(Box::new(ModelQueryInput {
+            limit: Some(1),
+            ..Default::default()
+        })),
+    ] {
+        let query = ModelQueryInput {
+            include: Some(HashMap::from([("pinned".to_string(), sub)])),
+            include_unverified: Some(true),
+            ..Default::default()
+        };
+        let result =
+            super::query::execute_model_query(&store, post_shape.as_ref(), &query, &resolver)
+                .await
+                .unwrap();
+        let post = result
+            .instances
+            .iter()
+            .find(|p| p["id"] == "we://post/1")
+            .unwrap();
+        pinned.push(post["pinned"]["id"].clone());
+    }
+    assert_eq!(pinned, vec![comment(1, 3), comment(1, 3)]);
+}
+
+/// An include with a link guard of its own pages the rows the include lists
+/// without a window: the relation's members, read with the parent's guard.
+#[tokio::test]
+async fn an_include_with_its_own_link_status_pages_the_relations_members() {
+    let store = store_with_two_posts();
+    // post/1's earliest comment, linked to it by a Local link.
+    let mut local = link(
+        "we://post/1",
+        "we://comment",
+        "we://c/1/0",
+        1_700_000_000_001,
+    );
+    local.status = Some(crate::types::LinkStatus::Local);
+    store.add_link(&local).unwrap();
+    store
+        .add_link(&link(
+            "we://c/1/0",
+            "we://cflag",
+            "we://comment",
+            1_700_000_000_001,
+        ))
+        .unwrap();
+    let shared = || ModelQueryInput {
+        link_status: Some(crate::types::LinkStatus::Shared),
+        ..Default::default()
+    };
+    let all = included(&store, "comments", shared()).await;
+    let first = included(
+        &store,
+        "comments",
+        ModelQueryInput {
+            limit: Some(1),
+            ..shared()
+        },
+    )
+    .await;
+    assert_eq!(all["we://post/1"][0], "we://c/1/0");
+    for (post, rows) in &first {
+        assert_eq!(rows[..], all[post][..1], "{post}");
+    }
+}
+
 /// Without `limit` / `offset` every parent keeps every related row, in the
 /// relation's link order.
 #[tokio::test]
