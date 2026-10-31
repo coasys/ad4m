@@ -135,7 +135,8 @@ Settings with no config key are flags only, each with its
 harnesses: the executor shuts down once the process that started it is gone,
 however that process ended, so a launcher that crashes or is killed leaves no
 executor behind. Off by default, so an executor started in the background from
-a shell keeps running after the shell exits.
+a shell keeps running after the shell exits. Linux and macOS only: on Windows
+the setting is accepted and has no effect.
 The variable name is the flag in upper case with `-` as `_`, prefixed with
 `AD4M_`: `--hc-relay-url` reads `AD4M_HC_RELAY_URL`.
 

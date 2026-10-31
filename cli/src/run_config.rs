@@ -248,7 +248,7 @@ pub struct RunArgs {
     pub pid_file: Option<String>,
     /// Shut down once the process that started the executor is gone, however it ended
     /// (SIGKILLed, crashed, exited without stopping the executor). For launchers and test
-    /// harnesses. Default: false
+    /// harnesses. Linux and macOS only; no effect on Windows. Default: false
     #[arg(
         long,
         num_args = 0..=1,
