@@ -10,7 +10,7 @@
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -182,24 +182,35 @@ fn sighup_ends_an_executor_whose_launcher_is_gone() {
     assert_signal_ends_it("hup", "HUP");
 }
 
-/// The launcher, `sh` here, starts the executor and is SIGKILLed, as a cancelled CI job's test
-/// runner or a crashed Electron is: nobody signals the executor. It is told through
-/// `AD4M_EXIT_WITH_PARENT` rather than the flag, so a build without the setting ignores it
-/// instead of refusing to start, and this test fails on it rather than passing.
-#[test]
-fn exit_with_parent_ends_the_executor_once_its_launcher_is_killed() {
-    let data_path = fresh_data_path("parent");
-    let mut launcher = Command::new("sh")
+/// Written by the executor at startup and removed only by its graceful shutdown.
+fn pid_file(data_path: &Path) -> PathBuf {
+    data_path.join("executor.pid")
+}
+
+/// Starts the executor under `sh`, its launcher, and waits until its API listens. With
+/// `exit_with_parent` it is told through `AD4M_EXIT_WITH_PARENT` rather than the flag, so a build
+/// without the setting ignores it instead of refusing to start, and a test that needs it fails
+/// rather than passing. Without it the variable is removed, so an inherited one cannot turn it on.
+fn start_under_sh(name: &str, exit_with_parent: bool) -> (Child, Orphan, BufReader<ChildStdout>) {
+    let data_path = fresh_data_path(name);
+    let mut command = Command::new("sh");
+    command
         .args(["-c", r#""$@" & echo "$!"; wait"#, "sh"])
         .arg(env!("CARGO_BIN_EXE_ad4m-executor"))
         .args(run_args(&data_path))
-        .env("AD4M_EXIT_WITH_PARENT", "true")
+        .arg("--pid-file")
+        .arg(pid_file(&data_path))
+        // Readiness is an info line: an inherited RUST_LOG=warn would hide it.
         .env("RUST_LOG", "rust_executor=info")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("sh starts");
+        .stderr(Stdio::piped());
+    if exit_with_parent {
+        command.env("AD4M_EXIT_WITH_PARENT", "true");
+    } else {
+        command.env_remove("AD4M_EXIT_WITH_PARENT");
+    }
+    let mut launcher = command.spawn().expect("sh starts");
     let mut stdout = BufReader::new(launcher.stdout.take().unwrap());
     let mut pid = String::new();
     stdout.read_line(&mut pid).unwrap();
@@ -208,6 +219,18 @@ fn exit_with_parent_ends_the_executor_once_its_launcher_is_killed() {
         data_path,
     };
     wait_until_ready(launcher.stderr.take().unwrap());
+    (launcher, executor, stdout)
+}
+
+/// The launcher, `sh` here, starts the executor and is SIGKILLed, as a cancelled CI job's test
+/// runner or a crashed Electron is: nobody signals the executor.
+#[test]
+fn exit_with_parent_ends_the_executor_once_its_launcher_is_killed() {
+    let (mut launcher, executor, _stdout) = start_under_sh("parent", true);
+    assert!(
+        pid_file(&executor.data_path).exists(),
+        "the executor writes its PID file"
+    );
 
     launcher.kill().unwrap();
     launcher.wait().unwrap();
@@ -219,5 +242,27 @@ fn exit_with_parent_ends_the_executor_once_its_launcher_is_killed() {
     assert!(
         !alive(executor.pid),
         "the executor was still running {EXIT_WITHIN:?} after its launcher was killed"
+    );
+    // The parent watch starts the graceful shutdown; its deadline exits without it.
+    assert!(
+        !pid_file(&executor.data_path).exists(),
+        "the executor ended without its graceful shutdown (the PID file is still there)"
+    );
+}
+
+/// Off by default: an executor started in the background from a shell that then exits
+/// (`nohup ad4m-executor run &`) keeps running.
+#[test]
+fn without_exit_with_parent_the_executor_outlives_its_killed_launcher() {
+    let (mut launcher, executor, _stdout) = start_under_sh("no-parent-watch", false);
+
+    launcher.kill().unwrap();
+    launcher.wait().unwrap();
+
+    // Several of the parent watch's 500 ms polls, and longer than a shutdown without Holochain.
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        alive(executor.pid),
+        "the executor ended with its launcher although exit_with_parent is off"
     );
 }
