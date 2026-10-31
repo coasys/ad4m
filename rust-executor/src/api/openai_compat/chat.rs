@@ -1,20 +1,16 @@
 //! `POST /v1/chat/completions` and `POST /v1/completions`.
 //!
-//! Both endpoints translate an OpenAI request into an ephemeral
-//! `AIService::prompt_messages{,_stream}` call.  No DB-backed task is
-//! created; the model thread spawns the task in-memory for the duration
-//! of the call.
+//! A request the executor answers itself (an Anthropic model, or tools for a model that
+//! does not take them as definitions) becomes one stateless
+//! `AIService::prompt_messages{,_stream}` call. No task is stored.
 //!
-//! ## Tool / function calling
+//! ## Tool / function calling as text
 //!
-//! When the request carries `tools`, we inject the Hermes/Qwen
-//! `<tools>…</tools>` block as a system message and, for
-//! `tool_choice: "required"` or a named function, hand the local model a
-//! grammar constraint (see [`super::tool_grammar`]) so decoding is forced
-//! onto a well-formed `<tool_call>` block.  `auto`/`none` generate freely;
-//! any tool calls are recovered from the text afterwards.  Assistant
-//! `tool_calls` and `role:"tool"` results are folded back into prompt text
-//! because the local chat template has no tool role.
+//! When the request carries `tools` for a model without native tools, we inject the
+//! Hermes/Qwen `<tools>…</tools>` block as a system message (see
+//! [`super::tool_grammar`]) and recover any `<tool_call>` blocks from the text afterwards.
+//! Assistant `tool_calls` and `role:"tool"` results are folded back into prompt text,
+//! since the text path has no tool role.
 //!
 //! A model whose provider carries tools as data skips all of that and goes
 //! through [`super::native_tools`] instead.
@@ -31,7 +27,6 @@ use axum::{
     Json,
 };
 use futures::Stream;
-use kalosm::language::ArcParser;
 use uuid::Uuid;
 
 use super::errors::{OpenAIError, OpenAIJson};
@@ -72,7 +67,6 @@ pub async fn chat_completions(
     let tools: Vec<ToolDef> = req.tools.clone().unwrap_or_default();
     let has_tools = !tools.is_empty();
     let choice = tool_grammar::parse_tool_choice(&req.tool_choice, has_tools);
-    let parallel = req.parallel_tool_calls.unwrap_or(true);
     // Tools are "active" (rendered + potentially constrained + parsed out)
     // unless the caller explicitly disabled them with tool_choice: "none".
     let tools_active = has_tools && choice != ToolChoice::None;
@@ -104,34 +98,10 @@ pub async fn chat_completions(
         messages.push(flatten_message(m));
     }
 
-    // Constrain decoding for required / named choices (guarantees a
-    // well-formed call).  Auto/None return `None` and generate freely.
-    let constraint = if tools_active {
-        tool_grammar::build_tool_call_parser(&tools, &choice, parallel)
-    } else {
-        None
-    };
-
     if req.stream {
-        chat_stream(
-            auth,
-            req.model.clone(),
-            model_id,
-            messages,
-            constraint,
-            tools_active,
-        )
-        .await
+        chat_stream(auth, req.model.clone(), model_id, messages, tools_active).await
     } else {
-        chat_oneshot(
-            auth,
-            req.model.clone(),
-            model_id,
-            messages,
-            constraint,
-            tools_active,
-        )
-        .await
+        chat_oneshot(auth, req.model.clone(), model_id, messages, tools_active).await
     }
 }
 
@@ -167,12 +137,7 @@ pub async fn completions(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
-        .prompt_messages(
-            model_id,
-            messages,
-            auth.user_did().map(str::to_string),
-            None,
-        )
+        .prompt_messages(model_id, messages, auth.user_did().map(str::to_string))
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
@@ -210,7 +175,6 @@ async fn chat_oneshot(
     requested_model: String,
     model_id: String,
     messages: Vec<(String, String)>,
-    constraint: Option<ArcParser<()>>,
     tools_active: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
     // NOTE: WS-RPC `ai.prompt` on dev does not bill today (only pre-checks).
@@ -225,12 +189,7 @@ async fn chat_oneshot(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
-        .prompt_messages(
-            model_id,
-            messages,
-            auth.user_did().map(str::to_string),
-            constraint,
-        )
+        .prompt_messages(model_id, messages, auth.user_did().map(str::to_string))
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
@@ -286,7 +245,6 @@ async fn chat_stream(
     requested_model: String,
     model_id: String,
     messages: Vec<(String, String)>,
-    constraint: Option<ArcParser<()>>,
     tools_active: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
     if let Some(agent_did) = auth.user_did() {
@@ -298,12 +256,7 @@ async fn chat_stream(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let (token_rx, done_rx) = service
-        .prompt_messages_stream(
-            model_id,
-            messages,
-            auth.user_did().map(str::to_string),
-            constraint,
-        )
+        .prompt_messages_stream(model_id, messages, auth.user_did().map(str::to_string))
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
@@ -312,7 +265,7 @@ async fn chat_stream(
     let stream_model = requested_model.clone();
 
     // We construct the SSE stream by spawning a forwarder task that
-    // drains tokens from the LLM thread + emits one `Event` per chunk
+    // drains tokens from the model's stream + emits one `Event` per chunk
     // into a bounded channel.  axum's `Sse` consumes the resulting
     // receiver.  This avoids pulling in `async-stream` for the sole
     // sake of one `yield`-style generator.

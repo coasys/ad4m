@@ -63,12 +63,12 @@ impl Default for SideEffect {
 /// LLM-facing description of one tool. The three schema fields map 1-to-1
 /// onto the OpenAI `tools[]` request array (function.name /
 /// function.description / function.parameters). No wrapper: the harness
-/// passes this straight into `chat_gpt_lib_rs` / kalosm and the LLM sees
+/// passes this straight into the provider's `tools[]` and the LLM sees
 /// exactly what's here.
 ///
 /// `parameters` is a JSON Schema fragment describing the argument object.
 /// Zero-arg tools use `{"type":"object","properties":{},"required":[]}` —
-/// don't drop the object wrapper (OpenAI + kalosm both reject bare types).
+/// don't drop the object wrapper (OpenAI rejects bare types).
 ///
 /// `side_effect` is NOT sent to the LLM. It's an internal classification
 /// consumed by [`is_read_only`] (which drives the harness's read-only cut)
@@ -466,7 +466,7 @@ mod tests {
     async fn zero_arg_schema_is_openai_valid_empty_object() {
         let t = ToolSchema::zero_arg("noop", "does nothing");
         // Empty-object schemas STILL need the object wrapper — OpenAI
-        // + kalosm both reject a bare type field with no properties.
+        // rejects a bare type field with no properties.
         assert_eq!(t.parameters["type"], "object");
         assert!(t.parameters["properties"].is_object());
         assert!(t.parameters["required"].is_array());

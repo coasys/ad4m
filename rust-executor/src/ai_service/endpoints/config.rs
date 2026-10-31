@@ -12,9 +12,7 @@ use url::Url;
 use super::super::providers::http::is_transport_safe;
 use crate::db::Ad4mDb;
 use crate::secret::Secret;
-use crate::types::{
-    AiCapability, Endpoint, EndpointHealth, EndpointKind, ModelApiInput, ModelInput, ModelType,
-};
+use crate::types::{AiCapability, Endpoint, EndpointHealth, EndpointKind, ModelInput, ModelType};
 
 /// One `ai_endpoints` entry. The key is read from the environment variable `api_key_env`
 /// names, never written in the file.
@@ -44,7 +42,7 @@ pub struct AiModelSetting {
     pub model_type: ModelType,
     pub endpoint: String,
     pub remote_model: String,
-    /// See `ModelApiView::native_tools`.
+    /// See `ModelView::native_tools`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_tools: Option<bool>,
 }
@@ -156,16 +154,10 @@ fn apply_model(setting: &AiModelSetting) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no endpoint is named {:?}", setting.endpoint))?;
     let input = ModelInput {
         name: setting.name.clone(),
-        api: Some(ModelApiInput {
-            base_url: endpoint.base_url.to_string(),
-            api_key: Some(endpoint.api_key.clone()),
-            model: setting.remote_model.clone(),
-            api_type: endpoint.kind.protocol().to_string(),
-            max_num_ctx: endpoint.max_num_ctx,
-            native_tools: setting.native_tools,
-        }),
-        local: None,
         model_type: setting.model_type.clone(),
+        endpoint_id: endpoint.id,
+        remote_model: setting.remote_model.clone(),
+        native_tools: setting.native_tools,
     };
     let existing = Ad4mDb::with_global_instance(|db| db.get_models())?
         .into_iter()
@@ -173,11 +165,10 @@ fn apply_model(setting: &AiModelSetting) -> anyhow::Result<()> {
     match existing {
         None => Ad4mDb::with_global_instance(|db| db.add_model(&input)).map(|_| ()),
         Some(model)
-            if model.endpoint_id.as_deref() == Some(endpoint.id.as_str())
-                && model.model_type == setting.model_type
-                && model.api.as_ref().is_some_and(|api| {
-                    api.model == setting.remote_model && api.native_tools == setting.native_tools
-                }) =>
+            if model.endpoint_id == input.endpoint_id
+                && model.model_type == input.model_type
+                && model.remote_model == input.remote_model
+                && model.native_tools == input.native_tools =>
         {
             Ok(())
         }
@@ -254,16 +245,12 @@ mod tests {
         assert_eq!(models.len(), 3);
         let by_name = |name: &str| models.iter().find(|m| m.name == name).unwrap();
         let gpt = by_name("gpt");
-        assert_eq!(gpt.endpoint_id.as_deref(), Some(openai.id.as_str()));
-        assert!(gpt
-            .api
-            .as_ref()
-            .unwrap()
-            .api_key
-            .expose_for_compare("sk-from-env"));
-        assert_eq!(gpt.api.as_ref().unwrap().native_tools, Some(true));
+        assert_eq!(gpt.endpoint_id, openai.id);
+        assert_eq!(gpt.remote_model, "gpt-5");
+        assert_eq!(gpt.native_tools, Some(true));
         let qwen = by_name("qwen");
-        assert_eq!(qwen.api.as_ref().unwrap().max_num_ctx, Some(8192));
+        assert_eq!(endpoints[0].max_num_ctx, Some(8192));
+        assert_eq!(qwen.endpoint_id, endpoints[0].id);
         assert_eq!(llm.as_deref(), Some(qwen.id.as_str()));
         assert_eq!(embedding.as_deref(), Some(by_name("nomic").id.as_str()));
     }
@@ -279,12 +266,11 @@ mod tests {
 
         let models = Ad4mDb::with_global_instance(|db| db.get_models()).unwrap();
         let qwen = models.iter().find(|m| m.name == "qwen").unwrap();
-        let api = qwen.api.as_ref().unwrap();
-        assert_eq!(api.model, "qwen3:14b");
-        assert_eq!(api.base_url.as_str(), "http://127.0.0.1:11435/");
+        assert_eq!(qwen.remote_model, "qwen3:14b");
         let endpoints = Ad4mDb::with_global_instance(|db| db.get_endpoints()).unwrap();
         assert_eq!(endpoints.len(), 2, "updated in place, not added");
-        assert_eq!(qwen.endpoint_id.as_deref(), Some(endpoints[0].id.as_str()));
+        assert_eq!(endpoints[0].base_url.as_str(), "http://127.0.0.1:11435/");
+        assert_eq!(qwen.endpoint_id, endpoints[0].id);
     }
 
     #[test]

@@ -261,17 +261,18 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     (
         "ai.discoverModels",
-        || json!({ "baseUrl": "https://api.example.org/v1" }),
+        || json!({ "kind": "OPEN_AI", "baseUrl": "https://api.example.org/v1" }),
     ),
     (
         "ai.addModel",
-        || json!({ "model": { "name": "m", "type": "LLM" } }),
+        || json!({ "model": { "name": "m", "modelType": "LLM", "endpointId": "e1", "remoteModel": "r" } }),
     ),
     (
         "ai.updateModel",
-        || json!({ "id": "m1", "model": { "name": "m", "type": "LLM" } }),
+        || json!({ "id": "m1", "model": { "name": "m", "modelType": "LLM", "endpointId": "e1", "remoteModel": "r" } }),
     ),
     ("ai.removeModel", || json!({ "id": "m1" })),
+    ("ai.modelStatus", || json!({ "id": "m1" })),
     (
         "ai.addEndpoint",
         || json!({ "name": "e", "kind": "OLLAMA", "baseUrl": "http://127.0.0.1:11434" }),

@@ -7,7 +7,7 @@
 //! Tools go out as `tools[]` and come back as `tool_calls`, also when streamed: the
 //! deltas of one call arrive under one `index` and are joined here. `tool_choice` and
 //! `response_format` pass through as the caller wrote them. Whether a model is *handed*
-//! tools is the model's `native_tools` flag (`ModelApi::uses_native_tools`), because
+//! tools is the model's `native_tools` flag (`Model::uses_native_tools`), because
 //! OpenAI-shaped servers differ per model and per server flag in whether they honour them.
 //!
 //! A streamed request asks for `stream_options.include_usage`, so the final chunk carries

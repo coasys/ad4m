@@ -3,29 +3,44 @@
 `AIService` (global singleton, tokio-mutexed: `AIService::global_instance().await`).
 Split plan: spec item 9 (`mod.rs`), item 7 (`harness/` → `agentic/`).
 
-## `mod.rs` sections (2.8k lines, one file)
+The executor runs no model itself. Every model is an upstream model on an **endpoint** (a
+model server: Ollama, llama-server, vLLM, speaches, OpenAI, Anthropic, ...): `Model {
+endpoint_id, remote_model, model_type, native_tools }`. The endpoint owns URL, key,
+protocol and health. A fresh executor has no model and loads none.
+
+## `mod.rs` sections (1.8k lines, one file)
 
 | Lines (approx) | Content |
 |---|---|
-| top | DTOs: `PromptResult`, `EmbedResult`, `LLMTask*Request`, `LlmModel`, `TranscriptionSession` / `StreamBackend` |
-| ~330–510 | construction, model load/add/status, background tasks, global instance |
-| ~510–1120 | LLM: candle device selection, `build_local_llama`, `build_remote_client` (a `providers::RemoteChat` per protocol), `spawn_llm_model` (per-model worker thread + channel) |
-| ~1120–1670 | AI tasks CRUD, `prompt` / `prompt_messages` / `prompt_messages_stream`, billing hooks (`bill_prompt_if_authed`) |
-| ~1670–1775 | embeddings: one `Embedder` per model id (the endpoint's `providers::embed` client, or a Bert thread for a model without an endpoint); `embed_batch` resolves an id or a name and sends one request per batch |
-| ~1775–2440 | transcription streams: open (endpoint or local Whisper), feed, close, ownership |
+| top | DTOs: `PromptResult`, `EmbedResult`, `EmbedBatch`, `TranscriptionSession`; `AIService` (two client maps), `ChatModel`, `Embedder`; token estimates; `turns_for` |
+| ~260–430 | construction, `load` (a client per stored model), `init_model` / `drop_clients`, model add/default/views, global instance |
+| ~430–860 | AI tasks CRUD (rows only: a prompt reads its task from the database), `prompt` / `prompt_messages` / `prompt_messages_stream` / `prompt_with_tools`, billing hooks (`bill_prompt_if_authed`) |
+| ~860–950 | embeddings: `embed_batch` resolves an id or a name and sends one request per batch to the model's `Embedder` |
+| ~950–1110 | transcription streams: open, feed, close, ownership |
+| ~1110–1135 | model update / reload / remove |
 | rest | tests |
 
-Persistence of models/tasks is in `db.rs` (`models`, `tasks`, `model_status`,
-`default_models` tables), endpoints in `db/endpoints.rs` (`ai_endpoints`). Tasks have an owner (`tasks.agent_did`, the managed agent's DID;
-`NULL` for a task of the main agent; see `src/db/AGENTS.md`): `add_task` takes it, and the
-WS guards enforce it. Billing goes through `crate::billing` with the caller's agent DID.
+A client is `Send + Sync` and takes concurrent requests: `llms` holds one `ChatModel`
+(`providers::chat_client(endpoint)`, the remote model id, the endpoint) per LLM, `embedders`
+one `Embedder` per embedding model, both keyed by model id. There is no per-model thread.
+`ChatModel::chat` / `chat_stream` and `embed_batch` take a slot of the endpoint's
+`max_concurrent` (none by default), so the cap holds for tasks, the harness and `/v1` alike.
+A model whose client does not build is not kept by `add_model`; at `load` it logs and stays
+without one. Transcription and speech build their clients per stream / request.
+
+Persistence of models/tasks is in `db.rs` (`models`, `tasks`, `default_models` tables),
+endpoints in `db/endpoints.rs` (`ai_endpoints`), the one-time move from the old model
+shape in `db/model_migration.rs`. Tasks have an owner (`tasks.agent_did`, the managed
+agent's DID; `NULL` for a task of the main agent; see `src/db/AGENTS.md`): `add_task` takes
+it, and the WS guards enforce it. Billing goes through `crate::billing` with the caller's
+agent DID.
 
 ## `endpoints/`
 
 The registry of upstream model servers (an endpoint owns URL, key, capabilities, health):
 
 - `mod.rs`: `ai.addEndpoint` / `updateEndpoint` / `removeEndpoint` (probe once before a
-  save; an update rewrites and reloads the models on it), `check_health` and the 60 s
+  save; an update reloads the models on it), `check_health` and the 60 s
   health loop (`ai-endpoint-status`, to the main agent's sessions only), Ollama
   `pull_model` / `delete_upstream_model` (`model-status`, at most 4/s), and the
   per-request limits: `request_timeout` (the endpoint's, else the route's default) and
@@ -34,20 +49,19 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
 - `config.rs`: the config file's `ai_endpoints` / `ai_models` / `ai_defaults`, applied
   before the service loads; idempotent by name, keys only from env vars.
 
-A remote model still carries its own `api` (URL, key, protocol) and gets an `endpoint_id`
-from `Ad4mDb::link_models_to_endpoints` (startup and every model write). Never set a
-model's connection fields without going through the endpoint when it has one.
+A model's status (`ModelView::status`, `ai.modelStatus`) is computed from its endpoint's
+last health check (`Endpoint::model_status`): `READY` when the endpoint lists it,
+`MISSING` when it answers without it, `ENDPOINT_DOWN`, or `UNKNOWN` before a check.
 
 ## Transcription
 
-`transcription.rs` holds the endpoint path and what both paths share:
+`transcription.rs` holds the endpoint path and what streams and `/v1` share:
 
-- A stream on a model with an endpoint (`endpoint_transcriber`) runs a
-  `RemoteStream` worker: each fed utterance becomes a 16 kHz mono PCM16 WAV and one
+- A stream (`endpoint_transcriber` builds its client) runs a `RemoteStream` worker: each fed utterance becomes a 16 kHz mono PCM16 WAV and one
   `providers::audio::RemoteTranscribe` call. The worker takes utterances from a channel
   filled under the stream-map lock, so text comes out in the order fed. A feed answers
   after its transcript is published; an upstream failure is the feed's error (no URL in
-  it) and publishes nothing. A model without `api` stays on local Whisper (until P4).
+  it) and publishes nothing.
 - No executor-side voice-activity detection: the client cuts utterances.
 - `bill_transcription` is the only place transcription is billed (streams and
   `/v1/audio/transcriptions`); `publish_text` sends `transcription-text` to the owner's
@@ -75,7 +89,8 @@ edges; item 7 moves harness + interpretation + flows + auto_processor into `agen
 
 - Never call a model without a billing decision: use the existing `bill_*_if_authed` /
   `CreditGate` path.
-- Model name strings (whisper table, default model ids) are data; don't scatter new ones.
-- Streaming responses of models the executor runs go through `prompt_messages_stream`; WS
-  `ai.*` handlers and `/v1` for those models sit on it. `/v1` forwards a model on an
+- Model names are data: the onboarding recommendations live in one place
+  (`core/src/ai/recommendedModels.ts`); don't scatter new ones in Rust.
+- Streaming responses the executor answers itself (Anthropic, the text tool fallback) go
+  through `prompt_messages_stream`. `/v1` forwards a model on an
   OpenAI-shaped endpoint itself (`api/openai_compat/passthrough.rs`).

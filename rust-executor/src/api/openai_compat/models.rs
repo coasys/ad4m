@@ -14,7 +14,7 @@ use super::errors::{OpenAIError, OpenAIResult};
 use super::types::{ModelExtensions, ModelInfo, ModelListResponse};
 use crate::agent::capabilities::AI_READ_CAPABILITY;
 use crate::db::Ad4mDb;
-use crate::types::{Endpoint, EndpointState, Model, ModelState, ModelStatus, RequestContext};
+use crate::types::{Endpoint, Model, RequestContext};
 
 pub async fn list_models(auth: RequestContext) -> OpenAIResult<Json<ModelListResponse>> {
     auth.require(&AI_READ_CAPABILITY)
@@ -31,7 +31,7 @@ pub async fn list_models(auth: RequestContext) -> OpenAIResult<Json<ModelListRes
     let data = models
         .into_iter()
         .map(|m| {
-            let endpoint = m.endpoint_id.as_ref().and_then(|id| endpoints.get(id));
+            let endpoint = endpoints.get(&m.endpoint_id);
             model_info(m, endpoint, created)
         })
         .collect();
@@ -42,41 +42,17 @@ pub async fn list_models(auth: RequestContext) -> OpenAIResult<Json<ModelListRes
 }
 
 fn model_info(m: Model, endpoint: Option<&Endpoint>, created: i64) -> ModelInfo {
-    let remote_model = m.api.as_ref().map(|api| api.model.clone());
-    let status = endpoint.and_then(|e| status_of(e, remote_model.as_deref()?));
+    let view = m.view(endpoint);
     ModelInfo {
-        id: m.name,
+        id: view.name,
         object: "model",
         created,
-        owned_by: endpoint.map_or_else(|| "ad4m".to_string(), |e| e.name.clone()),
+        owned_by: endpoint.map_or_else(String::new, |e| e.name.clone()),
         extensions: ModelExtensions {
-            model_type: m.model_type,
-            endpoint_id: m.endpoint_id,
-            remote_model,
-            status,
+            model_type: view.model_type,
+            endpoint_id: view.endpoint_id,
+            remote_model: view.remote_model,
+            status: view.status,
         },
     }
-}
-
-/// Where `remote_model` stands on `endpoint` by its last health check: down when the
-/// endpoint is, missing when it answered and did not list the model (Ollama lists `m` as
-/// `m:latest`). `None` before a check.
-fn status_of(endpoint: &Endpoint, remote_model: &str) -> Option<ModelStatus> {
-    let state = match endpoint.health.state {
-        EndpointState::Unknown => return None,
-        EndpointState::Unreachable | EndpointState::Unauthorized => ModelState::EndpointDown,
-        EndpointState::Reachable
-            if endpoint.health.served_models.iter().any(|served| {
-                served == remote_model || served.strip_suffix(":latest") == Some(remote_model)
-            }) =>
-        {
-            ModelState::Ready
-        }
-        EndpointState::Reachable => ModelState::Missing,
-    };
-    Some(ModelStatus {
-        state,
-        progress: None,
-        detail: endpoint.health.detail.clone(),
-    })
 }

@@ -1,12 +1,11 @@
-import { ModelInput } from "@coasys/ad4m/lib/src/ai/AIResolver";
 import { invoke } from "@tauri-apps/api/core";
-import { useContext, useEffect, useState, useRef } from "react";
+import { useContext, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
-import { open } from "@tauri-apps/plugin-shell";
 import "../index.css";
 import Logo from "./Logo";
+import AISetup from "./AISetup";
 
 const Login = () => {
   const {
@@ -36,20 +35,7 @@ const Login = () => {
   const [pendingSwitchAgent, setPendingSwitchAgent] = useState<any>(null);
   const [appState, setAppState] = useState<any>(null);
   const [holochain, setHolochain] = useState(true);
-  const [aiMode, setAIMode] = useState("Local");
-
-  const [apiUrl, setApiUrl] = useState("https://api.openai.com/v1");
-  const [apiUrlError, setApiUrlError] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [apiKeyError, setApiKeyError] = useState("");
-  const [apiValid, setApiValid] = useState(false);
-  const [apiModelValid, setApiModelValid] = useState(false);
-  const [apiModelError, setApiModelError] = useState("");
-  const [apiLoading, setApiLoading] = useState(false);
-  const [apiModel, setApiModel] = useState("");
-  const [apiModels, setApiModels] = useState<string[]>([]);
-  const apiUrlRef = useRef("https://api.openai.com/v1");
-  const apiKeyRef = useRef("");
+  const [aiReady, setAIReady] = useState(false);
 
   if (hasLoginError) setPasswordError("Invalid password");
 
@@ -74,12 +60,6 @@ const Login = () => {
     if (!agentStatus?.isUnlocked) await invoke("clear_state");
   }
 
-  function closeMenu(menuId: string) {
-    const menu = document.getElementById(menuId);
-    const items = menu?.shadowRoot?.querySelector("details");
-    if (items) items.open = false;
-  }
-
   function passwordValid(): boolean {
     if (password.length === 0) {
       setPasswordError("Password is required");
@@ -91,140 +71,6 @@ const Login = () => {
     }
     setPasswordError(null);
     return true;
-  }
-
-  async function checkApi() {
-    setApiLoading(true);
-    setApiKeyError("");
-    setApiUrlError("");
-    let valid = false;
-    try {
-      const response = await fetch(`${apiUrlRef.current}/models`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${apiKeyRef.current}`,
-          "Content-Type": "application/json",
-        },
-      });
-      const { ok, status, statusText } = response;
-      if (ok) valid = true;
-      else {
-        // key invalid
-        setApiKeyError(status === 401 ? "Invalid key" : statusText);
-      }
-    } catch {
-      // url invalid
-      setApiUrlError("Error connecting to API");
-    }
-    setApiValid(valid);
-
-    if (valid) {
-      // get models
-      setApiModels([]);
-      setApiModel("");
-      setApiModelValid(false);
-      try {
-        const response = await fetch(`${apiUrlRef.current}/models`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${apiKeyRef.current}`,
-            "Content-Type": "application/json",
-          },
-        });
-        if (response.ok) {
-          const body = await response.json();
-          const models = body.data.map((e: any) => e.id);
-          setApiModels(models);
-          if (apiUrlRef.current === "https://api.openai.com/v1")
-            setApiModel("gpt-4o");
-        }
-      } catch {}
-    } else {
-      setApiModels([]);
-      setApiModel("");
-    }
-    setApiLoading(false);
-  }
-
-  async function checkModel() {
-    setApiLoading(true);
-    if (apiModel) {
-      try {
-        const response = await fetch(`${apiUrl}/chat/completions`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: apiModel,
-            messages: [{ role: "user", content: "Hi" }],
-            max_tokens: 5,
-          }),
-        });
-        setApiLoading(false);
-        const { ok, status, statusText } = response;
-        if (ok) {
-          setApiModelValid(true);
-        } else {
-          if (status === 401) {
-            setApiKeyError("Invalid Key");
-          } else {
-            setApiModelError(statusText);
-          }
-          return false;
-        }
-      } catch (e) {
-        setApiModelError(`Error testing API completion: ${e}`);
-      }
-    } else {
-      setApiModelError("Model required");
-    }
-    setApiLoading(false);
-  }
-
-  async function saveModels() {
-    let whisperModel = "whisper_small";
-    // add llm model
-    if (aiMode !== "None") {
-      const llm = { modelType: "LLM" } as ModelInput;
-      if (aiMode === "Local") {
-        whisperModel = "whisper_distil_large_v3";
-        llm.name = "Qwen2.5.1-Coder-7B-Instruct";
-        llm.local = { fileName: "Qwen2.5.1-Coder-7B-Instruct" };
-      } else {
-        llm.name = "Remote LLM";
-        llm.api = {
-          baseUrl: apiUrl,
-          apiKey,
-          apiType: "OPEN_AI",
-          model: apiModel,
-        };
-      }
-      client!.ai
-        .addModel(llm)
-        .then((modelId) => client!.ai.setDefaultModel("LLM", modelId));
-    }
-    // add embedding model
-    client!.ai.addModel({
-      name: "bert",
-      local: { fileName: "bert" },
-      modelType: "EMBEDDING",
-    });
-    // add medium whisper model
-    client!.ai.addModel({
-      name: "Whisper",
-      local: { fileName: whisperModel },
-      modelType: "TRANSCRIPTION",
-    });
-
-    client!.ai.addModel({
-      name: "Whisper tiny quantized",
-      local: { fileName: "whisper_tiny_quantized" },
-      modelType: "TRANSCRIPTION",
-    });
-
-    setCurrentIndex(6);
   }
 
   useEffect(() => {
@@ -579,333 +425,11 @@ const Login = () => {
             }}
           >
             <j-text size="800" nomargin color="ui-900">
-              Is your computer capabale of running Large Language Models
-              locally?
+              Where should your AI models run?
             </j-text>
           </j-flex>
 
-          <j-flex gap="400" style={{ padding: "0 10px" }}>
-            <button
-              className={`card ${aiMode === "Local" && "selected"}`}
-              onClick={() => setAIMode("Local")}
-            >
-              <j-icon name="house-fill" size="lg" color="ui-500" />
-              <j-text
-                size="600"
-                color="ui-0"
-                nomargin
-                style={{ marginBottom: 5 }}
-              >
-                Local
-              </j-text>
-              <j-text size="500" nomargin color="ui-800">
-                Select Local if you have an <b>M1 mac</b> (or better) or an{" "}
-                <b>nVidia GPU</b> with 8Gb of RAM or more!
-              </j-text>
-            </button>
-
-            <button
-              className={`card ${aiMode === "Remote" && "selected"}`}
-              onClick={() => setAIMode("Remote")}
-            >
-              <j-icon name="broadcast-pin" size="lg" color="ui-500" />
-              <j-text
-                size="600"
-                color="ui-0"
-                nomargin
-                style={{ marginBottom: 5 }}
-              >
-                Remote
-              </j-text>
-              <j-text size="500" nomargin color="ui-800">
-                Select to use an external API like <b>OpenAI</b> or your own{" "}
-                <b>Ollama</b> server.
-              </j-text>
-            </button>
-
-            <button
-              className={`card ${aiMode === "None" && "selected"}`}
-              onClick={() => setAIMode("None")}
-            >
-              <j-icon name="x-lg" size="lg" color="ui-500" />
-              <j-text
-                size="600"
-                color="ui-0"
-                nomargin
-                style={{ marginBottom: 5 }}
-              >
-                None
-              </j-text>
-              <j-text size="500" nomargin color="ui-800">
-                Select if you'd prefer <b>NOT to use LLMs</b> at all.
-              </j-text>
-            </button>
-          </j-flex>
-
-          {aiMode === "Local" && (
-            <j-flex
-              direction="column"
-              a="center"
-              gap="400"
-              style={{ marginTop: 30, maxWidth: 350 }}
-            >
-              <j-text>
-                This will download
-                <p>
-                  <a
-                    onClick={() =>
-                      open(
-                        "https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF"
-                      )
-                    }
-                    style={{ cursor: "pointer" }}
-                  >
-                    Qwen2.5.1-Coder-7B-Instruct Q4_K_M (4.68GB)
-                  </a>
-                </p>
-                and
-                <p>
-                  <a
-                    onClick={() =>
-                      open(
-                        "https://huggingface.co/openai/whisper-large-v3-turbo"
-                      )
-                    }
-                    style={{ cursor: "pointer" }}
-                  >Whisper distill large v3 (1.42GB)</a>
-                </p>
-                and
-                <p>
-                  <a
-                    onClick={() =>
-                      open(
-                        "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
-                      )
-                    }
-                    style={{ cursor: "pointer" }}
-                  >
-                    Bert Embedding model (90MB)
-                  </a>
-                </p>
-              </j-text>
-            </j-flex>
-          )}
-
-          {aiMode === "Remote" && (
-            <j-box pt="500">
-              <j-flex a="center" direction="column" gap="500">
-                <j-flex a="center" gap="400">
-                  <j-button
-                    onClick={() => {
-                      setApiUrl("https://api.openai.com/v1");
-                      apiUrlRef.current = "https://api.openai.com/v1";
-                      setApiValid(false);
-                      setApiModelValid(false);
-                      setApiKeyError("");
-                      setApiUrlError("");
-                    }}
-                  >
-                    OpenAI
-                  </j-button>
-                  <j-button
-                    onClick={() => {
-                      setApiUrl("http://localhost:11434/v1");
-                      apiUrlRef.current = "http://localhost:11434/v1";
-                      setApiValid(false);
-                      setApiModelValid(false);
-                      setApiKeyError("");
-                      setApiUrlError("");
-                    }}
-                  >
-                    Ollama
-                  </j-button>
-                </j-flex>
-
-                <j-flex a="center" gap="400">
-                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                    API URL:
-                  </j-text>
-                  <j-input
-                    size="md"
-                    type="text"
-                    value={apiUrl}
-                    error={!!apiUrlError}
-                    errortext={apiUrlError}
-                    onInput={(e: any) => {
-                      setApiUrl(e.target.value);
-                      apiUrlRef.current = e.target.value;
-                      setApiValid(false);
-                      setApiKeyError("");
-                      setApiUrlError("");
-                    }}
-                    style={{ width: "100%" }}
-                  />
-                  {apiUrlError && <j-icon name="x-circle" color="danger-500" />}
-                  {apiValid && (
-                    <j-icon name="check-circle" color="success-500" />
-                  )}
-                </j-flex>
-
-                <j-flex a="center" gap="400">
-                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                    API Key:
-                  </j-text>
-                  <j-input
-                    size="md"
-                    type="text"
-                    value={apiKey}
-                    error={!!apiKeyError}
-                    errortext={apiKeyError}
-                    onInput={(e: any) => {
-                      setApiKey(e.target.value);
-                      apiKeyRef.current = e.target.value;
-                      setApiValid(false);
-                      setApiKeyError("");
-                      setApiUrlError("");
-                    }}
-                    style={{ width: "100%" }}
-                  />
-                  {apiKeyError && <j-icon name="x-circle" color="danger-500" />}
-                  {apiValid && (
-                    <j-icon name="check-circle" color="success-500" />
-                  )}
-                </j-flex>
-
-                {apiValid && (
-                  <j-flex direction="column" a="center" gap="400">
-                    <j-flex a="center" gap="400">
-                      <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                        API Model:
-                      </j-text>
-                      <j-menu style={{ zIndex: 2 }}>
-                        <j-menu-group
-                          collapsible
-                          title={apiModel || "None selected"}
-                          id="api-models"
-                        >
-                          {apiModels.map((model) => (
-                            <j-menu-item
-                              selected={model === apiModel}
-                              onClick={() => {
-                                setApiModelError("");
-                                setApiModel(model);
-                                closeMenu("api-models");
-                              }}
-                            >
-                              {model}
-                            </j-menu-item>
-                          ))}
-                        </j-menu-group>
-                      </j-menu>
-                      {apiModelError && (
-                        <j-icon name="x-circle" color="danger-500" />
-                      )}
-                      {apiModelValid && (
-                        <j-icon name="check-circle" color="success-500" />
-                      )}
-                    </j-flex>
-
-                    {apiModelError && (
-                      <j-text color="danger-500" nomargin>
-                        {apiModelError}
-                      </j-text>
-                    )}
-                  </j-flex>
-                  
-                )}
-
-                {(!apiModelValid || !apiValid) && (
-                  <>
-                    {!apiValid ? (
-                      <j-button
-                        onClick={checkApi}
-                        variant="primary"
-                        loading={apiLoading}
-                      >
-                        Check API
-                      </j-button>
-                    ) : (
-                      <j-button
-                        onClick={checkModel}
-                        variant="primary"
-                        loading={apiLoading}
-                      >
-                        Check Model
-                      </j-button>
-                    )}
-                  </>
-                )}
-
-                <j-text>
-                  This will still download
-                  <p>
-                    <a
-                      onClick={() =>
-                        open(
-                          "https://huggingface.co/openai/whisper-small"
-                        )
-                      }
-                      style={{ cursor: "pointer" }}
-                    >Whisper small (244MB)</a>
-                  </p>
-                  and
-                  <p>
-                    <a
-                      onClick={() =>
-                        open(
-                          "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
-                        )
-                      }
-                      style={{ cursor: "pointer" }}
-                    >
-                      Bert Embedding model (90MB)
-                    </a>
-                  </p>
-                </j-text>
-              </j-flex>
-            </j-box>
-          )}
-
-          {aiMode === "None" && (
-            <j-flex
-              direction="column"
-              a="center"
-              gap="400"
-              style={{ marginTop: 30, maxWidth: 350 }}
-            >
-              <j-text>
-                Selecting <b>None</b> here and not having any LLM configured
-                might result in new Synergy features not working in Flux...
-              </j-text>
-
-              <j-text>
-                  This will still download
-                  <p>
-                    <a
-                      onClick={() =>
-                        open(
-                          "https://huggingface.co/openai/whisper-small"
-                        )
-                      }
-                      style={{ cursor: "pointer" }}
-                    >Whisper small (244MB)</a>
-                  </p>
-                  and
-                  <p>
-                    <a
-                      onClick={() =>
-                        open(
-                          "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
-                        )
-                      }
-                      style={{ cursor: "pointer" }}
-                    >
-                      Bert Embedding model (90MB)
-                    </a>
-                  </p>
-                </j-text>
-            </j-flex>
-          )}
+          {client && <AISetup client={client} onReady={setAIReady} />}
 
           <j-flex gap="500" j="center" wrap style={{ marginTop: 60 }}>
             <j-button size="xl" onClick={() => setCurrentIndex(4)}>
@@ -914,8 +438,8 @@ const Login = () => {
             <j-button
               variant="primary"
               size="xl"
-              onClick={saveModels}
-              disabled={aiMode === "Remote" && (!apiValid || !apiModelValid)}
+              onClick={() => setCurrentIndex(6)}
+              disabled={!aiReady}
             >
               Next
             </j-button>

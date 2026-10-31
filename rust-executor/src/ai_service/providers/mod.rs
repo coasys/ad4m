@@ -1,27 +1,22 @@
-//! Remote LLM providers — one trait, one implementation per wire protocol.
+//! Model providers — one trait per capability, one implementation per wire protocol.
 //!
-//! Before this module the remote path was a bare `ChatGPTClient` held in
-//! `LlmModel::Remote`, so "a remote model" and "an OpenAI-shaped HTTP API"
-//! were the same thing. Anthropic is not OpenAI-shaped: it carries tools and
-//! tool results as structured content blocks rather than text, and its prompt
-//! cache has to be addressed explicitly with `cache_control` breakpoints —
-//! neither of which an OpenAI request struct has anywhere to put.
+//! Anthropic is not OpenAI-shaped: it carries tools and tool results as structured
+//! content blocks rather than text, and its prompt cache has to be addressed explicitly
+//! with `cache_control` breakpoints. Ollama's native `/api/chat` sizes `num_ctx`. So the
+//! provider is the seam: [`RemoteChat`] is what `ai_service` prompts an LLM through,
+//! each implementation owns its own wire format, and nothing above this module knows
+//! which one answered.
 //!
-//! So the provider is the seam. [`RemoteChat`] is what the per-model worker
-//! thread in `ai_service` talks to; each implementation owns its own wire
-//! format, and nothing above this module knows which one answered.
-//!
-//! Adding a provider: implement [`RemoteChat`] and [`discovery::Discover`],
-//! construct the client in `AIService::build_remote_client` from the model's
-//! [`ModelApiType`](crate::types::ModelApiType), and the listing in
-//! [`discovery::discover_for`] from the endpoint's
-//! [`EndpointKind`](crate::types::EndpointKind).
-//! Do not add a variant to `LlmModel` — that enum distinguishes *local
-//! weights* from *a remote endpoint*, which is a different question.
+//! Adding a provider: implement [`RemoteChat`] and [`discovery::Discover`], construct the
+//! client in [`chat_client`] from the endpoint's protocol
+//! ([`EndpointKind::protocol`](crate::types::EndpointKind::protocol)), and the listing in
+//! [`discovery::discover_for`] from its [`EndpointKind`](crate::types::EndpointKind).
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
+
+use crate::types::{Endpoint, ModelApiType};
 
 pub mod anthropic;
 pub mod audio;
@@ -34,17 +29,45 @@ pub mod openai;
 #[cfg(test)]
 mod anthropic_e2e;
 
+/// The chat client of `endpoint`, by its protocol. One per model: it holds a connection
+/// pool, no per-request state.
+///
+/// Refuses a key that would cross the network in the clear. The endpoint handlers refuse
+/// it too, but an endpoint saved before they did still loads through here, and would
+/// otherwise send its key with every completion.
+pub fn chat_client(endpoint: &Endpoint) -> Result<Box<dyn RemoteChat>> {
+    if !endpoint.api_key.is_empty() && !http::is_transport_safe(&endpoint.base_url) {
+        return Err(anyhow!(
+            "{} ({})",
+            http::CLEARTEXT_KEY_REFUSAL,
+            endpoint.base_url
+        ));
+    }
+    // The client is the key's one receiver: it sends the key to the provider.
+    let api_key = endpoint.api_key.expose();
+    let base_url = endpoint.base_url.clone();
+    Ok(match endpoint.kind.protocol() {
+        ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new(api_key, base_url)),
+        ModelApiType::Anthropic => Box::new(anthropic::AnthropicChat::new(api_key, base_url)),
+        ModelApiType::Ollama => Box::new(ollama::OllamaChat::new(
+            api_key,
+            base_url,
+            endpoint.max_num_ctx,
+        )),
+    })
+}
+
 /// Whether this executor's client for an API type passes tools as data.
 ///
 /// The same fact as [`RemoteChat::supports_native_tools`], asked of a model
 /// config rather than of a built client — the harness has to decide how to
-/// render tools *before* anything reaches a worker thread, so it cannot ask
+/// render tools *before* it picks a client to call, so it cannot ask
 /// the instance. Kept beside the trait, and covered by a test asserting the
 /// two agree, because two answers drifting apart would route a model down a
 /// path its client cannot serve.
 ///
 /// Every client can. Whether a given model is handed tools is the model's own
-/// flag on top of this (`ModelApi::uses_native_tools`): OpenAI-shaped servers
+/// flag on top of this (`Model::uses_native_tools`): OpenAI-shaped servers
 /// differ per model in whether they honour `tools[]`.
 pub fn api_type_supports_native_tools(api_type: &crate::types::ModelApiType) -> bool {
     match api_type {
@@ -238,10 +261,9 @@ pub struct ChatReply {
 
 /// A remote chat endpoint.
 ///
-/// One instance per configured model, built once when the model's worker
-/// thread starts and reused for every prompt on that thread — so an
-/// implementation may hold a connection pool, but must not hold per-request
-/// state.
+/// One instance per configured model, built once when the model loads and called
+/// concurrently for every prompt on it — so an implementation may hold a
+/// connection pool, but must not hold per-request state.
 #[async_trait]
 pub trait RemoteChat: Send + Sync {
     /// Whether tools can be handed to this provider as structured

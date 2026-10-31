@@ -209,7 +209,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.computeLog': [],
 
     // ── AI ──
-    'ai.models': [{ id: 'model-1', name: 'GPT-Test', modelType: 'LLM', api: 'openai' }],
+    'ai.models': [{ id: 'model-1', name: 'GPT-Test', modelType: 'LLM', endpointId: 'e1', remoteModel: 'gpt-5', status: { state: 'READY' } }],
     'ai.addModel': 'model-new-id',
     'ai.updateModel': true,
     'ai.removeModel': true,
@@ -220,7 +220,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'ai.updateTask': { taskId: 'task-1', name: 'updated', modelId: 'model-1', systemPrompt: 'Updated', promptExamples: [] },
     'ai.removeTask': true,
     'ai.prompt': 'This is the AI response',
-    'ai.modelLoadingStatus': { model: 'model-1', progress: 100, status: 'loaded' },
+    'ai.modelStatus': { state: 'READY' },
+    'ai.discoverModels': [{ id: 'qwen3:8b', capabilities: ['chat'] }],
 
     // ── Users (unauthenticated on server — empty token allowed) ──
     'user.create': { success: true, did: 'did:test:new-user' },
@@ -1242,19 +1243,26 @@ describe('AIClient', () => {
         expect(models[0].name).toBe('GPT-Test');
     });
 
-    test('addModel() adds a model', async () => {
-        const id = await ad4m.ai.addModel({ name: 'New Model', modelType: 'LLM' } as any);
+    test('addModel() adds a model on an endpoint', async () => {
+        const model = { name: 'New Model', modelType: 'LLM' as const, endpointId: 'e1', remoteModel: 'qwen3:8b' };
+        const id = await ad4m.ai.addModel(model);
         expect(id).toBe('model-new-id');
-        expect(lastRpcCall!.params.model).toBeDefined();
-        expect((lastRpcCall!.params.model as any).type).toBe('LLM');
-        expect((lastRpcCall!.params.model as any).modelType).toBeUndefined();
+        expect(lastRpcCall!.params).toEqual({ model });
     });
 
     test('updateModel() updates a model', async () => {
-        const result = await ad4m.ai.updateModel('model-1', { name: 'Updated', modelType: 'EMBEDDING' } as any);
+        const model = { name: 'Updated', modelType: 'EMBEDDING' as const, endpointId: 'e1', remoteModel: 'nomic-embed-text' };
+        const result = await ad4m.ai.updateModel('model-1', model);
         expect(result).toBe(true);
-        expect((lastRpcCall!.params.model as any).type).toBe('EMBEDDING');
-        expect((lastRpcCall!.params.model as any).modelType).toBeUndefined();
+        expect(lastRpcCall!.params).toEqual({ id: 'model-1', model });
+    });
+
+    test('discoverModels() lists a saved endpoint or a server by its kind and URL', async () => {
+        const models = await ad4m.ai.discoverModels({ endpointId: 'e1' });
+        expect(models[0].id).toBe('qwen3:8b');
+        expect(lastRpcCall!.params).toEqual({ endpointId: 'e1' });
+        await ad4m.ai.discoverModels({ kind: 'OLLAMA', baseUrl: 'http://127.0.0.1:11434' });
+        expect(lastRpcCall!.params).toEqual({ kind: 'OLLAMA', baseUrl: 'http://127.0.0.1:11434' });
     });
 
     test('removeModel() removes a model', async () => {
@@ -1284,9 +1292,10 @@ describe('AIClient', () => {
         expect(lastRpcCall!.params.prompt).toBe('Hello AI');
     });
 
-    test('modelLoadingStatus() returns status', async () => {
-        const status = await ad4m.ai.modelLoadingStatus('model-1');
-        expect(status.progress).toBe(100);
+    test('modelStatus() returns where the model stands', async () => {
+        const status = await ad4m.ai.modelStatus('model-1');
+        expect(status.state).toBe('READY');
+        expect(lastRpcCall!.params).toEqual({ id: 'model-1' });
     });
 
     test('setDefaultModel() sets default', async () => {

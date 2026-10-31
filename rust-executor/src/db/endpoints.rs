@@ -1,20 +1,13 @@
-//! The `ai_endpoints` table: the upstream model servers, and the link from each remote
-//! model (`models.endpoint_id`) to the endpoint that serves it.
-//!
-//! An endpoint owns the URL, the key and the health. A model still carries its own copy of
-//! the URL, key and protocol in its `api_*` columns (models switch to endpoint references
-//! only in a later step); [`Ad4mDb::update_endpoint`] rewrites those copies, so a linked
-//! model always connects where its endpoint says. [`Ad4mDb::link_models_to_endpoints`]
-//! gives every remote model an endpoint: at startup, and after each model write.
+//! The `ai_endpoints` table: the upstream model servers. An endpoint owns the URL, the key,
+//! the protocol and the health; a model (`models.endpoint_id`) names the endpoint it runs
+//! on and the id the endpoint knows it by.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use url::Url;
 
 use super::{Ad4mDb, Ad4mDbResult, ApiKeyNotResent};
 use crate::secret::Secret;
-use crate::types::{
-    same_endpoint, AiCapability, Endpoint, EndpointHealth, EndpointKind, ModelApiType, ModelType,
-};
+use crate::types::{same_endpoint, AiCapability, Endpoint, EndpointHealth, EndpointKind};
 
 /// A write the endpoint registry refuses: a name or `(protocol, URL, key)` already taken, or
 /// a removal while models use the endpoint. The caller's mistake: a bad request.
@@ -90,23 +83,6 @@ fn kind_column(kind: EndpointKind) -> String {
     }
 }
 
-/// The endpoint a model with this `api` would get when none serves it yet: named by its
-/// host and port, of the kind its protocol and host say (plan §8.1 step 2).
-fn endpoint_for_api(api_type: &ModelApiType, base_url: &Url) -> (String, EndpointKind) {
-    let host = base_url.host_str().unwrap_or("endpoint");
-    let name = match base_url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    };
-    let kind = match api_type {
-        ModelApiType::Anthropic => EndpointKind::Anthropic,
-        ModelApiType::Ollama => EndpointKind::Ollama,
-        ModelApiType::OpenAi if host == "api.openai.com" => EndpointKind::OpenAi,
-        ModelApiType::OpenAi => EndpointKind::OpenAiCompatible,
-    };
-    (name, kind)
-}
-
 impl Ad4mDb {
     pub fn get_endpoints(&self) -> Ad4mDbResult<Vec<Endpoint>> {
         let mut stmt = self.conn.prepare(&format!(
@@ -139,8 +115,8 @@ impl Ad4mDb {
     }
 
     /// Refuses `endpoint` when another one has its name, or the same protocol, URL and key
-    /// (a model links to the endpoint its `api` names, so two such endpoints could not be
-    /// told apart), and a concurrency cap of 0, which would let no request through.
+    /// (two such endpoints are one server), and a concurrency cap of 0, which would let no
+    /// request through.
     fn refuse_invalid(&self, endpoint: &Endpoint) -> Ad4mDbResult<()> {
         if endpoint.max_concurrent == Some(0) {
             return Err(InvalidEndpoint(
@@ -194,9 +170,8 @@ impl Ad4mDb {
         Ok(())
     }
 
-    /// Writes `endpoint` over the stored one, and its URL, key, protocol and context
-    /// ceiling over the models it serves. Answers those models' ids: their clients have to
-    /// be built again.
+    /// Writes `endpoint` over the stored one. Answers the ids of the models it serves: their
+    /// clients have to be built again.
     pub fn update_endpoint(&self, endpoint: &Endpoint) -> Ad4mDbResult<Vec<String>> {
         self.refuse_invalid(endpoint)?;
         self.conn.execute(
@@ -217,17 +192,6 @@ impl Ad4mDb {
                 endpoint.max_concurrent,
             ],
         )?;
-        self.conn.execute(
-            "UPDATE models SET api_base_url = ?2, api_key = ?3, api_type = ?4, api_max_num_ctx = ?5
-             WHERE endpoint_id = ?1",
-            params![
-                endpoint.id,
-                endpoint.base_url.to_string(),
-                endpoint.api_key.expose(),
-                endpoint.kind.protocol().to_string(),
-                endpoint.max_num_ctx,
-            ],
-        )?;
         self.endpoint_model_ids(&endpoint.id)
     }
 
@@ -242,6 +206,25 @@ impl Ad4mDb {
             return Err(ApiKeyNotResent.into());
         }
         Ok(stored.api_key)
+    }
+
+    /// Gives `endpoint` `capability` when it lacks it.
+    pub fn add_endpoint_capability(
+        &self,
+        endpoint: &Endpoint,
+        capability: AiCapability,
+    ) -> Ad4mDbResult<()> {
+        if endpoint.capabilities.contains(&capability) {
+            return Ok(());
+        }
+        let mut capabilities = endpoint.capabilities.clone();
+        capabilities.push(capability);
+        capabilities.sort();
+        self.conn.execute(
+            "UPDATE ai_endpoints SET capabilities = ?2 WHERE id = ?1",
+            params![endpoint.id, serde_json::to_string(&capabilities)?],
+        )?;
+        Ok(())
     }
 
     pub fn set_endpoint_health(&self, id: &str, health: &EndpointHealth) -> Ad4mDbResult<()> {
@@ -264,7 +247,7 @@ impl Ad4mDb {
     /// The names of the models that use `remote_model` on endpoint `id`.
     pub fn models_using_remote(&self, id: &str, remote_model: &str) -> Ad4mDbResult<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name FROM models WHERE endpoint_id = ?1 AND model = ?2 ORDER BY name",
+            "SELECT name FROM models WHERE endpoint_id = ?1 AND remote_model = ?2 ORDER BY name",
         )?;
         let names = stmt.query_map(params![id, remote_model], |row| row.get(0))?;
         Ok(names.collect::<Result<_, _>>()?)
@@ -284,96 +267,13 @@ impl Ad4mDb {
             .execute("DELETE FROM ai_endpoints WHERE id = ?1", params![id])?;
         Ok(())
     }
-
-    /// Gives each remote model without an endpoint the one that serves its `api`: the
-    /// endpoint with the same protocol, URL and key, else a new one named by the URL's host
-    /// (plan §8.1 step 2). The endpoint gains the capability of each model type it serves.
-    /// A no-op when every remote model has an endpoint.
-    pub fn link_models_to_endpoints(&self) -> Ad4mDbResult<()> {
-        let unlinked: Vec<(String, String, String, String, String, Option<u32>)> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT id, api_base_url, COALESCE(api_key, ''), api_type, type, api_max_num_ctx
-                 FROM models
-                 WHERE endpoint_id IS NULL AND api_base_url IS NOT NULL AND api_type IS NOT NULL",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            })?;
-            rows.collect::<Result<_, _>>()?
-        };
-
-        for (model_id, base_url, api_key, api_type, model_type, max_num_ctx) in unlinked {
-            let (Ok(base_url), Ok(api_type), Ok(model_type)) = (
-                Url::parse(&base_url),
-                api_type.parse::<ModelApiType>(),
-                serde_json::from_str::<ModelType>(&model_type),
-            ) else {
-                log::warn!("Model {model_id} has an unreadable api; it gets no endpoint");
-                continue;
-            };
-            let capability = AiCapability::from(&model_type);
-
-            let existing = self.get_endpoints()?.into_iter().find(|endpoint| {
-                endpoint.kind.protocol() == api_type
-                    && same_endpoint(endpoint.base_url.as_str(), base_url.as_str())
-                    && endpoint.api_key.expose_for_compare(&api_key)
-            });
-            let endpoint_id = match existing {
-                Some(mut endpoint) => {
-                    if !endpoint.capabilities.contains(&capability) {
-                        endpoint.capabilities.push(capability);
-                        endpoint.capabilities.sort();
-                        self.conn.execute(
-                            "UPDATE ai_endpoints SET capabilities = ?2 WHERE id = ?1",
-                            params![endpoint.id, serde_json::to_string(&endpoint.capabilities)?],
-                        )?;
-                    }
-                    endpoint.id
-                }
-                None => {
-                    let (host_name, kind) = endpoint_for_api(&api_type, &base_url);
-                    let taken: Vec<String> =
-                        self.get_endpoints()?.into_iter().map(|e| e.name).collect();
-                    let name = std::iter::once(host_name.clone())
-                        .chain((2..).map(|n| format!("{host_name}-{n}")))
-                        .find(|name| !taken.contains(name))
-                        .expect("an unbounded list of names has a free one");
-                    let endpoint = Endpoint {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        name,
-                        kind,
-                        base_url,
-                        api_key: Secret::new(api_key),
-                        capabilities: vec![capability],
-                        max_num_ctx,
-                        request_timeout_secs: None,
-                        max_concurrent: None,
-                        health: EndpointHealth::default(),
-                    };
-                    self.insert_endpoint(&endpoint)?;
-                    endpoint.id
-                }
-            };
-            self.conn.execute(
-                "UPDATE models SET endpoint_id = ?2 WHERE id = ?1",
-                params![model_id, endpoint_id],
-            )?;
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{EndpointState, ModelApiInput, ModelInput};
+    use crate::db::InvalidModel;
+    use crate::types::{EndpointState, ModelInput, ModelType};
 
     fn db() -> Ad4mDb {
         Ad4mDb::new(":memory:").unwrap()
@@ -394,20 +294,22 @@ mod tests {
         }
     }
 
-    fn remote(name: &str, url: &str, key: Option<&str>, api_type: &str) -> ModelInput {
+    /// Model `name` on endpoint `endpoint_id`, known there as `<name>-remote`.
+    fn on(endpoint_id: &str, name: &str, model_type: ModelType) -> ModelInput {
         ModelInput {
             name: name.to_string(),
-            api: Some(ModelApiInput {
-                base_url: url.to_string(),
-                api_key: key.map(Into::into),
-                model: format!("{name}-remote"),
-                api_type: api_type.to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
-            model_type: ModelType::Llm,
+            model_type,
+            endpoint_id: endpoint_id.to_string(),
+            remote_model: format!("{name}-remote"),
+            native_tools: None,
         }
+    }
+
+    /// A saved endpoint `name` at `url`, without a key.
+    fn saved(db: &Ad4mDb, name: &str, url: &str) -> Endpoint {
+        let endpoint = endpoint(name, url, "");
+        db.insert_endpoint(&endpoint).unwrap();
+        endpoint
     }
 
     #[test]
@@ -468,100 +370,43 @@ mod tests {
         assert!(refused.downcast_ref::<InvalidEndpoint>().is_some());
     }
 
-    // Plan §8.1 step 2: rows that share protocol, URL and key share one endpoint; a
-    // different key gets its own; names come from the host and are suffixed on a clash.
     #[test]
-    fn remote_models_are_linked_to_one_endpoint_per_protocol_url_and_key() {
+    fn a_model_names_an_endpoint_that_exists_and_gives_it_its_capability() {
         let db = db();
-        let a = db
-            .add_model(&remote(
-                "a",
-                "https://api.openai.com/v1",
-                Some("k1"),
-                "OPEN_AI",
-            ))
-            .unwrap();
-        let b = db
-            .add_model(&remote(
-                "b",
-                "https://api.openai.com/v1",
-                Some("k1"),
-                "OPEN_AI",
-            ))
-            .unwrap();
-        let c = db
-            .add_model(&remote(
-                "c",
-                "https://api.openai.com/v1",
-                Some("k2"),
-                "OPEN_AI",
-            ))
-            .unwrap();
-        let d = db
-            .add_model(&remote("d", "http://localhost:11434", None, "OLLAMA"))
-            .unwrap();
-        let local = db
-            .add_model(&ModelInput {
-                name: "local".into(),
-                api: None,
-                local: Some(crate::types::LocalModelInput {
-                    file_name: "bert".into(),
-                    ..Default::default()
-                }),
-                model_type: ModelType::Embedding,
-            })
-            .unwrap();
+        let refused = db
+            .add_model(&on("no-such-endpoint", "m", ModelType::Llm))
+            .unwrap_err();
+        assert!(refused.downcast_ref::<InvalidModel>().is_some());
 
-        let endpoint_of = |id: &str| db.get_model(id.to_string()).unwrap().unwrap().endpoint_id;
-        assert_eq!(endpoint_of(&a), endpoint_of(&b));
-        assert_ne!(endpoint_of(&a), endpoint_of(&c));
-        assert_eq!(endpoint_of(&local), None, "a local model has no endpoint");
+        let box_ = saved(&db, "box", "http://127.0.0.1:9931");
+        let mut nameless = on(&box_.id, "m", ModelType::Llm);
+        nameless.remote_model = " ".into();
+        let refused = db.add_model(&nameless).unwrap_err();
+        assert!(refused.downcast_ref::<InvalidModel>().is_some());
 
-        let first = db.get_endpoint(&endpoint_of(&a).unwrap()).unwrap().unwrap();
-        assert_eq!(first.name, "api.openai.com");
-        assert_eq!(first.kind, EndpointKind::OpenAi);
-        assert!(first.api_key.expose_for_compare("k1"));
-        let second = db.get_endpoint(&endpoint_of(&c).unwrap()).unwrap().unwrap();
-        assert_eq!(second.name, "api.openai.com-2");
-        let ollama = db.get_endpoint(&endpoint_of(&d).unwrap()).unwrap().unwrap();
+        let id = db
+            .add_model(&on(&box_.id, "embed", ModelType::Embedding))
+            .unwrap();
+        let model = db.get_model(id).unwrap().unwrap();
+        assert_eq!(model.endpoint_id, box_.id);
+        assert_eq!(model.remote_model, "embed-remote");
+        assert_eq!(model.model_type, ModelType::Embedding);
         assert_eq!(
-            (ollama.name.as_str(), ollama.kind),
-            ("localhost:11434", EndpointKind::Ollama)
+            db.get_endpoint(&box_.id).unwrap().unwrap().capabilities,
+            vec![AiCapability::Chat, AiCapability::Embeddings]
         );
-        assert_eq!(ollama.capabilities, vec![AiCapability::Chat]);
-
-        // Linking again changes nothing.
-        db.link_models_to_endpoints().unwrap();
-        assert_eq!(db.get_endpoints().unwrap().len(), 3);
     }
 
     #[test]
-    fn an_endpoint_update_rewrites_the_models_it_serves() {
+    fn an_endpoint_update_names_the_models_it_serves() {
         let db = db();
-        let id = db
-            .add_model(&remote("m", "http://127.0.0.1:9931", Some("k"), "OPEN_AI"))
-            .unwrap();
-        let endpoint_id = db
-            .get_model(id.clone())
-            .unwrap()
-            .unwrap()
-            .endpoint_id
-            .unwrap();
-        let mut endpoint = db.get_endpoint(&endpoint_id).unwrap().unwrap();
-        endpoint.base_url = Url::parse("https://gpu.example.org/v1").unwrap();
-        endpoint.api_key = Secret::new("k-new");
-        endpoint.kind = EndpointKind::Ollama;
-        endpoint.max_num_ctx = Some(4096);
-
-        assert_eq!(db.update_endpoint(&endpoint).unwrap(), vec![id.clone()]);
-
-        let api = db.get_model(id).unwrap().unwrap().api.unwrap();
-        assert_eq!(api.base_url.as_str(), "https://gpu.example.org/v1");
-        assert!(api.api_key.expose_for_compare("k-new"));
-        assert_eq!(api.api_type, ModelApiType::Ollama);
-        assert_eq!(api.max_num_ctx, Some(4096));
+        let mut box_ = saved(&db, "box", "http://127.0.0.1:9931");
+        let id = db.add_model(&on(&box_.id, "m", ModelType::Llm)).unwrap();
+        box_.base_url = Url::parse("https://gpu.example.org/v1").unwrap();
+        assert_eq!(db.update_endpoint(&box_).unwrap(), vec![id.clone()]);
+        let model = db.get_model(id).unwrap().unwrap();
         assert_eq!(
-            api.model, "m-remote",
+            model.remote_model, "m-remote",
             "the remote model id stays the model's"
         );
     }
@@ -584,14 +429,9 @@ mod tests {
     #[test]
     fn an_endpoint_in_use_is_not_removed() {
         let db = db();
+        let endpoint_id = saved(&db, "box", "http://127.0.0.1:9931").id;
         let id = db
-            .add_model(&remote("m", "http://127.0.0.1:9931", None, "OPEN_AI"))
-            .unwrap();
-        let endpoint_id = db
-            .get_model(id.clone())
-            .unwrap()
-            .unwrap()
-            .endpoint_id
+            .add_model(&on(&endpoint_id, "m", ModelType::Llm))
             .unwrap();
         assert_eq!(
             db.models_using_remote(&endpoint_id, "m-remote").unwrap(),
@@ -606,17 +446,18 @@ mod tests {
     }
 
     #[test]
-    fn a_model_moved_to_another_url_moves_to_its_endpoint() {
+    fn a_model_moves_to_another_endpoint() {
         let db = db();
-        let id = db
-            .add_model(&remote("m", "http://127.0.0.1:9931", None, "OPEN_AI"))
+        let first = saved(&db, "first", "http://127.0.0.1:9931");
+        let second = saved(&db, "second", "http://127.0.0.1:8000");
+        let id = db.add_model(&on(&first.id, "m", ModelType::Llm)).unwrap();
+        db.update_model(&id, &on(&second.id, "m", ModelType::Llm))
             .unwrap();
-        let before = db.get_model(id.clone()).unwrap().unwrap().endpoint_id;
-        db.update_model(&id, &remote("m", "http://127.0.0.1:8000", None, "OPEN_AI"))
-            .unwrap();
-        let after = db.get_model(id).unwrap().unwrap().endpoint_id;
-        assert_ne!(before, after);
-        let endpoint = db.get_endpoint(&after.unwrap()).unwrap().unwrap();
-        assert_eq!(endpoint.base_url.as_str(), "http://127.0.0.1:8000/");
+        assert_eq!(
+            db.get_model(id.clone()).unwrap().unwrap().endpoint_id,
+            second.id
+        );
+        assert!(db.endpoint_model_ids(&first.id).unwrap().is_empty());
+        assert_eq!(db.endpoint_model_ids(&second.id).unwrap(), vec![id]);
     }
 }

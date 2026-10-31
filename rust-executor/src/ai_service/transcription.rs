@@ -1,7 +1,7 @@
-//! Transcription on an endpoint, and what both transcription paths share: billing and the
-//! `transcription-text` event.
+//! Transcription on an endpoint, and what streams and `/v1/audio/transcriptions` share:
+//! billing and the `transcription-text` event.
 //!
-//! A stream on an endpoint has no executor-side voice-activity gate: the client cuts
+//! A stream has no executor-side voice-activity gate: the client cuts
 //! utterances (WE's worklet) and the upstream filters silence. Each utterance fed is encoded
 //! as a 16 kHz mono PCM16 WAV and sent as one `/v1/audio/transcriptions` call, one at a time,
 //! so text comes out in the order the audio went in.
@@ -21,35 +21,28 @@ use crate::types::{ModelType, TranscriptionTextFilter};
 /// What every feed carries: 16 kHz mono `f32`.
 pub(crate) const SAMPLE_RATE: u32 = 16_000;
 
-/// The client and upstream model id of the transcription model `model_id` when an endpoint
-/// serves it. `None` for local Whisper: a preset name, or a row without `api`.
-pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<Option<(OpenAiTranscribe, String)>> {
-    let Some(model) = Ad4mDb::with_global_instance(|db| db.get_model(model_id.to_string()))? else {
-        return Ok(None);
-    };
+/// The client of the endpoint that serves transcription model `model_id`, and the id the
+/// endpoint knows the model by.
+pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<(OpenAiTranscribe, String)> {
+    let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.to_string()))?
+        .ok_or_else(|| anyhow!("No transcription model has the id '{model_id}'"))?;
     if model.model_type != ModelType::Transcription {
         return Err(anyhow!(
             "Model '{}' is not a transcription model",
             model.name
         ));
     }
-    let Some(api) = model.api else {
-        return Ok(None);
-    };
-    let endpoint_id = model
-        .endpoint_id
-        .ok_or_else(|| anyhow!("Transcription model '{}' has no endpoint", model.name))?;
-    let endpoint =
-        Ad4mDb::with_global_instance(|db| db.get_endpoint(&endpoint_id))?.ok_or_else(|| {
+    let endpoint = Ad4mDb::with_global_instance(|db| db.get_endpoint(&model.endpoint_id))?
+        .ok_or_else(|| {
             anyhow!(
                 "The endpoint of transcription model '{}' is gone",
                 model.name
             )
         })?;
-    Ok(Some((
+    Ok((
         OpenAiTranscribe::for_endpoint(&endpoint)?,
-        api.model,
-    )))
+        model.remote_model,
+    ))
 }
 
 /// Bill `words` transcribed by `model_id` to the managed agent `agent_did` (`None`: the main

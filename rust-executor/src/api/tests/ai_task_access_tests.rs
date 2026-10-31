@@ -5,8 +5,6 @@
 //! delete or prompt it (`Guard::Owns { owner: Task }`). The operator keeps access to every
 //! task; an app on the main agent reaches the main agent's tasks only.
 
-use std::time::Duration;
-
 use serde_json::{json, Value};
 
 use super::multi_user::{expect_code, Executor, Session};
@@ -16,49 +14,44 @@ use crate::perspectives::interpretation::{
     interpretation_task_name_for_model, register_interpretation_task_for_model,
     INTERPRETATION_SYSTEM_PROMPT,
 };
-use crate::types::{ModelApiInput, ModelApiType, ModelInput, ModelType};
+use crate::types::{Endpoint, EndpointKind, ModelInput, ModelType};
 
 /// Starts `AIService` over an LLM whose endpoint refuses connections, and returns the model
-/// id. Task CRUD needs only the model's worker. A prompt through one of its tasks passes
+/// id. Task CRUD needs only the model's client. A prompt through one of its tasks passes
 /// every check in the executor and then fails at the transport.
 async fn serve_unreachable_llm() -> String {
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
         .expect("free port")
         .port();
+    let endpoint = Endpoint::for_test(
+        "isolation-test",
+        EndpointKind::OpenAiCompatible,
+        &format!("http://127.0.0.1:{port}/v1"),
+        "",
+    );
     let model_id = Ad4mDb::with_global_instance(|db| {
+        db.insert_endpoint(&endpoint)?;
         db.add_model(&ModelInput {
             name: "isolation-test-llm".to_string(),
             model_type: ModelType::Llm,
-            local: None,
-            api: Some(ModelApiInput {
-                base_url: format!("http://127.0.0.1:{port}/v1"),
-                api_key: None,
-                model: "isolation-test".to_string(),
-                api_type: ModelApiType::OpenAi.to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
+            endpoint_id: endpoint.id.clone(),
+            remote_model: "isolation-test".to_string(),
+            native_tools: None,
         })
     })
     .expect("add model");
 
-    // Registered before the service starts: with no model at all, its first load would
-    // download the default embedding model instead.
     AIService::init_global_instance()
         .await
         .expect("start AIService");
-    for _ in 0..400 {
-        let loaded = Ad4mDb::with_global_instance(|db| db.get_model_status(&model_id))
-            .ok()
-            .flatten()
-            .is_some_and(|status| status.loaded);
-        if loaded {
-            return model_id;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("the model worker never reported ready");
+    AIService::global_instance()
+        .await
+        .expect("the service")
+        .load()
+        .await
+        .expect("the model's client builds");
+    model_id
 }
 
 async fn add_task(

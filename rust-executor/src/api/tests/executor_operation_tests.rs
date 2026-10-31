@@ -15,7 +15,7 @@ use crate::db::Ad4mDb;
 use crate::events::{Audience, Event, Topic};
 use crate::languages::LanguageController;
 use crate::pubsub::get_global_pubsub;
-use crate::types::{Agent, ModelApiInput, ModelInput, ModelType, RequestContext};
+use crate::types::{Agent, Endpoint, EndpointKind, ModelInput, ModelType, RequestContext};
 
 /// A user session on the managed agent `did`, with the default user capabilities.
 fn user_session(did: &str) -> Arc<RequestContext> {
@@ -368,19 +368,20 @@ async fn a_user_reads_only_their_own_compute_log() {
 #[tokio::test]
 async fn the_default_model_never_shows_its_key() {
     Ad4mDb::init_global_instance(":memory:").unwrap();
+    let endpoint = Endpoint::for_test(
+        "remote",
+        EndpointKind::OpenAi,
+        "https://api.example.org/v1",
+        "sk-provider-secret",
+    );
     let id = Ad4mDb::with_global_instance(|db| {
+        db.insert_endpoint(&endpoint)?;
         let id = db.add_model(&ModelInput {
             name: "Remote".to_string(),
-            api: Some(ModelApiInput {
-                base_url: "https://api.example.org/v1".to_string(),
-                api_key: Some("sk-provider-secret".into()),
-                model: "gpt".to_string(),
-                api_type: "OpenAi".to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
             model_type: ModelType::Llm,
+            endpoint_id: endpoint.id.clone(),
+            remote_model: "gpt".to_string(),
+            native_tools: None,
         })?;
         db.set_default_model(ModelType::Llm, &id)?;
         crate::db::Ad4mDbResult::Ok(id)
@@ -401,8 +402,8 @@ async fn the_default_model_never_shows_its_key() {
 
     for model in [as_user, as_operator] {
         assert_eq!(model["id"], json!(id));
-        assert_eq!(model["api"]["model"], json!("gpt"));
-        assert_eq!(model["api"]["hasApiKey"], json!(true));
+        assert_eq!(model["remoteModel"], json!("gpt"));
+        assert_eq!(model["endpointId"], json!(endpoint.id));
         assert!(
             !model.to_string().contains("sk-provider-secret"),
             "no session reads the provider key back: {model}"

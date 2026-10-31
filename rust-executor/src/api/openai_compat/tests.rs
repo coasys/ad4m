@@ -570,7 +570,7 @@ fn seam_can_force_insufficient_credits() {
 
 // ---------------------------------------------------------------------------
 // Regression guard for round-1 finding #2: /v1/audio/transcriptions
-// double-billed (once at the handler, once in the whisper worker).
+// double-billed (once at the handler, once in the transcription worker).
 //
 // Transcription is billed in one function, `ai_service::transcription::
 // bill_transcription`, once per transcript (`transcription_is_billed_in_one_place`
@@ -636,22 +636,23 @@ async fn transcriptions_handler_does_not_bill() {
     test_seam::reset();
 }
 
-/// A transcription model named `name` on the OpenAI-shaped server at `url` (an endpoint
-/// is linked to it), served upstream as `remote`.
+/// A transcription model named `name` on an endpoint for the OpenAI-shaped audio server at
+/// `url`, served upstream as `remote`.
 fn transcription_model_on(url: &str, name: &str, remote: &str) {
+    let endpoint = crate::types::Endpoint::for_test(
+        &format!("{name}-endpoint"),
+        crate::types::EndpointKind::OpenAiAudio,
+        url,
+        "",
+    );
     crate::db::Ad4mDb::with_global_instance(|db| {
+        db.insert_endpoint(&endpoint)?;
         db.add_model(&crate::types::ModelInput {
             name: name.to_string(),
-            api: Some(crate::types::ModelApiInput {
-                base_url: url.to_string(),
-                api_key: None,
-                model: remote.to_string(),
-                api_type: "OPEN_AI".to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
             model_type: crate::types::ModelType::Transcription,
+            endpoint_id: endpoint.id.clone(),
+            remote_model: remote.to_string(),
+            native_tools: None,
         })
     })
     .expect("the model is added");
@@ -740,37 +741,6 @@ async fn a_failing_upstream_is_a_gateway_error_that_names_no_endpoint() {
         .as_str()
         .unwrap()
         .contains("unsupported audio"));
-}
-
-#[tokio::test]
-async fn a_local_whisper_model_is_refused_by_the_passthrough() {
-    let router = test_router();
-    let name = format!("whisper-{}", uuid::Uuid::new_v4());
-    crate::db::Ad4mDb::with_global_instance(|db| {
-        db.add_model(&crate::types::ModelInput {
-            name: name.clone(),
-            api: None,
-            local: Some(crate::types::LocalModelInput {
-                file_name: "whisper_tiny".into(),
-                tokenizer_source: None,
-                huggingface_repo: None,
-                revision: None,
-            }),
-            model_type: crate::types::ModelType::Transcription,
-        })
-    })
-    .unwrap();
-
-    let resp = router
-        .oneshot(transcription_request(&name, &[]))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = body_json(resp).await;
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("has no endpoint"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,44 +1144,6 @@ fn tool_result_with_an_empty_id_renders_the_bare_tag() {
 
     assert!(text.contains("<tool_response>"), "got: {text}");
     assert!(!text.contains("id="), "got: {text}");
-}
-
-// ---------------------------------------------------------------------------
-// ai.addModel / ai.updateModel — a saved key must not travel in the clear
-// ---------------------------------------------------------------------------
-
-fn model_at(base_url: &str, api_key: &str) -> crate::types::ModelInput {
-    crate::types::ModelInput {
-        name: "m".into(),
-        api: Some(crate::types::ModelApiInput {
-            base_url: base_url.into(),
-            api_key: Some(api_key.into()),
-            model: "m".into(),
-            api_type: "ANTHROPIC".into(),
-            max_num_ctx: None,
-            native_tools: None,
-        }),
-        ..Default::default()
-    }
-}
-
-#[test]
-fn a_saved_model_may_not_send_its_key_over_plain_http() {
-    // Discovery sends a key once; a saved model sends it on every completion.
-    use super::super::ai_ws::refuse_cleartext_credential as refuse;
-    let error = refuse(&model_at("http://api.anthropic.com", "sk-ant")).expect_err("refused");
-    assert!(error.message.contains("plain HTTP"), "{}", error.message);
-}
-
-#[test]
-fn a_saved_model_is_held_to_the_same_exemptions_as_discovery() {
-    use super::super::ai_ws::refuse_cleartext_credential as refuse;
-    assert!(refuse(&model_at("https://api.anthropic.com", "sk-ant")).is_ok());
-    assert!(refuse(&model_at("http://localhost:11434/v1", "ollama")).is_ok());
-    // Keyless over plain HTTP carries nothing to leak.
-    assert!(refuse(&model_at("http://192.168.1.10:11434/v1", "")).is_ok());
-    // A local model has no endpoint at all.
-    assert!(refuse(&crate::types::ModelInput::default()).is_ok());
 }
 
 // ---------------------------------------------------------------------------
