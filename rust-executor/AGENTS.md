@@ -119,6 +119,17 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   session watches through `Session::ended()`. Start-up drops expired rows. The app registry of
   executors before grants (`apps_data.json`) is not read: no migration exists. Tests mint with
   `test_utils::granted_token(auth)`; a token signed without a grant is refused.
+- **Key sessions** (`identity/key_login.rs`, `grants::mint_key_grant`): a login signed by a
+  person's device key (`user.sessionChallenge`, `user.loginWithKey`) mints a grant bound to that
+  key (`KeyBinding`: the `did:scid`, the multikey, its key id; columns `scid`, `signing_key`,
+  `key_id`, `head_seq`, `checked_at`) for one hour. Its role (`GrantRole`, column `role`) is
+  `Operator` for the operator record's identity (`Session::open` opens `Principal::Operator`,
+  `OperatorSource::Key`, within the grant) or `Agent` on the local agent that speaks for the
+  identity. Its expiry is atomic: `user.renewSession` moves it and `Session::over` follows it,
+  so open sockets stay open. `Grants::revoke_key` ends a key's grants on the key-log cache's
+  `VerdictChange` and on the 5-minute re-check (which also ends grants whose key could not be
+  read for an hour). `user.logout` ends any grant; `user.endAllSessions` every grant of the
+  caller's identity (and of a managed agent).
 - **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
   `AgentService::create_managed_agent_key` creates one under its DID,
   `AgentService::wallet_key_for_did` finds it (cached). A shared wallet cannot name keys, so there

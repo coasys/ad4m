@@ -30,7 +30,7 @@ mod grants;
 mod identity;
 mod rekey;
 mod tasks;
-pub use grants::GrantRow;
+pub use grants::{GrantKeyRow, GrantRow};
 #[cfg(test)]
 pub(crate) use identity::operator_record_in;
 pub(crate) use identity::set_operator_record_if_empty_in;

@@ -646,13 +646,17 @@ where
     let over = conn.ctx.session.over();
     tokio::pin!(incoming, over);
     loop {
+        // Biased: a request already received is answered before the session's end is: it
+        // gets its 401 from the session check rather than no answer. `over` is ready at once
+        // for a grant that expired before the connection opened.
         let text = tokio::select! {
+            biased;
             _ = conn.session_over.cancelled() => break,
+            text = incoming.next() => text,
             _ = &mut over => {
                 conn.session_over.cancel();
                 break;
             }
-            text = incoming.next() => text,
         };
         let Some(text) = text else { break };
         conn.handle_text(&text).await;

@@ -646,7 +646,32 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "offer": "coasys:offer:1:x" }),
     ),
     ("identity.joinStatus", || json!({ "offerId": "o" })),
+    // Key sessions.
+    (
+        "user.loginWithKey",
+        || json!({ "proof": signed_key_statement("login"), "app": { "appName": "a", "appDesc": "", "appDomain": "" } }),
+    ),
+    (
+        "user.renewSession",
+        || json!({ "proof": signed_key_statement("renew") }),
+    ),
+    ("user.endAllSessions", || json!({ "keepCurrent": true })),
+    (
+        "agent.signSessionStatement",
+        || json!({ "statement": { "v": 1, "purpose": "login", "executor": "did:key:z6Mk", "challenge": "c", "client": { "kind": "native" }, "issuedAt": 1 } }),
+    ),
 ];
+
+fn signed_key_statement(purpose: &str) -> Value {
+    json!({
+        "statement": {
+            "v": 1, "purpose": purpose, "scid": "did:scid:coasys:1:Qm", "key": "z6Mk",
+            "executor": "did:key:z6Mk", "challenge": "c", "client": { "kind": "native" },
+            "issuedAt": 1,
+        },
+        "sig": "z",
+    })
+}
 
 fn signed_offer() -> Value {
     json!({
@@ -1046,14 +1071,40 @@ async fn a_local_only_method_admits_only_the_operator_on_this_machine() {
     assert_eq!(map.local_only_methods(), vec![method]);
 }
 
-/// The calls that stay on this machine: opening and replacing the executor's own key, the
-/// custody channel and stopping its process. (`agent.generate`, `agent.import`, `agent.lock`,
-/// `runtime.exportData` and `runtime.importData` join them with key login.)
+/// No `.local_only()` method admits an operator from a key login, though it arrives on a
+/// loopback listener: a forwarded port makes a remote device key look local.
+#[tokio::test]
+async fn no_local_only_method_admits_an_operator_from_a_key_login() {
+    let map = build_handler_map();
+    let key = RequestContext::for_session(
+        crate::agent::session::Session::for_test(crate::agent::session::Principal::Operator)
+            .from_key_login(),
+    );
+    let local_only = map.local_only_methods();
+    assert!(!local_only.is_empty());
+    for method in local_only {
+        let refused = map
+            .admit(method, &params(method, None, false), &key)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (403, crate::api::guards::LOCAL_ONLY),
+            "{method}"
+        );
+    }
+}
+
+/// The calls that stay on this machine: opening and replacing the executor's own key, signing
+/// as this device, the custody channel and stopping its process. (`agent.generate`,
+/// `agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` are not local
+/// only yet.)
 #[test]
 fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
     assert_eq!(
         build_handler_map().local_only_methods(),
         vec![
+            "agent.signSessionStatement",
             "agent.unlock",
             "identity.custodyStatus",
             "identity.rekey",
@@ -1151,7 +1202,8 @@ async fn only_the_operator_binds_the_main_agent_to_an_identity() {
 
 /// `Guard::Cap` checks the capability alone, so a caller without a token reaches exactly the
 /// methods whose capability is in the anonymous set (and the `Open` ones): asking for a
-/// capability, redeeming it, signing up, logging in, verifying an email.
+/// capability, redeeming it, signing up, logging in (by password or by a device key), verifying
+/// an email.
 #[test]
 fn anonymous_callers_reach_only_the_anonymous_capabilitys_methods() {
     let map = build_handler_map();
@@ -1170,8 +1222,10 @@ fn anonymous_callers_reach_only_the_anonymous_capabilitys_methods() {
             "agent.requestCapability",
             "user.create",
             "user.login",
+            "user.loginWithKey",
             "user.multiUserEnabled",
             "user.requestVerification",
+            "user.sessionChallenge",
             "user.verifyEmail",
         ]
     );
@@ -1190,6 +1244,7 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
     assert_eq!(
         operator_methods,
         vec![
+            "agent.signSessionStatement",
             "identity.claimOffer",
             "identity.custodyStatus",
             "identity.rekey",
@@ -1513,7 +1568,10 @@ fn only_methods_that_check_no_capability_are_open() {
             "runtime.freeHostingEnabled",
             "runtime.info",
             "runtime.tlsDomain",
+            "user.currentSession",
+            "user.endAllSessions",
             "user.logout",
+            "user.renewSession",
         ]
     );
 }

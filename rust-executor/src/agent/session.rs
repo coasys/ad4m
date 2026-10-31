@@ -54,6 +54,31 @@ pub enum Principal {
     Anonymous,
 }
 
+/// How the operator proved it is the operator: where an operator session's role comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperatorSource {
+    /// It presented the admin credential.
+    Credential,
+    /// It presented no token on a loopback listener of an executor without an admin
+    /// credential (#1059).
+    Loopback,
+    /// It holds a grant with the operator role, from a login with a device key of the
+    /// operator record's identity. Never the operator on this machine, whatever listener it
+    /// arrived on: local-only methods refuse it.
+    Key,
+}
+
+impl OperatorSource {
+    /// The wire name (`user.currentSession`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OperatorSource::Credential => "credential",
+            OperatorSource::Loopback => "loopback",
+            OperatorSource::Key => "key",
+        }
+    }
+}
+
 /// Why a token opens no session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthError {
@@ -127,16 +152,6 @@ pub struct Session {
     operator_source: Option<OperatorSource>,
 }
 
-/// How the operator proved it is the operator.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OperatorSource {
-    /// It presented the admin credential.
-    Credential,
-    /// It presented no token on a loopback listener of an executor without an admin
-    /// credential (#1059).
-    Loopback,
-}
-
 impl Session {
     /// The identity of a caller that presents `token` on a listener with this reach.
     pub fn open(
@@ -178,6 +193,19 @@ impl Session {
         })?;
 
         let grant = grant_for(&claims)?;
+        if grant.is_operator() {
+            // The operator role a key login carries: the operator, within the grant, so it
+            // ends when the grant does.
+            return Ok(Session {
+                principal: Principal::Operator,
+                caps: vec![ALL_CAPABILITY.clone()],
+                grant: Some(grant),
+                did: OnceLock::new(),
+                main_did: Default::default(),
+                reach,
+                operator_source: Some(OperatorSource::Key),
+            });
+        }
         let did = OnceLock::new();
         if let Some(agent_did) = grant.agent.managed_did() {
             let _ = did.set(agent_did.to_string());
@@ -247,22 +275,29 @@ impl Session {
         }
     }
 
-    /// Completes when the session stops holding: its grant ends or its token expires, so an
-    /// idle socket closes at expiry as it does at a revocation. Never for the operator and
-    /// anonymous callers.
+    /// Completes when the session stops holding: its grant ends or expires, so an idle socket
+    /// closes at expiry as it does at a revocation. It watches the grant's expiry, not the
+    /// token's: a renewal moves the expiry, and the socket stays open. Never for the admin
+    /// credential, the loopback operator and anonymous callers.
     pub fn over(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
         let grant = self.grant.clone();
         async move {
             let Some(grant) = grant else {
                 return std::future::pending().await;
             };
-            let expired = grant
-                .expires_at
-                .saturating_add(TOKEN_EXPIRY_LEEWAY_SECONDS + 1);
-            let wait = std::time::Duration::from_secs(expired.saturating_sub(super::grants::now()));
-            tokio::select! {
-                _ = grant.ended.cancelled() => {}
-                _ = tokio::time::sleep(wait) => {}
+            loop {
+                let expired = grant
+                    .expires_at()
+                    .saturating_add(TOKEN_EXPIRY_LEEWAY_SECONDS + 1);
+                let now = super::grants::now();
+                if now >= expired {
+                    return;
+                }
+                let wait = std::time::Duration::from_secs(expired - now);
+                tokio::select! {
+                    _ = grant.ended.cancelled() => return,
+                    _ = tokio::time::sleep(wait) => {}
+                }
             }
         }
     }
@@ -282,17 +317,16 @@ impl Session {
         self.principal == Principal::Operator
     }
 
-    /// How the operator proved it is the operator; `None` for every other caller.
-    pub fn operator_source(&self) -> Option<OperatorSource> {
-        self.operator_source
-    }
-
     /// Whether the caller is the operator on this machine: the operator on a loopback
-    /// listener. The one test of a method registered `.local_only()`. A grant is never on this
-    /// machine in this sense, whatever its capabilities, and neither is the admin credential
-    /// on a listener that the network reaches.
+    /// listener, by the admin credential or by no token there. The one test of a method
+    /// registered `.local_only()`. A grant is never on this machine in this sense, whatever
+    /// its capabilities, and neither is the admin credential on a listener that the network
+    /// reaches. An operator from a key login is not either, even on a loopback listener: a
+    /// forwarded port makes a remote device key look local.
     pub fn is_operator_on_this_machine(&self) -> bool {
-        self.is_operator() && self.reach == ListenerReach::Loopback
+        self.is_operator()
+            && self.reach == ListenerReach::Loopback
+            && self.operator_source != Some(OperatorSource::Key)
     }
 
     /// Whether the caller presented a credential: the operator or a grant on an agent.
@@ -305,12 +339,28 @@ impl Session {
         self.caps.clone()
     }
 
-    /// The grant the session acts within. `None` for the operator and anonymous callers.
+    /// The grant the session acts within. `None` for the admin credential, the loopback
+    /// operator and anonymous callers; an operator from a key login has its grant.
     pub fn grant(&self) -> Option<&Arc<LiveGrant>> {
         self.grant.as_ref()
     }
 
-    /// A user session's grant: what `user.logout` revokes.
+    /// Where the operator role comes from; `None` unless [`Session::is_operator`].
+    pub fn operator_source(&self) -> Option<OperatorSource> {
+        self.operator_source
+    }
+
+    /// The device key behind the session's grant, when a key login made it.
+    pub fn key_binding(&self) -> Option<&super::grants::KeyBinding> {
+        self.grant.as_ref().and_then(|g| g.key.as_ref())
+    }
+
+    /// The id of the session's grant.
+    pub fn grant_id(&self) -> Option<&TokenId> {
+        self.grant.as_ref().map(|g| &g.id)
+    }
+
+    /// A user session's grant: what `user.revokeAllSessions` reads.
     pub fn user_grant(&self) -> Option<&Arc<LiveGrant>> {
         match &self.principal {
             Principal::Agent(AgentContext::Managed { .. }) => self.grant.as_ref(),
@@ -461,6 +511,17 @@ impl Session {
         }
     }
 
+    /// This operator session, from a key login: the operator role within a grant with that
+    /// role, as `Session::open` gives a device key of the operator record's identity.
+    pub(crate) fn from_key_login(self) -> Session {
+        let grant =
+            LiveGrant::for_test("key-login", AgentContext::main_agent(), u64::MAX).operator_role();
+        Session {
+            operator_source: Some(OperatorSource::Key),
+            ..self.with_grant(Arc::new(grant))
+        }
+    }
+
     /// This session within `grant`.
     pub(crate) fn with_grant(self, grant: Arc<LiveGrant>) -> Session {
         Session {
@@ -568,6 +629,18 @@ mod resolution_tests {
         let anonymous = Session::open("", &admin(), ListenerReach::Loopback).unwrap();
         assert!(!anonymous.is_operator_on_this_machine());
         assert_eq!(anonymous.operator_source(), None);
+    }
+
+    /// An operator from a key login is never on this machine, even on a loopback listener (a
+    /// forwarded port makes a remote device key look local): `.local_only()` refuses it.
+    #[test]
+    fn an_operator_from_a_key_login_is_not_on_this_machine_on_a_loopback_listener() {
+        let key = Session::for_test(Principal::Operator).from_key_login();
+        assert_eq!(key.reach, ListenerReach::Loopback);
+        assert!(key.is_operator());
+        assert_eq!(key.operator_source(), Some(OperatorSource::Key));
+        assert!(!key.is_operator_on_this_machine());
+        assert!(!key.on_network().is_operator_on_this_machine());
     }
 
     #[test]
@@ -708,7 +781,7 @@ mod resolution_tests {
                 "a user never holds every capability"
             );
             assert!(
-                session.grant().is_some_and(|g| g.expires_at > 0),
+                session.grant().is_some_and(|g| g.expires_at() > 0),
                 "a user token expires"
             );
             assert!(session.check().is_ok());

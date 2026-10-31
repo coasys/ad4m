@@ -116,6 +116,11 @@ impl Claims {
         }
     }
 
+    /// These claims with `nonce` as the token's id: a renewed token names the grant it renews.
+    pub(crate) fn with_nonce(self, nonce: String) -> Self {
+        Claims { nonce, ..self }
+    }
+
     /// The DID of the key that signed the token.
     pub fn issuer(&self) -> &str {
         &self.iss

@@ -35,7 +35,7 @@ use super::types::{
     convert, DidDocumentMetadata, DidResolutionMetadata, DidResolutionResult, ForkRecord,
     SkippedSource,
 };
-use super::verdict::{judge, LinkFacts, LinkVerdict, SignerLog};
+use super::verdict::{judge, KeyVerdict, LinkFacts, LinkVerdict, SignerLog};
 
 /// The representation the resolver writes.
 pub const DID_LD_JSON: &str = "application/did+ld+json";
@@ -722,6 +722,59 @@ enum ForeignMiss {
     Failed(String),
 }
 
+/// What a log says, at its trusted seq, about a device key that asks for a session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionKey {
+    /// The log's SCID (bare).
+    pub scid: String,
+    /// The key's id in the log (`d2`).
+    pub key_id: String,
+    pub verdict: KeyVerdict,
+    /// The key carries the bot mark at the trusted seq.
+    pub bot: bool,
+    /// The trusted seq the verdict was read at.
+    pub head_seq: u64,
+}
+
+impl SessionKey {
+    /// Whether the key may open or keep a person's session: valid, and not a bot's.
+    pub fn admits(&self) -> bool {
+        self.verdict == KeyVerdict::Valid && !self.bot
+    }
+}
+
+/// Why no verdict of a session's key could be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionKeyError {
+    /// The log lists no such device key at its trusted seq: no log, no store-signed head, a
+    /// master key, or a key added only past the trusted seq.
+    NotListed,
+    /// The configured store did not answer, and the cached answer is too old.
+    StoreUnavailable,
+}
+
+/// [`SessionKey`] of `key` in the log `state` of `scid` at the trusted seq `trusted`, by the
+/// clock `now`. A master key is not a device key and is never listed here.
+pub fn session_key_in(
+    scid: &str,
+    state: &ad4m_identity_core::KeyState,
+    trusted: u64,
+    key: &str,
+    now: u64,
+) -> Result<SessionKey, SessionKeyError> {
+    let id = device_key_id(state, key).ok_or(SessionKeyError::NotListed)?;
+    if state.keys.get(&id).is_none_or(|r| r.added > trusted) {
+        return Err(SessionKeyError::NotListed);
+    }
+    Ok(SessionKey {
+        scid: scid.to_string(),
+        verdict: super::verdict::key_verdict(state, trusted, key, now),
+        bot: state.bot_scope_at(&id, trusted).is_some(),
+        key_id: id,
+        head_seq: trusted,
+    })
+}
+
 /// DID resolution through the key-log cache and the agent language.
 pub struct Resolver {
     cache: Arc<KelCache>,
@@ -909,6 +962,50 @@ impl Resolver {
                 }
             }
         }
+    }
+
+    /// What the log of `scid` says about the device key `key` (a multikey) that asks for a
+    /// session: read from the configured store first when the log's last refresh is older than
+    /// `max_age` seconds. A refresh that fails answers [`SessionKeyError::StoreUnavailable`]
+    /// (fail closed), except that a store with no log of `scid` answers `NotListed`.
+    pub async fn session_key(
+        &self,
+        scid: &str,
+        key: &str,
+        max_age: u64,
+    ) -> Result<SessionKey, SessionKeyError> {
+        let scid = scid_from(scid);
+        if !self
+            .cache
+            .refreshed_within(scid, super::service::now(), max_age)
+        {
+            match self
+                .cache
+                .refresh(self.backend.as_ref(), &did_of(scid))
+                .await
+            {
+                Ok(_) => {}
+                Err(CacheError::NotFound) => return Err(SessionKeyError::NotListed),
+                Err(e) => {
+                    log::info!("identity: refresh of {} failed ({e})", did_of(scid));
+                    return Err(SessionKeyError::StoreUnavailable);
+                }
+            }
+        }
+        self.cached_session_key(scid, key).await
+    }
+
+    /// [`Resolver::session_key`] from the cached log only, whatever its age.
+    pub async fn cached_session_key(
+        &self,
+        scid: &str,
+        key: &str,
+    ) -> Result<SessionKey, SessionKeyError> {
+        let scid = scid_from(scid);
+        let (chain, trusted) = trusted_log(&self.cache, scid)
+            .await
+            .ok_or(SessionKeyError::NotListed)?;
+        session_key_in(scid, chain.state(), trusted, key, super::service::now())
     }
 
     fn index_down(&self) -> bool {
