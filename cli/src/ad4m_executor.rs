@@ -191,12 +191,11 @@ async fn main() -> Result<()> {
             tokio::spawn(rust_executor::unlock_agent_at_startup(passphrase));
         }
 
-        let _ = ctrlc::set_handler(move || {
-            println!("Received CTRL-C! Exiting...");
-            exit(0);
-        });
-
-        use ctrlc;
+        // SIGINT and SIGTERM are handled by `rust_executor::run`, which shuts down within a
+        // deadline. Do not install another handler here: one replaces the other, and the
+        // `ctrlc` handler that used to sit here printed to stdout first, which panics once the
+        // launcher holding the other end of the pipe is gone, so the executor then ignored
+        // every signal but SIGKILL.
         use std::process::exit;
         use std::time::Duration;
         use tokio::time::sleep;
