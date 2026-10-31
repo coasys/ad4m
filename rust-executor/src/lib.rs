@@ -320,10 +320,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             // The cleanup must not keep the process alive: a second signal, or the deadline,
             // ends it without waiting any longer.
             tokio::select! {
-                _ = sigint.recv() => warn!("Received SIGINT again, exiting without finishing the cleanup"),
-                _ = sigterm.recv() => warn!("Received SIGTERM again, exiting without finishing the cleanup"),
+                _ = sigint.recv() => warn!("⚠️ Received SIGINT again, exiting without finishing the cleanup"),
+                _ = sigterm.recv() => warn!("⚠️ Received SIGTERM again, exiting without finishing the cleanup"),
                 _ = tokio::time::sleep(SHUTDOWN_DEADLINE) => warn!(
-                    "Cleanup did not finish within {:?}, exiting without it",
+                    "⚠️ Cleanup did not finish within {:?}, exiting without it",
                     SHUTDOWN_DEADLINE
                 ),
             }

@@ -57,6 +57,8 @@ fn start_with_stdout_reader_gone(name: &str) -> Executor {
             "false",
             "--insecure-no-admin-credential",
         ])
+        // Readiness is an info line: an inherited RUST_LOG=warn would hide it.
+        .env("RUST_LOG", "rust_executor=info")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
