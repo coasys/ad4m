@@ -293,9 +293,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         *guard = Some(shutdown_tx);
     }
 
-    // Spawn a task that listens for OS signals (SIGTERM/SIGINT) and triggers shutdown.
+    // Spawn a task that listens for OS signals (SIGTERM, SIGINT, SIGHUP) and triggers shutdown.
     // It is the process's only handler for them: the executor binaries install none of their
-    // own (one would replace this one). SIGHUP keeps its default action and ends the process.
+    // own (one would replace this one). SIGHUP, a closed terminal, gets the same cleanup.
     // It logs and never prints: stdout may be a pipe whose reader (the launcher) is gone, and
     // `println!` panics on the broken pipe.
     #[cfg(unix)]
@@ -306,10 +306,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
             let mut sigterm =
                 signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            let mut sighup =
+                signal(SignalKind::hangup()).expect("failed to install SIGHUP handler");
 
             tokio::select! {
                 _ = sigint.recv() => info!("Received SIGINT, initiating graceful shutdown..."),
                 _ = sigterm.recv() => info!("Received SIGTERM, initiating graceful shutdown..."),
+                _ = sighup.recv() => info!("Received SIGHUP, initiating graceful shutdown..."),
             }
 
             // Trigger shutdown via the global channel
@@ -322,6 +325,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             tokio::select! {
                 _ = sigint.recv() => warn!("⚠️ Received SIGINT again, exiting without finishing the cleanup"),
                 _ = sigterm.recv() => warn!("⚠️ Received SIGTERM again, exiting without finishing the cleanup"),
+                _ = sighup.recv() => warn!("⚠️ Received SIGHUP again, exiting without finishing the cleanup"),
                 _ = tokio::time::sleep(SHUTDOWN_DEADLINE) => warn!(
                     "⚠️ Cleanup did not finish within {:?}, exiting without it",
                     SHUTDOWN_DEADLINE
