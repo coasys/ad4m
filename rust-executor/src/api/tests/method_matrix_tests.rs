@@ -41,6 +41,9 @@ pub(super) const OTHER_USER_DID: &str = "did:key:matrix-other-user";
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Caller {
     Operator,
+    /// The admin credential on a listener that the network reaches: the operator, but not on
+    /// this machine, so every `.local_only()` method refuses it.
+    OperatorOnNetwork,
     /// An app token on the main agent without the guard's capability.
     AppWithout,
     /// An app token on the main agent with the guard's capability.
@@ -432,6 +435,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "url": "https://example.org" }),
     ),
     ("runtime.setHostRates", || json!({ "rates": [] })),
+    ("runtime.logTail", || json!({ "lines": 10 })),
     ("runtime.setUnytMembraneProof", || json!({ "proof": "p" })),
     (
         "runtime.unytSendHot",
@@ -768,6 +772,10 @@ fn context(caller: Caller, capability: Option<Capability>) -> RequestContext {
     let caps = || capability.clone().into_iter().collect::<Vec<_>>();
     match caller {
         Caller::Operator => RequestContext::operator_for_test(),
+        Caller::OperatorOnNetwork => RequestContext::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Operator)
+                .on_network(),
+        ),
         Caller::AppWithout => RequestContext::app_for_test(vec![]),
         Caller::AppWith => RequestContext::app_for_test(caps()),
         Caller::User => RequestContext::user_for_test(USER_DID, caps()),
@@ -914,15 +922,19 @@ fn outcome(result: Result<(), WsRpcError>) -> Result<(), u16> {
 }
 
 /// Every row of every method in `map` whose answer differs from the row's (and every method
-/// without a guard), and the number of rows checked.
+/// without a guard), and the number of rows checked. A `.local_only()` method admits only the
+/// operator on this machine: every row its guard grants to another caller is a 403, and the
+/// operator on the network gets a 403 too.
 async fn walk(map: &HandlerMap, world: &World) -> (Vec<String>, usize) {
     let mut failures = Vec::new();
     let mut checked = 0;
+    let local_only = map.local_only_methods();
     for (method, guard) in map.guards() {
         let Some(guard) = guard else {
             failures.push(format!("{method} has no guard"));
             continue;
         };
+        let is_local = local_only.contains(&method);
         let mut cases: Vec<(Caller, Option<String>, Expect)> = resource_rows(guard)
             .into_iter()
             .map(|(caller, expect)| (caller, None, expect))
@@ -937,8 +949,21 @@ async fn walk(map: &HandlerMap, world: &World) -> (Vec<String>, usize) {
                     (caller, Some(world.id(owner, target)), expect)
                 }),
             );
+        } else {
+            // Every guard but `Owns` admits the operator, wherever it calls from.
+            let expect = if is_local {
+                Expect::Forbidden
+            } else {
+                Expect::Granted
+            };
+            cases.push((Caller::OperatorOnNetwork, None, expect));
         }
         for (caller, target, expect) in cases {
+            let expect = match (is_local, caller, expect) {
+                (true, Caller::Operator, expect) => expect,
+                (true, _, Expect::Granted) => Expect::Forbidden,
+                (_, _, expect) => expect,
+            };
             let ctx = context(caller, guard.capability("*"));
             let params = params(method, target.as_deref(), owner == Some(Owner::Perspective));
             let got = outcome(map.admit(method, &params, &ctx).await);
@@ -1015,6 +1040,77 @@ fn register_test_methods(map: &mut HandlerMap, calls: &Arc<AtomicUsize>) {
         .guard(Guard::Operator);
     map.method::<NoParams, bool>("test.user_or_operator", handler())
         .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
+    map.method::<NoParams, bool>("test.executor.local_only", handler())
+        .local_only()
+        .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
+}
+
+/// `.local_only()` admits only the operator on this machine, after its guard: the app its
+/// guard admits and the admin credential on a network listener get 403 `local-only`.
+#[tokio::test]
+async fn a_local_only_method_admits_only_the_operator_on_this_machine() {
+    let mut map = HandlerMap::new();
+    register_test_methods(&mut map, &Arc::new(AtomicUsize::new(0)));
+    let method = "test.executor.local_only";
+    let operator = context(Caller::Operator, None);
+    assert!(map.admit(method, &json!({}), &operator).await.is_ok());
+    for caller in [Caller::OperatorOnNetwork, Caller::AppWith] {
+        let ctx = context(caller, Some(AGENT_UPDATE_CAPABILITY.clone()));
+        let refused = map.admit(method, &json!({}), &ctx).await.unwrap_err();
+        assert_eq!(refused.code, 403, "{caller:?}");
+        assert_eq!(
+            refused.message,
+            crate::api::guards::LOCAL_ONLY,
+            "{caller:?}"
+        );
+    }
+    // The guard runs first: an app without the capability gets the guard's refusal.
+    let without = context(Caller::AppWithout, None);
+    let refused = map.admit(method, &json!({}), &without).await.unwrap_err();
+    assert_ne!(refused.message, crate::api::guards::LOCAL_ONLY);
+    assert_eq!(map.local_only_methods(), vec![method]);
+}
+
+/// No `.local_only()` method admits an operator from a key login, though it arrives on a
+/// loopback listener: a forwarded port makes a remote device key look local.
+#[tokio::test]
+async fn no_local_only_method_admits_an_operator_from_a_key_login() {
+    let map = build_handler_map();
+    let key = RequestContext::for_session(
+        crate::agent::session::Session::for_test(crate::agent::session::Principal::Operator)
+            .from_key_login(),
+    );
+    let local_only = map.local_only_methods();
+    assert!(!local_only.is_empty());
+    for method in local_only {
+        let refused = map
+            .admit(method, &params(method, None, false), &key)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (403, crate::api::guards::LOCAL_ONLY),
+            "{method}"
+        );
+    }
+}
+
+/// The calls that stay on this machine: opening and replacing the executor's own key, signing
+/// as this device, the custody channel and stopping its process. (`agent.generate`,
+/// `agent.import`, `agent.lock`, `runtime.exportData` and `runtime.importData` are not local
+/// only yet.)
+#[test]
+fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
+    assert_eq!(
+        build_handler_map().local_only_methods(),
+        vec![
+            "agent.signSessionStatement",
+            "agent.unlock",
+            "identity.custodyStatus",
+            "identity.rekey",
+            "runtime.quit",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1150,11 +1246,17 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
         vec![
             "agent.signSessionStatement",
             "identity.claimOffer",
+            "identity.custodyStatus",
+            "identity.rekey",
             "identity.resetLog",
+            "runtime.config",
             "runtime.grantNotification",
             "runtime.importData",
+            "runtime.logTail",
             "runtime.openLink",
+            "runtime.restart",
             "runtime.restartHolochain",
+            "runtime.setConfig",
             "runtime.setHostRates",
             "runtime.setUnytMembraneProof",
             "runtime.unytAgentKey",

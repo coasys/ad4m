@@ -10,11 +10,13 @@
 pub mod backend;
 pub mod cache;
 pub mod claim;
+pub mod custody;
 pub mod device;
 pub mod head;
 pub mod key_login;
 pub mod operator;
 pub mod person;
+pub mod rekey;
 pub mod resolver;
 pub mod service;
 pub mod src_fetch;

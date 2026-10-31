@@ -38,7 +38,7 @@ use super::types::{
 use super::verdict::{KeyVerdict, VerdictChange};
 use crate::agent::capabilities::{get_user_default_capabilities, grant_caps_for, AuthInfo};
 use crate::agent::grants::{self, Grants, KeyBinding, KeyGrant, LiveGrant};
-use crate::agent::session::{OperatorSource, Principal, Session};
+use crate::agent::session::{Principal, Session};
 use crate::agent::{did_for_context, AgentContext};
 use crate::api::ws_handler::WsRpcError;
 
@@ -77,8 +77,6 @@ pub enum KeyLoginError {
     Grant,
     /// Too many challenges are open.
     TooManyChallenges,
-    /// Only the admin credential or the loopback caller signs as this device.
-    LocalOnly,
     /// The call does not fit the session (no key-bound grant, no identity to sign for) or the
     /// statement's shape: the message says which.
     BadRequest(String),
@@ -97,7 +95,6 @@ impl KeyLoginError {
             KeyLoginError::StoreUnavailable => "store-unavailable",
             KeyLoginError::Grant => "grant",
             KeyLoginError::TooManyChallenges => "too-many-challenges",
-            KeyLoginError::LocalOnly => "local-only",
             KeyLoginError::BadRequest(_) => "bad-request",
             KeyLoginError::Internal(_) => "internal",
         }
@@ -113,8 +110,7 @@ impl From<KeyLoginError> for WsRpcError {
             | KeyLoginError::Signature
             | KeyLoginError::Key
             | KeyLoginError::NotKnown
-            | KeyLoginError::Grant
-            | KeyLoginError::LocalOnly => WsRpcError::forbidden(code),
+            | KeyLoginError::Grant => WsRpcError::forbidden(code),
             KeyLoginError::StoreUnavailable => WsRpcError {
                 code: 503,
                 message: code.into(),
@@ -494,7 +490,7 @@ pub fn session_info(session: &Session) -> SessionInfo {
     let binding = session.key_binding();
     SessionInfo {
         role,
-        did: session.acts_as_did().map(str::to_string),
+        did: session.acts_as_did(),
         scid: binding.map(|b| b.scid.clone()),
         key_id: binding.map(|b| b.key_id.clone()),
         grant_id: session.grant_id().map(|id| id.0.clone()),
@@ -542,19 +538,10 @@ pub fn end_all_sessions(
 }
 
 /// `agent.signSessionStatement`: signs `unsigned` with the main agent's device key, as the main
-/// agent's identity, under `coasys:session`. Only for the admin credential or the loopback
-/// caller (the shell on this machine), never for an operator from a key login; only a native
-/// statement without PKCE.
-pub fn sign_statement(
-    session: &Session,
-    unsigned: UnsignedKeyStatement,
-) -> Result<SignedKeyStatement, KeyLoginError> {
-    if !matches!(
-        session.operator_source(),
-        Some(OperatorSource::Credential | OperatorSource::Loopback)
-    ) {
-        return Err(KeyLoginError::LocalOnly);
-    }
+/// agent's identity, under `coasys:session`; only a native statement without PKCE. Who may call
+/// it is the method's: `.local_only()`, the operator on this machine (the shell), never an
+/// operator from a key login (`Session::is_operator_on_this_machine`).
+pub fn sign_statement(unsigned: UnsignedKeyStatement) -> Result<SignedKeyStatement, KeyLoginError> {
     check_shape(
         unsigned.v,
         unsigned.purpose,
@@ -713,7 +700,7 @@ pub async fn run_key_session_watch(service: Arc<IdentityService>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::session::AuthError;
+    use crate::agent::session::{AuthError, OperatorSource};
     use crate::identity::backend::IdentityBackend;
     use crate::identity::cache::tests::{accept_signed, trusting, FakeStore, TestLog};
     use crate::identity::device::{enc_key_of, multikey_of as device_multikey};
@@ -1480,12 +1467,11 @@ mod tests {
     }
 
     // The executor's own device key signs a native statement for its identity under
-    // `coasys:session`, for the admin credential only.
+    // `coasys:session`, for the operator on this machine only.
     #[tokio::test]
-    async fn the_executor_signs_a_native_statement_for_the_admin_credential_only() {
+    async fn the_executor_signs_a_native_statement_for_the_operator_on_this_machine_only() {
         let world = world(220).await;
         let main = did_for_context(&AgentContext::main_agent()).unwrap();
-        let operator = Session::for_test(Principal::Operator);
         let unsigned = UnsignedKeyStatement {
             v: 1,
             purpose: KeyPurpose::Login,
@@ -1498,11 +1484,11 @@ mod tests {
         };
         db(|db| db.clear_agent_identity_for_test(&main)).unwrap();
         assert!(matches!(
-            sign_statement(&operator, unsigned.clone()),
+            sign_statement(unsigned.clone()),
             Err(KeyLoginError::BadRequest(m)) if m.starts_with("no-identity")
         ));
         let _bound = MainBound::to(&world.log.scid());
-        let signed = sign_statement(&operator, unsigned.clone()).unwrap();
+        let signed = sign_statement(unsigned.clone()).unwrap();
         assert_eq!(signed.statement.scid, world.did);
         assert_eq!(signed.statement.key, multikey_of(&main).unwrap());
         assert!(signature_holds(&signed));
@@ -1514,7 +1500,7 @@ mod tests {
             ..unsigned.clone()
         };
         assert!(matches!(
-            sign_statement(&operator, web),
+            sign_statement(web),
             Err(KeyLoginError::BadRequest(_))
         ));
         let pkce = UnsignedKeyStatement {
@@ -1522,22 +1508,47 @@ mod tests {
             ..unsigned.clone()
         };
         assert!(matches!(
-            sign_statement(&operator, pkce),
+            sign_statement(pkce),
             Err(KeyLoginError::BadRequest(_))
         ));
 
-        // An operator from a key login, and an app, may not sign as this device.
+        // The method is `.local_only()`: the operator on this machine signs; an operator from a
+        // key login (even on a loopback listener, as through a forwarded port) and the admin
+        // credential on a network listener get 403 local-only, an app the operator refusal.
+        let mut map = crate::api::ws_handler::HandlerMap::new();
+        crate::api::key_login_ws::register_ws_handlers(&mut map);
+        let call = |session: Session| {
+            map.dispatch(
+                "agent.signSessionStatement",
+                serde_json::json!({ "statement": unsigned.clone() }),
+                Arc::new(crate::types::RequestContext::for_session(session)),
+            )
+        };
+        let reply = call(Session::for_test(Principal::Operator)).await.unwrap();
+        let signed: SignedKeyStatement = serde_json::from_value(reply).unwrap();
+        assert!(signature_holds(&signed));
+
         world.operate();
-        let key_operator = open(&world.login_as(&world.phone).await.unwrap().token).unwrap();
-        assert_eq!(
-            sign_statement(&key_operator, unsigned.clone()).unwrap_err(),
-            KeyLoginError::LocalOnly
-        );
+        let token = world.login_as(&world.phone).await.unwrap().token;
+        let key_operator = Session::open(
+            &token,
+            &Some("the-admin-credential".into()),
+            crate::agent::capabilities::ListenerReach::Loopback,
+        )
+        .unwrap();
+        assert_eq!(key_operator.operator_source(), Some(OperatorSource::Key));
+        for refused in [
+            key_operator,
+            Session::for_test(Principal::Operator).on_network(),
+        ] {
+            let refused = call(refused).await.unwrap_err();
+            assert_eq!(
+                (refused.code, refused.message.as_str()),
+                (403, crate::api::guards::LOCAL_ONLY)
+            );
+        }
         let app = Session::for_test(Principal::Agent(AgentContext::main_agent()));
-        assert_eq!(
-            sign_statement(&app, unsigned).unwrap_err(),
-            KeyLoginError::LocalOnly
-        );
+        assert_eq!(call(app).await.unwrap_err().code, 403);
         no_operator();
     }
 

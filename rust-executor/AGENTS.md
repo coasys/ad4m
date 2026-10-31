@@ -34,6 +34,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `lib.rs` | Boot sequence (`run()`): config → wallet/db backends → `Ad4mDb` → `AIService` → `AgentService` → runtime → V8 → `LanguageController` → perspectives → axum. Order is hand-maintained. | — |
 | `config.rs` | `Ad4mConfig` + global config accessor | — |
 | `config_file.rs` | The `run --config` JSON file shared with the launcher (`launcher-state.json` key names), secret resolution (`AD4M_*_FILE`), and the one mapping to `Ad4mConfig` | `docs-src/pages/developer-guides/executor-config.mdx` |
+| `config_rpc.rs` | The config file as RPC (`runtime.config`, `runtime.setConfig`, handlers in `api/config_ws.rs`): key classes (`restart`, `machine`), atomic 0600 writes, pinned keys, validators (`register_config_key`), `config-changed`. A value is written only when the file still maps to `Ad4mConfig` as the next start maps it (`to_ad4m_config`), else `invalid` | — |
+| `exit.rs` | The run contract a supervisor reads: `ExitReason` (0, 75, 78, 79, 80), `StartRefused`, the graceful stop (`request_shutdown`), `--watch-stdin` (`stop_when_closed`), the data-folder lock (`executor.lock`, taken before the log folder rotates, so a refused start leaves the running executor's log alone and reports to stdout), no core dumps on Linux | — |
+| `log_files.rs` | `--log-dir`: one file per run (`executor-0.log`), five runs kept, 50 MiB cap per file, `tail` for `runtime.logTail` | — |
 | `api/` | axum WS RPC (`/api/v1/ws`), event stream, OpenAI-compatible `/v1` | `src/api/AGENTS.md` |
 | `mcp/` | MCP server + tools (static + SHACL-generated dynamic tools) | `src/mcp/AGENTS.md` |
 | `perspectives/` | Perspective registry, `PerspectiveInstance`, SPARQL store, SHACL/model queries, flows, interpretation, auto-processor | `src/perspectives/AGENTS.md` |
@@ -62,6 +65,25 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   (see `perspectives/AGENTS.md`), so a 256 soft `RLIMIT_NOFILE` ran out at about a dozen
   perspectives ("Too many open files"). The executor raises its soft limit at startup in
   `fd_limit::raise_fd_limit_at_startup` (#1462); do not add another.
+- **The run contract** (`exit.rs`), for a supervisor (the desktop app, systemd, a host). Exit
+  codes: 0 stopped (`runtime.quit`, SIGTERM, SIGINT, stdin closed with `--watch-stdin true`),
+  75 `runtime.restart`, 78 a refused config (the CLI's resolve, the admin-credential check,
+  `--custody-channel` with multi-user mode), 79 another executor holds
+  `<app_data_path>/executor.lock`, 80 the API port does not bind; any other code is a crash.
+  `run` returns a refused start through its handle as a `StartRefused`, and
+  `exit_when_api_fails` exits with its code. Readiness: `GET /health` answers once the API
+  listener is bound, the last step of `run`. The admin credential comes from the environment
+  (`AD4M_ADMIN_CREDENTIAL`, or `AD4M_ADMIN_CREDENTIAL_FILE`), never from a file the executor
+  writes; a supervisor gives a new one at each start. On Linux `run` sets `RLIMIT_CORE = 0`
+  and `PR_SET_DUMPABLE = 0`.
+- **Local only.** A method registered `.local_only()` answers only the operator on this
+  machine (`Session::is_operator_on_this_machine`: the admin credential, or no token on an
+  executor without one, on a loopback listener). Every other caller, the admin credential on
+  a network listener included, gets 403 `local-only`. It is on `agent.unlock`,
+  `identity.rekey`, `identity.custodyStatus` and `runtime.quit`, and `runtime.setConfig`
+  refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
+  An executor on `--localhost false` without TLS has no loopback listener, so these calls
+  answer on no listener there.
 - **Prolog is off.** `prolog_service::PROLOG_MODE` is `Disabled`; Prolog query paths return empty.
   Subject classes, flows and model queries run on SHACL + SPARQL (`perspectives/model_query`).
 - **Tokio vs std locks** are both used; check the import before assuming `.lock()` is async.
@@ -175,7 +197,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `ClaimService::claim_for_main`. `agent.status` and `agent.get` gain `identity`; `did` stays the
   device `did:key`. `identity.resolve` (`identity/resolver.rs`) answers a DID Core resolution
   result for a `did:scid:coasys:1` DID URL or a device `did:key`; a URL's `src` must name a
-  public HTTPS host unless `identity.allowPrivateSrc` is set.
+  public HTTPS host unless `identity.allowPrivateSrc` is set. `identity.rekey` (local only, or
+  `ad4m-executor rekey`) gives the main agent a new wallet key and moves every place that holds
+  its DID (`identity/rekey.rs`); tokens signed with the old key stop working.
+  `identity.custodyStatus` is the custody channel (`identity/custody.rs`).
 
 ## Do / don't
 

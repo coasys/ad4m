@@ -63,10 +63,10 @@ async fn end_all_sessions(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 
 async fn sign_session_statement(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     let params: SignSessionStatementParams = parse(params)?;
-    answer(key_login::sign_statement(&ctx.session, params.statement)?)
+    answer(key_login::sign_statement(params.statement)?)
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -91,13 +91,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // handler requires a key-bound session or a session on a managed agent; 400 otherwise.
     map.method::<EndAllSessionsParams, EndedSessions>("user.endAllSessions", end_all_sessions)
         .guard(Guard::Open);
-    // Signs a native key statement as this executor's device. The handler admits only the
-    // admin credential and the loopback caller (the shell on this machine): an operator from a
-    // key login gets 403 local-only.
+    // Signs a native key statement as this executor's device: only for the operator on this
+    // machine (the shell). An operator from a key login is never on this machine, so it gets
+    // 403 local-only on any listener.
     map.method::<SignSessionStatementParams, SignedKeyStatement>(
         "agent.signSessionStatement",
         sign_session_statement,
     )
+    .local_only()
     .guard(Guard::Operator);
 }
 

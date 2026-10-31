@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 mod grants;
 mod identity;
+mod rekey;
 mod tasks;
 pub use grants::{GrantKeyRow, GrantRow};
 #[cfg(test)]

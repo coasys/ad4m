@@ -142,6 +142,11 @@ enum Domain {
         no_wait: bool,
     },
     Run(RunArgs),
+    /// Give this executor a new main wallet key (a revoked server links again with it). Runs
+    /// only on the executor's own machine: it reaches the executor on a loopback address with
+    /// the admin credential from AD4M_ADMIN_CREDENTIAL_FILE (or --admin-credential,
+    /// AD4M_ADMIN_CREDENTIAL). The old key stays for history.
+    Rekey,
     /// Inspect the settings `run` would start with
     Config {
         #[command(subcommand)]
@@ -156,9 +161,23 @@ enum ConfigCommand {
     Print(RunArgs),
 }
 
+/// The exit code for a command line clap does not run: 0 for `--help` and `--version`, else 78
+/// (`ExitReason::ConfigRefused`), as for a refused config file: an invalid flag or `AD4M_*`
+/// variable fails the same way at every start, so a supervisor does not retry it.
+fn command_line_exit_code(error: &clap::Error) -> i32 {
+    match error.kind() {
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => 0,
+        _ => rust_executor::exit::ExitReason::ConfigRefused.code(),
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    let args = ClapApp::parse();
+    let args = ClapApp::try_parse().unwrap_or_else(|e| {
+        let code = command_line_exit_code(&e);
+        let _ = e.print();
+        std::process::exit(code);
+    });
 
     if let Domain::Dev { command } = args.domain {
         dev::run(command).await?;
@@ -211,6 +230,24 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Domain::Rekey = args.domain {
+        let executor_url = match args.executor_url {
+            Some(url) => url,
+            None => startup::get_executor_url()?,
+        };
+        let rekeyed = match identity::admin_credential(args.admin_credential, |name| {
+            std::env::var(name).ok()
+        }) {
+            Ok(token) => identity::rekey(&executor_url, &token).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = rekeyed {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     if let Domain::Config {
         command: ConfigCommand::Print(run_args),
     } = args.domain
@@ -224,10 +261,23 @@ async fn main() -> Result<()> {
     }
 
     if let Domain::Run(run_args) = args.domain {
+        // A config the executor refuses exits 78 (`ExitReason::ConfigRefused`): a supervisor
+        // does not retry it.
+        let refused = |message: String| -> ! {
+            eprintln!("{message}");
+            exit(rust_executor::exit::ExitReason::ConfigRefused.code());
+        };
         let ResolvedRun {
             config,
             unlock_passphrase,
-        } = run_args.resolve(process_env)?;
+        } = run_args
+            .resolve(process_env)
+            .unwrap_or_else(|e| refused(format!("{e:#}")));
+        let mut checked = config.clone();
+        checked.prepare();
+        if let Err(message) = checked.check_admin_credential() {
+            refused(message);
+        }
         let startup = tokio::spawn(async move { rust_executor::run(config).await }).await;
         // Exit 1 when the REST API fails (e.g. the port is taken), instead of
         // running on with no API.
@@ -386,6 +436,25 @@ mod tests {
         assert!(help.contains("AD4M_ADMIN_CREDENTIAL"), "{help}");
         assert!(!help.contains("s3cret-value"), "{help}");
     }
+
+    /// A command line clap refuses exits 78 like a refused config; help is not a refusal.
+    #[test]
+    fn a_refused_command_line_exits_78_and_help_exits_0() {
+        let _env = lock_env();
+        let code = |argv: &[&str]| {
+            command_line_exit_code(
+                &ClapApp::try_parse_from(argv).expect_err("clap does not run it"),
+            )
+        };
+        assert_eq!(code(&["ad4m-executor", "run", "--port", "not-a-port"]), 78);
+        assert_eq!(code(&["ad4m-executor", "run", "--no-such-flag"]), 78);
+        std::env::set_var("AD4M_APP_DATA_PATH", "");
+        let empty = code(&["ad4m-executor", "run", "--insecure-no-admin-credential"]);
+        std::env::remove_var("AD4M_APP_DATA_PATH");
+        assert_eq!(empty, 78);
+        assert_eq!(code(&["ad4m-executor", "run", "--help"]), 0);
+    }
+
     fn parse_run(argv: &[&str]) -> RunArgs {
         match ClapApp::try_parse_from(argv).expect("argv parses").domain {
             Domain::Run(run) => run,

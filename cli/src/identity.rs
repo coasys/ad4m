@@ -113,9 +113,107 @@ pub async fn claim(
     }
 }
 
+/// The admin credential a subcommand presents: the file `AD4M_ADMIN_CREDENTIAL_FILE` names
+/// (mode 0600 or 0400), else `flag` (`--admin-credential` or `AD4M_ADMIN_CREDENTIAL`), else
+/// none (an executor started with `--insecure-no-admin-credential`).
+pub fn admin_credential(
+    flag: Option<String>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<String> {
+    if let Some(path) = env("AD4M_ADMIN_CREDENTIAL_FILE").filter(|p| !p.trim().is_empty()) {
+        return rust_executor::config_file::read_secret_file(Path::new(&path))
+            .map_err(|e| anyhow!("{e}"));
+    }
+    Ok(flag
+        .or_else(|| env("AD4M_ADMIN_CREDENTIAL"))
+        .unwrap_or_default())
+}
+
+/// Whether `url` names a loopback host: `identity.rekey` answers only there.
+fn is_loopback_url(url: &str) -> bool {
+    let Ok(url) = url::Url::parse(url) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(name)) => name == "localhost",
+        None => false,
+    }
+}
+
+#[derive(Deserialize)]
+struct DeviceKeys {
+    sign: String,
+    enc: String,
+}
+
+/// `ad4m-executor rekey`: gives the executor at `executor_url` (a loopback address) a new main
+/// wallet key, so a revoked server can link again, and prints its new device keys.
+pub async fn rekey(executor_url: &str, token: &str) -> Result<()> {
+    if !is_loopback_url(executor_url) {
+        bail!(
+            "rekey runs only on the executor's own machine: {executor_url} is not a loopback \
+             address (use ws://127.0.0.1:<port>/api/v1/ws)"
+        );
+    }
+    let client = WsRpcClient::connect(executor_url, token)
+        .await
+        .with_context(|| format!("cannot reach the executor at {executor_url}"))?;
+    let keys: DeviceKeys = client.call("identity.rekey", json!({})).await?;
+    println!("This executor's device key is now {}.", keys.sign);
+    println!("Its encryption key is {}.", keys.enc);
+    println!("The old key is kept for history. Link this executor again: show its device string or claim an offer.");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rekey_reaches_only_a_loopback_executor() {
+        assert!(is_loopback_url("ws://127.0.0.1:12000/api/v1/ws"));
+        assert!(is_loopback_url("ws://[::1]:12000/api/v1/ws"));
+        assert!(is_loopback_url("ws://localhost:12000/api/v1/ws"));
+        assert!(!is_loopback_url("ws://10.0.0.5:12000/api/v1/ws"));
+        assert!(!is_loopback_url("wss://executor.example/api/v1/ws"));
+        assert!(!is_loopback_url("not a url"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_admin_credential_comes_from_its_file_first() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ad4m-cli-credential-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("credential");
+        std::fs::write(&file, "from-file\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let env = |name: &str| match name {
+            "AD4M_ADMIN_CREDENTIAL_FILE" => Some(path.clone()),
+            "AD4M_ADMIN_CREDENTIAL" => Some("from-env".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            admin_credential(Some("from-flag".into()), env).unwrap(),
+            "from-file"
+        );
+        let no_file =
+            |name: &str| (name == "AD4M_ADMIN_CREDENTIAL").then(|| "from-env".to_string());
+        assert_eq!(
+            admin_credential(Some("from-flag".into()), no_file).unwrap(),
+            "from-flag"
+        );
+        assert_eq!(admin_credential(None, no_file).unwrap(), "from-env");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            admin_credential(None, env).is_err(),
+            "a group-readable file is refused"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     const A: &str = "did:scid:coasys:1:QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
     const B: &str = "did:scid:coasys:1:QmT78zSuBmuS4z925WZfrqQ1qHaJ56DQaTfyMUF7F8ff5o";

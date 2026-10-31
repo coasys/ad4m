@@ -20,6 +20,7 @@ mod tests;
 pub mod agent_session_ws;
 pub mod agent_ws;
 pub mod ai_ws;
+pub mod config_ws;
 pub mod expressions_ws;
 pub mod hosting_ws;
 pub mod identity_ws;
@@ -254,7 +255,14 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
             .as_ref()
             .and(config.tls.as_ref().map(|tls| tls.tls_port)),
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        // Exit 80: a supervisor picks another port and starts the executor again.
+        crate::exit::StartRefused::new(
+            crate::exit::ExitReason::BindFailed,
+            format!("The API cannot listen on port {port}: {e}"),
+        )
+    })?;
 
     // The listeners are bound before these lines. Test harnesses (tests/js startExecutor) take
     // the cleartext "API server starting on" line as the server being ready, so it is logged

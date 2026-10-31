@@ -54,15 +54,17 @@ pub enum Principal {
     Anonymous,
 }
 
-/// Where an operator session's role comes from.
+/// How the operator proved it is the operator: where an operator session's role comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperatorSource {
-    /// The admin credential.
+    /// It presented the admin credential.
     Credential,
-    /// No token on a loopback listener of an executor without an admin credential (#1059).
+    /// It presented no token on a loopback listener of an executor without an admin
+    /// credential (#1059).
     Loopback,
-    /// A grant with the operator role, from a login with a device key of the operator record's
-    /// identity.
+    /// It holds a grant with the operator role, from a login with a device key of the
+    /// operator record's identity. Never the operator on this machine, whatever listener it
+    /// arrived on: local-only methods refuse it.
     Key,
 }
 
@@ -135,10 +137,18 @@ pub struct Session {
     caps: Vec<Capability>,
     /// The grant the token acts within. `None` for the operator and anonymous callers.
     grant: Option<Arc<LiveGrant>>,
-    /// The DID of the agent the session acts as. A grant's is set at open; the main agent's
-    /// is read once it exists for the operator (a socket can open before `agent.generate()`).
+    /// The DID of the managed agent the session acts as, set at open (or by
+    /// [`Session::with_did`]). Unset for the main agent: its DID changes at a re-key, so
+    /// [`Session::acts_as_did`] reads it through `main_did`.
     did: OnceLock<String>,
-    /// Where the operator role comes from; `None` unless the principal is the operator.
+    /// The main agent's DID as this session last read it, with the main key's generation
+    /// then (`agent::rekey::main_key_generation`). A socket can open before
+    /// `agent.generate()`, and the DID changes at `identity.rekey`.
+    main_did: Arc<std::sync::RwLock<Option<(u64, String)>>>,
+    /// Who can connect to the listener the session arrived on. An in-process session has no
+    /// listener and reads as `Network`, so it is never the operator on this machine.
+    reach: ListenerReach,
+    /// How the operator proved it is the operator; `None` for every other caller.
     operator_source: Option<OperatorSource>,
 }
 
@@ -150,21 +160,21 @@ impl Session {
         reach: ListenerReach,
     ) -> Result<Session, AuthError> {
         if is_admin_credential_token_on(token, admin_credential, reach) {
-            let source = if token.is_empty() {
-                OperatorSource::Loopback
-            } else {
-                OperatorSource::Credential
+            let source = match admin_credential {
+                Some(_) => OperatorSource::Credential,
+                None => OperatorSource::Loopback,
             };
             return Ok(Session {
+                reach,
                 operator_source: Some(source),
                 ..Session::without_token(Principal::Operator, vec![ALL_CAPABILITY.clone()])
             });
         }
         if token.is_empty() {
-            return Ok(Session::without_token(
-                Principal::Anonymous,
-                anonymous_capabilities(),
-            ));
+            return Ok(Session {
+                reach,
+                ..Session::without_token(Principal::Anonymous, anonymous_capabilities())
+            });
         }
 
         // Checking a token needs the wallet's signing key. A locked wallet says nothing about
@@ -191,35 +201,36 @@ impl Session {
                 caps: vec![ALL_CAPABILITY.clone()],
                 grant: Some(grant),
                 did: OnceLock::new(),
+                main_did: Default::default(),
+                reach,
                 operator_source: Some(OperatorSource::Key),
             });
         }
         let did = OnceLock::new();
-        match grant.agent.managed_did() {
-            Some(agent_did) => {
-                let _ = did.set(agent_did.to_string());
-            }
-            None if !grant.did.is_empty() => {
-                let _ = did.set(grant.did.clone());
-            }
-            None => {}
+        if let Some(agent_did) = grant.agent.managed_did() {
+            let _ = did.set(agent_did.to_string());
         }
         Ok(Session {
             principal: Principal::Agent(grant.agent.clone()),
             caps: grant.caps.clone(),
             grant: Some(grant),
             did,
+            main_did: Default::default(),
+            reach,
             operator_source: None,
         })
     }
 
     /// A session without a token: the operator, an anonymous caller, or an in-process agent.
+    /// It reads as arriving on a network listener until the caller sets its reach.
     fn without_token(principal: Principal, caps: Vec<Capability>) -> Session {
         Session {
             principal,
             caps,
             grant: None,
             did: OnceLock::new(),
+            main_did: Default::default(),
+            reach: ListenerReach::Network,
             operator_source: None,
         }
     }
@@ -306,6 +317,18 @@ impl Session {
         self.principal == Principal::Operator
     }
 
+    /// Whether the caller is the operator on this machine: the operator on a loopback
+    /// listener, by the admin credential or by no token there. The one test of a method
+    /// registered `.local_only()`. A grant is never on this machine in this sense, whatever
+    /// its capabilities, and neither is the admin credential on a listener that the network
+    /// reaches. An operator from a key login is not either, even on a loopback listener: a
+    /// forwarded port makes a remote device key look local.
+    pub fn is_operator_on_this_machine(&self) -> bool {
+        self.is_operator()
+            && self.reach == ListenerReach::Loopback
+            && self.operator_source != Some(OperatorSource::Key)
+    }
+
     /// Whether the caller presented a credential: the operator or a grant on an agent.
     pub fn is_authenticated(&self) -> bool {
         self.principal != Principal::Anonymous
@@ -365,17 +388,32 @@ impl Session {
 
     /// The DID of the agent the session acts as: a managed agent's own DID, the main
     /// agent's for the operator and for grants on the main agent. `None` for an anonymous
-    /// caller, and for the main agent until it has a DID.
-    pub fn acts_as_did(&self) -> Option<&str> {
+    /// caller, and for the main agent until it has a DID. The main agent's DID is read again
+    /// after a re-key.
+    pub fn acts_as_did(&self) -> Option<String> {
         if self.principal == Principal::Anonymous {
             return None;
         }
-        if self.did.get().is_none() {
-            if let Ok(did) = did_for_context(&self.acts_as()) {
-                let _ = self.did.set(did);
+        if let Some(did) = self.did.get() {
+            return Some(did.clone());
+        }
+        let context = self.acts_as();
+        if !context.is_main_agent() {
+            return did_for_context(&context).ok();
+        }
+        let generation = super::rekey::main_key_generation();
+        if let Ok(cached) = self.main_did.read() {
+            if let Some((seen, did)) = cached.as_ref() {
+                if *seen == generation {
+                    return Some(did.clone());
+                }
             }
         }
-        self.did.get().map(String::as_str)
+        let did = did_for_context(&context).ok()?;
+        if let Ok(mut cached) = self.main_did.write() {
+            *cached = Some((generation, did.clone()));
+        }
+        Some(did)
     }
 
     /// Whether this session's event stream delivers `event`: the session is in the event's
@@ -389,9 +427,7 @@ impl Session {
         let in_audience = match &event.audience {
             Audience::Everyone => true,
             Audience::Operator => self.is_operator(),
-            Audience::Dids(dids) => self
-                .acts_as_did()
-                .is_some_and(|did| dids.iter().any(|d| d == did)),
+            Audience::Dids(dids) => self.acts_as_did().is_some_and(|did| dids.contains(&did)),
         };
         in_audience && self.may(&event.capability)
     }
@@ -439,10 +475,15 @@ impl Session {
             ))),
             _ => None,
         };
-        let operator_source =
-            (principal == Principal::Operator).then_some(OperatorSource::Credential);
+        // The operator holds the admin credential and calls on a loopback listener, as the
+        // desktop shell and `ad4m-executor` subcommands do.
+        let (reach, operator_source) = match principal {
+            Principal::Operator => (ListenerReach::Loopback, Some(OperatorSource::Credential)),
+            _ => (ListenerReach::Network, None),
+        };
         Session {
             grant,
+            reach,
             operator_source,
             ..Session::without_token(principal, caps)
         }
@@ -451,6 +492,34 @@ impl Session {
     /// This session with `caps` as its capabilities.
     pub(crate) fn with_caps(self, caps: Vec<Capability>) -> Session {
         Session { caps, ..self }
+    }
+
+    /// This session, arriving on a listener that the network reaches.
+    pub(crate) fn on_network(self) -> Session {
+        Session {
+            reach: ListenerReach::Network,
+            ..self
+        }
+    }
+
+    /// This operator session, proved by no token on a loopback listener of an executor
+    /// without an admin credential.
+    pub(crate) fn without_credential(self) -> Session {
+        Session {
+            operator_source: Some(OperatorSource::Loopback),
+            ..self
+        }
+    }
+
+    /// This operator session, from a key login: the operator role within a grant with that
+    /// role, as `Session::open` gives a device key of the operator record's identity.
+    pub(crate) fn from_key_login(self) -> Session {
+        let grant =
+            LiveGrant::for_test("key-login", AgentContext::main_agent(), u64::MAX).operator_role();
+        Session {
+            operator_source: Some(OperatorSource::Key),
+            ..self.with_grant(Arc::new(grant))
+        }
     }
 
     /// This session within `grant`.
@@ -539,6 +608,39 @@ mod resolution_tests {
             !remote.may(&ALL_CAPABILITY),
             "#1059: no operator over the network"
         );
+    }
+
+    /// `.local_only()` admits the operator on a loopback listener only: the admin credential
+    /// on a network listener is the operator, but not on this machine.
+    #[test]
+    fn only_the_operator_on_a_loopback_listener_is_on_this_machine() {
+        let local = Session::open(ADMIN, &admin(), ListenerReach::Loopback).unwrap();
+        assert!(local.is_operator_on_this_machine());
+        assert_eq!(local.operator_source(), Some(OperatorSource::Credential));
+
+        let remote = Session::open(ADMIN, &admin(), ListenerReach::Network).unwrap();
+        assert!(remote.is_operator());
+        assert!(!remote.is_operator_on_this_machine());
+
+        let tokenless = Session::open("", &None, ListenerReach::Loopback).unwrap();
+        assert!(tokenless.is_operator_on_this_machine());
+        assert_eq!(tokenless.operator_source(), Some(OperatorSource::Loopback));
+
+        let anonymous = Session::open("", &admin(), ListenerReach::Loopback).unwrap();
+        assert!(!anonymous.is_operator_on_this_machine());
+        assert_eq!(anonymous.operator_source(), None);
+    }
+
+    /// An operator from a key login is never on this machine, even on a loopback listener (a
+    /// forwarded port makes a remote device key look local): `.local_only()` refuses it.
+    #[test]
+    fn an_operator_from_a_key_login_is_not_on_this_machine_on_a_loopback_listener() {
+        let key = Session::for_test(Principal::Operator).from_key_login();
+        assert_eq!(key.reach, ListenerReach::Loopback);
+        assert!(key.is_operator());
+        assert_eq!(key.operator_source(), Some(OperatorSource::Key));
+        assert!(!key.is_operator_on_this_machine());
+        assert!(!key.on_network().is_operator_on_this_machine());
     }
 
     #[test]
@@ -668,7 +770,10 @@ mod resolution_tests {
                 Principal::Agent(AgentContext::managed(expected_did.clone()))
             );
             assert_eq!(session.managed_did(), Some(expected_did.as_str()));
-            assert_eq!(session.acts_as_did(), Some(expected_did.as_str()));
+            assert_eq!(
+                session.acts_as_did().as_deref(),
+                Some(expected_did.as_str())
+            );
             assert_eq!(caps(&session), caps_of(get_user_default_capabilities()));
             assert!(!session.is_operator());
             assert!(
@@ -780,7 +885,7 @@ mod resolution_tests {
             session.principal,
             Principal::Agent(AgentContext::managed(did.clone()))
         );
-        assert_eq!(session.acts_as_did(), Some(did.as_str()));
+        assert_eq!(session.acts_as_did().as_deref(), Some(did.as_str()));
         let signed = crate::agent::create_signed_expression(
             serde_json::json!({ "x": 1 }),
             &session.acts_as(),
@@ -1013,7 +1118,7 @@ mod resolution_tests {
         let main = Session::open(&main_token, &admin(), ListenerReach::Network).unwrap();
         assert!(matches!(&main.principal, Principal::Agent(agent) if agent.is_main_agent()));
         assert!(main.acts_as().is_main_agent());
-        assert_eq!(main.acts_as_did(), Some(main_did.as_str()));
+        assert_eq!(main.acts_as_did().as_deref(), Some(main_did.as_str()));
         assert_eq!(main.managed_did(), None, "the main agent has no user");
         assert_eq!(
             caps(&main),
@@ -1024,7 +1129,7 @@ mod resolution_tests {
         let user = Session::open(&user_token, &admin(), ListenerReach::Network).unwrap();
         assert!(matches!(&user.principal, Principal::Agent(agent) if !agent.is_main_agent()));
         assert_eq!(user.acts_as(), AgentContext::managed(user_did.clone()));
-        assert_eq!(user.acts_as_did(), Some(user_did.as_str()));
+        assert_eq!(user.acts_as_did().as_deref(), Some(user_did.as_str()));
         assert_eq!(caps(&user), caps_of(get_user_default_capabilities()));
 
         for grant in [&main, &user] {
@@ -1036,7 +1141,7 @@ mod resolution_tests {
         let operator = Session::open(ADMIN, &admin(), ListenerReach::Network).unwrap();
         assert!(operator.is_authenticated());
         assert_eq!(operator.acts_as(), AgentContext::main_agent());
-        assert_eq!(operator.acts_as_did(), Some(main_did.as_str()));
+        assert_eq!(operator.acts_as_did().as_deref(), Some(main_did.as_str()));
         assert_eq!(operator.managed_did(), None);
         assert!(operator.grant().is_none());
     }
