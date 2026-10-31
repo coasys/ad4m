@@ -15,7 +15,7 @@
 1. `new Ad4mClient(baseUrl, token, options?)` builds one `ApiClient(baseUrl, token)`. The socket URL is `<ws base>/api/v1/ws?token=<token>`.
 2. `ApiClient.call(type, params, { signal?, timeoutMs? })` sends `{ id, type, params }` and waits for the reply. The default timeout is 30 s, and 20 min for `LONG_METHODS`. Aborting sends `request.cancel`. Errors are `RpcError { status, body }`.
 3. `ApiClient.on(event, handler, { perspective? })` registers a handler and keeps `events.watch` in step with the registered events (retried up to 5 times).
-4. Reconnect uses backoff (0.5 s to 30 s). Calls in `READ_METHODS` are retried after a reconnect, and `onReconnect` callbacks fire.
+4. Reconnect uses backoff (0.5 s to 30 s). A socket that does not answer a ping within a ping interval (10 s) counts as closed and reconnects the same way. Calls in `READ_METHODS` are retried after a reconnect, and `onReconnect` callbacks fire.
 5. Close code 1008 (or a 401 reply) → `onAuthFailed(reason)`: every call fails with 401, and the client stops reconnecting. Close code 1013 (locked) → reconnect and keep the token.
 6. Each sub-client takes `baseUrl` and `token`. When no `ApiClient` is passed in, it builds its own, so a sub-client created alone opens its own socket (`AgentClient` constructor).
 7. Sub-clients map methods to RPC names, e.g. `agent.requestCapability` → `agent.requestCapability`, `agent.loginUser` → `user.login`, `agent.revokeToken(requestId)` → `agent.revokeToken { token: requestId }`.
