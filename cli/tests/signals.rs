@@ -107,7 +107,7 @@ fn exit_within(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
     None
 }
 
-fn assert_signal_ends_it(name: &str, sig: &str) {
+fn assert_signal_ends_it(name: &str, sig: &str) -> ExitStatus {
     let mut executor = start_with_stdout_reader_gone(name);
     signal(&executor.child, sig);
     let status = exit_within(&mut executor.child, EXIT_WITHIN);
@@ -115,16 +115,27 @@ fn assert_signal_ends_it(name: &str, sig: &str) {
         status.is_some(),
         "the executor was still running {EXIT_WITHIN:?} after SIG{sig}"
     );
+    status.unwrap()
+}
+
+/// SIGTERM and SIGINT start the graceful shutdown. Only the deadline that ends a cleanup that hangs
+/// exits with 1, and it fires inside `EXIT_WITHIN` too, so the code tells the two apart.
+fn assert_graceful(status: ExitStatus, sig: &str) {
+    assert_ne!(
+        status.code(),
+        Some(1),
+        "SIG{sig} ended the executor through the shutdown deadline, not its graceful shutdown"
+    );
 }
 
 #[test]
 fn sigterm_ends_an_executor_whose_launcher_is_gone() {
-    assert_signal_ends_it("term", "TERM");
+    assert_graceful(assert_signal_ends_it("term", "TERM"), "TERM");
 }
 
 #[test]
 fn sigint_ends_an_executor_whose_launcher_is_gone() {
-    assert_signal_ends_it("int", "INT");
+    assert_graceful(assert_signal_ends_it("int", "INT"), "INT");
 }
 
 /// A closed terminal sends SIGHUP.
