@@ -592,3 +592,35 @@ async fn union_page_classifies_a_two_class_record_and_filters_after_hydration() 
     assert_eq!(result.total_count, (11..n).count());
     files.stop().await;
 }
+
+/// `updatedAt` is the time of a record's latest link, which only the hydrated row has: a union
+/// ordered by it must not page on creation time. `t1` is the oldest record but was edited last.
+#[tokio::test]
+async fn union_orders_by_updated_at_from_the_hydrated_rows() {
+    let (store, resolver) = task_and_note();
+    task(&store, "app://t1", Some(1), "open", "10");
+    note(&store, "app://n1", Some(2), "20");
+    task(&store, "app://t2", Some(3), "open", "30");
+    add(
+        &store,
+        "app://t1",
+        "app://status",
+        "literal:string:done",
+        "50",
+    );
+
+    let result = execute_union_query(
+        &store,
+        &classes(&["Task", "Note"]),
+        &query(serde_json::json!({ "order": { "updatedAt": "DESC" }, "limit": 2 })),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ids(&result),
+        vec!["app://t1", "app://t2"],
+        "t1's edit at 50 makes it the most recently updated"
+    );
+    assert_eq!(result.total_count, 3);
+}
