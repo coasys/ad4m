@@ -638,12 +638,15 @@ async fn transcriptions_handler_does_not_bill() {
 
 /// A transcription model named `name` on an endpoint for the OpenAI-shaped audio server at
 /// `url`, served upstream as `remote`.
+///
+/// Its key is unique: mockito hands out pooled servers, so an endpoint another test left in
+/// the shared database can sit at this URL, and one with the same key would be refused.
 fn transcription_model_on(url: &str, name: &str, remote: &str) {
     let endpoint = crate::types::Endpoint::for_test(
         &format!("{name}-endpoint"),
         crate::types::EndpointKind::OpenAiAudio,
         url,
-        "",
+        &format!("{name}-key"),
     );
     crate::db::Ad4mDb::with_global_instance(|db| {
         db.insert_endpoint(&endpoint)?;
