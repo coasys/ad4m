@@ -43,10 +43,10 @@ const SESSION_KEYS = ["ad4m-token", "ad4m-url", "ad4m-port", "ad4m-last-host"];
  * version's keys, and the next load carried the old session over again. Answers whether a session
  * was carried over.
  *
- * `url` is the executor URL the app passes (`options.url`), which overrides the stored one: a
- * session stored for another URL (or for none) is not carried over, since its token was minted by
- * another executor. Versions compare with numeric `localeCompare`, which ranks `1.0.0-staging.1`
- * above `1.0.0`; harmless, as either session is the user's and the other versions' are removed.
+ * `url` is the executor URL the app passes (`options.url`), which overrides the stored one: only
+ * sessions stored for that executor are candidates, since a token is minted by one executor. A
+ * session stored for another URL (or for none) is not carried over, and does not hide an older
+ * version's session for the right one.
  */
 export function adoptStoredSession(url?: string): boolean {
   if (!localStorageSupported() || localStorage.getItem(`${version}/ad4m-token`)) return false;
@@ -59,13 +59,10 @@ export function adoptStoredSession(url?: string): boolean {
     const prefix = key.slice(0, key.length - suffix.length);
     if (prefix === version) continue;
     prefixes.push(prefix);
-    if (newest === null || newest.localeCompare(prefix, undefined, { numeric: true }) < 0) newest = prefix;
+    if (url !== undefined && !storedFor(prefix, url)) continue;
+    if (newest === null || compareVersions(newest, prefix) < 0) newest = prefix;
   }
   if (newest === null) return false;
-  if (url !== undefined) {
-    const storedUrl = localStorage.getItem(`${newest}/ad4m-url`);
-    if (storedUrl === null || wsUrlToHttpBase(storedUrl) !== wsUrlToHttpBase(url)) return false;
-  }
   // All the keys come from `newest`: one it lacks is removed here, not left from this version.
   for (const name of SESSION_KEYS) {
     const value = localStorage.getItem(`${newest}/${name}`);
@@ -76,6 +73,27 @@ export function adoptStoredSession(url?: string): boolean {
     for (const name of SESSION_KEYS) localStorage.removeItem(`${prefix}/${name}`);
   }
   return true;
+}
+
+/** Whether the session under `prefix` was stored for the executor at `url`. */
+function storedFor(prefix: string, url: string): boolean {
+  const stored = localStorage.getItem(`${prefix}/ad4m-url`);
+  return stored !== null && wsUrlToHttpBase(stored) === wsUrlToHttpBase(url);
+}
+
+/** Package versions by semver precedence: a release ranks above its own prereleases. */
+export function compareVersions(a: string, b: string): number {
+  const split = (v: string) => {
+    const i = v.indexOf("-");
+    return i < 0 ? [v, ""] : [v.slice(0, i), v.slice(i + 1)];
+  };
+  const [aCore, aPre] = split(a);
+  const [bCore, bPre] = split(b);
+  const byCore = aCore.localeCompare(bCore, undefined, { numeric: true });
+  if (byCore !== 0 || aPre === bPre) return byCore;
+  if (!aPre) return 1;
+  if (!bPre) return -1;
+  return aPre.localeCompare(bPre, undefined, { numeric: true });
 }
 
 /** Convert a WebSocket URL to an HTTP base URL. */

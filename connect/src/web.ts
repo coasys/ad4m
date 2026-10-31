@@ -222,6 +222,12 @@ export class Ad4mConnectElement extends LitElement {
     this.storedSessionRetry = null;
   }
 
+  disconnectedCallback() {
+    // A removed element must not be logged in later by a retry it started.
+    this.stopStoredSessionRetry();
+    super.disconnectedCallback();
+  }
+
   connectedCallback() {
     super.connectedCallback();
     autoBind(this);

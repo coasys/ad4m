@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { wsUrlToHttpBase, getInitials, getHue, checkConnection, isEmbedded, setLocal, getLocal, removeLocal, adoptStoredSession } from './utils';
+import { wsUrlToHttpBase, getInitials, getHue, checkConnection, isEmbedded, setLocal, getLocal, removeLocal, adoptStoredSession, compareVersions } from './utils';
 
 describe('wsUrlToHttpBase', () => {
   it('converts ws:// to http://', () => {
@@ -116,6 +116,13 @@ describe('localStorage helpers', () => {
   });
 });
 
+describe('compareVersions', () => {
+  it('orders by semver precedence', () => {
+    const sorted = ['0.10.0', '0.13.1', '0.9.0', '0.13.1-staging.10', '0.13.1-staging.5', '0.13.0'].sort(compareVersions);
+    expect(sorted).toEqual(['0.9.0', '0.10.0', '0.13.0', '0.13.1-staging.5', '0.13.1-staging.10', '0.13.1']);
+  });
+});
+
 describe('adoptStoredSession', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -168,6 +175,22 @@ describe('adoptStoredSession', () => {
     localStorage.removeItem('0.10.0/ad4m-url');
     expect(adoptStoredSession('http://new:1')).toBe(false);
     expect(getLocal('ad4m-token')).toBeNull();
+  });
+
+  it('picks the newest session stored for the executor the app names, past a newer one for another', () => {
+    localStorage.setItem('0.9.0/ad4m-token', 'same-executor');
+    localStorage.setItem('0.9.0/ad4m-url', 'http://node:1');
+    localStorage.setItem('0.10.0/ad4m-token', 'other-executor');
+    localStorage.setItem('0.10.0/ad4m-url', 'http://other:1');
+    expect(adoptStoredSession('http://node:1')).toBe(true);
+    expect(getLocal('ad4m-token')).toBe('same-executor');
+  });
+
+  it('ranks a release above its own prereleases', () => {
+    localStorage.setItem('0.12.0-staging.5/ad4m-token', 'prerelease');
+    localStorage.setItem('0.12.0/ad4m-token', 'release');
+    expect(adoptStoredSession()).toBe(true);
+    expect(getLocal('ad4m-token')).toBe('release');
   });
 
   it('carries over a session stored for the URL the app names, ws:// or http://', () => {

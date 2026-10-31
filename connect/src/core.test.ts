@@ -292,6 +292,19 @@ describe('Ad4mConnect', () => {
       expect(vi.mocked(Ad4mClient).mock.calls.filter(([url]) => url === 'https://other-host.example')).toEqual([]);
     });
 
+    it('gives up a try in flight once a new login stores another token', async () => {
+      const { conn, staleClient, authStates, checkConnection, release } = await holdTryInHealthCheck();
+      const result = conn.connectWhenReachable({ initialDelayMs: 1 });
+      await vi.waitFor(() => expect(checkConnection).toHaveBeenCalled());
+      conn.token = 'new-login-jwt';
+      release();
+      await expect(result).resolves.toBeUndefined();
+      expect(staleClient.close).toHaveBeenCalled();
+      expect(conn.ad4mClient).toBeUndefined();
+      expect(authStates).toEqual([]);
+      expect(conn.token).toBe('new-login-jwt');
+    });
+
     it('resolves undefined at once in embedded mode, without connecting', async () => {
       setLocal('ad4m-token', 'saved-jwt');
       const { checkConnection, isEmbedded } = await import('./utils');

@@ -53,6 +53,23 @@ describe('<ad4m-connect> stored session', () => {
     expect((element as any).selectedHost).toBe(host);
   });
 
+  it('stops the background retry when the element is removed', async () => {
+    const { core } = unreachableAtLoad();
+    let signal: AbortSignal | undefined;
+    const retry = vi.spyOn(core, 'connectWhenReachable').mockImplementation(async (opts) => {
+      signal = opts?.signal;
+      return new Promise(() => {});
+    });
+
+    element = Ad4mConnectUI(core);
+    await vi.waitFor(() => expect(retry).toHaveBeenCalled());
+    expect(signal?.aborted).toBe(false);
+
+    element.remove();
+    element = undefined;
+    expect(signal?.aborted).toBe(true);
+  });
+
   it('starts no credit tracking when the background retry gives up', async () => {
     const { core, startCreditSubscription } = unreachableAtLoad();
     core.connectedHost = host;
