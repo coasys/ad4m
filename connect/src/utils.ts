@@ -42,8 +42,13 @@ const SESSION_KEYS = ["ad4m-token", "ad4m-url", "ad4m-port", "ad4m-last-host"];
  * over: left in place, a logout (or a refused token, which is discarded) only cleared this
  * version's keys, and the next load carried the old session over again. Answers whether a session
  * was carried over.
+ *
+ * `url` is the executor URL the app passes (`options.url`), which overrides the stored one: a
+ * session stored for another URL (or for none) is not carried over, since its token was minted by
+ * another executor. Versions compare with numeric `localeCompare`, which ranks `1.0.0-staging.1`
+ * above `1.0.0`; harmless, as either session is the user's and the other versions' are removed.
  */
-export function adoptStoredSession(): boolean {
+export function adoptStoredSession(url?: string): boolean {
   if (!localStorageSupported() || localStorage.getItem(`${version}/ad4m-token`)) return false;
   const suffix = "/ad4m-token";
   const prefixes: string[] = [];
@@ -57,9 +62,15 @@ export function adoptStoredSession(): boolean {
     if (newest === null || newest.localeCompare(prefix, undefined, { numeric: true }) < 0) newest = prefix;
   }
   if (newest === null) return false;
+  if (url !== undefined) {
+    const storedUrl = localStorage.getItem(`${newest}/ad4m-url`);
+    if (storedUrl === null || wsUrlToHttpBase(storedUrl) !== wsUrlToHttpBase(url)) return false;
+  }
+  // All the keys come from `newest`: one it lacks is removed here, not left from this version.
   for (const name of SESSION_KEYS) {
     const value = localStorage.getItem(`${newest}/${name}`);
     if (value !== null) localStorage.setItem(`${version}/${name}`, value);
+    else localStorage.removeItem(`${version}/${name}`);
   }
   for (const prefix of prefixes) {
     for (const name of SESSION_KEYS) localStorage.removeItem(`${prefix}/${name}`);

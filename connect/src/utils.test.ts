@@ -147,6 +147,36 @@ describe('adoptStoredSession', () => {
     expect(getLocal('ad4m-token')).toBeNull();
   });
 
+  it('removes this version\'s session keys the carried-over session lacks, so its keys move together', () => {
+    setLocal('ad4m-url', 'http://this-version:1');
+    setLocal('ad4m-last-host', '{"id":"h"}');
+    localStorage.setItem('0.10.0/ad4m-token', 'newer');
+    localStorage.setItem('0.10.0/ad4m-port', '2');
+    expect(adoptStoredSession()).toBe(true);
+    expect(getLocal('ad4m-token')).toBe('newer');
+    expect(getLocal('ad4m-port')).toBe('2');
+    expect(getLocal('ad4m-url')).toBeNull();
+    expect(getLocal('ad4m-last-host')).toBeNull();
+  });
+
+  it('carries over no session stored for another URL than the app names', () => {
+    localStorage.setItem('0.10.0/ad4m-token', 'other-executor');
+    localStorage.setItem('0.10.0/ad4m-url', 'http://old:1');
+    expect(adoptStoredSession('http://new:1')).toBe(false);
+    expect(getLocal('ad4m-token')).toBeNull();
+    // Nor one whose URL is unknown: the token's executor cannot be told.
+    localStorage.removeItem('0.10.0/ad4m-url');
+    expect(adoptStoredSession('http://new:1')).toBe(false);
+    expect(getLocal('ad4m-token')).toBeNull();
+  });
+
+  it('carries over a session stored for the URL the app names, ws:// or http://', () => {
+    localStorage.setItem('0.10.0/ad4m-token', 'same-executor');
+    localStorage.setItem('0.10.0/ad4m-url', 'ws://node:1');
+    expect(adoptStoredSession('http://node:1')).toBe(true);
+    expect(getLocal('ad4m-token')).toBe('same-executor');
+  });
+
   it('leaves a session this version stored alone', () => {
     setLocal('ad4m-token', 'current');
     localStorage.setItem('0.0.1/ad4m-token', 'old');

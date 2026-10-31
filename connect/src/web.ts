@@ -271,13 +271,7 @@ export class Ad4mConnectElement extends LitElement {
 
     if (this.core.token) {
       // Try to auto-connect with stored token
-      this.core.connect().then(() => {
-        // If we have a connected host, start credit polling
-        if (this.core.connectedHost) {
-          this.selectedHost = this.core.connectedHost;
-          this.core.startCreditSubscription();
-        }
-      }).catch((error) => {
+      this.core.connect().then(() => this.storedSessionConnected()).catch((error) => {
         // Connection failed - show connection options
         console.error('[Ad4m Connect UI] Auto-connect failed:', error);
         this.currentView = "connection-options";
@@ -285,12 +279,21 @@ export class Ad4mConnectElement extends LitElement {
         // The stored session is still the user's: its node may be restarting or redeploying.
         // Keep trying it behind the options; the modal closes on its own once it answers.
         this.storedSessionRetry = new AbortController();
-        void this.core.connectWhenReachable({ signal: this.storedSessionRetry.signal });
+        void this.core.connectWhenReachable({ signal: this.storedSessionRetry.signal })
+          .then((client) => { if (client) this.storedSessionConnected(); });
       });
     } else {
       // No token - show connection options
       this.currentView = "connection-options";
       this.modalOpen = true;
+    }
+  }
+
+  /** The stored session connected, at load or on a later retry: a hosted node tracks its credits. */
+  private storedSessionConnected() {
+    if (this.core.connectedHost) {
+      this.selectedHost = this.core.connectedHost;
+      this.core.startCreditSubscription();
     }
   }
 

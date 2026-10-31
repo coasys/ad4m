@@ -123,6 +123,22 @@ describe('Ad4mConnect', () => {
       expect(getLocal('ad4m-token')).toBe('old-version-jwt');
     });
 
+    it('restores no earlier session stored for another executor than the app names', () => {
+      localStorage.setItem('0.0.1/ad4m-token', 'old-executor-jwt');
+      localStorage.setItem('0.0.1/ad4m-url', 'https://old-node.example:12000');
+      const conn = new Ad4mConnect({ ...defaultOptions, url: 'https://new-node.example:12000' });
+      expect(conn.token).toBe('');
+      expect(conn.url).toBe('https://new-node.example:12000');
+      expect(getLocal('ad4m-token')).toBeNull();
+    });
+
+    it('restores an earlier session stored for the executor the app names', () => {
+      localStorage.setItem('0.0.1/ad4m-token', 'same-executor-jwt');
+      localStorage.setItem('0.0.1/ad4m-url', 'https://node.example:12000');
+      const conn = new Ad4mConnect({ ...defaultOptions, url: 'https://node.example:12000' });
+      expect(conn.token).toBe('same-executor-jwt');
+    });
+
     it('restores URL from localStorage', () => {
       setLocal('ad4m-url', 'http://saved:9999');
       const conn = new Ad4mConnect(defaultOptions);
@@ -231,6 +247,64 @@ describe('Ad4mConnect', () => {
       await expect(result).resolves.toBeUndefined();
       expect(checkConnection).not.toHaveBeenCalled();
       expect(vi.mocked(Ad4mClient).mock.calls.filter(([, token]) => token === 'saved-jwt')).toEqual([]);
+    });
+
+    /** A try held in its health check; the client it opens is its own, so the test can tell it apart. */
+    const holdTryInHealthCheck = async () => {
+      setLocal('ad4m-token', 'saved-jwt');
+      setLocal('ad4m-url', 'http://localhost:12000');
+      const { checkConnection } = await import('./utils');
+      (checkConnection as any).mockClear();
+      let releaseHealth!: () => void;
+      (checkConnection as any).mockImplementationOnce(() => new Promise<void>((resolve) => (releaseHealth = resolve)));
+      const staleClient = { ...mockClientInstance, close: vi.fn(), onAuthFailed: vi.fn() };
+      vi.mocked(Ad4mClient).mockImplementationOnce(() => staleClient as any);
+      const conn = new Ad4mConnect(defaultOptions);
+      const authStates: string[] = [];
+      conn.addEventListener('authstatechange', (e: any) => authStates.push(e.detail));
+      return { conn, staleClient, authStates, checkConnection, release: () => releaseHealth() };
+    };
+
+    it('gives up a try in flight when aborted, leaving the connection alone', async () => {
+      const { conn, staleClient, authStates, checkConnection, release } = await holdTryInHealthCheck();
+      const controller = new AbortController();
+      const result = conn.connectWhenReachable({ signal: controller.signal, initialDelayMs: 1 });
+      await vi.waitFor(() => expect(checkConnection).toHaveBeenCalled());
+      controller.abort();
+      release();
+      await expect(result).resolves.toBeUndefined();
+      expect(staleClient.close).toHaveBeenCalled();
+      expect(staleClient.onAuthFailed).not.toHaveBeenCalled();
+      expect(conn.ad4mClient).toBeUndefined();
+      expect(authStates).toEqual([]);
+    });
+
+    it('gives up a try in flight once the user picks another node', async () => {
+      const { conn, staleClient, authStates, checkConnection, release } = await holdTryInHealthCheck();
+      const result = conn.connectWhenReachable({ initialDelayMs: 1 });
+      await vi.waitFor(() => expect(checkConnection).toHaveBeenCalled());
+      conn.url = 'https://other-host.example';
+      release();
+      await expect(result).resolves.toBeUndefined();
+      expect(staleClient.close).toHaveBeenCalled();
+      expect(conn.ad4mClient).toBeUndefined();
+      expect(authStates).toEqual([]);
+      expect(vi.mocked(Ad4mClient).mock.calls.filter(([url]) => url === 'https://other-host.example')).toEqual([]);
+    });
+
+    it('resolves undefined at once in embedded mode, without connecting', async () => {
+      setLocal('ad4m-token', 'saved-jwt');
+      const { checkConnection, isEmbedded } = await import('./utils');
+      (checkConnection as any).mockClear();
+      (isEmbedded as any).mockReturnValueOnce(true);
+      const conn = new Ad4mConnect(defaultOptions);
+      const timedOut = Symbol('timed out');
+      const result = await Promise.race([
+        conn.connectWhenReachable({ initialDelayMs: 1 }),
+        new Promise((resolve) => setTimeout(() => resolve(timedOut), 200)),
+      ]);
+      expect(result).toBeUndefined();
+      expect(checkConnection).not.toHaveBeenCalled();
     });
 
     it('leaves no abort listener behind per try', async () => {
