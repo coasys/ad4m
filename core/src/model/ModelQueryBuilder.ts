@@ -77,6 +77,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     return (this.ctor as any).parseModelResult(this.perspective, raw, include, properties);
   }
 
+  /** Snapshot instances for dirty tracking, as `execute` does for its rows. */
+  private takeSnapshots(instances: T[]): void {
+    const include = this.queryParams.include;
+    const relations = include
+      ? Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')))
+      : undefined;
+    const snapshot = relations && Object.keys(relations).length > 0 ? relations : undefined;
+    for (const inst of instances) (inst as any).takeSnapshot?.(snapshot);
+  }
+
   /** Ends the current subscription, if any, on the client and the executor. */
   dispose() {
     if (this.currentSubscription) {
@@ -635,74 +645,36 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     pageNumber: number,
     callback: (results: PaginationResult<T>) => void
   ): Promise<PaginationResult<T>> {
-    // Clean up any existing subscription
     this.dispose();
 
-    // Subscribe to the full result set (no limit/offset) so the subscription
-    // detects changes anywhere in the dataset; each change re-reads the page.
-    const subscriptionParams = { ...(this.queryParams || {}) };
-    delete subscriptionParams.limit;
-    delete subscriptionParams.offset;
-
-    // Build the paginated query for Rust endpoint (count: true fetches both results and totalCount in one call)
-    const paginatedQuery = {
+    // Subscribe to the page itself. Since #1237 the executor re-runs a paged
+    // subscription when a record outside the page starts or stops matching
+    // (the `joins` and `scan` trigger rules), and a model result carries
+    // `totalCount`, so a write outside the page still changes the result and
+    // is pushed. Each page is built from the pushed rows: no second query, and
+    // the executor hydrates one page per change rather than every match.
+    // Pushes arrive in revision order, so the last callback is the latest
+    // state (#1051). After dispose() the live query delivers nothing.
+    const paginatedQuery: Query = {
       ...(this.queryParams || {}),
       limit: pageSize,
       offset: pageSize * (pageNumber - 1),
       count: true,
     };
-
-    // One read in flight. A dispatch while a read is running sets `pending`
-    // so a fetch always completes after the last dispatch. The generation
-    // counter from #1020 dropped superseded fetches, but ordered them by
-    // start time rather than by how fresh the data they read was — two
-    // back-to-back dispatches could keep the fetch that saw 1 model and
-    // drop the one that saw 2, after which the server has nothing further
-    // to say (issue #1051 / CI: "Paginate callback did not see second model save").
-    // After dispose() no read starts and no result is delivered, including
-    // a read that was already in flight when dispose() ran.
-    let disposed = false;
-    let fetching = false;
-    let pending = false;
-    const processResults = async (): Promise<void> => {
-      if (disposed) return;
-      if (fetching) {
-        pending = true;
-        return;
-      }
-      fetching = true;
-      try {
-        const { results, totalCount } = await this.execute(paginatedQuery);
-        if (!disposed) callback({ results, totalCount, pageSize, pageNumber });
-      } finally {
-        fetching = false;
-        if (pending) {
-          pending = false;
-          // Detached from the caller's promise: needs its own handler, or a
-          // rejection here is unhandled.
-          processResults().catch(e => console.error('Paginate subscription error:', e));
-        }
-      }
+    const toPage = (raw: any): PaginationResult<T> => {
+      const results = this.parse(raw);
+      this.takeSnapshots(results);
+      return { results, totalCount: raw?.totalCount, pageSize, pageNumber };
     };
 
-    const { live } = await this.live(subscriptionParams, () => {
-      processResults().catch(e => console.error('Paginate subscription error:', e));
+    const { initial } = await this.live(paginatedQuery, (raw) => {
+      try {
+        callback(toPage(raw));
+      } catch (e) {
+        console.error('Paginate subscription error:', e);
+      }
     });
-    if (this.currentSubscription === live) {
-      this.currentSubscription = {
-        dispose: () => {
-          disposed = true;
-          live.dispose();
-        },
-      };
-    } else {
-      // Disposed, or overtaken by a later subscribe, while opening: deliver nothing.
-      disposed = true;
-    }
-
-    // Initial fetch (single call with count: true)
-    const { results, totalCount } = await this.execute(paginatedQuery);
-    return { results, totalCount, pageSize, pageNumber };
+    return toPage(initial);
   }
 
   /**
