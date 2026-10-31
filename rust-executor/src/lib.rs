@@ -259,6 +259,13 @@ pub async fn unlock_agent_at_startup(passphrase: String) {
     }
 }
 
+/// How long the graceful shutdown that SIGTERM or SIGINT starts may take before the process
+/// exits anyway. Below the 5 s after which test harnesses escalate to SIGKILL, so the cleanup
+/// that does finish (the Holochain conductor's own shutdown is bounded at 3 s) is not cut short
+/// by them.
+#[cfg(unix)]
+const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// Runs the REST server and the deno core runtime.
 ///
 /// Returns the REST API server's thread. It ends with `Err` when the server
@@ -287,18 +294,21 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     }
 
     // Spawn a task that listens for OS signals (SIGTERM/SIGINT) and triggers shutdown.
-    // This replaces the old ctrlc handler in the CLI binaries with an in-executor handler
-    // that allows graceful cleanup of Holochain conductor and databases.
+    // It is the process's only handler for them: the executor binaries install none of their
+    // own (one would replace this one). SIGHUP keeps its default action and ends the process.
+    // It logs and never prints: stdout may be a pipe whose reader (the launcher) is gone, and
+    // `println!` panics on the broken pipe.
     #[cfg(unix)]
     {
         tokio::spawn(async {
-            use tokio::signal;
-            let ctrl_c = signal::ctrl_c();
-            let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler");
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint =
+                signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
 
             tokio::select! {
-                _ = ctrl_c => info!("Received SIGINT, initiating graceful shutdown..."),
+                _ = sigint.recv() => info!("Received SIGINT, initiating graceful shutdown..."),
                 _ = sigterm.recv() => info!("Received SIGTERM, initiating graceful shutdown..."),
             }
 
@@ -306,6 +316,18 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
                 let _ = tx.send(());
             }
+
+            // The cleanup must not keep the process alive: a second signal, or the deadline,
+            // ends it without waiting any longer.
+            tokio::select! {
+                _ = sigint.recv() => warn!("Received SIGINT again, exiting without finishing the cleanup"),
+                _ = sigterm.recv() => warn!("Received SIGTERM again, exiting without finishing the cleanup"),
+                _ = tokio::time::sleep(SHUTDOWN_DEADLINE) => warn!(
+                    "Cleanup did not finish within {:?}, exiting without it",
+                    SHUTDOWN_DEADLINE
+                ),
+            }
+            std::process::exit(1);
         });
     }
 

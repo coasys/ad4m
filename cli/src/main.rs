@@ -332,15 +332,10 @@ async fn main() -> Result<()> {
             rust_executor::exit_when_api_fails(api_thread);
         }
         
-        let _ = ctrlc::set_handler(move || {
-            println!("Received CTRL-C! Exiting...");
-            exit(0);
-        });
-
+        // As in ad4m_executor.rs: `rust_executor::run` handles SIGINT and SIGTERM; no
+        // second handler.
         use tokio::time::sleep;
         use std::time::Duration;
-        use std::process::exit;
-        use ctrlc;
 
         loop {
             sleep(Duration::from_secs(2)).await;
