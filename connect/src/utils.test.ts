@@ -186,6 +186,17 @@ describe('adoptStoredSession', () => {
     expect(getLocal('ad4m-token')).toBe('same-executor');
   });
 
+  it('keeps the sessions it skipped for another executor, so an app configured for that one finds them', () => {
+    localStorage.setItem('0.9.0/ad4m-token', 'same-executor');
+    localStorage.setItem('0.9.0/ad4m-url', 'http://node:1');
+    localStorage.setItem('0.10.0/ad4m-token', 'other-executor');
+    localStorage.setItem('0.10.0/ad4m-url', 'http://other:1');
+    expect(adoptStoredSession('http://node:1')).toBe(true);
+    expect(localStorage.getItem('0.9.0/ad4m-token')).toBeNull();
+    expect(localStorage.getItem('0.10.0/ad4m-token')).toBe('other-executor');
+    expect(localStorage.getItem('0.10.0/ad4m-url')).toBe('http://other:1');
+  });
+
   it('ranks a release above its own prereleases', () => {
     localStorage.setItem('0.12.0-staging.5/ad4m-token', 'prerelease');
     localStorage.setItem('0.12.0/ad4m-token', 'release');

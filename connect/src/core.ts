@@ -188,17 +188,18 @@ export default class Ad4mConnect extends EventTarget {
       });
     }
 
-    // Resolves a client: `wanted` defaults to always, so it never gives up.
+    // Resolves a client: not a background try, so it never gives up.
     return this.connectStandalone() as Promise<Ad4mClient>;
   }
 
   /**
-   * Connect directly to `this.url`. `wanted` is asked after each wait (the health check, the auth
-   * read): once it answers false the attempt gives up without touching the connection, closes the
-   * client it opened and resolves `undefined`. A stale retry must not replace the client, or apply
-   * the auth, of a connection the user started meanwhile.
+   * Connect directly to `this.url`. For a background try (`retry`), `retry.wanted` is asked after
+   * each wait (the health check, the auth read): once it answers false the attempt gives up without
+   * touching the connection, closes the client it opened and resolves `undefined`. A stale retry
+   * must not replace the client, or apply the auth, of a connection the user started meanwhile.
    */
-  private async connectStandalone(wanted: () => boolean = () => true): Promise<Ad4mClient | undefined> {
+  private async connectStandalone(retry?: { wanted: () => boolean }): Promise<Ad4mClient | undefined> {
+    const wanted = () => retry?.wanted() ?? true;
     // Standalone mode - connect directly.
     //
     // The health check and the first authenticated call run together. The health check exists to
@@ -233,6 +234,13 @@ export default class Ad4mConnect extends EventTarget {
     if (!wanted()) {
       session.client.close();
       return undefined;
+    }
+    // A background try has nothing to report until the executor answers about the token: a
+    // reading that neither accepts nor refuses it (not ready yet, a timeout) is tried again,
+    // rather than leaving the user on the connection screen with a token that still works.
+    if (retry && auth.state === 'unauthenticated' && !refusesToken(auth.error)) {
+      session.client.close();
+      throw auth.error ?? new Error('the executor has not answered about the session yet');
     }
     setLocal("ad4m-url", this.url);
     this.adoptClient(session.client);
@@ -271,9 +279,9 @@ export default class Ad4mConnect extends EventTarget {
       });
       if (!wanted()) return undefined;
       try {
-        return await this.connectStandalone(wanted);
+        return await this.connectStandalone({ wanted });
       } catch {
-        // Still unreachable: `connect` has reported it as a connection error.
+        // Still unreachable, or not yet able to say whether the token is good: try again.
       }
     }
   }

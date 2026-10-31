@@ -57,9 +57,10 @@ export function adoptStoredSession(url?: string): boolean {
     const key = localStorage.key(i);
     if (!key?.endsWith(suffix) || !localStorage.getItem(key)) continue;
     const prefix = key.slice(0, key.length - suffix.length);
-    if (prefix === version) continue;
+    // A session for another executor is neither a candidate nor cleaned up: an app configured for
+    // that executor can still carry it over.
+    if (prefix === version || (url !== undefined && !storedFor(prefix, url))) continue;
     prefixes.push(prefix);
-    if (url !== undefined && !storedFor(prefix, url)) continue;
     if (newest === null || compareVersions(newest, prefix) < 0) newest = prefix;
   }
   if (newest === null) return false;

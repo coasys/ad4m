@@ -305,6 +305,34 @@ describe('Ad4mConnect', () => {
       expect(conn.token).toBe('new-login-jwt');
     });
 
+    it('tries again when the executor answers but cannot yet say whether the token holds', async () => {
+      setLocal('ad4m-token', 'saved-jwt');
+      setLocal('ad4m-url', 'http://localhost:12000');
+      mockAgent.status.mockRejectedValueOnce(new Error('timed out'));
+      const conn = new Ad4mConnect(defaultOptions);
+      const authStates: string[] = [];
+      conn.addEventListener('authstatechange', (e: any) => authStates.push(e.detail));
+      const client = await conn.connectWhenReachable({ initialDelayMs: 1, maxDelayMs: 2 });
+      expect(client).toBeDefined();
+      expect(mockAgent.status).toHaveBeenCalledTimes(2);
+      expect(authStates).toEqual(['authenticated']);
+      expect(conn.token).toBe('saved-jwt');
+    });
+
+    it('stops at a refused token instead of trying it again', async () => {
+      setLocal('ad4m-token', 'saved-jwt');
+      setLocal('ad4m-url', 'http://localhost:12000');
+      mockAgent.status.mockRejectedValueOnce(new RpcError(401, 'Unauthorized access'));
+      mockAgent.isLocked.mockRejectedValueOnce(new RpcError(401, 'Unauthorized access'));
+      const conn = new Ad4mConnect(defaultOptions);
+      const authStates: string[] = [];
+      conn.addEventListener('authstatechange', (e: any) => authStates.push(e.detail));
+      await conn.connectWhenReachable({ initialDelayMs: 1, maxDelayMs: 2 });
+      expect(mockAgent.status).toHaveBeenCalledTimes(1);
+      expect(authStates).toEqual(['unauthenticated']);
+      expect(conn.token).toBe('');
+    });
+
     it('resolves undefined at once in embedded mode, without connecting', async () => {
       setLocal('ad4m-token', 'saved-jwt');
       const { checkConnection, isEmbedded } = await import('./utils');
