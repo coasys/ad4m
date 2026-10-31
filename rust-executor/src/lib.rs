@@ -259,12 +259,23 @@ pub async fn unlock_agent_at_startup(passphrase: String) {
     }
 }
 
-/// How long the graceful shutdown that SIGTERM or SIGINT starts may take before the process
-/// exits anyway. Below the 5 s after which test harnesses escalate to SIGKILL, so the cleanup
-/// that does finish (the Holochain conductor's own shutdown is bounded at 3 s) is not cut short
-/// by them.
+/// How long the graceful shutdown that a signal starts may take before the process exits anyway.
+/// Below the 5 s after which test harnesses escalate to SIGKILL, so the cleanup that does finish
+/// (the Holochain conductor's own shutdown is bounded at 3 s) is not cut short by them.
 #[cfg(unix)]
 const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Whether the executor was started with SIGHUP ignored, as `nohup` does. Read before any handler
+/// is installed: installing one replaces the inherited disposition.
+#[cfg(unix)]
+fn sighup_ignored() -> bool {
+    // SAFETY: a null new action only reads the current disposition into `current`.
+    unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut current) == 0
+            && current.sa_sigaction == libc::SIG_IGN
+    }
+}
 
 /// Runs the REST server and the deno core runtime.
 ///
@@ -295,37 +306,48 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 
     // Spawn a task that listens for OS signals (SIGTERM, SIGINT, SIGHUP) and triggers shutdown.
     // It is the process's only handler for them: the executor binaries install none of their
-    // own (one would replace this one). SIGHUP, a closed terminal, gets the same cleanup.
+    // own (one would replace this one). SIGHUP, a closed terminal, gets the same cleanup, unless
+    // the executor was started with SIGHUP ignored (`nohup`): then it stays ignored.
     // It logs and never prints: stdout may be a pipe whose reader (the launcher) is gone, and
     // `println!` panics on the broken pipe.
     #[cfg(unix)]
     {
         tokio::spawn(async {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{signal, Signal, SignalKind};
             let mut sigint =
                 signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
             let mut sigterm =
                 signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-            let mut sighup =
-                signal(SignalKind::hangup()).expect("failed to install SIGHUP handler");
-
-            tokio::select! {
-                _ = sigint.recv() => info!("Received SIGINT, initiating graceful shutdown..."),
-                _ = sigterm.recv() => info!("Received SIGTERM, initiating graceful shutdown..."),
-                _ = sighup.recv() => info!("Received SIGHUP, initiating graceful shutdown..."),
+            let mut sighup = (!sighup_ignored())
+                .then(|| signal(SignalKind::hangup()).expect("failed to install SIGHUP handler"));
+            async fn hangup(sighup: &mut Option<Signal>) {
+                match sighup {
+                    Some(sighup) => {
+                        sighup.recv().await;
+                    }
+                    None => std::future::pending().await,
+                }
             }
 
-            // Trigger shutdown via the global channel
+            let received = tokio::select! {
+                _ = sigint.recv() => "SIGINT",
+                _ = sigterm.recv() => "SIGTERM",
+                _ = hangup(&mut sighup) => "SIGHUP",
+            };
+
+            // Trigger shutdown via the global channel, before logging: a log write that blocks (a
+            // launcher that no longer drains stderr) must not hold up the cleanup.
             if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
                 let _ = tx.send(());
             }
+            info!("Received {received}, initiating graceful shutdown...");
 
             // The cleanup must not keep the process alive: a second signal, or the deadline,
             // ends it without waiting any longer.
             tokio::select! {
                 _ = sigint.recv() => warn!("⚠️ Received SIGINT again, exiting without finishing the cleanup"),
                 _ = sigterm.recv() => warn!("⚠️ Received SIGTERM again, exiting without finishing the cleanup"),
-                _ = sighup.recv() => warn!("⚠️ Received SIGHUP again, exiting without finishing the cleanup"),
+                _ = hangup(&mut sighup) => warn!("⚠️ Received SIGHUP again, exiting without finishing the cleanup"),
                 _ = tokio::time::sleep(SHUTDOWN_DEADLINE) => warn!(
                     "⚠️ Cleanup did not finish within {:?}, exiting without it",
                     SHUTDOWN_DEADLINE
