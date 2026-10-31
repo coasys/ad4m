@@ -549,6 +549,58 @@ fn is_stored_local(tx: &Transaction<'_>, link: &LinkExpression) -> Result<bool, 
         .any(|s| s == local))
 }
 
+/// Remove all quads of `link` in `tx`: its reifier with its annotations,
+/// and the direct triple unless another reifier still references it. The
+/// transaction reads its own removals, so this reifier no longer counts.
+fn remove_link_quads(tx: &mut Transaction<'_>, link: &LinkExpression) -> Result<(), Error> {
+    let reifier_iri = make_reifier_iri(link);
+
+    // 1. Remove all quads where reifier is subject (metadata + rdf:reifies)
+    let quads: Vec<_> = tx
+        .quads_for_pattern(
+            Some(reifier_iri.as_ref().into()),
+            None,
+            None,
+            Some(GraphNameRef::DefaultGraph),
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    for quad in &quads {
+        tx.remove(quad);
+    }
+
+    // 2. Remove the direct triple IF no other reifier references it. The
+    //    transaction reads its own removals, so this reifier no longer counts.
+    let (source, predicate, target_term) = make_direct_triple(link);
+    let triple_term = Triple::new(source.clone(), predicate.clone(), target_term.clone());
+    let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+
+    let still_referenced = tx
+        .quads_for_pattern(
+            None,
+            Some(rdf_reifies),
+            Some(TermRef::Triple(&triple_term)),
+            None,
+        )
+        .next()
+        .is_some();
+
+    if !still_referenced {
+        let target_ref: TermRef = match &target_term {
+            Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
+            Term::Literal(l) => TermRef::Literal(l.as_ref()),
+            Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
+            Term::Triple(_) => return Ok(()),
+        };
+        tx.remove(QuadRef::new(
+            source.as_ref(),
+            predicate.as_ref(),
+            target_ref,
+            GraphNameRef::DefaultGraph,
+        ));
+    }
+    Ok(())
+}
+
 /// Write all quads of `link` with `status` in `tx`: the direct triple, its
 /// reifier, and the reifier's annotations, each replacing what the reifier
 /// held for it. The proof annotations are written as [`proof_write`] allows.
@@ -1029,57 +1081,47 @@ impl SparqlStore {
         if skip_local && is_stored_local(&tx, link)? {
             return Ok(false);
         }
-        let reifier_iri = make_reifier_iri(link);
-
-        // 1. Remove all quads where reifier is subject (metadata + rdf:reifies)
-        let quads: Vec<_> = tx
-            .quads_for_pattern(
-                Some(reifier_iri.as_ref().into()),
-                None,
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .collect::<Result<Vec<_>, _>>()?;
-        for quad in &quads {
-            tx.remove(quad);
-        }
-
-        // 2. Remove the direct triple IF no other reifier references it. The
-        //    transaction reads its own removals, so this reifier no longer counts.
-        let (source, predicate, target_term) = make_direct_triple(link);
-        let triple_term = Triple::new(source.clone(), predicate.clone(), target_term.clone());
-        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-
-        let still_referenced = tx
-            .quads_for_pattern(
-                None,
-                Some(rdf_reifies),
-                Some(TermRef::Triple(&triple_term)),
-                None,
-            )
-            .next()
-            .is_some();
-
-        if !still_referenced {
-            let target_ref: TermRef = match &target_term {
-                Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
-                Term::Literal(l) => TermRef::Literal(l.as_ref()),
-                Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-                Term::Triple(_) => {
-                    tx.commit()?;
-                    return Ok(true);
-                }
-            };
-            tx.remove(QuadRef::new(
-                source.as_ref(),
-                predicate.as_ref(),
-                target_ref,
-                GraphNameRef::DefaultGraph,
-            ));
-        }
-
+        remove_link_quads(&mut tx, link)?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Apply a diff in one transaction, removals before additions. Removal
+    /// matches by reifier (author, triple and timestamp), so the other order
+    /// would delete a link that is removed and re-added unchanged. Readers see
+    /// the store before or after the whole diff. An addition without a status
+    /// is skipped, as `add_link` refuses it; a link in the store's metadata
+    /// vocabulary fails the whole diff, as `add_link` and `remove_link` refuse it.
+    pub fn apply_diff(
+        &self,
+        removals: &[LinkExpression],
+        additions: &[LinkExpression],
+    ) -> Result<(), Error> {
+        for link in removals.iter().chain(additions) {
+            refuse_link_metadata(link)?;
+        }
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let mut tx = self.store.start_transaction()?;
+        for link in removals {
+            remove_link_quads(&mut tx, link)?;
+        }
+        for link in additions {
+            let Some(status) = link.status.as_ref() else {
+                log::warn!(
+                    "Refusing to store link without an explicit local/shared status: {} -[{}]-> {}",
+                    link.data.source,
+                    link.data.predicate.as_deref().unwrap_or(""),
+                    link.data.target
+                );
+                continue;
+            };
+            write_link_quads(&mut tx, link, status)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Return all links in the store using a SPARQL 1.2 reifier query.
@@ -2022,6 +2064,70 @@ mod tests {
 
     fn new_service() -> SparqlStore {
         SparqlStore::new(None).unwrap()
+    }
+
+    /// `apply_diff` removes before it adds, so a link removed and re-added
+    /// unchanged in the same diff (same reifier) stays, a re-add of its triple
+    /// with a new timestamp stays beside it, a replaced value is swapped, and
+    /// an addition without a status is skipped alone.
+    #[test]
+    fn apply_diff_removes_before_it_adds() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let kept = make_link_with_ts(
+            &signer,
+            "ad4m://n",
+            "ad4m://status",
+            "ad4m://active",
+            "2026-01-01T00:00:01Z",
+        );
+        let old = make_link_with_ts(
+            &signer,
+            "ad4m://n",
+            "ad4m://expires",
+            "ad4m://t1",
+            "2026-01-01T00:00:01Z",
+        );
+        svc.add_link(&kept).unwrap();
+        svc.add_link(&old).unwrap();
+
+        let kept_again = make_link_with_ts(
+            &signer,
+            "ad4m://n",
+            "ad4m://status",
+            "ad4m://active",
+            "2026-01-01T00:00:02Z",
+        );
+        let new = make_link_with_ts(
+            &signer,
+            "ad4m://n",
+            "ad4m://expires",
+            "ad4m://t2",
+            "2026-01-01T00:00:02Z",
+        );
+        let mut no_status = make_link(&signer, "ad4m://n", "ad4m://other", "ad4m://x");
+        no_status.status = None;
+        svc.apply_diff(
+            &[kept.clone(), old],
+            &[kept_again, new, kept.clone(), no_status],
+        )
+        .unwrap();
+
+        let mut targets: Vec<(String, String)> = svc
+            .get_links_by_source("ad4m://n")
+            .unwrap()
+            .into_iter()
+            .map(|l| (l.data.predicate.unwrap_or_default(), l.data.target))
+            .collect();
+        targets.sort();
+        assert_eq!(
+            targets,
+            vec![
+                ("ad4m://expires".to_string(), "ad4m://t2".to_string()),
+                ("ad4m://status".to_string(), "ad4m://active".to_string()),
+                ("ad4m://status".to_string(), "ad4m://active".to_string()),
+            ]
+        );
     }
 
     // ── Storage Model Tests (Reifier Model) ──
