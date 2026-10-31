@@ -38,23 +38,31 @@ const SESSION_KEYS = ["ad4m-token", "ad4m-url", "ad4m-port", "ad4m-last-host"];
  * leave the stored token under the old prefix, unread: the user had to log in again although the
  * executor still accepted the token. When this version holds no token, the session of the newest
  * other version that holds one is copied over. The token is not checked here; a refused one is
- * dropped by `checkAuth` as before. Answers whether a session was carried over.
+ * dropped by `checkAuth` as before. The other versions' sessions are removed once one is carried
+ * over: left in place, a logout (or a refused token, which is discarded) only cleared this
+ * version's keys, and the next load carried the old session over again. Answers whether a session
+ * was carried over.
  */
 export function adoptStoredSession(): boolean {
   if (!localStorageSupported() || localStorage.getItem(`${version}/ad4m-token`)) return false;
   const suffix = "/ad4m-token";
+  const prefixes: string[] = [];
   let newest: string | null = null;
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
     if (!key?.endsWith(suffix) || !localStorage.getItem(key)) continue;
     const prefix = key.slice(0, key.length - suffix.length);
     if (prefix === version) continue;
+    prefixes.push(prefix);
     if (newest === null || newest.localeCompare(prefix, undefined, { numeric: true }) < 0) newest = prefix;
   }
   if (newest === null) return false;
   for (const name of SESSION_KEYS) {
     const value = localStorage.getItem(`${newest}/${name}`);
     if (value !== null) localStorage.setItem(`${version}/${name}`, value);
+  }
+  for (const prefix of prefixes) {
+    for (const name of SESSION_KEYS) localStorage.removeItem(`${prefix}/${name}`);
   }
   return true;
 }

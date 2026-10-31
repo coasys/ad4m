@@ -133,6 +133,20 @@ describe('adoptStoredSession', () => {
     expect(getLocal('ad4m-port')).toBe('2');
   });
 
+  it('removes the other versions\' sessions it carried over from, so a logout sticks', () => {
+    localStorage.setItem('0.9.0/ad4m-token', 'older');
+    localStorage.setItem('0.10.0/ad4m-token', 'newer');
+    localStorage.setItem('0.10.0/ad4m-url', 'http://newer:2');
+    expect(adoptStoredSession()).toBe(true);
+    expect(localStorage.getItem('0.9.0/ad4m-token')).toBeNull();
+    expect(localStorage.getItem('0.10.0/ad4m-token')).toBeNull();
+    expect(localStorage.getItem('0.10.0/ad4m-url')).toBeNull();
+    // A logout clears this version's token; the next load has nothing left to carry over.
+    removeLocal('ad4m-token');
+    expect(adoptStoredSession()).toBe(false);
+    expect(getLocal('ad4m-token')).toBeNull();
+  });
+
   it('leaves a session this version stored alone', () => {
     setLocal('ad4m-token', 'current');
     localStorage.setItem('0.0.1/ad4m-token', 'old');
