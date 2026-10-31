@@ -1,7 +1,11 @@
 import { expect } from "chai";
-import { execSync, spawnSync } from "node:child_process";
+import { execSync, spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
+import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sfuScenario } from "../helpers/sfu/harness.js";
@@ -62,6 +66,43 @@ describe("SFU: end to end through the SDK", function () {
       process.execPath, ...process.execArgv, check,
     ], { stdio: "inherit", timeout: 180_000 });
     expect(run.status).to.equal(0);
+  });
+
+  it("a participant process ends with the run that started it, however the run ends", async function () {
+    // #1485: participants left behind by a run that ended (mocha --exit after a failed batch, a
+    // SIGKILLed job) kept the CI log pipe open, and the job ran until its time limit. Here the
+    // run is SIGKILLed while its participant joins through an API that never answers.
+    if (!wrtc) this.skip();
+    this.timeout(60_000);
+    const api = createServer(() => {});
+    const connected = new Promise<void>((resolve) => api.once("connection", () => resolve()));
+    await new Promise<void>((resolve) => api.listen(0, "127.0.0.1", resolve));
+    const script = join(dirname(fileURLToPath(import.meta.url)), "../helpers/sfu/e2e/orphan-run.ts");
+    const run = spawn(process.execPath, [...process.execArgv, script, String((api.address() as AddressInfo).port)], {
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    let pid = 0;
+    const alive = () => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      const [line] = (await once(createInterface({ input: run.stdout! }), "line")) as [string];
+      pid = Number(line);
+      expect(pid, "the run prints its participant's PID").to.be.greaterThan(0);
+      await connected;
+      run.kill("SIGKILL");
+      await pollUntil(() => !alive(), { timeoutMs: 5_000, intervalMs: 100, label: "the participant ends with its run" });
+    } finally {
+      run.kill("SIGKILL");
+      if (pid && alive()) process.kill(pid, "SIGKILL");
+      api.closeAllConnections();
+      api.close();
+    }
   });
 
   it("a user hears a participant on the connection they are on now, not on a closed one", async function () {

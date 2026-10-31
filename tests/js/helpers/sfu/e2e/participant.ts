@@ -52,6 +52,10 @@ export class Participant {
     return this.user.did;
   }
 
+  get pid(): number | undefined {
+    return this.proc.pid;
+  }
+
   /** The process died of a signal nobody sent: the libwebrtc binding crashed. */
   get crashed(): boolean {
     return !this.killed && this.exit?.signal != null;
