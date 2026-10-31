@@ -30,6 +30,8 @@ export type Command =
   | { kind: "stopScreen" }
   | { kind: "quality"; preference: SfuQualityPreference }
   | { kind: "send"; label: string; data: string; binary: boolean }
+  /** The platform says the network changed: `online` on the global object, as a browser fires it. */
+  | { kind: "networkChanged" }
   | { kind: "snapshot" }
   | { kind: "close" };
 
