@@ -333,6 +333,20 @@ describe('Ad4mConnect', () => {
       expect(conn.token).toBe('');
     });
 
+    it('stops at a token that holds but lacks the capabilities, keeping it', async () => {
+      setLocal('ad4m-token', 'saved-jwt');
+      setLocal('ad4m-url', 'http://localhost:12000');
+      mockAgent.status.mockRejectedValueOnce(new RpcError(403, 'Capability is not matched'));
+      mockAgent.isLocked.mockRejectedValueOnce(new RpcError(403, 'Capability is not matched'));
+      const conn = new Ad4mConnect(defaultOptions);
+      const authStates: string[] = [];
+      conn.addEventListener('authstatechange', (e: any) => authStates.push(e.detail));
+      await conn.connectWhenReachable({ initialDelayMs: 1, maxDelayMs: 2 });
+      expect(mockAgent.status).toHaveBeenCalledTimes(1);
+      expect(authStates).toEqual(['unauthenticated']);
+      expect(conn.token).toBe('saved-jwt');
+    });
+
     it('resolves undefined at once in embedded mode, without connecting', async () => {
       setLocal('ad4m-token', 'saved-jwt');
       const { checkConnection, isEmbedded } = await import('./utils');
