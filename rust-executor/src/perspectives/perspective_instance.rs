@@ -1393,8 +1393,7 @@ impl PerspectiveInstance {
 
             if let Some(mut link_language) = link_language_clone {
                 log::debug!("💾 committing {} pending diffs...", pending_ids.len());
-                let commit_result = link_language.commit(pending_diffs).await;
-                match commit_result {
+                let committed_ids = match link_language.commit(pending_diffs.clone()).await {
                     // Spec §5.2 splits perspective-commit (write) from
                     // perspective-sync (revision read), so a spec-compliant
                     // flat language that implements only perspective-commit
@@ -1404,19 +1403,64 @@ impl PerspectiveInstance {
                     // never drain its retry queue. The success signal for
                     // the retry path is "commit didn't throw" — clear the
                     // diffs regardless of whether a revision came back.
-                    Ok(_) => {
-                        Ad4mDb::with_global_instance(|db| {
-                            db.clear_pending_diffs(&uuid, pending_ids)
+                    Ok(_) => pending_ids,
+                    // One diff the language refuses must not hold back the
+                    // diffs behind it. Send the oldest alone: if it goes
+                    // through, the next tick sends the rest. If the language
+                    // fails it but takes the rest, park it: keep its row, out
+                    // of the queue. A failure alone does not prove a permanent
+                    // refusal, so it is not deleted; it is not sent again
+                    // either, since that would reorder it behind newer diffs.
+                    // If it takes neither, it is down: keep the batch and back
+                    // off.
+                    Err(e) if pending_ids.len() > 1 => {
+                        let (oldest, oldest_ids) = Ad4mDb::with_global_instance(|db| {
+                            db.get_pending_diffs(&uuid, Some(1))
                         })?;
-                        // Reset immediate commits counter after successful commit
-                        self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
-                        log::debug!("✅ 💾 successfully committed pending diffs");
-                        Ok(())
+                        match link_language.commit(oldest.clone()).await {
+                            Ok(_) => oldest_ids,
+                            Err(refusal) => {
+                                // The batch concatenates its diffs oldest first.
+                                let rest = PerspectiveDiff {
+                                    additions: pending_diffs.additions[oldest.additions.len()..]
+                                        .to_vec(),
+                                    removals: pending_diffs.removals[oldest.removals.len()..]
+                                        .to_vec(),
+                                };
+                                if link_language.commit(rest).await.is_err() {
+                                    return Err(e.context(format!(
+                                        "a batch of {} diffs",
+                                        pending_ids.len()
+                                    )));
+                                }
+                                log::error!(
+                                    "💾 perspective {}: the link language failed pending diff {:?} and accepted the {} after it; parked it (kept, no longer sent), its links stay local only: {:#}",
+                                    uuid,
+                                    oldest_ids,
+                                    pending_ids.len() - 1,
+                                    refusal
+                                );
+                                Ad4mDb::with_global_instance(|db| {
+                                    db.park_pending_diffs(&uuid, oldest_ids.clone())
+                                })?;
+                                pending_ids
+                                    .into_iter()
+                                    .filter(|id| !oldest_ids.contains(id))
+                                    .collect()
+                            }
+                        }
                     }
                     // The batch this commit sent: the size cap can make it smaller
                     // than the queue.
-                    Err(e) => Err(e.context(format!("a batch of {} diffs", pending_ids.len()))),
-                }
+                    Err(e) => {
+                        return Err(e.context(format!("a batch of {} diffs", pending_ids.len())))
+                    }
+                };
+                Ad4mDb::with_global_instance(|db| db.clear_pending_diffs(&uuid, committed_ids))?;
+                // Reset immediate commits counter after successful commit
+                self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
+                log::debug!("✅ 💾 successfully committed pending diffs");
+                Ok(())
             } else {
                 Ok(()) // Keep diffs if no link language
             }

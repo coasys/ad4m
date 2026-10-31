@@ -2,17 +2,25 @@
 //! link language, on tokio's paused clock.
 //!
 //! The fake language rejects every commit while it is "down" (a dead link
-//! server). Accepted links are recorded in order as `+target` / `-target`.
+//! server), and while up refuses any diff that adds a link to `REFUSED`.
+//! `fail_next` makes the next commits fail as if the server were briefly down.
+//! Accepted links are recorded in order as `+target` / `-target`.
 
 use super::*;
 use crate::db::Ad4mDb;
 use crate::types::{DecoratedNeighbourhoodExpression, ExpressionProof, Link, PerspectiveState};
 use std::sync::atomic::AtomicUsize;
 
+/// The fake language refuses, whenever it is up, any diff that adds a link
+/// to this target.
+const REFUSED: &str = "refused";
+
 #[derive(Default)]
 struct FakeLanguage {
     attempts: AtomicUsize,
     down: AtomicBool,
+    /// Fail this many of the next commits, whatever they carry.
+    fail_next: AtomicUsize,
     committed: std::sync::Mutex<Vec<String>>,
     /// Links per accepted commit, in order.
     batches: std::sync::Mutex<Vec<usize>>,
@@ -21,8 +29,16 @@ struct FakeLanguage {
 impl FakeLanguage {
     fn commit(&self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
         self.attempts.fetch_add(1, Ordering::SeqCst);
-        if self.down.load(Ordering::SeqCst) {
+        if self.down.load(Ordering::SeqCst)
+            || self
+                .fail_next
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+        {
             return Err(anyhow!("link server unreachable"));
+        }
+        if diff.additions.iter().any(|l| l.data.target == REFUSED) {
+            return Err(anyhow!("link server refused the diff"));
         }
         self.batches
             .lock()
@@ -96,6 +112,20 @@ fn pending(perspective: &PerspectiveInstance) -> usize {
         .unwrap()
         .1
         .len()
+}
+
+/// Targets of the diffs taken out of the queue and kept (parked), read
+/// through the export, which lists every row with its `is_pending` flag.
+fn parked_targets(perspective: &PerspectiveInstance) -> Vec<String> {
+    let export = Ad4mDb::with_global_instance(|db| db.export_all_to_json()).unwrap();
+    export["perspective_diffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["perspective"] == perspective.uuid.as_str() && d["is_pending"] == false)
+        .flat_map(|d| d["additions"].as_array().unwrap().clone())
+        .map(|l| l["data"]["target"].as_str().unwrap().to_string())
+        .collect()
 }
 
 fn start_loop(perspective: &PerspectiveInstance) -> tokio::task::JoinHandle<()> {
@@ -212,10 +242,12 @@ async fn a_failing_language_is_retried_with_backoff() {
 
     let attempts = fake.attempts();
     // 100 ms doubling to a 30 s cap: about 9 attempts in the first minute,
-    // then 2 a minute (28 in all). Retrying every 100 ms would be ~6,000;
-    // without the cap the wait grows to 51.2 s and gives about 20.
+    // then 2 a minute (28 in all). Each attempt makes 3 calls: the batch,
+    // its oldest diff alone, the rest. Retrying every 100 ms would be
+    // ~18,000 calls; without the cap the wait grows to 51.2 s and gives
+    // about 60.
     assert!(
-        (25..=60).contains(&attempts),
+        (75..=180).contains(&attempts),
         "10 simulated minutes against a dead language made {} commit attempts",
         attempts
     );
@@ -250,6 +282,58 @@ async fn the_backoff_starts_again_after_a_success() {
         "a second outage got {} attempts in its first 10 s: the backoff did not reset",
         attempts
     );
+}
+
+/// A diff the language refuses while it accepts the others is parked (kept,
+/// out of the queue), and the diffs queued before and after it still reach
+/// the language, in order.
+#[tokio::test(start_paused = true)]
+async fn a_refused_diff_does_not_block_the_diffs_behind_it() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("before"));
+    enqueue(&perspective, &add(REFUSED));
+    enqueue(&perspective, &add("after"));
+    let task = start_loop(&perspective);
+
+    let drained = run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    // A later write is no longer queued behind the refused diff.
+    perspective.commit(&add("later")).await.unwrap();
+    task.abort();
+
+    assert!(
+        drained.is_some(),
+        "{} diffs still pending after {} commit attempts",
+        pending(&perspective),
+        fake.attempts()
+    );
+    assert_eq!(fake.committed(), vec!["+before", "+after", "+later"]);
+    assert_eq!(pending(&perspective), 0);
+    assert_eq!(parked_targets(&perspective), vec![REFUSED]);
+}
+
+/// Two healthy diffs; the batch and the oldest alone fail on a transient
+/// outage, and the newer one goes through once it is over. The oldest was
+/// never refused for good, so it must be kept (parked), not deleted.
+#[tokio::test(start_paused = true)]
+async fn a_transient_failure_of_the_oldest_diff_parks_it_instead_of_deleting_it() {
+    let fake = Arc::new(FakeLanguage::default());
+    fake.fail_next.store(2, Ordering::SeqCst);
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("a"));
+    enqueue(&perspective, &add("b"));
+    let task = start_loop(&perspective);
+
+    let drained = run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    task.abort();
+
+    assert!(
+        drained.is_some(),
+        "{} diffs still pending",
+        pending(&perspective)
+    );
+    assert_eq!(fake.committed(), vec!["+b"]);
+    assert_eq!(parked_targets(&perspective), vec!["a"]);
 }
 
 /// A slow link-language commit must not block `set_immediate_commits`, and

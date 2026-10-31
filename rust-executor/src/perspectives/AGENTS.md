@@ -45,6 +45,11 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   counter has its own short lock: `set_immediate_commits` never waits for a language call.
 - `pending_diffs_loop`: a failed `commit_pending_diffs` is logged at warn and retried after
   100 ms doubling to 30 s, reset on success (tests: `perspective_instance_pending_diffs_tests.rs`).
+  When a batch of several diffs fails, the oldest diff is sent alone, then the rest. A diff that
+  fails while the language accepts the rest is parked: its `perspective_diff` row stays with
+  `is_pending = 0` (`Ad4mDb::park_pending_diffs`; the export lists it), logged at
+  error level by row id (its links stay local). The failure may have been transient, so the row
+  is kept, but it is never sent again after its successors: that would reorder it behind newer diffs.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
