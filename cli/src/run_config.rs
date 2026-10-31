@@ -246,6 +246,17 @@ pub struct RunArgs {
     /// Useful for test harnesses that need targeted process cleanup.
     #[arg(long, env = "AD4M_PID_FILE", value_parser = non_empty(StringValueParser::new()))]
     pub pid_file: Option<String>,
+    /// Shut down once the process that started the executor is gone, however it ended
+    /// (SIGKILLed, crashed, exited without stopping the executor). For launchers and test
+    /// harnesses. Default: false
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        env = "AD4M_EXIT_WITH_PARENT",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
+    pub exit_with_parent: Option<bool>,
     /// Local DID for this SFU node in a cascade cluster. Required alongside
     /// --sfu-cascade-listen to enable cascade gossip.
     #[arg(long, env = "AD4M_SFU_LOCAL_DID", value_parser = non_empty(StringValueParser::new()))]
@@ -427,6 +438,7 @@ impl RunArgs {
         config.log_holochain_metrics = self.log_holochain_metrics;
         config.dynamic_class_tools = self.dynamic_class_tools;
         config.pid_file = self.pid_file;
+        config.exit_with_parent = self.exit_with_parent;
         config.insecure_no_admin_credential = Some(self.insecure_no_admin_credential);
         config.sfu_local_did = self.sfu_local_did;
         config.sfu_max_participants_per_node = self.sfu_max_participants_per_node;
