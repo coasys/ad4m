@@ -174,7 +174,36 @@ class FakePeerConnection {
     private offersMade = 0
     private remoteOfferSeq = 0
 
+    /**
+     * An offer is `offer-sdp@pc1#2` (pc1's second offer); an answer names the
+     * offer it answers: `answer-sdp@pc2>pc1#2`.
+     */
+    private describe(type: "offer" | "answer") {
+        return type === "offer"
+            ? `offer-sdp@${this.id}#${(this.offersMade += 1)}`
+            : `answer-sdp@${this.id}>${this.remoteDescription?.sdp?.split("@")[1] ?? ""}`
+    }
+
+    async createOffer(): Promise<RTCSessionDescriptionInit> {
+        return { type: "offer", sdp: this.describe("offer") }
+    }
+
+    async createAnswer(): Promise<RTCSessionDescriptionInit> {
+        if (this.signalingState !== "have-remote-offer") {
+            throw new Error(`InvalidStateError: cannot create an answer in state ${this.signalingState}`)
+        }
+        return { type: "answer", sdp: this.describe("answer") }
+    }
+
     async setLocalDescription(description?: RTCSessionDescriptionInit) {
+        // As Chromium does: a description passed in is applied as written, so
+        // a type with no `sdp` is an empty description. `@roamhq/wrtc` accepts
+        // it, which is how the end-to-end scenarios missed it.
+        if (description && !description.sdp) {
+            throw new Error(
+                "OperationError: Failed to execute 'setLocalDescription' on 'RTCPeerConnection': Failed to parse SessionDescription.  Expect line: v=",
+            )
+        }
         this.negotiationNeeded = false
         // With no argument the browser picks offer or answer from the signaling state.
         const type = description?.type ?? (this.signalingState === "have-remote-offer" ? "answer" : "offer")
@@ -182,12 +211,7 @@ class FakePeerConnection {
         if ((type === "offer") !== (this.signalingState !== "have-remote-offer")) {
             throw new Error(`InvalidStateError: cannot set a local ${type} in state ${this.signalingState}`)
         }
-        // An offer is `offer-sdp@pc1#2` (pc1's second offer); an answer names
-        // the offer it answers: `answer-sdp@pc2>pc1#2`.
-        const sdp =
-            type === "offer"
-                ? `offer-sdp@${this.id}#${(this.offersMade += 1)}`
-                : `answer-sdp@${this.id}>${this.remoteDescription?.sdp?.split("@")[1] ?? ""}`
+        const sdp = description?.sdp ?? this.describe(type as "offer" | "answer")
         this.localDescription = { type: type as RTCSdpType, sdp }
         this.signalingState = type === "offer" ? "have-local-offer" : "stable"
     }
