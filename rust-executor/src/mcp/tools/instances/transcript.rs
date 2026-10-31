@@ -110,6 +110,7 @@ impl Ad4mMcpHandler {
             "parent": { "id": link_target(parent) },
             "order": [["timestamp", "desc"]],
             "limit": limit,
+            "count": true,
         });
         let (mut instances, total) =
             match run_model_query(&perspective, TEXT_CONTENT_URI, &query).await {

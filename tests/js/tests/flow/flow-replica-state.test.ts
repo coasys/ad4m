@@ -120,7 +120,11 @@ describe("flow replica state — flowStates, flowFired, flow-state-changed", fun
       false,
     );
     expect(await aliceP.flowStates(["replica-state://not-an-instance"])).to.deep.equal([]);
-    expect(await aliceP.flowFired(inst.uri)).to.deep.equal([result.proposalUri]);
+    const unknown = "replica-state://not-an-instance";
+    expect(await aliceP.flowFired([inst.uri, unknown])).to.deep.equal([
+      { instance: inst.uri, fired: [result.proposalUri] },
+      { instance: unknown, fired: [] },
+    ]);
 
     const [reloaded] = await FlowInstance.findAll(aliceP, { subject: "replica-state://task/1" });
     expect(reloaded.currentStateName, "findAll reads the recorded state").to.equal("Done");
@@ -139,7 +143,7 @@ describe("flow replica state — flowStates, flowFired, flow-state-changed", fun
     // The admin agent's bookkeeping is its own, and empty: it can read the
     // perspective, but it is not an owner, so no pass has run for it.
     expect(await adminP.flowStates()).to.deep.equal([]);
-    expect(await adminP.flowFired(inst.uri)).to.deep.equal([]);
+    expect(await adminP.flowFired([inst.uri])).to.deep.equal([{ instance: inst.uri, fired: [] }]);
 
     // And it never saw Alice's event. Give a misdelivery time to arrive.
     await new Promise((r) => setTimeout(r, 1500));

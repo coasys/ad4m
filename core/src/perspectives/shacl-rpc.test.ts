@@ -148,7 +148,7 @@ describe('PerspectiveProxy SHACL RPC delegation', () => {
 
       const shapes = await proxy.getAllShacl();
 
-      expect(client.getAllShacl).toHaveBeenCalledWith('test-uuid');
+      expect(client.getAllShacl).toHaveBeenCalledWith('test-uuid', undefined);
       expect(shapes.length).toBe(2);
       expect(shapes[0].name).toBe('Message');
       expect(shapes[0].shape.targetClass).toBe('flux://Message');

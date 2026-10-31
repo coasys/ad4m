@@ -359,7 +359,7 @@ pub async fn execute_union_query_with_views(
         }),
         None => sort_union(&mut union, &order),
     }
-    let total_count = union.len();
+    let total_count = query.count.unwrap_or(false).then_some(union.len());
     if query.limit == Some(0) {
         return Ok(ModelQueryResult {
             instances: vec![],

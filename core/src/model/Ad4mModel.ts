@@ -19,7 +19,7 @@ import {
 } from "./hydration";
 import type {
   Scope, TraverseScope, IncludeMap, Query,
-  GetOptions, AllInstancesResult, ResultsWithTotalCount,
+  GetOptions, AllInstancesResult, QueryResults, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf, LinksMap,
@@ -373,6 +373,11 @@ function jsonToModelInstance<T extends Ad4mModel>(
   return instance;
 }
 
+/** One field write: the commands and parameters of one `executeAction`. */
+interface FieldWrite {
+  commands: any[];
+  parameters: { name: string; value: any }[];
+}
 
 /**
  * Put `childId` under `parent`. A containment scope `{ id }` writes through the
@@ -1348,7 +1353,7 @@ export class Ad4mModel {
     classes: (typeof Ad4mModel)[],
     query: Query = {},
     options?: CallOptions,
-  ): Promise<ResultsWithTotalCount<Ad4mModel>> {
+  ): Promise<QueryResults<Ad4mModel>> {
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
     const result = await perspective.modelQuery(classNames, queryJson, options);
     const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
@@ -1434,7 +1439,7 @@ export class Ad4mModel {
     query: Query = {},
     classNameOverride?: string | null,
     options?: CallOptions,
-  ): Promise<ResultsWithTotalCount<T>> {
+  ): Promise<QueryResults<T>> {
     // Delegate query input building to the shared prepareModelQueryParams
     // helper.  The executor resolves the shape from SHACL server-side.
     const { className, queryJson } = this.prepareModelQueryParams(
@@ -1557,8 +1562,8 @@ export class Ad4mModel {
     query?: Q,
     options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const out = await this.executeModelQuery(perspective, (query ?? {}) as Query, undefined, options);
-    return out as ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>;
+    const { results, totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), count: true }, undefined, options);
+    return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount: totalCount ?? 0 };
   }
 
   /**
@@ -1588,7 +1593,7 @@ export class Ad4mModel {
   ): Promise<PaginationResult<T & IncludeExtras<T, IncludeOf<Q>>>> {
     const paginationQuery = { ...((query ?? {}) as Query), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
-    return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount, pageSize, pageNumber };
+    return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount: totalCount ?? 0, pageSize, pageNumber };
   }
 
   /**
@@ -1623,15 +1628,16 @@ export class Ad4mModel {
     query?: TypedQuery<T>,
     options?: CallOptions,
   ): Promise<number> {
-    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0 }, undefined, options);
-    return totalCount;
+    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0, count: true }, undefined, options);
+    return totalCount ?? 0;
   }
 
-  private async setProperty(key: string, value: any, batchId?: string) {
+  /** The `executeAction` write that sets property `key` to `value`; none for an empty value. */
+  private async planProperty(key: string, value: any): Promise<FieldWrite[]> {
     const metadata = this.getPropertyMetadata(key);
     if (!metadata) {
       console.warn(`Property "${key}" has no metadata, skipping`);
-      return;
+      return [];
     }
 
     // Generate actions from metadata (replaces Prolog query)
@@ -1639,7 +1645,7 @@ export class Ad4mModel {
 
     // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal:string:)
     if (value === undefined || value === null || value === "") {
-      return;
+      return [];
     }
 
     const mode = effectiveLiteralStorage(metadata);
@@ -1654,7 +1660,73 @@ export class Ad4mModel {
       value = valueToLiteralIri(value);
     }
 
-    await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId);
+    return [{ commands: actions, parameters: [{ name: "value", value }] }];
+  }
+
+  /**
+   * The `executeAction` writes of a relation change: one for a set (its
+   * `collectionSetter` takes every value), one per value for an add or remove.
+   */
+  private planRelation(key: string, kind: 'setter' | 'adder' | 'remover', value: any): FieldWrite[] {
+    const metadata = this.getRelationOptions(key);
+    if (!metadata) {
+      console.warn(`Relation "${key}" has no metadata, skipping`);
+      return [];
+    }
+
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generateRelationAction(key, kind);
+
+    if (value == null) return [];
+    const values = Array.isArray(value) ? value : [value];
+    const param = (v: any) => ({ name: "value", value: this.resolveRelationId(v) });
+    if (kind === 'setter') return [{ commands: actions, parameters: values.map(param) }];
+    return values.map(v => ({ commands: actions, parameters: [param(v)] }));
+  }
+
+  /**
+   * Sends writes in as few `executeAction` calls as keep their links: the
+   * executor runs a call's commands in order, so consecutive writes share one
+   * call, each with its own parameter names. A `collectionSetter` takes every
+   * parameter of its call as a member, so it goes in a call of its own. A
+   * command's `local` flag is per command, so Local and Shared links mix.
+   */
+  private async sendWrites(writes: FieldWrite[], batchId?: string): Promise<void> {
+    let group: FieldWrite[] = [];
+    const flush = async () => {
+      if (group.length === 1) {
+        await this._perspective.executeAction(group[0].commands, this._baseExpression, group[0].parameters, batchId);
+      } else if (group.length > 1) {
+        const commands: any[] = [];
+        const parameters: { name: string; value: any }[] = [];
+        group.forEach((write, i) => {
+          // The executor substitutes a parameter name wherever it occurs in a
+          // command's source, predicate or target; rename `value` the same way.
+          const name = `ad4m-model-write-${i}-value`;
+          const rename = (s: any) => (typeof s === "string" && write.parameters.length ? s.split("value").join(name) : s);
+          for (const c of write.commands) {
+            commands.push({ ...c, source: rename(c.source), predicate: rename(c.predicate), target: rename(c.target) });
+          }
+          for (const p of write.parameters) parameters.push({ name, value: p.value });
+        });
+        await this._perspective.executeAction(commands, this._baseExpression, parameters, batchId);
+      }
+      group = [];
+    };
+    for (const write of writes) {
+      if (write.commands.some((c: any) => c.action === "collectionSetter")) {
+        await flush();
+        group = [write];
+        await flush();
+      } else {
+        group.push(write);
+      }
+    }
+    await flush();
+  }
+
+  private async setProperty(key: string, value: any, batchId?: string) {
+    await this.sendWrites(await this.planProperty(key, value), batchId);
   }
 
   /** Resolve a relation argument to a plain string ID. Accepts either a raw
@@ -1681,88 +1753,32 @@ export class Ad4mModel {
   }
 
   private async setRelationValues(key: string, value: any, batchId?: string) {
-    const metadata = this.getRelationOptions(key);
-    if (!metadata) {
-      console.warn(`Relation "${key}" has no metadata, skipping`);
-      return;
-    }
-    const abstractName = this.abstractName();
-    if (abstractName) {
-      if (value != null) await this.relationThroughAbstract(abstractName, key, 'setter', value, batchId);
-      return;
-    }
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateRelationAction(key, 'setter');
-
-    if (value != null) {
-      if (Array.isArray(value)) {
-        await this._perspective.executeAction(
-          actions,
-          this._baseExpression,
-          value.map((v) => ({ name: "value", value: this.resolveRelationId(v) })),
-          batchId
-        );
-      } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
-      }
-    }
+    await this.writeRelation(key, 'setter', value, batchId);
   }
 
   private async addRelationValue(key: string, value: any, batchId?: string) {
-    const metadata = this.getRelationOptions(key);
-    if (!metadata) {
-      console.warn(`Relation "${key}" has no metadata, skipping`);
-      return;
-    }
-    const abstractName = this.abstractName();
-    if (abstractName) {
-      if (value != null) await this.relationThroughAbstract(abstractName, key, 'adder', value, batchId);
-      return;
-    }
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateRelationAction(key, 'adder');
-
-    if (value != null) {
-      if (Array.isArray(value)) {
-        await Promise.all(
-          value.map((v) =>
-            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
-          )
-        );
-      } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
-      }
-    }
+    await this.writeRelation(key, 'adder', value, batchId);
   }
 
   private async removeRelationValue(key: string, value: any, batchId?: string) {
-    const metadata = this.getRelationOptions(key);
-    if (!metadata) {
+    await this.writeRelation(key, 'remover', value, batchId);
+  }
+
+  /** A relation setter, adder or remover call: on a row read through an
+   *  abstract class it dispatches through the executor (see
+   *  {@link relationThroughAbstract}); otherwise its writes go out in as few
+   *  `executeAction` calls as {@link sendWrites} allows. */
+  private async writeRelation(key: string, kind: 'setter' | 'adder' | 'remover', value: any, batchId?: string) {
+    const abstractName = this.abstractName();
+    if (!abstractName) {
+      await this.sendWrites(this.planRelation(key, kind, value), batchId);
+      return;
+    }
+    if (!this.getRelationOptions(key)) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
-    const abstractName = this.abstractName();
-    if (abstractName) {
-      if (value != null) await this.relationThroughAbstract(abstractName, key, 'remover', value, batchId);
-      return;
-    }
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateRelationAction(key, 'remover');
-
-    if (value != null) {
-      if (Array.isArray(value)) {
-        await Promise.all(
-          value.map((v) =>
-            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
-          )
-        );
-      } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
-      }
-    }
+    if (value != null) await this.relationThroughAbstract(abstractName, key, kind, value, batchId);
   }
 
   /**
@@ -1865,14 +1881,15 @@ export class Ad4mModel {
     );
 
     // Relations via innerUpdate; createSubject wrote the scalar properties.
-    await this.innerUpdate(false, batchId)
+    const writes = await this.updateWrites(false);
 
     for (const key of deferredExpressionProps) {
       const value = (this as any)[key];
       if (value !== undefined && value !== null) {
-        await this.setProperty(key, value, batchId);
+        writes.push(...await this.planProperty(key, value));
       }
     }
+    await this.sendWrites(writes, batchId);
 
     // If we got a batchId passed in, we let the caller decide when to commit.
     // We can't call getData() since the instance won't exist in the perspective
@@ -1943,6 +1960,12 @@ export class Ad4mModel {
   }
 
   private async innerUpdate(setProperties: boolean = true, batchId?: string) {
+    await this.sendWrites(await this.updateWrites(setProperties), batchId);
+  }
+
+  /** The writes of the changed fields, in field order (see {@link sendWrites}). */
+  private async updateWrites(setProperties: boolean = true): Promise<FieldWrite[]> {
+    const writes: FieldWrite[] = [];
     const ctor = this.constructor as typeof Ad4mModel;
 
     // Determine which fields actually changed (skip unchanged when snapshot exists)
@@ -1985,21 +2008,21 @@ export class Ad4mModel {
         if (value?.action) {
           switch (value.action) {
             case "setter":
-              await this.setRelationValues(key, value.value, batchId);
+              writes.push(...this.planRelation(key, 'setter', value.value));
               break;
             case "adder":
-              await this.addRelationValue(key, value.value, batchId);
+              writes.push(...this.planRelation(key, 'adder', value.value));
               break;
             case "remover":
-              await this.removeRelationValue(key, value.value, batchId);
+              writes.push(...this.planRelation(key, 'remover', value.value));
               break;
             default:
-              await this.setRelationValues(key, value.value, batchId);
+              writes.push(...this.planRelation(key, 'setter', value.value));
               break;
           }
         } else if (Array.isArray(value)) {
           // Handle all arrays as relations, including empty ones (which clears the relation)
-          await this.setRelationValues(key, value, batchId);
+          writes.push(...this.planRelation(key, 'setter', value));
         } else if (value !== undefined && value !== null && value !== "") {
           // A scalar handed to a relation field is a single-member relation.
           //
@@ -2027,7 +2050,7 @@ export class Ad4mModel {
           // both paths at once.
           const relationMeta = this.getRelationOptions(key);
           if (relationMeta) {
-            await this.setRelationValues(key, [value], batchId);
+            writes.push(...this.planRelation(key, 'setter', [value]));
             continue;
           }
 
@@ -2038,11 +2061,12 @@ export class Ad4mModel {
               continue;
             }
 
-            await this.setProperty(key, value, batchId);
+            writes.push(...await this.planProperty(key, value));
           }
         }
       }
     }
+    return writes;
   }
 
   /**

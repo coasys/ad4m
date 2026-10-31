@@ -2022,15 +2022,29 @@ async fn flow_states_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(serde_json::to_value(entries)?)
 }
 
+/// Most instances one `perspective.flowFired` call may name: their marks are
+/// read under one database lock.
+pub(crate) const MAX_FLOW_FIRED_INSTANCES: usize = 200;
+
+/// `perspective.flowFired { instances }`: more than
+/// [`MAX_FLOW_FIRED_INSTANCES`] instances → 400.
 async fn flow_fired_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let instance = params.require_str("instance")?;
     let perspective = guarded_perspective(&params).await?;
+    let body: PerspectiveFlowFiredParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    if body.instances.len() > MAX_FLOW_FIRED_INSTANCES {
+        return Err(WsRpcError::bad_request(format!(
+            "`instances` holds {} entries; the limit is {}",
+            body.instances.len(),
+            MAX_FLOW_FIRED_INSTANCES
+        )));
+    }
     let agent_did = flow_bookkeeping_agent(&ctx)?;
     let fired =
-        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instance(
+        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instances(
             &perspective.uuid,
             &agent_did,
-            &instance,
+            &body.instances,
         )
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(fired)?)
@@ -2397,8 +2411,10 @@ async fn get_all_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     use crate::perspectives::flow_instance::{
-        pass::FireOutcome, produced::ValidOutput, propose::ProposeOutcome,
-        replica_state::FlowStateEntry,
+        pass::FireOutcome,
+        produced::ValidOutput,
+        propose::ProposeOutcome,
+        replica_state::{FlowFiredEntry, FlowStateEntry},
     };
     use crate::perspectives::interpretation::overlay::OverlayView;
     let query = || Guard::perspective(perspective_query_capability);
@@ -2634,7 +2650,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(query());
-    map.method::<PerspectiveFlowFiredParams, Vec<String>>(
+    map.method::<PerspectiveFlowFiredParams, Vec<FlowFiredEntry>>(
         "perspective.flowFired",
         flow_fired_handler,
     )
@@ -3109,13 +3125,13 @@ pub struct PerspectiveFlowStatesParams {
     pub instances: Option<Vec<String>>,
 }
 
-/// `perspective.flowFired`: the proposals of `instance` the calling agent's
-/// pass has recorded as fired, sorted.
+/// `perspective.flowFired`: for each of `instances`, in order, the proposals
+/// the calling agent's pass has recorded as fired, sorted.
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct PerspectiveFlowFiredParams {
     pub uuid: String,
-    pub instance: String,
+    pub instances: Vec<String>,
 }
 
 #[derive(Deserialize, TS)]
