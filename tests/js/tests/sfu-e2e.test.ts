@@ -76,26 +76,40 @@ describe("SFU: end to end through the SDK", function () {
     if (!wrtc) this.skip();
     this.timeout(60_000);
     const api = createServer(() => {});
-    const connected = new Promise<void>((resolve) => api.once("connection", () => resolve()));
+    // Both waits end before mocha's timeout, which would skip the `finally` and leave the run
+    // behind: on their own deadline, or as soon as the run exits without getting there.
+    const signal = AbortSignal.timeout(30_000);
+    const connected = once(api, "connection", { signal });
+    connected.catch(() => {});
     await new Promise<void>((resolve) => api.listen(0, "127.0.0.1", resolve));
     const script = join(dirname(fileURLToPath(import.meta.url)), "../helpers/sfu/e2e/orphan-run.ts");
     const run = spawn(process.execPath, [...process.execArgv, script, String((api.address() as AddressInfo).port)], {
       stdio: ["ignore", "pipe", "inherit"],
     });
+    const exited = once(run, "exit", { signal }).then(([code, sig]) => {
+      throw new Error(`the run exited (${sig ?? code}) before its participant joined`);
+    });
+    exited.catch(() => {});
     let pid = 0;
     const alive = () => {
       try {
         process.kill(pid, 0);
-        return true;
       } catch {
         return false;
       }
+      // A process that ended but that nobody reaped yet (no reaping init in a container)
+      // still answers signal 0. It holds no sockets or pipes any more: it ended.
+      try {
+        return !/^\d+ \(.*\) Z/.test(readFileSync(`/proc/${pid}/stat`, "utf8"));
+      } catch {
+        return true;
+      }
     };
     try {
-      const [line] = (await once(createInterface({ input: run.stdout! }), "line")) as [string];
+      const [line] = (await Promise.race([once(createInterface({ input: run.stdout! }), "line", { signal }), exited])) as [string];
       pid = Number(line);
       expect(pid, "the run prints its participant's PID").to.be.greaterThan(0);
-      await connected;
+      await Promise.race([connected, exited]);
       run.kill("SIGKILL");
       await pollUntil(() => !alive(), { timeoutMs: 5_000, intervalMs: 100, label: "the participant ends with its run" });
     } finally {
