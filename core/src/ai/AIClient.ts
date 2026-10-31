@@ -160,18 +160,16 @@ export class AIClient {
         return decompressed;
     }
 
+    /**
+     * Open a transcription stream on a TRANSCRIPTION model. Feed it one utterance at a time
+     * (the caller decides where speech starts and ends: the executor runs no voice-activity
+     * detection); each utterance's text arrives at `streamCallback`, in the order fed.
+     */
     async openTranscriptionStream(
         modelId: string,
         streamCallback: (text: string) => void,
-        params?: {
-            startThreshold?: number;
-            startWindow?: number;
-            endThreshold?: number;
-            endWindow?: number;
-            timeBeforeSpeech?: number;
-        }
     ): Promise<string> {
-        const streamId = await this.#apiClient.call('ai.transcriptionOpen', { modelId, params });
+        const streamId = await this.#apiClient.call('ai.transcriptionOpen', { modelId });
 
         const unsub = this.#apiClient.on('transcription-text', (event) => {
             if (event.streamId === streamId && event.text) streamCallback(event.text);
@@ -195,8 +193,10 @@ export class AIClient {
     #pendingStreamIds: Set<string> = new Set();
 
     /**
-     * Feed an audio utterance to one or more transcription streams.
-     * Sends raw binary Float32Array as application/octet-stream.
+     * Feed an audio utterance (16 kHz mono) to one or more transcription streams.
+     * Sends raw binary Float32Array as application/octet-stream. On a model served by an
+     * endpoint this resolves once the utterance is transcribed, and rejects when the upstream
+     * failed (nothing is published then).
      * NOTE: This method still uses HTTP fetch because binary audio data
      * cannot be efficiently sent over the JSON-based WebSocket RPC protocol.
      * Transcription results are delivered via the WS event channel.

@@ -5,21 +5,21 @@
 //!
 //! * **Client → server**
 //!   - `{"type":"transcription_session.update","session":{"model":"<id>"}}` —
-//!     opens a Whisper session.  Must arrive before any audio.
+//!     opens a transcription stream.  Must arrive before any audio.
 //!   - `{"type":"input_audio_buffer.append","audio":"<base64 PCM>"}` —
-//!     16 kHz mono PCM16 (signed i16 LE) samples, base64-encoded.
+//!     16 kHz mono PCM16 (signed i16 LE) samples, base64-encoded, added to the buffer.
 //!     Matches the OpenAI Realtime default `input_audio_format: pcm16`.
-//!   - `{"type":"input_audio_buffer.commit"}` — acknowledge the commit.
-//!     The underlying whisper engine uses VAD-based segmentation, so
-//!     this is a client synchronisation point, not a forced flush.
+//!   - `{"type":"input_audio_buffer.commit"}` — the buffer is one utterance: it is
+//!     transcribed as one call (one upstream request on an endpoint) and emptied. The
+//!     executor does no voice-activity detection: the client decides where an
+//!     utterance ends.
 //!   - `{"type":"session.close"}` — close the session and the socket.
 //!
 //! * **Server → client**
 //!   - `{"type":"transcription_session.created","session_id":"<uuid>"}`
 //!   - `{"type":"conversation.item.input_audio_transcription.delta","delta":"<text>"}`
-//!   - `{"type":"conversation.item.input_audio_transcription.completed","transcript":"<text>"}`
-//!     emitted on each finalised whisper segment (the existing engine
-//!     emits one event per segment via the broadcast channel).
+//!     for each text the stream publishes (one per utterance on an endpoint, one per
+//!     segment on local Whisper).
 //!   - `{"type":"error","error":{"message":"...","code":"..."}}`
 //!
 //! Auth: the WS extractor reads the bearer JWT from the
@@ -41,6 +41,9 @@ use crate::agent::session::{AuthError, Session};
 use crate::ai_service::AIService;
 use crate::api::errors::ApiError;
 use crate::types::{ModelType, RequestContext};
+
+/// The most audio one utterance may buffer: 10 MB of `f32`, as the HTTP feed accepts.
+const MAX_BUFFERED_SAMPLES: usize = 10 * 1024 * 1024 / 4;
 
 /// A token that opens no session gets the upgrade, an `unauthorized` error event and a close
 /// with 1008, before any work: a browser cannot read the HTTP status of a refused upgrade.
@@ -81,6 +84,8 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
     let mut stream_id: Option<String> = None;
     let mut delta_rx: Option<broadcast::Receiver<String>> = None;
     let mut audio_format = AudioFormat::Pcm16;
+    // The utterance being appended, sent on commit.
+    let mut buffered: Vec<f32> = Vec::new();
 
     loop {
         // Move the receiver out so select! doesn't conflict with
@@ -217,12 +222,23 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
                     let _ = service.close_transcription_stream(&old_sid, &caller).await;
                 }
                 delta_rx = None;
+                buffered.clear();
 
-                let sid = match service
-                    .open_transcription_stream(model_id.clone(), None, &caller)
+                let opened = match service
+                    .open_transcription_stream(model_id.clone(), &caller)
                     .await
                 {
-                    Ok(id) => id,
+                    Ok(sid) => service
+                        .subscribe_transcription_text(&sid, &caller)
+                        .await
+                        .map(|rx| (sid, rx)),
+                    Err(e) => Err(e),
+                };
+                let sid = match opened {
+                    Ok((sid, rx)) => {
+                        delta_rx = Some(rx);
+                        sid
+                    }
                     Err(e) => {
                         let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
                         continue;
@@ -237,7 +253,7 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
                 stream_id = Some(sid);
             }
             "input_audio_buffer.append" => {
-                let Some(ref sid) = stream_id else {
+                if stream_id.is_none() {
                     let _ = send_error(
                         &mut socket,
                         "invalid_request",
@@ -245,7 +261,7 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
                     )
                     .await;
                     continue;
-                };
+                }
                 let audio_b64 = match parsed.get("audio").and_then(|v| v.as_str()) {
                     Some(s) => s,
                     None => {
@@ -269,38 +285,48 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
                 let samples = match audio_format {
                     AudioFormat::Pcm16 => pcm16_to_f32(&bytes),
                 };
-
-                let service = match AIService::global_instance().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
-                        continue;
-                    }
-                };
-                if delta_rx.is_none() {
-                    match service
-                        .feed_transcription_stream_with_broadcast(sid, samples, &caller)
-                        .await
-                    {
-                        Ok(rx) => delta_rx = Some(rx),
-                        Err(e) => {
-                            let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
-                        }
-                    }
-                } else {
-                    if let Err(e) = service
-                        .feed_transcription_stream(sid, samples, &caller)
-                        .await
-                    {
-                        let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
-                    }
+                if buffered.len() + samples.len() > MAX_BUFFERED_SAMPLES {
+                    let _ = send_error(
+                        &mut socket,
+                        "invalid_request",
+                        "input_audio_buffer is full: commit the utterance first",
+                    )
+                    .await;
+                    continue;
                 }
+                buffered.extend(samples);
             }
             "input_audio_buffer.commit" => {
-                // The whisper backend uses VAD-based segmentation; there
-                // is no explicit flush API.  We acknowledge the commit so
-                // clients that wait for it can proceed — transcription
-                // results arrive asynchronously via delta events.
+                let Some(ref sid) = stream_id else {
+                    let _ = send_error(
+                        &mut socket,
+                        "invalid_request",
+                        "Send `transcription_session.update` before committing audio.",
+                    )
+                    .await;
+                    continue;
+                };
+                if buffered.is_empty() {
+                    let _ = send_error(
+                        &mut socket,
+                        "invalid_request",
+                        "input_audio_buffer is empty",
+                    )
+                    .await;
+                    continue;
+                }
+                let utterance = std::mem::take(&mut buffered);
+                let fed = match AIService::global_instance().await {
+                    Ok(service) => {
+                        service
+                            .feed_transcription_stream(sid, utterance, &caller)
+                            .await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = fed {
+                    let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
+                }
             }
             "session.close" => {
                 break;

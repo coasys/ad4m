@@ -9,12 +9,11 @@
 //!
 //! Operation labels used with `bill_compute`:
 //!   - `"ai_tts"` → speech
-//!   - `"ai_transcription"` → NOT billed at the handler level. Transcription
-//!     is billed exactly once in the worker (`ai_service/mod.rs::open_transcription_stream`).
-//!     This layout was a deliberate fix for round-1 review finding #2
-//!     (double-billing). If you add a `bill_compute("ai_transcription", ...)`
-//!     call in `audio::transcriptions`, the `no_bill_compute_in_transcriptions_handler`
-//!     test will fail — that's the guard.
+//!   - `"ai_transcription"` → NOT billed here. Transcription is billed once per
+//!     transcript in `ai_service::transcription::bill_transcription`, which both the
+//!     streams and `audio::transcriptions` call. This layout was a deliberate fix for
+//!     round-1 review finding #2 (double-billing); `transcription_is_billed_in_one_place`
+//!     fails if the label appears anywhere else in the transcription code.
 //!
 //! Chat/completions (streaming and non-streaming) and embeddings are billed
 //! by `AIService` via host_rates (`crate::billing::bill_ai_operation`), not

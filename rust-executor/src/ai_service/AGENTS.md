@@ -7,12 +7,12 @@ Split plan: spec item 9 (`mod.rs`), item 7 (`harness/` → `agentic/`).
 
 | Lines (approx) | Content |
 |---|---|
-| top | DTOs: `PromptResult`, `EmbedResult`, `LLMTask*Request`, `LlmModel`, transcription params |
+| top | DTOs: `PromptResult`, `EmbedResult`, `LLMTask*Request`, `LlmModel`, `TranscriptionSession` / `StreamBackend` |
 | ~330–510 | construction, model load/add/status, background tasks, global instance |
 | ~510–1120 | LLM: candle device selection, `build_local_llama`, `build_remote_client` (a `providers::RemoteChat` per protocol), `spawn_llm_model` (per-model worker thread + channel) |
 | ~1120–1670 | AI tasks CRUD, `prompt` / `prompt_messages` / `prompt_messages_stream`, billing hooks (`bill_prompt_if_authed`) |
 | ~1670–1775 | embeddings: one `Embedder` per model id (the endpoint's `providers::embed` client, or a Bert thread for a model without an endpoint); `embed_batch` resolves an id or a name and sends one request per batch |
-| ~1775–2440 | whisper transcription sessions + VAD |
+| ~1775–2440 | transcription streams: open (endpoint or local Whisper), feed, close, ownership |
 | rest | tests |
 
 Persistence of models/tasks is in `db.rs` (`models`, `tasks`, `model_status`,
@@ -37,6 +37,25 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
 A remote model still carries its own `api` (URL, key, protocol) and gets an `endpoint_id`
 from `Ad4mDb::link_models_to_endpoints` (startup and every model write). Never set a
 model's connection fields without going through the endpoint when it has one.
+
+## Transcription
+
+`transcription.rs` holds the endpoint path and what both paths share:
+
+- A stream on a model with an endpoint (`endpoint_transcriber`) runs a
+  `RemoteStream` worker: each fed utterance becomes a 16 kHz mono PCM16 WAV and one
+  `providers::audio::RemoteTranscribe` call. The worker takes utterances from a channel
+  filled under the stream-map lock, so text comes out in the order fed. A feed answers
+  after its transcript is published; an upstream failure is the feed's error (no URL in
+  it) and publishes nothing. A model without `api` stays on local Whisper (until P4).
+- No executor-side voice-activity detection: the client cuts utterances.
+- `bill_transcription` is the only place transcription is billed (streams and
+  `/v1/audio/transcriptions`); `publish_text` sends `transcription-text` to the owner's
+  DID only. `transcription_is_billed_in_one_place` pins the first.
+- The idle reaper (`start_stream_reaper`) holds the stream map weakly: dropping a clone of
+  the service (every `global_instance()` call makes one) does not stop it.
+- `transcription_e2e.rs`: real server, skipped unless `TRANSCRIPTION_E2E_BASE_URL` and
+  `TRANSCRIPTION_E2E_MODEL` are set.
 
 ## `harness/`
 
