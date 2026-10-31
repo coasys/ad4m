@@ -335,8 +335,11 @@ export interface WakerSubscriptionManagerOptions {
   /** Optional: provide QuerySubscriptionProxy class directly (avoids require("@coasys/ad4m") at runtime). */
   QuerySubscriptionProxy?: any;
   /** How long to wait before re-attempting a subscription the executor rejected
-   *  (default 30000). 0 disables re-attempts. */
+   *  (default 30000). 0 disables re-attempts. Each re-attempt round that still
+   *  leaves something pending doubles the wait, up to `maxRetryPendingMs`. */
   retryPendingMs?: number;
+  /** Longest wait between two re-attempt rounds (default 300000). */
+  maxRetryPendingMs?: number;
   /**
    * How long the executor gets to answer the subscribe handshake before the
    * attempt is abandoned and queued for re-attempt (default 15000). 0 removes
@@ -413,6 +416,18 @@ export class WakerSubscriptionManager {
   /** Subscriptions the executor rejected, waiting to be re-attempted. */
   private pendingSubscriptions = new Map<string, WakerSubscription>();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private maxRetryPendingMs: number;
+  /** Re-attempt rounds in a row that left something pending, for the backoff. */
+  private retryRounds = 0;
+  /**
+   * Subscriptions that were active until one of their live queries lost its
+   * executor subscription (a reconnect, a failed resync) and failed to open it
+   * again, with the proxies still re-opening. The query retries on its own,
+   * with backoff, so the manager does not subscribe them again; it reports
+   * them as pending instead of active until every proxy is open again, and
+   * keeps persisting them so a restart restores them (#1595).
+   */
+  private reopening = new Map<string, { sub: WakerSubscription; proxies: Set<any> }>();
   /**
    * Cancellation tokens for in-flight `subscribe()` calls.
    *
@@ -454,6 +469,7 @@ export class WakerSubscriptionManager {
     this.QuerySubscriptionProxyCtor = options.QuerySubscriptionProxy ?? null;
     this.previousSeenMessages = options.previousSeenMessages ?? {};
     this.retryPendingMs = options.retryPendingMs ?? 30000;
+    this.maxRetryPendingMs = Math.max(this.retryPendingMs, options.maxRetryPendingMs ?? 300000);
     this.subscribeTimeoutMs = options.subscribeTimeoutMs ?? 15000;
     this.retryWakeMs = options.retryWakeMs ?? 5000;
   }
@@ -475,8 +491,9 @@ export class WakerSubscriptionManager {
    * If a subscription with the same id already exists, it is disposed first.
    */
   async subscribe(sub: WakerSubscription): Promise<void> {
-    // Dispose existing subscription with same id if any
-    this.dispose(sub.id, false);
+    // Dispose existing subscription with same id if any. Not `dispose()`: a
+    // re-attempt must not start the backoff over.
+    this.release(sub.id, false);
     const token = this.beginAttempt(sub.id);
 
     if (!this.QuerySubscriptionProxyCtor) {
@@ -511,9 +528,12 @@ export class WakerSubscriptionManager {
       ? new QuerySubscriptionProxy(sub.perspective, sub.mentionQuery, this.perspectiveClient, sub.mentionClass)
       : undefined;
     const proxies = mentionProxy ? [proxy, mentionProxy] : [proxy];
+    // `cancelOpening`: a handshake given up on must not keep the executor
+    // computing a first result nobody reads; abandoned ones piled up into
+    // hundreds of busy executor threads on staging (#1595).
     const disposeProxies = () => {
       for (const p of proxies) {
-        try { p.dispose(); } catch {}
+        try { p.dispose({ cancelOpening: true }); } catch {}
       }
     };
     // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
@@ -568,7 +588,7 @@ export class WakerSubscriptionManager {
       throw new Error(
         `Waker subscription ${sub.id} failed: ${msg}${hintFor(msg)}` +
           (this.retryPendingMs > 0
-            ? `. Not listening yet — re-attempting every ${Math.round(this.retryPendingMs / 1000)}s; check ad4m_list_waker_subscriptions.`
+            ? `. Not listening yet — re-attempting within ${Math.round(this.retryCeiling() / 1000)}s, then less often (at most every ${Math.round(this.maxRetryPendingMs / 1000)}s); check ad4m_list_waker_subscriptions.`
             : ""),
       );
     }
@@ -577,6 +597,7 @@ export class WakerSubscriptionManager {
       return;
     }
     this.pendingSubscriptions.delete(sub.id);
+    if (this.pendingSubscriptions.size === 0) this.retryRounds = 0;
     this.logger.info(`[waker] ${sub.id}: subscription initialized successfully`);
 
     // Seed from persisted seen messages so we don't re-wake after restart
@@ -694,6 +715,9 @@ export class WakerSubscriptionManager {
     };
     proxy.onResult((result: any) => handleResult(result));
     mentionProxy?.onResult((result: any) => handleResult(result, false, " (mention query)"));
+    for (const p of proxies) {
+      p.onStatus?.((status: any) => this.onReopenStatus(sub, proxies, p, status));
+    }
 
     if (this.isStale(sub.id, token)) {
       disposeProxies();
@@ -719,14 +743,60 @@ export class WakerSubscriptionManager {
     );
   }
 
+  /**
+   * A proxy of `sub` failed to re-open its live query, or re-opened it after
+   * failing. `sub` counts as active again once none of its proxies is still
+   * re-opening. `proxies` tells a status of a replaced subscription apart.
+   */
+  private onReopenStatus(sub: WakerSubscription, proxies: any[], proxy: any, status: any): void {
+    if (this.proxies.get(sub.id) !== proxies) return;
+    if (status?.state === "reopening") {
+      const entry = this.reopening.get(sub.id) ?? { sub, proxies: new Set<any>() };
+      entry.proxies.add(proxy);
+      if (!this.reopening.has(sub.id)) {
+        this.reopening.set(sub.id, entry);
+        this.activeSubscriptions.delete(sub.id);
+        this.logger.warn(
+          `[waker] ${sub.id}: live query lost after a reconnect and could not be re-opened (${status.error?.message ?? status.error}); not listening, retrying in ${Math.round((status.retryInMs ?? 0) / 1000)}s`,
+        );
+      }
+      return;
+    }
+    if (status?.state !== "open") return;
+    const entry = this.reopening.get(sub.id);
+    if (!entry) return;
+    entry.proxies.delete(proxy);
+    if (entry.proxies.size > 0) return;
+    this.reopening.delete(sub.id);
+    this.activeSubscriptions.set(sub.id, sub);
+    this.logger.info(`[waker] ${sub.id}: live query re-opened, listening again`);
+    // Wakes held back while it was not active go out now, not with the next mention.
+    if (this.undelivered.get(sub.id)?.size) this.scheduleMentionWake(sub, proxy.result, this.debounceMs);
+  }
+
+  /** The wait before the next re-attempt round: `retryPendingMs` doubled per
+   *  round in a row that left something pending, capped at
+   *  `maxRetryPendingMs`, and between half and all of that, so wakers of a
+   *  restarted executor do not all retry at once. */
+  private nextRetryDelay(): number {
+    const ceiling = this.retryCeiling();
+    return ceiling / 2 + Math.random() * (ceiling / 2);
+  }
+
+  /** The longest the next re-attempt round waits. */
+  private retryCeiling(): number {
+    return Math.min(this.retryPendingMs * 2 ** this.retryRounds, this.maxRetryPendingMs);
+  }
+
   /** Arm the re-attempt timer if pending subscriptions are waiting. */
   private scheduleRetry(): void {
     if (this.retryPendingMs <= 0) return;
     if (this.retryTimer || this.pendingSubscriptions.size === 0) return;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
+      this.retryRounds++;
       void this.retryPending();
-    }, this.retryPendingMs);
+    }, this.nextRetryDelay());
     if (typeof this.retryTimer.unref === "function") this.retryTimer.unref();
   }
 
@@ -761,9 +831,14 @@ export class WakerSubscriptionManager {
     }
   }
 
-  /** Subscriptions that were rejected and are waiting to be re-attempted. */
+  /** Subscriptions that are not listening and are being re-attempted: the
+   *  ones the executor rejected, and active ones whose live query is
+   *  re-opening after a reconnect. */
   getPending(): WakerSubscription[] {
-    return Array.from(this.pendingSubscriptions.values());
+    return [
+      ...this.pendingSubscriptions.values(),
+      ...Array.from(this.reopening.values(), (entry) => entry.sub),
+    ];
   }
 
   /**
@@ -771,16 +846,24 @@ export class WakerSubscriptionManager {
    * @param persist — if false, skip calling onPersist (used during batch cleanup).
    */
   dispose(id: string, persist = true): void {
+    this.release(id, persist);
+    if (this.pendingSubscriptions.size === 0) this.retryRounds = 0;
+  }
+
+  /** Drop everything held for `id`, as `dispose()` does, but leave the
+   *  re-attempt backoff as it is. */
+  private release(id: string, persist: boolean): void {
     // Invalidate any subscribe() for this id that is still awaiting.
     this.generations.set(id, (this.generations.get(id) ?? 0) + 1);
     for (const proxy of this.proxies.get(id) ?? []) {
       try {
-        proxy.dispose();
+        proxy.dispose({ cancelOpening: true });
       } catch {
         /* ignore */
       }
     }
     this.proxies.delete(id);
+    this.reopening.delete(id);
     const timer = this.debounceTimers.get(id);
     if (timer) {
       clearTimeout(timer);
@@ -855,6 +938,8 @@ export class WakerSubscriptionManager {
       this.dispose(id, false);
     }
     this.pendingSubscriptions.clear();
+    this.reopening.clear();
+    this.retryRounds = 0;
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
@@ -916,7 +1001,9 @@ export class WakerSubscriptionManager {
       for (const [id, set] of this.delivered) {
         seen[id] = Array.from(set);
       }
-      this.onPersist(this.getActive(), seen);
+      // A subscription that is re-opening was enrolled and is coming back: a
+      // restart in the meantime must restore it.
+      this.onPersist([...this.getActive(), ...Array.from(this.reopening.values(), (entry) => entry.sub)], seen);
     }
   }
 }
