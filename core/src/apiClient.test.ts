@@ -17,6 +17,11 @@ class TestSocket {
     static autoOpen = false
     /** Fire onclose some time after close(), like browsers and `ws`. */
     static asyncClose = false
+    /** close() never fires onclose: a dead TCP connection, whose close frame
+     *  no peer answers, can stay CLOSING for minutes. */
+    static closeHangs = false
+    /** Answer `ping` with `pong`, as the executor does while calls run. */
+    static answersPings = true
 
     readyState = 0
     sent: AnyMsg[] = []
@@ -29,9 +34,17 @@ class TestSocket {
         TestSocket.instances.push(this)
         if (TestSocket.autoOpen) queueMicrotask(() => this.open())
     }
-    send(data: string) { this.sent.push(JSON.parse(data)) }
+    send(data: string) {
+        const msg = JSON.parse(data)
+        this.sent.push(msg)
+        if (msg.type === 'ping' && TestSocket.answersPings) {
+            queueMicrotask(() => { if (this.readyState === 1) this.reply({ type: 'pong' }) })
+        }
+    }
     close() {
-        if (TestSocket.asyncClose) {
+        if (TestSocket.closeHangs) {
+            this.readyState = 2
+        } else if (TestSocket.asyncClose) {
             this.readyState = 2
             setTimeout(() => this.drop(), 5)
         } else {
@@ -56,6 +69,8 @@ beforeEach(() => {
     TestSocket.instances = []
     TestSocket.autoOpen = true
     TestSocket.asyncClose = false
+    TestSocket.closeHangs = false
+    TestSocket.answersPings = true
     client = new ApiClient(url, undefined, TestSocket as unknown as new (url: string) => WebSocket)
 })
 afterEach(() => client.closeAll())
@@ -305,6 +320,191 @@ describe('ApiClient retries idempotent reads once after a reconnect', () => {
     })
 })
 
+describe('ApiClient notices a socket that went silent', () => {
+    // A network switch leaves the old socket OPEN: no FIN or RST ever arrives,
+    // so no close event comes, and nothing the client sends gets an answer.
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        TestSocket.closeHangs = true
+        TestSocket.answersPings = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => jest.useRealTimers())
+
+    it('drops a socket whose ping goes unanswered and redials; a pending write fails, a pending read is resent', async () => {
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u' }, { timeoutMs: 120_000 }))
+        const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
+        expect(socket(0).sent.map(m => m.type)).toEqual(['events.watch', 'perspective.addLink', 'perspective.all'])
+
+        // Silent from here on: no pong, no reply, no close event.
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
+        expect(socket(0).readyState).toBe(2)
+        expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+
+        await jest.advanceTimersByTimeAsync(500)
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        const sent = socket(1).sent.map(m => m.type)
+        expect(sent).toContain('events.watch')
+        expect(sent).toContain('perspective.all')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+
+        const next = call<number>('agent.status')
+        socket(1).reply({ id: socket(1).sent.at(-1)!.id, result: 1 })
+        await expect(next).resolves.toBe(1)
+
+        // The dead socket's close event, if it ever comes, leaves its successor alone.
+        socket(0).drop()
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(socket(1).readyState).toBe(1)
+    })
+
+    it('keeps a socket while a large write it sent may still be crossing a slow link', async () => {
+        // The executor reads a ping only after the frame sent before it, so a
+        // 600 kB write on a slow link holds the pong back for as long as the
+        // write takes. That silence is not a dead socket.
+        open()
+        socket(0).open()
+        const write = call<string>('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 })
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ id: socket(0).sent.find(m => m.type === 'perspective.addLink')!.id, result: 'done' })
+        await expect(write).resolves.toBe('done')
+        // Once heard from, the socket is held to the usual deadline again.
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('counts a write in the UTF-8 bytes it is sent as, not in characters', async () => {
+        // 300 000 two-byte characters go out as 600 kB.
+        open()
+        socket(0).open()
+        void call('perspective.addLink', { uuid: 'u', blob: 'é'.repeat(300_000) }, { timeoutMs: 120_000 }).catch(() => {})
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('keeps the time a large write needs when other messages come in while it is still going out', async () => {
+        // Hearing from the executor says nothing about how far the upload got:
+        // a 600 kB write takes 37.5 s at 16 kB/s, whatever arrives meanwhile.
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 }))
+        await jest.advanceTimersByTimeAsync(1_000)
+        socket(0).reply({ type: 'agent-updated' })
+        await jest.advanceTimersByTimeAsync(14_000)
+        socket(0).reply({ type: 'agent-updated' })
+        await jest.advanceTimersByTimeAsync(15_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(write()).toBe('pending')
+        // The ping could reach the executor at 37.5 s; its pong gets 5 s more to come back.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(0).readyState).toBe(1)
+        // Still unanswered at the next tick: dropped.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(0).readyState).toBe(2)
+        expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+    })
+
+    it('gives a ping that waited behind a large write time for its pong to come back', async () => {
+        // The write could have crossed at about 39.94 s, just before the 40 s tick.
+        // The ping after it is read then, and its pong comes back 100 ms later.
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(638_900) }, { timeoutMs: 120_000 }))
+        await jest.advanceTimersByTimeAsync(40_040)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ type: 'pong' })
+        await jest.advanceTimersByTimeAsync(15_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(write()).toBe('pending')
+    })
+
+    it('does not give a silent socket more time for what it sent after its unanswered ping', async () => {
+        // Those frames queue behind the ping, so they cannot delay its pong.
+        open()
+        socket(0).open()
+        for (let t = 0; t < 20_000; t += 2_000) {
+            call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(20_000) }, { timeoutMs: 120_000 })
+            await jest.advanceTimersByTimeAsync(2_000)
+        }
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('judges a new socket by its own pings, not by its predecessor\'s', async () => {
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+        await jest.advanceTimersByTimeAsync(500)
+        socket(1).open()
+        // Its first tick pings; nothing has gone unanswered on it yet.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(1).sent.some(m => m.type === 'ping')).toBe(true)
+        expect(socket(1).readyState).toBe(1)
+    })
+
+    it('pings a quiet socket before it counts as silent, even when the timer fires late', async () => {
+        // A socket with no traffic hears nothing until its first ping is answered.
+        // Silence is counted from that ping, not from the last message.
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(9_990)
+        // The interval fires 40 ms late.
+        const now = performance.now.bind(performance)
+        const late = jest.spyOn(performance, 'now').mockImplementation(() => now() + 50)
+        try {
+            await jest.advanceTimersByTimeAsync(10)
+            expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
+            expect(socket(0).readyState).toBe(1)
+            // Unanswered for a whole interval after that ping: dropped.
+            await jest.advanceTimersByTimeAsync(10_000)
+            expect(socket(0).readyState).toBe(2)
+        } finally {
+            late.mockRestore()
+        }
+    })
+
+    it('ignores events that reach a socket after it was dropped', async () => {
+        const seen = jest.fn()
+        client.on('agent-updated', seen)
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+        socket(0).reply({ type: 'agent-updated' })
+        expect(seen).not.toHaveBeenCalled()
+    })
+
+    it('keeps a socket that answers its pings or sends anything else', async () => {
+        open()
+        socket(0).open()
+        // Replies by hand: a pong after some pings, an event after the others.
+        for (let i = 0; i < 6; i++) {
+            await jest.advanceTimersByTimeAsync(10_000)
+            if (i % 2 === 0) socket(0).reply({ type: 'pong' })
+            else socket(0).reply({ type: 'agent-updated' })
+        }
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('leaves no timers after closeAll on an open socket', async () => {
+        const promise = call('agent.status')
+        socket(0).open()
+        socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
+        await promise
+        client.closeAll()
+        expect(jest.getTimerCount()).toBe(0)
+    })
+})
+
 describe('ApiClient.onReconnect', () => {
     beforeEach(() => { TestSocket.autoOpen = false })
 
@@ -340,6 +540,269 @@ describe('ApiClient.onReconnect', () => {
         client.onReconnect(reconnected)
         connect(1)
         expect(reconnected).not.toHaveBeenCalled()
+    })
+})
+
+/** An event target that counts the listeners on it, as `window` or `document`. */
+class CountingTarget extends EventTarget {
+    listeners = new Map<string, number>()
+    visibilityState = 'hidden'
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject | null, options?: AddEventListenerOptions | boolean) {
+        this.listeners.set(type, (this.listeners.get(type) ?? 0) + 1)
+        super.addEventListener(type, listener, options)
+    }
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null, options?: EventListenerOptions | boolean) {
+        this.listeners.set(type, (this.listeners.get(type) ?? 0) - 1)
+        super.removeEventListener(type, listener, options)
+    }
+    /** Listeners added and not removed, of every type. */
+    get live() { return [...this.listeners.values()].reduce((a, b) => a + b, 0) }
+}
+
+describe('ApiClient.reconnectNow', () => {
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => jest.useRealTimers())
+
+    /** Open socket 0, then drop `drops` sockets in a row, so the client waits out a grown backoff. */
+    function backOff(drops: number) {
+        open()
+        socket(0).open()
+        socket(0).drop()
+        for (let i = 1; i < drops; i++) {
+            jest.advanceTimersByTime(30_000)
+            socket(i).drop()
+        }
+    }
+
+    it('dials at once instead of waiting out the backoff, and fires onReconnect', () => {
+        const reconnected = jest.fn()
+        client.onReconnect(reconnected)
+        backOff(5) // now waiting 8 s
+        const before = TestSocket.instances.length
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(before + 1)
+        socket(before).open()
+        expect(reconnected).toHaveBeenCalledTimes(1)
+        // The wait it cut short does not dial again later: one loop, no second timer.
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(before + 1)
+        // The backoff starts over: the next drop is retried after 500 ms.
+        socket(before).drop()
+        jest.advanceTimersByTime(499)
+        expect(TestSocket.instances).toHaveLength(before + 1)
+        jest.advanceTimersByTime(1)
+        expect(TestSocket.instances).toHaveLength(before + 2)
+    })
+
+    it('keeps backing off from the start when the dial it made fails too', () => {
+        backOff(5)
+        const before = TestSocket.instances.length
+        client.reconnectNow()
+        socket(before).drop()
+        jest.advanceTimersByTime(500)
+        expect(TestSocket.instances).toHaveLength(before + 2)
+    })
+
+    it('cuts short the wait after a socket dropped for going silent', async () => {
+        TestSocket.closeHangs = true
+        TestSocket.answersPings = false
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2) // dropped as silent, waiting 500 ms
+        expect(TestSocket.instances).toHaveLength(1)
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(2)
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(TestSocket.instances).toHaveLength(2)
+    })
+
+    it('does nothing while a socket is open', () => {
+        open()
+        socket(0).open()
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('does nothing while a dial is in flight', () => {
+        open()
+        expect(socket(0).readyState).toBe(0)
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(1)
+
+        // Nor once the backoff timer has fired and its dial is still connecting.
+        socket(0).open()
+        socket(0).drop()
+        jest.advanceTimersByTime(500)
+        expect(TestSocket.instances).toHaveLength(2)
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(2)
+    })
+
+    it('does nothing while a call dials during the backoff', () => {
+        backOff(3) // waiting 2 s
+        call('agent.status').catch(() => {})
+        const dialling = TestSocket.instances.length
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(dialling)
+    })
+
+    it('ends the wait when a call dials during the backoff, so that socket retries from 500 ms', () => {
+        backOff(5) // waiting 8 s
+        call('agent.status').catch(() => {})
+        const dialled = TestSocket.instances.length - 1
+        socket(dialled).open()
+        socket(dialled).drop()
+        jest.advanceTimersByTime(500)
+        expect(TestSocket.instances).toHaveLength(dialled + 2)
+    })
+
+    it('does nothing once the executor refused the token', () => {
+        open()
+        socket(0).open()
+        socket(0).drop(1008, 'token expired')
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
+    it('does nothing after closeAll', () => {
+        backOff(3)
+        const before = TestSocket.instances.length
+        client.closeAll()
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(before)
+    })
+
+    it('dials through Ad4mClient.reconnectNow', () => {
+        const { Ad4mClient } = require('./Ad4mClient')
+        const facade = new Ad4mClient(url, undefined, {
+            webSocketImpl: TestSocket as unknown as new (url: string) => WebSocket,
+        })
+        try {
+            facade.on('agent-updated', () => {})
+            const first = TestSocket.instances.length - 1
+            socket(first).open()
+            socket(first).drop()
+            facade.reconnectNow()
+            expect(TestSocket.instances).toHaveLength(first + 2)
+        } finally {
+            facade.close()
+        }
+    })
+
+    describe('in a browser', () => {
+        const g = globalThis as Record<string, unknown>
+        let win: CountingTarget
+        let doc: CountingTarget
+        beforeEach(() => {
+            win = new CountingTarget()
+            doc = new CountingTarget()
+            g.window = win
+            g.document = doc
+        })
+        afterEach(() => {
+            client.closeAll()
+            delete g.window
+            delete g.document
+        })
+
+        it('reconnects on `online` and on the page becoming visible, only while waiting to reconnect', () => {
+            open()
+            win.dispatchEvent(new Event('online')) // dialling
+            doc.visibilityState = 'visible'
+            doc.dispatchEvent(new Event('visibilitychange'))
+            expect(TestSocket.instances).toHaveLength(1)
+            socket(0).open()
+            win.dispatchEvent(new Event('online')) // connected
+            doc.dispatchEvent(new Event('visibilitychange'))
+            expect(TestSocket.instances).toHaveLength(1)
+
+            socket(0).drop()
+            jest.advanceTimersByTime(500)
+            socket(1).drop() // waiting 1 s now
+            win.dispatchEvent(new Event('online'))
+            expect(TestSocket.instances).toHaveLength(3)
+
+            socket(2).drop()
+            doc.visibilityState = 'hidden'
+            doc.dispatchEvent(new Event('visibilitychange'))
+            expect(TestSocket.instances).toHaveLength(3)
+            doc.visibilityState = 'visible'
+            doc.dispatchEvent(new Event('visibilitychange'))
+            expect(TestSocket.instances).toHaveLength(4)
+        })
+
+        it('listens only while waiting to reconnect', () => {
+            open()
+            socket(0).open()
+            expect(win.live + doc.live).toBe(0)
+            socket(0).drop()
+            expect(win.listeners.get('online')).toBe(1)
+            expect(doc.listeners.get('visibilitychange')).toBe(1)
+            jest.advanceTimersByTime(500) // the wait is over: dialling
+            expect(win.live + doc.live).toBe(0)
+            socket(1).drop()
+            expect(win.live + doc.live).toBe(2)
+            client.reconnectNow()
+            expect(win.live + doc.live).toBe(0)
+            // Many waits leave one listener each, never more.
+            for (let i = 2; i < 8; i++) {
+                socket(i).drop()
+                expect(win.live + doc.live).toBe(2)
+                jest.advanceTimersByTime(30_000)
+            }
+        })
+
+        it('removes its listeners on closeAll', () => {
+            backOff(3)
+            expect(win.live + doc.live).toBe(2)
+            client.closeAll()
+            expect(win.live + doc.live).toBe(0)
+            expect(jest.getTimerCount()).toBe(0)
+        })
+
+        it('removes its listeners when the executor refuses the token', () => {
+            backOff(2)
+            expect(win.live + doc.live).toBe(2)
+            jest.advanceTimersByTime(30_000)
+            socket(2).drop(1008, 'token expired')
+            expect(win.live + doc.live).toBe(0)
+        })
+
+        it('stops listening when the last subscriber leaves during the wait', () => {
+            const unsubscribe = client.on('perspective-added', () => {})
+            socket(0).open()
+            socket(0).drop()
+            expect(win.live + doc.live).toBe(2)
+            unsubscribe()
+            expect(win.live + doc.live).toBe(0)
+            win.dispatchEvent(new Event('online'))
+            jest.advanceTimersByTime(30_000)
+            expect(TestSocket.instances).toHaveLength(1)
+        })
+    })
+
+    it('registers nothing without window, and still reconnects on its backoff', () => {
+        const g = globalThis as Record<string, unknown>
+        expect(typeof g.window).toBe('undefined')
+        // A document without a window (a non-browser host with a DOM shim) is left alone too.
+        const doc = new CountingTarget()
+        g.document = doc
+        try {
+            backOff(2) // waiting 1 s
+            expect(doc.live).toBe(0)
+            const before = TestSocket.instances.length
+            jest.advanceTimersByTime(1_000)
+            expect(TestSocket.instances).toHaveLength(before + 1)
+            client.reconnectNow() // dialling: nothing to do
+            expect(TestSocket.instances).toHaveLength(before + 1)
+        } finally {
+            delete g.document
+        }
     })
 })
 
@@ -774,7 +1237,8 @@ describe('PerspectiveProxy.on', () => {
         proxy.dispose()
         await flush()
 
-        socket(0).reply(linkAdded('p1'))
+        // off() left no handler, so the client closed its socket; the new registration opened another.
+        TestSocket.instances.at(-1)!.reply(linkAdded('p1'))
         expect(handler).toHaveBeenCalledTimes(1)
     })
 })
