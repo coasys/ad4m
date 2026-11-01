@@ -61,6 +61,32 @@ jobs:
       - name: Build modules
         run: pnpm run build-npm-packages
 
+      # A snapshot says what it is. Without this, every snapshot's package.json carries the release
+      # version it was branched from (`0.13.1-staging.2`) and no commit, so an installed copy, a
+      # `pnpm ls` and a lockfile entry cannot tell one snapshot from another, or from the release.
+      # The version becomes `<release>-snapshot.<sha7>`, a prerelease that sorts below the release
+      # it was cut before, and `gitHead` records the full commit, as npm does on a real publish.
+      #
+      # After the build, and only in the two published package.json files. Connect's bundle reads
+      # the ROOT package.json's version at build time and keys its stored session by it, so a
+      # version that changed per snapshot there would sign people out on every update.
+      - name: Stamp the snapshot's version and commit
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const sha = process.env.SHA;
+            for (const dir of ['core', 'connect']) {
+              const file = dir + '/package.json';
+              const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+              pkg.version = pkg.version.split('-snapshot.')[0] + '-snapshot.' + sha.slice(0, 7);
+              pkg.gitHead = sha;
+              fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
+              console.log(pkg.name, pkg.version, pkg.gitHead);
+            }
+          "
+
       # Both packages in one call, so the PR comment lists them together. Connect's snapshot matches
       # core's because connect's build bundles core from this checkout; core is only a
       # devDependency of connect, which an app installing connect does not get. An app installs
