@@ -14,6 +14,11 @@ import type {
   TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
+/** What a subscription compares to skip a callback whose results equal the
+ *  last ones emitted (a resync or a reconnect re-open of an unchanged result). */
+const fingerprint = (value: unknown): string =>
+  JSON.stringify(value, (_, v) => (typeof v === 'function' ? undefined : v));
+
 /** Query builder for Ad4mModel queries.
  * Allows building queries with a fluent interface and either running them once
  * or subscribing to updates.
@@ -79,12 +84,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /** Snapshot instances for dirty tracking, as `execute` does for its rows. */
   private takeSnapshots(instances: T[]): void {
-    const include = this.queryParams.include;
-    const relations = include
-      ? Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    const snapshot = relations && Object.keys(relations).length > 0 ? relations : undefined;
-    for (const inst of instances) (inst as any).takeSnapshot?.(snapshot);
+    (this.ctor as any).takeSnapshots(instances, this.queryParams.include);
   }
 
   /** Ends the current subscription, if any, on the client and the executor. */
@@ -480,8 +480,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const parseResults = (raw: any): T[] => this.parse(raw);
 
     // Suppress callbacks whose parsed results equal the last ones emitted.
-    const fingerprint = (results: any[]) =>
-      JSON.stringify(results, (_, v) => (typeof v === 'function' ? undefined : v));
     let lastFingerprint: string | null = null;
 
     const { initial } = await this.live(this.queryParams, (raw) => {
@@ -661,20 +659,30 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       offset: pageSize * (pageNumber - 1),
       count: true,
     };
-    const toPage = (raw: any): PaginationResult<T> => {
+    // As subscribe(): a callback fires only when the rows or totalCount
+    // differ from the last page emitted, not on a resync or a reconnect
+    // re-open of an unchanged page.
+    let lastFingerprint: string | null = null;
+    const toPage = (raw: any): { page: PaginationResult<T>; fp: string } => {
       const results = this.parse(raw);
+      const fp = fingerprint([results, raw?.totalCount]);
       this.takeSnapshots(results);
-      return { results, totalCount: raw?.totalCount, pageSize, pageNumber };
+      return { page: { results, totalCount: raw?.totalCount, pageSize, pageNumber }, fp };
     };
 
     const { initial } = await this.live(paginatedQuery, (raw) => {
       try {
-        callback(toPage(raw));
+        const { page, fp } = toPage(raw);
+        if (fp === lastFingerprint) return;
+        lastFingerprint = fp;
+        callback(page);
       } catch (e) {
         console.error('Paginate subscription error:', e);
       }
     });
-    return toPage(initial);
+    const { page, fp } = toPage(initial);
+    lastFingerprint = fp;
+    return page;
   }
 
   /**

@@ -1446,6 +1446,25 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     builder.dispose();
   });
 
+  it("skips a pushed page equal to the last one, as subscribe() does", async () => {
+    // A resync or a reconnect re-open replaces the result wholesale, and
+    // LiveQuery calls back even when nothing changed.
+    const { mockPerspective, push } = buildMocks({ instances: [{ id: "a" }], totalCount: 1 });
+    const pages: any[] = [];
+    const builder = testModel("PaginateUnchanged").query(mockPerspective);
+    await builder.paginateSubscribe(1, 1, p => pages.push(p));
+
+    push({ result: { instances: [{ id: "a" }], totalCount: 1 } });
+    await settle();
+    expect(pages).toHaveLength(0);
+
+    push({ result: { instances: [{ id: "a" }], totalCount: 2 } });
+    push({ result: { instances: [{ id: "a" }], totalCount: 2 } });
+    await settle();
+    expect(pages.map(p => p.totalCount)).toEqual([2]);
+    builder.dispose();
+  });
+
   it("ends on the latest state after back-to-back changes (#1051)", async () => {
     // #1051: two saves in quick succession used to leave the callback on the
     // first save, because each push started a re-read and a re-read could

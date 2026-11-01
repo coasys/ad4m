@@ -32,8 +32,9 @@
 //!    recognised by, written on a node that links an anchor through that
 //!    class's edge. This is how a node becomes a holder of an anchor when the
 //!    subscribed class does not read the holder's flag (#1461 review).
-//! 5. **`scan`**: a predicate of a scanned class (the subscribed class and
-//!    any class a `where` quantifier reads), written on a node that is an
+//! 5. **`scan`**: a predicate of a scanned class (the subscribed class, any
+//!    class a `where` quantifier reads, and, when the query has a window, the
+//!    class a dotted `order` key reads), written on a node that is an
 //!    instance of that class: it has one of the class's flag links. This is
 //!    how a record that is not in the result yet moves into a filter or a page.
 //! 6. **`via`**: a `near` predicate written on a node linked, through a
@@ -637,6 +638,13 @@ impl Walk<'_> {
         // Watch the target as an include one level down, without recursing:
         // only its own properties are read. A key naming no declared relation
         // sorts by nothing (the query falls back to the timestamp).
+        //
+        // Under a window (`limit` / `offset`) the last result holds only the
+        // page, so a target linked to a record off the page is near nothing
+        // in it, and `near` / `via` miss the edit that moves that record onto
+        // the page. Scan the target class then: a write on any instance of
+        // it re-runs. Without a window every match is in the result already.
+        let windowed = query.limit.is_some() || query.offset.is_some();
         for key in query.order.iter().flatten().map(|(key, _)| key.as_str()) {
             let Some((rel_name, _)) = key.split_once('.') else {
                 continue;
@@ -649,6 +657,7 @@ impl Walk<'_> {
                 .then(|| self.resolver.get_shape(&rel.target_class_name).ok())
                 .flatten();
             match target {
+                Some(target) if windowed => self.scan_class(&target, None),
                 Some(target) => self.watch_class(&target),
                 // The targets' class is not known, so neither is the sorted
                 // property's predicate: any write on a target may move it.
