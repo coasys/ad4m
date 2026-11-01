@@ -4260,16 +4260,39 @@ impl PerspectiveInstance {
         // pubsub/prolog, rather than decorating and converting back here.
 
         let effects = self.retraction_effects(&diff.additions)?;
-        let retracted = effects.retracted.iter().cloned().map(LinkExpression::from);
+        let removals: Vec<LinkExpression> = diff
+            .removals
+            .iter()
+            .cloned()
+            .chain(effects.retracted.iter().cloned().map(LinkExpression::from))
+            .collect();
+        let additions: Vec<LinkExpression> = diff
+            .additions
+            .iter()
+            .filter(|a| !effects.covers(a))
+            .cloned()
+            .collect();
+
+        // One store transaction for the whole diff, so a batch lands as one
+        // write. On failure nothing was written; fall back to one link at a
+        // time.
+        match self.sparql_store.apply_diff(&removals, &additions) {
+            Ok(()) => return Ok(effects),
+            Err(e) => log::warn!(
+                "Failed to apply link diff to SPARQL store in one transaction, \
+                 writing links one by one: {:?}",
+                e
+            ),
+        }
 
         // Removals first
-        for removal in diff.removals.iter().cloned().chain(retracted) {
-            if let Err(e) = self.sparql_store.remove_link(&removal) {
+        for removal in &removals {
+            if let Err(e) = self.sparql_store.remove_link(removal) {
                 log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
-        for addition in diff.additions.iter().filter(|a| !effects.covers(a)) {
+        for addition in &additions {
             if let Err(e) = self.sparql_store.add_link(addition) {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
@@ -6621,6 +6644,7 @@ impl PerspectiveInstance {
             // to the claim (the min-DID claim still prevents doubles among peers
             // that escalate together).
             let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
+            let settle_ms = crate::perspectives::auto_processor::claim::claim_settle_ms(self).await;
             let outcome = match run_one_pass(
                 &mut perspective_clone,
                 cfg,
@@ -6628,7 +6652,7 @@ impl PerspectiveInstance {
                 now_ms,
                 context,
                 escalate,
-                crate::perspectives::auto_processor::claim::CLAIM_SETTLE_MS,
+                settle_ms,
             )
             .await
             {
