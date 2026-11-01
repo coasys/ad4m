@@ -426,7 +426,8 @@ fn refuse_unanswerable_scope(query_input: &ModelQueryInput) -> Result<(), Error>
 /// The id phase of [`execute_model_query_inner`] on its own: every record in
 /// scope that passes `where`, as the rows of the two-phase plan's first query
 /// with no window — `?source` and the binding `sort_key` sorts on
-/// (`?_first_ts` for [`SortKey::Timestamp`], `?_sort_num` / `?_sort_str` for
+/// (`?_first_ts` for [`SortKey::Timestamp`] and [`SortKey::CreatedAt`],
+/// `?_sort_num` / `?_sort_str` for
 /// [`SortKey::Property`]). Nothing is hydrated. A union over several classes
 /// pages on these and hydrates only its page.
 ///

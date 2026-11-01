@@ -27,7 +27,17 @@
 //! ```
 //!
 //! Only the page is hydrated (PERF-29): a union read costs ids for every
-//! record and rows for the page, as a single-class page does.
+//! record and rows for the page, as a single-class page does. Every sort value
+//! step 1 reads is the value the record's hydrated row carries, whichever way
+//! its class answers, so the order is the one hydrating every row would give.
+//! Creation time (`timestamp`, `createdAt`, and the default order) is the
+//! earliest link hydration reads ([`SortKey::CreatedAt`]), not the conformance
+//! link a paged single-class read sorts on.
+//!
+//! Membership comes from step 1, as on a paged single-class read: under an
+//! order on a property, a record that passes `where` but hydrates to no row
+//! (all its links withheld from hydration) counts in `totalCount` and leaves
+//! its page one row short.
 //!
 //! Semantics, as decided on the issue
 //! (<https://github.com/coasys/ad4m/issues/1238#issuecomment-6081266040>):
@@ -37,7 +47,8 @@
 //!   classes is kept when any of its readings passes, and is read as one that
 //!   does.
 //! - `order` sorts rows without the value last in both directions, then by id,
-//!   the rule the store's `ORDER BY` applies to a single class.
+//!   the rule the store's `ORDER BY` applies to a single class. It may name
+//!   `__subjectClass` / `__subjectClasses`, which sort on the values below.
 //! - `limit` / `offset` apply once over the union; `totalCount` is the union
 //!   after `where`.
 //! - Every row carries `__subjectClass` (the class it was hydrated as) and
@@ -151,16 +162,29 @@ fn sort_union(members: &mut [Member], order: &[(String, OrderDirection)]) {
     });
 }
 
+/// A row's `__subjectClasses`: every class the record conforms to, or the
+/// class it is read as when classification did not answer for it.
+fn subject_classes_value(classified: Option<&Vec<String>>, chosen: &str) -> Value {
+    let all = classified
+        .cloned()
+        .unwrap_or_else(|| vec![chosen.to_string()]);
+    Value::Array(all.into_iter().map(Value::String).collect())
+}
+
 /// Where a class's value for one order key comes from when the class's id
 /// phase answers it, so the record is not hydrated to be sorted.
 enum KeySource {
-    /// Creation time: `?_first_ts`, the time a single-class page sorts on.
-    FirstTimestamp,
+    /// Creation time: `?_first_ts` of [`SortKey::CreatedAt`], the earliest
+    /// link hydration reads, so the `timestamp` the class's rows carry.
+    CreatedAt,
     /// A scalar property, as `?_sort_str`: the lexical value `parse_literal`
     /// reads, which [`compare_values`] orders as it orders the hydrated one.
     Property(String),
     /// The record's id.
     Id,
+    /// `__subjectClass` or `__subjectClasses`: set once the record's class is
+    /// chosen, as the union sets them on the row.
+    Chosen,
     /// A key this class's rows never carry: null on every record.
     Absent,
 }
@@ -173,8 +197,9 @@ enum KeySource {
 /// a language other than `literal` resolves).
 fn key_source(shape: &ModelShape, key: &str) -> Option<KeySource> {
     match key {
-        "timestamp" | "createdAt" => return Some(KeySource::FirstTimestamp),
+        "timestamp" | "createdAt" => return Some(KeySource::CreatedAt),
         "id" | "baseExpression" => return Some(KeySource::Id),
+        SUBJECT_CLASS_KEY | SUBJECT_CLASSES_KEY => return Some(KeySource::Chosen),
         "updatedAt" | "author" => return None,
         _ if key.starts_with('$') => return None,
         _ => {}
@@ -223,16 +248,13 @@ async fn members_from_ids(
     });
     let sort_key = match predicates.next() {
         Some(p) if predicates.all(|q| q == p) => {
-            if sources
-                .iter()
-                .any(|s| matches!(s, KeySource::FirstTimestamp))
-            {
+            if sources.iter().any(|s| matches!(s, KeySource::CreatedAt)) {
                 return Ok(None);
             }
             SortKey::Property(p.clone())
         }
         Some(_) => return Ok(None),
-        None => SortKey::Timestamp,
+        None => SortKey::CreatedAt,
     };
     let Some(rows) = select_ids(store, shape, select, resolver, sort_key).await? else {
         return Ok(None);
@@ -244,10 +266,10 @@ async fn members_from_ids(
                 let keys = sources
                     .iter()
                     .map(|source| match source {
-                        KeySource::FirstTimestamp => row["_first_ts"].clone(),
+                        KeySource::CreatedAt => row["_first_ts"].clone(),
                         KeySource::Property(_) => row["_sort_str"].clone(),
                         KeySource::Id => Value::String(id.clone()),
-                        KeySource::Absent => Value::Null,
+                        KeySource::Chosen | KeySource::Absent => Value::Null,
                     })
                     .collect();
                 Some((id, keys))
@@ -450,12 +472,19 @@ pub async fn execute_union_query_with_views(
             total_count,
         });
     }
-    let readers_of = |id: &str| -> Vec<&String> {
-        requested
-            .iter()
-            .filter(|c| keys_by_class.get(*c).is_some_and(|k| k.contains_key(id)))
-            .collect()
-    };
+    // The requested classes whose step-1 query returned each record.
+    let readers_by_id: Vec<Vec<&String>> = all_ids
+        .iter()
+        .map(|id| {
+            requested
+                .iter()
+                .filter(|c| keys_by_class.get(*c).is_some_and(|k| k.contains_key(id)))
+                .collect()
+        })
+        .collect();
+    // An order on `__subjectClasses` sorts on every record's classes, so all
+    // are classified before the page is cut, as the hydrated union did.
+    let order_on_classes = sort_keys.iter().any(|(k, _)| k == SUBJECT_CLASSES_KEY);
 
     // 2. One reading per record. The choice is the polymorphic include's
     //    (`choose`), restricted to the requested classes whose step-1 query
@@ -470,8 +499,9 @@ pub async fn execute_union_query_with_views(
     //    sort value.
     let shared: Vec<String> = all_ids
         .iter()
-        .filter(|id| readers_of(id).len() > 1)
-        .cloned()
+        .zip(&readers_by_id)
+        .filter(|(_, readers)| order_on_classes || readers.len() > 1)
+        .map(|(id, _)| id.clone())
         .collect();
     let mut classified: HashMap<String, Vec<String>> = if shared.is_empty() {
         HashMap::new()
@@ -480,8 +510,7 @@ pub async fn execute_union_query_with_views(
     };
     let preferred = query.prefer_classes.as_deref().unwrap_or(&[]);
     let mut union: Vec<Member> = Vec::with_capacity(all_ids.len());
-    for id in &all_ids {
-        let readers = readers_of(id);
+    for (id, readers) in all_ids.iter().zip(&readers_by_id) {
         let Some(first) = readers.first() else {
             continue;
         };
@@ -504,11 +533,19 @@ pub async fn execute_union_query_with_views(
                 .cloned()
                 .unwrap_or_else(|| (*first).clone())
         };
-        let keys = keys_by_class
+        let mut keys = keys_by_class
             .get(&chosen)
             .and_then(|k| k.get(id))
             .cloned()
             .unwrap_or_default();
+        // The keys the union itself sets on the row, as it will set them.
+        for ((key, _), value) in sort_keys.iter().zip(keys.iter_mut()) {
+            if key == SUBJECT_CLASS_KEY {
+                *value = Value::String(chosen.clone());
+            } else if key == SUBJECT_CLASSES_KEY {
+                *value = subject_classes_value(classified.get(id), &chosen);
+            }
+        }
         union.push(Member {
             id: id.clone(),
             class: chosen,
@@ -575,13 +612,9 @@ pub async fn execute_union_query_with_views(
             };
             if let Some(obj) = row.as_object_mut() {
                 obj.insert(SUBJECT_CLASS_KEY.to_string(), Value::String(class.clone()));
-                let all = classified
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| vec![class.clone()]);
                 obj.insert(
                     SUBJECT_CLASSES_KEY.to_string(),
-                    Value::Array(all.into_iter().map(Value::String).collect()),
+                    subject_classes_value(classified.get(&id), &class),
                 );
             }
             hydrated.insert(id, row);
