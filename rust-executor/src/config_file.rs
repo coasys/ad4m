@@ -227,6 +227,9 @@ pub struct ExecutorConfigFile {
     /// reaches and the keys its heads must be signed by.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentityFileSettings>,
+    /// The folder of the executor's own rotated log files. Unset: stdout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_dir: Option<String>,
 }
 
 /// `identity` in the config file.
@@ -539,6 +542,7 @@ impl ExecutorConfigFile {
             identity_store_url: self.identity.as_ref().and_then(|i| i.store_url.clone()),
             identity_store_keys: self.identity.as_ref().and_then(|i| i.store_keys.clone()),
             identity_allow_private_src: self.identity.as_ref().and_then(|i| i.allow_private_src),
+            log_dir: self.log_dir.clone(),
             admin_credential: secrets.admin_credential.clone(),
             ..Ad4mConfig::unprepared()
         })
@@ -551,6 +555,16 @@ mod tests {
 
     fn parse(json: &str) -> Result<ExecutorConfigFile, ConfigFileError> {
         ExecutorConfigFile::parse(json)
+    }
+
+    /// `log_dir` reaches the executor's config.
+    #[test]
+    fn log_dir_reaches_the_executor_config() {
+        let config = parse(r#"{"log_dir": "/data/adam/logs"}"#)
+            .unwrap()
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap();
+        assert_eq!(config.log_dir.as_deref(), Some("/data/adam/logs"));
     }
 
     /// `identity.storeUrl` and `identity.storeKeys` reach the executor's config.

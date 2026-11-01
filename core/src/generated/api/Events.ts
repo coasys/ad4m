@@ -7,6 +7,7 @@ import type { AgentUpdatedEvent } from "./AgentUpdatedEvent";
 import type { Apps } from "./Apps";
 import type { AutoProcessorEvent } from "./AutoProcessorEvent";
 import type { AutoProcessorNeighbourhoodState } from "./AutoProcessorNeighbourhoodState";
+import type { ConfigChanged } from "./ConfigChanged";
 import type { ExceptionOccurredEvent } from "./ExceptionOccurredEvent";
 import type { FlowStateChangedEvent } from "./FlowStateChangedEvent";
 import type { HostingUserInfo } from "./HostingUserInfo";
@@ -52,6 +53,7 @@ export interface EventMap {
   "sfu-room-roster": SfuRoomRoster;
   "flow-state-changed": FlowStateChangedEvent;
   "identity-fork": IdentityForkEvent;
+  "config-changed": ConfigChanged;
 }
 
 export type EventName = keyof EventMap;

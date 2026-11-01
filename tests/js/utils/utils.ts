@@ -380,7 +380,7 @@ export async function spawnExecutor(
         let resolved = false;
 
         // Without these, an executor that dies or stalls before the marker
-        // (e.g. the API port is taken: it logs the bind error and exits 1)
+        // (e.g. the API port is taken: it logs the bind error and exits 80)
         // leaves this promise pending until mocha's 1200 s timeout.
         const fail = (reason: string) => {
             if (resolved) return;

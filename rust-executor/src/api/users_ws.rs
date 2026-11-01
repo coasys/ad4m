@@ -35,6 +35,11 @@ async fn set_multi_user_enabled(
             crate::config::MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR,
         ));
     }
+    crate::config::refuse_custody_channel_with_multi_user(
+        crate::config::custody_channel_on(),
+        body.enabled,
+    )
+    .map_err(WsRpcError::forbidden)?;
 
     Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(body.enabled))
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -617,6 +622,15 @@ mod operator_tests {
             ..Default::default()
         });
         let credentialed = set(true).await;
+        let _ = set(false).await;
+
+        crate::config::set_global_config(Ad4mConfig {
+            admin_credential: Some("users-ws-admin".into()),
+            custody_channel: Some(true),
+            ..Default::default()
+        });
+        let custody_refused = set(true).await.unwrap_err();
+        let custody_mode = crate::user_management::is_multi_user_enabled();
 
         set_mode(saved_mode);
         *GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = saved_config;
@@ -629,6 +643,13 @@ mod operator_tests {
         assert!(!refused_mode, "the refused call left multi-user mode on");
         assert_eq!(turned_off.unwrap(), json!(true));
         assert_eq!(credentialed.unwrap(), json!(true));
+        // An executor with the custody channel never turns multi-user mode on.
+        assert_eq!(custody_refused.code, 403, "{}", custody_refused.message);
+        assert_eq!(
+            custody_refused.message,
+            crate::config::CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR
+        );
+        assert!(!custody_mode, "the refused call left multi-user mode on");
     }
 }
 
