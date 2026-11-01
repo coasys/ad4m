@@ -16,7 +16,6 @@ use crate::db::Ad4mDb;
 use crate::types::{
     AIModelLoadingStatus, AITask, AITaskInput, DetectedEndpoint, EndpointInput, EndpointKind,
     EndpointView, Model, ModelInput, ModelType, ModelView, RequestContext,
-    VoiceActivityParamsInput,
 };
 use base64::Engine;
 
@@ -495,7 +494,7 @@ async fn open_transcription_stream(
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let stream_id = service
-        .open_transcription_stream(body.model_id, body.params.map(|p| p.into()), &ctx)
+        .open_transcription_stream(body.model_id, &ctx)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -691,16 +690,20 @@ pub async fn feed_transcription_stream(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let mut errors: Vec<String> = Vec::new();
-    for stream_id in &stream_ids {
-        if let Err(e) = service
-            .feed_transcription_stream(stream_id, audio_f32.clone(), &context)
-            .await
-        {
+    // Concurrently: a stream on an endpoint answers once its utterance is transcribed.
+    let outcomes = futures::future::join_all(stream_ids.iter().map(|stream_id| {
+        service.feed_transcription_stream(stream_id, audio_f32.clone(), &context)
+    }))
+    .await;
+    let errors: Vec<String> = stream_ids
+        .iter()
+        .zip(outcomes)
+        .filter_map(|(stream_id, outcome)| {
+            let e = outcome.err()?;
             log::warn!("Error feeding stream {}: {}", stream_id, e);
-            errors.push(format!("{}: {}", stream_id, e));
-        }
-    }
+            Some(format!("{}: {}", stream_id, e))
+        })
+        .collect();
 
     feed_outcome(&errors, stream_ids.len())?;
     Ok(Json("true".to_string()))
@@ -838,8 +841,6 @@ pub struct AiUpdateTaskParams {
 #[ts(export)]
 pub struct AiTranscriptionOpenParams {
     pub model_id: String,
-    #[ts(optional)]
-    pub params: Option<VoiceActivityParamsInput>,
 }
 
 #[derive(Deserialize, TS)]

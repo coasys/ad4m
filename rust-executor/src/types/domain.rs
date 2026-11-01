@@ -1119,29 +1119,6 @@ pub struct AIModelLoadingStatus {
     pub loaded: bool,
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(optional_fields)]
-pub struct VoiceActivityParamsInput {
-    pub start_threshold: Option<f64>,
-    pub start_window: Option<i32>,
-    pub end_threshold: Option<f64>,
-    pub end_window: Option<i32>,
-    pub time_before_speech: Option<i32>,
-}
-
-impl From<VoiceActivityParamsInput> for crate::ai_service::VoiceActivityParams {
-    fn from(val: VoiceActivityParamsInput) -> Self {
-        crate::ai_service::VoiceActivityParams {
-            start_threshold: val.start_threshold.map(|x| x as f32),
-            start_window: val.start_window.map(|x| x as u64),
-            end_threshold: val.end_threshold.map(|x| x as f32),
-            end_window: val.end_window.map(|x| x as u64),
-            time_before_speech: val.time_before_speech.map(|x| x as u64),
-        }
-    }
-}
-
 #[derive(Debug, serde::Serialize, serde::Deserialize, TS)]
 pub struct ImportStats {
     pub total: i32,

@@ -231,49 +231,23 @@ const streamId = await client.ai.openTranscriptionStream(
   "Whisper",
   (text) => {
     console.log("Transcribed:", text);
-  },
-  {
-    // Optional voice activity detection parameters
-    startThreshold: 0.3,
-    startWindow: 150,
-    endThreshold: 0.2,
-    endWindow: 300,
-    timeBeforeSpeech: 100
   }
 );
 
-// Feed audio data (Float32Array samples at 16kHz)
-await client.ai.feedTranscriptionStream(streamId, audioSamples);
+// Feed one utterance at a time (Float32Array samples at 16kHz)
+await client.ai.feedTranscriptionStream(streamId, utteranceSamples);
 
 // Close stream when done
 await client.ai.closeTranscriptionStream(streamId);
 
-// Or use multiple streams simultaneously
-const fastStreamId = await client.ai.openTranscriptionStream(
-  "whisper_tiny",
-  (text) => console.log("Fast preview:", text),
-  {
-    startThreshold: 0.25,
-    startWindow: 100,
-    endThreshold: 0.15,
-    endWindow: 100
-  }
-);
-
-const accurateStreamId = await client.ai.openTranscriptionStream(
-  "whisper_small",
-  (text) => console.log("Accurate:", text),
-  {
-    startThreshold: 0.3,
-    startWindow: 150,
-    endThreshold: 0.2,
-    endWindow: 500
-  }
-);
-
-// Feed same audio to both streams with a single call
-await client.ai.feedTranscriptionStream([fastStreamId, accurateStreamId], audioSamples);
 ```
+
+The executor does no voice-activity detection: the caller decides where an utterance
+starts and ends (for example with an energy gate in an audio worklet) and feeds each one
+as it ends. A model registered on a transcription endpoint (any server with an OpenAI-shaped
+`POST /v1/audio/transcriptions`: speaches, a Parakeet wrapper, OpenAI) transcribes each
+utterance as one request; `feedTranscriptionStream` then resolves once the text is
+published, in the order the utterances were fed, and rejects when the endpoint failed.
 
 Note: Transcription streams are automatically cleaned up after 30 seconds of inactivity.
 
@@ -341,24 +315,6 @@ Models can be updated while maintaining tasks:
 const updated = await client.ai.updateModel(modelId, newConfig);
 ```
 
-### Real-time Transcription
-
-Configure voice activity detection for word-by-word transcription:
-
-```typescript
-const streamId = await client.ai.openTranscriptionStream(
-  "Whisper",
-  (text) => console.log("Word:", text),
-  {
-    startThreshold: 0.25,
-    startWindow: 100,
-    endThreshold: 0.15,
-    endWindow: 100,
-    timeBeforeSpeech: 20
-  }
-);
-```
-
 ### Multiple Transcription Streams
 
 You can process the same audio through multiple models simultaneously:
@@ -367,15 +323,13 @@ You can process the same audio through multiple models simultaneously:
 // Use a fast model for real-time preview
 const fastStreamId = await client.ai.openTranscriptionStream(
   "whisper_tiny",
-  (text) => console.log("Preview:", text),
-  { startThreshold: 0.25, endWindow: 100 }
+  (text) => console.log("Preview:", text)
 );
 
 // Use a more accurate model for final results
 const accurateStreamId = await client.ai.openTranscriptionStream(
   "whisper_small",
-  (text) => console.log("Final:", text),
-  { startThreshold: 0.3, endWindow: 500 }
+  (text) => console.log("Final:", text)
 );
 
 // Feed audio to both streams efficiently
