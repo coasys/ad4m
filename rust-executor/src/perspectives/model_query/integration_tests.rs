@@ -9870,3 +9870,156 @@ async fn test_projection_where_on_a_polymorphic_include_reads_the_member_class_t
     assert_eq!(task["$liked"], json!(["we://sig/1"]));
     assert!(placed(&result, "we://p/2").get("$likes").is_none());
 }
+
+// ── PERF-15: a page that is not full already tells the total ──
+//
+// A paged query used to run a `COUNT(DISTINCT ?source)` over the whole scope after every page.
+// When the page comes back shorter than `limit`, the scope ran out inside it, so the total is
+// `offset + rows` and the COUNT is a second pass over the same set for a number already known.
+
+/// Five `Scored` items, one second apart, so the timestamp order is item-0 … item-4.
+fn five_scored_items() -> (SparqlStore, &'static str) {
+    let store = SparqlStore::new(None).unwrap();
+    for i in 0..5 {
+        let item = format!("test://paged-{i}");
+        let ts = format!("170000000000{i}");
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://scored", &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                &item,
+                "ns://score",
+                &signed_literal_number(i as f64),
+                &ts,
+            ))
+            .unwrap();
+    }
+    let shape_json = r#"{
+        "className": "Scored",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+            "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+    (store, shape_json)
+}
+
+/// Runs one paged query on a fresh fixture; returns (ids, totalCount, whether a COUNT ran).
+async fn paged(offset: Option<usize>, limit: usize) -> (Vec<String>, usize, bool) {
+    let (store, shape_json) = five_scored_items();
+    let before = store.queries_run().len();
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            offset,
+            limit: Some(limit),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    let counted = store.queries_run()[before..]
+        .iter()
+        .any(|q| q.contains("AS ?cnt)"));
+    let ids = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
+    (ids, result.total_count, counted)
+}
+
+fn paged_ids(range: std::ops::Range<usize>) -> Vec<String> {
+    range.map(|i| format!("test://paged-{i}")).collect()
+}
+
+#[tokio::test]
+async fn a_short_first_page_is_its_own_total_and_runs_no_count() {
+    let (ids, total, counted) = paged(None, 10).await;
+    assert_eq!(ids, paged_ids(0..5));
+    assert_eq!(total, 5, "the total COUNT would have returned");
+    assert!(
+        !counted,
+        "a page shorter than its limit must not run the COUNT"
+    );
+
+    let (ids, total, counted) = paged(Some(0), 10).await;
+    assert_eq!(ids, paged_ids(0..5));
+    assert_eq!(total, 5);
+    assert!(!counted, "an explicit offset 0 is the same first page");
+}
+
+#[tokio::test]
+async fn a_full_page_still_counts() {
+    let (ids, total, counted) = paged(None, 2).await;
+    assert_eq!(ids, paged_ids(0..2));
+    assert_eq!(total, 5, "a full page says nothing about the rest");
+    assert!(counted, "a full page must run the COUNT");
+
+    // A page that exactly fits the scope is full too: there could be more.
+    let (ids, total, counted) = paged(None, 5).await;
+    assert_eq!(ids, paged_ids(0..5));
+    assert_eq!(total, 5);
+    assert!(counted, "a page exactly `limit` long cannot tell the total");
+}
+
+#[tokio::test]
+async fn a_short_page_after_an_offset_totals_offset_plus_rows() {
+    let (ids, total, counted) = paged(Some(3), 10).await;
+    assert_eq!(ids, paged_ids(3..5));
+    assert_eq!(total, 5, "offset 3 + 2 rows");
+    assert!(
+        !counted,
+        "a non-empty short page after an offset must not run the COUNT"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_page_after_an_offset_still_counts() {
+    let (ids, total, counted) = paged(Some(10), 5).await;
+    assert!(ids.is_empty());
+    assert_eq!(
+        total, 5,
+        "an offset past the end says only that the total is at most the offset"
+    );
+    assert!(counted, "an empty page after an offset must run the COUNT");
+}
+
+/// A per-anchor limit slices the id phase in the executor, so its window is not pushed and its
+/// short page says nothing about the total: the store's count stays, "1 shown of 3 under root".
+#[tokio::test]
+async fn a_short_page_sliced_per_anchor_keeps_the_stores_count() {
+    let store = comment_tree_store();
+    let result = fixture_query_from_json(
+        &store,
+        "Comment",
+        &ModelQueryInput {
+            parent: Some(traverse_scope(
+                &["we://root"],
+                false,
+                ScopeDirection::Out,
+                Some(1),
+            )),
+            order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        COMMENT_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["we://c1"], "one per anchor, oldest first");
+    assert_eq!(
+        result.total_count, 3,
+        "the page is short because of the slice, not because the scope ran out"
+    );
+}
