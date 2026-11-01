@@ -38,6 +38,12 @@ function addListeners(p: PerspectiveProxy) {
       cb(p, link);
     });
   });
+
+  // An update replaces a link: the old one leaves, the new one arrives.
+  p.on("link-updated", ({ oldLink, newLink }) => {
+    onRemovedLinkCbs.value.forEach((cb) => cb(p, oldLink));
+    onAddedLinkCbs.value.forEach((cb) => cb(p, newLink));
+  });
 }
 
 export function usePerspectives(client: Ad4mClient) {

@@ -2,7 +2,7 @@
 //! a write that read a record checks, under `persist_lock`, that the record is still what it
 //! read, so a write that landed in between is not overwritten.
 
-use super::PerspectiveInstance;
+use super::{PerspectiveInstance, TimestampedBatch};
 use crate::agent::{create_signed_expression, AgentContext};
 use crate::types::{
     DecoratedLinkExpression, DecoratedPerspectiveDiff, LinkExpression, LinkStatus, PerspectiveDiff,
@@ -75,12 +75,14 @@ impl PerspectiveInstance {
         //log::info!("🔄 BATCH COMMIT: Starting batch commit for batch_uuid: {}", batch_uuid);
         //let batch_retrieval_start = std::time::Instant::now();
 
-        // Get the diff without holding lock during the entire operation
-        let diff = {
+        // Take the batch out of the store without holding the lock for the commit
+        let TimestampedBatch {
+            mut diff, updates, ..
+        } = {
             let mut batch_store = self.batch_store.write().await;
 
             match batch_store.remove(&batch_uuid) {
-                Some(batch) => batch.diff,
+                Some(batch) => batch,
                 None => return Err(anyhow!("No batch found with given UUID")),
             }
         };
@@ -98,76 +100,84 @@ impl PerspectiveInstance {
             )?;
         }
 
-        //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
-        //    batch_retrieval_start.elapsed(), diff.additions.len(), diff.removals.len());
-
-        //let processing_start = std::time::Instant::now();
-        let mut shared_diff = DecoratedPerspectiveDiff {
-            additions: Vec::new(),
-            removals: Vec::new(),
-        };
-        let mut local_diff = DecoratedPerspectiveDiff {
-            additions: Vec::new(),
-            removals: Vec::new(),
-        };
+        // An update whose halves are both still staged commits as an update.
+        // Later work in the batch may have dropped one half; then the other
+        // stays a plain addition or removal.
+        let updates: Vec<(LinkExpression, LinkExpression)> = updates
+            .into_iter()
+            .filter(|(old, new)| {
+                let (Some(r), Some(a)) = (
+                    diff.removals.iter().position(|l| l == old),
+                    diff.additions.iter().position(|l| l == new),
+                ) else {
+                    return false;
+                };
+                diff.removals.remove(r);
+                diff.additions.remove(a);
+                true
+            })
+            .collect();
 
         let mut persist_diff = PerspectiveDiff::empty();
+        // Only Shared links reach the link language.
+        let mut shared_diff = PerspectiveDiff::empty();
+        // Additions and removals, published as ADDED / REMOVED.
+        let mut published = DecoratedPerspectiveDiff {
+            additions: Vec::new(),
+            removals: Vec::new(),
+        };
 
-        // Process additions
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
             let signed_expr = create_signed_expression(link.data.normalize(), context)?;
             let mut stored = LinkExpression::from(signed_expr);
             stored.status = Some(status.clone());
             persist_diff.additions.push(stored.clone());
-            let decorated = DecoratedLinkExpression::from((stored, status.clone()));
-
-            match status {
-                LinkStatus::Shared => shared_diff.additions.push(decorated),
-                LinkStatus::Local => local_diff.additions.push(decorated),
+            if status == LinkStatus::Shared {
+                shared_diff.additions.push(stored.clone());
             }
+            published
+                .additions
+                .push(DecoratedLinkExpression::from((stored, status)));
         }
 
-        // Process removals
         for link in diff.removals {
             let status = link.status.clone().unwrap_or(LinkStatus::Shared);
             persist_diff.removals.push(link.clone());
-            let decorated = DecoratedLinkExpression::from((link, status.clone()));
-            match status {
-                LinkStatus::Shared => shared_diff.removals.push(decorated),
-                LinkStatus::Local => local_diff.removals.push(decorated),
+            if status == LinkStatus::Shared {
+                shared_diff.removals.push(link.clone());
             }
+            published
+                .removals
+                .push(DecoratedLinkExpression::from((link, status)));
         }
 
-        //log::info!("🔄 BATCH COMMIT: Link processing took {:?} - shared: {} add/{} rem, local: {} add/{} rem",
-        //    processing_start.elapsed(),
-        //    shared_diff.additions.len(), shared_diff.removals.len(),
-        //    local_diff.additions.len(), local_diff.removals.len());
+        // Both halves of an update carry the stored status `update_link` gave them.
+        let mut combined_diff = published.clone();
+        let mut updated = Vec::new();
+        for (old, new) in updates {
+            let status = new.status.clone().unwrap_or_default();
+            persist_diff.removals.push(old.clone());
+            persist_diff.additions.push(new.clone());
+            if status == LinkStatus::Shared {
+                shared_diff.removals.push(old.clone());
+                shared_diff.additions.push(new.clone());
+            }
+            let old = DecoratedLinkExpression::from((old, status.clone()));
+            let new = DecoratedLinkExpression::from((new, status));
+            combined_diff.removals.push(old.clone());
+            combined_diff.additions.push(new.clone());
+            updated.push((old, new));
+        }
 
         // The shared changes go to the link language, if there is one.
         let shared_changed = !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty();
         let link_language_diff = if shared_changed && self.has_link_language().await {
-            Some(PerspectiveDiff {
-                additions: shared_diff
-                    .additions
-                    .iter()
-                    .map(|l| l.clone().into())
-                    .collect(),
-                removals: shared_diff
-                    .removals
-                    .iter()
-                    .map(|l| l.clone().into())
-                    .collect(),
-            })
+            Some(shared_diff)
         } else {
             None
         };
 
-        // Create combined diff for prolog update, SPARQL store update, and return value
-        let mut combined_diff = DecoratedPerspectiveDiff {
-            additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
-            removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
-        };
         let changed = !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty();
 
         {
@@ -189,8 +199,9 @@ impl PerspectiveInstance {
             // The SPARQL store must be updated first so any subscription re-checks
             // triggered by update_prolog_engines() see the committed batch state.
             if changed {
-                self.write_link_diff(&persist_diff)?
-                    .fold_into(&mut combined_diff);
+                let effects = self.write_link_diff(&persist_diff)?;
+                effects.fold_into(&mut combined_diff);
+                effects.fold_into(&mut published);
             }
         }
 
@@ -199,15 +210,14 @@ impl PerspectiveInstance {
             // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(combined_diff.clone()).await;
 
-            // Publish link-added/-removed/-updated to WS subscribers.
-            // The single-mutation paths (add_link / link_mutations /
-            // diff_from_link_language) publish their diff synchronously before
-            // spawning the prolog update, and spawn_prolog_facts_update
-            // deliberately skips publishing to avoid double-delivery on those
-            // paths. commit_batch never went through that publish step, so
-            // batched diffs were never reaching WS subscribers — that's what
-            // this call restores.
-            self.pubsub_publish_diff(&combined_diff).await;
+            // Publish link-added/-removed/-updated to WS subscribers. The
+            // single-mutation paths publish their own diff, and
+            // spawn_prolog_facts_update deliberately does not (no double
+            // delivery there), so a batch must publish here or its links never
+            // reach WS subscribers. Updates go out as `link-updated`, not as a
+            // removal plus an addition.
+            self.pubsub_publish_diff(&published).await;
+            self.publish_link_updates(&updated).await;
         }
 
         //log::info!("🔄 BATCH COMMIT: Total batch commit took {:?}", commit_start.elapsed());
