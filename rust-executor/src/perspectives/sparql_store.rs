@@ -946,6 +946,10 @@ pub struct SparqlStore {
     store: Arc<Store>,
     /// Serializes link mutations and clear across every clone of this store.
     writer: Arc<Mutex<()>>,
+    /// Test-only: every read query's text, in order, shared across clones, so a test can
+    /// assert which store queries a pipeline ran (see [`SparqlStore::queries_run`]).
+    #[cfg(test)]
+    query_log: Arc<Mutex<Vec<String>>>,
 }
 
 /// The SELECT behind [`SparqlStore::get_all_links`] and other link reads that
@@ -1011,6 +1015,8 @@ impl SparqlStore {
         Ok(SparqlStore {
             store: Arc::new(store),
             writer: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            query_log: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -1924,6 +1930,11 @@ impl SparqlStore {
         hydrate_target_vars: bool,
     ) -> Result<String, Error> {
         validate_readonly_query(query_string)?;
+        #[cfg(test)]
+        self.query_log
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store query log lock poisoned"))?
+            .push(query_string.to_string());
 
         let results = self
             .sparql_evaluator()
@@ -2209,6 +2220,15 @@ impl SparqlStore {
         }
         tx.commit()?;
         Ok(metadata_links.len())
+    }
+
+    /// Test-only: the read queries this store (and its clones) ran so far, in order.
+    #[cfg(test)]
+    pub(crate) fn queries_run(&self) -> Vec<String> {
+        self.query_log
+            .lock()
+            .map(|log| log.clone())
+            .unwrap_or_default()
     }
 
     /// Store `link` without refusing a link in the metadata vocabulary: the

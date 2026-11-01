@@ -104,7 +104,7 @@ pub(super) fn file_type(i: usize) -> &'static str {
     }
 }
 
-fn link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
+pub(super) fn link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
     LinkExpression {
         author: "did:key:test".to_string(),
         timestamp: ts.to_string(),
@@ -123,7 +123,7 @@ fn link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression
 }
 
 /// Instance `i`'s links' timestamp: one second apart, in `i` order.
-fn ts(i: usize) -> String {
+pub(super) fn ts(i: usize) -> String {
     format!(
         "2026-01-01T{:02}:{:02}:{:02}.000Z",
         i / 3600,
