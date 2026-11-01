@@ -69,7 +69,7 @@ export class Perspective {
      * and the target of that link is what you are looking for.
      */
     getSingleTarget(query: LinkQuery): string|void {
-        const foundLinks = this.get(new LinkQuery({ ...query, target: undefined }))
+        const foundLinks = this.get({ ...query, target: undefined } as LinkQuery)
         if(foundLinks.length)
             return foundLinks[0].data.target
         else

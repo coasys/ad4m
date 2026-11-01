@@ -2892,6 +2892,26 @@ describe("Polymorphic relations", () => {
     expect(collection.children[1].src).toBe("cat.png");
   });
 
+  it("snapshots each included child, so it is clean and save() updates it", () => {
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.isDirty()).toBe(false);
+    expect(collection.children[0].isDirty()).toBe(false);
+    collection.children[0].text = "changed";
+    expect(collection.children[0].changedFields()).toEqual(["text"]);
+  });
+
   it("maps a child to its class by the name the class itself declares", () => {
     // The mapping is derived from `@Model({ name })`, not restated beside the
     // class list — the two cannot drift apart because there is only one of them.

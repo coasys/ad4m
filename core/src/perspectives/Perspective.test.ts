@@ -105,4 +105,8 @@ describe('Perspective', () => {
         expect(new Perspective([link]).getSingleTarget(query)).toBe(link.data.target)
         expect(query.target).toBe('literal://ignored')
     })
+
+    it('getSingleTarget() honours an explicit limit of 0, as get() does', () => {
+        expect(new Perspective([link]).getSingleTarget({ source: 'root', limit: 0 } as any)).toBeNull()
+    })
 })

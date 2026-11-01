@@ -239,16 +239,16 @@ function liftNestedProjections(includes: IncludeMap, ctor: Function | undefined)
   return out;
 }
 
-/** Snapshot each top-level instance for dirty tracking, so `save()` on any
- *  hydrated instance (query, union or subscription push) takes the update
- *  path. Only the included relations (not `$` projections) are recorded.
- *  Rows of a query by class name are base `Ad4mModel`s: nothing to track. */
-function snapshotHydrated(instances: any[], include?: IncludeMap): void {
+/** Snapshot a hydrated instance for dirty tracking, so `save()` on it (a query
+ *  row, a union row, a subscription push, or a record an `include` loaded)
+ *  takes the update path. Only the included relations (not `$` projections)
+ *  are recorded. Rows of a query by class name are base `Ad4mModel`s:
+ *  nothing to track. */
+function snapshotHydrated(instance: any, include?: IncludeMap): void {
+  if (!(instance instanceof Ad4mModel) || instance.constructor === Ad4mModel) return;
   const relations = include && Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')));
   const recorded = relations && Object.keys(relations).length > 0 ? relations : undefined;
-  for (const inst of instances) {
-    if (inst instanceof Ad4mModel && inst.constructor !== Ad4mModel) (inst as any).takeSnapshot(recorded);
-  }
+  (instance as any).takeSnapshot(recorded);
 }
 
 function jsonToModelInstance<T extends Ad4mModel>(
@@ -382,6 +382,8 @@ function jsonToModelInstance<T extends Ad4mModel>(
     }
   }
 
+  // After its relations are built, so the snapshot holds what was loaded.
+  snapshotHydrated(instance, include);
   return instance;
 }
 
@@ -1257,9 +1259,7 @@ export class Ad4mModel {
     const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
-    const instances = arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
-    snapshotHydrated(instances, include);
-    return instances;
+    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
   }
 
 
@@ -1360,12 +1360,10 @@ export class Ad4mModel {
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
     const byName = new Map(classes.map((c) => [c.getModelMetadata().className, c]));
-    const instances = arr.map((json: any) => {
+    return arr.map((json: any) => {
       const cls = byName.get(json?.[SUBJECT_CLASS_KEY]);
       return cls ? jsonToModelInstance(cls as any, perspective, json, include, properties) : json;
     });
-    snapshotHydrated(instances, include);
-    return instances;
   }
 
   /** @internal */
