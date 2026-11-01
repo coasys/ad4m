@@ -711,7 +711,7 @@ async fn a_did_scid_record_needs_a_signed_request_and_a_valid_non_bot_key_of_the
     let phone_id = t.link(&mut alice, &phone, OfferKind::Device, None).await;
     let d1 = alice.device_key(1);
     let path = format!("/v1/agents/{}", alice.did());
-    let profile = json!({ "perspective": { "links": [] } });
+    let profile = json!({ "did": alice.did(), "perspective": { "links": [] } });
     let later = t.now() + 60;
 
     // `body` as the person's PUT of its record, with a signed request by d1.

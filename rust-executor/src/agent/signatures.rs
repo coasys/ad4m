@@ -20,6 +20,13 @@ pub fn verify_string_signed_by_did(
 }
 
 pub fn verify<T: Serialize>(expr: &Expression<T>) -> Result<bool, AnyError> {
+    verify_by(expr, &expr.author)
+}
+
+/// `expr`'s signature under the `did:key` `did` instead of under its author: for an author
+/// that is not a `did:key` (a `did:scid` person), once the caller has established that `did`
+/// signs for it.
+pub fn verify_by<T: Serialize>(expr: &Expression<T>, did: &str) -> Result<bool, AnyError> {
     let sig_bytes = hex::decode(&expr.proof.signature)?;
     let timestamp = DateTime::<Utc>::from_str(&expr.timestamp).map_err(|e| {
         anyhow!(
@@ -28,7 +35,7 @@ pub fn verify<T: Serialize>(expr: &Expression<T>) -> Result<bool, AnyError> {
         )
     })?;
     let message = hash_data_and_timestamp(&expr.data, &timestamp);
-    let result = inner_verify(&expr.author, &message, &sig_bytes);
+    let result = inner_verify(did, &message, &sig_bytes);
     Ok(result)
 }
 
@@ -64,7 +71,7 @@ pub fn verify_or_false<T: Serialize>(expr: &Expression<T>, context: &str) -> boo
     }
 }
 
-pub(super) fn hash_data_and_timestamp<T: Serialize>(
+pub(crate) fn hash_data_and_timestamp<T: Serialize>(
     data: &T,
     timestamp: &DateTime<Utc>,
 ) -> Vec<u8> {

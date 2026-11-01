@@ -209,6 +209,17 @@ const EXECUTOR_STARTUP_TIMEOUT_MS = 300_000;
 /** Output lines startExecutor() includes when the executor never gets ready. */
 const STARTUP_LOG_TAIL_LINES = 50;
 
+/**
+ * The data folder `startExecutor` runs an executor in for `dataPath`: a short path under the
+ * OS temp dir (socket paths have a length limit), the same for the same `dataPath`.
+ */
+export function executorDataPath(dataPath: string): string {
+    return path.join(
+        os.tmpdir(),
+        `ad4m-${createHash('sha1').update(dataPath).digest('hex').slice(0, 12)}`,
+    );
+}
+
 export async function startExecutor(dataPath: string,
     bootstrapSeedPath: string,
     apiPort: number,
@@ -235,6 +246,8 @@ export async function startExecutor(dataPath: string,
     sharedStores: boolean = true,
     // Added to the executor's environment, e.g. `AD4M_<FLAG>` settings.
     env: Record<string, string> = {},
+    // Added to `ad4m-executor init`, e.g. `--operator <did:scid>`.
+    initArgs: string[] = [],
 ): Promise<ChildProcess> {
     if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
@@ -246,10 +259,7 @@ export async function startExecutor(dataPath: string,
     }
     const command = executorBinary();
 
-    const effectiveDataPath = path.join(
-        os.tmpdir(),
-        `ad4m-${createHash('sha1').update(dataPath).digest('hex').slice(0, 12)}`,
-    );
+    const effectiveDataPath = executorDataPath(dataPath);
 
     console.log(bootstrapSeedPath);
     console.log(dataPath);
@@ -258,7 +268,7 @@ export async function startExecutor(dataPath: string,
     }
     rmSync(dataPath, { recursive: true, force: true })
     rmSync(effectiveDataPath, { recursive: true, force: true })
-    execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
+    execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath} ${initArgs.join(' ')}`, {cwd: process.cwd()})
 
     // Shared mode for the local language-language and neighbourhood store,
     // so executors see each other's published languages and neighbourhoods
