@@ -129,6 +129,10 @@ pub struct Ad4mConfig {
     pub dynamic_class_tools: Option<bool>,
     /// Path to write PID file (for test harness cleanup)
     pub pid_file: Option<String>,
+    /// Shut down once the process that started the executor is gone (unix). For launchers and
+    /// test harnesses that may die without stopping it. Default `false`: a daemonised executor
+    /// (`nohup`, `&` from a shell that then exits) keeps running.
+    pub exit_with_parent: Option<bool>,
     /// Local DID for this SFU node in a cascade cluster.  Required if
     /// any cascade options are set; otherwise the SFU runs single-node.
     pub sfu_local_did: Option<String>,
@@ -529,6 +533,7 @@ impl Ad4mConfig {
             mcp_port: None,
             dynamic_class_tools: None,
             pid_file: None,
+            exit_with_parent: None,
             sfu_local_did: None,
             sfu_max_participants_per_node: None,
             sfu_cascade_listen: None,
