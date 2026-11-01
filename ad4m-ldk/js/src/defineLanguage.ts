@@ -15,6 +15,26 @@ import type {
     QueryRequest,
     QueryResponse,
     DID,
+    IdentitySpec,
+    TokenSpec,
+    LogPage,
+    SignedHead,
+    AppendRequest,
+    KeyIndexEntry,
+    PowParams,
+    SignedRequest,
+    VouchNote,
+    AgentRecord,
+    SignedOffer,
+    OfferOpened,
+    OfferListing,
+    Claim,
+    ClaimReceipt,
+    OfferProgress,
+    Amount,
+    TokenBalance,
+    TokenTransfer,
+    TransferPage,
 } from "./types.js";
 
 // ----- Capability sub-objects -----
@@ -80,6 +100,13 @@ export interface LanguageSpec {
     query?: PerspectiveQueryCapability;
     peers?: PeersCapability;
     telepresence?: TelepresenceCapability;
+    /** The agent language's identity interface (section 5.8 of
+     *  `docs-src/language-interface-spec.md`). The executor
+     *  calls it only on the language at `system_addresses.agent_language`. */
+    identity?: IdentitySpec;
+    /** The agent language's token interface (section 5.9 of the same spec), agent
+     *  language only. */
+    token?: TokenSpec;
 
     /** Holochain signal handler (spec §8). The runtime routes Holochain
      * signals to this export based on a DnaHash → instance map. */
@@ -133,6 +160,29 @@ export interface FlatLanguageExports {
     telepresenceSendSignal?(remoteDid: DID, payload: unknown): Promise<object>;
     telepresenceSendBroadcast?(payload: unknown): Promise<object>;
     telepresenceRegisterSignalCallback?(callback: any): Promise<void>;
+
+    // Identity (agent language only)
+    identityLog?(did: string, from: number): Promise<LogPage | null>;
+    identityHead?(did: string): Promise<SignedHead | null>;
+    identityAppend?(did: string, req: AppendRequest): Promise<SignedHead>;
+    identityKeyOwner?(multikey: string, waitSec?: number): Promise<KeyIndexEntry | null>;
+    identityPowParams?(): Promise<PowParams>;
+    identityAttachNote?(did: string, token: string, req: SignedRequest): Promise<VouchNote>;
+    identityPutAgent?(record: AgentRecord, req?: SignedRequest): Promise<void>;
+    identityOpenOffer?(offer: SignedOffer): Promise<OfferOpened>;
+    identityListOffers?(did: string, req: SignedRequest, waitSec?: number): Promise<OfferListing[]>;
+    identityCancelOffer?(did: string, offerId: string, req: SignedRequest): Promise<void>;
+    identityClaimOffer?(did: string, offerId: string, claim: Claim): Promise<ClaimReceipt>;
+    identityOfferState?(did: string, offerId: string, key: string, waitSec?: number): Promise<OfferProgress>;
+
+    // Token (agent language only)
+    tokenAssets?(): Promise<string[]>;
+    tokenBalance?(account: string, asset: string): Promise<TokenBalance>;
+    tokenSend?(to: string, asset: string, amount: Amount, memo?: string): Promise<TokenTransfer>;
+    tokenReceived?(cursor: string | null, limit: number): Promise<TransferPage>;
+    /** The runtime registers its sink here; it forwards each transfer as the
+     *  `token-transfer` language signal (`tokenTransferSignal`). */
+    tokenOnTransfer?(callback: (transfer: TokenTransfer) => void): void;
 
     // Holochain signal
     handleHolochainSignal?(signal: unknown): void | Promise<void>;
@@ -224,6 +274,33 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
         if (t.sendSignal) out.telepresenceSendSignal = t.sendSignal.bind(t);
         if (t.sendBroadcast) out.telepresenceSendBroadcast = t.sendBroadcast.bind(t);
         if (t.registerSignalCallback) out.telepresenceRegisterSignalCallback = t.registerSignalCallback.bind(t);
+    }
+
+    // Identity
+    if (spec.identity) {
+        const i = spec.identity;
+        out.identityLog = i.log.bind(i);
+        out.identityHead = i.head.bind(i);
+        out.identityAppend = i.append.bind(i);
+        out.identityKeyOwner = i.keyOwner.bind(i);
+        out.identityPowParams = i.powParams.bind(i);
+        out.identityAttachNote = i.attachNote.bind(i);
+        out.identityPutAgent = i.putAgent.bind(i);
+        out.identityOpenOffer = i.openOffer.bind(i);
+        out.identityListOffers = i.listOffers.bind(i);
+        out.identityCancelOffer = i.cancelOffer.bind(i);
+        out.identityClaimOffer = i.claimOffer.bind(i);
+        out.identityOfferState = i.offerState.bind(i);
+    }
+
+    // Token
+    if (spec.token) {
+        const t = spec.token;
+        out.tokenAssets = t.assets.bind(t);
+        out.tokenBalance = t.balance.bind(t);
+        out.tokenSend = t.send.bind(t);
+        out.tokenReceived = t.received.bind(t);
+        out.tokenOnTransfer = t.onTransfer.bind(t);
     }
 
     if (spec.handleHolochainSignal) {

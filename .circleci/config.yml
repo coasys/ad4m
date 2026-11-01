@@ -550,6 +550,7 @@ jobs:
           command: |
             cargo test --release -p ad4m-hash-chain --all-features
             cargo test --release -p ad4m-identity-core --all-features
+            cargo test --release -p identity-store
           no_output_timeout: 30m
       - run:
           # ad4m-ldk/rust is its own workspace, so the commands above skip it. Here

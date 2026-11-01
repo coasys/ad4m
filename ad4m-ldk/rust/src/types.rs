@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+// The identity and token wire types live in their own
+// modules and are part of the language data shapes.
+pub use crate::identity::*;
+pub use crate::token::*;
+
 pub type Did = String;
 pub type Address = String;
 
@@ -14,6 +19,15 @@ pub struct ExpressionProof {
     pub valid: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invalid: Option<bool>,
+    /// `proof.record`: the agent record a `did:scid` profile came in. The agent language's
+    /// `expressionGet` answers a `did:scid` agent's profile as the record stores it, plus this
+    /// field and nothing else, so a reader can check the record itself at its anchor: removing
+    /// `proof.record` gives back the record's `profile` exactly, and `sig` is the record
+    /// signature over `{profile, version, anchor}` (`coasys:link`) by `proof.key`, the record's
+    /// `signedBy`. Absent on every other expression. See
+    /// [`AgentRecordProof`](crate::identity::AgentRecordProof).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<crate::identity::AgentRecordProof>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
