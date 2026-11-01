@@ -201,6 +201,9 @@ pub const LINK_DOMAIN: &str = "coasys:link";
 pub const HEAD_DOMAIN: &str = "coasys:head";
 /// The signing domain of signed requests to the store.
 pub const REQUEST_DOMAIN: &str = "coasys:store-request";
+/// The signing domain of key statements: a device key's login or renewal on an executor, and an
+/// executor's sign-in to the hosting index.
+pub const SESSION_DOMAIN: &str = "coasys:session";
 
 /// What a store signs for a log's head under [`HEAD_DOMAIN`]: `store` is the
 /// store key's `did:key`. The store signs it; executors check it against `identity.storeKeys`.

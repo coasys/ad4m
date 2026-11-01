@@ -9,7 +9,7 @@ use ad4m_identity_core::build;
 use ad4m_identity_core::domain::{check_domain, Scheme, LABELS, SIGNING_DOMAINS};
 use ad4m_identity_core::{
     signing_bytes, verify_signed, ChainError, DomainError, FoldError, HeadStatement, Proof,
-    KEL_DOMAIN,
+    KEL_DOMAIN, SESSION_DOMAIN,
 };
 use common::*;
 use serde_json::{json, Value};
@@ -200,4 +200,39 @@ fn a_head_statement_verifies_only_under_a_trusted_key() {
         ..statement
     };
     assert!(!no_did.verify(&sig, &[mk(&store)]));
+}
+
+/// A key statement signs under `coasys:session` (a domain-field row of the registry): its bytes
+/// are JCS with the domain, and its signature holds under no other domain.
+#[test]
+fn a_key_statement_signs_under_the_session_domain_only() {
+    let row = ad4m_identity_core::domain::domain(SESSION_DOMAIN).expect("a registry row");
+    assert_eq!(row.scheme, Scheme::DomainField);
+    let key = sk("device");
+    let statement = json!({
+        "v": 1,
+        "purpose": "login",
+        "scid": "did:scid:coasys:1:QmS",
+        "key": mk(&key),
+        "executor": "did:key:z6MkExecutor",
+        "challenge": "c2",
+        "client": {"kind": "native"},
+        "issuedAt": 7,
+    });
+    let bytes = signing_bytes(SESSION_DOMAIN, &statement).unwrap();
+    assert_eq!(
+        String::from_utf8(bytes).unwrap(),
+        format!(
+            r#"{{"challenge":"c2","client":{{"kind":"native"}},"domain":"coasys:session","executor":"did:key:z6MkExecutor","issuedAt":7,"key":"{}","purpose":"login","scid":"did:scid:coasys:1:QmS","v":1}}"#,
+            mk(&key)
+        )
+    );
+    let sig = build::sign_domain(SESSION_DOMAIN, &statement, &key).unwrap();
+    assert!(verify_signed(SESSION_DOMAIN, &statement, &mk(&key), &sig));
+    for other in OTHER {
+        assert!(
+            !verify_signed(other, &statement, &mk(&key), &sig),
+            "{other}"
+        );
+    }
 }

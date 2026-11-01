@@ -141,6 +141,8 @@ pub struct IdentityService {
     pub store_url: Option<String>,
     /// DID resolution (`identity.resolve`) over the same cache and backend.
     pub resolver: Arc<super::resolver::Resolver>,
+    /// The open challenges of key logins (`user.sessionChallenge`).
+    pub challenges: super::key_login::Challenges,
 }
 
 impl IdentityService {
@@ -645,6 +647,7 @@ mod tests {
             backend,
             cache,
             store_url: None,
+            challenges: Default::default(),
         }
     }
 
@@ -770,6 +773,7 @@ mod tests {
             backend,
             cache,
             store_url: None,
+            challenges: Default::default(),
         };
         let scid = ours.scid();
         let did = did_of(&scid);
@@ -933,6 +937,7 @@ mod tests {
             backend: backend.clone(),
             cache,
             store_url: None,
+            challenges: Default::default(),
         };
         let incept = incept_listing(&agent, 53);
         let cosigned = service.cosign_incept(&agent, &incept).await.unwrap();

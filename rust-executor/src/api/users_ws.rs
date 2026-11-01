@@ -290,10 +290,15 @@ async fn request_verification(
 }
 
 /// user.logout — revokes the caller's own grant: its token stops working and its open
-/// sockets close. The user's other logins keep working.
+/// sockets close. Every session a token opened has one: a user's login, an app's grant, a key
+/// login (the operator role included). The caller's other sessions keep working, and a key
+/// login's device key stays valid. 400 for a session without a grant (the admin credential,
+/// the loopback operator, an anonymous caller).
 async fn logout(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let grant = ctx.session.user_grant().ok_or_else(|| {
-        WsRpcError::bad_request("user.logout ends a user session; this session is not one")
+    let grant = ctx.session.grant().ok_or_else(|| {
+        WsRpcError::bad_request(
+            "user.logout ends a session a token opened; this session has no token",
+        )
     })?;
     crate::agent::grants::Grants::global()
         .revoke(std::slice::from_ref(grant))
@@ -369,8 +374,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Cap(
             RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
         ));
-    // Open: a login ends itself whatever its capabilities. The handler checks the session's
-    // principal. Revokes the caller's user token; 400 for any other session. Answers `true`.
+    // Open: a session ends itself whatever its capabilities. Revokes the caller's own grant
+    // (a login, an app, a key session); 400 for a session without one. Answers `true`.
     map.method::<NoParams, bool>("user.logout", logout)
         .guard(Guard::Open);
     // Revokes every token of a user issued up to now, logins and apps. AGENT_UPDATE, as
@@ -770,16 +775,22 @@ mod session_revocation_tests {
         assert!(open(&phone).is_ok());
     }
 
+    // Every session a token opened logs out of its own grant; the admin credential has none.
     #[tokio::test]
-    async fn logout_is_a_bad_request_for_a_session_without_a_user_token() {
+    async fn logout_ends_an_apps_grant_and_is_a_bad_request_for_the_admin_credential() {
         setup();
+        let (code, message) = call("user.logout", json!({}), ctx(ADMIN))
+            .await
+            .unwrap_err();
+        assert_eq!(code, 400, "{message}");
+        assert!(message.contains("no token"), "{message}");
+
         let app = app_token("logout app");
-        for caller in [ctx(ADMIN), ctx(&app)] {
-            let (code, message) = call("user.logout", json!({}), caller).await.unwrap_err();
-            assert_eq!(code, 400, "{message}");
-            assert!(message.contains("user session"), "{message}");
-        }
-        assert!(open(&app).is_ok(), "the app's grant stays");
+        let other = app_token("other app");
+        let reply = call("user.logout", json!({}), ctx(&app)).await.unwrap();
+        assert_eq!(reply, json!(true));
+        assert_eq!(open(&app).unwrap_err(), AuthError::Revoked);
+        assert!(open(&other).is_ok(), "another app's grant stays");
     }
 
     #[tokio::test]

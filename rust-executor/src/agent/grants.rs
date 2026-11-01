@@ -12,17 +12,25 @@
 //! [`CancellationToken`] that fires when the grant ends: every socket of a session watches a
 //! child of it, so a revocation closes the grant's sockets at once.
 //!
-//! Two paths mint tokens, and both insert a grant through [`mint`]: the capability flow of an
-//! app (a grant on the main agent) and a user's login (an auto-approved grant on the user's
-//! managed agent). The admin credential is not a token and has no grant.
+//! Three paths mint tokens, and all insert a grant through [`mint`] or [`mint_key_grant`]: the
+//! capability flow of an app (a grant on the main agent), a user's login (an auto-approved
+//! grant on the user's managed agent) and a login with a device key (`identity::key_login`): a
+//! grant bound to that key ([`KeyBinding`]), with the operator role ([`GrantRole::Operator`])
+//! or on the agent that speaks for the key's identity. The admin credential is not a token and
+//! has no grant.
+//!
+//! A key-bound grant lives one hour and is renewed ([`Grants::renew`]): its expiry is atomic,
+//! so sockets opened before a renewal stay open. It ends when its key stops being valid in the
+//! identity's log ([`Grants::revoke_key`]) and on log out everywhere ([`Grants::revoke_identity`]).
 
 use super::capabilities::{
     read_stored_claims, AuthInfo, Capability, AGENT_AUTH_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
 use super::session::{AuthError, TokenId};
 use super::AgentContext;
-use crate::db::{Ad4mDb, GrantRow};
+use crate::db::{Ad4mDb, GrantKeyRow, GrantRow};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -45,11 +53,87 @@ pub struct LiveGrant {
     pub caps: Vec<Capability>,
     /// The app that holds the token: its metadata and requested capabilities.
     pub auth: AuthInfo,
-    /// The token's expiry (Unix seconds).
-    pub expires_at: u64,
+    /// The token's expiry (Unix seconds). A renewal of a key-bound grant moves it.
+    expires_at: AtomicU64,
     pub created_at: u64,
     /// Fires when the grant is revoked or removed.
     pub ended: CancellationToken,
+    /// What the grant carries: one agent, or the operator role.
+    pub role: GrantRole,
+    /// The device key a key login made the grant for. `None` for app approvals and password
+    /// logins.
+    pub key: Option<KeyBinding>,
+}
+
+/// What a grant carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrantRole {
+    /// A grant on one agent: the main agent, or a managed agent.
+    Agent,
+    /// The operator role, carried by a grant: `Session::open` maps it to `Principal::Operator`.
+    /// Only a key login of the operator record's identity mints one.
+    Operator,
+}
+
+/// The device key behind a grant that a key login made.
+#[derive(Debug)]
+pub struct KeyBinding {
+    /// The identity: `did:scid:coasys:1:…`.
+    pub scid: String,
+    /// The device key that signed the login: its multikey (`z6Mk…`).
+    pub key: String,
+    /// Its id in the key log (`d2`).
+    pub key_id: String,
+    /// The trusted seq of the log at the last valid verdict.
+    head_seq: AtomicU64,
+    /// When the key was last found valid (Unix seconds).
+    checked_at: AtomicU64,
+}
+
+impl KeyBinding {
+    pub fn new(scid: String, key: String, key_id: String, head_seq: u64, checked_at: u64) -> Self {
+        KeyBinding {
+            scid,
+            key,
+            key_id,
+            head_seq: AtomicU64::new(head_seq),
+            checked_at: AtomicU64::new(checked_at),
+        }
+    }
+
+    pub fn head_seq(&self) -> u64 {
+        self.head_seq.load(Ordering::SeqCst)
+    }
+
+    pub fn checked_at(&self) -> u64 {
+        self.checked_at.load(Ordering::SeqCst)
+    }
+
+    /// Records a valid verdict at `head_seq`, read at `at`.
+    pub fn checked(&self, head_seq: u64, at: u64) {
+        self.head_seq.store(head_seq, Ordering::SeqCst);
+        self.checked_at.fetch_max(at, Ordering::SeqCst);
+    }
+
+    fn row(&self) -> GrantKeyRow {
+        GrantKeyRow {
+            scid: self.scid.clone(),
+            signing_key: self.key.clone(),
+            key_id: self.key_id.clone(),
+            head_seq: self.head_seq(),
+            checked_at: self.checked_at(),
+        }
+    }
+
+    fn from_row(row: GrantKeyRow) -> Self {
+        KeyBinding::new(
+            row.scid,
+            row.signing_key,
+            row.key_id,
+            row.head_seq,
+            row.checked_at,
+        )
+    }
 }
 
 impl LiveGrant {
@@ -75,10 +159,46 @@ impl LiveGrant {
             did,
             caps,
             auth,
-            expires_at,
+            expires_at: AtomicU64::new(expires_at),
             created_at,
             ended: CancellationToken::new(),
+            role: GrantRole::Agent,
+            key: None,
         }
+    }
+
+    /// This grant with the operator role, on the main agent, with every capability.
+    pub fn operator_role(self) -> LiveGrant {
+        LiveGrant {
+            role: GrantRole::Operator,
+            agent: AgentContext::main_agent(),
+            did: String::new(),
+            caps: vec![super::capabilities::ALL_CAPABILITY.clone()],
+            ..self
+        }
+    }
+
+    /// This grant with `caps` as its capabilities.
+    pub fn with_caps(self, caps: Vec<Capability>) -> LiveGrant {
+        LiveGrant { caps, ..self }
+    }
+
+    /// This grant bound to the device key `key`.
+    pub fn bound_to(self, key: KeyBinding) -> LiveGrant {
+        LiveGrant {
+            key: Some(key),
+            ..self
+        }
+    }
+
+    /// The token's expiry (Unix seconds).
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at.load(Ordering::SeqCst)
+    }
+
+    /// Whether the grant carries the operator role.
+    pub fn is_operator(&self) -> bool {
+        self.role == GrantRole::Operator
     }
 
     /// The name of the app that holds the token.
@@ -94,7 +214,9 @@ impl LiveGrant {
     /// Whether the token is past its expiry at `now`, beyond the leeway that JWT validation
     /// allows.
     pub fn is_expired_at(&self, now: u64) -> bool {
-        now > self.expires_at.saturating_add(TOKEN_EXPIRY_LEEWAY_SECONDS)
+        now > self
+            .expires_at()
+            .saturating_add(TOKEN_EXPIRY_LEEWAY_SECONDS)
     }
 
     /// `Ok` while the grant lets its token act: not ended and not expired.
@@ -126,8 +248,10 @@ impl LiveGrant {
             agent_did: self.agent.managed_did().map(str::to_string),
             auth_info: serde_json::to_string(&self.auth).map_err(|e| e.to_string())?,
             revoked: self.is_ended(),
-            expires_at: self.expires_at,
+            expires_at: self.expires_at(),
             created_at: self.created_at,
+            operator: self.is_operator(),
+            key: self.key.as_ref().map(KeyBinding::row),
         })
     }
 
@@ -140,7 +264,7 @@ impl LiveGrant {
             Some(did) => (AgentContext::managed(did.clone()), did),
             None => (AgentContext::main_agent(), String::new()),
         };
-        let grant = LiveGrant::new(
+        let mut grant = LiveGrant::new(
             TokenId(row.id),
             row.request_id,
             agent,
@@ -149,6 +273,12 @@ impl LiveGrant {
             row.expires_at,
             row.created_at,
         );
+        if row.operator {
+            grant = grant.operator_role();
+        }
+        if let Some(key) = row.key {
+            grant = grant.bound_to(KeyBinding::from_row(key));
+        }
         if row.revoked {
             grant.ended.cancel();
         }
@@ -180,9 +310,19 @@ impl LiveGrant {
             did: self.did.clone(),
             caps: self.caps.clone(),
             auth: self.auth.clone(),
-            expires_at,
+            expires_at: AtomicU64::new(expires_at),
             created_at: self.created_at,
             ended: self.ended.clone(),
+            role: self.role,
+            key: self.key.as_ref().map(|k| {
+                KeyBinding::new(
+                    k.scid.clone(),
+                    k.key.clone(),
+                    k.key_id.clone(),
+                    k.head_seq(),
+                    k.checked_at(),
+                )
+            }),
         }
     }
 }
@@ -329,6 +469,91 @@ impl Grants {
         grants
     }
 
+    /// Revokes every grant bound to the device key `key` (a multikey): its key stopped being
+    /// valid in its identity's log. Returns how many were active.
+    pub fn revoke_key(&self, key: &str) -> Result<usize, GrantError> {
+        self.revoke_where(|g| g.key.as_ref().is_some_and(|k| k.key == key))
+    }
+
+    /// Revokes every grant bound to a key of the identity `scid` (`did:scid:…`), except the
+    /// grant `keep` and grants made at or after `before` (Unix seconds). Returns how many were
+    /// active.
+    pub fn revoke_identity(
+        &self,
+        scid: &str,
+        keep: Option<&TokenId>,
+        before: Option<u64>,
+    ) -> Result<usize, GrantError> {
+        self.revoke_where(|g| {
+            g.key.as_ref().is_some_and(|k| k.scid == scid)
+                && Some(&g.id) != keep
+                && before.is_none_or(|before| g.created_at < before)
+        })
+    }
+
+    /// Revokes every grant on `agent`, except the grant `keep` and grants made at or after
+    /// `before`. Returns how many were active.
+    pub fn revoke_agent_except(
+        &self,
+        agent: &AgentContext,
+        keep: Option<&TokenId>,
+        before: Option<u64>,
+    ) -> Result<usize, GrantError> {
+        self.revoke_where(|g| {
+            g.agent == *agent
+                && g.role == GrantRole::Agent
+                && Some(&g.id) != keep
+                && before.is_none_or(|before| g.created_at < before)
+        })
+    }
+
+    /// Revokes the unexpired grants that `matches`, ended ones included (a failed write left
+    /// them active in the database). Returns how many were active.
+    fn revoke_where(&self, matches: impl Fn(&LiveGrant) -> bool) -> Result<usize, GrantError> {
+        let now = now();
+        let grants: Vec<Arc<LiveGrant>> = read(&self.live)
+            .values()
+            .filter(|g| !g.is_expired_at(now) && matches(g))
+            .cloned()
+            .collect();
+        if grants.is_empty() {
+            return Ok(0);
+        }
+        let active = grants.iter().filter(|g| !g.is_ended()).count();
+        self.revoke(&grants).map(|_| active)
+    }
+
+    /// The active, unexpired grants bound to a device key: what the re-check of keys reads.
+    pub fn key_bound(&self) -> Vec<Arc<LiveGrant>> {
+        read(&self.live)
+            .values()
+            .filter(|g| g.key.is_some() && g.holds().is_ok())
+            .cloned()
+            .collect()
+    }
+
+    /// Renews the key-bound grant `id` until `until` (Unix seconds) on a valid verdict of its
+    /// key at `head_seq`, read at `checked_at`. The grant keeps its id, so its open sockets
+    /// stay open. `NotFound` for a grant that does not hold or has no key.
+    pub fn renew(
+        &self,
+        id: &TokenId,
+        until: u64,
+        head_seq: u64,
+        checked_at: u64,
+    ) -> Result<Arc<LiveGrant>, GrantError> {
+        let grant = self.get(id).ok_or(GrantError::NotFound)?;
+        let key = grant.key.as_ref().ok_or(GrantError::NotFound)?;
+        with_db(|db| {
+            db.renew_grant(&id.0, until, head_seq, checked_at)
+                .map_err(|e| e.to_string())
+        })
+        .map_err(GrantError::Store)?;
+        key.checked(head_seq, checked_at);
+        grant.expires_at.fetch_max(until, Ordering::SeqCst);
+        Ok(grant)
+    }
+
     /// Adds the grants that `db` holds, after it deletes the rows of expired tokens.
     pub fn load(&self, db: &Ad4mDb) -> Result<(), String> {
         db.delete_grants_expired_before(prune_cutoff(now()))
@@ -408,6 +633,72 @@ pub fn mint(
     );
     let grant = Grants::global().insert(grant)?;
     Ok((token, grant))
+}
+
+/// What a key login grants: the operator role, or one agent with these capabilities.
+#[derive(Clone, Debug)]
+pub enum KeyGrant {
+    Operator,
+    Agent {
+        agent: AgentContext,
+        caps: Vec<Capability>,
+    },
+}
+
+/// Signs a token for the app `auth`, valid for `valid_for` seconds, whose grant is bound to
+/// `key` and carries `what`, and inserts the grant. Fails, handing out no token, when the grant
+/// is not stored. The grant's capabilities are kept in its `auth`, so a restart reads them back.
+pub fn mint_key_grant(
+    what: KeyGrant,
+    mut auth: AuthInfo,
+    key: KeyBinding,
+    valid_for: u64,
+) -> Result<(String, Arc<LiveGrant>), String> {
+    let (agent, caps) = match &what {
+        KeyGrant::Operator => (
+            AgentContext::main_agent(),
+            vec![super::capabilities::ALL_CAPABILITY.clone()],
+        ),
+        KeyGrant::Agent { agent, caps } => (agent.clone(), caps.clone()),
+    };
+    auth.capabilities = Some(caps.clone());
+    let (token, claims) = super::capabilities::token::sign_token(
+        auth.app_name.clone(),
+        valid_for,
+        agent.managed_did().map(str::to_string),
+    )
+    .map_err(|e| e.to_string())?;
+    let did = agent.managed_did().unwrap_or_default().to_string();
+    let id = claims.nonce().to_string();
+    let mut grant = LiveGrant::new(
+        TokenId(id.clone()),
+        id,
+        agent,
+        did,
+        auth,
+        claims.expires_at(),
+        claims.issued_at(),
+    )
+    .with_caps(caps)
+    .bound_to(key);
+    if matches!(what, KeyGrant::Operator) {
+        grant = grant.operator_role();
+    }
+    let grant = Grants::global().insert(grant)?;
+    Ok((token, grant))
+}
+
+/// A token for the key-bound grant `grant` after its renewal: the same id (`nonce`), valid for
+/// `valid_for` seconds.
+pub fn renewed_token(grant: &LiveGrant, valid_for: u64) -> Result<String, String> {
+    super::capabilities::token::sign_token_with_id(
+        grant.auth.app_name.clone(),
+        valid_for,
+        grant.agent.managed_did().map(str::to_string),
+        Some(grant.id.0.clone()),
+    )
+    .map(|(token, _)| token)
+    .map_err(|e| e.to_string())
 }
 
 /// Fills the executor's grants at start, after the database opens and before the API serves:
@@ -655,6 +946,7 @@ mod tests {
             revoked: false,
             expires_at,
             created_at: 0,
+            ..GrantRow::default()
         };
         db.add_grant(&row("expired", now() - TOKEN_EXPIRY_LEEWAY_SECONDS - 10))
             .unwrap();

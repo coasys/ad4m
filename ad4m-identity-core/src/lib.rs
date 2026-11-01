@@ -37,7 +37,7 @@ pub use document::{
 };
 pub use domain::{
     signing_bytes, verify_signed, DomainError, HeadStatement, HEAD_DOMAIN, LINK_DOMAIN,
-    REQUEST_DOMAIN,
+    REQUEST_DOMAIN, SESSION_DOMAIN,
 };
 pub use event::{BotScope, DeviceKey, Event, KeyLife, Kind, Op, BOT_ACTIONS};
 pub use keys::{

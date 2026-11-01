@@ -41,6 +41,8 @@ import type { DeviceKeys } from "./DeviceKeys";
 import type { DeviceView } from "./DeviceView";
 import type { DidResolutionResult } from "./DidResolutionResult";
 import type { EmbedRequest } from "./EmbedRequest";
+import type { EndAllSessionsParams } from "./EndAllSessionsParams";
+import type { EndedSessions } from "./EndedSessions";
 import type { EntanglementProof } from "./EntanglementProof";
 import type { EntanglementProofPreflightRequest } from "./EntanglementProofPreflightRequest";
 import type { EntanglementProofsWrapper } from "./EntanglementProofsWrapper";
@@ -68,6 +70,7 @@ import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
 import type { JoinStatus } from "./JoinStatus";
 import type { JoinStatusParams } from "./JoinStatusParams";
 import type { JsonValue } from "./serde_json/JsonValue";
+import type { KeySessionResult } from "./KeySessionResult";
 import type { LanguageAddressParams } from "./LanguageAddressParams";
 import type { LanguageHandle } from "./LanguageHandle";
 import type { LanguageListParams } from "./LanguageListParams";
@@ -79,6 +82,7 @@ import type { LockAgentRequest } from "./LockAgentRequest";
 import type { LogParams } from "./LogParams";
 import type { LogTail } from "./LogTail";
 import type { LogTailParams } from "./LogTailParams";
+import type { LoginWithKeyParams } from "./LoginWithKeyParams";
 import type { Model } from "./Model";
 import type { NeighbourhoodBroadcastParams } from "./NeighbourhoodBroadcastParams";
 import type { NeighbourhoodOnlineStatusParams } from "./NeighbourhoodOnlineStatusParams";
@@ -146,6 +150,8 @@ import type { ProposeOutcome } from "./ProposeOutcome";
 import type { PublishLanguageRequest } from "./PublishLanguageRequest";
 import type { PublishNeighbourhoodRequest } from "./PublishNeighbourhoodRequest";
 import type { PublishParams } from "./PublishParams";
+import type { RenewSessionParams } from "./RenewSessionParams";
+import type { RenewedSession } from "./RenewedSession";
 import type { RequestCapabilityRequest } from "./RequestCapabilityRequest";
 import type { RequestPaymentRequest } from "./RequestPaymentRequest";
 import type { ResetLogParams } from "./ResetLogParams";
@@ -166,6 +172,8 @@ import type { RuntimeUnytSendHotParams } from "./RuntimeUnytSendHotParams";
 import type { RuntimeUnytWalletHistoryParams } from "./RuntimeUnytWalletHistoryParams";
 import type { RuntimeUpdateNotificationParams } from "./RuntimeUpdateNotificationParams";
 import type { SentMessage } from "./SentMessage";
+import type { SessionChallenge } from "./SessionChallenge";
+import type { SessionInfo } from "./SessionInfo";
 import type { SetConfigParams } from "./SetConfigParams";
 import type { SetConfigResult } from "./SetConfigResult";
 import type { SetHostRatesRequest } from "./SetHostRatesRequest";
@@ -190,7 +198,9 @@ import type { SfuSendDataParams } from "./SfuSendDataParams";
 import type { SfuSetConfigParams } from "./SfuSetConfigParams";
 import type { SfuStatus } from "./SfuStatus";
 import type { SignMessageRequest } from "./SignMessageRequest";
+import type { SignSessionStatementParams } from "./SignSessionStatementParams";
 import type { SignedHead } from "./SignedHead";
+import type { SignedKeyStatement } from "./SignedKeyStatement";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
 import type { UnytVersionInfo } from "./UnytVersionInfo";
@@ -232,6 +242,7 @@ export interface RpcMethods {
   "agent.requestCapability": { params: RequestCapabilityRequest; result: string };
   "agent.revokeToken": { params: AgentRevokeTokenParams; result: Array<Apps> };
   "agent.sign": { params: SignMessageRequest; result: AgentSignature };
+  "agent.signSessionStatement": { params: SignSessionStatementParams; result: SignedKeyStatement };
   "agent.status": { params: Record<string, never>; result: AgentStatus };
   "agent.unlock": { params: UnlockAgentRequest; result: AgentStatus };
   "agent.updateProfile": { params: UpdateProfileRequest; result: Agent };
@@ -413,14 +424,19 @@ export interface RpcMethods {
   "sfu.stopRoom": { params: SfuRoomParams; result: boolean };
   "user.create": { params: CreateUserRequest; result: UserCreationResult };
   "user.credits": { params: UsersSetCreditsParams; result: boolean };
+  "user.currentSession": { params: Record<string, never>; result: SessionInfo };
   "user.emailTest": { params: UsersEmailTestParams; result: UsersEmailTestResult };
+  "user.endAllSessions": { params: EndAllSessionsParams; result: EndedSessions };
   "user.freeAccess": { params: SetUserFreeAccessRequest; result: boolean };
   "user.list": { params: Record<string, never>; result: Array<UserStatistics> };
   "user.login": { params: UsersLoginParams; result: string };
+  "user.loginWithKey": { params: LoginWithKeyParams; result: KeySessionResult };
   "user.logout": { params: Record<string, never>; result: boolean };
   "user.multiUserEnabled": { params: Record<string, never>; result: boolean };
+  "user.renewSession": { params: RenewSessionParams; result: RenewedSession };
   "user.requestVerification": { params: UsersRequestVerificationParams; result: VerificationRequestResult };
   "user.revokeAllSessions": { params: UsersRevokeAllSessionsParams; result: boolean };
+  "user.sessionChallenge": { params: Record<string, never>; result: SessionChallenge };
   "user.setMultiUserEnabled": { params: SetMultiUserRequest; result: boolean };
   "user.verifyEmail": { params: UsersVerifyEmailParams; result: string };
   "user.wallet": { params: UsersEmailParams; result: string };
@@ -514,6 +530,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "sfu.sfuPeerForNeighbourhood",
   "sfu.sfuPeersForNeighbourhood",
   "sfu.status",
+  "user.currentSession",
   "user.list",
   "user.multiUserEnabled",
   "user.wallet",
