@@ -1,9 +1,9 @@
 # ai_service/providers/ — agent guide
 
-Remote model servers behind three traits: `RemoteChat` (one client per model),
+Model servers behind four traits: `RemoteChat` (one client per LLM, `chat_client`),
 `audio::RemoteTranscribe` (speech to text), `embed::RemoteEmbed` (one client per embedding
-model) and `discovery::Discover` (one listing per endpoint). Local (candle/kalosm) models do not come
-through here — `LlmModel::Local` is a different thing entirely.
+model) and `discovery::Discover` (one listing per endpoint). Every model the executor uses
+comes through here: it runs none itself.
 
 ## Files
 
@@ -21,10 +21,12 @@ through here — `LlmModel::Local` is a different thing entirely.
 
 ## Entry points
 
-- `OpenAiChat::new` / `AnthropicChat::new` / `OllamaChat::new`: built once per
-  model by `AIService::build_remote_client`, owned by that model's worker thread.
-- `RemoteChat::chat` / `chat_stream`: called from that thread's loop.
-  `chat_stream` defaults to one chunk; tools on a stream only on the OpenAI-shaped client.
+- `chat_client(endpoint)`: the `OpenAiChat` / `AnthropicChat` / `OllamaChat` of the
+  endpoint's protocol, built once per model by `AIService::init_model` and held in its
+  client map (no per-model thread).
+- `RemoteChat::chat` / `chat_stream`: called concurrently through `ai_service::ChatModel`,
+  which takes a slot of the endpoint's `max_concurrent` first. `chat_stream` defaults to
+  one chunk; tools on a stream only on the OpenAI-shaped client.
 - `discovery::discover_for(kind, base_url, key, timeout)`: listing and health of an
   endpoint, also before one is saved (`ai.discoverModels`, `ai.addEndpoint`).
 
@@ -40,7 +42,7 @@ through here — `LlmModel::Local` is a different thing entirely.
   carrying tools rather than dropping them. A provider that does not translate
   `tool_choice` / `response_format` refuses a request carrying them
   (`ChatRequest::refuse_openai_options`).
-- Whether a *model* gets tools as data is `ModelApi::uses_native_tools`: the client can,
+- Whether a *model* gets tools as data is `Model::uses_native_tools(endpoint)`: the client can,
   and the model's `native_tools` flag (default on for Anthropic and Ollama, off for
   OpenAI-shaped servers) says it should.
 - Billing is the caller's. `ChatUsage` reports the provider's counts;
@@ -48,7 +50,7 @@ through here — `LlmModel::Local` is a different thing entirely.
 
 ## Do not
 
-- Do not add an `LlmModel` variant per provider. That enum answers "local
-  weights or remote endpoint"; which remote protocol is this module's question.
+- Do not branch on the provider above this module: a new protocol is a `RemoteChat`
+  implementation and an arm in `chat_client`.
 - Do not reach for `AIService::global_instance()` from a provider — everything
   a call needs is on `ChatRequest` or the constructor.

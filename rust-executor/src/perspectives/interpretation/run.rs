@@ -600,9 +600,8 @@ pub async fn run_interpretation_with_strategy_and_model(
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
-    // Returns a task already spawned into its LLM worker, so `prompt` can use it
-    // immediately (see `ensure_interpretation_task_for_model`).
-    let task = ensure_interpretation_task_for_model(model_override).await?;
+    // The task row `prompt` reads (see `ensure_interpretation_task_for_model`).
+    let task = ensure_interpretation_task_for_model(model_override)?;
     let interpretation_started = std::time::Instant::now();
     let class_names: Vec<String> = shapes
         .iter()
@@ -1050,7 +1049,7 @@ pub async fn run_interpretation_with_harness_and_model(
     // prompt + few-shots + billing meta come from the same row the operator
     // configured — the harness pass is just a different loop, not a
     // different LLM identity.
-    let task = ensure_interpretation_task_for_model(model_override).await?;
+    let task = ensure_interpretation_task_for_model(model_override)?;
 
     // Same existing-instance snapshot as the single-shot path: goes into the
     // prompt so the LLM has context (and can name existing `id`s in

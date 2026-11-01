@@ -3,6 +3,6 @@ import type { ModelStatus } from "./ModelStatus";
 
 /**
  * The `model-status` event: an upstream model on one endpoint, e.g. while `ai.pullModel`
- * downloads it. A model row names it by its `endpointId` and `api.model`.
+ * downloads it. A model names it by its `endpointId` and `remoteModel`.
  */
 export type ModelStatusEvent = { endpointId: string, remoteModel: string, status: ModelStatus, };

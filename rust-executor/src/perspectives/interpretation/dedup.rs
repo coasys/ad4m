@@ -41,8 +41,8 @@ pub enum DedupStrategy {
     /// the default: existing callers observe no behaviour change.
     NormalizedString,
     /// Embed each identity string through the executor's own
-    /// [`AIService`](crate::ai_service::AIService) embedding model (the endpoint
-    /// that serves it, or a local candle Bert for a model without one).
+    /// [`AIService`](crate::ai_service::AIService) embedding model (on the
+    /// endpoint that serves it).
     /// Proposals whose maximum cosine similarity to any existing identity in
     /// the same class meets or exceeds `threshold` are treated as duplicates
     /// and dropped.
@@ -99,8 +99,8 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Embed `texts` through the executor's own [`AIService`] embedding model
-/// (`model_id` names a registered `ModelType::Embedding` model, by id or name: the
-/// endpoint that serves it, or a local Bert for a model without one). One batch
+/// (`model_id` names a registered `ModelType::Embedding` model, by id or name, on the
+/// endpoint that serves it). One batch
 /// request; order is preserved so callers can zip results back onto their inputs.
 pub(crate) async fn embed_via_ai_service(
     model_id: &str,
@@ -402,6 +402,32 @@ pub async fn resolve_already_present_semantic(
     Ok(out)
 }
 
+/// The strategy a pass runs: `strategy`, except a semantic one whose embedding model is not
+/// registered on this executor, which falls back to [`DedupStrategy::NormalizedString`]
+/// with a warning (a fresh executor has no models until the operator adds one).
+fn effective_strategy(strategy: &DedupStrategy) -> &DedupStrategy {
+    let DedupStrategy::Semantic { model, .. } = strategy else {
+        return strategy;
+    };
+    let registered = crate::db::Ad4mDb::with_global_instance(|db| db.get_models())
+        .map(|models| {
+            models.iter().any(|m| {
+                m.model_type == crate::types::ModelType::Embedding
+                    && (m.id == *model || m.name == *model)
+            })
+        })
+        .unwrap_or(false);
+    if registered {
+        return strategy;
+    }
+    log::warn!(
+        "Semantic dedup: no EMBEDDING model '{model}' on this executor; comparing normalized \
+         strings instead"
+    );
+    static NORMALIZED_STRING: DedupStrategy = DedupStrategy::NormalizedString;
+    &NORMALIZED_STRING
+}
+
 /// Strategy dispatcher: pick the string or semantic dedup path based on
 /// `strategy`, preserving [`ProposedInstance`] order in both cases so
 /// downstream `new:<Class>:<n>` ordinals still line up.
@@ -411,7 +437,7 @@ pub async fn filter_already_present_with_strategy(
     identity_props: &HashMap<String, String>,
     strategy: &DedupStrategy,
 ) -> anyhow::Result<Vec<ProposedInstance>> {
-    match strategy {
+    match effective_strategy(strategy) {
         DedupStrategy::NormalizedString => {
             Ok(filter_already_present(instances, existing, identity_props))
         }
@@ -434,7 +460,7 @@ pub async fn resolve_already_present_with_strategy(
     identity_props: &HashMap<String, String>,
     strategy: &DedupStrategy,
 ) -> anyhow::Result<Vec<(ProposedInstance, Resolution)>> {
-    match strategy {
+    match effective_strategy(strategy) {
         DedupStrategy::NormalizedString => {
             Ok(resolve_already_present(instances, existing, identity_props))
         }
@@ -776,6 +802,46 @@ mod tests {
             semantic_res, string_res,
             "semantic tagging precedence must match the string path exactly"
         );
+    }
+
+    // A fresh executor has no embedding model: a semantic pass compares strings instead of
+    // failing the whole interpretation on the embed.
+    #[tokio::test]
+    async fn a_semantic_pass_without_its_embedding_model_compares_strings() {
+        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+        let proposed = parse_interpretation_response(
+            r#"[
+              {"class":"Task","title":"  ship   the   mvp  "},
+              {"class":"Task","title":"Write the docs"}
+            ]"#,
+        )
+        .unwrap();
+        let existing = existing_by_identity(&[("Task", "ship the MVP")]);
+        let mut identity_props = HashMap::new();
+        identity_props.insert("Task".to_string(), "title".to_string());
+        let semantic = DedupStrategy::Semantic {
+            model: "not-registered".into(),
+            threshold: 0.9,
+        };
+
+        let kept = filter_already_present_with_strategy(
+            proposed.clone(),
+            &existing,
+            &identity_props,
+            &semantic,
+        )
+        .await
+        .unwrap();
+        let titles: Vec<&str> = kept
+            .iter()
+            .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(titles, vec!["Write the docs"]);
+        let tagged =
+            resolve_already_present_with_strategy(proposed, &existing, &identity_props, &semantic)
+                .await
+                .unwrap();
+        assert_eq!(tagged.len(), 2);
     }
 
     #[tokio::test]

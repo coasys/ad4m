@@ -1,13 +1,12 @@
 use crate::secret::Secret;
-use crate::types::ModelApiInput;
 use crate::types::{
-    AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput,
-    NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
+    AIPromptExamples, AITask, AiCapability, DateTime, Expression, ExpressionProof, Link,
+    LinkExpression, Model, ModelType, Notification, PerspectiveDiff, User, UserInfo,
+    UserStatistics,
 };
 use crate::types::{
-    AIPromptExamples, AITask, DateTime, Expression, ExpressionProof, Link, LinkExpression,
-    LocalModel, Model, ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff,
-    TokenizerSource, User, UserInfo, UserStatistics,
+    EntanglementProof, ImportResult, LinkStatus, ModelInput, NotificationInput,
+    PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
 };
 use crate::utils::constant_time_eq;
 use argon2::{
@@ -21,13 +20,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
-use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
-use url::Url;
 use uuid::Uuid;
 
 mod endpoints;
 mod grants;
+mod model_migration;
 mod tasks;
 pub use endpoints::InvalidEndpoint;
 pub use grants::GrantRow;
@@ -65,7 +63,20 @@ impl std::fmt::Display for InvalidDefaultModel {
 
 impl std::error::Error for InvalidDefaultModel {}
 
-/// An update of a model or an endpoint was asked to keep a stored provider key while moving
+/// `add_model` / `update_model` was given a model that names no endpoint, or no model on
+/// it: the caller's mistake, a bad request.
+#[derive(Debug)]
+pub struct InvalidModel(pub String);
+
+impl std::fmt::Display for InvalidModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InvalidModel {}
+
+/// An update of an endpoint was asked to keep a stored provider key while moving
 /// to another base URL. The key goes only to the endpoint it was set for, so the caller
 /// sends it again (or an empty key) with the new URL. A caller's mistake: a bad request.
 #[derive(Debug)]
@@ -148,68 +159,22 @@ fn flow_replica_row(row: &rusqlite::Row) -> rusqlite::Result<FlowReplicaStateRow
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-/// A `models` row (`SELECT *`, columns in table order) as a [`Model`].
+/// The `models` columns [`model_from_row`] reads, in its order.
+const MODEL_COLUMNS: &str = "id, name, type, endpoint_id, remote_model, native_tools";
+
+/// A `models` row ([`MODEL_COLUMNS`]) as a [`Model`].
 fn model_from_row(row: &rusqlite::Row) -> rusqlite::Result<Model> {
-    let api = if let (Some(base_url), Some(api_key), Some(model), Some(api_type)) = (
-        row.get::<_, Option<String>>(2)?,
-        row.get::<_, Option<String>>(3)?,
-        row.get::<_, Option<String>>(4)?,
-        row.get::<_, Option<String>>(5)?,
-    ) {
-        Some(ModelApi {
-            base_url: Url::parse(&base_url).unwrap(),
-            api_key: Secret::new(api_key),
-            model,
-            api_type: ModelApiType::from_str(&api_type).unwrap(),
-            max_num_ctx: row.get::<_, Option<u32>>(13)?,
-            native_tools: row.get::<_, Option<bool>>(15)?,
-        })
-    } else {
-        None
-    };
-
-    let local = match row.get::<_, Option<String>>(6)? {
-        Some(file_name) => {
-            let tokenizer_source = if let (Some(repo), Some(revision), Some(file_name)) = (
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-            ) {
-                Some(TokenizerSource {
-                    repo,
-                    revision,
-                    file_name,
-                })
-            } else {
-                None
-            };
-            Some(LocalModel {
-                file_name,
-                tokenizer_source,
-                huggingface_repo: row.get::<_, Option<String>>(10)?,
-                revision: row.get::<_, Option<String>>(11)?,
-            })
-        }
-        None => None,
-    };
-
+    let model_type: String = row.get(2)?;
     Ok(Model {
         id: row.get(0)?,
         name: row.get(1)?,
-        api,
-        local,
-        model_type: serde_json::from_str(&row.get::<_, String>(12)?).unwrap(),
-        endpoint_id: row.get(14)?,
+        model_type: serde_json::from_str(&model_type).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        endpoint_id: row.get(3)?,
+        remote_model: row.get(4)?,
+        native_tools: row.get(5)?,
     })
-}
-
-/// The key column for a sent `api`: the key, or empty for none. Reads the secret out
-/// because the database is where the executor keeps it.
-fn sent_api_key(api: &ModelApiInput) -> String {
-    api.api_key
-        .as_ref()
-        .map(|key| key.expose().to_string())
-        .unwrap_or_default()
 }
 
 lazy_static! {
@@ -381,38 +346,7 @@ impl Ad4mDb {
             [],
         )?;
 
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS models (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                api_base_url TEXT,
-                api_key TEXT,
-                model TEXT,
-                api_type TEXT,
-                local_file_name TEXT,
-                local_tokenizer_repo TEXT,
-                local_tokenizer_revision TEXT,
-                local_tokenizer_file_name TEXT,
-                local_huggingface_repo TEXT,
-                local_revision TEXT,
-                type TEXT NOT NULL,
-                api_max_num_ctx INTEGER,
-                endpoint_id TEXT,
-                api_native_tools INTEGER
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS model_status (
-                model TEXT PRIMARY KEY,
-                progress DOUBLE NOT NULL,
-                status TEXT NOT NULL,
-                downloaded BOOLEAN NOT NULL,
-                loaded BOOLEAN NOT NULL
-            )",
-            [],
-        )?;
+        conn.execute(model_migration::CREATE_MODELS, [])?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS default_models (
@@ -532,14 +466,6 @@ impl Ad4mDb {
         )?;
         alter_add_column("ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0")?;
 
-        // Optional per-model context-window ceiling for API models (see
-        // ModelApi::max_num_ctx). Appended last so its SELECT * position is
-        // the same on a fresh table and on one migrated via ALTER.
-        alter_add_column("ALTER TABLE models ADD COLUMN api_max_num_ctx INTEGER")?;
-        // The endpoint that serves a model's `api` (`db/endpoints.rs`), and whether the model
-        // takes tools as definitions (`ModelApi::native_tools`). Appended last, in this order.
-        alter_add_column("ALTER TABLE models ADD COLUMN endpoint_id TEXT")?;
-        alter_add_column("ALTER TABLE models ADD COLUMN api_native_tools INTEGER")?;
         endpoints::create_table(&conn)?;
 
         // Host rates table — stores per-item pricing used for credit deduction
@@ -649,8 +575,7 @@ impl Ad4mDb {
         )?;
 
         let db = Self { conn };
-        // Every remote model gets the endpoint it runs on; a no-op once they have one.
-        db.link_models_to_endpoints()?;
+        db.migrate_models_to_endpoints()?;
         Ok(db)
     }
 
@@ -677,53 +602,6 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn create_or_update_model_status(
-        &self,
-        model: &str,
-        progress: f64,
-        status: &str,
-        downloaded: bool,
-        loaded: bool,
-    ) -> Result<(), rusqlite::Error> {
-        let conn = &self.conn;
-        conn.execute(
-            "INSERT INTO model_status (model, progress, status, downloaded, loaded)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(model) DO UPDATE SET
-             progress = excluded.progress,
-             status = excluded.status,
-             downloaded = excluded.downloaded,
-             loaded = excluded.loaded",
-            params![model, progress, status, downloaded, loaded],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_model_status(
-        &self,
-        model: &str,
-    ) -> Result<Option<AIModelLoadingStatus>, rusqlite::Error> {
-        let conn = &self.conn;
-        let mut stmt = conn.prepare(
-            "SELECT model, progress, status, downloaded, loaded FROM model_status WHERE model = ?1",
-        )?;
-        let mut rows = stmt.query(params![model])?;
-
-        if let Some(row) = rows.next()? {
-            let model = AIModelLoadingStatus {
-                model: row.get(0)?,
-                progress: row.get(1)?,
-                status: row.get(2)?,
-                downloaded: row.get(3)?,
-                loaded: row.get(4)?,
-            };
-            Ok(Some(model))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// `agent_did` is the owning managed agent; `None` makes a task of the main agent.
     pub fn add_task(
         &self,
         name: String,
@@ -2204,137 +2082,79 @@ impl Ad4mDb {
         Ok(expression.map(|e| serde_json::from_str(&e).unwrap()))
     }
 
+    /// Refuses `model` unless its endpoint exists, and gives the endpoint the capability
+    /// the model's type needs when it lacks it: registering the model says the endpoint
+    /// serves it.
+    fn check_model_endpoint(&self, model: &ModelInput) -> Ad4mDbResult<()> {
+        let endpoint = self.get_endpoint(&model.endpoint_id)?.ok_or_else(|| {
+            InvalidModel(format!(
+                "Model {:?}: no AI endpoint has id {}",
+                model.name, model.endpoint_id
+            ))
+        })?;
+        if model.remote_model.trim().is_empty() {
+            return Err(InvalidModel(format!(
+                "Model {:?}: remoteModel names the model on its endpoint and cannot be empty",
+                model.name
+            ))
+            .into());
+        }
+        self.add_endpoint_capability(&endpoint, AiCapability::from(&model.model_type))
+    }
+
     pub fn add_model(&self, model: &ModelInput) -> Ad4mDbResult<String> {
+        self.check_model_endpoint(model)?;
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO models (id, name, api_base_url, api_key, model, api_type, local_file_name, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, local_huggingface_repo, local_revision, type, api_max_num_ctx, api_native_tools)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            &format!("INSERT INTO models ({MODEL_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"),
             params![
                 id,
                 model.name,
-                model.api.as_ref().map(|api| api.base_url.to_string()),
-                model.api.as_ref().map(sent_api_key),
-                model.api.as_ref().map(|api| api.model.clone()),
-                model.api.as_ref().map(|api| serde_json::to_string(&api.api_type).unwrap()),
-                model.local.as_ref().map(|local| local.file_name.clone()),
-                model.local.as_ref().and_then(|local| local.tokenizer_source.as_ref().map(|ts| ts.repo.clone())),
-                model.local.as_ref().and_then(|local| local.tokenizer_source.as_ref().map(|ts| ts.revision.clone())),
-                model.local.as_ref().and_then(|local| local.tokenizer_source.as_ref().map(|ts| ts.file_name.clone())),
-                model.local.as_ref().and_then(|local| local.huggingface_repo.clone()),
-                model.local.as_ref().and_then(|local| local.revision.clone()),
-                serde_json::to_string(&model.model_type).unwrap(),
-                model.api.as_ref().and_then(|api| api.max_num_ctx),
-                model.api.as_ref().and_then(|api| api.native_tools),
+                serde_json::to_string(&model.model_type)?,
+                model.endpoint_id,
+                model.remote_model,
+                model.native_tools,
             ],
         )?;
-        self.link_models_to_endpoints()?;
         Ok(id)
     }
 
     pub fn get_model(&self, model_id: String) -> Ad4mDbResult<Option<Model>> {
-        let mut stmt = self.conn.prepare("SELECT * FROM models WHERE id = ?1")?;
-        Ok(stmt
-            .query_row(params![model_id], model_from_row)
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {MODEL_COLUMNS} FROM models WHERE id = ?1"),
+                params![model_id],
+                model_from_row,
+            )
             .optional()?)
     }
 
     pub fn get_models(&self) -> Ad4mDbResult<Vec<Model>> {
-        let mut stmt = self.conn.prepare("SELECT * FROM models")?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {MODEL_COLUMNS} FROM models"))?;
         let models = stmt.query_map([], model_from_row)?;
         Ok(models.collect::<Result<_, _>>()?)
     }
 
-    /// Replaces the model's settings with `model`. An `api` without a key keeps the stored
-    /// key, and fails with [`ApiKeyNotResent`] when that key is set and the base URL changes.
+    /// Replaces the model's settings with `model`.
     pub fn update_model(&self, id: &str, model: &ModelInput) -> Ad4mDbResult<()> {
-        let api_base_url = model.api.as_ref().map(|api| api.base_url.to_string());
-        let api_key = match &model.api {
-            Some(api) if api.api_key.is_none() => Some(self.kept_api_key(id, &api.base_url)?),
-            api => api.as_ref().map(sent_api_key),
-        };
-        let api_model = model.api.as_ref().map(|api| api.model.clone());
-        let api_type = model.api.as_ref().map(|api| api.api_type.to_string());
-        let api_max_num_ctx = model.api.as_ref().and_then(|api| api.max_num_ctx);
-        let api_native_tools = model.api.as_ref().and_then(|api| api.native_tools);
-        let local_file_name = model.local.as_ref().map(|local| local.file_name.clone());
-        let local_tokenizer = model
-            .local
-            .as_ref()
-            .and_then(|local| local.tokenizer_source.as_ref());
-        let local_huggingface_repo = model
-            .local
-            .as_ref()
-            .and_then(|local| local.huggingface_repo.clone());
-        let local_revision = model
-            .local
-            .as_ref()
-            .and_then(|local| local.revision.clone());
-
+        self.check_model_endpoint(model)?;
         self.conn.execute(
-            "UPDATE models SET 
-                name = ?1,
-                api_base_url = ?2,
-                api_key = ?3,
-                model = ?4,
-                api_type = ?5,
-                local_file_name = ?6,
-                local_tokenizer_repo = ?7,
-                local_tokenizer_revision = ?8,
-                local_tokenizer_file_name = ?9,
-                local_huggingface_repo = ?10,
-                local_revision = ?11,
-                type = ?12,
-                api_max_num_ctx = ?13,
-                api_native_tools = ?14,
-                endpoint_id = NULL
-             WHERE id = ?15",
+            "UPDATE models SET name = ?2, type = ?3, endpoint_id = ?4, remote_model = ?5,
+                native_tools = ?6
+             WHERE id = ?1",
             params![
+                id,
                 model.name,
-                api_base_url,
-                api_key,
-                api_model,
-                api_type,
-                local_file_name,
-                local_tokenizer.as_ref().map(|ts| ts.repo.clone()),
-                local_tokenizer.as_ref().map(|ts| ts.revision.clone()),
-                local_tokenizer.as_ref().map(|ts| ts.file_name.clone()),
-                local_huggingface_repo,
-                local_revision,
-                serde_json::to_string(&model.model_type).unwrap(),
-                api_max_num_ctx,
-                api_native_tools,
-                id
+                serde_json::to_string(&model.model_type)?,
+                model.endpoint_id,
+                model.remote_model,
+                model.native_tools,
             ],
         )?;
-        // Linked again: the update may have moved the model to another endpoint.
-        self.link_models_to_endpoints()?;
         Ok(())
-    }
-
-    /// The stored key an update without one keeps: empty when the model has none (or does
-    /// not exist), refused when it has one and `base_url` differs from the stored URL.
-    fn kept_api_key(&self, id: &str, base_url: &str) -> Ad4mDbResult<String> {
-        let stored: Option<(Option<String>, Option<String>)> = self
-            .conn
-            .query_row(
-                "SELECT api_base_url, api_key FROM models WHERE id = ?1",
-                params![id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let Some((stored_url, Some(stored_key))) = stored else {
-            return Ok(String::new());
-        };
-        if stored_key.is_empty() {
-            return Ok(stored_key);
-        }
-        let same_endpoint = stored_url
-            .as_deref()
-            .is_some_and(|stored| crate::types::same_endpoint(stored, base_url));
-        if !same_endpoint {
-            return Err(ApiKeyNotResent.into());
-        }
-        Ok(stored_key)
     }
 
     pub fn remove_model(&self, id: &str) -> Ad4mDbResult<()> {
@@ -2521,27 +2341,41 @@ impl Ad4mDb {
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert("tasks".to_string(), serde_json::to_value(tasks)?);
 
+        // Export AI endpoints, keys included as the database holds them.
+        let endpoints: Vec<serde_json::Value> = self
+            .get_endpoints()?
+            .iter()
+            .map(|endpoint| {
+                serde_json::json!({
+                    "id": endpoint.id,
+                    "name": endpoint.name,
+                    "kind": endpoint.kind,
+                    "base_url": endpoint.base_url.to_string(),
+                    "api_key": endpoint.api_key.expose(),
+                    "capabilities": endpoint.capabilities,
+                    "max_num_ctx": endpoint.max_num_ctx,
+                    "request_timeout_secs": endpoint.request_timeout_secs,
+                    "max_concurrent": endpoint.max_concurrent,
+                })
+            })
+            .collect();
+        export_data.insert("ai_endpoints".to_string(), serde_json::to_value(endpoints)?);
+
         // Export models
-        let models: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, api_max_num_ctx FROM models"
-        )?.query_map([], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "name": row.get::<_, String>(1)?,
-                "model_type": row.get::<_, String>(2)?,
-                "api_type": row.get::<_, Option<String>>(3)?,
-                "api_key": row.get::<_, Option<String>>(4)?,
-                "api_base_url": row.get::<_, Option<String>>(5)?,
-                "model": row.get::<_, Option<String>>(6)?,
-                "local_file_name": row.get::<_, Option<String>>(7)?,
-                "local_huggingface_repo": row.get::<_, Option<String>>(8)?,
-                "local_revision": row.get::<_, Option<String>>(9)?,
-                "local_tokenizer_repo": row.get::<_, Option<String>>(10)?,
-                "local_tokenizer_revision": row.get::<_, Option<String>>(11)?,
-                "local_tokenizer_file_name": row.get::<_, Option<String>>(12)?,
-                "api_max_num_ctx": row.get::<_, Option<u32>>(13)?
-            }))
-        })?.collect::<Result<Vec<_>, _>>()?;
+        let models: Vec<serde_json::Value> = self
+            .get_models()?
+            .iter()
+            .map(|model| {
+                serde_json::json!({
+                    "id": model.id,
+                    "name": model.name,
+                    "model_type": serde_json::to_string(&model.model_type).unwrap_or_default(),
+                    "endpoint_id": model.endpoint_id,
+                    "remote_model": model.remote_model,
+                    "native_tools": model.native_tools,
+                })
+            })
+            .collect();
         export_data.insert("models".to_string(), serde_json::to_value(models)?);
 
         // Export default_models
@@ -2559,27 +2393,6 @@ impl Ad4mDb {
             "default_models".to_string(),
             serde_json::to_value(default_models)?,
         );
-
-        // Nah, we don't need to export model_status
-        // It's kinda transient, but in the DB so the model loading percentage is not lost over restarts
-        // but doesn't make sense to import it into another instance
-        // let model_status: Vec<serde_json::Value> = self
-        //     .conn
-        //     .prepare("SELECT model, progress, status, downloaded, loaded FROM model_status")?
-        //     .query_map([], |row| {
-        //         Ok(serde_json::json!({
-        //             "model": row.get::<_, String>(0)?,
-        //             "progress": row.get::<_, f64>(1)?,
-        //             "status": row.get::<_, String>(2)?,
-        //             "downloaded": row.get::<_, bool>(3)?,
-        //             "loaded": row.get::<_, bool>(4)?
-        //         }))
-        //     })?
-        //     .collect::<Result<Vec<_>, _>>()?;
-        // export_data.insert(
-        //     "model_status".to_string(),
-        //     serde_json::to_value(model_status)?,
-        // );
 
         // Export users
         let users: Vec<serde_json::Value> = self
@@ -2909,6 +2722,36 @@ impl Ad4mDb {
             }
         }
 
+        // Import AI endpoints, before the models that name them
+        if let Some(endpoints) = data.get("ai_endpoints") {
+            match serde_json::from_value::<Vec<serde_json::Value>>(endpoints.clone()) {
+                Ok(endpoints) => {
+                    result.ai_endpoints.total = endpoints.len() as i32;
+                    for endpoint in endpoints {
+                        let name = endpoint["name"].as_str().unwrap_or("<unknown>").to_string();
+                        if let Err(e) = self.import_endpoint(&endpoint) {
+                            result.ai_endpoints.failed += 1;
+                            result
+                                .ai_endpoints
+                                .errors
+                                .push(format!("Failed to import AI endpoint {name}: {e}"));
+                            log::warn!("Failed to import AI endpoint {name}: {e}");
+                        } else {
+                            result.ai_endpoints.imported += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    result.ai_endpoints.failed = 1;
+                    result
+                        .ai_endpoints
+                        .errors
+                        .push(format!("Failed to parse AI endpoints: {e}"));
+                    log::warn!("Failed to parse AI endpoints: {e}")
+                }
+            }
+        }
+
         // Import models
         if let Some(models) = data.get("models") {
             match serde_json::from_value::<Vec<serde_json::Value>>(models.clone()) {
@@ -2916,56 +2759,17 @@ impl Ad4mDb {
                     result.models.total = models.len() as i32;
                     log::debug!("Importing {} models", models.len());
                     for model in models {
-                        let name = model
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("<unknown>");
-                        // Missing or null in exports that predate the column;
-                        // a present value must be a usable num_ctx ceiling.
-                        let max_num_ctx = match &model["api_max_num_ctx"] {
-                            serde_json::Value::Null => None,
-                            v => match v.as_u64().and_then(|v| u32::try_from(v).ok()) {
-                                Some(ctx) if ctx > 0 => Some(ctx),
-                                _ => {
-                                    result.models.failed += 1;
-                                    result.models.errors.push(format!(
-                                        "Failed to import model {}: invalid api_max_num_ctx {}",
-                                        name, v
-                                    ));
-                                    log::warn!(
-                                        "Failed to import model {}: invalid api_max_num_ctx {}",
-                                        name,
-                                        v
-                                    );
-                                    continue;
-                                }
-                            },
-                        };
-                        match self.conn.execute(
-                            "INSERT INTO models (id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, api_max_num_ctx) 
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                            params![
-                                model["id"].as_str().unwrap_or(""),
-                                model["name"].as_str().unwrap_or(""),
-                                model["model_type"].as_str().unwrap_or(""),
-                                model["api_type"].as_str(),
-                                model["api_key"].as_str(),
-                                model["api_base_url"].as_str(),
-                                model["model"].as_str(),
-                                model["local_file_name"].as_str(),
-                                model["local_huggingface_repo"].as_str(),
-                                model["local_revision"].as_str(),
-                                model["local_tokenizer_repo"].as_str(),
-                                model["local_tokenizer_revision"].as_str(),
-                                model["local_tokenizer_file_name"].as_str(),
-                                max_num_ctx
-                            ],
-                        ) {
-                            Ok(_) => result.models.imported += 1,
+                        let name = model["name"].as_str().unwrap_or("<unknown>").to_string();
+                        match self.import_model(&model) {
+                            Ok(true) => result.models.imported += 1,
+                            Ok(false) => result.models.omitted += 1,
                             Err(e) => {
                                 result.models.failed += 1;
-                                result.models.errors.push(format!("Failed to import model {}: {}", name, e));
-                                log::warn!("Failed to import model {}: {}", name, e)
+                                result
+                                    .models
+                                    .errors
+                                    .push(format!("Failed to import model {name}: {e}"));
+                                log::warn!("Failed to import model {name}: {e}")
                             }
                         }
                     }
@@ -4465,11 +4269,8 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Endpoint, EndpointKind, ExpressionProof, Link, LinkExpression, ModelType};
     use crate::types::{PerspectiveHandle, PerspectiveState};
-    use crate::{
-        types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType},
-        types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
-    };
     use chrono::Utc;
     use fake::{Fake, Faker};
     use uuid::Uuid;
@@ -4593,20 +4394,22 @@ mod tests {
             )
             .unwrap();
 
-        // Add models — Ollama with a non-default ceiling, so the export
-        // must carry api_max_num_ctx for it to survive the round trip.
+        // An endpoint with a key and a non-default ceiling, and a model on it: the export
+        // carries both, the key and the ceiling with the endpoint.
+        let mut ollama = Endpoint::for_test(
+            "ollama",
+            EndpointKind::Ollama,
+            "http://localhost:11434",
+            "test-key",
+        );
+        ollama.max_num_ctx = Some(16_384);
+        db.insert_endpoint(&ollama).unwrap();
         let model_input = ModelInput {
             name: "Test Model".to_string(),
             model_type: ModelType::Llm,
-            api: Some(ModelApiInput {
-                base_url: "http://localhost:11434".to_string(),
-                api_key: Some("test-key".into()),
-                model: "qwen3:32b".to_string(),
-                api_type: ModelApiType::Ollama.to_string(),
-                max_num_ctx: Some(16_384),
-                native_tools: None,
-            }),
-            local: None,
+            endpoint_id: ollama.id.clone(),
+            remote_model: "qwen3:32b".to_string(),
+            native_tools: Some(true),
         };
         let model_id = db.add_model(&model_input).unwrap();
 
@@ -4662,9 +4465,13 @@ mod tests {
         let imported_model = models.first().unwrap();
         assert_eq!(imported_model.id, model_id);
         assert_eq!(imported_model.name, "Test Model");
-        let imported_api = imported_model.api.as_ref().unwrap();
-        assert_eq!(imported_api.api_type, ModelApiType::Ollama);
-        assert_eq!(imported_api.max_num_ctx, Some(16_384));
+        assert_eq!(imported_model.endpoint_id, ollama.id);
+        assert_eq!(imported_model.remote_model, "qwen3:32b");
+        assert_eq!(imported_model.native_tools, Some(true));
+        let imported_endpoint = import_db.get_endpoint(&ollama.id).unwrap().unwrap();
+        assert_eq!(imported_endpoint.kind, EndpointKind::Ollama);
+        assert_eq!(imported_endpoint.max_num_ctx, Some(16_384));
+        assert!(imported_endpoint.api_key.expose_for_compare("test-key"));
 
         // Verify default model mapping was imported
         let imported_default_model = import_db.get_default_model(ModelType::Llm).unwrap();
@@ -4714,63 +4521,44 @@ mod tests {
         assert_eq!(imported_links2[0], (link2, LinkStatus::Local));
     }
 
+    // An export written before endpoints: its API models get an endpoint as the migration
+    // gives one, its local models are left out.
     #[test]
-    fn import_rejects_invalid_max_num_ctx() {
+    fn an_export_from_before_endpoints_imports_its_api_models_onto_endpoints() {
+        let data = serde_json::json!({
+            "models": [
+                {
+                    "id": "m1", "name": "qwen", "model_type": "\"LLM\"",
+                    "api_type": "\"OLLAMA\"", "api_key": "", "api_base_url": "http://localhost:11434",
+                    "model": "qwen3:8b", "api_max_num_ctx": 8192
+                },
+                {
+                    "id": "m2", "name": "bert", "model_type": "\"EMBEDDING\"",
+                    "local_file_name": "bert"
+                }
+            ],
+            "default_models": [{ "model_type": "\"LLM\"", "model_id": "m1" }]
+        });
         let db = Ad4mDb::new(":memory:").unwrap();
-        db.add_model(&ModelInput {
-            name: "Ollama".to_string(),
-            model_type: ModelType::Llm,
-            api: Some(ModelApiInput {
-                base_url: "http://localhost:11434".to_string(),
-                api_key: None,
-                model: "qwen3:32b".to_string(),
-                api_type: ModelApiType::Ollama.to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
-        })
-        .unwrap();
-        let exported = db.export_all_to_json().unwrap();
-
-        // Import the exported model with api_max_num_ctx replaced by `ctx`
-        // (None = field removed, as in exports that predate the column).
-        let import_with = |ctx: Option<serde_json::Value>| {
-            let mut data = exported.clone();
-            let model = data["models"][0].as_object_mut().unwrap();
-            match ctx {
-                Some(v) => model.insert("api_max_num_ctx".to_string(), v),
-                None => model.remove("api_max_num_ctx"),
-            };
-            let import_db = Ad4mDb::new(":memory:").unwrap();
-            let result = import_db.import_from_json(data, None).unwrap();
-            let models = import_db.get_models().unwrap();
-            (result.models, models)
-        };
-
-        for invalid in [
-            serde_json::json!(0),
-            serde_json::json!(1u64 << 32),
-            serde_json::json!(-1),
-            serde_json::json!(1.5),
-            serde_json::json!("8192"),
-        ] {
-            let (stats, models) = import_with(Some(invalid.clone()));
-            assert_eq!((stats.imported, stats.failed), (0, 1), "{}", invalid);
-            assert!(stats.errors[0].contains("api_max_num_ctx"), "{}", invalid);
-            assert!(models.is_empty(), "{}", invalid);
-        }
-
-        for (ctx, expected) in [
-            (None, None),
-            (Some(serde_json::Value::Null), None),
-            (Some(serde_json::json!(8192)), Some(8192)),
-            (Some(serde_json::json!(u32::MAX)), Some(u32::MAX)),
-        ] {
-            let (stats, models) = import_with(ctx);
-            assert_eq!((stats.imported, stats.failed), (1, 0));
-            assert_eq!(models[0].api.as_ref().unwrap().max_num_ctx, expected);
-        }
+        let result = db.import_from_json(data, None).unwrap();
+        assert_eq!(
+            (
+                result.models.imported,
+                result.models.omitted,
+                result.models.failed
+            ),
+            (1, 1, 0)
+        );
+        let models = db.get_models().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].remote_model, "qwen3:8b");
+        let endpoint = db.get_endpoint(&models[0].endpoint_id).unwrap().unwrap();
+        assert_eq!(endpoint.kind, EndpointKind::Ollama);
+        assert_eq!(endpoint.max_num_ctx, Some(8192));
+        assert_eq!(
+            db.get_default_model(ModelType::Llm).unwrap().as_deref(),
+            Some("m1")
+        );
     }
 
     #[test]
@@ -5321,427 +5109,100 @@ mod tests {
     #[test]
     fn test_models_crud() {
         let db = Ad4mDb::new(":memory:").unwrap();
+        let id = db
+            .add_model(&model_on(&db, "Test Model", ModelType::Llm))
+            .unwrap();
 
-        // Create a test model with ModelApi
-        let test_model_api = ModelInput {
-            name: "Test Model API".to_string(),
-            api: Some(ModelApiInput {
-                base_url: "https://api.example.com".to_string(),
-                api_key: Some("test_api_key".into()),
-                model: "llama3".to_string(),
-                api_type: ModelApiType::OpenAi.to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
-            model_type: ModelType::Llm,
-        };
-
-        // Create a test model with LocalModel
-        let test_model_local = ModelInput {
-            name: "Test Model Local".to_string(),
-            api: None,
-            local: Some(LocalModelInput {
-                file_name: "test_model.bin".to_string(),
-                tokenizer_source: Some(TokenizerSourceInput {
-                    repo: "test_repo".to_string(),
-                    revision: "main".to_string(),
-                    file_name: "tokenizer.json".to_string(),
-                }),
-                huggingface_repo: Some("huggingface/test".to_string()),
-                revision: Some("main".to_string()),
-            }),
-            model_type: ModelType::Llm,
-        };
-
-        // Add the test models
-        let id_model_api = db.add_model(&test_model_api).unwrap();
-        let id_model_local = db.add_model(&test_model_local).unwrap();
-
-        // Get all models
         let models = db.get_models().unwrap();
+        assert_eq!(models.len(), 1);
+        let model = &models[0];
+        assert_eq!(model.id, id);
+        assert_eq!(model.name, "Test Model");
+        assert_eq!(model.model_type, ModelType::Llm);
+        assert_eq!(model.remote_model, "Test Model-remote");
+        assert_eq!(model.native_tools, None);
+        assert_eq!(db.get_model(id.clone()).unwrap().as_ref(), Some(model));
 
-        // Ensure the test models are in the list of models and have all properties set
-        let retrieved_model_api = models.iter().find(|m| m.name == "Test Model API").unwrap();
-        assert_eq!(retrieved_model_api.id, id_model_api);
-        assert_eq!(retrieved_model_api.name, "Test Model API");
-        assert!(retrieved_model_api.api.is_some());
-        assert!(retrieved_model_api.local.is_none());
-        assert_eq!(
-            retrieved_model_api.api.as_ref().unwrap().base_url,
-            Url::parse("https://api.example.com").unwrap()
-        );
-        assert!(retrieved_model_api
-            .api
-            .as_ref()
-            .unwrap()
-            .api_key
-            .expose_for_compare("test_api_key"));
-        assert_eq!(retrieved_model_api.api.as_ref().unwrap().model, "llama3");
-        assert_eq!(
-            retrieved_model_api.api.as_ref().unwrap().api_type,
-            ModelApiType::OpenAi
-        );
-        assert_eq!(retrieved_model_api.model_type, ModelType::Llm);
+        db.remove_model(&id).unwrap();
+        assert!(db.get_models().unwrap().is_empty());
+    }
 
-        let retrieved_model_local = models.iter().find(|m| m.id == id_model_local).unwrap();
-        assert_eq!(retrieved_model_local.name, "Test Model Local");
-        assert!(retrieved_model_local.api.is_none());
-        assert!(retrieved_model_local.local.is_some());
-        assert_eq!(
-            retrieved_model_local.local.as_ref().unwrap().file_name,
-            "test_model.bin"
+    /// Model `name` of `model_type` on a new endpoint, known there as `<name>-remote`.
+    fn model_on(db: &Ad4mDb, name: &str, model_type: ModelType) -> ModelInput {
+        let endpoint = Endpoint::for_test(
+            &format!("{name}-endpoint"),
+            EndpointKind::Vllm,
+            &format!(
+                "http://127.0.0.1:{}",
+                8000 + db.get_endpoints().unwrap().len()
+            ),
+            "",
         );
-        assert_eq!(
-            retrieved_model_local
-                .local
-                .as_ref()
-                .unwrap()
-                .tokenizer_source
-                .as_ref()
-                .unwrap()
-                .repo,
-            "test_repo"
-        );
-        assert_eq!(
-            retrieved_model_local
-                .local
-                .as_ref()
-                .unwrap()
-                .huggingface_repo
-                .as_ref()
-                .unwrap(),
-            "huggingface/test"
-        );
-        assert_eq!(retrieved_model_local.model_type, ModelType::Llm);
-
-        // Remove the test models
-        db.remove_model(&id_model_api).unwrap();
-        db.remove_model(&id_model_local).unwrap();
-
-        // Ensure the test models are removed
-        let models_after_removal = db.get_models().unwrap();
-        assert!(models_after_removal
-            .iter()
-            .all(|m| m.name != "Test Model API" && m.name != "Test Model Local"));
+        db.insert_endpoint(&endpoint).unwrap();
+        ModelInput {
+            name: name.to_string(),
+            model_type,
+            endpoint_id: endpoint.id,
+            remote_model: format!("{name}-remote"),
+            native_tools: None,
+        }
     }
 
     #[test]
     fn test_update_model() {
         let db = Ad4mDb::new(":memory:").unwrap();
-
-        // Create initial model
-        let initial_model = ModelInput {
-            name: "Test Model".to_string(),
-            api: Some(ModelApiInput {
-                base_url: "https://api.example.com".to_string(),
-                api_key: Some("test_key".into()),
-                model: "llama3".to_string(),
-                api_type: ModelApiType::OpenAi.to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
-            model_type: ModelType::Llm,
-        };
-
-        // Add model and get its ID
-        let model_id = db.add_model(&initial_model).unwrap();
-
-        // Create updated model
-        let updated_model = ModelInput {
-            name: "Updated Model".to_string(),
-            api: Some(ModelApiInput {
-                base_url: "https://api.example.org".to_string(),
-                api_key: Some("test_key".into()),
-                model: "llama4".to_string(),
-                api_type: ModelApiType::OpenAi.to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
-            model_type: ModelType::Embedding,
-        };
-
-        // Update the model
-        db.update_model(&model_id, &updated_model).unwrap();
-
-        // Retrieve and verify the updated model
-        let retrieved_model = db.get_model(model_id.clone()).unwrap().unwrap();
-
-        assert_eq!(retrieved_model.name, "Updated Model");
-        assert!(retrieved_model.api.is_some());
-        assert!(retrieved_model.local.is_none());
-
-        let api = retrieved_model.api.unwrap();
-        assert_eq!(api.base_url, Url::parse("https://api.example.org").unwrap());
-        assert!(api.api_key.expose_for_compare("test_key"));
-        assert_eq!(api.model, "llama4");
-        assert_eq!(api.api_type, ModelApiType::OpenAi);
-
-        // Clean up
-        db.remove_model(&model_id).unwrap();
-    }
-
-    #[test]
-    fn max_num_ctx_survives_the_model_roundtrip() {
-        let db = Ad4mDb::new(":memory:").unwrap();
-
-        let mut model = ModelInput {
-            name: "Capped Ollama".to_string(),
-            api: Some(ModelApiInput {
-                base_url: "http://localhost:11434".to_string(),
-                api_key: Some("".into()),
-                model: "qwen3:32b".to_string(),
-                api_type: ModelApiType::Ollama.to_string(),
-                max_num_ctx: Some(32_768),
-                native_tools: None,
-            }),
-            local: None,
-            model_type: ModelType::Llm,
-        };
-
-        // A set cap comes back from both read paths.
-        let id = db.add_model(&model).unwrap();
-        let loaded = db.get_model(id.clone()).unwrap().unwrap();
-        assert_eq!(loaded.api.unwrap().max_num_ctx, Some(32_768));
-        let listed = db
-            .get_models()
-            .unwrap()
-            .into_iter()
-            .find(|m| m.id == id)
-            .unwrap();
-        assert_eq!(listed.api.unwrap().max_num_ctx, Some(32_768));
-
-        // Updating with the cap cleared clears it in the store.
-        model.api.as_mut().unwrap().max_num_ctx = None;
-        db.update_model(&id, &model).unwrap();
-        let reloaded = db.get_model(id.clone()).unwrap().unwrap();
-        assert_eq!(reloaded.api.unwrap().max_num_ctx, None);
-
-        // An unset cap stays unset.
-        let id_unset = db.add_model(&model).unwrap();
-        let unset = db.get_model(id_unset).unwrap().unwrap();
-        assert_eq!(unset.api.unwrap().max_num_ctx, None);
-
-        db.remove_model(&id).unwrap();
-    }
-
-    #[test]
-    fn test_model_status() {
-        let db = Ad4mDb::new(":memory:").unwrap();
-
-        // Create three models of different types
-        let model_llm = ModelInput {
-            name: "Test LLM Model".to_string(),
-            api: Some(ModelApiInput {
-                base_url: "https://api.example.com".to_string(),
-                api_key: Some("llm_key".into()),
-                model: "llama".to_string(),
-                api_type: ModelApiType::OpenAi.to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
-            model_type: ModelType::Llm,
-        };
-
-        let model_embedding = ModelInput {
-            name: "Test Embedding Model".to_string(),
-            local: Some(LocalModelInput {
-                file_name: "embedding.bin".to_string(),
-                tokenizer_source: Some(TokenizerSourceInput {
-                    repo: "test_repo".to_string(),
-                    revision: "main".to_string(),
-                    file_name: "tokenizer.json".to_string(),
-                }),
-                huggingface_repo: Some("huggingface/test".to_string()),
-                revision: Some("main".to_string()),
-            }),
-            api: None,
-            model_type: ModelType::Embedding,
-        };
-
-        let model_transcription = ModelInput {
-            name: "Test Transcription Model".to_string(),
-            api: Some(ModelApiInput {
-                base_url: "https://api.transcribe.com".to_string(),
-                api_key: Some("transcribe_key".into()),
-                model: "llama".to_string(),
-                api_type: ModelApiType::OpenAi.to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
-            model_type: ModelType::Transcription,
-        };
-
-        // Add first model and test its status
-        db.add_model(&model_llm).unwrap();
-        db.create_or_update_model_status(&model_llm.name, 1.0, "ready", true, true)
-            .unwrap();
-        assert!(
-            db.get_model_status(&model_llm.name)
-                .unwrap()
-                .unwrap()
-                .loaded
-        );
-
-        // Add second model and test both statuses
-        db.add_model(&model_embedding).unwrap();
-        db.create_or_update_model_status(&model_embedding.name, 1.0, "ready", false, false)
-            .unwrap();
-        assert!(
-            db.get_model_status(&model_llm.name)
-                .unwrap()
-                .unwrap()
-                .loaded
-        );
-        assert!(
-            !db.get_model_status(&model_embedding.name)
-                .unwrap()
-                .unwrap()
-                .loaded
-        );
-
-        // Add third model and test all statuses
-        db.add_model(&model_transcription).unwrap();
-        db.create_or_update_model_status(&model_transcription.name, 1.0, "ready", true, true)
-            .unwrap();
-        assert!(
-            db.get_model_status(&model_llm.name)
-                .unwrap()
-                .unwrap()
-                .loaded
-        );
-        assert!(
-            !db.get_model_status(&model_embedding.name)
-                .unwrap()
-                .unwrap()
-                .loaded
-        );
-        assert!(
-            db.get_model_status(&model_transcription.name)
-                .unwrap()
-                .unwrap()
-                .loaded
-        );
-
-        // Update some statuses and verify all still work
-        db.create_or_update_model_status(&model_transcription.name, 1.0, "ready", false, false)
-            .unwrap();
-        db.create_or_update_model_status(&model_embedding.name, 1.0, "ready", true, true)
+        let model_id = db
+            .add_model(&model_on(&db, "Test Model", ModelType::Llm))
             .unwrap();
 
-        assert!(
-            db.get_model_status(&model_llm.name)
-                .unwrap()
-                .unwrap()
-                .loaded
-        );
-        assert!(
-            db.get_model_status(&model_embedding.name)
-                .unwrap()
-                .unwrap()
-                .loaded
-        );
-        assert!(
-            !db.get_model_status(&model_transcription.name)
-                .unwrap()
-                .unwrap()
-                .loaded
-        );
+        let mut updated = model_on(&db, "Updated Model", ModelType::Embedding);
+        updated.native_tools = Some(true);
+        db.update_model(&model_id, &updated).unwrap();
 
-        // Clean up
-        db.remove_model(&model_llm.name).unwrap();
-        db.remove_model(&model_embedding.name).unwrap();
-        db.remove_model(&model_transcription.name).unwrap();
+        let retrieved = db.get_model(model_id.clone()).unwrap().unwrap();
+        assert_eq!(retrieved.name, "Updated Model");
+        assert_eq!(retrieved.model_type, ModelType::Embedding);
+        assert_eq!(retrieved.endpoint_id, updated.endpoint_id);
+        assert_eq!(retrieved.remote_model, "Updated Model-remote");
+        assert_eq!(retrieved.native_tools, Some(true));
+
+        // Clearing the flag clears it in the store.
+        updated.native_tools = None;
+        db.update_model(&model_id, &updated).unwrap();
+        assert_eq!(db.get_model(model_id).unwrap().unwrap().native_tools, None);
     }
 
     #[test]
     fn can_set_and_get_default_model() {
         let db = Ad4mDb::new(":memory:").unwrap();
+        let model_id = db
+            .add_model(&model_on(&db, "test-model", ModelType::Llm))
+            .unwrap();
+        assert!(db.get_default_model(ModelType::Llm).unwrap().is_none());
 
-        // Create a test model
-        let model = ModelInput {
-            name: "test-model".to_string(),
-            api: Some(ModelApiInput {
-                base_url: "https://api.test.com".to_string(),
-                api_key: Some("test-key".into()),
-                model: "llama".to_string(),
-                api_type: ModelApiType::OpenAi.to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
-            model_type: ModelType::Llm,
-        };
-
-        // Add model to DB
-        let model_id = db.add_model(&model).unwrap();
-
-        // Initially no default model set
-        let default = db.get_default_model(ModelType::Llm).unwrap();
-        assert!(default.is_none());
-
-        // Set default model
         db.set_default_model(ModelType::Llm, &model_id).unwrap();
+        assert_eq!(
+            db.get_default_model(ModelType::Llm).unwrap().as_deref(),
+            Some(model_id.as_str())
+        );
 
-        // Verify default model is set correctly
-        let default = db.get_default_model(ModelType::Llm).unwrap();
-        assert!(default.is_some());
-        let retrieved_default_model = db
-            .get_model(default.unwrap())
-            .expect("to get added model")
-            .expect("to get added model");
-        assert_eq!(retrieved_default_model.name, "test-model");
-
-        // Update default model
-        let model2 = ModelInput {
-            name: "test-model-2".to_string(),
-            api: None,
-            local: Some(LocalModelInput {
-                file_name: "model.bin".to_string(),
-                tokenizer_source: Some(TokenizerSourceInput {
-                    repo: "test_repo".to_string(),
-                    revision: "main".to_string(),
-                    file_name: "tokenizer.json".to_string(),
-                }),
-                huggingface_repo: Some("huggingface/test".to_string()),
-                revision: Some("main".to_string()),
-            }),
-            model_type: ModelType::Transcription,
-        };
-        let model2_id = db.add_model(&model2).unwrap();
+        let model2_id = db
+            .add_model(&model_on(&db, "test-model-2", ModelType::Transcription))
+            .unwrap();
         db.set_default_model(ModelType::Transcription, &model2_id)
             .unwrap();
-
-        // Verify default was updated
-        let default = db.get_default_model(ModelType::Transcription).unwrap();
-        assert_eq!(default, Some(model2_id));
-
-        // Clean up
-        db.remove_model(&model.name).unwrap();
-        db.remove_model(&model2.name).unwrap();
+        assert_eq!(
+            db.get_default_model(ModelType::Transcription).unwrap(),
+            Some(model2_id)
+        );
     }
 
     #[test]
     fn default_model_must_exist_have_its_type_and_go_with_it() {
         let db = Ad4mDb::new(":memory:").unwrap();
-        let llm = ModelInput {
-            name: "an-llm".to_string(),
-            api: Some(ModelApiInput {
-                base_url: "https://api.test.com".to_string(),
-                api_key: Some("test-key".into()),
-                model: "llama".to_string(),
-                api_type: ModelApiType::OpenAi.to_string(),
-                max_num_ctx: None,
-                native_tools: None,
-            }),
-            local: None,
-            model_type: ModelType::Llm,
-        };
-        let llm_id = db.add_model(&llm).unwrap();
+        let llm_id = db
+            .add_model(&model_on(&db, "an-llm", ModelType::Llm))
+            .unwrap();
 
         // Both refusals are the caller's mistake, which the API answers as a bad request.
         let refused = |r: Ad4mDbResult<()>| {

@@ -1,7 +1,7 @@
 //! `/v1` as an aggregator: a request for a model on a registered endpoint is forwarded to
 //! that endpoint as the client wrote it (plan §5).
 //!
-//! Only `model` is rewritten, to the id the endpoint knows (`ModelApi::model`), and back to
+//! Only `model` is rewritten, to the id the endpoint knows (`Model::remote_model`), and back to
 //! the client's name in the answer. Every other field (`tools`, `tool_choice`,
 //! `response_format`, fields this executor has never heard of) reaches the upstream, and an
 //! SSE stream comes back event by event. A stream asks for
@@ -91,34 +91,26 @@ pub struct Upstream {
 impl Upstream {
     /// The upstream of `resolved` when `/v1` forwards to it: a model on an endpoint of any
     /// kind but Anthropic (Ollama through its OpenAI-compatible `/v1`). `None`: the executor
-    /// answers, through the model's own client (Anthropic is translated there) or a local
-    /// model.
+    /// answers, through the model's own client (Anthropic is translated there).
     pub fn of(resolved: &Resolved) -> Option<Upstream> {
-        let endpoint = resolved.endpoint.clone()?;
-        if endpoint.kind == EndpointKind::Anthropic {
+        if resolved.endpoint.kind == EndpointKind::Anthropic {
             return None;
         }
         Some(Upstream {
-            remote_model: resolved.remote_model()?.to_string(),
+            remote_model: resolved.model.remote_model.clone(),
             model: resolved.model.clone(),
-            endpoint,
+            endpoint: resolved.endpoint.clone(),
         })
     }
 
     /// The upstream of a `/v1/chat/completions` `body` for `resolved`, by the rule of
     /// [`Self::of`] plus one: a request with active tools (`tools` given, `tool_choice` not
     /// `"none"`) is forwarded only to a model that takes tools as definitions
-    /// (`ModelApi::uses_native_tools`). For any other, the executor renders the tools into
+    /// (`Model::uses_native_tools`). For any other, the executor renders the tools into
     /// the prompt and reads the calls back out of the text.
     pub fn for_chat(resolved: &Resolved, body: &Value) -> Option<Upstream> {
         let upstream = Self::of(resolved)?;
-        let takes_tools = || {
-            resolved
-                .model
-                .api
-                .as_ref()
-                .is_some_and(|api| api.uses_native_tools())
-        };
+        let takes_tools = || resolved.model.uses_native_tools(&resolved.endpoint);
         (!tools_active(body) || takes_tools()).then_some(upstream)
     }
 }

@@ -123,7 +123,8 @@ startup only: after the public IP changes, restart the executor.
 ```
 
 **The `ai_*` keys** register AI model servers and models at startup, before
-the AI service loads. They apply by name: an entry that exists is brought to
+the AI service loads. The executor runs no model itself: without these keys (or
+models added through the launcher or `ai.addModel`) AI features stay off. They apply by name: an entry that exists is brought to
 the file's settings, a missing one is added, and nothing the file does not
 name changes. An endpoint's key comes from the environment variable its
 `api_key_env` names; an `api_key` in the file stops `run`. An entry that

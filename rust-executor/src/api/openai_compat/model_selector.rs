@@ -17,18 +17,10 @@ use super::errors::{OpenAIError, OpenAIResult};
 use crate::db::Ad4mDb;
 use crate::types::{Endpoint, Model, ModelType};
 
-/// A registered model, with the endpoint that serves it. `endpoint` is `None` for a model
-/// without one (a local model): the executor runs it.
+/// A registered model, with the endpoint that serves it.
 pub struct Resolved {
     pub model: Model,
-    pub endpoint: Option<Endpoint>,
-}
-
-impl Resolved {
-    /// The id the endpoint knows the model by.
-    pub fn remote_model(&self) -> Option<&str> {
-        self.model.api.as_ref().map(|api| api.model.as_str())
-    }
+    pub endpoint: Endpoint,
 }
 
 fn db_error(e: impl std::fmt::Display) -> OpenAIError {
@@ -84,10 +76,11 @@ pub async fn resolve(requested: &str, expected_type: ModelType) -> OpenAIResult<
         )));
     }
 
-    let endpoint = match &model.endpoint_id {
-        Some(id) => Ad4mDb::with_global_instance(|db| db.get_endpoint(id)).map_err(db_error)?,
-        None => None,
-    };
+    let endpoint = Ad4mDb::with_global_instance(|db| db.get_endpoint(&model.endpoint_id))
+        .map_err(db_error)?
+        .ok_or_else(|| {
+            OpenAIError::internal(format!("The endpoint of model '{}' is gone", model.name))
+        })?;
     Ok(Resolved { model, endpoint })
 }
 
@@ -108,10 +101,7 @@ fn by_endpoint_and_remote(models: &[Model], requested: &str) -> OpenAIResult<Opt
     };
     Ok(models
         .iter()
-        .find(|m| {
-            m.endpoint_id.as_deref() == Some(endpoint.id.as_str())
-                && m.api.as_ref().is_some_and(|api| api.model == remote)
-        })
+        .find(|m| m.endpoint_id == endpoint.id && m.remote_model == remote)
         .cloned())
 }
 

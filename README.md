@@ -59,7 +59,6 @@ AD4M integrates several powerful technologies into a cohesive whole:
 - [Oxigraph](https://github.com/oxigraph/oxigraph): For local RDF/SPARQL persistence and live queries
 - [Scryer-Prolog](https://github.com/mthom/scryer-prolog): For semantic reasoning and queries
 - [Axum](https://github.com/tokio-rs/axum): For WebSocket RPC and HTTP API
-- [Kalosm](https://github.com/floneum/floneum): For AI model inference with Candle
 
 This complexity is necessary to provide a rich, sovereign computing environment – but it's all packaged to run smoothly on personal devices.
 

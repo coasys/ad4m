@@ -36,7 +36,7 @@ import {
   gracefulShutdown,
 } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
-import { waitUntil } from "../helpers/index";
+import { addOpenAiShapedLlm, waitUntil } from "../helpers/index";
 import { ChildProcess } from "node:child_process";
 import { ConversationSubgroup } from "./model/auto-processor-models";
 
@@ -115,11 +115,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     // LLM lives on the admin side — its default binding is global, so
     // interpretation passes running under a managed user's context still
     // resolve to it.
-    const modelId = await admin.ai.addModel({
-      name: "interpretation-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
-      modelType: "LLM",
-    } as any);
+    const modelId = await addOpenAiShapedLlm(admin, "interpretation-llm", BASE_URL, MODEL);
     await admin.ai.setDefaultModel("LLM", modelId);
 
     // Two managed users, free-access so billing doesn't gate the LLM call.

@@ -32,7 +32,6 @@ pub enum Topic {
     RuntimeNotificationTriggered,
     ExceptionOccurred,
     AiTranscriptionText,
-    AiModelLoadingStatus,
     AiModelStatus,
     AiEndpointStatus,
     PerspectiveQuerySubscription,
@@ -47,7 +46,7 @@ pub enum Topic {
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 26] = [
+    pub const ALL: [Topic; 25] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -63,7 +62,6 @@ impl Topic {
         Topic::RuntimeNotificationTriggered,
         Topic::ExceptionOccurred,
         Topic::AiTranscriptionText,
-        Topic::AiModelLoadingStatus,
         Topic::AiModelStatus,
         Topic::AiEndpointStatus,
         Topic::PerspectiveQuerySubscription,
@@ -95,7 +93,6 @@ impl Topic {
             Topic::RuntimeNotificationTriggered => "notification-triggered",
             Topic::ExceptionOccurred => "exception-occurred",
             Topic::AiTranscriptionText => "transcription-text",
-            Topic::AiModelLoadingStatus => "model-loading-status",
             Topic::AiModelStatus => "model-status",
             Topic::AiEndpointStatus => "ai-endpoint-status",
             Topic::PerspectiveQuerySubscription => "query-subscription-update",
@@ -161,9 +158,9 @@ impl Topic {
             Topic::ExceptionOccurred => caps::RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone(),
             // `ai.transcriptionOpen`.
             Topic::AiTranscriptionText => caps::AI_TRANSCRIBE_CAPABILITY.clone(),
-            // `ai.modelLoadingStatus`, `ai.models`; `ai.endpoints` (an operator-only event:
+            // `ai.modelStatus`, `ai.models`; `ai.endpoints` (an operator-only event:
             // published to the main agent's sessions, as `Guard::Executor` admits).
-            Topic::AiModelLoadingStatus | Topic::AiModelStatus | Topic::AiEndpointStatus => {
+            Topic::AiModelStatus | Topic::AiEndpointStatus => {
                 caps::AI_READ_CAPABILITY.clone()
             }
             // The `sfu.*` reads check NEIGHBOURHOOD_READ (#712 gave the SFU streams the same).

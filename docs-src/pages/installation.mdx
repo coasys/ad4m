@@ -8,7 +8,7 @@ This guide aligns with the v0.10.1 release candidate (as of March 24, 2025), fea
 The AD4M Launcher is a Tauri-based, system-tray app that bundles the AD4M executor, a background UI and a setup wizard—ideal for users and developers seeking a quick start. 
 It runs your agent’s instance locally, managing keys and data as the back-end for AD4M apps. Install it like this:
 - Download: Visit the [GitHub release page](https://github.com/coasys/ad4m/releases) and download the binary for your OS—e.g., 
-  `ADAM_Launcher_<version>-release-candidate-1_aarch64.dmg`, or `ADAM.Launcher_<version>-release-candidate-1_amd64-CUDA.AppImage` 
+  `ADAM_Launcher_<version>-release-candidate-1_aarch64.dmg`, or `ADAM.Launcher_<version>-release-candidate-1_amd64.AppImage` 
   (**We are working on a Windows build!.**)
 - Run/Install: Execute the file. Windows may prompt a security warning (allow it; signed builds are coming); macOS/Linux follow standard app install steps.
 - Initialize: Launch it to generate or unlock an agent (DID and keys). It runs on localhost:12000, offering a WebSocket RPC endpoint.
@@ -94,6 +94,6 @@ Start with `@coasys/ad4m-connect` for quick UI integration with auth, then use `
 - Memory: 4GB RAM minimum (8GB recommended).
 - Node.js: 18+
 - Dependencies: Launcher bundles all (Holochain, Deno, Rust); CLI needs Rust; client libs need Node.js (18+) and an executor instance.
-- Optional: CUDA for GPU acceleration AI inference.
+- Optional: a model server for AI features (Ollama for chat and embeddings, speaches for transcription), on this machine or remote. See the [AI guide](/developer-guides/ai).
 With these tools installed, you’re ready to harness AD4M’s distributed power.
 

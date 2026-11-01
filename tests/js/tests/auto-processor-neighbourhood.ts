@@ -18,7 +18,7 @@ import { PerspectiveProxy, Perspective, Link, LinkQuery, InterpretationRun } fro
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
 import { pollUntil, sleep } from "../utils/utils";
-import { waitUntil } from "../helpers/index";
+import { addOpenAiShapedLlm, waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
@@ -45,11 +45,7 @@ const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
 ORDER BY ?timestamp`;
 
 async function registerLlm(ad4m: any): Promise<void> {
-  const modelId = await ad4m.ai.addModel({
-    name: "interpretation-llm",
-    api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
-    modelType: "LLM",
-  });
+  const modelId = await addOpenAiShapedLlm(ad4m, "interpretation-llm", BASE_URL, MODEL);
   await ad4m.ai.setDefaultModel("LLM", modelId);
 }
 

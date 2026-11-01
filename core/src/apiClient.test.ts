@@ -938,7 +938,7 @@ describe('long calls', () => {
     const calls: [string, (o?: object) => Promise<unknown>][] = [
         ['ai.prompt', (o) => new AIClient(url, undefined, client).prompt('t', 'p', o)],
         ['ai.embed', (o) => new AIClient(url, undefined, client).embed('m', 'x', o)],
-        ['ai.addModel', (o) => new AIClient(url, undefined, client).addModel({ name: 'm', modelType: 'LLM' } as any, o)],
+        ['ai.pullModel', (o) => new AIClient(url, undefined, client).pullModel('e', 'm', o)],
         ['agent.generate', (o) => new AgentClient(url, undefined, client).generate('pw', o)],
         ['agent.unlock', (o) => new AgentClient(url, undefined, client).unlock('pw', true, o)],
         ['language.publish', (o) => new LanguageClient(url, undefined, client).publish('/p', { name: 'l' } as any, o)],
