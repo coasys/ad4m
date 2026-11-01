@@ -6,7 +6,24 @@ on:
       - main
 
 jobs:
+  # The binaries and packages below compile in rust-executor/src/mainnet_seed.json
+  # as committed in this push. A node can install only the languages that seed
+  # pins if they are in the bootstrap store, signed by one of its trustedAgents.
+  # The bootstrap seed workflow publishes them on dev; this refuses a release
+  # whose seed got ahead of the store.
+  bootstrap-seed:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/check-seed-published
+
   create-release:
+    needs:
+      - bootstrap-seed
     runs-on: GH-hosted-ubuntu
     outputs:
       upload_url: ${{ steps.create-release.outputs.upload_url }}
@@ -385,6 +402,8 @@ jobs:
         asset_content_type: application/octet-stream
 
   npm-publish:
+    needs:
+      - bootstrap-seed
     runs-on: ubuntu-latest
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
@@ -478,6 +497,8 @@ jobs:
 
 
   crates-publish:
+   needs:
+     - bootstrap-seed
    runs-on: GH-hosted-ubuntu
    steps:
      - uses: actions/checkout@v2
