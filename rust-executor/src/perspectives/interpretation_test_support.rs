@@ -86,6 +86,35 @@ pub(crate) const TASK_WITH_RELATION_SDNA: &str = r#"{
   ]
 }"#;
 
+/// An edge stored as a record: two required ends, declared `sh:disjoint` so
+/// they must name two different nodes.
+pub(crate) const CONNECTION_SDNA: &str = r#"{
+  "target_class":"ns://Connection",
+  "interpretation_hint":"A connection the speakers made between two things.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://connection"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://connection","min_count":1,"max_count":1},
+    {"path":"ns://label","name":"label","max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://label","target":"value"}]},
+    {"path":"ns://from","name":"from","relation_kind":"hasOne","min_count":1,"max_count":1,"disjoint":["ns://to"]},
+    {"path":"ns://to","name":"to","relation_kind":"hasOne","min_count":1,"max_count":1,"disjoint":["ns://from"]}
+  ]
+}"#;
+
+/// A node class with a required relation — what a sibling's `new:` ref points
+/// at, unlike an edge record. Used to show refusal cascading through refs.
+/// `seeAlso` is optional, so a link through it survives resolution on a record
+/// that is refused for its missing `about`.
+pub(crate) const NOTE_SDNA: &str = r#"{
+  "target_class":"ns://Note",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://note"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://note","min_count":1,"max_count":1},
+    {"path":"ns://text","name":"text","identity":true,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://text","target":"value"}]},
+    {"path":"ns://about","name":"about","relation_kind":"hasOne","min_count":1,"max_count":1},
+    {"path":"ns://seeAlso","name":"seeAlso","relation_kind":"hasMany"}
+  ]
+}"#;
+
 /// Intention class carrying a `basedOn` hasMany relation to Belief — the
 /// relation-typed shape the harness path exercises in `interpretation_harness_e2e`.
 ///

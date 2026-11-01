@@ -363,6 +363,74 @@ describe("Decorators → SHACL writer round-trip", () => {
     expect(rebuiltProp?.ordering).toBe("linkedList");
   });
 
+  it("writes required and disjoint relations as sh:minCount and sh:disjoint", () => {
+    @Model({ name: "Edge" })
+    class Edge extends Ad4mModel {
+      @HasOne({ through: "ns://from", required: true, disjoint: "to" })
+      from: string = "";
+
+      @HasOne({ through: "ns://to", required: true, disjoint: ["from"] })
+      to: string = "";
+    }
+
+    const { shape } = Edge.generateSHACL();
+    const links = flatten(shape);
+
+    // `sh:disjoint` names the other property's path, not a literal.
+    expect(findLinkTarget(links, "ns://Edge.from", "sh://disjoint")).toBe("ns://to");
+    expect(findLinkTarget(links, "ns://Edge.to", "sh://disjoint")).toBe("ns://from");
+    expect(findLinkTarget(links, "ns://Edge.from", "sh://minCount")).toBe("literal:1^^xsd:integer");
+
+    // `toJSON` is what reaches the executor; `fromLinks` is how it comes back.
+    const json: any = shape.toJSON();
+    expect(json.properties.find((p: any) => p.name === "from")?.disjoint).toEqual(["ns://to"]);
+    const rebuilt = SHACLShape.fromLinks(shape.toLinks(), shape.nodeShapeUri);
+    expect(rebuilt.properties.find((p: any) => p.name === "to")?.disjoint).toEqual(["ns://from"]);
+  });
+
+  it("refuses a disjoint naming something that is not a relation of the class", () => {
+    @Model({ name: "BrokenEdge" })
+    class BrokenEdge extends Ad4mModel {
+      @HasOne({ through: "ns://from", disjoint: "nowhere" })
+      from: string = "";
+    }
+
+    expect(() => BrokenEdge.generateSHACL()).toThrow(/disjoint names 'nowhere'/);
+  });
+
+  it("refuses required or disjoint on a getter-only relation, which stores no links", () => {
+    @Model({ name: "GetterRequired" })
+    class GetterRequired extends Ad4mModel {
+      @HasMany({ getter: "SELECT ?target WHERE { ?target <ns://points> <Base> . }", required: true })
+      derived: string[] = [];
+    }
+
+    @Model({ name: "GetterDisjoint" })
+    class GetterDisjoint extends Ad4mModel {
+      @HasMany({ getter: "SELECT ?target WHERE { ?target <ns://points> <Base> . }", disjoint: "to" })
+      from: string[] = [];
+
+      @HasOne({ through: "ns://to" })
+      to: string = "";
+    }
+
+    expect(() => GetterRequired.generateSHACL()).toThrow(/a getter-only relation has no links to check/);
+    expect(() => GetterDisjoint.generateSHACL()).toThrow(/a getter-only relation has no links to check/);
+  });
+
+  it("refuses a disjoint naming a reverse relation, which stores its edge on the other node", () => {
+    @Model({ name: "OwnedEdge" })
+    class OwnedEdge extends Ad4mModel {
+      @HasOne({ through: "ns://about", disjoint: "owner" })
+      about: string = "";
+
+      @BelongsToOne({ through: "ns://owns" })
+      owner: string = "";
+    }
+
+    expect(() => OwnedEdge.generateSHACL()).toThrow(/disjoint names 'owner', which is not a forward relation/);
+  });
+
   it("round-trips ordering through toJSON/fromJSON", () => {
     @Model({ name: "JsonOrderedItem" })
     class JsonOrderedItem extends Ad4mModel {}

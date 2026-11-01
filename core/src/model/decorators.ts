@@ -76,6 +76,10 @@ export interface RelationMetadataEntry {
     interpretationHint?: string;
     /** Names for abstract classes — see `RelationOptions.alias`. */
     alias?: Record<string, string>;
+    /** Must hold a value — see `RelationOptions.required`. */
+    required?: boolean;
+    /** Relations, by property name, this one may share no value with — see `RelationOptions.disjoint`. */
+    disjoint?: string[];
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -1095,6 +1099,63 @@ export interface RelationOptions {
      * `PropertyOptions.alias`.
      */
     alias?: Record<string, string>;
+
+    /**
+     * Every instance holds at least one value here. Emitted as `sh:minCount 1`
+     * on the property shape, which the executor reads as a required property
+     * in three places:
+     *
+     * - **Interpretation**, on both the single-shot and the tool-calling
+     *   path, refuses to create an instance it could not give a value for — a
+     *   reference to a record the model invented, or one it left out — rather
+     *   than writing one with the relation missing.
+     * - **Conformance**: a record is only read as this class while it holds a
+     *   value here. Model queries leave out, and classification does not
+     *   recognise, a stored record without one — so declaring a relation
+     *   required on a class with existing records can take some of them out of
+     *   every query.
+     * - **MCP** `instance_create` refuses a create that leaves it out, and
+     *   `describe_perspective` lists it as required.
+     *
+     * Writes through `Ad4mModel` are not checked.
+     *
+     * Forward relations only, stored through `through`: `@HasOne` / `@HasMany`.
+     * A getter-only relation has no stored links, so declaring it required is
+     * refused when the shape is generated — its synthetic path would make
+     * every query of the class come back empty. `@BelongsTo*` ignore it: their
+     * edge is stored on the other node.
+     */
+    required?: boolean;
+
+    /**
+     * Other relations of this class, by property name, that may never share a
+     * value with this one: SHACL `sh:disjoint`, emitted once per name as a link
+     * to that relation's path.
+     *
+     * For a record standing for an edge, whose two ends must be two different
+     * things. Interpretation, on both the single-shot and the tool-calling
+     * path, refuses to write a link that would break it — including where
+     * dedup resolves two references the model wrote differently to one
+     * existing record, which is how a connection from a record to itself got
+     * written. Writes through `Ad4mModel` and MCP are not checked.
+     *
+     * Declare it on, and name, forward relations only (`@HasOne` / `@HasMany`
+     * with a `through`). A `@BelongsTo*` stores its edge on the other node,
+     * and a getter-only relation stores none, so there is nothing on this
+     * record to compare: naming either, or declaring `disjoint` on a
+     * getter-only relation, is refused when the shape is generated.
+     * `@BelongsTo*` ignore the option.
+     *
+     * @example
+     * ```typescript
+     * @HasOne({ through: "ns://from", disjoint: ["to"] })
+     * from: string = "";
+     *
+     * @HasOne({ through: "ns://to", disjoint: ["from"] })
+     * to: string = "";
+     * ```
+     */
+    disjoint?: string | string[];
 }
 
 /**
@@ -1266,6 +1327,8 @@ export function HasMany(
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
             ...(opts.alias && { alias: opts.alias }),
             ...(opts.readOnly && { readOnly: true }),
+            ...(opts.required && { required: true }),
+            ...(opts.disjoint && { disjoint: ([] as string[]).concat(opts.disjoint) }),
         };
 
         const relKey = key as string;
@@ -1345,6 +1408,8 @@ export function HasOne(
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
             ...(opts.alias && { alias: opts.alias }),
             ...(opts.readOnly && { readOnly: true }),
+            ...(opts.required && { required: true }),
+            ...(opts.disjoint && { disjoint: ([] as string[]).concat(opts.disjoint) }),
         };
 
         const relKey = key as string;
