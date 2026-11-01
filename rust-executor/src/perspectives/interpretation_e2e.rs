@@ -1365,8 +1365,8 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
     let mut last_err: Option<String> = None;
     for i in 1..=attempts {
         let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
-        // Semantic dedup embeds identity strings through AIService's own (local,
-        // CPU) embedding model — register it before the run.
+        // Semantic dedup embeds identity strings through AIService's embedding model
+        // (on INTERPRETATION_EMBED_BASE_URL when set) — register it before the run.
         super::interpretation_test_support::register_interpretation_embedding_model().await;
         let task_shape = &shapes[0];
 

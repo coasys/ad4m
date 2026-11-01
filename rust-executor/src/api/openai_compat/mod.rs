@@ -8,15 +8,16 @@
 //! Surface covered (matches the proposal under
 //! `~/workspaces/coasys/.specs/PROPOSAL_AI_OPENAI_COMPATIBLE_ENDPOINT.md`):
 //!
-//! * `GET  /v1/models`               — list registered models
+//! * `GET  /v1/models`               — registered models, across their endpoints
 //! * `POST /v1/chat/completions`     — stateless chat, with optional SSE streaming
-//! * `POST /v1/completions`          — legacy text-completion shim
+//! * `POST /v1/completions`          — legacy text completion
 //! * `POST /v1/embeddings`           — raw `f32` arrays (no zlib+b64)
 //! * `POST /v1/audio/transcriptions` — batch multipart whisper
-//! * `POST /v1/audio/speech`         — TTS (remote OpenAI-compatible
-//!                                     passthrough; local TTS backend is
-//!                                     scoped to a follow-up)
+//! * `POST /v1/audio/speech`         — TTS, forwarded to a `SPEECH` model's endpoint
 //! * `GET  /v1/realtime`             — WS, OpenAI Realtime-style streaming STT
+//!
+//! A chat or text completion for a model on an OpenAI-shaped endpoint is forwarded to
+//! it as the client wrote it ([`passthrough`]); the executor answers the rest itself.
 //!
 //! Auth + billing reuse the existing JWT extractor and `bill_compute`.
 //! Errors are wrapped in the canonical
@@ -31,13 +32,15 @@ pub mod harness_bridge;
 pub mod model_selector;
 pub mod models;
 pub mod native_tools;
+pub mod passthrough;
 pub mod realtime;
 pub mod router;
 pub mod tool_grammar;
-pub mod tts_passthrough;
 pub mod types;
 
 pub use router::router;
 
+#[cfg(test)]
+mod passthrough_tests;
 #[cfg(test)]
 mod tests;

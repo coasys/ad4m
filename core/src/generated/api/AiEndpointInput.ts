@@ -15,4 +15,13 @@ apiKey?: string,
 /**
  * Left out: probed from the models the endpoint lists.
  */
-capabilities?: Array<AiCapability>, maxNumCtx?: number, };
+capabilities?: Array<AiCapability>, maxNumCtx?: number, 
+/**
+ * How long one `/v1` request to the endpoint may take, queueing included. Left out:
+ * the route's default.
+ */
+requestTimeoutSecs?: number, 
+/**
+ * At most this many requests to the endpoint at once, at least 1. Left out: no limit.
+ */
+maxConcurrent?: number, };

@@ -4,10 +4,13 @@
 //! Storage is `db/endpoints.rs`; listing and health per kind are
 //! `providers::discovery`. This module adds what needs the network or the model workers:
 //! the probe before a save, the reload of the models an endpoint update moves, the
-//! 60-second health loop, and the `model-status` / `ai-endpoint-status` events.
+//! 60-second health loop, the `model-status` / `ai-endpoint-status` events, and the
+//! per-request limits an operator sets on an endpoint (timeout, concurrency cap).
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 
 use super::providers::discovery::{discover_for, endpoint_capabilities, health_of, PROBE_TIMEOUT};
 use super::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
@@ -31,6 +34,43 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// At most this often a pull publishes its progress (4 per second).
 const PULL_EVENT_INTERVAL: Duration = Duration::from_millis(250);
+
+lazy_static! {
+    /// The semaphore of each endpoint with a concurrency cap, with the cap it was made for.
+    static ref SLOTS: std::sync::Mutex<HashMap<String, (u32, Arc<Semaphore>)>> =
+        std::sync::Mutex::new(HashMap::new());
+}
+
+/// How long one request to `endpoint` may take, queueing included: the operator's
+/// `request_timeout_secs`, else `default` (the route's).
+pub fn request_timeout(endpoint: &Endpoint, default: Duration) -> Duration {
+    endpoint
+        .request_timeout_secs
+        .map(|secs| Duration::from_secs(secs.into()))
+        .unwrap_or(default)
+}
+
+/// A slot for one request to `endpoint`, once one is free. `None` when the operator set no
+/// `max_concurrent`: no limit, the upstream queues on its own. Hold it until the answer is
+/// read to its end.
+pub async fn request_slot(endpoint: &Endpoint) -> Option<OwnedSemaphorePermit> {
+    let cap = endpoint.max_concurrent?;
+    let semaphore = {
+        let mut slots = SLOTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match slots.get(&endpoint.id) {
+            Some((size, semaphore)) if *size == cap => semaphore.clone(),
+            // New, or the cap changed: requests already holding a slot of the old one finish.
+            _ => {
+                let semaphore = Arc::new(Semaphore::new(cap as usize));
+                slots.insert(endpoint.id.clone(), (cap, semaphore.clone()));
+                semaphore
+            }
+        }
+    };
+    semaphore.acquire_owned().await.ok()
+}
 
 /// No endpoint has this id. Missing is the caller's mistake: 404.
 #[derive(Debug)]
@@ -100,7 +140,11 @@ async fn publish_health(endpoint_id: &str, health: &EndpointHealth) {
 
 /// Publish where an upstream model stands. Model ids and states only: every session with
 /// AI_READ sees them, as it sees `ai.models`.
-async fn publish_model_status(endpoint_id: &str, remote_model: &str, status: ModelStatus) {
+pub(crate) async fn publish_model_status(
+    endpoint_id: &str,
+    remote_model: &str,
+    status: ModelStatus,
+) {
     get_global_pubsub().await.publish_event(Event::new(
         Topic::AiModelStatus,
         Audience::Everyone,
@@ -198,6 +242,8 @@ impl AIService {
             api_key: input.api_key.unwrap_or_else(|| Secret::new("")),
             capabilities: Vec::new(),
             max_num_ctx: input.max_num_ctx,
+            request_timeout_secs: input.request_timeout_secs,
+            max_concurrent: input.max_concurrent,
             health: EndpointHealth::default(),
         };
         refuse_cleartext_key(&endpoint)?;
@@ -222,6 +268,8 @@ impl AIService {
             api_key,
             capabilities: Vec::new(),
             max_num_ctx: input.max_num_ctx,
+            request_timeout_secs: input.request_timeout_secs,
+            max_concurrent: input.max_concurrent,
             health: EndpointHealth::default(),
         };
         refuse_cleartext_key(&endpoint)?;
@@ -327,6 +375,8 @@ mod tests {
             api_key: key.map(Into::into),
             capabilities: None,
             max_num_ctx: None,
+            request_timeout_secs: None,
+            max_concurrent: None,
         }
     }
 

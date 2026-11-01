@@ -141,9 +141,11 @@ pub fn bill_ai_operation(
         return Ok(());
     }
 
-    let rate_key = Ad4mDb::with_global_instance(|db| db.get_model(model_id.to_string()))
+    let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.to_string()))
         .ok()
-        .flatten()
+        .flatten();
+    let endpoint_id = model.as_ref().and_then(|m| m.endpoint_id.clone());
+    let rate_key = model
         .map(|m| m.name)
         .unwrap_or_else(|| model_id.to_string());
 
@@ -167,12 +169,12 @@ pub fn bill_ai_operation(
         return Ok(());
     }
 
-    let summary = format!(
-        "{unit_count} {unit_label} (model: {rate_key})",
-        unit_count = unit_count,
-        unit_label = unit_label,
-        rate_key = rate_key
-    );
+    let summary = match endpoint_id {
+        Some(endpoint_id) => {
+            format!("{unit_count} {unit_label} (model: {rate_key}, endpoint: {endpoint_id})")
+        }
+        None => format!("{unit_count} {unit_label} (model: {rate_key})"),
+    };
 
     match bill_compute(agent_did, cost, operation, Some(&summary)) {
         Ok(()) => Ok(()),

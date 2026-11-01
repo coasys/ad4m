@@ -70,6 +70,27 @@ pub struct UpstreamStatus {
     pub url: String,
     pub status: reqwest::StatusCode,
     pub body: String,
+    /// The upstream's `Retry-After`, passed on to a client it throttled.
+    pub retry_after: Option<String>,
+}
+
+impl UpstreamStatus {
+    /// The error answer `response` of `url`, its body with `api_key` scrubbed out.
+    pub(crate) async fn read(response: reqwest::Response, url: &str, api_key: &str) -> Self {
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body = response.text().await.unwrap_or_default();
+        UpstreamStatus {
+            url: url.to_string(),
+            status,
+            body: scrub(&body, api_key),
+            retry_after,
+        }
+    }
 }
 
 impl std::fmt::Display for UpstreamStatus {
@@ -79,6 +100,33 @@ impl std::fmt::Display for UpstreamStatus {
 }
 
 impl std::error::Error for UpstreamStatus {}
+
+/// An upstream that could not be asked: no connection, or no answer in time. `detail` has
+/// the key scrubbed out.
+#[derive(Debug)]
+pub struct UpstreamUnreachable {
+    pub url: String,
+    pub timed_out: bool,
+    pub detail: String,
+}
+
+impl UpstreamUnreachable {
+    pub(crate) fn new(url: &str, error: &reqwest::Error, api_key: &str) -> Self {
+        UpstreamUnreachable {
+            url: url.to_string(),
+            timed_out: error.is_timeout(),
+            detail: scrub(&error.to_string(), api_key),
+        }
+    }
+}
+
+impl std::fmt::Display for UpstreamUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Could not reach {}: {}", self.url, self.detail)
+    }
+}
+
+impl std::error::Error for UpstreamUnreachable {}
 
 /// `text` with every occurrence of `api_key` replaced by `<redacted>`.
 pub(crate) fn scrub(text: &str, api_key: &str) -> String {
@@ -96,23 +144,20 @@ pub(crate) async fn fetch_json(
     url: &str,
     api_key: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let response = request.send().await.map_err(|e| {
-        anyhow::anyhow!("Could not reach {url}: {}", scrub(&e.to_string(), api_key))
-    })?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(UpstreamStatus {
-            url: url.to_string(),
-            status,
-            body: scrub(&body, api_key),
-        }
-        .into());
-    }
-    response
-        .json()
+    let response = request
+        .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Could not read the answer of {url}: {e}"))
+        .map_err(|e| UpstreamUnreachable::new(url, &e, api_key))?;
+    if !response.status().is_success() {
+        return Err(UpstreamStatus::read(response, url, api_key).await.into());
+    }
+    response.json().await.map_err(|e| {
+        if e.is_timeout() {
+            UpstreamUnreachable::new(url, &e, api_key).into()
+        } else {
+            anyhow::anyhow!("Could not read the answer of {url}: {e}")
+        }
+    })
 }
 
 /// What an operator is told when [`is_transport_safe`] refuses their key.

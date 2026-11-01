@@ -780,6 +780,9 @@ pub enum ModelType {
     Embedding,
     #[serde(alias = "transcription", alias = "Transcription")]
     Transcription,
+    /// Text to speech (`/v1/audio/speech`), served by an endpoint with the speech capability.
+    #[serde(alias = "speech", alias = "Speech")]
+    Speech,
 }
 
 impl Display for ModelType {
@@ -788,6 +791,7 @@ impl Display for ModelType {
             ModelType::Llm => write!(f, "LLM"),
             ModelType::Embedding => write!(f, "EMBEDDING"),
             ModelType::Transcription => write!(f, "TRANSCRIPTION"),
+            ModelType::Speech => write!(f, "SPEECH"),
         }
     }
 }
@@ -905,6 +909,7 @@ impl From<&ModelType> for AiCapability {
             ModelType::Llm => AiCapability::Chat,
             ModelType::Embedding => AiCapability::Embeddings,
             ModelType::Transcription => AiCapability::Transcription,
+            ModelType::Speech => AiCapability::Speech,
         }
     }
 }
@@ -923,6 +928,10 @@ pub struct Endpoint {
     pub capabilities: Vec<AiCapability>,
     /// Ceiling for Ollama's `num_ctx`; copied to the models it serves.
     pub max_num_ctx: Option<u32>,
+    /// See [`EndpointView::request_timeout_secs`].
+    pub request_timeout_secs: Option<u32>,
+    /// See [`EndpointView::max_concurrent`].
+    pub max_concurrent: Option<u32>,
     pub health: EndpointHealth,
 }
 
@@ -937,6 +946,8 @@ impl Endpoint {
             has_api_key: !self.api_key.is_empty(),
             capabilities: self.capabilities.clone(),
             max_num_ctx: self.max_num_ctx,
+            request_timeout_secs: self.request_timeout_secs,
+            max_concurrent: self.max_concurrent,
             health: self.health.clone(),
         }
     }
@@ -955,6 +966,13 @@ pub struct EndpointView {
     pub capabilities: Vec<AiCapability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_num_ctx: Option<u32>,
+    /// How long a `/v1` request to this endpoint may take, queueing included. Unset: 300 s
+    /// for chat, 60 s for embeddings, 120 s for speech.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u32>,
+    /// At most this many requests to this endpoint at once; the rest queue. Unset: no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
     pub health: EndpointHealth,
 }
 

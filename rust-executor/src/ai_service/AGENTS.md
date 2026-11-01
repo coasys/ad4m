@@ -11,7 +11,7 @@ Split plan: spec item 9 (`mod.rs`), item 7 (`harness/` → `agentic/`).
 | ~330–510 | construction, model load/add/status, background tasks, global instance |
 | ~510–1120 | LLM: candle device selection, `build_local_llama`, `build_remote_client` (a `providers::RemoteChat` per protocol), `spawn_llm_model` (per-model worker thread + channel) |
 | ~1120–1670 | AI tasks CRUD, `prompt` / `prompt_messages` / `prompt_messages_stream`, billing hooks (`bill_prompt_if_authed`) |
-| ~1670–1775 | embeddings |
+| ~1670–1775 | embeddings: one `Embedder` per model id (the endpoint's `providers::embed` client, or a Bert thread for a model without an endpoint); `embed_batch` resolves an id or a name and sends one request per batch |
 | ~1775–2440 | whisper transcription sessions + VAD |
 | rest | tests |
 
@@ -27,7 +27,9 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
 - `mod.rs`: `ai.addEndpoint` / `updateEndpoint` / `removeEndpoint` (probe once before a
   save; an update rewrites and reloads the models on it), `check_health` and the 60 s
   health loop (`ai-endpoint-status`, to the main agent's sessions only), Ollama
-  `pull_model` / `delete_upstream_model` (`model-status`, at most 4/s).
+  `pull_model` / `delete_upstream_model` (`model-status`, at most 4/s), and the
+  per-request limits: `request_timeout` (the endpoint's, else the route's default) and
+  `request_slot` (a semaphore only when the operator set `max_concurrent`; none by default).
 - `detect.rs`: `ai.detectEndpoints`, loopback ports, classified by answer shape. Saves nothing.
 - `config.rs`: the config file's `ai_endpoints` / `ai_models` / `ai_defaults`, applied
   before the service loads; idempotent by name, keys only from env vars.
@@ -55,5 +57,6 @@ edges; item 7 moves harness + interpretation + flows + auto_processor into `agen
 - Never call a model without a billing decision: use the existing `bill_*_if_authed` /
   `CreditGate` path.
 - Model name strings (whisper table, default model ids) are data; don't scatter new ones.
-- Streaming responses go through `prompt_messages_stream`; the OpenAI shim (`api/openai_compat`)
-  and WS `ai.*` handlers both sit on it.
+- Streaming responses of models the executor runs go through `prompt_messages_stream`; WS
+  `ai.*` handlers and `/v1` for those models sit on it. `/v1` forwards a model on an
+  OpenAI-shaped endpoint itself (`api/openai_compat/passthrough.rs`).
