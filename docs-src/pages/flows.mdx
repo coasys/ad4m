@@ -87,8 +87,10 @@ co-owner reads the new state and gets its own event.
   keeps bookkeeping for. `currentState` is `null` for a run you started that
   has not been derived yet; an instance with no entry is one your executor has
   not derived.
-- `perspective.flowFired(instance)` returns the proposals whose votes settled
-  an edge of that instance — its history, as your executor recorded it.
+- `perspective.flowFired(instances)` returns `[{ instance, fired }]`, one entry
+  per instance in the order asked: the proposals whose votes settled an edge
+  of that instance (its history, as your executor recorded it), `[]` when
+  none. One call covers every run on a board.
 - `perspective.onFlowStateChanged(({ instance, from, to, firedProposals, caughtUp }) => …)`
   is called when an instance's state moves on your executor or an edge
   settles. Only your own sockets receive it.

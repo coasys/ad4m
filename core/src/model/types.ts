@@ -400,6 +400,7 @@ export type Query = {
   order?: Order;
   offset?: number;
   limit?: number;
+  /** Ask for `totalCount`. Without it the result has none and the executor runs no COUNT query. */
   count?: boolean;
   /**
    * When true, SPARQL property getters (@Property with `getter`) ARE evaluated
@@ -772,8 +773,12 @@ export type GetOptions = Pick<Query, 'include' | 'properties'>;
 // ---------------------------------------------------------------------------
 
 export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: number };
-export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
-export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
+/** A model query's rows; `totalCount` is set when the query asked for it (`count: true`). */
+export type QueryResults<T> = { results: T[]; totalCount?: number };
+/** The result of `findAllAndCount()`, which always asks for the count. */
+export type ResultsWithTotalCount<T> = { results: T[]; totalCount: number };
+/** The result of `paginate()` and `paginateSubscribe()`, which always ask for the count. */
+export type PaginationResult<T> = { results: T[]; totalCount: number; pageSize: number; pageNumber: number };
 
 // ---------------------------------------------------------------------------
 // Internal value transport

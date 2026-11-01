@@ -10,7 +10,7 @@ export interface Subscribed {
 /**
  * A `query-subscription-update` event: the change from the previous revision.
  * Model results carry `ids` (the new order), `upsert` (new or changed
- * instances) and `totalCount`; query results carry `added` / `removed` rows;
+ * instances) and, when the query set `count: true`, `totalCount`; query results carry `added` / `removed` rows;
  * a result that could not be diffed comes whole as `result`.
  */
 export interface QueryUpdate {

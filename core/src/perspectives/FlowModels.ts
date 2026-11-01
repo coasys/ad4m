@@ -161,7 +161,7 @@ export class FlowTransitionProposal extends Ad4mModel {
 
   // Whether this proposal settled an edge is not on the record: the
   // executor keeps that per agent, outside the graph (#1424). Ask
-  // `PerspectiveProxy.flowFired(instance)` for the proposals your replica
+  // `PerspectiveProxy.flowFired(instances)` for the proposals your replica
   // recorded as fired, or listen with `onFlowStateChanged`.
 
   // "When was this proposal written?" is answered by `Ad4mModel`'s built-in

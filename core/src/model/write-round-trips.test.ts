@@ -1,7 +1,6 @@
 import { Ad4mModel } from "./Ad4mModel";
 import { Model, Property } from "./decorators";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { clearQueryCache } from "./query-cache";
 
 // Every RPC that save() and delete() send, counted on a client double that
 // keeps the registered classes' SHACL links like the executor does.
@@ -84,8 +83,6 @@ async function createNote(proxy: PerspectiveProxy) {
 }
 
 describe("RPCs per write", () => {
-  beforeEach(() => clearQueryCache());
-
   it("create of a decorated model sends no class-list lookup", async () => {
     const { proxy, calls } = countingProxy([RoundTripNote]);
     await createNote(proxy);
@@ -102,8 +99,6 @@ describe("RPCs per write", () => {
 });
 
 describe("class name a write resolves", () => {
-  beforeEach(() => clearQueryCache());
-
   @Model({ name: "RoundTripDerivedNote" })
   class RoundTripDerivedNote extends RoundTripNote {
     @Property({ through: "rt://body" })
@@ -193,7 +188,6 @@ const rtt = Number(process.env.SDK_RTT_MS || 0);
     const ms: number[] = [];
     let rpcs = 0;
     for (let i = 0; i < runs; i++) {
-      clearQueryCache();
       const { proxy, calls } = countingProxy([RoundTripNote, RoundTripReadable], rtt);
       const start = performance.now();
       await write(proxy);

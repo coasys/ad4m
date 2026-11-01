@@ -10,7 +10,7 @@ import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectivePr
 import { LiveQuery } from "../perspectives/LiveQuery";
 import type {
   Where, Order, IncludeMap, Query,
-  ResultsWithTotalCount, PaginationResult,
+  QueryResults, PaginationResult,
   TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
@@ -66,7 +66,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /** Run `params` once and build model instances from the rows. */
-  private execute(params: Query): Promise<ResultsWithTotalCount<T>> {
+  private execute(params: Query): Promise<QueryResults<T>> {
     if (this.unionClasses) {
       return (this.ctor as any).executeUnionQuery(this.perspective, this.unionClasses, params);
     }
@@ -525,8 +525,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    const { totalCount } = await this.execute({ ...this.queryParams, limit: 0 });
-    return totalCount;
+    const { totalCount } = await this.execute({ ...this.queryParams, limit: 0, count: true });
+    return totalCount ?? 0;
   }
 
   /**
@@ -567,7 +567,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
     this.dispose();
-    const { initial } = await this.live({ ...this.queryParams, limit: 0 }, (raw) => callback(raw.totalCount ?? 0));
+    const { initial } = await this.live({ ...this.queryParams, limit: 0, count: true }, (raw) => callback(raw.totalCount ?? 0));
     return initial.totalCount ?? 0;
   }
 
@@ -597,7 +597,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const { results, totalCount } = await this.execute(paginationQuery);
-    return { results, totalCount, pageSize, pageNumber };
+    return { results, totalCount: totalCount ?? 0, pageSize, pageNumber };
   }
 
   /**
@@ -667,7 +667,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       const results = this.parse(raw);
       const fp = fingerprint([results, raw?.totalCount]);
       this.takeSnapshots(results);
-      return { page: { results, totalCount: raw?.totalCount, pageSize, pageNumber }, fp };
+      // `count: true` is set above, so the executor sends a total.
+      return { page: { results, totalCount: raw?.totalCount ?? 0, pageSize, pageNumber }, fp };
     };
 
     const { initial } = await this.live(paginatedQuery, (raw) => {
