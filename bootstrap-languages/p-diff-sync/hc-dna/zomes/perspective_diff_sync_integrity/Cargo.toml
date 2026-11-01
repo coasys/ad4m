@@ -12,6 +12,7 @@ name = "perspective_diff_sync_integrity"
 derive_more = "0"
 serde = "1"
 chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+perspective-diff-types = { path = "../../../../../crates/perspective-diff-types", features = ["hdi"] }
 
 hdi = { version = "0.8.0", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
 hdk = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
