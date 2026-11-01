@@ -2030,7 +2030,7 @@ impl Ad4mDb {
         max_count: Option<usize>,
     ) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
         let mut stmt = self.conn.prepare(
-            "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2",
+            "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2 ORDER BY id",
         )?;
         let diffs_iter = stmt.query_map(params![perspective_uuid, true], |row| {
             let additions: Vec<LinkExpression> =
@@ -2106,6 +2106,26 @@ impl Ad4mDb {
                 id_list
             ),
             params![perspective_uuid],
+        )?;
+        Ok(())
+    }
+
+    /// Take diffs out of the pending queue without deleting them: the commit
+    /// loop no longer sends them, and the rows stay for inspection, export and
+    /// recovery.
+    pub fn park_pending_diffs(&self, perspective_uuid: &str, ids: Vec<u64>) -> Ad4mDbResult<()> {
+        let id_list = ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<String>>()
+            .join(",");
+
+        self.conn.execute(
+            &format!(
+                "UPDATE perspective_diff SET is_pending = ?2 WHERE perspective = ?1 AND id IN ({})",
+                id_list
+            ),
+            params![perspective_uuid, false],
         )?;
         Ok(())
     }
