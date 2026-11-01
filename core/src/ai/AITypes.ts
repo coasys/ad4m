@@ -9,6 +9,9 @@ export class ModelApi {
     /** Optional ceiling for the provider's context window (tokens).
      *  Read by the Ollama provider to bound num_ctx / KV-cache VRAM. */
     maxNumCtx?: number;
+    /** Whether prompts with tools send them as tool definitions. Unset: yes for
+     *  Anthropic and Ollama, no for an OpenAI-shaped server. */
+    nativeTools?: boolean;
 }
 
 export class TokenizerSource {
@@ -32,6 +35,8 @@ export class Model {
     api?: ModelApi;
     local?: LocalModel;
     modelType: ModelType;
+    /** The endpoint that serves `api` (see `AIClient.endpoints`). Unset for a local model. */
+    endpointId?: string;
 }
 
 export class ModelApiInput {
@@ -44,6 +49,9 @@ export class ModelApiInput {
     apiType: string;
     /** Optional ceiling for the provider's context window (tokens). */
     maxNumCtx?: number;
+    /** Send tools as tool definitions. Unset: yes for Anthropic and Ollama, no for an
+     *  OpenAI-shaped server, which honours them per model and per server flag. */
+    nativeTools?: boolean;
 }
 
 export class TokenizerSourceInput {

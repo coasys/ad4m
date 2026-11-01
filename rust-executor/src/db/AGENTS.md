@@ -8,6 +8,7 @@ with its own `impl Ad4mDb` block. Child modules can use the private `conn` field
 
 | File | Content |
 |---|---|
+| `endpoints.rs` | The `ai_endpoints` table (AI model servers, key held as models' keys are) and `models.endpoint_id`: `link_models_to_endpoints` gives every remote model the endpoint with its protocol, URL and key (creating one named by the host); `update_endpoint` rewrites the `api_*` columns of the models on it |
 | `session_cutoffs.rs` | The users' session cutoffs (`users.sessions_valid_after`), read by `agent::revoked` |
 | `tasks.rs` | Owner-scoped reads of the `tasks` table: `get_task_owner`, `get_tasks_owned_by` |
 

@@ -16,14 +16,19 @@ import type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
 import type { AiAddModelParams } from "./AiAddModelParams";
 import type { AiAddTaskParams } from "./AiAddTaskParams";
 import type { AiDiscoverModelsParams } from "./AiDiscoverModelsParams";
+import type { AiEndpoint } from "./AiEndpoint";
+import type { AiEndpointInput } from "./AiEndpointInput";
 import type { AiGetDefaultModelParams } from "./AiGetDefaultModelParams";
 import type { AiIdParams } from "./AiIdParams";
 import type { AiModelLoadingStatusParams } from "./AiModelLoadingStatusParams";
+import type { AiRemoveEndpointParams } from "./AiRemoveEndpointParams";
 import type { AiSetDefaultModelParams } from "./AiSetDefaultModelParams";
 import type { AiTranscriptionCloseParams } from "./AiTranscriptionCloseParams";
 import type { AiTranscriptionOpenParams } from "./AiTranscriptionOpenParams";
+import type { AiUpdateEndpointParams } from "./AiUpdateEndpointParams";
 import type { AiUpdateModelParams } from "./AiUpdateModelParams";
 import type { AiUpdateTaskParams } from "./AiUpdateTaskParams";
+import type { AiUpstreamModelParams } from "./AiUpstreamModelParams";
 import type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 import type { Apps } from "./Apps";
 import type { CallSessionInfo } from "./CallSessionInfo";
@@ -33,6 +38,7 @@ import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 import type { CreateUserRequest } from "./CreateUserRequest";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
+import type { DetectedEndpoint } from "./DetectedEndpoint";
 import type { EmbedRequest } from "./EmbedRequest";
 import type { EntanglementProof } from "./EntanglementProof";
 import type { EntanglementProofPreflightRequest } from "./EntanglementProofPreflightRequest";
@@ -210,20 +216,27 @@ export interface RpcMethods {
   "agent.status": { params: Record<string, never>; result: AgentStatus };
   "agent.unlock": { params: UnlockAgentRequest; result: AgentStatus };
   "agent.updateProfile": { params: UpdateProfileRequest; result: Agent };
+  "ai.addEndpoint": { params: AiEndpointInput; result: AiEndpoint };
   "ai.addModel": { params: AiAddModelParams; result: string };
   "ai.addTask": { params: AiAddTaskParams; result: AITask };
+  "ai.deleteUpstreamModel": { params: AiUpstreamModelParams; result: boolean };
+  "ai.detectEndpoints": { params: Record<string, never>; result: Array<DetectedEndpoint> };
   "ai.discoverModels": { params: AiDiscoverModelsParams; result: Array<string> };
   "ai.embed": { params: EmbedRequest; result: string };
+  "ai.endpoints": { params: Record<string, never>; result: Array<AiEndpoint> };
   "ai.getDefaultModel": { params: AiGetDefaultModelParams; result: Model | null };
   "ai.modelLoadingStatus": { params: AiModelLoadingStatusParams; result: AIModelLoadingStatus };
   "ai.models": { params: Record<string, never>; result: Array<Model> };
   "ai.prompt": { params: PromptRequest; result: string };
+  "ai.pullModel": { params: AiUpstreamModelParams; result: boolean };
+  "ai.removeEndpoint": { params: AiRemoveEndpointParams; result: boolean };
   "ai.removeModel": { params: AiIdParams; result: boolean };
   "ai.removeTask": { params: AiIdParams; result: boolean };
   "ai.setDefaultModel": { params: AiSetDefaultModelParams; result: boolean };
   "ai.tasks": { params: Record<string, never>; result: Array<AITask> };
   "ai.transcriptionClose": { params: AiTranscriptionCloseParams; result: string };
   "ai.transcriptionOpen": { params: AiTranscriptionOpenParams; result: string };
+  "ai.updateEndpoint": { params: AiUpdateEndpointParams; result: AiEndpoint };
   "ai.updateModel": { params: AiUpdateModelParams; result: boolean };
   "ai.updateTask": { params: AiUpdateTaskParams; result: AITask };
   "events.unwatch": { params: Record<string, never>; result: boolean };
@@ -397,7 +410,9 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "agent.getTrustedAgents",
   "agent.isLocked",
   "agent.status",
+  "ai.detectEndpoints",
   "ai.discoverModels",
+  "ai.endpoints",
   "ai.getDefaultModel",
   "ai.modelLoadingStatus",
   "ai.models",
@@ -475,6 +490,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.addModel",
   "ai.embed",
   "ai.prompt",
+  "ai.pullModel",
   "language.applyTemplate",
   "language.publish",
   "neighbourhood.join",

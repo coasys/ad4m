@@ -33,6 +33,8 @@ pub enum Topic {
     ExceptionOccurred,
     AiTranscriptionText,
     AiModelLoadingStatus,
+    AiModelStatus,
+    AiEndpointStatus,
     PerspectiveQuerySubscription,
     AutoProcessorEvent,
     AutoProcessorNeighbourhoodState,
@@ -45,7 +47,7 @@ pub enum Topic {
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 24] = [
+    pub const ALL: [Topic; 26] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -62,6 +64,8 @@ impl Topic {
         Topic::ExceptionOccurred,
         Topic::AiTranscriptionText,
         Topic::AiModelLoadingStatus,
+        Topic::AiModelStatus,
+        Topic::AiEndpointStatus,
         Topic::PerspectiveQuerySubscription,
         Topic::AutoProcessorEvent,
         Topic::AutoProcessorNeighbourhoodState,
@@ -92,6 +96,8 @@ impl Topic {
             Topic::ExceptionOccurred => "exception-occurred",
             Topic::AiTranscriptionText => "transcription-text",
             Topic::AiModelLoadingStatus => "model-loading-status",
+            Topic::AiModelStatus => "model-status",
+            Topic::AiEndpointStatus => "ai-endpoint-status",
             Topic::PerspectiveQuerySubscription => "query-subscription-update",
             Topic::AutoProcessorEvent => "auto-processor-event",
             Topic::AutoProcessorNeighbourhoodState => "auto-processor-neighbourhood-state",
@@ -155,8 +161,11 @@ impl Topic {
             Topic::ExceptionOccurred => caps::RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone(),
             // `ai.transcriptionOpen`.
             Topic::AiTranscriptionText => caps::AI_TRANSCRIBE_CAPABILITY.clone(),
-            // `ai.modelLoadingStatus`.
-            Topic::AiModelLoadingStatus => caps::AI_READ_CAPABILITY.clone(),
+            // `ai.modelLoadingStatus`, `ai.models`; `ai.endpoints` (an operator-only event:
+            // published to the main agent's sessions, as `Guard::Executor` admits).
+            Topic::AiModelLoadingStatus | Topic::AiModelStatus | Topic::AiEndpointStatus => {
+                caps::AI_READ_CAPABILITY.clone()
+            }
             // The `sfu.*` reads check NEIGHBOURHOOD_READ (#712 gave the SFU streams the same).
             // A call names its neighbourhood by URL, not by perspective, so on every
             // perspective.

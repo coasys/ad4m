@@ -520,6 +520,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         return failed_start(reason);
     }
 
+    // Before the AI service loads, so the models the config file names start with it.
+    if let Some(ai_settings) = &config.ai_settings {
+        ai_service::endpoints::config::apply(ai_settings, |var| std::env::var(var).ok());
+    }
+
     info!("Initializing AI service...");
     AIService::init_global_instance()
         .await
@@ -538,6 +543,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             info!("Agent not yet initialized (first run)");
         }
     });
+    // After the agent loads: health events go to the sessions acting as the main agent.
+    ai_service::endpoints::spawn_health_loop();
 
     // Notifications of older executors name their owner by email; move them to DIDs.
     if let Some(main_agent_did) = AgentService::with_global_instance(|a| a.did.clone()) {

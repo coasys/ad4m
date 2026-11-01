@@ -26,8 +26,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
+mod endpoints;
 mod grants;
 mod tasks;
+pub use endpoints::InvalidEndpoint;
 pub use grants::GrantRow;
 
 #[derive(Serialize, Deserialize)]
@@ -63,8 +65,8 @@ impl std::fmt::Display for InvalidDefaultModel {
 
 impl std::error::Error for InvalidDefaultModel {}
 
-/// `update_model` was asked to keep a stored provider key while moving the model to
-/// another base URL. The key goes only to the endpoint it was set for, so the caller
+/// An update of a model or an endpoint was asked to keep a stored provider key while moving
+/// to another base URL. The key goes only to the endpoint it was set for, so the caller
 /// sends it again (or an empty key) with the new URL. A caller's mistake: a bad request.
 #[derive(Debug)]
 pub struct ApiKeyNotResent;
@@ -72,8 +74,8 @@ pub struct ApiKeyNotResent;
 impl std::fmt::Display for ApiKeyNotResent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
-            "The model has a stored API key and the base URL changed: send apiKey again \
-             (an empty string for none) to move the model to another endpoint",
+            "A stored API key goes only to the base URL it was set for, and the base URL \
+             changed: send apiKey again (an empty string for none) with the new URL",
         )
     }
 }
@@ -145,6 +147,61 @@ fn flow_replica_row(row: &rusqlite::Row) -> rusqlite::Result<FlowReplicaStateRow
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+
+/// A `models` row (`SELECT *`, columns in table order) as a [`Model`].
+fn model_from_row(row: &rusqlite::Row) -> rusqlite::Result<Model> {
+    let api = if let (Some(base_url), Some(api_key), Some(model), Some(api_type)) = (
+        row.get::<_, Option<String>>(2)?,
+        row.get::<_, Option<String>>(3)?,
+        row.get::<_, Option<String>>(4)?,
+        row.get::<_, Option<String>>(5)?,
+    ) {
+        Some(ModelApi {
+            base_url: Url::parse(&base_url).unwrap(),
+            api_key: Secret::new(api_key),
+            model,
+            api_type: ModelApiType::from_str(&api_type).unwrap(),
+            max_num_ctx: row.get::<_, Option<u32>>(13)?,
+            native_tools: row.get::<_, Option<bool>>(15)?,
+        })
+    } else {
+        None
+    };
+
+    let local = match row.get::<_, Option<String>>(6)? {
+        Some(file_name) => {
+            let tokenizer_source = if let (Some(repo), Some(revision), Some(file_name)) = (
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+            ) {
+                Some(TokenizerSource {
+                    repo,
+                    revision,
+                    file_name,
+                })
+            } else {
+                None
+            };
+            Some(LocalModel {
+                file_name,
+                tokenizer_source,
+                huggingface_repo: row.get::<_, Option<String>>(10)?,
+                revision: row.get::<_, Option<String>>(11)?,
+            })
+        }
+        None => None,
+    };
+
+    Ok(Model {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        api,
+        local,
+        model_type: serde_json::from_str(&row.get::<_, String>(12)?).unwrap(),
+        endpoint_id: row.get(14)?,
+    })
+}
 
 /// The key column for a sent `api`: the key, or empty for none. Reads the secret out
 /// because the database is where the executor keeps it.
@@ -339,7 +396,9 @@ impl Ad4mDb {
                 local_huggingface_repo TEXT,
                 local_revision TEXT,
                 type TEXT NOT NULL,
-                api_max_num_ctx INTEGER
+                api_max_num_ctx INTEGER,
+                endpoint_id TEXT,
+                api_native_tools INTEGER
             )",
             [],
         )?;
@@ -477,6 +536,11 @@ impl Ad4mDb {
         // ModelApi::max_num_ctx). Appended last so its SELECT * position is
         // the same on a fresh table and on one migrated via ALTER.
         alter_add_column("ALTER TABLE models ADD COLUMN api_max_num_ctx INTEGER")?;
+        // The endpoint that serves a model's `api` (`db/endpoints.rs`), and whether the model
+        // takes tools as definitions (`ModelApi::native_tools`). Appended last, in this order.
+        alter_add_column("ALTER TABLE models ADD COLUMN endpoint_id TEXT")?;
+        alter_add_column("ALTER TABLE models ADD COLUMN api_native_tools INTEGER")?;
+        endpoints::create_table(&conn)?;
 
         // Host rates table — stores per-item pricing used for credit deduction
         conn.execute_batch(
@@ -584,7 +648,10 @@ impl Ad4mDb {
              ON flow_fired_mark(perspective, agent_did, instance)",
         )?;
 
-        Ok(Self { conn })
+        let db = Self { conn };
+        // Every remote model gets the endpoint it runs on; a no-op once they have one.
+        db.link_models_to_endpoints()?;
+        Ok(db)
     }
 
     /// Refuses a database that a `dev` build wrote before agents were keyed by DID (D16):
@@ -2140,8 +2207,8 @@ impl Ad4mDb {
     pub fn add_model(&self, model: &ModelInput) -> Ad4mDbResult<String> {
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO models (id, name, api_base_url, api_key, model, api_type, local_file_name, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, local_huggingface_repo, local_revision, type, api_max_num_ctx)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO models (id, name, api_base_url, api_key, model, api_type, local_file_name, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, local_huggingface_repo, local_revision, type, api_max_num_ctx, api_native_tools)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 id,
                 model.name,
@@ -2157,131 +2224,24 @@ impl Ad4mDb {
                 model.local.as_ref().and_then(|local| local.revision.clone()),
                 serde_json::to_string(&model.model_type).unwrap(),
                 model.api.as_ref().and_then(|api| api.max_num_ctx),
+                model.api.as_ref().and_then(|api| api.native_tools),
             ],
         )?;
+        self.link_models_to_endpoints()?;
         Ok(id)
     }
 
     pub fn get_model(&self, model_id: String) -> Ad4mDbResult<Option<Model>> {
         let mut stmt = self.conn.prepare("SELECT * FROM models WHERE id = ?1")?;
-        let model = stmt
-            .query_row(params![model_id], |row| {
-                let api = if let (Some(base_url), Some(api_key), Some(model), Some(api_type)) = (
-                    row.get::<_, Option<String>>(2)?.map(|s| s.to_string()),
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ) {
-                    Some(ModelApi {
-                        base_url: Url::parse(&base_url).unwrap(),
-                        api_key: Secret::new(api_key),
-                        model,
-                        api_type: ModelApiType::from_str(&api_type).unwrap(),
-                        max_num_ctx: row.get::<_, Option<u32>>(13)?,
-                    })
-                } else {
-                    None
-                };
-
-                let local: Option<LocalModel> = if let Some(file_name) =
-                    row.get::<_, Option<String>>(6)?
-                {
-                    let tokenizer_source = if let (Some(repo), Some(revision), Some(file_name)) = (
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<String>>(9)?,
-                    ) {
-                        Some(TokenizerSource {
-                            repo,
-                            revision,
-                            file_name,
-                        })
-                    } else {
-                        None
-                    };
-
-                    Some(LocalModel {
-                        file_name,
-                        tokenizer_source,
-                        huggingface_repo: row.get::<_, Option<String>>(10)?,
-                        revision: row.get::<_, Option<String>>(11)?,
-                    })
-                } else {
-                    None
-                };
-
-                Ok(Model {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    api,
-                    local,
-                    model_type: serde_json::from_str(&row.get::<_, String>(12)?).unwrap(),
-                })
-            })
-            .optional()?;
-        Ok(model)
+        Ok(stmt
+            .query_row(params![model_id], model_from_row)
+            .optional()?)
     }
 
     pub fn get_models(&self) -> Ad4mDbResult<Vec<Model>> {
         let mut stmt = self.conn.prepare("SELECT * FROM models")?;
-        let model_iter = stmt.query_map([], |row| {
-            let api = if let (Some(base_url), Some(api_key), Some(model), Some(api_type)) = (
-                row.get::<_, Option<String>>(2)?.map(|s| s.to_string()),
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ) {
-                Some(ModelApi {
-                    base_url: Url::parse(&base_url).unwrap(),
-                    api_key: Secret::new(api_key),
-                    model,
-                    api_type: ModelApiType::from_str(&api_type).unwrap(),
-                    max_num_ctx: row.get::<_, Option<u32>>(13)?,
-                })
-            } else {
-                None
-            };
-
-            let local: Option<LocalModel> =
-                if let Some(file_name) = row.get::<_, Option<String>>(6)? {
-                    let tokenizer_source = if let (Some(repo), Some(revision), Some(file_name)) = (
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<String>>(9)?,
-                    ) {
-                        Some(TokenizerSource {
-                            repo,
-                            revision,
-                            file_name,
-                        })
-                    } else {
-                        None
-                    };
-
-                    Some(LocalModel {
-                        file_name,
-                        tokenizer_source,
-                        huggingface_repo: row.get::<_, Option<String>>(10)?,
-                        revision: row.get::<_, Option<String>>(11)?,
-                    })
-                } else {
-                    None
-                };
-
-            Ok(Model {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                api,
-                local,
-                model_type: serde_json::from_str(&row.get::<_, String>(12)?).unwrap(),
-            })
-        })?;
-
-        let mut models = Vec::new();
-        for model in model_iter {
-            models.push(model?);
-        }
-        Ok(models)
+        let models = stmt.query_map([], model_from_row)?;
+        Ok(models.collect::<Result<_, _>>()?)
     }
 
     /// Replaces the model's settings with `model`. An `api` without a key keeps the stored
@@ -2295,6 +2255,7 @@ impl Ad4mDb {
         let api_model = model.api.as_ref().map(|api| api.model.clone());
         let api_type = model.api.as_ref().map(|api| api.api_type.to_string());
         let api_max_num_ctx = model.api.as_ref().and_then(|api| api.max_num_ctx);
+        let api_native_tools = model.api.as_ref().and_then(|api| api.native_tools);
         let local_file_name = model.local.as_ref().map(|local| local.file_name.clone());
         let local_tokenizer = model
             .local
@@ -2323,8 +2284,10 @@ impl Ad4mDb {
                 local_huggingface_repo = ?10,
                 local_revision = ?11,
                 type = ?12,
-                api_max_num_ctx = ?13
-             WHERE id = ?14",
+                api_max_num_ctx = ?13,
+                api_native_tools = ?14,
+                endpoint_id = NULL
+             WHERE id = ?15",
             params![
                 model.name,
                 api_base_url,
@@ -2339,9 +2302,12 @@ impl Ad4mDb {
                 local_revision,
                 serde_json::to_string(&model.model_type).unwrap(),
                 api_max_num_ctx,
+                api_native_tools,
                 id
             ],
         )?;
+        // Linked again: the update may have moved the model to another endpoint.
+        self.link_models_to_endpoints()?;
         Ok(())
     }
 
@@ -4638,6 +4604,7 @@ mod tests {
                 model: "qwen3:32b".to_string(),
                 api_type: ModelApiType::Ollama.to_string(),
                 max_num_ctx: Some(16_384),
+                native_tools: None,
             }),
             local: None,
         };
@@ -4759,6 +4726,7 @@ mod tests {
                 model: "qwen3:32b".to_string(),
                 api_type: ModelApiType::Ollama.to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
         })
@@ -5363,6 +5331,7 @@ mod tests {
                 model: "llama3".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Llm,
@@ -5470,6 +5439,7 @@ mod tests {
                 model: "llama3".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Llm,
@@ -5487,6 +5457,7 @@ mod tests {
                 model: "llama4".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Embedding,
@@ -5524,6 +5495,7 @@ mod tests {
                 model: "qwen3:32b".to_string(),
                 api_type: ModelApiType::Ollama.to_string(),
                 max_num_ctx: Some(32_768),
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Llm,
@@ -5568,6 +5540,7 @@ mod tests {
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Llm,
@@ -5597,6 +5570,7 @@ mod tests {
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Transcription,
@@ -5697,6 +5671,7 @@ mod tests {
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Llm,
@@ -5761,6 +5736,7 @@ mod tests {
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
                 max_num_ctx: None,
+                native_tools: None,
             }),
             local: None,
             model_type: ModelType::Llm,

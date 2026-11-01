@@ -9,16 +9,32 @@ Split plan: spec item 9 (`mod.rs`), item 7 (`harness/` → `agentic/`).
 |---|---|
 | top | DTOs: `PromptResult`, `EmbedResult`, `LLMTask*Request`, `LlmModel`, transcription params |
 | ~330–510 | construction, model load/add/status, background tasks, global instance |
-| ~510–1120 | LLM: candle device selection, `build_local_llama`, `build_remote_client` (OpenAI-compatible HTTP via `chat_gpt_lib_rs`), `spawn_llm_model` (per-model worker thread + channel) |
+| ~510–1120 | LLM: candle device selection, `build_local_llama`, `build_remote_client` (a `providers::RemoteChat` per protocol), `spawn_llm_model` (per-model worker thread + channel) |
 | ~1120–1670 | AI tasks CRUD, `prompt` / `prompt_messages` / `prompt_messages_stream`, billing hooks (`bill_prompt_if_authed`) |
 | ~1670–1775 | embeddings |
 | ~1775–2440 | whisper transcription sessions + VAD |
 | rest | tests |
 
 Persistence of models/tasks is in `db.rs` (`models`, `tasks`, `model_status`,
-`default_models` tables). Tasks have an owner (`tasks.agent_did`, the managed agent's DID;
+`default_models` tables), endpoints in `db/endpoints.rs` (`ai_endpoints`). Tasks have an owner (`tasks.agent_did`, the managed agent's DID;
 `NULL` for a task of the main agent; see `src/db/AGENTS.md`): `add_task` takes it, and the
 WS guards enforce it. Billing goes through `crate::billing` with the caller's agent DID.
+
+## `endpoints/`
+
+The registry of upstream model servers (an endpoint owns URL, key, capabilities, health):
+
+- `mod.rs`: `ai.addEndpoint` / `updateEndpoint` / `removeEndpoint` (probe once before a
+  save; an update rewrites and reloads the models on it), `check_health` and the 60 s
+  health loop (`ai-endpoint-status`, to the main agent's sessions only), Ollama
+  `pull_model` / `delete_upstream_model` (`model-status`, at most 4/s).
+- `detect.rs`: `ai.detectEndpoints`, loopback ports, classified by answer shape. Saves nothing.
+- `config.rs`: the config file's `ai_endpoints` / `ai_models` / `ai_defaults`, applied
+  before the service loads; idempotent by name, keys only from env vars.
+
+A remote model still carries its own `api` (URL, key, protocol) and gets an `endpoint_id`
+from `Ad4mDb::link_models_to_endpoints` (startup and every model write). Never set a
+model's connection fields without going through the endpoint when it has one.
 
 ## `harness/`
 

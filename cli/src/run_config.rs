@@ -738,6 +738,10 @@ pub(crate) mod tests {
             sfu_udp_port: Some(40000),
             sfu_public_addr: Some("203.0.113.10".into()),
             sfu_stun_server: Some("stun.a.example:3478".into()),
+            // File-only keys with no variable or flag, so unset here.
+            ai_endpoints: None,
+            ai_models: None,
+            ai_defaults: None,
         };
         let file_json = serde_json::to_value(&file).unwrap();
         let config = write_config(&dir, &file_json.to_string());

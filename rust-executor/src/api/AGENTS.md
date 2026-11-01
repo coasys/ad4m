@@ -143,7 +143,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-194 methods: Cap 72, Executor 33, Open 5, Operator 16, Owns 68.
+201 methods: Cap 72, Executor 40, Open 5, Operator 16, Owns 68.
 
 | Method | Guard |
 |---|---|
@@ -171,21 +171,28 @@ the guard checked:
 | `agent.status` | `Cap(agent:READ)` |
 | `agent.unlock` | `Executor(agent:SIGN)` |
 | `agent.updateProfile` | `Cap(agent:UPDATE)` |
+| `ai.addEndpoint` | `Executor(artificial intelligence:CREATE)` |
 | `ai.addModel` | `Executor(artificial intelligence:CREATE)` |
 | `ai.addTask` | `Cap(artificial intelligence:CREATE)` |
+| `ai.deleteUpstreamModel` | `Executor(artificial intelligence:DELETE)` |
+| `ai.detectEndpoints` | `Executor(artificial intelligence:CREATE)` |
 | `ai.discoverModels` | `Executor(artificial intelligence:CREATE)` |
 | `ai.embed` | `Cap(artificial intelligence:PROMPT)` |
+| `ai.endpoints` | `Executor(artificial intelligence:READ)` |
 | `ai.getDefaultModel` | `Cap(artificial intelligence:READ)` |
 | `ai.modelLoadingStatus` | `Cap(artificial intelligence:READ)` |
 | `ai.models` | `Cap(artificial intelligence:READ)` |
 | `ai.prompt` | `Owns(Task taskId, artificial intelligence:PROMPT)` |
-| `ai.removeModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.pullModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.removeEndpoint` | `Executor(artificial intelligence:DELETE)` |
+| `ai.removeModel` | `Executor(artificial intelligence:DELETE)` |
 | `ai.removeTask` | `Owns(Task id, artificial intelligence:CREATE)` |
-| `ai.setDefaultModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.setDefaultModel` | `Executor(artificial intelligence:UPDATE)` |
 | `ai.tasks` | `Cap(artificial intelligence:READ)` |
 | `ai.transcriptionClose` | `Cap(artificial intelligence:TRANSCRIBE)` |
 | `ai.transcriptionOpen` | `Cap(artificial intelligence:TRANSCRIBE)` |
-| `ai.updateModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.updateEndpoint` | `Executor(artificial intelligence:UPDATE)` |
+| `ai.updateModel` | `Executor(artificial intelligence:UPDATE)` |
 | `ai.updateTask` | `Owns(Task task.taskId, artificial intelligence:CREATE)` |
 | `expression.create` | `Cap(expression:CREATE)` |
 | `expression.get` | `Cap(expression:READ)` |

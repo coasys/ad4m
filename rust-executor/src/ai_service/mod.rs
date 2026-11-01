@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
+pub mod endpoints;
 mod error;
 pub mod harness;
 pub mod providers;
@@ -510,6 +511,7 @@ impl AIService {
                         revision: None,
                     }),
                     api: None,
+                    endpoint_id: None,
                 })
                 .map(|_| ()),
             ));
@@ -1495,7 +1497,7 @@ impl AIService {
             .ok()
             .flatten()
             .and_then(|model| model.api)
-            .map(|api| providers::api_type_supports_native_tools(&api.api_type))
+            .map(|api| api.uses_native_tools())
             .unwrap_or(false)
     }
 
@@ -2438,8 +2440,8 @@ impl AIService {
 
     pub async fn update_model(&self, model_id: String, model_config: ModelInput) -> Result<()> {
         log::info!("Updating model: {} with: {:?}", model_id, model_config);
-        // First get the existing model to determine its type
-        let existing_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+        // The model must exist before the row is rewritten.
+        Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
             .map_err(|e| anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
 
@@ -2448,14 +2450,19 @@ impl AIService {
         Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model_config))
             .context("Failed to update model in database")?;
 
-        // Get the updated model from the database
+        self.reload_model(model_id).await
+    }
+
+    /// Builds a model's client again from its stored row, after the row changed: an update
+    /// of the model, or of the endpoint it runs on.
+    pub(crate) async fn reload_model(&self, model_id: String) -> Result<()> {
         let updated_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
             .map_err(|e| anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow!("Model not found after update: {}", model_id))?;
 
         log::info!("Updated model in DB: {:?}", updated_model);
 
-        match existing_model.model_type {
+        match updated_model.model_type {
             ModelType::Llm => {
                 // Shutdown the existing model thread
                 {
@@ -2651,6 +2658,7 @@ mod tests {
             model: "claude-test".to_string(),
             api_type: ModelApiType::Anthropic,
             max_num_ctx: None,
+            native_tools: None,
         }
     }
 
