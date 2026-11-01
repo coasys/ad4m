@@ -153,6 +153,7 @@ import type { SetUserFreeAccessRequest } from "./SetUserFreeAccessRequest";
 import type { SfuAddIceCandidateParams } from "./SfuAddIceCandidateParams";
 import type { SfuAnswerServerOfferParams } from "./SfuAnswerServerOfferParams";
 import type { SfuCallJoinParams } from "./SfuCallJoinParams";
+import type { SfuCallLeaveParams } from "./SfuCallLeaveParams";
 import type { SfuCascadeStatus } from "./SfuCascadeStatus";
 import type { SfuConfig } from "./SfuConfig";
 import type { SfuEnsureMembershipParams } from "./SfuEnsureMembershipParams";
@@ -354,7 +355,7 @@ export interface RpcMethods {
   "sfu.addIceCandidate": { params: SfuAddIceCandidateParams; result: boolean };
   "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: boolean };
   "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
-  "sfu.callLeave": { params: SfuRoomParams; result: boolean };
+  "sfu.callLeave": { params: SfuCallLeaveParams; result: boolean };
   "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
   "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
   "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };

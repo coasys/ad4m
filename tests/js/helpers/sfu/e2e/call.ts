@@ -9,54 +9,86 @@
 
 import { CAMERA, toneFor } from "./media.js";
 import { Participant } from "./participant.js";
-import type { Size, Snapshot } from "./protocol.js";
+import type { JoinOptions, Size, Snapshot } from "./protocol.js";
 import type { World } from "./world.js";
 
 export type Check = (snapshots: Map<string, Snapshot>) => string[];
+
+/** Every one of `checks`. */
+export function all(...checks: Check[]): Check {
+  return (snapshots) => checks.flatMap((check) => check(snapshots));
+}
 
 export class Call {
   readonly participants: Participant[] = [];
   /** Who is meant to be in the call right now. */
   readonly present = new Set<string>();
+  /** Each participant's tone, by participant name. */
   private tones = new Map<string, number>();
 
+  /**
+   * `clients` names the participants beyond one per user: `user:client`, another
+   * client of that user (a second tab, a phone), sending its own tone.
+   */
   constructor(
     private world: World,
     readonly neighbourhood: string,
     readonly room: string,
     private onStart: (participant: Participant) => void = () => {},
     private video: Size | null = CAMERA,
-  ) {}
+    clients: string[] = [],
+  ) {
+    // Every participant the call may ever hold gets its tone up front, so receivers can name them all.
+    for (const [index, name] of [...Object.keys(world.users), ...clients].entries()) this.tones.set(name, toneFor(index));
+  }
 
-  /** Bring `names` into the call: each starts a process and joins. Concurrently unless `oneByOne`. */
-  async join(names: string[], { oneByOne = false } = {}): Promise<void> {
+  /**
+   * Bring `names` into the call: each starts a process and joins. Concurrently unless `oneByOne`.
+   * `device` is the device they call from (unset: each process its own); `failOffer` makes the join fail.
+   */
+  async join(names: string[], { oneByOne = false, device, failOffer }: { oneByOne?: boolean; device?: string; failOffer?: boolean } = {}): Promise<void> {
     const joinOne = async (name: string) => {
       // A participant whose process ended (killed, or crashed) comes back as a new process.
       const existing = this.who(name, false);
       const participant = existing && !existing.exit ? existing : await this.start(name);
-      await participant.join({
-        port: participant.user.port,
-        token: participant.user.token,
-        neighbourhoodUrl: this.world.url(this.neighbourhood),
-        room: this.room,
-        tone: this.tones.get(participant.did)!,
-        tones: [...this.tones.values()],
-        video: this.video,
-      });
+      await participant.join({ ...this.options(participant, device), ...(failOffer ? { failOffer } : {}) });
       this.present.add(name);
     };
     if (oneByOne) for (const name of names) await joinOne(name);
     else await Promise.all(names.map(joinOne));
   }
 
+  /** `name` opens the space's call session on `device` without joining, as a tab that shows the space. */
+  async open(name: string, { device }: { device?: string } = {}): Promise<void> {
+    const existing = this.who(name, false);
+    const participant = existing && !existing.exit ? existing : await this.start(name);
+    await participant.open(this.options(participant, device));
+  }
+
+  /** `name` destroys its session and its process ends, as a closed tab. */
+  async close(name: string): Promise<void> {
+    await this.who(name).close();
+    this.present.delete(name);
+  }
+
+  private options(participant: Participant, device?: string): JoinOptions {
+    return {
+      port: participant.user.port,
+      token: participant.user.token,
+      neighbourhoodUrl: this.world.url(this.neighbourhood),
+      room: this.room,
+      tone: this.tones.get(participant.name)!,
+      tones: [...this.tones.values()],
+      video: this.video,
+      ...(device ? { deviceId: device } : {}),
+    };
+  }
+
   private async start(name: string): Promise<Participant> {
-    const user = this.world.users[name];
-    if (!user) throw new Error(`no user "${name}"`);
-    // Every participant the call may ever hold gets its tone up front, so receivers can name them all.
-    for (const [index, u] of Object.values(this.world.users).entries()) {
-      if (!this.tones.has(u.did)) this.tones.set(u.did, toneFor(index));
-    }
-    const participant = await Participant.start(user);
+    const user = this.world.users[userOf(name)];
+    if (!user) throw new Error(`no user "${userOf(name)}"`);
+    if (!this.tones.has(name)) throw new Error(`no tone for "${name}": name it in the call's clients`);
+    const participant = await Participant.start(user, name);
     this.participants.push(participant);
     this.onStart(participant);
     return participant;
@@ -106,8 +138,18 @@ export class Call {
     throw new Error(`${label}: not true within ${timeoutMs} ms — ${shown}`);
   }
 
+  /** `check` stays true for all of `durationMs`: the first problem fails it. */
+  async holds(check: Check, durationMs: number, label: string): Promise<void> {
+    const until = Date.now() + durationMs;
+    while (Date.now() < until) {
+      const problems = check(await this.snapshots());
+      if (problems.length) throw new Error(`${label}: broke — ${problems.slice(0, 12).join("; ")}`);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
   private did(name: string): string {
-    return this.world.users[name].did;
+    return this.world.users[userOf(name)].did;
   }
 
   private nameOf(did: string): string {
@@ -134,7 +176,7 @@ export class Call {
     return (snapshots) => {
       const problems: string[] = [];
       for (const [me, snapshot] of snapshots) {
-        const expected = [...this.present].filter((n) => n !== me).sort();
+        const expected = [...this.present].filter((n) => n !== me).map(userOf).sort();
         for (const [source, dids] of [["roster", snapshot.roster], ["participants", snapshot.participants]] as const) {
           const actual = dids.map((d) => this.nameOf(d)).sort();
           if (actual.join() !== expected.join()) problems.push(`${me}'s ${source} is [${actual}], expected [${expected}]`);
@@ -144,18 +186,28 @@ export class Call {
     };
   }
 
-  /** Audio arriving now from every other participant, carrying *that* participant's tone. */
+  /**
+   * Audio arriving now from every other participant, carrying *that* participant's tone,
+   * on one of the participants the SDK attributes to their agent.
+   */
   hearsEveryone(): Check {
     return this.pairs((snapshot, other) => {
-      const remote = snapshot.remotes[this.did(other)];
-      if (!remote || remote.audioRecent === 0) return `hears nothing from ${other}`;
-      const expected = this.tones.get(this.did(other));
-      if (remote.tone !== expected) {
-        const heard = remote.tone == null ? "silence" : `${remote.tone} Hz (${this.toneOwner(remote.tone)})`;
+      const theirs = snapshot.sessions.filter((s) => s.agentDid === this.did(other) && s.audioRecent > 0);
+      if (theirs.length === 0) return `hears nothing from ${other}`;
+      const expected = this.tones.get(other);
+      if (!theirs.some((s) => s.tone === expected)) {
+        const heard = theirs.map((s) => (s.tone == null ? "silence" : `${s.tone} Hz (${this.toneOwner(s.tone)})`)).join(", ");
         return `hears ${heard} from ${other}, who sends ${expected} Hz`;
       }
       return null;
     });
+  }
+
+  /** Nobody hears their own tone back. */
+  hearsNoEcho(): Check {
+    return (snapshots) => [...snapshots]
+      .filter(([me, s]) => s.sessions.some((r) => r.audioRecent > 0 && r.tone === this.tones.get(me)))
+      .map(([me]) => `${me} hears its own tone`);
   }
 
   /** Video arriving now from every other participant, at `size` when given. */
@@ -206,6 +258,13 @@ export class Call {
     };
   }
 
+  /** No present participant has seen anyone leave since `before` (absent there: since its start). */
+  noDeparturesSince(before: Map<string, Snapshot> = new Map()): Check {
+    return (snapshots) => [...snapshots]
+      .filter(([me, s]) => s.departures > (before.get(me)?.departures ?? 0))
+      .map(([me, s]) => `${me} saw ${s.departures - (before.get(me)?.departures ?? 0)} departure(s)`);
+  }
+
   /** Nobody present reports a session error. */
   noErrors(): Check {
     return (snapshots) => [...snapshots].flatMap(([me, s]) => s.errors.map((e) => `${me} reported "${e}"`));
@@ -219,11 +278,16 @@ export class Call {
   }
 
   private toneOwner(hz: number): string {
-    const did = [...this.tones].find(([, t]) => t === hz)?.[0];
-    return did ? `${this.nameOf(did)}'s tone` : "nobody's tone";
+    const name = [...this.tones].find(([, t]) => t === hz)?.[0];
+    return name ? `${name}'s tone` : "nobody's tone";
   }
 
   async end(): Promise<void> {
     await Promise.all(this.participants.map((p) => p.close()));
   }
+}
+
+/** The user a participant name belongs to: `u1:phone` is u1's. */
+export function userOf(name: string): string {
+  return name.split(":")[0];
 }

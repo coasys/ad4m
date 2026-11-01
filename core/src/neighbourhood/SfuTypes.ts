@@ -20,6 +20,8 @@ export type { SfuMigrateEvent } from "../generated/api/SfuMigrateEvent"
 export type { SfuParticipantQualityPreference } from "../generated/api/SfuParticipantQualityPreference"
 export type { SfuRoomInfo } from "../generated/api/SfuRoomInfo"
 export type { SfuRoomRoster } from "../generated/api/SfuRoomRoster"
+export type { SfuRosterParticipant } from "../generated/api/SfuRosterParticipant"
+export type { SfuSessionReplaced } from "../generated/api/SfuSessionReplaced"
 export type { SfuRoomParticipantInfo } from "../generated/api/SfuRoomParticipantInfo"
 export type { SfuStatus } from "../generated/api/SfuStatus"
 export type { TrackMapEntry } from "../generated/api/TrackMapEntry"
@@ -32,6 +34,8 @@ export type SfuQualityPreference = SfuQualityPreferenceParams["preference"]
 
 /** Browser-side participant — carries a live MediaStream. */
 export interface SfuParticipantInfo {
+    /** The participant's session: an agent in the call from two devices is two participants. On the mesh path, the DID. */
+    participantId: string
     agentDid: string
     stream: MediaStream
     hasAudio: boolean

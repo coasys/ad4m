@@ -28,6 +28,11 @@ export type SessionEvent =
     /** `(did, { rung, attempts })` — the mesh attempted a repair on this pair. */
     | "peer-recovery"
     | "state-changed"
+    /**
+     * `(SfuSessionReplaced)` — the call was joined again from this device (another tab), and
+     * that join took it over: this session's call has ended, and it is idle again. SFU only.
+     */
+    | "replaced"
     | "error"
 
 export type SessionEventCallback = (...args: any[]) => void
@@ -38,7 +43,7 @@ export interface Session {
     join(localStream: MediaStream): Promise<void>
     /** Disconnect from the room. The session returns to idle and can rejoin. */
     leave(): Promise<void>
-    /** Current participants in the room (excluding self). */
+    /** Current participants in the room (excluding this session; this agent's other devices included). */
     readonly participants: ReadonlyArray<SfuParticipantInfo>
     /** Subscribe to incoming remote media tracks. Returns an unsubscribe function. */
     onTrack(cb: (stream: MediaStream, track: MediaStreamTrack) => void): () => void
@@ -81,6 +86,12 @@ export interface SessionCreateOptions {
     sfuConfig?: SfuConfig
     /** NAT traversal for both paths, each server as given. Takes precedence over `sfuConfig.iceServers`. */
     iceServers?: IceServer[]
+    /**
+     * The device this session calls from, for the SFU path: a join from the same device
+     * replaces this agent's earlier session (another tab); another device joins beside it.
+     * Unset, the browser profile's id (`localStorage`), or one per process outside a browser.
+     */
+    deviceId?: string
 }
 
 interface SessionImplConfig {
@@ -91,6 +102,8 @@ interface SessionImplConfig {
     topology: SessionTopology
     sfuConfig?: SfuConfig
     iceServers?: IceServer[]
+    /** See `SessionCreateOptions.deviceId`. */
+    deviceId?: string
     /** Signalling channel for mesh topology — required when topology resolves to mesh. */
     channel?: SignallingChannel
     /** Publish call-presence via telepresence.  The session broadcasts
@@ -127,7 +140,7 @@ const ROSTER_POLL_INTERVAL_MS = 3_000
 export function createSession(config: SessionImplConfig): Session {
     const {
         api, roomId, agentDid, neighbourhoodUrl,
-        topology, sfuConfig, iceServers,
+        topology, sfuConfig, iceServers, deviceId,
         channel, setOnlineStatus, ownOnlineStatus, onlineAgents,
         localSfuStatus, sfuServesAllMembers,
     } = config
@@ -153,6 +166,11 @@ export function createSession(config: SessionImplConfig): Session {
     function setState(next: SessionState) {
         state = next
         emit("state-changed", next)
+    }
+
+    /** `destroy()` ran: a join still resolving must not go on to reach the executor. */
+    function destroyed(): boolean {
+        return state === "closed"
     }
 
     /**
@@ -317,6 +335,15 @@ export function createSession(config: SessionImplConfig): Session {
         sfu.on("stream-removed", (stream: MediaStream, track: MediaStreamTrack) => {
             emit("stream-removed", stream, track)
         })
+        // Another tab on this device took the call over. The manager has stopped
+        // and will not rejoin; the session is idle and may join again.
+        sfu.on("replaced", (event: unknown) => {
+            if (sfuManager !== sfu) return
+            if (dataUnsubscribe) { dataUnsubscribe(); dataUnsubscribe = null }
+            sfuManager = null
+            emit("replaced", event)
+            setState("idle")
+        })
     }
 
     // ── Session object ──────────────────────────────────────────────
@@ -328,6 +355,7 @@ export function createSession(config: SessionImplConfig): Session {
 
             setState("joining")
             const topo = await resolveTopology()
+            if (destroyed()) throw new Error("Session destroyed")
 
             if (topo === "mesh") {
                 if (!channel) {
@@ -390,14 +418,17 @@ export function createSession(config: SessionImplConfig): Session {
                 ? { servers: iceServers.map(s => ({ urls: s.urls, ...(s.username ? { username: s.username } : {}), ...(s.credential ? { credential: s.credential } : {}) })) }
                 : undefined
 
-            sfuManager = new SfuManager(api, roomId, agentDid, neighbourhoodUrl, iceConfig, sfuConfig)
-            wireSfuEvents(sfuManager)
+            const manager = new SfuManager(api, roomId, agentDid, neighbourhoodUrl, iceConfig, sfuConfig, deviceId)
+            sfuManager = manager
+            wireSfuEvents(manager)
 
-            dataUnsubscribe = sfuManager.subscribeDataChannel((msg) => {
+            dataUnsubscribe = manager.subscribeDataChannel((msg) => {
                 for (const cb of dataListeners) cb(msg)
             })
 
-            await sfuManager.join(localStream)
+            await manager.join(localStream)
+            // Replaced while joining: the session is idle again.
+            if (sfuManager !== manager) return
             emit("topology-changed", "sfu")
             setState("active")
         },
@@ -416,6 +447,7 @@ export function createSession(config: SessionImplConfig): Session {
         get participants() {
             if (meshManager) {
                 return meshManager.getParticipants().map(p => ({
+                    participantId: p.did,
                     agentDid: p.did,
                     stream: p.stream,
                     hasAudio: p.hasAudio,
@@ -425,6 +457,7 @@ export function createSession(config: SessionImplConfig): Session {
             }
             if (sfuManager) {
                 return sfuManager.getParticipants().map(p => ({
+                    participantId: p.participantId,
                     agentDid: p.did,
                     stream: p.stream,
                     hasAudio: p.hasAudio,

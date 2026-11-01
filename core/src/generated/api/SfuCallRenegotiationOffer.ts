@@ -14,7 +14,12 @@ export type SfuCallRenegotiationOffer = {
  * DID of the participant this offer is addressed to.  Used by the
  * events_ws fanout to filter per-user.
  */
-targetDid: string, neighbourhoodUrl: string, roomName: string, 
+targetDid: string, 
+/**
+ * The session the offer is for. Every session of `target_did` gets
+ * it; only this one applies it.
+ */
+participantId: string, neighbourhoodUrl: string, roomName: string, 
 /**
  * JSON-encoded `RTCSessionDescriptionInit` for the new offer.
  */

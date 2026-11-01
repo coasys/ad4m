@@ -577,26 +577,29 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     // params take `{}`.
     ("sfu.startRoom", sfu_room),
     ("sfu.stopRoom", sfu_room),
-    ("sfu.callLeave", sfu_room),
+    (
+        "sfu.callLeave",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1" }),
+    ),
     (
         "sfu.callJoin",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}", "deviceId": "d" }),
     ),
     (
         "sfu.callSetQualityPreference",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "preference": "low" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "preference": "low" }),
     ),
     (
         "sfu.callAnswerServerOffer",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpAnswer": "{}" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "sdpAnswer": "{}" }),
     ),
     (
         "sfu.addIceCandidate",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "candidate": "c" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "candidate": "c" }),
     ),
     (
         "sfu.sendData",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "channelLabel": "c", "data": "d" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "channelLabel": "c", "data": "d" }),
     ),
     ("sfu.getConfig", sfu_neighbourhood),
     ("sfu.sfuPeerForNeighbourhood", sfu_neighbourhood),

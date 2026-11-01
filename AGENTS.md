@@ -149,10 +149,25 @@ so the same file runs on both link languages.
   recoveries per participant, and world phase timings. `E2E_DEBUG=stack`
   adds the caller of each local description.
 
-SFU behaviour the scenarios pin: the executor publishes `sfu-room-roster`
-(to the listed DIDs, plus the removed DID on departure) after every join and departure, and the SDK keys
-participants by DID from it; tracks are attributed only by the `trackMapping`
-mids; `sfu-data` never echoes to its sender; room capacity comes from the
+SFU behaviour the scenarios pin: one session per device. `sfu.callJoin`
+names a `deviceId`; a join from the same DID and device (another tab)
+replaces the earlier session, which gets `sfu-session-replaced` and stops
+without rejoining, even mid-reconnect (E20); another device joins beside it as a participant of
+its own (E22; at most `MAX_DEVICES_PER_DID` = 4 per room). Every call about
+a session (`callLeave`, `callAnswerServerOffer`, `addIceCandidate`,
+`callSetQualityPreference`, `sendData`) names the `participantId` its join
+returned, and acts only on that session of the caller's DID; the SDK sends
+none of them without one, so a tab that never joined cannot end another
+tab's call (E19, E21). The executor publishes `sfu-room-roster` (to the
+listed DIDs, plus the departed session's DID on departure) after every join
+and departure, listing sessions (`participantId` + `agentDid`), and the SDK
+keys participants by participant id from it; when the roster stops listing
+this session (its `participantId`) for 3 s, the SDK rebuilds the call, but a
+replaced session never does; tracks are attributed only by the `trackMapping`
+mids (which name
+the participant id); a session never receives its own media or its own
+`sfu-data` (`senderParticipantId`), but does receive its agent's other
+device; room capacity comes from the
 space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
 per-node capacity only drives redirects; the server drops a peer only after
 10 s of ICE `Disconnected`; the SDK rebuilds a failed connection and retries

@@ -2,7 +2,17 @@
  * Instrumented AD4M Client — WebSocket RPC
  */
 
+import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
+
+/** The `sfu.*` calls about one session: each names the participant id its join returned. */
+const SESSION_METHODS = new Set([
+  "sfu.callLeave",
+  "sfu.callAnswerServerOffer",
+  "sfu.addIceCandidate",
+  "sfu.callSetQualityPreference",
+  "sfu.sendData",
+]);
 
 export interface TimedResult<T> {
   data: T;
@@ -22,6 +32,10 @@ export class InstrumentedClient {
   private ws: WebSocket | null = null;
   private wsReady: Promise<void> | null = null;
   private requestId = 0;
+  /** The device this client joins calls from: one per client, as a browser profile is one. */
+  private readonly deviceId = randomUUID();
+  /** The session each room's last join on this client returned, by `url\nroom`. */
+  private sessions = new Map<string, string>();
   private pendingRequests = new Map<
     string,
     { resolve: (v: any) => void; reject: (e: any) => void }
@@ -90,11 +104,20 @@ export class InstrumentedClient {
    * SFU surface in the WebRTC scenarios).
    */
   async call<T = any>(method: string, params: any = {}): Promise<T> {
-    // The harness holds a client for every node, so unlike an SDK client
-    // it can follow a cascade redirect; the executor sends one only to a
-    // caller that says so.
-    if (method === "sfu.callJoin" && params.acceptRedirect === undefined) {
-      params = { ...params, acceptRedirect: true };
+    const room = `${params.neighbourhoodUrl}\n${params.roomName}`;
+    if (method === "sfu.callJoin") {
+      // The harness holds a client for every node, so unlike an SDK client
+      // it can follow a cascade redirect; the executor sends one only to a
+      // caller that says so.
+      if (params.acceptRedirect === undefined) params = { ...params, acceptRedirect: true };
+      if (params.deviceId === undefined) params = { ...params, deviceId: this.deviceId };
+      const session = await this.wsCall<any>(method, params);
+      if (session?.participantId) this.sessions.set(room, session.participantId);
+      return session as T;
+    }
+    // Calls about the session name the one this client's join returned, as the SDK does.
+    if (SESSION_METHODS.has(method) && params.participantId === undefined && this.sessions.has(room)) {
+      params = { ...params, participantId: this.sessions.get(room) };
     }
     return this.wsCall<T>(method, params);
   }

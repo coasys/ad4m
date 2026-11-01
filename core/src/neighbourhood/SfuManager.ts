@@ -10,6 +10,12 @@
  * through cascade pipes between executors, so the client never follows
  * a redirect or a rebalance to another node — it has no way to reach one.
  *
+ * One session per device: a join names this device (`deviceId`), and the
+ * executor gives it a participant id that every later call about the
+ * session names. The same agent on another device is another participant;
+ * a later join from this device — another tab — replaces this session, and
+ * the manager stops (`replaced`) rather than taking the call back.
+ *
  * Applications (Flux, WE, or any other) wrap this class with their
  * own reactive store and UI layer.  The manager itself only touches
  * Web APIs (RTCPeerConnection, MediaStream) and the AD4M
@@ -24,6 +30,8 @@ import type {
     SfuDataMessage,
     SfuQualityPreference,
     SfuRoomRoster,
+    SfuRosterParticipant,
+    SfuSessionReplaced,
 } from "./SfuTypes"
 
 // ── Public types ──────────────────────────────────────────────────
@@ -36,19 +44,23 @@ export interface SfuNeighbourhoodApi {
         neighbourhoodUrl: string,
         roomName: string,
         sdpOffer: string,
+        deviceId: string,
     ): Promise<CallSessionInfo>
     sfuCallLeave(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
     ): Promise<boolean>
     sfuCallSetQualityPreference(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         preference: SfuQualityPreference,
     ): Promise<boolean>
     sfuCallAnswerServerOffer(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         sdpAnswer: string,
     ): Promise<boolean>
     subscribeSfuCallRenegotiationOffer(
@@ -58,11 +70,13 @@ export interface SfuNeighbourhoodApi {
     sfuAddIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         candidate: string,
     ): Promise<boolean>
     sfuSendData(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         channelLabel: string,
         data: string,
         binary?: boolean,
@@ -72,6 +86,9 @@ export interface SfuNeighbourhoodApi {
     ): () => void
     subscribeSfuRoomRoster(
         callback: (roster: SfuRoomRoster) => void,
+    ): () => void
+    subscribeSfuSessionReplaced(
+        callback: (event: SfuSessionReplaced) => void,
     ): () => void
 }
 
@@ -87,7 +104,9 @@ export interface SfuCallState {
     peerConnection: RTCPeerConnection | null
 }
 
+/** One session in the call: an agent on two devices is two participants. */
 export interface SfuParticipantState {
+    participantId: string
     did: string
     stream: MediaStream
     hasAudio: boolean
@@ -102,6 +121,8 @@ export type SfuEvent =
     | "active-speaker"
     | "stream-added"
     | "stream-removed"
+    /** `(SfuSessionReplaced)` — a later join from this device took the call over; this manager stopped. */
+    | "replaced"
     | "error"
 
 export type SfuEventCallback = (...args: any[]) => void
@@ -117,6 +138,50 @@ export interface SfuIceConfig {
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
     { urls: "stun:stun.l.google.com:19302" },
 ]
+
+/**
+ * Where a browser profile keeps its device id. The prefix versions the
+ * stored value, as `connect`'s `{version}/ad4m-token` does; it is not the
+ * SDK release, so an upgrade does not make every browser a new device.
+ */
+const DEVICE_ID_KEY = "v1/ad4m-sfu-device-id"
+
+/** Outside a browser: one device id for the life of the process. */
+let processDeviceId: string | null = null
+
+function randomId(): string {
+    const crypto = (globalThis as any).crypto
+    if (crypto?.randomUUID) return crypto.randomUUID()
+    return Array.from({ length: 4 }, () => Math.random().toString(36).slice(2, 10)).join("")
+}
+
+/**
+ * This device's id for SFU calls, unless the app gives one. In a browser it
+ * is kept in `localStorage`, which every tab of one profile shares, so the
+ * tabs of one browser are one device; outside a browser (Node), the process
+ * is the device.
+ */
+export function defaultDeviceId(): string {
+    let storage: Storage | undefined
+    try {
+        storage = (globalThis as any).localStorage
+    } catch {
+        storage = undefined // storage denied (sandboxed frame, privacy settings)
+    }
+    if (storage) {
+        try {
+            let id = storage.getItem(DEVICE_ID_KEY)
+            if (!id) {
+                id = randomId()
+                storage.setItem(DEVICE_ID_KEY, id)
+            }
+            return id
+        } catch {
+            /* unusable storage: fall back to the process */
+        }
+    }
+    return (processDeviceId ??= randomId())
+}
 
 // ── Topology resolution ───────────────────────────────────────────
 
@@ -175,6 +240,8 @@ export class SfuManager {
     private neighbourhoodUrl: string
     private roomId: string
     private agentDid: string
+    /** The device this manager calls from: a later join from it replaces this session. */
+    private deviceId: string
     private state: SfuCallState
     private callbacks: Map<SfuEvent, SfuEventCallback[]> = new Map()
     private iceServers: RTCIceServer[]
@@ -190,9 +257,9 @@ export class SfuManager {
     private reconnecting = false
     /** Bumped by `leave()`, so a reconnect in flight stops before rejoining. */
     private generation: number = 0
-    /** Which participant each received media section carries, from the server's mappings. */
-    private midToParticipant: Map<string, string> = new Map()
-    /** DIDs the roster removed and has not listed since. */
+    /** Which participant (session and agent) each received media section carries, from the server's mappings. */
+    private midToParticipant: Map<string, { participantId: string; did: string }> = new Map()
+    /** Participant ids the roster removed and has not listed since. */
     private departed: Set<string> = new Set()
     /** The sender of each kind of local media: declared at join, so a later camera or screen needs no renegotiation. */
     private senders: Map<"audio" | "video", RTCRtpSender> = new Map()
@@ -204,11 +271,17 @@ export class SfuManager {
     private offerQueue: Promise<void> = Promise.resolve()
     private renegotiationUnsubscribe: (() => void) | null = null
     private rosterUnsubscribe: (() => void) | null = null
+    /** For the manager's call, not one join: a reconnect between its leave and its join still hears a notice. */
+    private replacedUnsubscribe: (() => void) | null = null
+    /** Participant ids of this call a notice can still name: the current one, and any whose leave found it gone. */
+    private heldIds: Set<string> = new Set()
+    /** Settles when the latest join has its participant id, or failed. */
+    private joinSettled: Promise<void> = Promise.resolve()
     private dataChannelUnsubscribe: (() => void) | null = null
     private disconnectedTimer: ReturnType<typeof setTimeout> | null = null
-    /** Running while the room's roster leaves this agent out: see `noticeRoster`. */
+    /** Running while the room's roster leaves this session out: see `noticeRoster`. */
     private unlistedTimer: ReturnType<typeof setTimeout> | null = null
-    /** How long the roster may leave this agent out before the call is rebuilt. */
+    /** How long the roster may leave this session out before the call is rebuilt. */
     private static readonly UNLISTED_GRACE_MS = 3_000
 
     constructor(
@@ -218,11 +291,14 @@ export class SfuManager {
         neighbourhoodUrl?: string,
         iceConfig?: SfuIceConfig,
         sfuConfig?: SfuConfig,
+        /** This device; unset, `defaultDeviceId()`. Apps outside a browser profile (Electron, tests) pass their own. */
+        deviceId?: string,
     ) {
         this.neighbourhood = neighbourhood
         this.neighbourhoodUrl = neighbourhoodUrl || ""
         this.roomId = roomId
         this.agentDid = agentDid
+        this.deviceId = deviceId || defaultDeviceId()
         this.state = {
             topology: "sfu",
             roomId,
@@ -252,8 +328,11 @@ export class SfuManager {
 
     /**
      * Rebuild the call after its connection failed: leave, then join again
-     * on this executor. Leaving first matters: the executor still holds this
-     * DID's old session until it notices the connection died.
+     * on this executor. Leaving first frees the old session's slot at once;
+     * the join would replace it anyway, as it comes from this device.
+     * Another tab's join can still replace the old session before the leave
+     * lands: that notice stops the rebuild wherever it is, and a session its
+     * join already got is left.
      *
      * Two budgets. A rebuild whose join works but whose connection fails
      * again counts once against `MAX_RECONNECTS`, reset when ICE connects.
@@ -281,12 +360,8 @@ export class SfuManager {
                     this.state.peerConnection.close()
                     this.state.peerConnection = null
                 }
-                try {
-                    await this.neighbourhood.sfuCallLeave(this.neighbourhoodUrl, this.roomId)
-                } catch {
-                    /* best-effort: the executor frees a dead session on its own */
-                }
-                if (generation !== this.generation) return // left meanwhile
+                await this.leaveSession()
+                if (generation !== this.generation) return // left or replaced meanwhile
                 this.resetParticipants()
                 try {
                     await this.join(stream)
@@ -347,6 +422,7 @@ export class SfuManager {
 
     /** Join the SFU call with simulcast support. */
     async join(localStream: MediaStream): Promise<void> {
+        const generation = this.generation
         this.state.localStream = localStream
 
         const pc = new RTCPeerConnection({ iceServers: this.iceServers })
@@ -427,10 +503,10 @@ export class SfuManager {
         pc.ontrack = (event: RTCTrackEvent) => {
             if (this.state.peerConnection !== pc) return
             const mid = event.transceiver?.mid
-            const did = mid ? this.midToParticipant.get(mid) : undefined
+            const owner = mid ? this.midToParticipant.get(mid) : undefined
             // Someone the roster said left stays gone: a late offer can still name them.
-            if (!did || did === this.agentDid || this.departed.has(did)) return
-            const participant = this.ensureParticipant(did)
+            if (!owner || owner.participantId === this.state.participantId || this.departed.has(owner.participantId)) return
+            const participant = this.ensureParticipant(owner.participantId, owner.did)
             participant.stream.addTrack(event.track)
             this.refreshKinds(participant)
             this.emit("stream-added", participant.stream, event.track)
@@ -453,9 +529,11 @@ export class SfuManager {
         pc.onicecandidate = (event) => {
             if (!event.candidate) return
             if (joinComplete) {
+                if (this.state.peerConnection !== pc || !this.state.participantId) return
                 this.neighbourhood.sfuAddIceCandidate(
                     this.neighbourhoodUrl,
                     this.roomId,
+                    this.state.participantId,
                     event.candidate.candidate,
                 ).catch((err) => {
                     console.error(
@@ -477,6 +555,7 @@ export class SfuManager {
         // they wait for it, then apply in order.
         let markJoined!: () => void
         const joined = new Promise<void>((resolve) => { markJoined = resolve })
+        this.joinSettled = joined
         this.subscribeServerEvents(pc, joined)
         let session: CallSessionInfo
         try {
@@ -484,29 +563,49 @@ export class SfuManager {
                 this.neighbourhoodUrl,
                 this.roomId,
                 sdpOffer,
+                this.deviceId,
             )
         } catch (err) {
             // Settled either way: offers queued behind this join reach
             // `applyServerOffer`, which drops them for the abandoned connection.
+            // The executor holds no session for it, so there is nothing to leave.
             markJoined()
             this.abandon(pc)
             throw err
         }
+        if (generation !== this.generation) {
+            // Left or replaced while the join was out: the session it got is no one's.
+            markJoined()
+            this.abandon(pc)
+            await this.neighbourhood
+                .sfuCallLeave(this.neighbourhoodUrl, this.roomId, session.participantId)
+                .catch((e) => console.warn("SFU: leaving the call failed:", e))
+            return
+        }
         this.state.participantId = session.participantId
+        this.heldIds.add(session.participantId)
 
         try {
             const answer = JSON.parse(session.sdpAnswer)
             await pc.setRemoteDescription(new RTCSessionDescription(answer))
         } catch (err) {
+            // The executor holds a session this connection cannot use: leave it.
             markJoined()
             this.abandon(pc)
+            await this.leaveSession()
             throw err
         }
         markJoined()
 
         // Who was in the room when this join landed (`participantId:did`).
         // The roster event keeps it current from here.
-        this.applyRoster(session.streamMapping.map((entry) => entry.slice(entry.indexOf(":") + 1)), false)
+        this.applyRoster(
+            session.streamMapping.map((entry) => {
+                const at = entry.indexOf(":")
+                return { participantId: entry.slice(0, at), agentDid: entry.slice(at + 1) }
+            }),
+            false,
+        )
 
         // Flush buffered trickle ICE candidates
         joinComplete = true
@@ -514,6 +613,7 @@ export class SfuManager {
             this.neighbourhood.sfuAddIceCandidate(
                 this.neighbourhoodUrl,
                 this.roomId,
+                session.participantId,
                 candidate,
             ).catch((err) => {
                 console.error(
@@ -541,31 +641,64 @@ export class SfuManager {
     }
 
     /**
-     * The room's roster no longer lists this agent while `pc` is the call's:
-     * the server has dropped this session, and ICE may not say so. In E6
-     * (CI job 53158) one of six sessions never started a rebuild after a
-     * 20 s outage the server had dropped it for. Rebuild once the roster has
-     * left this agent out for `UNLISTED_GRACE_MS`; a roster that lists it
-     * again in that time cancels, since one published just before this
-     * join landed can arrive after it.
+     * The room's roster no longer lists this session (its participant id)
+     * while `pc` is the call's: the server has dropped this session, and ICE
+     * may not say so. In E6 (CI job 53158) one of six sessions never started
+     * a rebuild after a 20 s outage the server had dropped it for. The check
+     * is per session, not per agent: another device of this agent keeps the
+     * DID listed. Rebuild once the roster has left this session out for
+     * `UNLISTED_GRACE_MS`; a roster that lists it again in that time
+     * cancels, since one published just before this join landed can arrive
+     * after it. A manager with no session (between leave and join, or
+     * stopped because a later tab replaced it) starts no rebuild: `stop`
+     * clears the timer and drops `pc`, so a replaced session never rejoins
+     * and never takes the call back from the newer tab.
      */
-    private noticeRoster(pc: RTCPeerConnection, dids: string[]): void {
-        if (dids.includes(this.agentDid)) {
+    private noticeRoster(pc: RTCPeerConnection, sessions: SfuRosterParticipant[]): void {
+        const participantId = this.state.participantId
+        if (!participantId || sessions.some((s) => s.participantId === participantId)) {
             this.clearUnlistedTimer()
             return
         }
         if (this.unlistedTimer) return
         this.unlistedTimer = setTimeout(() => {
             this.unlistedTimer = null
-            if (this.state.peerConnection !== pc) return
+            if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
             console.info("SFU: the room no longer lists this session, rebuilding the call")
             void this.reconnect()
         }, SfuManager.UNLISTED_GRACE_MS)
     }
 
-    /** Undo a join that failed part way: its subscription and its connection. */
+    /**
+     * Leave this manager's session on the executor, if it has one, and forget
+     * it. Only the participant id a join returned is ever left: a manager
+     * that never joined, or whose join was refused, sends nothing, so it can
+     * never end a session another tab of this agent is in.
+     */
+    private async leaveSession(): Promise<void> {
+        const participantId = this.state.participantId
+        if (!participantId) return
+        this.state.participantId = null
+        // A session the leave found gone may have been replaced, its notice
+        // still on the way. One the leave ended, or that it never reached, a
+        // notice names only if this manager's own rejoin replaced it.
+        let found = true
+        try {
+            found = await this.neighbourhood.sfuCallLeave(this.neighbourhoodUrl, this.roomId, participantId)
+        } catch (e) {
+            /* best-effort: the executor frees a dead session on its own */
+            console.warn("SFU: leaving the call failed:", e)
+        }
+        if (found) this.heldIds.delete(participantId)
+    }
+
+    /** Undo a join that failed part way: its subscriptions and its connection. */
     private abandon(pc: RTCPeerConnection): void {
         this.releaseServerEvents()
+        if (this.heldIds.size === 0) {
+            this.replacedUnsubscribe?.()
+            this.replacedUnsubscribe = null
+        }
         pc.close()
         if (this.state.peerConnection === pc) this.state.peerConnection = null
     }
@@ -587,13 +720,18 @@ export class SfuManager {
         const ours = (e: { neighbourhoodUrl: string; roomName: string }) =>
             e.neighbourhoodUrl === this.neighbourhoodUrl && e.roomName === this.roomId
 
+        // The executor sends this agent's offers and notices to each of its
+        // sessions; only those naming this session's participant id are ours,
+        // and that id is known once the join returns.
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
             this.agentDid,
             (event) => {
                 if (!ours(event)) return
                 this.offerQueue = this.offerQueue
                     .then(() => joined)
-                    .then(() => this.applyServerOffer(pc, event))
+                    .then(() => {
+                        if (event.participantId === this.state.participantId) return this.applyServerOffer(pc, event)
+                    })
             },
         )
         this.rosterUnsubscribe = this.neighbourhood.subscribeSfuRoomRoster((roster) => {
@@ -604,6 +742,15 @@ export class SfuManager {
                 this.noticeRoster(pc, roster.participants)
             })
         })
+        // A notice can name the id the join in flight is about to return.
+        this.replacedUnsubscribe ??= this.neighbourhood.subscribeSfuSessionReplaced((event) => {
+            if (!ours(event)) return
+            const stopIfHeld = () => {
+                if (this.heldIds.has(event.participantId)) this.stopReplaced(event)
+            }
+            stopIfHeld()
+            void this.joinSettled.then(stopIfHeld)
+        })
 
         for (const unsubscribe of previous) unsubscribe?.()
     }
@@ -613,7 +760,7 @@ export class SfuManager {
         if (this.state.peerConnection !== pc) return
         // The mapping first: the tracks this offer adds arrive while it is applied.
         for (const entry of event.trackMapping ?? []) {
-            this.midToParticipant.set(entry.mid, entry.agentDid)
+            this.midToParticipant.set(entry.mid, { participantId: entry.participantId, did: entry.agentDid })
         }
         try {
             await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(event.sdpOffer)))
@@ -621,6 +768,7 @@ export class SfuManager {
             await this.neighbourhood.sfuCallAnswerServerOffer(
                 this.neighbourhoodUrl,
                 event.roomName,
+                event.participantId,
                 JSON.stringify(pc.localDescription),
             )
         } catch (err) {
@@ -635,53 +783,70 @@ export class SfuManager {
     }
 
     /**
-     * Make the participants match `dids`, the room's roster: everyone new
+     * Make the participants match `sessions`, the room's roster: everyone new
      * joins, and — when `complete`, as the roster event is — everyone
      * missing leaves. The join's own roster can lag the room, so it only adds.
+     * This session is never a participant; this agent's other devices are.
      */
-    private applyRoster(dids: string[], complete: boolean): void {
-        const present = new Set(dids.filter((did) => did !== this.agentDid))
-        for (const did of present) {
-            this.departed.delete(did)
-            this.ensureParticipant(did)
+    private applyRoster(sessions: { participantId: string; agentDid: string }[], complete: boolean): void {
+        const present = sessions.filter((s) => s.participantId !== this.state.participantId)
+        for (const { participantId, agentDid } of present) {
+            this.departed.delete(participantId)
+            this.ensureParticipant(participantId, agentDid)
         }
         if (!complete) return
-        for (const [did, participant] of [...this.state.participants]) {
-            if (present.has(did)) continue
-            this.state.participants.delete(did)
-            this.departed.add(did)
+        const listed = new Set(present.map((s) => s.participantId))
+        for (const [participantId, participant] of [...this.state.participants]) {
+            if (listed.has(participantId)) continue
+            this.state.participants.delete(participantId)
+            this.departed.add(participantId)
             for (const [mid, owner] of this.midToParticipant) {
-                if (owner === did) this.midToParticipant.delete(mid)
+                if (owner.participantId === participantId) this.midToParticipant.delete(mid)
             }
             this.emit("participant-left", participant)
         }
     }
 
-    /** The participant for `did`, joining them to the call if they are new. */
-    private ensureParticipant(did: string): SfuParticipantState {
-        let participant = this.state.participants.get(did)
+    /** The participant for session `participantId` of `did`, joining them to the call if they are new. */
+    private ensureParticipant(participantId: string, did: string): SfuParticipantState {
+        let participant = this.state.participants.get(participantId)
         if (!participant) {
             participant = {
+                participantId,
                 did,
                 stream: new MediaStream(),
                 hasAudio: false,
                 hasVideo: false,
                 isActiveSpeaker: false,
             }
-            this.state.participants.set(did, participant)
+            this.state.participants.set(participantId, participant)
             this.emit("participant-joined", participant)
         }
         return participant
     }
 
-    private refreshKinds(participant: SfuParticipantState): void {
-        participant.hasAudio = participant.stream.getAudioTracks().length > 0
-        participant.hasVideo = participant.stream.getVideoTracks().length > 0
+    /**
+     * A later join from this device replaced a session of this call: the
+     * executor has already dropped it. Stop as `leave` does, but never
+     * rejoin — the other tab has the call now — and say so with `replaced`.
+     * A session this manager got since (a reconnect's) is left.
+     */
+    private stopReplaced(event: SfuSessionReplaced): void {
+        console.info("SFU: another tab on this device joined the call; this one stops")
+        if (this.state.participantId === event.participantId) this.state.participantId = null
+        this.stop()
+        void this.leaveSession()
+        this.resetParticipants()
+        this.emit("replaced", event)
     }
 
-    async leave(): Promise<void> {
+    /** End this manager's call locally: no reconnect in flight continues, nothing is sent. */
+    private stop(): void {
         this.generation++
         this.releaseServerEvents()
+        this.replacedUnsubscribe?.()
+        this.replacedUnsubscribe = null
+        this.heldIds.clear()
         if (this.disconnectedTimer) {
             clearTimeout(this.disconnectedTimer)
             this.disconnectedTimer = null
@@ -701,14 +866,18 @@ export class SfuManager {
             this.state.peerConnection.close()
             this.state.peerConnection = null
         }
-        try {
-            await this.neighbourhood.sfuCallLeave(
-                this.neighbourhoodUrl,
-                this.roomId,
-            )
-        } catch (e) {
-            console.error("Error leaving SFU call:", e)
-        }
+        this.state.localStream = null
+    }
+
+    private refreshKinds(participant: SfuParticipantState): void {
+        participant.hasAudio = participant.stream.getAudioTracks().length > 0
+        participant.hasVideo = participant.stream.getVideoTracks().length > 0
+    }
+
+    /** End the call: locally, and on the executor if this manager joined. */
+    async leave(): Promise<void> {
+        this.stop()
+        await this.leaveSession()
         this.resetParticipants()
     }
 
@@ -718,7 +887,6 @@ export class SfuManager {
             this.emit("participant-left", participant)
         }
         this.state.participants.clear()
-        this.state.participantId = null
         this.midToParticipant.clear()
         this.departed.clear()
     }
@@ -737,6 +905,7 @@ export class SfuManager {
             await this.neighbourhood.sfuCallSetQualityPreference(
                 this.neighbourhoodUrl,
                 this.roomId,
+                this.state.participantId,
                 preference,
             )
         } catch (e) {
@@ -788,6 +957,7 @@ export class SfuManager {
             await this.neighbourhood.sfuSendData(
                 this.neighbourhoodUrl,
                 this.roomId,
+                this.state.participantId,
                 channelLabel,
                 data,
                 binary,
@@ -799,7 +969,8 @@ export class SfuManager {
     }
 
     /**
-     * Subscribe to data channel messages from other participants.
+     * Subscribe to data channel messages from other participants — this
+     * agent's other devices included, this session's own messages not.
      * Returns an unsubscribe function.  Only one subscription per
      * manager instance — a second call replaces the first.
      */
@@ -814,8 +985,10 @@ export class SfuManager {
                 /* swallow */
             }
         }
-        this.dataChannelUnsubscribe =
-            this.neighbourhood.subscribeSfuDataChannel(callback)
+        this.dataChannelUnsubscribe = this.neighbourhood.subscribeSfuDataChannel((message) => {
+            if (message.senderParticipantId && message.senderParticipantId === this.state.participantId) return
+            callback(message)
+        })
         return () => {
             if (this.dataChannelUnsubscribe) {
                 try {

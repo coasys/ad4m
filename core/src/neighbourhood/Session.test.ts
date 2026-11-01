@@ -70,6 +70,7 @@ function fakeApi() {
         sfuSendData: jest.fn(),
         subscribeSfuDataChannel: jest.fn(),
         subscribeSfuRoomRoster: jest.fn(),
+        subscribeSfuSessionReplaced: jest.fn(),
     }
 }
 
@@ -421,8 +422,9 @@ describe("mesh path", () => {
         }))
         await session.join(fakeMediaStream())
 
+        // The mesh keys its peers by DID: the DID is the participant id.
         expect(session.participants).toEqual([
-            { agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+            { participantId: "did:bob", agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
         ])
     })
 
@@ -498,7 +500,82 @@ describe("SFU path", () => {
             "neighbourhood://sfu",
             undefined, // iceConfig
             undefined, // sfuConfig
+            undefined, // deviceId: the SDK's default
         )
+    })
+
+    it("passes the app's device id to the SFU manager", async () => {
+        const session = createSession(baseConfig({ topology: "sfu", deviceId: "electron-main" }))
+        await session.join(fakeMediaStream())
+        expect((SfuManager as unknown as jest.Mock).mock.calls[0][6]).toBe("electron-main")
+    })
+
+    it("lists each session of an agent as its own participant", async () => {
+        const laptop = fakeMediaStream()
+        const phone = fakeMediaStream()
+        mockSfuManagerInstance.getParticipants.mockReturnValue([
+            { participantId: "P2", did: "did:bob", stream: laptop, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+            { participantId: "P3", did: "did:bob", stream: phone, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+        ])
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        await session.join(fakeMediaStream())
+
+        expect(session.participants.map((p) => [p.participantId, p.agentDid, p.stream])).toEqual([
+            ["P2", "did:bob", laptop],
+            ["P3", "did:bob", phone],
+        ])
+    })
+
+    it("a replaced call says so and goes idle without leaving, and can be joined again", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        const dataUnsubscribe = jest.fn()
+        mockSfuManagerInstance.subscribeDataChannel.mockReturnValue(dataUnsubscribe)
+        await session.join(fakeMediaStream())
+        const states = collectStates(session)
+        const replacedEvents: unknown[] = []
+        session.on("replaced", (event: unknown) => replacedEvents.push(event))
+
+        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
+        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "replaced") handler(event)
+
+        expect(replacedEvents).toEqual([event])
+        expect(states).toEqual(["idle"])
+        expect(dataUnsubscribe).toHaveBeenCalled()
+        expect(mockSfuManagerInstance.leave).not.toHaveBeenCalled()
+        expect(session.participants).toEqual([])
+
+        await session.join(fakeMediaStream())
+        expect(session.getState()).toBe("active")
+        expect(SfuManager).toHaveBeenCalledTimes(2)
+    })
+
+    it("a call replaced while it joins stays idle", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
+        mockSfuManagerInstance.join.mockImplementationOnce(async () => {
+            for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "replaced") handler(event)
+        })
+        const states = collectStates(session)
+
+        await session.join(fakeMediaStream())
+
+        expect(states).toEqual(["joining", "idle"])
+        expect(session.getState()).toBe("idle")
+    })
+
+    it("a session destroyed while its topology resolves never joins", async () => {
+        let serves!: (all: boolean) => void
+        const session = createSession(baseConfig({
+            localSfuStatus: { isPublic: true },
+            sfuServesAllMembers: () => new Promise<boolean>((resolve) => { serves = resolve }),
+        }))
+        const joining = session.join(fakeMediaStream())
+        await session.destroy()
+        serves(true)
+
+        await expect(joining).rejects.toThrow(/destroyed/)
+        expect(SfuManager).not.toHaveBeenCalled()
+        expect(session.getState()).toBe("closed")
     })
 
     it("calls sfu.join with the local stream", async () => {
@@ -511,13 +588,13 @@ describe("SFU path", () => {
     it("delegates participants to SFU manager (includes stream)", async () => {
         const bobStream = fakeMediaStream()
         mockSfuManagerInstance.getParticipants.mockReturnValue([
-            { did: "did:bob", stream: bobStream, hasAudio: true, hasVideo: true, isActiveSpeaker: true },
+            { participantId: "P2", did: "did:bob", stream: bobStream, hasAudio: true, hasVideo: true, isActiveSpeaker: true },
         ])
         const session = createSession(baseConfig({ topology: "sfu" }))
         await session.join(fakeMediaStream())
 
         expect(session.participants).toEqual([
-            { agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: true, isActiveSpeaker: true },
+            { participantId: "P2", agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: true, isActiveSpeaker: true },
         ])
     })
 

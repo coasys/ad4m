@@ -10,6 +10,11 @@
  * Membership comes from the room roster.  A received track belongs to the
  * participant the server mapped its media section to, and to no one when
  * its section has no mapping.
+ *
+ * A participant is a session, not an agent: the same agent on another device
+ * is someone else in the call. Every call about this session names the
+ * participant id its join returned, and a manager that never joined sends
+ * nothing.
  */
 
 class FakeTrack {
@@ -92,12 +97,14 @@ class FakePeerConnection {
     constructor(init: RTCSessionDescriptionInit) { Object.assign(this, init) }
 }
 
-import { SfuManager, type SfuNeighbourhoodApi, type SfuParticipantState } from "./SfuManager"
+import { defaultDeviceId, SfuManager, type SfuNeighbourhoodApi, type SfuParticipantState } from "./SfuManager"
 import type {
     CallSessionInfo,
     SfuCallRenegotiationOffer,
     SfuConfig,
+    SfuDataMessage,
     SfuRoomRoster,
+    SfuSessionReplaced,
     TrackMapEntry,
 } from "./SfuTypes"
 
@@ -106,6 +113,14 @@ const ROOM = "room"
 const ME = "did:me"
 const ALICE = "did:key:alice"
 const BOB = "did:key:bob"
+/** The participant id the executor gives this manager's join. */
+const MINE = "P1"
+const DEVICE = "device-1"
+
+/** The session of `did` in the room: this manager's own for ME, one per other agent otherwise. */
+function pid(did: string): string {
+    return did === ME ? MINE : `P-${did}`
+}
 
 function fakeStream(...tracks: FakeTrack[]): MediaStream {
     return new FakeMediaStream(tracks) as unknown as MediaStream
@@ -115,16 +130,17 @@ function session(overrides: Partial<CallSessionInfo> = {}): CallSessionInfo {
     return {
         roomName: ROOM,
         neighbourhoodUrl: URL,
-        participantId: "p1",
+        participantId: MINE,
         sdpAnswer: JSON.stringify({ type: "answer", sdp: "server-answer" }),
         streamMapping: [],
         ...overrides,
     }
 }
 
-function offer(sdp: string, trackMapping?: TrackMapEntry[]): SfuCallRenegotiationOffer {
+function offer(sdp: string, trackMapping?: TrackMapEntry[], participantId = MINE): SfuCallRenegotiationOffer {
     return {
         targetDid: ME,
+        participantId,
         neighbourhoodUrl: URL,
         roomName: ROOM,
         sdpOffer: JSON.stringify({ type: "offer", sdp }),
@@ -132,18 +148,32 @@ function offer(sdp: string, trackMapping?: TrackMapEntry[]): SfuCallRenegotiatio
     }
 }
 
-function mapped(mid: string, agentDid: string, mediaKind: "audio" | "video"): TrackMapEntry {
-    return { mid, agentDid, mediaKind }
+function mapped(mid: string, agentDid: string, mediaKind: "audio" | "video", participantId = pid(agentDid)): TrackMapEntry {
+    return { mid, participantId, agentDid, mediaKind }
 }
 
-/** The room's roster as the executor publishes it: this agent is in it, unless `withoutMe`. */
+/**
+ * The room's roster as the executor publishes it: one session per DID (`pid`),
+ * or the sessions given as `[participantId, did]`. This manager's session
+ * (`MINE`) is in it too, unless `withoutMe`.
+ */
 function roster(
-    participants: string[],
+    participants: (string | [string, string])[],
     overrides: Partial<SfuRoomRoster> = {},
     { withoutMe = false } = {},
 ): SfuRoomRoster {
-    const listed = withoutMe || participants.includes(ME) ? participants : [...participants, ME]
+    const sessions = participants.map((p) =>
+        typeof p === "string" ? { participantId: pid(p), agentDid: p } : { participantId: p[0], agentDid: p[1] },
+    )
+    const listed =
+        withoutMe || sessions.some((s) => s.participantId === MINE)
+            ? sessions
+            : [...sessions, { participantId: MINE, agentDid: ME }]
     return { neighbourhoodUrl: URL, roomName: ROOM, participants: listed, ...overrides }
+}
+
+function replaced(participantId: string, overrides: Partial<SfuSessionReplaced> = {}): SfuSessionReplaced {
+    return { targetDid: ME, neighbourhoodUrl: URL, roomName: ROOM, participantId, ...overrides }
 }
 
 function deferred<T>() {
@@ -157,10 +187,15 @@ function fakeApi() {
     const log: string[] = []
     const offerHandlers = new Set<(e: SfuCallRenegotiationOffer) => void>()
     const rosterHandlers = new Set<(r: SfuRoomRoster) => void>()
+    const replacedHandlers = new Set<(r: SfuSessionReplaced) => void>()
     const api = {
         log,
         offerHandlers,
         rosterHandlers,
+        replacedHandlers,
+        emitReplaced(event: SfuSessionReplaced) {
+            for (const handler of replacedHandlers) handler(event)
+        },
         emitOffer(event: SfuCallRenegotiationOffer) {
             for (const handler of offerHandlers) handler(event)
         },
@@ -198,6 +233,12 @@ function fakeApi() {
                 rosterHandlers.delete(handler)
             }
         }),
+        subscribeSfuSessionReplaced: jest.fn((handler: (r: SfuSessionReplaced) => void) => {
+            replacedHandlers.add(handler)
+            return () => {
+                replacedHandlers.delete(handler)
+            }
+        }),
         sfuAddIceCandidate: jest.fn(async () => true),
         sfuSendData: jest.fn(async () => true),
         subscribeSfuDataChannel: jest.fn(() => () => {}),
@@ -207,7 +248,7 @@ function fakeApi() {
 
 /** A manager with its membership and media events recorded. */
 function recordedManager(api: ReturnType<typeof fakeApi>) {
-    const manager = new SfuManager(api, ROOM, ME, URL)
+    const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
     const joined: string[] = []
     const left: string[] = []
     const added: [MediaStream, FakeTrack][] = []
@@ -278,6 +319,7 @@ test("offers that arrive before the join completes apply after its answer, in ar
     expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(
         URL,
         ROOM,
+        MINE,
         JSON.stringify({ type: "answer", sdp: "local-answer" }),
     )
 })
@@ -329,6 +371,7 @@ test("a failed join drops its subscriptions", async () => {
     await expect(new SfuManager(api, ROOM, ME, URL).join(fakeStream())).rejects.toThrow("Not a member")
     expect(api.offerHandlers.size).toBe(0)
     expect(api.rosterHandlers.size).toBe(0)
+    expect(api.replacedHandlers.size).toBe(0)
     expect(api.log).toEqual(expect.arrayContaining(["unsubscribe-offer", "unsubscribe-roster"]))
 })
 
@@ -557,11 +600,11 @@ test("a failed connection leaves, then joins this executor again", async () => {
         "subscribe-roster",
         "sfuCallJoin",
     ])
-    expect(api.sfuCallJoin).toHaveBeenLastCalledWith(URL, ROOM, expect.any(String))
+    expect(api.sfuCallJoin).toHaveBeenLastCalledWith(URL, ROOM, expect.any(String), expect.any(String))
     expect(FakePeerConnection.instances).toHaveLength(2)
 })
 
-test("a roster that leaves this agent out rebuilds the call after the grace", async () => {
+test("a roster that leaves this session out rebuilds the call after the grace", async () => {
     // The server dropped this session; ICE never said so (E6, CI job 53158).
     jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
     try {
@@ -591,7 +634,7 @@ test("a roster that leaves this agent out rebuilds the call after the grace", as
     }
 })
 
-test("a roster that lists this agent again within the grace cancels the rebuild", async () => {
+test("a roster that lists this session again within the grace cancels the rebuild", async () => {
     // A roster published just before this join landed can arrive after it.
     jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
     try {
@@ -632,7 +675,7 @@ test("leaving stops a pending rebuild for an unlisted session", async () => {
     }
 })
 
-test("after a cancelled grace, a later roster without this agent starts a new one", async () => {
+test("after a cancelled grace, a later roster without this session starts a new one", async () => {
     jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
     try {
         const api = fakeApi()
@@ -655,7 +698,7 @@ test("after a cancelled grace, a later roster without this agent starts a new on
     }
 })
 
-test("a second roster without this agent keeps the first grace, and one listing it cancels both", async () => {
+test("a second roster without this session keeps the first grace, and one listing it cancels both", async () => {
     // Others leaving while this session is unlisted publish more rosters without it.
     jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
     try {
@@ -699,6 +742,95 @@ test("a rebuild for ICE ends the old grace, and the new connection gets its own"
         expect(FakePeerConnection.instances).toHaveLength(2)
         await jest.advanceTimersByTimeAsync(1)
         expect(FakePeerConnection.instances).toHaveLength(3)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a roster that lists another device of this agent but not this session rebuilds after the grace", async () => {
+    // The DID stays listed through the other device: only the participant id tells.
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+        await manager.join(fakeStream())
+        const dropped = currentPc()
+        api.log.length = 0
+
+        api.emitRoster(roster([ALICE, ["P2", ME]], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(2_999)
+        expect(api.log).toEqual([])
+        expect(manager.getParticipants().map((p) => p.participantId).sort()).toEqual(["P2", pid(ALICE)].sort())
+
+        await jest.advanceTimersByTimeAsync(1)
+        expect(dropped.closed).toBe(true)
+        expect(api.sfuCallLeave).toHaveBeenCalledWith(URL, ROOM, MINE)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+for (const order of ["roster first", "notice first"] as const) {
+    test(`a replaced session left out of the roster never rebuilds (${order})`, async () => {
+        // A later tab on this device took the call: the executor sends this
+        // agent the notice and a roster listing the new session, not this one.
+        // Rejoining would replace the newer tab in turn.
+        jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+        try {
+            const api = fakeApi()
+            const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+            await manager.join(fakeStream())
+            const pc = currentPc()
+            const newerTab = roster([ALICE, ["P2", ME]], {}, { withoutMe: true })
+
+            if (order === "roster first") {
+                api.emitRoster(newerTab)
+                await flush()
+                await jest.advanceTimersByTimeAsync(1_000)
+                api.emitReplaced(replaced(MINE))
+            } else {
+                api.emitReplaced(replaced(MINE))
+                api.emitRoster(newerTab)
+            }
+            await flush()
+            await jest.advanceTimersByTimeAsync(10_000)
+
+            expect(pc.closed).toBe(true)
+            expect(manager.getState().participantId).toBeNull()
+            expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+            expect(api.sfuCallLeave).not.toHaveBeenCalled()
+            expect(FakePeerConnection.instances).toHaveLength(1)
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+}
+
+test("the roster of a reconnect's own leave does not rebuild the rejoined call", async () => {
+    // It arrives between the reconnect's leave and its join, while the manager
+    // has no participant id; the rejoin's roster lists the new session.
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const join = deferred<CallSessionInfo>()
+        api.sfuCallJoin.mockImplementationOnce(() => join.promise)
+        await iceState("failed")
+        expect(manager.getState().participantId).toBeNull()
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        join.resolve(session())
+        await flush()
+        api.emitRoster(roster([ALICE]))
+        await flush()
+        await jest.advanceTimersByTimeAsync(10_000)
+
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        expect(FakePeerConnection.instances).toHaveLength(2)
+        expect(manager.getState().participantId).toBe(MINE)
     } finally {
         jest.useRealTimers()
     }
@@ -790,8 +922,8 @@ test("a rebuilt connection sends the tracks replaceTrack set and restores the qu
 
     expect(currentPc().transceivers.map((t) => t.trackOrKind)).toEqual(["audio", screen])
     expect(api.sfuCallSetQualityPreference.mock.calls).toEqual([
-        [URL, ROOM, "low"],
-        [URL, ROOM, "low"],
+        [URL, ROOM, MINE, "low"],
+        [URL, ROOM, MINE, "low"],
     ])
 })
 
@@ -823,4 +955,315 @@ test("leaving during a reconnect stops it before it joins again", async () => {
     await flush()
 
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+})
+
+test("replaced while a reconnect waits between leave and join: it stops, and never joins", async () => {
+    // Another tab joined just before this reconnect's leave landed: the
+    // executor replaced the old session, so the leave finds nothing.
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+    const replacedEvents: unknown[] = []
+    manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+    await manager.join(fakeStream())
+    const leaving = deferred<boolean>()
+    api.sfuCallLeave.mockImplementationOnce(() => leaving.promise)
+
+    await iceState("failed")
+    api.emitReplaced(replaced(MINE))
+    leaving.resolve(false)
+    await flush()
+
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    expect(replacedEvents).toEqual([replaced(MINE)])
+    expect(manager.getState().peerConnection).toBeNull()
+    expect(api.replacedHandlers.size).toBe(0)
+})
+
+test("replaced while a reconnect's join is out: the session that join got is left", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+    const replacedEvents: unknown[] = []
+    manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+    await manager.join(fakeStream())
+    api.sfuCallLeave.mockResolvedValueOnce(false)
+    const rejoining = deferred<CallSessionInfo>()
+    api.sfuCallJoin.mockImplementationOnce(() => rejoining.promise)
+
+    await iceState("failed")
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    api.emitReplaced(replaced(MINE))
+    rejoining.resolve(session({ participantId: "P2" }))
+    await flush()
+
+    expect(replacedEvents).toEqual([replaced(MINE)])
+    expect(api.sfuCallLeave.mock.calls).toEqual([
+        [URL, ROOM, MINE],
+        [URL, ROOM, "P2"],
+    ])
+    expect(manager.getState().participantId).toBeNull()
+    expect(manager.getState().peerConnection).toBeNull()
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+})
+
+test("a reconnect whose leave never landed is not stopped by its own rejoin replacing the old session", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+    const replacedEvents: unknown[] = []
+    manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+    await manager.join(fakeStream())
+    api.sfuCallLeave.mockRejectedValueOnce(new Error("socket closed"))
+    const rejoining = deferred<CallSessionInfo>()
+    api.sfuCallJoin.mockImplementationOnce(() => rejoining.promise)
+
+    await iceState("failed")
+    // The executor still held the old session: the rejoin, from this device, replaces it.
+    api.emitReplaced(replaced(MINE))
+    rejoining.resolve(session({ participantId: "P2" }))
+    await flush()
+
+    expect(replacedEvents).toEqual([])
+    expect(manager.getState().participantId).toBe("P2")
+    expect(currentPc().closed).toBe(false)
+})
+
+// ── One session per device ────────────────────────────────────────
+
+test("the join sends the device id; every later call names the participant id the join returned", async () => {
+    const api = fakeApi()
+    const { manager } = recordedManager(api)
+    const joining = manager.join(fakeStream())
+    // A candidate gathered before the join returns waits for its participant id.
+    ;(currentPc() as any).onicecandidate({ candidate: { candidate: "early" } })
+    await joining
+    ;(currentPc() as any).onicecandidate({ candidate: { candidate: "late" } })
+    api.emitOffer(offer("next"))
+    await flush()
+    await manager.setQualityPreference("low")
+    await manager.sendData("chat", "hi")
+    await manager.leave()
+
+    expect(api.sfuCallJoin).toHaveBeenCalledWith(URL, ROOM, expect.any(String), DEVICE)
+    expect(api.sfuAddIceCandidate.mock.calls).toEqual([
+        [URL, ROOM, MINE, "early"],
+        [URL, ROOM, MINE, "late"],
+    ])
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(URL, ROOM, MINE, expect.any(String))
+    expect(api.sfuCallSetQualityPreference).toHaveBeenCalledWith(URL, ROOM, MINE, "low")
+    expect(api.sfuSendData).toHaveBeenCalledWith(URL, ROOM, MINE, "chat", "hi", false)
+    expect(api.sfuCallLeave.mock.calls).toEqual([[URL, ROOM, MINE]])
+})
+
+test("a manager that never joined, or whose join was refused, sends no leave", async () => {
+    const api = fakeApi()
+    await new SfuManager(api, ROOM, ME, URL).destroy()
+
+    api.sfuCallJoin.mockRejectedValue(new Error("Room is full"))
+    const refused = new SfuManager(api, ROOM, ME, URL)
+    await expect(refused.join(fakeStream())).rejects.toThrow("Room is full")
+    await refused.leave()
+    await refused.destroy()
+
+    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    expect(refused.getState().participantId).toBeNull()
+})
+
+test("a join whose answer cannot be applied leaves the session it made, once", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    const original = FakePeerConnection.prototype.setRemoteDescription
+    FakePeerConnection.prototype.setRemoteDescription = async () => { throw new Error("bad answer") }
+    try {
+        await expect(manager.join(fakeStream())).rejects.toThrow("bad answer")
+    } finally {
+        FakePeerConnection.prototype.setRemoteDescription = original
+    }
+    await manager.destroy()
+
+    expect(api.sfuCallLeave.mock.calls).toEqual([[URL, ROOM, MINE]])
+})
+
+test("replaced: the session ends without a leave or a rejoin, and says so", async () => {
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const { manager, left } = recordedManager(api)
+        const replacedEvents: unknown[] = []
+        manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+        await manager.join(fakeStream())
+        api.emitRoster(roster([ALICE]))
+        await flush()
+        const pc = currentPc()
+
+        api.emitReplaced(replaced(MINE))
+        await flush()
+
+        expect(replacedEvents).toEqual([replaced(MINE)])
+        expect(pc.closed).toBe(true)
+        expect(left).toEqual([ALICE])
+        expect(manager.getState().participantId).toBeNull()
+        expect(manager.getState().peerConnection).toBeNull()
+        expect(api.offerHandlers.size + api.rosterHandlers.size + api.replacedHandlers.size).toBe(0)
+
+        // Nothing brings it back: not its dead connection, not time.
+        ;(pc as any).iceConnectionState = "failed"
+        ;(pc as any).oniceconnectionstatechange()
+        await jest.advanceTimersByTimeAsync(180_000)
+        await manager.destroy()
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(FakePeerConnection.instances).toHaveLength(1)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a replaced event for another session, or another call, is ignored", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    const replacedEvents: unknown[] = []
+    manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+    await manager.join(fakeStream())
+
+    api.emitReplaced(replaced("P9"))
+    api.emitReplaced(replaced(MINE, { roomName: "other" }))
+    api.emitReplaced(replaced(MINE, { neighbourhoodUrl: "neighbourhood://other" }))
+    await flush()
+
+    expect(replacedEvents).toEqual([])
+    expect(currentPc().closed).toBe(false)
+    expect(manager.getState().participantId).toBe(MINE)
+})
+
+test("an agent in the call from two devices is two participants, each with its own media", async () => {
+    const api = fakeApi()
+    const { manager, joined, participants } = recordedManager(api)
+    await manager.join(fakeStream())
+    api.emitOffer(offer("alice", [mapped("0", ALICE, "audio", "P7"), mapped("1", ALICE, "audio", "P8")]))
+    api.emitRoster(roster([["P7", ALICE], ["P8", ALICE], ME]))
+    await flush()
+    const laptop = new FakeTrack("audio")
+    const phone = new FakeTrack("audio")
+    currentPc().receive(laptop, "0")
+    currentPc().receive(phone, "1")
+
+    expect(joined).toEqual([ALICE, ALICE])
+    expect(participants()).toEqual([ALICE, ALICE])
+    const [first, second] = manager.getParticipants()
+    expect([first.participantId, second.participantId]).toEqual(["P7", "P8"])
+    expect(first.stream.getTracks()).toEqual([laptop])
+    expect(second.stream.getTracks()).toEqual([phone])
+})
+
+test("this agent's other device is a participant; this session never is", async () => {
+    const api = fakeApi()
+    const { manager, joined, added } = recordedManager(api)
+    await manager.join(fakeStream())
+    api.emitOffer(offer("mine", [mapped("0", ME, "audio", MINE), mapped("1", ME, "audio", "P5")]))
+    api.emitRoster(roster([[MINE, ME], ["P5", ME], ALICE]))
+    await flush()
+    currentPc().receive(new FakeTrack("audio"), "0")
+    const otherDevice = new FakeTrack("audio")
+    currentPc().receive(otherDevice, "1")
+
+    expect(joined).toEqual([ME, ALICE])
+    expect(manager.getParticipants().map((p) => p.participantId)).toEqual(["P5", pid(ALICE)])
+    expect(added.map(([, track]) => track)).toEqual([otherDevice])
+})
+
+test("an offer for another session of this agent is not applied", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+
+    api.emitOffer(offer("for-my-phone", [], "P5"))
+    await flush()
+
+    expect(currentPc().remoteSdps()).toEqual(["server-answer"])
+    expect(api.sfuCallAnswerServerOffer).not.toHaveBeenCalled()
+})
+
+test("an agent hanging up on one device stays in the call on the other", async () => {
+    const api = fakeApi()
+    const { manager, left } = recordedManager(api)
+    await manager.join(fakeStream())
+    api.emitRoster(roster([["P7", ALICE], ["P8", ALICE]]))
+    await flush()
+
+    api.emitRoster(roster([["P8", ALICE]]))
+    await flush()
+
+    expect(left).toEqual([ALICE])
+    expect(manager.getParticipants().map((p) => p.participantId)).toEqual(["P8"])
+})
+
+test("data this session sent never comes back to it; data from this agent's other device does", async () => {
+    const api = fakeApi()
+    let deliver!: (message: SfuDataMessage) => void
+    api.subscribeSfuDataChannel.mockImplementation(((handler: (message: SfuDataMessage) => void) => {
+        deliver = handler
+        return () => {}
+    }) as any)
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    const received: string[] = []
+    manager.subscribeDataChannel((message) => received.push(message.data))
+    await manager.join(fakeStream())
+
+    const message = (senderParticipantId: string, data: string): SfuDataMessage => ({
+        senderDid: ME, senderParticipantId, neighbourhoodUrl: URL, roomName: ROOM, channelLabel: "chat", binary: false, data,
+    })
+    deliver(message(MINE, "echo"))
+    deliver(message("P5", "from my phone"))
+
+    expect(received).toEqual(["from my phone"])
+})
+
+// ── Device id ─────────────────────────────────────────────────────
+
+describe("the default device id", () => {
+    const g = globalThis as any
+    afterEach(() => { delete g.localStorage })
+
+    function fakeLocalStorage() {
+        const items = new Map<string, string>()
+        return {
+            items,
+            getItem: (key: string) => items.get(key) ?? null,
+            setItem: (key: string, value: string) => { items.set(key, value) },
+            removeItem: (key: string) => { items.delete(key) },
+        }
+    }
+
+    test("in a browser, every manager of one profile shares one, kept in localStorage", async () => {
+        g.localStorage = fakeLocalStorage()
+        const api = fakeApi()
+        await new SfuManager(api, ROOM, ME, URL).join(fakeStream())
+        await new SfuManager(api, "other-room", ME, URL).join(fakeStream())
+
+        const [first, second] = api.sfuCallJoin.mock.calls.map((call: unknown[]) => call[3])
+        expect(typeof first).toBe("string")
+        expect(first).not.toBe("")
+        expect(second).toBe(first)
+        expect([...g.localStorage.items.values()]).toEqual([first])
+        expect(defaultDeviceId()).toBe(first)
+    })
+
+    test("another browser profile, with its own storage, is another device", () => {
+        g.localStorage = fakeLocalStorage()
+        const one = defaultDeviceId()
+        g.localStorage = fakeLocalStorage()
+        expect(defaultDeviceId()).not.toBe(one)
+    })
+
+    test("outside a browser, one per process", () => {
+        expect(g.localStorage).toBeUndefined()
+        expect(defaultDeviceId()).toBe(defaultDeviceId())
+    })
+
+    test("an explicit device id overrides it", async () => {
+        g.localStorage = fakeLocalStorage()
+        const api = fakeApi()
+        await new SfuManager(api, ROOM, ME, URL, undefined, undefined, "electron-main").join(fakeStream())
+        expect(api.sfuCallJoin).toHaveBeenCalledWith(URL, ROOM, expect.any(String), "electron-main")
+        expect(g.localStorage.items.size).toBe(0)
+    })
 })
