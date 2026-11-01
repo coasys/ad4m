@@ -1,0 +1,21 @@
+{
+  "name": "@coasys/ad4m-agent-harness-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Agent harness integration tests — provision, waker, A/V loop",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "start": "tsx src/main.ts",
+    "scenario": "tsx src/main.ts --scenario",
+    "test": "tsx --test interop/agents/sovereign/waker-ad4m.test.ts"
+  },
+  "dependencies": {
+    "@coasys/ad4m": "link:../../core"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}
