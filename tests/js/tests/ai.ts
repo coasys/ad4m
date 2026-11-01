@@ -317,6 +317,8 @@ export default function aiTests(testContext: TestContext) {
                 const status = await ad4mClient.ai.modelLoadingStatus("bert-id");
                 expect(status).to.have.property('model');
                 expect(status).to.have.property('status');
+                // The default embedding model loads on the first embed, not at start.
+                expect(status.loaded).to.equal(false);
             })
 
             it('can set and get default model', async () => {

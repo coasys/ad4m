@@ -121,8 +121,9 @@ pub struct AIService {
     default_embedding: Arc<DefaultEmbedding>,
 }
 
-/// Name of the embedding model an executor without configured models serves.
+/// Name and id of the embedding model an executor without configured models serves.
 const DEFAULT_EMBEDDING_MODEL: &str = "bert";
+const DEFAULT_EMBEDDING_MODEL_ID: &str = "bert-id";
 
 /// Loads an embedding model and returns the channel to its worker once the model is ready.
 type EmbeddingLoader = Arc<
@@ -539,6 +540,14 @@ impl AIService {
 
         if models.is_empty() {
             // No models configured: serve Bert for embeddings, loaded by the first embed call
+            publish_model_status(
+                DEFAULT_EMBEDDING_MODEL_ID.to_string(),
+                0.0,
+                "Not loaded",
+                false,
+                false,
+            )
+            .await;
             self.default_embedding
                 .enabled
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1963,7 +1972,7 @@ impl AIService {
                     return Ok(());
                 }
                 let model = Model {
-                    id: "bert-id".to_string(),
+                    id: DEFAULT_EMBEDDING_MODEL_ID.to_string(),
                     name: DEFAULT_EMBEDDING_MODEL.to_string(),
                     model_type: ModelType::Embedding,
                     local: Some(LocalModel {
@@ -2887,6 +2896,11 @@ mod tests {
             0,
             "start loads no embedding model"
         );
+        let status = AIService::model_status(DEFAULT_EMBEDDING_MODEL_ID.into())
+            .await
+            .expect("the default model has a status before its first use");
+        assert_eq!(status.status, "Not loaded");
+        assert!(!status.loaded && !status.downloaded);
 
         let (a, b) = tokio::join!(
             service.embed("bert".into(), "one".into(), None),
