@@ -5,6 +5,7 @@
 //! subscription registry without widening its visibility.
 
 use deno_core::error::AnyError;
+use futures::future::BoxFuture;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
@@ -271,6 +272,51 @@ impl Drop for UnregisterOnDrop {
             runtime.spawn(async move {
                 queries.lock().await.remove(&id);
             });
+        }
+    }
+}
+
+/// The most subscription re-checks of one pass that run at once.
+const MAX_CONCURRENT_RECHECKS: usize = 8;
+
+/// How many re-checks of one pass run at once: one per core, at most
+/// [`MAX_CONCURRENT_RECHECKS`]. A perspective can hold many subscriptions,
+/// and each running re-check holds a blocking-pool thread.
+pub(super) fn recheck_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(MAX_CONCURRENT_RECHECKS)
+}
+
+/// Run one pass's subscription re-checks off the async workers, at most
+/// `limit` at a time, and return their outputs in the order they finish.
+///
+/// A re-check reads the SPARQL store synchronously: a raw SPARQL
+/// subscription through `query_arbitrary`, a model subscription in parts
+/// of `execute_model_query`. Each re-check runs on a blocking-pool thread
+/// that drives its future with `Handle::block_on`, so the store work never
+/// holds an async worker, nor the task that runs the perspective's
+/// background loops (`start_background_tasks` joins them on one task).
+/// A re-check is spawned only when a slot is free; one that panics is
+/// logged and yields nothing.
+pub(super) async fn run_rechecks<T: Send + 'static>(
+    checks: Vec<BoxFuture<'static, T>>,
+    limit: usize,
+) -> Vec<T> {
+    let runtime = tokio::runtime::Handle::current();
+    let mut waiting = checks.into_iter();
+    let mut running = tokio::task::JoinSet::new();
+    let mut outputs = Vec::with_capacity(waiting.len());
+    loop {
+        while running.len() < limit.max(1) {
+            let Some(check) = waiting.next() else { break };
+            let runtime = runtime.clone();
+            running.spawn_blocking(move || runtime.block_on(check));
+        }
+        match running.join_next().await {
+            Some(Ok(output)) => outputs.push(output),
+            Some(Err(e)) => log::error!("❌ 🔗 subscription re-check failed: {}", e),
+            None => return outputs,
         }
     }
 }
@@ -559,5 +605,64 @@ mod tests {
         drop(held);
         tokio::time::sleep(short).await;
         assert!(p.subscribed_queries.lock().await.is_empty());
+    }
+
+    // ── Re-check passes ─────────────────────────────────────────────────
+
+    /// A pass never runs more re-checks at once than its limit, and every
+    /// re-check's output comes back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pass_runs_at_most_its_limit_of_rechecks_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let checks = (0..20usize)
+            .map(|i| {
+                let (running, peak) = (running.clone(), peak.clone());
+                Box::pin(async move {
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    running.fetch_sub(1, Ordering::SeqCst);
+                    i
+                }) as futures::future::BoxFuture<'static, usize>
+            })
+            .collect();
+
+        let mut outputs = super::run_rechecks(checks, 3).await;
+
+        outputs.sort();
+        assert_eq!(outputs, (0..20).collect::<Vec<_>>());
+        assert_eq!(peak.load(Ordering::SeqCst), 3);
+    }
+
+    /// A re-check runs on a blocking-pool thread, not on an async worker.
+    #[tokio::test]
+    async fn a_recheck_runs_off_the_async_workers() {
+        let caller = std::thread::current().id();
+        let check = Box::pin(async { std::thread::current().id() })
+            as futures::future::BoxFuture<'static, std::thread::ThreadId>;
+
+        let ran_on = super::run_rechecks(vec![check], 1).await;
+
+        assert_eq!(ran_on.len(), 1);
+        assert_ne!(ran_on[0], caller);
+    }
+
+    /// A re-check that panics yields nothing; the rest of the pass is kept.
+    #[tokio::test]
+    async fn a_panicking_recheck_drops_only_its_own_output() {
+        let checks: Vec<futures::future::BoxFuture<'static, u8>> = vec![
+            Box::pin(async { 1 }),
+            Box::pin(async { panic!("re-check failed") }),
+            Box::pin(async { 3 }),
+        ];
+
+        let mut outputs = super::run_rechecks(checks, 2).await;
+
+        outputs.sort();
+        assert_eq!(outputs, vec![1, 3]);
     }
 }
