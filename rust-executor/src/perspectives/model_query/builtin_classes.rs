@@ -111,6 +111,7 @@ fn read_back(name: &str, sdna: &str) -> ModelShape {
                 proof: ExpressionProof {
                     key: String::new(),
                     signature: String::new(),
+                    anchor: None,
                 },
                 status: Some(LinkStatus::Shared),
             })

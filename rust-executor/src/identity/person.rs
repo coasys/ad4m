@@ -363,7 +363,7 @@ mod tests {
             &world.service.cache,
             None,
             &expression,
-            Some(&proof),
+            &proof,
             now()
         )
         .await

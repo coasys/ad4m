@@ -367,21 +367,46 @@ pub fn create_signed_expression<T: Serialize>(
     data: T,
     context: &AgentContext,
 ) -> Result<Expression<T>, AnyError> {
-    let timestamp = chrono::Utc::now();
-    let signature = hex::encode(sign_for_context(
-        &signatures::hash_data_and_timestamp(&data, &timestamp),
-        context,
-    )?);
+    create_signed_expression_anchored(data, context, None)
+}
+
+/// Signs `data` for `context`. With `anchor` (a seq of the log that lists the agent's key) the
+/// signature covers `coasys:link` `{data, timestamp, anchor}`; without it, the old signed bytes.
+pub fn create_signed_expression_anchored<T: Serialize>(
+    data: T,
+    context: &AgentContext,
+    anchor: Option<u64>,
+) -> Result<Expression<T>, AnyError> {
+    let now = chrono::Utc::now();
+    let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let payload = match anchor {
+        Some(anchor) => signatures::anchored_signing_bytes(&data, &timestamp, anchor)?,
+        None => signatures::hash_data_and_timestamp(&data, &now),
+    };
+    let signature = hex::encode(sign_for_context(&payload, context)?);
 
     Ok(Expression {
         author: did_for_context(context)?,
-        timestamp: timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        timestamp,
         data,
         proof: ExpressionProof {
             key: signing_key_id_for_context(context)?,
             signature,
+            anchor,
         },
     })
+}
+
+/// Signs a link for `context`, anchored at the trusted head of the agent's identity's log when
+/// the agent is bound to one ([`crate::identity::anchor_for`]); without an anchor otherwise.
+/// Synchronous: the anchor comes from the key map, where the local identities' logs are loaded
+/// at start and replaced by each accepted head.
+pub fn create_signed_link(
+    link: crate::types::Link,
+    context: &AgentContext,
+) -> Result<Expression<crate::types::Link>, AnyError> {
+    let anchor = crate::identity::anchor_for(&did_for_context(context)?);
+    create_signed_expression_anchored(link, context, anchor)
 }
 
 pub fn sign_string_hex_for_context(

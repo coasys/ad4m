@@ -45,8 +45,11 @@ pub fn link(
             signature: "sig".to_string(),
             valid: Some(valid),
             invalid: Some(!valid),
+            anchor: None,
         },
         status: None,
+        verdict: None,
+        person: None,
     }
 }
 

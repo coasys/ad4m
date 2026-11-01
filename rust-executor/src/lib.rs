@@ -550,6 +550,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         if let Err(e) = crate::identity::init(&db_path, &settings) {
             return failed_start(format!("Could not open the key-log cache: {e}"));
         }
+        // Before any agent signs: a link's anchor is read from the key map with no I/O.
+        crate::identity::load_local_identities().await;
     }
 
     // Set multi-user mode before starting services to avoid race condition

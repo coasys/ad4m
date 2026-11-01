@@ -1,6 +1,6 @@
 use super::core::{
-    AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
-    ExpressionProof, Link, ModelType,
+    AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression, Link,
+    ModelType,
 };
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify_or_false;
@@ -275,6 +275,9 @@ pub struct ExpressionProofInput {
     pub key: Option<String>,
     pub signature: Option<String>,
     pub valid: Option<bool>,
+    /// The seq of the signer's log the link is anchored at (`ExpressionProof::anchor`).
+    #[ts(type = "number", optional)]
+    pub anchor: Option<u64>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -437,6 +440,10 @@ pub struct LinkQuery {
     pub source: Option<String>,
     pub target: Option<String>,
     pub until_date: Option<DateTime>,
+    /// A display read leaves out links whose verdict is `invalid`; `Some(true)` returns
+    /// them too, each with its verdict (so the owner can see and remove them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_unverified: Option<bool>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -558,8 +565,11 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
                 signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
                 valid: input.proof.valid,
                 invalid: input.proof.invalid,
+                anchor: input.proof.anchor,
             },
             status: input.status,
+            verdict: None,
+            person: None,
         })
     }
 }
@@ -583,6 +593,7 @@ impl From<Expression<Perspective>> for PerspectiveExpression {
                 signature: expr.proof.signature,
                 valid: None,
                 invalid: None,
+                anchor: expr.proof.anchor,
             },
             timestamp: expr.timestamp,
         }
@@ -596,10 +607,7 @@ impl PerspectiveExpression {
         let perspective_expression = Expression::<Perspective> {
             author: self.author.clone(),
             data: self.data.clone(),
-            proof: ExpressionProof {
-                key: self.proof.key.clone(),
-                signature: self.proof.signature.clone(),
-            },
+            proof: self.proof.plain(),
             timestamp: self.timestamp.clone(),
         };
 

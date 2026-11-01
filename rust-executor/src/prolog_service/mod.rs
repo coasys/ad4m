@@ -688,8 +688,11 @@ mod prolog_test {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+                    anchor: None,
                 },
                 status: None,
+                verdict: None,
+                person: None,
             },
             DecoratedLinkExpression {
                 author: "test_author".to_string(),
@@ -704,8 +707,11 @@ mod prolog_test {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+                    anchor: None,
                 },
                 status: None,
+                verdict: None,
+                person: None,
             },
         ];
 

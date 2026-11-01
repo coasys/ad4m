@@ -7,6 +7,8 @@ use crate::Hash;
 pub struct ExpressionProof {
     pub signature: String,
     pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug, PartialEq, Eq, Hash)]

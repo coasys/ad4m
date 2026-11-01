@@ -1,6 +1,9 @@
+use crate::identity::verdict::{InvalidReason, LinkVerdict};
 use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
 use crate::types::LinkStatus;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression};
+use crate::types::{
+    DecoratedExpressionProof, DecoratedLinkExpression, ExpressionProof, Link, LinkExpression,
+};
 use chrono::DateTime as ChronoDateTime;
 use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
@@ -15,6 +18,14 @@ const ONT_TIMESTAMP: &str = "ad4m://ontology/timestamp";
 const ONT_PROOF_KEY: &str = "ad4m://ontology/proofKey";
 const ONT_PROOF_SIG: &str = "ad4m://ontology/proofSignature";
 const ONT_PROOF_VALID: &str = "ad4m://ontology/proofValid";
+/// The seq of the signer's log a link is anchored at (`proof.anchor`).
+const ONT_PROOF_ANCHOR: &str = "ad4m://ontology/proofAnchor";
+/// The link's verdict (`LinkVerdict::stored`). `proofValid` is `true` exactly when it is
+/// `valid`.
+const ONT_LINK_VERDICT: &str = "ad4m://ontology/linkVerdict";
+/// The derived person of a valid link: the `did:scid` its signer's key speaks for. This
+/// executor's index only; the link never carries it.
+const ONT_PERSON: &str = "ad4m://ontology/person";
 const ONT_STATUS: &str = "ad4m://ontology/status";
 /// The target exactly as the link was signed, kept only when it differs from
 /// what [`storage_term_to_target_string`] renders for the stored term. See
@@ -224,6 +235,16 @@ fn literal(val: &str) -> Literal {
     Literal::new_simple_literal(val)
 }
 
+/// `s` as a SPARQL string literal.
+fn sparql_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+}
+
+/// Whether a display read shows `link`: every verdict but `invalid`.
+pub(crate) fn shown(link: &DecoratedLinkExpression) -> bool {
+    link.verdict.as_ref().is_none_or(LinkVerdict::shown)
+}
+
 /// The stored spelling of a link's status. `model_query`'s `link_status_filter`
 /// matches with this too, so the read side cannot disagree with the write side.
 pub(crate) fn status_str(status: &LinkStatus) -> &'static str {
@@ -260,6 +281,42 @@ pub(crate) fn status_from_str(stored: &str) -> Option<LinkStatus> {
 /// yield `""` for an unbound variable, so this is the shape absence arrives in.
 fn decode_proof_valid(s: &str) -> bool {
     s == "true"
+}
+
+/// The verdict of a stored link: its `linkVerdict` annotation; for a link stored before
+/// verdicts (none), its `proofValid`: `valid`, or `invalid` with a bad signature, the only way
+/// such a link failed. [`SparqlStore::migrate_link_verdicts`] writes the same.
+fn decode_verdict(verdict: &str, proof_valid: &str) -> LinkVerdict {
+    LinkVerdict::from_stored(verdict).unwrap_or_else(|| {
+        if decode_proof_valid(proof_valid) {
+            LinkVerdict::Valid
+        } else {
+            LinkVerdict::Invalid(InvalidReason::BadSignature)
+        }
+    })
+}
+
+/// A stored link's decorated parts: the proof (with `valid` from the verdict), the verdict and
+/// the person (kept only for a valid link).
+fn decode_proof(
+    key: String,
+    signature: String,
+    anchor: &str,
+    verdict: &str,
+    proof_valid: &str,
+    person: &str,
+) -> (DecoratedExpressionProof, LinkVerdict, Option<String>) {
+    let verdict = decode_verdict(verdict, proof_valid);
+    let valid = verdict.counts();
+    let person = (valid && !person.is_empty()).then(|| person.to_string());
+    let proof = DecoratedExpressionProof {
+        key,
+        signature,
+        valid: Some(valid),
+        invalid: Some(!valid),
+        anchor: anchor.parse().ok(),
+    };
+    (proof, verdict, person)
 }
 
 /// Back-compat SPARQL function for legacy notification triggers and SDNA
@@ -424,10 +481,14 @@ pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// The proof annotations an insert writes: see [`SparqlStore::proof_write`].
+/// The proof annotations an insert writes: see [`proof_write`].
 enum ProofWrite {
-    /// Key, signature, verdict and `wireTarget` together.
+    /// Key, signature, anchor and `wireTarget` together, with the judgement.
     Whole,
+    /// The judgement only (`proofValid`, the verdict and the person), for the
+    /// proof the reifier already holds, re-checked against what the key map
+    /// knows now.
+    Rejudge,
     /// Only `wireTarget`, for a verified row stored before #1141.
     WireTargetOnly,
     Nothing,
@@ -477,13 +538,20 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 /// Which proof annotations an insert may write on `reifier` (#1146), as `tx`
 /// reads the store.
 ///
-/// The proof (key, signature, verdict and `wireTarget`) is one unit.
+/// The proof (key, signature, anchor and `wireTarget`) is one unit, and the
+/// judgement of it (`proofValid`, the verdict and the person) goes with it.
 /// The reifier does not hash it, so anyone who has seen a link can
 /// re-assert its five fields with another proof and land here. The unit
 /// is written only when nothing is stored yet, or as an upgrade: the
-/// stored verdict is not `"true"` and the incoming one is. Verified to
-/// verified is not an upgrade, because verification never reads the key:
-/// a replay of the author's signature with another key would rewrite it.
+/// stored `proofValid` is not `"true"` and the incoming verdict counts.
+/// Verified to verified is not an upgrade, because verification never reads
+/// the key: a replay of the author's signature with another key would
+/// rewrite it.
+///
+/// The same proof again (key, signature, anchor and signed target bytes all
+/// as stored) is the link the store holds, judged anew: its judgement is
+/// rewritten whichever way it moved, so a re-check records a log learned
+/// since (`cantCheck` to `valid`) or a revocation (`valid` to `flagged`).
 ///
 /// One partial write heals rows stored before #1141, which kept no
 /// `wireTarget`: a verified row without one, re-inserted with the same
@@ -492,7 +560,8 @@ fn proof_write(
     tx: &Transaction<'_>,
     reifier: &NamedNode,
     incoming_valid: bool,
-    incoming_signature: &str,
+    incoming: &ExpressionProof,
+    incoming_wire_target: Option<&str>,
 ) -> Result<ProofWrite, Error> {
     let key = annotation_values(tx, reifier, ONT_PROOF_KEY)?;
     let signature = annotation_values(tx, reifier, ONT_PROOF_SIG)?;
@@ -501,16 +570,27 @@ fn proof_write(
         return Ok(ProofWrite::Whole);
     }
     let stored_valid = verdict.iter().any(|v| v == "true");
-    if !stored_valid {
-        return Ok(if incoming_valid {
-            ProofWrite::Whole
-        } else {
-            ProofWrite::Nothing
-        });
+    if !stored_valid && incoming_valid {
+        return Ok(ProofWrite::Whole);
     }
-    let same_statement = incoming_valid && signature == [incoming_signature];
-    let no_wire_target = annotation_values(tx, reifier, ONT_WIRE_TARGET)?.is_empty();
-    Ok(if same_statement && no_wire_target {
+    let same_signature = signature == [incoming.signature.as_str()];
+    let wire_target = annotation_values(tx, reifier, ONT_WIRE_TARGET)?;
+    let no_wire_target = wire_target.is_empty();
+    let heal_wire_target = stored_valid && incoming_valid && same_signature && no_wire_target;
+    let anchor = annotation_values(tx, reifier, ONT_PROOF_ANCHOR)?;
+    let incoming_anchor: Vec<String> = incoming.anchor.iter().map(u64::to_string).collect();
+    let same_signed_bytes = wire_target
+        .iter()
+        .map(String::as_str)
+        .eq(incoming_wire_target);
+    if same_signature
+        && key == [incoming.key.as_str()]
+        && anchor == incoming_anchor
+        && same_signed_bytes
+    {
+        return Ok(ProofWrite::Rejudge);
+    }
+    Ok(if heal_wire_target {
         ProofWrite::WireTargetOnly
     } else {
         ProofWrite::Nothing
@@ -613,19 +693,23 @@ fn write_link_quads_proof(
     // 3. Metadata on the reifier node (all default graph)
     let proof = &link.proof;
 
-    // `proof.valid` is a read view over the signature: always compute it from
-    // the key and signature, never trust the caller's field. This means no
-    // test helper, migration, or external caller can slip a fabricated or
-    // stale verdict onto disk. The caller's `proof.valid` is intentionally
-    // ignored here â tests that want `Some(true)` must carry a real signature.
-    let incoming_valid = link.compute_proof_valid();
+    // The verdict is a read view over the signature and the signer's log: always
+    // compute it here (the key map answers without I/O), never trust the caller's
+    // field. No test helper, migration, or external caller can slip a fabricated or
+    // stale verdict onto disk; tests that want `valid` must carry a real signature.
+    // `proofValid` stays for the readers that test it: `true` exactly when the
+    // verdict is `valid`.
+    let checked = link.check();
+    let incoming_valid = checked.verdict.counts();
     let valid_str = incoming_valid.to_string();
+    let verdict_str = checked.verdict.stored();
+    let anchor_str = proof.anchor.map(|a| a.to_string());
 
     let wire_target = signed_target_annotation(link, &target_term);
 
     // `None` writes nothing, after clearing a stale value: a proof written
     // with a canonical target must not keep the wire target of an earlier
-    // encoding.
+    // encoding, nor one without an anchor the anchor of an earlier proof.
     let mut annotations: Vec<(&str, Option<&str>)> = vec![
         (ONT_AUTHOR, Some(&link.author)),
         (ONT_TIMESTAMP, Some(&link.timestamp)),
@@ -634,15 +718,30 @@ fn write_link_quads_proof(
     let write = if repair {
         ProofWrite::Whole
     } else {
-        proof_write(tx, &reifier_iri, incoming_valid, &proof.signature)?
+        proof_write(
+            tx,
+            &reifier_iri,
+            incoming_valid,
+            proof,
+            wire_target.as_deref(),
+        )?
     };
+    let judgement = [
+        (ONT_PROOF_VALID, Some(valid_str.as_str())),
+        (ONT_LINK_VERDICT, Some(verdict_str.as_str())),
+        (ONT_PERSON, checked.person.as_deref()),
+    ];
     match write {
-        ProofWrite::Whole => annotations.extend([
-            (ONT_PROOF_KEY, Some(proof.key.as_str())),
-            (ONT_PROOF_SIG, Some(proof.signature.as_str())),
-            (ONT_PROOF_VALID, Some(valid_str.as_str())),
-            (ONT_WIRE_TARGET, wire_target.as_deref()),
-        ]),
+        ProofWrite::Whole => {
+            annotations.extend([
+                (ONT_PROOF_KEY, Some(proof.key.as_str())),
+                (ONT_PROOF_SIG, Some(proof.signature.as_str())),
+                (ONT_PROOF_ANCHOR, anchor_str.as_deref()),
+                (ONT_WIRE_TARGET, wire_target.as_deref()),
+            ]);
+            annotations.extend(judgement);
+        }
+        ProofWrite::Rejudge => annotations.extend(judgement),
         ProofWrite::WireTargetOnly => annotations.push((ONT_WIRE_TARGET, wire_target.as_deref())),
         ProofWrite::Nothing => {}
     }
@@ -723,26 +822,29 @@ fn signed_link_of(
     };
     let canonical = storage_term_to_target_string(&triple.object);
     let link_with =
-        |author: &str, timestamp: &str, target: &str, key: &str, sig: &str| LinkExpression {
-            author: author.to_string(),
-            timestamp: timestamp.to_string(),
-            data: Link {
-                source: source.as_str().to_string(),
-                predicate: Some(triple.predicate.as_str().to_string()),
-                target: target.to_string(),
-            },
-            proof: crate::types::ExpressionProof {
-                key: key.to_string(),
-                signature: sig.to_string(),
-            },
-            status: None,
+        |author: &str, timestamp: &str, target: &str, key: &str, sig: &str, anchor: Option<u64>| {
+            LinkExpression {
+                author: author.to_string(),
+                timestamp: timestamp.to_string(),
+                data: Link {
+                    source: source.as_str().to_string(),
+                    predicate: Some(triple.predicate.as_str().to_string()),
+                    target: target.to_string(),
+                },
+                proof: crate::types::ExpressionProof {
+                    key: key.to_string(),
+                    signature: sig.to_string(),
+                    anchor,
+                },
+                status: None,
+            }
         };
 
     let (authors, timestamps) = (values(ONT_AUTHOR)?, values(ONT_TIMESTAMP)?);
     let Some((author, timestamp)) = authors
         .iter()
         .flat_map(|a| timestamps.iter().map(move |t| (a, t)))
-        .find(|(a, t)| &make_reifier_iri(&link_with(a, t, &canonical, "", "")) == reifier)
+        .find(|(a, t)| &make_reifier_iri(&link_with(a, t, &canonical, "", "", None)) == reifier)
     else {
         return Ok(None);
     };
@@ -750,19 +852,40 @@ fn signed_link_of(
     let mut targets = values(ONT_WIRE_TARGET)?;
     targets.push(canonical.clone());
     let (mut keys, sigs) = (values(ONT_PROOF_KEY)?, values(ONT_PROOF_SIG)?);
+    // The anchor is part of the signed bytes when present: try each stored one,
+    // and none when the link was stored without.
+    let mut anchors: Vec<Option<u64>> = values(ONT_PROOF_ANCHOR)?
+        .iter()
+        .filter_map(|a| a.parse().ok())
+        .map(Some)
+        .collect();
+    if anchors.is_empty() {
+        anchors.push(None);
+    }
     // A signature verifies against the author's DID whatever key it names,
     // so the key the link was stored with is the one naming the author.
     keys.sort_by_key(|key| !key.starts_with(author.as_str()));
     let verified = targets.iter().find_map(|target| {
         keys.iter().find_map(|key| {
             sigs.iter()
-                .map(|sig| link_with(author, timestamp, target, key, sig))
+                .flat_map(|sig| {
+                    anchors
+                        .iter()
+                        .map(move |anchor| link_with(author, timestamp, target, key, sig, *anchor))
+                })
                 .find(|link| link.compute_proof_valid())
         })
     });
     let link = verified.unwrap_or_else(|| {
         let first = |v: &[String]| v.first().cloned().unwrap_or_default();
-        link_with(author, timestamp, &targets[0], &first(&keys), &first(&sigs))
+        link_with(
+            author,
+            timestamp,
+            &targets[0],
+            &first(&keys),
+            &first(&sigs),
+            anchors[0],
+        )
     });
     // A link's status is the executor's own bookkeeping, not signed; with
     // more than one stated, a peer's link is Shared.
@@ -839,7 +962,7 @@ pub struct SparqlStore {
 pub(crate) fn decorated_links_query(source_constraint: &str, filter: &str) -> String {
     format!(
         r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {{
+SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?proofAnchor ?linkVerdict ?person ?status WHERE {{
     {source_constraint}
     ?source ?predicate ?target .
     ?reifier rdf:reifies <<( ?source ?predicate ?target )>> .
@@ -849,6 +972,9 @@ SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proo
     OPTIONAL {{ ?reifier <ad4m://ontology/proofKey> ?proofKey . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/proofSignature> ?proofSig . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/proofValid> ?proofValid . }}
+    OPTIONAL {{ ?reifier <ad4m://ontology/proofAnchor> ?proofAnchor . }}
+    OPTIONAL {{ ?reifier <ad4m://ontology/linkVerdict> ?linkVerdict . }}
+    OPTIONAL {{ ?reifier <ad4m://ontology/person> ?person . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/status> ?status . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
 }}"#
@@ -1125,6 +1251,89 @@ impl SparqlStore {
         }
     }
 
+    /// The links signed by any of `authors` (`did:key` DIDs), at most `limit`.
+    pub fn links_by_authors(
+        &self,
+        authors: &[String],
+        limit: usize,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        if authors.is_empty() {
+            return Ok(vec![]);
+        }
+        let values = authors
+            .iter()
+            .map(|a| sparql_string(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let query = decorated_links_query(&format!("VALUES ?author {{ {values} }}"), "true");
+        self.query_decorated_links(&format!("{query} LIMIT {limit}"))
+    }
+
+    /// The links whose stored verdict is `verdict`, at most `limit`.
+    pub fn links_with_verdict(
+        &self,
+        verdict: &LinkVerdict,
+        limit: usize,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        // A FILTER, not VALUES: `?linkVerdict` is bound in an OPTIONAL, and a VALUES row would
+        // survive the OPTIONAL that does not match it.
+        let query = decorated_links_query(
+            "",
+            &format!("?linkVerdict = {}", sparql_string(&verdict.stored())),
+        );
+        self.query_decorated_links(&format!("{query} LIMIT {limit}"))
+    }
+
+    /// Gives every link stored before verdicts (a `proofValid` annotation and no
+    /// `linkVerdict`) the verdict it had: `valid` for `proofValid "true"`, else
+    /// `invalid:badSignature`. Idempotent; answers how many links it changed.
+    pub fn migrate_link_verdicts(&self) -> Result<usize, Error> {
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let proof_valid = NamedNodeRef::new_unchecked(ONT_PROOF_VALID);
+        let link_verdict = NamedNodeRef::new_unchecked(ONT_LINK_VERDICT);
+        let mut tx = self.store.start_transaction()?;
+        let held: Vec<Quad> = tx
+            .quads_for_pattern(
+                None,
+                Some(proof_valid),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut migrated = 0;
+        for quad in held {
+            let has_verdict = tx
+                .quads_for_pattern(
+                    Some(quad.subject.as_ref()),
+                    Some(link_verdict),
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                )
+                .next()
+                .is_some();
+            if has_verdict {
+                continue;
+            }
+            let valid = match &quad.object {
+                Term::Literal(l) => l.value().to_string(),
+                _ => String::new(),
+            };
+            let verdict = literal(&decode_verdict("", &valid).stored());
+            tx.insert(QuadRef::new(
+                quad.subject.as_ref(),
+                link_verdict,
+                TermRef::Literal(verdict.as_ref()),
+                GraphNameRef::DefaultGraph,
+            ));
+            migrated += 1;
+        }
+        tx.commit()?;
+        Ok(migrated)
+    }
+
     /// Query links matching optional filters using index-based pattern matching.
     /// Scans direct triples in the default graph, then looks up reifiers for metadata.
     /// `limit` truncates in iteration order (RocksDB scan order, not timestamp);
@@ -1162,6 +1371,7 @@ impl SparqlStore {
     /// Uses a bounded heap of size `limit` so memory stays O(limit) regardless
     /// of how many links match — avoids the O(N) materialise-sort-truncate
     /// path when callers only want a top-N page (e.g. paginated `get_links`).
+    #[allow(clippy::too_many_arguments)]
     pub fn query_links_top_n_by_timestamp(
         &self,
         source: Option<&str>,
@@ -1171,6 +1381,48 @@ impl SparqlStore {
         until_date: Option<&str>,
         limit: usize,
         reverse: bool,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        self.top_n_by_timestamp(
+            source,
+            predicate,
+            target,
+            from_date,
+            until_date,
+            limit,
+            reverse,
+            |_| true,
+        )
+    }
+
+    /// [`Self::query_links_top_n_by_timestamp`] for a display read: a link whose verdict is
+    /// `invalid` never takes a place on the page.
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_shown_links_top_n_by_timestamp(
+        &self,
+        source: Option<&str>,
+        predicate: Option<&str>,
+        target: Option<&str>,
+        from_date: Option<&str>,
+        until_date: Option<&str>,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        self.top_n_by_timestamp(
+            source, predicate, target, from_date, until_date, limit, reverse, shown,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn top_n_by_timestamp(
+        &self,
+        source: Option<&str>,
+        predicate: Option<&str>,
+        target: Option<&str>,
+        from_date: Option<&str>,
+        until_date: Option<&str>,
+        limit: usize,
+        reverse: bool,
+        keep: fn(&DecoratedLinkExpression) -> bool,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
@@ -1187,6 +1439,9 @@ impl SparqlStore {
             // exactly the K smallest.
             let mut heap: BinaryHeap<TimestampedLink> = BinaryHeap::with_capacity(limit + 1);
             self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
+                if !keep(&link) {
+                    return ControlFlow::Continue(());
+                }
                 let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
                 heap.push(TimestampedLink { dt, seq, link });
                 seq += 1;
@@ -1208,6 +1463,9 @@ impl SparqlStore {
             let mut heap: BinaryHeap<Reverse<TimestampedLink>> =
                 BinaryHeap::with_capacity(limit + 1);
             self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
+                if !keep(&link) {
+                    return ControlFlow::Continue(());
+                }
                 let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
                 heap.push(Reverse(TimestampedLink { dt, seq, link }));
                 seq += 1;
@@ -1326,6 +1584,9 @@ impl SparqlStore {
                 let mut proof_key = String::new();
                 let mut proof_sig = String::new();
                 let mut proof_valid_str = String::new();
+                let mut proof_anchor = String::new();
+                let mut verdict_str = String::new();
+                let mut person = String::new();
                 let mut status_val = String::new();
                 let mut wire_target = None;
                 for ann_quad in self.store.quads_for_pattern(
@@ -1346,6 +1607,9 @@ impl SparqlStore {
                         ONT_PROOF_KEY => proof_key = value,
                         ONT_PROOF_SIG => proof_sig = value,
                         ONT_PROOF_VALID => proof_valid_str = value,
+                        ONT_PROOF_ANCHOR => proof_anchor = value,
+                        ONT_LINK_VERDICT => verdict_str = value,
+                        ONT_PERSON => person = value,
                         ONT_STATUS => status_val = value,
                         ONT_WIRE_TARGET => wire_target = Some(value),
                         _ => {}
@@ -1396,7 +1660,14 @@ impl SparqlStore {
                     }
                 }
 
-                let proof_valid = decode_proof_valid(&proof_valid_str);
+                let (proof, verdict, person) = decode_proof(
+                    proof_key,
+                    proof_sig,
+                    &proof_anchor,
+                    &verdict_str,
+                    &proof_valid_str,
+                    &person,
+                );
                 let status = status_from_str(&status_val);
 
                 let link = DecoratedLinkExpression {
@@ -1411,13 +1682,10 @@ impl SparqlStore {
                         },
                         target: wire_target.unwrap_or_else(|| tgt.clone()),
                     },
-                    proof: DecoratedExpressionProof {
-                        key: proof_key,
-                        signature: proof_sig,
-                        valid: Some(proof_valid),
-                        invalid: Some(!proof_valid),
-                    },
+                    proof,
                     status,
+                    verdict: Some(verdict),
+                    person,
                 };
 
                 if let ControlFlow::Break(_) = callback(link) {
@@ -1607,8 +1875,14 @@ impl SparqlStore {
         let timestamp = get_str("timestamp");
         let proof_key = get_str("proofKey");
         let proof_sig = get_str("proofSig");
-        let proof_valid_str = get_str("proofValid");
-        let proof_valid = decode_proof_valid(&proof_valid_str);
+        let (proof, verdict, person) = decode_proof(
+            proof_key,
+            proof_sig,
+            &get_str("proofAnchor"),
+            &get_str("linkVerdict"),
+            &get_str("proofValid"),
+            &get_str("person"),
+        );
         let status = status_from_str(&get_str("status"));
 
         Some(DecoratedLinkExpression {
@@ -1619,13 +1893,10 @@ impl SparqlStore {
                 predicate,
                 target,
             },
-            proof: DecoratedExpressionProof {
-                key: proof_key,
-                signature: proof_sig,
-                valid: Some(proof_valid),
-                invalid: Some(!proof_valid),
-            },
+            proof,
             status,
+            verdict: Some(verdict),
+            person,
         })
     }
 
@@ -2399,8 +2670,9 @@ mod tests {
             );
         }
 
-        // Should have: 1 direct triple + 1 reifier + 6 metadata = 8 quads
-        assert_eq!(all_quads.len(), 8, "Expected 8 quads total");
+        // Should have: 1 direct triple + 1 reifier + 7 metadata (no anchor, no person for
+        // a link without an anchor whose key no log lists) = 9 quads
+        assert_eq!(all_quads.len(), 9, "Expected 9 quads total");
     }
 
     /// The canonical storage model needs no migration: a `literal:*` wire target
@@ -4255,6 +4527,188 @@ mod tests {
             !decode_proof_valid("TRUE"),
             "only the exact literal this store writes counts as verified"
         );
+    }
+
+    /// The store keeps each link's verdict and anchor, and `proofValid` is `true` only for a
+    /// `valid` verdict. A key no log the executor knows lists makes an anchored link
+    /// `cantCheck`, which display reads show and the re-check finds.
+    #[test]
+    fn stored_links_keep_their_verdict_and_anchor() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let plain = make_link(&signer, "ad4m://v", "ad4m://p", "ad4m://plain");
+        let mut forged = make_link(&signer, "ad4m://v", "ad4m://p", "ad4m://forged");
+        forged.proof.signature = "deadbeef".into();
+        let signed = signer.sign_anchored(
+            Link {
+                source: "ad4m://v".into(),
+                predicate: Some("ad4m://p".into()),
+                target: "ad4m://anchored".into(),
+            },
+            0,
+        );
+        let mut anchored: LinkExpression = signed.into();
+        anchored.status = Some(LinkStatus::Shared);
+        for link in [&plain, &forged, &anchored] {
+            svc.add_link(link).unwrap();
+        }
+
+        let verdict_of = |target: &str| {
+            let found = svc
+                .query_links(Some("ad4m://v"), None, Some(target), None, None, None)
+                .unwrap();
+            assert_eq!(found.len(), 1, "{target}");
+            found[0].clone()
+        };
+        let read = verdict_of("ad4m://plain");
+        assert_eq!(read.verdict, Some(LinkVerdict::Valid));
+        assert_eq!(read.proof.valid, Some(true));
+        let read = verdict_of("ad4m://forged");
+        assert_eq!(
+            read.verdict,
+            Some(LinkVerdict::Invalid(InvalidReason::BadSignature))
+        );
+        let read = verdict_of("ad4m://anchored");
+        assert_eq!(read.verdict, Some(LinkVerdict::CantCheck));
+        assert_eq!(read.proof.valid, Some(false));
+        assert_eq!(read.proof.anchor, Some(0), "the anchor reads back");
+        let back = crate::types::Expression::from(LinkExpression::from(read));
+        assert!(
+            crate::agent::signatures::signature_holds(&back),
+            "the read-back link carries what was signed"
+        );
+
+        let waiting = svc.links_with_verdict(&LinkVerdict::CantCheck, 10).unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].data.target, "ad4m://anchored");
+
+        let page = svc
+            .query_shown_links_top_n_by_timestamp(
+                Some("ad4m://v"),
+                None,
+                None,
+                None,
+                None,
+                10,
+                false,
+            )
+            .unwrap();
+        let mut targets: Vec<_> = page.iter().map(|l| l.data.target.as_str()).collect();
+        targets.sort();
+        assert_eq!(
+            targets,
+            ["ad4m://anchored", "ad4m://plain"],
+            "a display page leaves the invalid link out"
+        );
+    }
+
+    #[test]
+    fn links_by_authors_finds_only_their_links() {
+        let alice = TestSigner::generate();
+        let bob = TestSigner::generate();
+        let svc = new_service();
+        svc.add_link(&make_link(&alice, "ad4m://a", "ad4m://p", "ad4m://t"))
+            .unwrap();
+        svc.add_link(&make_link(&bob, "ad4m://b", "ad4m://p", "ad4m://t"))
+            .unwrap();
+        let found = svc
+            .links_by_authors(std::slice::from_ref(&alice.did), 10)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].author, alice.did);
+    }
+
+    /// Links stored before verdicts keep the validity they had.
+    #[test]
+    fn the_migration_gives_old_links_their_verdict() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let good = make_link(&signer, "ad4m://m", "ad4m://p", "ad4m://good");
+        let mut bad = make_link(&signer, "ad4m://m", "ad4m://p", "ad4m://bad");
+        bad.proof.signature = "deadbeef".into();
+        for link in [&good, &bad] {
+            svc.add_link(link).unwrap();
+            svc.remove_reifier_annotation(link, ONT_LINK_VERDICT)
+                .unwrap();
+        }
+        // Before the migration, reads fall back to `proofValid`.
+        let verdicts = |svc: &SparqlStore| {
+            let mut all: Vec<_> = svc
+                .get_all_links()
+                .unwrap()
+                .into_iter()
+                .map(|l| (l.data.target, l.verdict))
+                .collect();
+            all.sort_by(|a, b| a.0.cmp(&b.0));
+            all
+        };
+        let expected = vec![
+            (
+                "ad4m://bad".to_string(),
+                Some(LinkVerdict::Invalid(InvalidReason::BadSignature)),
+            ),
+            ("ad4m://good".to_string(), Some(LinkVerdict::Valid)),
+        ];
+        assert_eq!(verdicts(&svc), expected);
+        assert!(svc
+            .links_with_verdict(&LinkVerdict::Valid, 10)
+            .unwrap()
+            .is_empty());
+
+        assert_eq!(svc.migrate_link_verdicts().unwrap(), 2);
+        assert_eq!(verdicts(&svc), expected);
+        assert_eq!(
+            svc.links_with_verdict(&LinkVerdict::Valid, 10)
+                .unwrap()
+                .len(),
+            1,
+            "the verdict is stored now"
+        );
+        assert_eq!(svc.migrate_link_verdicts().unwrap(), 0, "idempotent");
+    }
+
+    /// The same proof re-inserted (as a re-check does) rewrites the judgement the
+    /// store holds for it, even on a verified row, where a different proof could
+    /// not (#1146): the verdict follows the key map, the proof stays.
+    ///
+    /// Turns red on: a `proof_write` that only upgrades (no `Rejudge`), under
+    /// which a verified row keeps whatever verdict it was first given.
+    #[test]
+    fn the_same_proof_again_rewrites_its_judgement() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let link = make_link(&signer, "ad4m://rejudge", "ad4m://p", "ad4m://t");
+        svc.add_link(&link).unwrap();
+        // An earlier judgement of the same proof, recorded before a re-check.
+        svc.remove_reifier_annotation(&link, ONT_LINK_VERDICT)
+            .unwrap();
+        let earlier = literal(&LinkVerdict::Flagged.stored());
+        svc.store
+            .insert(QuadRef::new(
+                make_reifier_iri(&link).as_ref(),
+                NamedNodeRef::new_unchecked(ONT_LINK_VERDICT),
+                TermRef::Literal(earlier.as_ref()),
+                GraphNameRef::DefaultGraph,
+            ))
+            .unwrap();
+        let verdict = |svc: &SparqlStore| {
+            let links = svc.get_all_links().unwrap();
+            assert_eq!(links.len(), 1, "{links:?}");
+            links[0].verdict.clone()
+        };
+        assert_eq!(verdict(&svc), Some(LinkVerdict::Flagged), "setup");
+
+        svc.add_link(&link).unwrap();
+        assert_eq!(verdict(&svc), Some(LinkVerdict::Valid));
+
+        // Another proof on the verified row still writes nothing.
+        let other = TestSigner::generate();
+        let mut replay = link.clone();
+        replay.proof = make_link(&other, "ad4m://rejudge", "ad4m://p", "ad4m://t").proof;
+        svc.add_link(&replay).unwrap();
+        let row = &svc.get_all_links().unwrap()[0];
+        assert_eq!(row.proof.key, link.proof.key);
+        assert_eq!(row.verdict, Some(LinkVerdict::Valid));
     }
 
     /// v4 migration converts every `literal:*:` IRI-shaped object into the

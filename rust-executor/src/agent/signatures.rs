@@ -19,21 +19,97 @@ pub fn verify_string_signed_by_did(
     Ok(inner_verify(did, &message, &sig_bytes))
 }
 
+/// The one check of a signed expression (a link above all): whether it counts.
+///
+/// - No `proof.anchor`: the signature under the author's `did:key`, over the old signed bytes
+///   ([`hash_data_and_timestamp`]); then, when a log lists the key (a key a log adopted
+///   after it signed), the log's rules at the seq that added the key.
+/// - With `proof.anchor`: the signature under the author's `did:key`, over
+///   `coasys:link` `{data, timestamp, anchor}` ([`anchored_signing_bytes`]); the log that lists
+///   the key as a device key, at the anchor.
+///
+/// The log is read from the key map ([`crate::identity::check_signed`]), so the answer needs no
+/// `await`. `Ok(true)` only for [`LinkVerdict::Valid`](crate::identity::verdict::LinkVerdict).
+/// `Err` only for a malformed proof envelope (a signature that is not hex, a timestamp that
+/// does not parse).
 pub fn verify<T: Serialize>(expr: &Expression<T>) -> Result<bool, AnyError> {
-    verify_by(expr, &expr.author)
+    // The envelope first: a malformed one is an error, not a verdict.
+    hex::decode(&expr.proof.signature)?;
+    if expr.proof.anchor.is_none() {
+        parse_timestamp(&expr.timestamp)?;
+    }
+    Ok(crate::identity::check_signed(expr).verdict.counts())
 }
 
-/// `expr`'s signature under the `did:key` `did` instead of under its author: for an author
-/// that is not a `did:key` (a `did:scid` person), once the caller has established that `did`
-/// signs for it.
-pub fn verify_by<T: Serialize>(expr: &Expression<T>, did: &str) -> Result<bool, AnyError> {
-    let sig_bytes = hex::decode(&expr.proof.signature)?;
-    let timestamp = DateTime::<Utc>::from_str(&expr.timestamp).map_err(|e| {
+/// Whether `expr`'s signature holds under its author's `did:key`, over the bytes its proof
+/// names: the old signed bytes without an anchor, `coasys:link` `{data, timestamp, anchor}`
+/// with one. Reads no log.
+pub fn signature_holds<T: Serialize>(expr: &Expression<T>) -> bool {
+    let Ok(sig_bytes) = hex::decode(&expr.proof.signature) else {
+        return false;
+    };
+    match expr.proof.anchor {
+        None => verify_by(expr, &expr.author).unwrap_or(false),
+        Some(anchor) => {
+            let Some(key) = expr.author.strip_prefix("did:key:") else {
+                return false;
+            };
+            let value = AnchoredLink {
+                data: &expr.data,
+                timestamp: &expr.timestamp,
+                anchor,
+            };
+            ad4m_identity_core::verify_signed(
+                ad4m_identity_core::LINK_DOMAIN,
+                &value,
+                key,
+                &sig_bytes,
+            )
+        }
+    }
+}
+
+/// What an anchored link signs under `coasys:link`: its data, its timestamp as it carries it,
+/// and the anchor.
+#[derive(Serialize)]
+struct AnchoredLink<'a, T: Serialize> {
+    data: &'a T,
+    timestamp: &'a str,
+    anchor: u64,
+}
+
+/// The bytes an anchored expression signs: `coasys:link` over `{data, timestamp, anchor}`.
+pub(crate) fn anchored_signing_bytes<T: Serialize>(
+    data: &T,
+    timestamp: &str,
+    anchor: u64,
+) -> Result<Vec<u8>, AnyError> {
+    ad4m_identity_core::signing_bytes(
+        ad4m_identity_core::LINK_DOMAIN,
+        &AnchoredLink {
+            data,
+            timestamp,
+            anchor,
+        },
+    )
+    .map_err(|e| anyhow!("cannot build the signed bytes of an anchored expression: {e}"))
+}
+
+fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, AnyError> {
+    DateTime::<Utc>::from_str(timestamp).map_err(|e| {
         anyhow!(
             "Failed to parse timestamp when trying to verify signature: {}",
             e
         )
-    })?;
+    })
+}
+
+/// `expr`'s signature under the `did:key` `did`, over the old signed bytes (no anchor): for an
+/// author that is not a `did:key` (a `did:scid` person), once the caller has established that
+/// `did` signs for it.
+pub fn verify_by<T: Serialize>(expr: &Expression<T>, did: &str) -> Result<bool, AnyError> {
+    let sig_bytes = hex::decode(&expr.proof.signature)?;
+    let timestamp = parse_timestamp(&expr.timestamp)?;
     let message = hash_data_and_timestamp(&expr.data, &timestamp);
     let result = inner_verify(did, &message, &sig_bytes);
     Ok(result)
@@ -165,7 +241,30 @@ impl TestSigner {
             proof: crate::types::ExpressionProof {
                 key: self.key_id.clone(),
                 signature,
+                anchor: None,
             },
         }
+    }
+
+    /// Sign `data` now, anchored at seq `anchor` of the log that lists this signer's key, as
+    /// the executor signs a link of an agent bound to an identity.
+    pub fn sign_anchored<T: Serialize>(&self, data: T, anchor: u64) -> Expression<T> {
+        let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let bytes = anchored_signing_bytes(&data, &timestamp, anchor).expect("signed bytes");
+        Expression {
+            author: self.did.clone(),
+            timestamp,
+            data,
+            proof: crate::types::ExpressionProof {
+                key: self.key_id.clone(),
+                signature: hex::encode(self.keypair.sign(&bytes)),
+                anchor: Some(anchor),
+            },
+        }
+    }
+
+    /// This signer's signing multikey (the `did:key` without its prefix).
+    pub fn multikey(&self) -> String {
+        self.did.trim_start_matches("did:key:").to_string()
     }
 }

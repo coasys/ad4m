@@ -165,6 +165,7 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
                     from_date: None,
                     until_date: None,
                     limit: None,
+                    include_unverified: None,
                 })
                 .await
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;

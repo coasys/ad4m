@@ -186,6 +186,21 @@ describe('PerspectiveClient RPC operations', () => {
         )
     })
 
+    it('queryLinks sends includeUnverified only when set', async () => {
+        mockCall.mockResolvedValue([])
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+
+        await client.queryLinks('uuid-q', new LinkQuery({ includeUnverified: true }))
+        expect(mockCall).toHaveBeenLastCalledWith(
+            'perspective.queryLinks',
+            { uuid: 'uuid-q', includeUnverified: true },
+            undefined,
+        )
+
+        await client.queryLinks('uuid-q', new LinkQuery({}))
+        expect(mockCall).toHaveBeenLastCalledWith('perspective.queryLinks', { uuid: 'uuid-q' }, undefined)
+    })
+
     // ── CallOptions forwarding (AbortSignal plumbing) ──────────────────
     //
     // These tests prove the new `options?` parameter on the long-running

@@ -590,8 +590,11 @@ mod tests {
                 signature: String::new(),
                 valid: Some(true),
                 invalid: Some(false),
+                anchor: None,
             },
             status: Some(LinkStatus::Shared),
+            verdict: None,
+            person: None,
         }
     }
 

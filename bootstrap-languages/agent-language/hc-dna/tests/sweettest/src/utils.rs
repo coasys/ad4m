@@ -91,6 +91,7 @@ pub fn create_test_agent_expression(did: &str, direct_message_language: Option<S
         proof: ExpressionProof {
             signature: format!("sig_{}", Uuid::new_v4()),
             key: format!("key_{}", did),
+            anchor: None,
         },
     }
 }

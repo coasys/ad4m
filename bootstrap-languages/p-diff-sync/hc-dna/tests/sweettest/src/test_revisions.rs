@@ -64,7 +64,7 @@ async fn test_revision_isolation() {
     let alice_rev2: Option<ActionHash> = call_zome(&conductors[0], alice_cell, "current_revision", ()).await;
     assert_eq!(alice_rev2, alice_rev, "Alice's revision should be unchanged");
 
-    for conductor in conductors.iter_mut() {
+    for mut conductor in conductors.into_inner() {
         conductor.shutdown().await;
     }
 }
@@ -106,7 +106,7 @@ async fn test_revision_after_merge() {
     assert_ne!(alice_merge_rev.as_ref(), Some(&alice_commit), "Merge revision should differ from Alice's original");
     assert_ne!(alice_merge_rev.as_ref(), Some(&bob_commit), "Merge revision should differ from Bob's commit");
 
-    for conductor in conductors.iter_mut() {
+    for mut conductor in conductors.into_inner() {
         conductor.shutdown().await;
     }
 }
