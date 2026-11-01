@@ -9,7 +9,7 @@ use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::{anyhow, Context};
 use candle_core::Device;
 use deno_core::error::AnyError;
-use futures::{FutureExt, SinkExt};
+use futures::SinkExt;
 use holochain::test_utils::itertools::Itertools;
 use kalosm::language::*;
 use kalosm::sound::TextStream;
@@ -118,6 +118,40 @@ pub struct AIService {
     /// Cloning Arc is cheap (just increments ref count), model weights stay in memory once
     /// Saves 500MB-1.5GB per stream!
     shared_whisper_models: Arc<Mutex<HashMap<String, Arc<Whisper>>>>,
+    default_embedding: Arc<DefaultEmbedding>,
+}
+
+/// Name of the embedding model an executor without configured models serves.
+const DEFAULT_EMBEDDING_MODEL: &str = "bert";
+
+/// Loads an embedding model and returns the channel to its worker once the model is ready.
+type EmbeddingLoader = Arc<
+    dyn Fn(
+            Model,
+        )
+            -> Pin<Box<dyn Future<Output = Result<mpsc::UnboundedSender<EmbeddingRequest>>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// The default embedding model of an executor without configured models. `load()` only
+/// enables it; the first `embed` call naming it loads it (downloading it on a fresh node),
+/// and concurrent first calls wait on that one load. A failed load leaves `ready` empty,
+/// so the error reaches the callers and the next call tries again.
+struct DefaultEmbedding {
+    enabled: std::sync::atomic::AtomicBool,
+    ready: tokio::sync::OnceCell<()>,
+    loader: EmbeddingLoader,
+}
+
+impl DefaultEmbedding {
+    fn new(loader: EmbeddingLoader) -> Self {
+        DefaultEmbedding {
+            enabled: std::sync::atomic::AtomicBool::new(false),
+            ready: tokio::sync::OnceCell::new(),
+            loader,
+        }
+    }
 }
 
 impl Drop for AIService {
@@ -428,12 +462,19 @@ fn transcription_stream_owner(
 
 impl AIService {
     pub fn new() -> Result<Self> {
+        Self::with_embedding_loader(Arc::new(|model| {
+            Box::pin(Self::load_embedding_worker(model))
+        }))
+    }
+
+    fn with_embedding_loader(loader: EmbeddingLoader) -> Result<Self> {
         let service = AIService {
             embedding_channel: Arc::new(Mutex::new(HashMap::new())),
             llm_channel: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
             cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
             shared_whisper_models: Arc::new(Mutex::new(HashMap::new())), // Models loaded on demand per size
+            default_embedding: Arc::new(DefaultEmbedding::new(loader)),
         };
 
         let clone = service.clone();
@@ -497,22 +538,10 @@ impl AIService {
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
 
         if models.is_empty() {
-            // No models configured — auto-load Bert for embedding support
-            futures.push(Box::pin(
-                self.init_model(Model {
-                    id: "bert-id".to_string(),
-                    name: "bert".to_string(),
-                    model_type: ModelType::Embedding,
-                    local: Some(LocalModel {
-                        file_name: "bert".to_string(),
-                        tokenizer_source: None,
-                        huggingface_repo: None,
-                        revision: None,
-                    }),
-                    api: None,
-                })
-                .map(|_| ()),
-            ));
+            // No models configured: serve Bert for embeddings, loaded by the first embed call
+            self.default_embedding
+                .enabled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         } else {
             for model in models.into_iter() {
                 futures.push(Box::pin(async move {
@@ -1837,32 +1866,57 @@ impl AIService {
     // -------------------------------------
 
     async fn spawn_embedding_model(&self, model_config: crate::types::Model) {
-        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
         let model_name = model_config.name.clone();
+        let (bert_tx, _ready) = Self::start_embedding_worker(model_config);
+        self.embedding_channel
+            .lock()
+            .await
+            .insert(model_name, bert_tx);
+    }
+
+    /// Starts a worker thread that loads the model, then answers embedding requests from
+    /// the returned channel. The receiver resolves once the model has loaded or failed to.
+    fn start_embedding_worker(
+        model_config: crate::types::Model,
+    ) -> (
+        mpsc::UnboundedSender<EmbeddingRequest>,
+        oneshot::Receiver<Result<()>>,
+    ) {
+        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
+        let (ready_tx, ready_rx) = oneshot::channel();
         thread::spawn({
             let model_id = model_config.id.clone();
             move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
 
-                let model = rt
-                    .block_on(async {
-                        publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
+                let model = rt.block_on(async {
+                    publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
 
-                        let bert = Bert::builder()
-                            .with_device(Self::new_candle_device())
-                            .build_with_loading_handler({
-                                let model_id = model_id.clone();
-                                move |progress| {
-                                    tokio::spawn(handle_progress(model_id.clone(), progress));
-                                }
-                            })
-                            .await;
+                    let bert = Bert::builder()
+                        .with_device(Self::new_candle_device())
+                        .build_with_loading_handler({
+                            let model_id = model_id.clone();
+                            move |progress| {
+                                tokio::spawn(handle_progress(model_id.clone(), progress));
+                            }
+                        })
+                        .await;
 
-                        publish_model_status(model_id.clone(), 100.0, "Loaded", true, false).await;
+                    publish_model_status(model_id.clone(), 100.0, "Loaded", true, false).await;
 
-                        bert
-                    })
-                    .expect("couldn't build Bert model");
+                    bert
+                });
+                let model = match model {
+                    Ok(model) => {
+                        let _ = ready_tx.send(Ok(()));
+                        model
+                    }
+                    Err(e) => {
+                        error!("couldn't build Bert model {model_id}: {e:?}");
+                        let _ = ready_tx.send(Err(anyhow!("couldn't build Bert model: {e:?}")));
+                        return;
+                    }
+                };
 
                 // Block on the channel — zero CPU while idle.
                 loop {
@@ -1879,11 +1933,56 @@ impl AIService {
                 }
             }
         });
+        (bert_tx, ready_rx)
+    }
 
-        self.embedding_channel
-            .lock()
+    async fn load_embedding_worker(
+        model_config: crate::types::Model,
+    ) -> Result<mpsc::UnboundedSender<EmbeddingRequest>> {
+        let (bert_tx, ready) = Self::start_embedding_worker(model_config);
+        ready
             .await
-            .insert(model_name, bert_tx);
+            .map_err(|_| anyhow!("embedding worker ended before its model loaded"))??;
+        Ok(bert_tx)
+    }
+
+    /// Loads the default embedding model if `model_id` names it, it is enabled, and it has
+    /// not loaded yet. See [`DefaultEmbedding`].
+    async fn ensure_default_embedding(&self, model_id: &str) -> Result<()> {
+        let default = &self.default_embedding;
+        if model_id != DEFAULT_EMBEDDING_MODEL
+            || !default.enabled.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+        default
+            .ready
+            .get_or_try_init(|| async {
+                if self.embedding_channel.lock().await.contains_key(model_id) {
+                    // A model added under this name since start serves it.
+                    return Ok(());
+                }
+                let model = Model {
+                    id: "bert-id".to_string(),
+                    name: DEFAULT_EMBEDDING_MODEL.to_string(),
+                    model_type: ModelType::Embedding,
+                    local: Some(LocalModel {
+                        file_name: DEFAULT_EMBEDDING_MODEL.to_string(),
+                        tokenizer_source: None,
+                        huggingface_repo: None,
+                        revision: None,
+                    }),
+                    api: None,
+                };
+                let sender = (default.loader)(model).await?;
+                self.embedding_channel
+                    .lock()
+                    .await
+                    .insert(model_id.to_string(), sender);
+                Ok::<(), anyhow::Error>(())
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn embed(
@@ -1905,6 +2004,7 @@ impl AIService {
             token_count
         );
         let started = std::time::Instant::now();
+        self.ensure_default_embedding(&model_id).await?;
         let (result_sender, rx) = oneshot::channel();
         let embedding_channel = self.embedding_channel.lock().await;
         if let Some(sender) = embedding_channel.get(&model_id) {
@@ -2748,6 +2848,85 @@ mod tests {
         assert!(vector.embeddings.len() > 300)
     }
 
+    /// A loader that counts its calls, fails the first `fail_first` of them, and otherwise
+    /// returns a worker answering every request with `[1.0, 2.0]`. It takes a moment to
+    /// "load" so concurrent first calls overlap.
+    fn counting_embedding_loader(
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        fail_first: usize,
+    ) -> EmbeddingLoader {
+        Arc::new(move |model: Model| {
+            let calls = calls.clone();
+            Box::pin(async move {
+                assert_eq!(model.name, DEFAULT_EMBEDDING_MODEL);
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                sleep(Duration::from_millis(100)).await;
+                if call < fail_first {
+                    return Err(anyhow!("download failed"));
+                }
+                let (tx, mut rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
+                tokio::spawn(async move {
+                    while let Some(request) = rx.recv().await {
+                        let _ = request.result_sender.send(Ok(vec![1.0, 2.0]));
+                    }
+                });
+                Ok(tx)
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn default_embedding_loads_on_first_embed_not_at_start() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = AIService::with_embedding_loader(counting_embedding_loader(calls.clone(), 0))
+            .expect("initialization to work");
+        service.load().await.expect("load to work");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "start loads no embedding model"
+        );
+
+        let (a, b) = tokio::join!(
+            service.embed("bert".into(), "one".into(), None),
+            service.embed("bert".into(), "two".into(), None),
+        );
+        assert_eq!(a.expect("first embed").embeddings, vec![1.0, 2.0]);
+        assert_eq!(b.expect("second embed").embeddings, vec![1.0, 2.0]);
+        service
+            .embed("bert".into(), "three".into(), None)
+            .await
+            .expect("later embed");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "concurrent and later embeds share one load"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_embedding_load_error_reaches_caller_and_next_call_retries() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = AIService::with_embedding_loader(counting_embedding_loader(calls.clone(), 1))
+            .expect("initialization to work");
+        service.load().await.expect("load to work");
+
+        let Err(error) = service.embed("bert".into(), "one".into(), None).await else {
+            panic!("a failed load fails the embed");
+        };
+        assert!(
+            format!("{error:#}").contains("download failed"),
+            "{error:#}"
+        );
+        service
+            .embed("bert".into(), "two".into(), None)
+            .await
+            .expect("the next embed loads again");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     #[ignore]
     #[tokio::test]
     async fn test_prompt() {
@@ -3125,6 +3304,9 @@ mod stream_ownership_tests {
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
             cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
             shared_whisper_models: Arc::new(Mutex::new(HashMap::new())),
+            default_embedding: Arc::new(DefaultEmbedding::new(Arc::new(|_| {
+                Box::pin(async { Err(anyhow!("no embedding models in this test")) })
+            }))),
         };
         let alice = RequestContext::user_for_test("did:key:alice", vec![]);
         let app =
