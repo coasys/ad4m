@@ -53,6 +53,16 @@ describe('Perspective', () => {
             expect(p.get(new LinkQuery({ limit: 1 }))).toEqual([early])
         })
 
+        it('ignores a date bound it cannot parse, as the executor does', () => {
+            const p = snapshot()
+            expect(p.get({ fromDate: 'not a date' } as any)).toEqual([early, middle, late])
+            expect(p.get({ untilDate: 'not a date', predicate: 'p://name' } as any)).toEqual([early, middle])
+        })
+
+        it('returns no links for an explicit limit of 0', () => {
+            expect(snapshot().get({ limit: 0 } as any)).toEqual([])
+        })
+
         it('returns copies: changing a result does not change the snapshot', () => {
             const p = snapshot()
             for (const query of [new LinkQuery({}), new LinkQuery({ source: 'a' }), new LinkQuery({ predicate: 'p://name' })]) {
