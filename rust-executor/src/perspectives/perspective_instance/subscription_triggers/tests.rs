@@ -554,6 +554,38 @@ async fn an_edit_moving_a_record_into_a_relation_property_ordered_page_reruns() 
     assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p1"], "a < k");
 }
 
+/// As above, but c1 has no Comment flag: the sort reads `text` on every
+/// linked target, so its edit still moves p1 onto the page, and no class scan
+/// sees a node without the flag.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_on_an_unflagged_target_moving_a_record_into_an_ordered_page_reruns() {
+    let mut p = blog().await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    let old_text = add(&mut p, "ns://c1", "ns://text", "literal:string:m").await;
+    add(&mut p, "ns://p1", "ns://comment", "ns://c1").await;
+    record(&mut p, "ns://p2", "Post", &[]).await;
+    record(&mut p, "ns://c2", "Comment", &[("ns://text", "k")]).await;
+    add(&mut p, "ns://p2", "ns://comment", "ns://c2").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Post",
+        json!({ "order": [["comments.text", "ASC"]], "limit": 1, "count": true }),
+    )
+    .await;
+    assert_eq!(ids(&first), vec!["ns://p2"], "k < m: {first}");
+
+    p.remove_link(old_text.into(), None)
+        .await
+        .expect("remove_link");
+    add(&mut p, "ns://c1", "ns://text", "literal:string:a").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1, "c1's text moves p1 onto the page");
+    assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p1"], "a < k");
+}
+
 /// Task (steps → Step, conformance requires Step's `label`; `open` → Step
 /// filtered on `state = "done"`), Step (label, state).
 async fn tasks() -> PerspectiveInstance {
