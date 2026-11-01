@@ -80,6 +80,11 @@ export class Call {
     this.present.add(name);
   }
 
+  /** Replace `name`'s session with one on `topology`, keeping its local stream (see the `switch` command). */
+  async switchTo(name: string, topology: "mesh" | "sfu"): Promise<void> {
+    await this.who(name).switchTo(topology);
+  }
+
   /** End `name`'s process without a word, as a closed tab does. */
   kill(name: string): void {
     this.who(name).kill();
@@ -144,10 +149,13 @@ export class Call {
     };
   }
 
-  /** Audio arriving now from every other participant, carrying *that* participant's tone. */
-  hearsEveryone(): Check {
+  /**
+   * Audio arriving now from every other participant, carrying *that* participant's tone.
+   * `view` "shown" counts only the streams the session's events handed over (see `Snapshot.shown`).
+   */
+  hearsEveryone(view: "remotes" | "shown" = "remotes"): Check {
     return this.pairs((snapshot, other) => {
-      const remote = snapshot.remotes[this.did(other)];
+      const remote = snapshot[view][this.did(other)];
       if (!remote || remote.audioRecent === 0) return `hears nothing from ${other}`;
       const expected = this.tones.get(this.did(other));
       if (remote.tone !== expected) {
@@ -158,10 +166,10 @@ export class Call {
     });
   }
 
-  /** Video arriving now from every other participant, at `size` when given. */
-  seesEveryone(size?: Size): Check {
+  /** Video arriving now from every other participant, at `size` when given. `view` as in {@link hearsEveryone}. */
+  seesEveryone(size?: Size, view: "remotes" | "shown" = "remotes"): Check {
     return this.pairs((snapshot, other) => {
-      const remote = snapshot.remotes[this.did(other)];
+      const remote = snapshot[view][this.did(other)];
       if (!remote || remote.videoRecent === 0) return `sees nothing from ${other}`;
       if (size && (remote.width !== size.width || remote.height !== size.height)) {
         return `sees ${other} at ${remote.width}x${remote.height}, expected ${size.width}x${size.height}`;

@@ -185,10 +185,13 @@ export class Hearing {
     }
   }
 
-  /** Per participant: the frames arriving, the tone their audio carries, their video's size. */
-  remotes(participants: readonly Heard[], tones: number[]): Record<string, Remote> {
+  /**
+   * Per participant: the frames arriving, the tone their audio carries, their video's size.
+   * Receivers of tracks neither `participants` nor `keep` hold stop.
+   */
+  remotes(participants: readonly Heard[], tones: number[], keep: readonly Heard[] = []): Record<string, Remote> {
     this.attach(participants);
-    const held = new Set<string>();
+    const held = new Set(keep.flatMap((k) => k.stream.getTracks().map((t) => t.id)));
     const remotes: Record<string, Remote> = {};
     for (const participant of participants) {
       const remote = (remotes[participant.agentDid] ??= { audioFrames: 0, audioRecent: 0, tone: null, videoFrames: 0, videoRecent: 0, width: 0, height: 0 });
