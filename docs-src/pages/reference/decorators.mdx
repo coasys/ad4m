@@ -13,7 +13,7 @@ All names are exported from `@coasys/ad4m`. Behaviour is explained in [Models an
 
 | Option | Type | Default | Effect |
 |---|---|---|---|
-| `name` | `string` | required | Class name; the shape is `<ns><name>Shape`, the target class `<ns><name>`, where `<ns>` is the scheme of the first property's `through` (`ad4m://` if none) |
+| `name` | `string` | required | Class name; the shape is `<ns><name>Shape`, the target class `<ns><name>`, where `<ns>` is the scheme of the first property's `through`; when the class has no properties, of the first relation's predicate; `ad4m://` when neither has one (`core/src/model/shacl-gen.ts`) |
 | `abstract` | `boolean` | `false` | An abstract class: reads every class with its names; cannot be created. Emits `ad4m://abstract` |
 | `implements` | `Ad4mModelLike[]` | `[]` | Abstract classes this class must answer to; checked when the class is declared, throws on a missing name or alias. Not sent to the executor |
 | `interpretationHint` | `string` | | Natural-language hint for the interpretation harness; emitted as `ad4m://interpretation_hint` on the shape |
@@ -35,7 +35,7 @@ Schema generation constructs the class once without a perspective to read field 
 | `getter` | `string` | | SPARQL `SELECT` returning one binding; `<Base>` is replaced by the instance URI. Runs as written (no signature or status filter) |
 | `transform` | `NodeExpression` | | SHACL-AF node expression applied in the executor to the resolved value; see [Transform builders](#transform-builders) |
 | `datatype` | `string` | inferred | Explicit `sh:datatype` (`"xsd://string"`, `"xsd://decimal"`, `"xsd://boolean"`). Inferred from the field's default value when the property stores literals and has no `getter`. Needed on a `getter` property whose values are literals |
-| `options` | `Array<{ value: string; label?: string }>` | | Allowed values; emitted as `sh:in` (values) plus `ad4m:in` (with labels) |
+| `options` | `Array<{ value: string; label?: string }>` | | Allowed values; stored as one `sh://in` link whose target is the JSON with labels. `toTurtle()` renders it as an `sh:in` list of the values plus `ad4m:in` with the labels |
 | `alias` | `Record<string, string>` | | Name this property answers to through an abstract class, keyed by its name: `{ TextContent: "text" }`. Registration fails if the class already uses that name |
 | `identity` | `boolean` | | Dedup key for the interpretation harness; `ad4m://identity`. At most one per class |
 | `interpretationHint` | `string` | | Hint for the harness; `ad4m://interpretation_hint` on the property shape |
@@ -69,7 +69,7 @@ The methods are added at runtime; declare them with `HasManyMethods<"tasks" | "o
 
 | Option | Type | Default | Effect |
 |---|---|---|---|
-| `through` | `string` | `"ad4m://has_child"` | Predicate of the member links. Cannot be combined with `getter` unless `readOnly: true` |
+| `through` | `string` | `"ad4m://has_child"` | Predicate of the member links. On `@HasMany`, combines with `getter` only with `readOnly: true`; `@HasOne` refuses `through` with `getter` even with `readOnly` |
 | `target` | `() => Ad4mModelLike` | | Target class. Enables `include` hydration and, unless `filter: false`, a conformance filter so only instances of the target are returned. Emits `sh:class` and `ad4m://targetClassName`. Excludes `datatype` |
 | `getter` | `string` | | SPARQL `SELECT ?target` with `<Base>`; replaces link-based reading, relation becomes read-only. Combines with `target` (hydration) and `where` (post-getter filter) |
 | `readOnly` | `boolean` | `false` | No `add`/`remove`/`set` methods and no adder or remover actions. With `getter`, `through` names the predicate the getter reads so subscriptions re-run on it |

@@ -20,7 +20,7 @@ A model's schema is a SHACL node shape with AD4M extensions. The SDK generates i
 | `ad4m://abstract` | `literal:true` | an abstract class |
 | `ad4m://interpretation_hint` | `literal:string:<text>` | hint for the interpretation harness |
 
-Shape URI: `<ns><Name>Shape`, where `<ns>` is the scheme of the first property's predicate. The executor refuses a `node_shape_uri` that does not end in `<Name>Shape`.
+Shape URI: `<ns><Name>Shape`, where `<ns>` is the scheme of the first property's `through`; when the class has no properties, of the first relation's predicate; `ad4m://` when neither has one (`core/src/model/shacl-gen.ts`). The executor refuses a `node_shape_uri` that does not end in `<Name>Shape`.
 
 ## Property-level
 
@@ -44,8 +44,8 @@ Property shape URI: `<ns><Name>.<propertyName>`.
 | `ad4m://adder`, `ad4m://remover` | `literal:string:<JSON actions>` | `addLink` / `removeLink` on writable relations |
 | `ad4m://getter` | `literal:string:<SPARQL>` | an explicit `getter`, or the conformance getter derived from a relation's `target` |
 | `ad4m://conformanceConditions` | `literal:string:<JSON>` | structured form of the derived filter (flag matches, required predicates) |
-| `ad4m://relationKind` | `hasMany` \| `hasOne` \| `belongsToOne` \| `belongsToMany` | relation decorators |
-| `ad4m://targetClassName` | class name | relation `target` |
+| `ad4m://relationKind` | `literal:string:hasMany` \| `…:hasOne` \| `…:belongsToOne` \| `…:belongsToMany` | relation decorators |
+| `ad4m://targetClassName` | `literal:string:<Name>` | relation `target` |
 | `ad4m://whereFilter`, `ad4m://wherePredicates` | JSON | relation `where` and its name → predicate map |
 | `ad4m://filter` | `literal:false` | relation `filter: false` |
 | `ad4m://ordering` | `literal:string:linkedList` | relation `ordering` |
@@ -84,7 +84,7 @@ Written when a class is installed, beside the shape:
 
 ## JSON wire format
 
-`shape.toJSON()`; the string `addSdna` and `addShacl` send, and what `instance`-level tools accept. Snake case. Optional keys are omitted when unset.
+`shape.toJSON()`; the string `addSdna` and `addShacl` send, and what the MCP tool `add_model` accepts as `shacl_json`. Snake case. Optional keys are omitted when unset.
 
 ```json
 {
@@ -193,7 +193,7 @@ board://TaskShape            sh://property            board://Task.comments
 board://Task.comments        rdf://type               ad4m://CollectionShape
 board://Task.comments        sh://nodeKind            sh://IRI
 board://Task.comments        sh://class               board://CommentShape
-board://Task.comments        ad4m://relationKind      hasMany
+board://Task.comments        ad4m://relationKind      literal:string:hasMany
 ```
 
 Because the schema is links, it syncs with a neighbourhood like any other data and any client can read it with `getAllShacl()` or a SPARQL query. The SDNA flow vocabulary (`ad4m://hasState`, `ad4m://hasTransition`, `ad4m://requires`, ...) is written by the same parser and described in [Flows](../concepts/flows.mdx).

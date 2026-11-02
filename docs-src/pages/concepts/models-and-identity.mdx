@@ -75,7 +75,7 @@ A record is not owned by one class. The same node can be read as a `Task` by one
 
 ### The shape
 
-`@Model` injects `generateSHACL()` into the class. The namespace is the scheme of the first property's predicate (`board://` here; `ad4m://` when there is none). For `Task` it produces a SHACL node shape with URI `board://TaskShape` and `sh:targetClass board://Task`, plus one property shape per decorated field (`board://Task.title`, `board://Task.status`, ...). The shape URI must end in `<Name>Shape`; the executor refuses any other.
+`@Model` injects `generateSHACL()` into the class. The namespace is the scheme of the first property's predicate (`board://` here); a class with no properties takes the first relation's, and `ad4m://` is the fallback. For `Task` it produces a SHACL node shape with URI `board://TaskShape` and `sh:targetClass board://Task`, plus one property shape per decorated field (`board://Task.title`, `board://Task.status`, ...). The shape URI must end in `<Name>Shape`; the executor refuses any other.
 
 `register()` sends the shape as JSON (`shape.toJSON()`) to the executor, which writes it as links in the perspective:
 
