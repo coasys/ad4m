@@ -4069,6 +4069,22 @@ describe("save() create path and its own batch", () => {
     expect(perspective.createSubject).not.toHaveBeenCalled();
   });
 
+  it("create() in a caller's batch refuses a parent model with no relation to it before it writes", async () => {
+    @Model({ name: "UnrelatedParent" })
+    class UnrelatedParent extends Ad4mModel {}
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "own"),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => true),
+    } as any;
+
+    await expect(
+      SaveBatchCard.create(perspective, {}, { parent: { model: UnrelatedParent, id: "ad4m://p" }, batchId: "caller-batch" }),
+    ).rejects.toThrow();
+    expect(perspective.createSubject).not.toHaveBeenCalled();
+  });
+
   it("create() with a parent discards the batch it opened and rethrows when the parent link fails", async () => {
     const failure = new Error("add failed");
     const perspective = {

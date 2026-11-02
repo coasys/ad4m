@@ -18,7 +18,7 @@ import {
   normalizeValue,
 } from "./hydration";
 import type {
-  Scope, TraverseScope, IncludeMap, Query,
+  Scope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
@@ -389,33 +389,31 @@ function jsonToModelInstance<T extends Ad4mModel>(
 
 
 /**
- * Put `childId` under `parent`. A containment scope `{ id }` writes through the
- * built-in `Container` (#1446): the executor runs the adder of the parent's own
- * `children` relation when its class has one (a block's `we://child`), else
- * writes `ad4m://has_child`. The other forms write their one predicate.
+ * Resolves the parent→child link of `create(…, { parent })` now, and returns the
+ * write for a child id. Resolving first means a parent that names no single
+ * instance or no relation to `childCtor` throws before anything is staged.
+ * A containment scope `{ id }` writes through the built-in `Container` (#1446):
+ * the executor runs the adder of the parent's own `children` relation when its
+ * class has one (a block's `we://child`), else writes `ad4m://has_child`. The
+ * other forms write their one predicate.
  */
-async function linkToParent(
-  perspective: PerspectiveProxy,
-  parent: Exclude<Scope, TraverseScope>,
+function parentLinkWriter(
+  scope: Scope,
   childCtor: Function,
-  childId: string,
-  batchId?: string,
-): Promise<void> {
+): (perspective: PerspectiveProxy, childId: string, batchId?: string) => Promise<unknown> {
+  const parent = requireSingleParent(scope);
   if (isContainedScope(parent)) {
-    await perspective.updateSubject(
-      "ad4m://Container",
-      parent.id,
-      { children: { action: "adder", value: [childId] } },
-      batchId,
-    );
-    return;
+    return (perspective, childId, batchId) =>
+      perspective.updateSubject(
+        "ad4m://Container",
+        parent.id,
+        { children: { action: "adder", value: [childId] } },
+        batchId,
+      );
   }
-  const link = new Link({
-    source: parent.id,
-    predicate: resolveParentPredicate(parent, childCtor),
-    target: childId,
-  });
-  await perspective.add(link, 'shared', batchId);
+  const predicate = resolveParentPredicate(parent, childCtor);
+  return (perspective, childId, batchId) =>
+    perspective.add(new Link({ source: parent.id, predicate, target: childId }), 'shared', batchId);
 }
 
 /**
@@ -2295,12 +2293,12 @@ export class Ad4mModel {
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
     // Resolved before any write, so an invalid parent stages nothing.
-    const parent = options?.parent ? requireSingleParent(options.parent) : undefined;
+    const linkParent = options?.parent ? parentLinkWriter(options.parent, this) : undefined;
 
     // In a caller's batch, the caller commits.
     if (options?.batchId) {
       await instance.save(options.batchId);
-      if (parent) await linkToParent(perspective, parent, this, instance.id, options.batchId);
+      await linkParent?.(perspective, instance.id, options.batchId);
       return instance;
     }
 
@@ -2311,7 +2309,7 @@ export class Ad4mModel {
     const batchId = await perspective.createBatch();
     try {
       await instance.save(batchId);
-      if (parent) await linkToParent(perspective, parent, this, instance.id, batchId);
+      await linkParent?.(perspective, instance.id, batchId);
       await perspective.commitBatch(batchId);
     } catch (e) {
       // A failed discard must not hide the original error.
