@@ -7,12 +7,13 @@
 //! returns it or not; the page pass resolves the rest of what it returns.
 
 use super::page_before_resolve_tests::{
-    data_uri, file_type, id, ids, run, seed, shape_json, ts_ms, FileLanguage,
+    data_uri, file_type, id, ids, link, run, seed, shape_json, ts, ts_ms, FileLanguage,
 };
 use super::query::{resolve_language_transforms, returned};
 use super::test_helpers::{prop, shape};
 use super::types::{ModelQueryInput, TransformExpression};
-use serde_json::json;
+use crate::perspectives::sparql_store::SparqlStore;
+use serde_json::{json, Value};
 use std::time::Duration;
 
 fn sorted(keys: Option<Vec<String>>) -> Option<Vec<String>> {
@@ -255,4 +256,283 @@ async fn a_sort_on_a_file_left_out_of_properties_picks_the_page_from_decoded_val
     }
     assert_eq!(files.gets(), n, "each file is fetched once, for the sort");
     files.stop().await;
+}
+
+// Getters and reverse relations follow the same rule: each is a store read per page (a getter
+// for every typed relation, since the SDK generates a conformance getter for each), so one the
+// query neither returns nor filters on is not read at all.
+
+/// Items with a typed `comments` and `owner` (getter-backed, as the SDK generates them) and a
+/// reverse `markedBy`.
+const RELATED_SHAPE: &str = r#"{
+    "className": "Item",
+    "properties": {
+        "type": { "predicate": "ad4m://type", "required": true, "flag": true, "initial": "item://Item" },
+        "kind": { "predicate": "item://kind" },
+        "title": { "predicate": "item://title" },
+        "rank": { "predicate": "item://rank" }
+    },
+    "relations": {
+        "comments": { "predicate": "item://comment", "kind": "hasMany", "targetClassName": "Comment",
+            "getter": "SELECT ?target WHERE { <Base> <item://comment> ?target . ?target <ad4m://type> <item://Comment> . }" },
+        "owner": { "predicate": "item://owner", "kind": "hasOne", "targetClassName": "Owner",
+            "getter": "SELECT ?target WHERE { <Base> <item://owner> ?target . ?target <ad4m://type> <item://Owner> . } LIMIT 1" },
+        "markedBy": { "predicate": "item://marks", "kind": "belongsToMany", "targetClassName": "", "direction": "reverse" }
+    }
+}"#;
+
+fn comment(i: usize) -> String {
+    format!("comment://{i:05}")
+}
+
+fn owner(i: usize) -> String {
+    format!("owner://{i:05}")
+}
+
+fn mark(i: usize) -> String {
+    format!("mark://{i:05}")
+}
+
+/// Item `i`'s `markedBy`: `mark(i)` for an even item, none for an odd one.
+fn marked_by(i: usize) -> Value {
+    if i.is_multiple_of(2) {
+        json!([mark(i)])
+    } else {
+        json!([])
+    }
+}
+
+/// `seed`'s items, each with a comment and an owner; the even ones marked by `mark(i)`.
+fn seed_related(n: usize) -> SparqlStore {
+    let store = seed(n, None);
+    for i in 0..n {
+        let t = ts(i);
+        let mut links = vec![
+            link(&id(i), "item://comment", &comment(i), &t),
+            link(&comment(i), "ad4m://type", "item://Comment", &t),
+            link(&id(i), "item://owner", &owner(i), &t),
+            link(&owner(i), "ad4m://type", "item://Owner", &t),
+        ];
+        if i.is_multiple_of(2) {
+            links.push(link(&mark(i), "item://marks", &id(i), &t));
+        }
+        for l in links {
+            store.add_link(&l).unwrap();
+        }
+    }
+    store
+}
+
+/// The relation reads among `queries`: each getter's and the reverse relation's, by name.
+fn relation_reads(queries: &[String]) -> Vec<(&'static str, &String)> {
+    let reads = [
+        ("comments", "?target <ad4m://type> <item://Comment>"),
+        ("owner", "?target <ad4m://type> <item://Owner>"),
+        ("markedBy", "?source <item://marks> ?target"),
+    ];
+    queries
+        .iter()
+        .flat_map(|q| {
+            reads
+                .iter()
+                .filter(|(_, marker)| q.contains(marker))
+                .map(move |(name, _)| (*name, q))
+        })
+        .collect()
+}
+
+/// What `f` returned and the store queries it ran.
+async fn logged<T>(
+    store: &SparqlStore,
+    f: impl std::future::Future<Output = T>,
+) -> (T, Vec<String>) {
+    let before = store.queries_run().len();
+    let out = f.await;
+    (out, store.queries_run().split_off(before))
+}
+
+fn names(reads: &[(&'static str, &String)]) -> Vec<&'static str> {
+    let mut names: Vec<&str> = reads.iter().map(|(name, _)| *name).collect();
+    names.sort();
+    names
+}
+
+fn item_index(row: &Value) -> usize {
+    row["id"].as_str().unwrap()[7..].parse().unwrap()
+}
+
+/// No `properties`: every relation is read once, for the page, and handed back as before.
+#[tokio::test]
+async fn a_query_without_properties_reads_every_relation() {
+    let store = seed_related(10);
+
+    let ((rows, _, _), queries) =
+        logged(&store, run(&store, RELATED_SHAPE, json!({ "limit": 4 }))).await;
+
+    assert_eq!(rows.len(), 4);
+    for row in &rows {
+        let i = item_index(row);
+        assert_eq!(row["comments"], json!([comment(i)]), "{row}");
+        assert_eq!(row["owner"], json!(owner(i)), "{row}");
+        assert_eq!(row["markedBy"], marked_by(i), "{row}");
+    }
+    assert_eq!(
+        names(&relation_reads(&queries)),
+        vec!["comments", "markedBy", "owner"]
+    );
+}
+
+/// `properties: ['title']`: no getter and no reverse relation is read, with or without
+/// `deepQuery` (relation getters run under `deepQuery: false` too).
+#[tokio::test]
+async fn a_query_naming_its_properties_reads_no_relation_it_leaves_out() {
+    let store = seed_related(10);
+
+    for deep_query in [true, false] {
+        let ((rows, _, _), queries) = logged(
+            &store,
+            run(
+                &store,
+                RELATED_SHAPE,
+                json!({ "properties": ["title"], "deepQuery": deep_query, "limit": 4 }),
+            ),
+        )
+        .await;
+
+        assert_eq!(rows.len(), 4);
+        for row in &rows {
+            let keys: Vec<&String> = row.as_object().unwrap().keys().collect();
+            assert_eq!(keys.len(), 3, "id, baseExpression and title only: {row}");
+            assert!(row["title"].is_string(), "{row}");
+        }
+        assert_eq!(
+            names(&relation_reads(&queries)),
+            Vec::<&str>::new(),
+            "deepQuery: {deep_query}"
+        );
+    }
+}
+
+/// A relation named in `properties` is read, and only it.
+#[tokio::test]
+async fn a_query_naming_one_relation_reads_only_that_one() {
+    let store = seed_related(10);
+
+    let ((rows, _, _), queries) = logged(
+        &store,
+        run(
+            &store,
+            RELATED_SHAPE,
+            json!({ "properties": ["title", "owner"], "limit": 4 }),
+        ),
+    )
+    .await;
+
+    for row in &rows {
+        assert_eq!(row["owner"], json!(owner(item_index(row))), "{row}");
+        assert!(row.get("comments").is_none(), "{row}");
+    }
+    assert_eq!(names(&relation_reads(&queries)), vec!["owner"]);
+}
+
+/// A `where` and an `order` on a getter-backed relation that `properties` leaves out still filter
+/// and sort on its hydrated value; its getter, which runs on the page after both and whose value
+/// the strip would drop, is not run.
+#[tokio::test]
+async fn a_where_and_order_on_a_getter_relation_left_out_of_properties_still_apply() {
+    let store = seed_related(10);
+
+    let ((rows, total, _), queries) = logged(&store, run(
+        &store,
+        RELATED_SHAPE,
+        json!({
+            "properties": ["title"],
+            "where": { "OR": [{ "owner": owner(3) }, { "owner": owner(7) }, { "owner": owner(5) }] },
+            "order": { "owner": "DESC" },
+            "limit": 2,
+        }),
+    ))
+    .await;
+
+    assert_eq!(ids(&rows), vec![id(7), id(5)]);
+    assert_eq!(total, 3);
+    for row in &rows {
+        assert!(row.get("owner").is_none(), "{row}");
+    }
+    assert_eq!(names(&relation_reads(&queries)), Vec::<&str>::new());
+}
+
+/// A `where` on a reverse relation that `properties` leaves out still filters on its value: it is
+/// read for every row before the filter, then stripped. The getters, neither read nor returned,
+/// are not run.
+#[tokio::test]
+async fn a_where_on_a_reverse_relation_left_out_of_properties_still_filters() {
+    let n = 10;
+    let store = seed_related(n);
+
+    // The `timestamp` arm keeps the whole `OR` out of the store.
+    let ((rows, total, _), queries) = logged(
+        &store,
+        run(
+            &store,
+            RELATED_SHAPE,
+            json!({
+                "properties": ["title"],
+                "where": { "OR": [
+                    { "markedBy": mark(4) },
+                    { "timestamp": { "gt": ts_ms(7) } }
+                ] },
+                "limit": 2,
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(ids(&rows), vec![id(4), id(8)]);
+    assert_eq!(total, 3, "items 4, 8 and 9");
+    for row in &rows {
+        assert!(row.get("markedBy").is_none(), "{row}");
+    }
+    let reads = relation_reads(&queries);
+    assert_eq!(names(&reads), vec!["markedBy"]);
+    assert!(
+        reads[0].1.contains(&id(1)),
+        "read for every row before the filter: {}",
+        reads[0].1
+    );
+}
+
+/// A reverse relation the query returns but does not filter on is read for the page only.
+#[tokio::test]
+async fn a_returned_reverse_relation_is_read_for_the_page_only() {
+    let n = 20;
+    let store = seed_related(n);
+
+    let ((rows, total, _), queries) = logged(
+        &store,
+        run(
+            &store,
+            RELATED_SHAPE,
+            json!({
+                "properties": ["title", "markedBy"],
+                "where": { "timestamp": { "gt": ts_ms(5) } },
+                "limit": 3,
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(ids(&rows), vec![id(6), id(7), id(8)]);
+    assert_eq!(total, n - 6);
+    for row in &rows {
+        let i = item_index(row);
+        assert_eq!(row["markedBy"], marked_by(i), "{row}");
+    }
+    let reads = relation_reads(&queries);
+    assert_eq!(names(&reads), vec!["markedBy"]);
+    let read = reads[0].1;
+    for i in 6..9 {
+        assert!(read.contains(&id(i)), "{read}");
+    }
+    assert!(!read.contains(&id(9)), "read beyond the page: {read}");
 }

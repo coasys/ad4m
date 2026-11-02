@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use super::filtering::matches_condition;
 use super::hydration::{reorder_members, ORDERING_STASH_KEY};
 use super::sparql_builder::{verified_link_exists, LinkGuard};
-use super::types::{IncludeValue, ModelShape, ShapeProperty};
+use super::types::{ModelShape, ShapeProperty};
 use super::utils::{parse_literal_value, validate_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::LinkStatus;
@@ -315,11 +315,14 @@ pub(super) fn inject_values_into_select(select: &str, source_constraint: &str) -
 /// When `deep_query` is `false`, only relation conformance getters (collections
 /// and scalar relations) are evaluated, skipping pure-property getters for
 /// performance.
+///
+/// Only the getters of `returned` keys run (all of them when `None`): each is
+/// a store read, and a value the query does not hand back would be stripped.
 pub(super) fn evaluate_getters(
     store: &SparqlStore,
     instances: &mut [Value],
     shape: &ModelShape,
-    _include: Option<&HashMap<String, IncludeValue>>,
+    returned: Option<&[String]>,
     deep_query: bool,
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
@@ -328,6 +331,7 @@ pub(super) fn evaluate_getters(
         .properties
         .iter()
         .filter(|p| p.getter.is_some() && (deep_query || p.is_collection || p.is_scalar_relation))
+        .filter(|p| returned.is_none_or(|keep| keep.contains(&p.name)))
         .collect();
 
     if getter_props.is_empty() || instances.is_empty() {
