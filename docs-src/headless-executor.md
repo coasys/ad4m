@@ -95,9 +95,9 @@ Expected: no output. `readlink ~/.local/share/ad4m/current` prints
    EOF
    ```
 
-   Expected: no output. `multi_user_config.enabled` cannot be turned off
-   again on the same data directory; leave it `false` for a single-user
-   executor.
+   Expected: no output. Leave `multi_user_config.enabled` `false` for a
+   single-user executor. `false` in the file does not turn multi-user off
+   on a data directory where it is on; `--enable-multi-user false` does.
 
 4. **The admin credential**, generated into its file (mode 0600, never
    printed):
