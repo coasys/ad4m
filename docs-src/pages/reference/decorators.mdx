@@ -93,7 +93,7 @@ Exported from the package root; each returns a `NodeExpression` that the executo
 |---|---|
 | `focus()` | the property's own resolved value |
 | `literal(v)` | a constant string, number or boolean |
-| `path("pred://uri")` | the value one hop along a predicate from the focus node |
+| `path("pred://uri")` | no graph hop: the field of the resolved value (a JSON object, such as a language-backed expression) whose key is the predicate's local name, the part after the last `#`, `/` or `://`; `null` when absent (`eval_transform.rs`) |
 | `exists(expr)` | whether `expr` resolves to a non-empty value |
 | `ifExpr(cond).then(a).else(b)` | conditional |
 | `concat(a, b, ...)` | string concatenation |
