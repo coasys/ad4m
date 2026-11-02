@@ -48,7 +48,7 @@ The class is a parameter, not part of the tool name. `describe_perspective` retu
 | `template_update` | `perspective_id`, `base_uri`, `version`, `patches`, `dry_run?` | Applies patches to a WE Template record and saves them as one change. A template that changed since `version` is refused; `dry_run` checks without saving. | `instances/template_tools.rs` | yes | yes |
 | `execute_commands` | `perspective_id`, `commands` (JSON array of `{source, predicate, target, action}`), `expression_address`, `parameters?` | Runs raw SDNA actions on an instance. It does not go through the class's SHACL validation. | `instances/commands.rs` | yes | no |
 
-What a node's children are, and why one record can have several holders: [Containment](../concepts/containment.mdx). The two built-in classes: [Built-in interfaces](./built-in-interfaces.mdx).
+What a node's children are, and why one record can have several holders: [Containment](../concepts/containment.mdx). The three built-in classes: [Built-in interfaces](./built-in-interfaces.mdx).
 
 ## Flows
 
