@@ -5,7 +5,7 @@ description: The two abstract classes the executor ships - TextContent and Conta
 
 # Built-in interfaces
 
-The executor declares two abstract classes in `rust-executor/src/perspectives/hardwired_sdna/` and compiles them in (`rust-executor/src/perspectives/model_query/builtin_classes.rs`). They are never written into a perspective, are read by URI so an app class with the same name cannot replace them, and are keyed for aliases by their local name. The SDK exports a mirror of each (`core/src/perspectives/TextContent.ts`, `Container.ts`); `register()` on a mirror writes nothing. Concepts: [Abstract classes and aliases](../concepts/abstract-classes-and-aliases.mdx), [Containment](../concepts/containment.mdx).
+The executor declares three abstract classes in `rust-executor/src/perspectives/hardwired_sdna/` and compiles them in (`rust-executor/src/perspectives/model_query/builtin_classes.rs`). They are never written into a perspective, are read by URI so an app class with the same name cannot replace them, and are keyed for aliases by their local name. The SDK exports a mirror of each (`core/src/perspectives/TextContent.ts`, `Mentioning.ts`, `Container.ts`); `register()` on a mirror writes nothing. Concepts: [Abstract classes and aliases](../concepts/abstract-classes-and-aliases.mdx), [Containment](../concepts/containment.mdx).
 
 ## TextContent
 
@@ -37,6 +37,24 @@ texts[0].__subjectClass;   // "Message"
 ```
 
 A class whose field is already named `text` needs no alias. `implements: [TextContent]` is optional and only checks at declaration that the name or alias exists. Writing `text` on a row read through `TextContent` runs the record's own class's setter.
+
+## Mentioning
+
+`Mentioning { mentions }`, URI `ad4m://Mentioning` (`hardwired_sdna/mentioning.json`): a record that mentions agents. `mentions` is a `hasMany` relation to their DIDs over `ad4m://mentions`. Every class with a relation named `mentions`, or one aliased to `mentions`, conforms under any predicate, with text or without.
+
+```typescript
+import { Mentioning } from "@coasys/ad4m";
+
+@Model({ name: "Note", implements: [Mentioning] })
+class Note extends Ad4mModel {
+  @HasMany({ through: "app://cc", alias: { Mentioning: "mentions" } })
+  cc: string[] = [];
+}
+
+const mentioningMe = await Mentioning.findAll(perspective, { where: { mentions: myDid } });
+```
+
+The waker's mention subscription reads it: `get_mention_waker_config` returns a query over `Mentioning` beside the one over `TextContent`, so a record whose `mentions` links the agent's DID wakes the agent whatever its text says.
 
 ## Container
 

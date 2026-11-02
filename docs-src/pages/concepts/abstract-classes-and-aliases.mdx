@@ -107,11 +107,12 @@ Relations dispatch the same way: `addChildren`, `removeChildren` and `setChildre
 
 Steps and a complete example: [Write through an abstract class](../how-to/write-through-abstract-class.mdx).
 
-## The built-ins: TextContent and Container
+## The built-ins: TextContent, Mentioning and Container
 
-The executor ships two abstract classes that no perspective stores and no app can replace. They are the interface an agent uses to read a space it has never seen:
+The executor ships three abstract classes that no perspective stores and no app can replace. They are the interface an agent uses to read a space it has never seen:
 
 - `TextContent { text }`, URI `ad4m://TextContent`: text a view or an LLM can read. The MCP tool `instance_transcript` is one query over it.
+- `Mentioning { mentions }`, URI `ad4m://Mentioning`: a record that mentions agents, a relation to their DIDs. The mention waker reads it.
 - `Container { children }`, URI `ad4m://Container`: what holds other records. The `parent: { id }` scope, `add_child` and `get_children` go through it ([Containment](./containment.mdx)).
 
 ```typescript
@@ -126,7 +127,7 @@ class Message extends Ad4mModel {
 const texts = await TextContent.findAll(perspective, { parent: { id: channelId } });
 ```
 
-The SDK exports both as `@Model({ abstract: true })` classes that query by URI; `register()` on them writes nothing. Exact shapes and behavior: [Built-in interfaces](../reference/built-in-interfaces.mdx).
+The SDK exports all three as `@Model({ abstract: true })` classes that query by URI; `register()` on them writes nothing. Exact shapes and behavior: [Built-in interfaces](../reference/built-in-interfaces.mdx).
 
 <Callout type="info">
 Two different questions, two mechanisms. "Does this class answer `Readable`?" is decided by names and aliases. "Is this node a `Message`?" is decided by the `Message` shape's flags, required properties and initial values ([Models and identity](./models-and-identity.mdx#how-a-node-is-recognized-as-an-instance)). An abstract class never decides the second.
