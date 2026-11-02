@@ -4,12 +4,12 @@ use crate::types::ModelInput;
 use crate::types::RequestContext;
 #[allow(unused_imports)]
 use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
-use crate::types::{AITask, LocalModel, Model, ModelApi, ModelApiType, ModelType};
+use crate::types::{AITask, LocalModel, ModelApi, ModelApiType, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::{anyhow, Context};
 use candle_core::Device;
 use deno_core::error::AnyError;
-use futures::{FutureExt, SinkExt};
+use futures::SinkExt;
 use holochain::test_utils::itertools::Itertools;
 use kalosm::language::*;
 use kalosm::sound::TextStream;
@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
+mod default_embedding;
 mod error;
 pub mod harness;
 pub mod providers;
@@ -118,6 +119,7 @@ pub struct AIService {
     /// Cloning Arc is cheap (just increments ref count), model weights stay in memory once
     /// Saves 500MB-1.5GB per stream!
     shared_whisper_models: Arc<Mutex<HashMap<String, Arc<Whisper>>>>,
+    default_embedding: Arc<default_embedding::DefaultEmbedding>,
 }
 
 impl Drop for AIService {
@@ -428,12 +430,19 @@ fn transcription_stream_owner(
 
 impl AIService {
     pub fn new() -> Result<Self> {
+        Self::with_embedding_loader(Arc::new(|model| {
+            Box::pin(Self::load_embedding_worker(model))
+        }))
+    }
+
+    fn with_embedding_loader(loader: default_embedding::EmbeddingLoader) -> Result<Self> {
         let service = AIService {
             embedding_channel: Arc::new(Mutex::new(HashMap::new())),
             llm_channel: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
             cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
             shared_whisper_models: Arc::new(Mutex::new(HashMap::new())), // Models loaded on demand per size
+            default_embedding: Arc::new(default_embedding::DefaultEmbedding::new(loader)),
         };
 
         let clone = service.clone();
@@ -497,22 +506,8 @@ impl AIService {
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
 
         if models.is_empty() {
-            // No models configured — auto-load Bert for embedding support
-            futures.push(Box::pin(
-                self.init_model(Model {
-                    id: "bert-id".to_string(),
-                    name: "bert".to_string(),
-                    model_type: ModelType::Embedding,
-                    local: Some(LocalModel {
-                        file_name: "bert".to_string(),
-                        tokenizer_source: None,
-                        huggingface_repo: None,
-                        revision: None,
-                    }),
-                    api: None,
-                })
-                .map(|_| ()),
-            ));
+            // No models configured: serve Bert for embeddings, loaded by the first embed call
+            self.enable_default_embedding().await;
         } else {
             for model in models.into_iter() {
                 futures.push(Box::pin(async move {
@@ -1837,32 +1832,69 @@ impl AIService {
     // -------------------------------------
 
     async fn spawn_embedding_model(&self, model_config: crate::types::Model) {
-        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
         let model_name = model_config.name.clone();
+        let (bert_tx, _ready) = Self::start_embedding_worker(model_config);
+        self.embedding_channel
+            .lock()
+            .await
+            .insert(model_name, bert_tx);
+    }
+
+    /// Starts a worker thread that loads the model, then answers embedding requests from
+    /// the returned channel. The receiver resolves once the model has loaded or failed to.
+    fn start_embedding_worker(
+        model_config: crate::types::Model,
+    ) -> (
+        mpsc::UnboundedSender<EmbeddingRequest>,
+        oneshot::Receiver<Result<()>>,
+    ) {
+        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
+        let (ready_tx, ready_rx) = oneshot::channel();
         thread::spawn({
             let model_id = model_config.id.clone();
             move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
 
-                let model = rt
-                    .block_on(async {
-                        publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
+                let model = rt.block_on(async {
+                    publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
 
-                        let bert = Bert::builder()
-                            .with_device(Self::new_candle_device())
-                            .build_with_loading_handler({
-                                let model_id = model_id.clone();
-                                move |progress| {
-                                    tokio::spawn(handle_progress(model_id.clone(), progress));
-                                }
-                            })
-                            .await;
+                    let bert = Bert::builder()
+                        .with_device(Self::new_candle_device())
+                        .build_with_loading_handler({
+                            let model_id = model_id.clone();
+                            move |progress| {
+                                tokio::spawn(handle_progress(model_id.clone(), progress));
+                            }
+                        })
+                        .await;
 
-                        publish_model_status(model_id.clone(), 100.0, "Loaded", true, false).await;
-
-                        bert
-                    })
-                    .expect("couldn't build Bert model");
+                    bert
+                });
+                let model = match model {
+                    Ok(model) => {
+                        rt.block_on(publish_model_status(
+                            model_id.clone(),
+                            100.0,
+                            "Loaded",
+                            true,
+                            true,
+                        ));
+                        let _ = ready_tx.send(Ok(()));
+                        model
+                    }
+                    Err(e) => {
+                        error!("couldn't build Bert model {model_id}: {e:?}");
+                        rt.block_on(publish_model_status(
+                            model_id.clone(),
+                            0.0,
+                            "Not loaded",
+                            false,
+                            false,
+                        ));
+                        let _ = ready_tx.send(Err(anyhow!("couldn't build Bert model: {e:?}")));
+                        return;
+                    }
+                };
 
                 // Block on the channel — zero CPU while idle.
                 loop {
@@ -1879,11 +1911,7 @@ impl AIService {
                 }
             }
         });
-
-        self.embedding_channel
-            .lock()
-            .await
-            .insert(model_name, bert_tx);
+        (bert_tx, ready_rx)
     }
 
     pub async fn embed(
@@ -1905,6 +1933,7 @@ impl AIService {
             token_count
         );
         let started = std::time::Instant::now();
+        self.ensure_default_embedding(&model_id).await?;
         let (result_sender, rx) = oneshot::channel();
         let embedding_channel = self.embedding_channel.lock().await;
         if let Some(sender) = embedding_channel.get(&model_id) {
@@ -3125,6 +3154,9 @@ mod stream_ownership_tests {
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
             cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
             shared_whisper_models: Arc::new(Mutex::new(HashMap::new())),
+            default_embedding: Arc::new(default_embedding::DefaultEmbedding::new(Arc::new(|_| {
+                Box::pin(async { Err(anyhow!("no embedding models in this test")) })
+            }))),
         };
         let alice = RequestContext::user_for_test("did:key:alice", vec![]);
         let app =
