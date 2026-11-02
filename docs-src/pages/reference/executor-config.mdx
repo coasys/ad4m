@@ -48,7 +48,7 @@ There is no default path: without `--config` or `AD4M_CONFIG` no file is read. T
 | `auto_permit_cap_requests` | bool | `false` when a file is used | `--auto-permit-cap-requests` | Grant capability requests without the user confirming them. Without any file the CLI defaults this to `true`. |
 | `mcp_enabled` | bool | `false` | `--enable-mcp` | Run the MCP server. |
 | `mcp_port` | u16 | `3001` | `--mcp-port` | MCP port. |
-| `multi_user_config.enabled` | bool, required in the object | | `--enable-multi-user` | Multi-user host mode. |
+| `multi_user_config.enabled` | bool, required in the object | | `--enable-multi-user` | Multi-user host mode. `false` does not turn it off on a data directory where it was on: the executor records the mode in its database and at startup only ever sets it (`rust-executor/src/lib.rs`). |
 | `multi_user_config.tls_config.enabled` | bool, required in the object | | set to `true` by `--tls-cert-file`/`--tls-key-file` | HTTPS/WSS listener on `0.0.0.0`. |
 | `multi_user_config.tls_config.cert_file_path` | string, required in the object | | `--tls-cert-file` | PEM certificate. |
 | `multi_user_config.tls_config.key_file_path` | string, required in the object | | `--tls-key-file` | PEM key. |
@@ -61,6 +61,13 @@ There is no default path: without `--config` or `AD4M_CONFIG` no file is read. T
 | `sfu_udp_port` | u16 | a free port at each start | `--sfu-udp-port` | Fixed SFU UDP port; startup fails when it is taken. |
 | `sfu_public_addr` | string (IP) | the STUN probe's answer | `--sfu-public-addr` | Public address advertised behind NAT. Read at startup; an IP change needs a restart. |
 | `sfu_stun_server` | `host:port` | none (no probe) | `--sfu-stun-server` | STUN server asked once at startup. |
+
+**Calls behind NAT.** The SFU binds `sfu_bind_addr` on `sfu_udp_port` and offers that address to every caller. On a machine behind NAT, set `sfu_bind_addr` to its LAN address, fix `sfu_udp_port` and forward that UDP port on the router: the SFU then also offers its public address on that port, which callers outside the LAN reach. The public address is `sfu_public_addr` if set (it needs `sfu_udp_port`), otherwise the address `sfu_stun_server` reports. `sfu.status` answers `isPublic: true` once the SFU accepts inbound connections from the internet (`SfuStatus` in `rust-executor/src/api/sfu_ws.rs`).
+
+```json
+{ "sfu_bind_addr": "192.168.0.10", "sfu_udp_port": 40000,
+  "sfu_stun_server": "stun.l.google.com:19302" }
+```
 
 What the parser refuses (`ExecutorConfigFile::parse`):
 
