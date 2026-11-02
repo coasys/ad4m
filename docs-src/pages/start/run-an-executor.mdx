@@ -19,11 +19,13 @@ Use it when the executor is for one person on their own machine. Settings includ
 
 ## Headless: `ad4m-executor run`
 
-The `cli/` crate builds two binaries: `ad4m-executor` (the runtime) and `ad4m` (a client for it). Build them from the repository:
+The `cli/` crate builds two binaries: `ad4m-executor` (the runtime) and `ad4m` (a client for it). Each GitHub release carries both; the download commands are on [Headless executor](../how-to/headless-executor.mdx#1-get-the-binaries). To build them from the repository, the dapp and the Deno snapshot have to exist first: the executor embeds the dapp build (`dapp/dist`) and `rust-executor/CUSTOM_DENO_SNAPSHOT.bin`, and neither is committed, so `cargo build` alone fails on a fresh clone.
 
 ```bash
-git clone --branch dev https://github.com/coasys/ad4m.git
-cd ad4m/cli && cargo build --release
+git clone --branch dev https://github.com/coasys/ad4m.git && cd ad4m
+pnpm install && pnpm build-dapp
+(cd core && pnpm install) && pnpm run build-deno-snapshot
+(cd cli && cargo build --release)   # binaries in target/release/
 ```
 
 `ad4m-executor` has five subcommands: `init`, `run`, `config print`, `log` and `dev`.

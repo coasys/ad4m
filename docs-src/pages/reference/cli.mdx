@@ -7,7 +7,7 @@ import { Callout } from "nextra/components";
 
 # CLI
 
-The `cli/` crate builds two binaries (`cli/Cargo.toml`): `ad4m-executor`, the runtime (`cli/src/ad4m_executor.rs`), and `ad4m`, a client that talks to a running executor over RPC (`cli/src/ad4m.rs`). Build both with `cd cli && cargo build --release`. Every command prints `--help`.
+The `cli/` crate builds two binaries (`cli/Cargo.toml`): `ad4m-executor`, the runtime (`cli/src/ad4m_executor.rs`), and `ad4m`, a client that talks to a running executor over RPC (`cli/src/ad4m.rs`). Building them needs the dapp and the Deno snapshot first (both embedded, neither committed); the full recipe is on [Run an executor](../start/run-an-executor.mdx#headless-ad4m-executor-run). Every command prints `--help`.
 
 ## `ad4m-executor`
 
