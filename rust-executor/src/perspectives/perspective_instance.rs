@@ -6204,11 +6204,12 @@ impl PerspectiveInstance {
         }
 
         // Run the re-checks off the async workers, a bounded number at once
-        // (the store reads are blocking). No lock is held meanwhile. Each
-        // subscription runs at most once per pass and passes run one after
-        // another, so the results compared below are the newest.
+        // across the executor (the store reads are blocking). No lock is
+        // held meanwhile. Each subscription runs at most once per pass and
+        // passes run one after another, so the results compared below are
+        // the newest.
         let results =
-            subscriptions::run_rechecks(query_futures, subscriptions::recheck_concurrency()).await;
+            subscriptions::run_rechecks(query_futures, &subscriptions::RECHECK_SLOTS).await;
 
         // Single lock acquisition to compare and update all results
         let mut delta_updates = Vec::new();
