@@ -490,6 +490,7 @@ impl AIService {
 
     /// A service with no models, no streams and no background tasks. Its default
     /// embedding model stays disabled until `load()`.
+    #[cfg(test)]
     fn empty() -> Self {
         Self::empty_with_loader(Self::bert_loader())
     }
