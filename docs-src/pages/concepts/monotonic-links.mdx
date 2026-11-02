@@ -7,7 +7,7 @@ description: Some links must outlast any peer removal — votes, revocations, ro
 
 Most links in a Perspective can be removed: by you, or, in a Neighbourhood, by a removal that arrives from a peer. Some links must outlast that. A vote must not disappear because another member removed it, and a revocation must not disappear because someone wants a grant back. For these the executor keeps a fixed list of **monotonic predicates**: a Shared link under one of them is **never removed by a diff**. It ends only through a new signed link, or not at all.
 
-[Flows](./concepts/flows.mdx#flow-links-end-only-by-tombstone) are the first feature that relies on this. The mechanism itself knows nothing about flows: it is one table of predicates in the executor, and a feature makes its links monotonic by adding an entry.
+[Flows](./flows.mdx#flow-links-end-only-by-tombstone) are the first feature that relies on this. The mechanism itself knows nothing about flows: it is one table of predicates in the executor, and a feature makes its links monotonic by adding an entry.
 
 ## The rules
 
