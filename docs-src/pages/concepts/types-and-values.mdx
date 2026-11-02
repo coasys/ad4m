@@ -16,6 +16,9 @@ A model has two kinds of fields. A **property** holds a value: a string, a numbe
 ```typescript
 import { Ad4mModel, Model, Property, fileToDataUri } from "@coasys/ad4m";
 
+// The address of a file-storage language your executor has installed; the SDK exports no constant for it.
+const FILE_STORAGE_LANGUAGE = "<file-storage language address>";
+
 @Model({ name: "Note" })
 class Note extends Ad4mModel {
   // 1. Default: a typed literal in the link target.

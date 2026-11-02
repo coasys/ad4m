@@ -115,10 +115,12 @@ Relations hydrate to id strings by default. `include` turns them into instances,
 await Task.findAll(perspective, {
   include: {
     assignee: true,
-    comments: { order: { createdAt: "DESC" }, limit: 5, include: { author: true } },
+    comments: { order: { createdAt: "DESC" }, limit: 5, include: { replies: true } },
   },
 });
 ```
+
+An `include` key must name a relation of the class (here `Comment.replies`). `author` is not one: it is a reserved field on every row, and `include` skips a key that is not a relation without an error (`model_query/relations.rs`).
 
 A key that starts with `$` is a **projection**: a count or a short list computed per row without hydrating the whole relation.
 
