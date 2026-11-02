@@ -7,9 +7,9 @@ import { Callout } from "nextra/components";
 
 # MCP tools
 
-The executor's MCP server registers 44 static tools (`Ad4mMcpHandler::tool_router` in `rust-executor/src/mcp/tools/mod.rs`). The list does not change with the classes a perspective carries. Paths below are relative to `rust-executor/src/mcp/tools/`. A `?` marks an optional parameter. How to enable the server and authenticate: [Run the MCP server](../how-to/mcp-server.mdx).
+The executor's MCP server registers 46 static tools (`Ad4mMcpHandler::tool_router` in `rust-executor/src/mcp/tools/mod.rs`). The list does not change with the classes a perspective carries. Paths below are relative to `rust-executor/src/mcp/tools/`. A `?` marks an optional parameter. How to enable the server and authenticate: [Run the MCP server](../how-to/mcp-server.mdx).
 
-**Auth** column: "none" means the tool runs without a credential (`AUTH_TOOLS` in `mod.rs`); every other tool answers `Authentication required. ...` until the session is authenticated. On an executor started without an admin credential, a caller that presents no credential passes this check (`check_auth_with_header` in `mod.rs`), which is why such a server binds loopback only. **OpenClaw** column: whether the OpenClaw AD4M plugin bridges the tool as `ad4m_<name>` (the plugin surfaces only the names in `plugins/ad4m/staticToolDefs.ts`).
+**Auth** column: "none" means the tool runs without a credential (`AUTH_TOOLS` in `mod.rs`); every other tool answers `Authentication required. ...` until the session is authenticated. On an executor started without an admin credential, a caller that presents no credential on the loopback listener is the operator and passes this check (`admit_tool_call` in `mod.rs`; `is_admin_credential_token_on` in `rust-executor/src/agent/capabilities/mod.rs`), which is why such a server binds loopback only. Beyond loopback that caller is anonymous. **OpenClaw** column: whether the OpenClaw AD4M plugin bridges the tool as `ad4m_<name>` (the plugin surfaces only the names in `plugins/ad4m/staticToolDefs.ts`).
 
 ## Documentation
 
@@ -44,6 +44,8 @@ The class is a parameter, not part of the tool name. `describe_perspective` retu
 | `instance_transcript` | `perspective_id`, `parent`, `limit?` (default 50, max 500) | The newest children of `parent` that carry text, as a chronological transcript (timestamp, author name and DID, text). One query on the built-in abstract class `TextContent`. | `instances/transcript.rs` | yes | yes |
 | `add_child` | `perspective_id`, `parent`, `child` | Puts an existing node under a parent: the parent class's own children relation when it has one, else one `ad4m://has_child` link. | `instances/children.rs` | yes | yes |
 | `get_children` | `perspective_id`, `parent`, `limit?` (default 100, max 500) | Lists a node's children of any class: id, timestamp and author of each child link, oldest first. Works on `ad4m://self`. | `instances/children.rs` | yes | yes |
+| `template_read` | `perspective_id`, `base_uri`, `ids?`, `find?`, `about?` | Reads a WE Template record: with no arguments its version, the template (whole, or as an outline when too large) and the space's data models; with `ids` those nodes in full; with `find` the nodes whose type or text matches. Description and arguments come from the bundled template tools. | `instances/template_tools.rs` | yes | yes |
+| `template_update` | `perspective_id`, `base_uri`, `version`, `patches`, `dry_run?` | Applies patches to a WE Template record and saves them as one change. A template that changed since `version` is refused; `dry_run` checks without saving. | `instances/template_tools.rs` | yes | yes |
 | `execute_commands` | `perspective_id`, `commands` (JSON array of `{source, predicate, target, action}`), `expression_address`, `parameters?` | Runs raw SDNA actions on an instance. It does not go through the class's SHACL validation. | `instances/commands.rs` | yes | no |
 
 What a node's children are, and why one record can have several holders: [Containment](../concepts/containment.mdx). The two built-in classes: [Built-in interfaces](./built-in-interfaces.mdx).
@@ -96,7 +98,7 @@ These build a query; they do not subscribe. A host registers the query as a live
 | Tool | Parameters | What it does | Handler | Auth | OpenClaw |
 |---|---|---|---|---|---|
 | `auth_status` | — | Whether the session holds a token, and whether the executor is locked. | `auth.rs` | none | yes |
-| `request_capability` | `app_name`, `app_desc`, `app_domain?`, `app_url?` | Creates a capability request for all capabilities. Returns `request_id`, and the `code` only when the session may permit (the admin credential or a token holding `PERMIT`, or an executor without an admin credential). | `auth.rs` | none | no |
+| `request_capability` | `app_name`, `app_desc`, `app_domain?`, `app_url?`, `agent?` | Creates a capability request for all capabilities; `agent` (a user's email or an agent's DID) asks to act as that agent on a multi-user executor, default the main agent. Returns `request_id`, and the `code` only when the session may permit (the admin credential or a token holding `PERMIT`, or, on an executor without an admin credential, a tokenless caller on loopback). | `auth.rs` | none | no |
 | `generate_jwt` | `request_id`, `code` | Exchanges the permitted request for a JWT and stores it in the session. | `auth.rs` | none | no |
 | `login_email` | `email`, `password` | Multi-user login; stores the JWT in the session. | `auth.rs` | none | yes |
 | `signup` | `email`, `password` | Creates a multi-user account; sends a verification email. | `auth.rs` | none | yes |

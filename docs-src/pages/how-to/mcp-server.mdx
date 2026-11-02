@@ -50,7 +50,7 @@ Eight tools need no authentication: `get_documentation`, `auth_status`, `request
 | Mode | How |
 |---|---|
 | **Admin credential** (the executor's operator) | Send it as `Authorization: Bearer <credential>` on each call. The first call with a valid header stores it in the session. |
-| **Capability token** (a local, single-user executor) | `request_capability(app_name, app_desc)` returns `request_id` and, when the caller may permit (no admin credential set, or the session already holds admin rights), the `code`; `generate_jwt(request_id, code)` stores the JWT in the session. On an executor with an admin credential and no such session, the request is created but the code must come from the operator, who approves the request in the Launcher dialog. |
+| **Capability token** (a local, single-user executor) | `request_capability(app_name, app_desc, agent?)` returns `request_id` and, when the caller may permit (no admin credential set and the call comes over loopback, or the session already holds admin rights), the `code`; `generate_jwt(request_id, code)` stores the JWT in the session. On an executor with an admin credential and no such session, the request is created but the code must come from the operator, who approves the request in the Launcher dialog. |
 | **Multi-user account** (a hosted executor) | `signup(email, password)` once, then `login_email(email, password)`; `verify_email_code(email, code, verification_type)` only if the host enforces email verification. |
 
 `auth_status()` reports `authenticated`, `principal` (`operator` for the admin credential, `app` or `user` for a token, `anonymous` without one), the session's `did` and capabilities, and `executor_locked` (`auth_status_json` in `rust-executor/src/mcp/tools/auth.rs`). Both JWT paths need an unlocked executor: after a restart, `login_email` and `generate_jwt` fail with `Executor is locked: ...` until the operator runs `ad4m agent unlock` ([Troubleshooting](./troubleshooting.mdx#the-executor-is-locked)).
@@ -63,7 +63,7 @@ Point any Streamable HTTP MCP client at `http://localhost:3001/mcp`. Configurati
 
 | Owner | Tools | Where they run |
 |---|---|---|
-| **Executor** | `describe_perspective`, the `instance_*` tools, `add_child`/`get_children`, `add_model`, perspectives, neighbourhoods, profiles, flows, auth, `get_documentation`, `generate_waker_query`/`get_mention_waker_config` | In the executor's MCP server; a host may bridge them under a prefix (OpenClaw: `ad4m_describe_perspective`) |
+| **Executor** | `describe_perspective`, the `instance_*` tools, `add_child`/`get_children`, `template_read`/`template_update`, `add_model`, perspectives, neighbourhoods, profiles, flows, auth, `get_documentation`, `generate_waker_query`/`get_mention_waker_config` | In the executor's MCP server; a host may bridge them under a prefix (OpenClaw: `ad4m_describe_perspective`) |
 | **OpenClaw plugin** | `ad4m_subscribe_to_mentions`, `ad4m_subscribe_to_children`, `ad4m_unsubscribe_from_*`, `ad4m_list_waker_subscriptions` | In the plugin. They register a live query subscription (model queries over `TextContent` and `Mentioning` for mentions, over `Container` for children) over the executor's WebSocket API and deliver wake events; the executor only provides the query builders |
 
 The complete list, one row per tool, is on [MCP tools](../reference/mcp-tools.mdx).
