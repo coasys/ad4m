@@ -1625,7 +1625,8 @@ export class Ad4mModel {
     query?: Q,
     options?: CallOptions,
   ): Promise<CursorPage<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const { offset: _offset, ...rest } = (query ?? {}) as Query;
+    // A cursor page returns no total, so `count` is dropped with `offset`: no COUNT runs for it.
+    const { offset: _offset, count: _count, ...rest } = (query ?? {}) as Query;
     const pageQuery: Query = { ...rest, limit: pageSize, after: after ?? '' };
     const { results, nextCursor } = await this.executeModelQuery(perspective, pageQuery, undefined, options);
     return {

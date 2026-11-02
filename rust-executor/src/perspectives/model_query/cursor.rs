@@ -317,6 +317,38 @@ mod pipeline_tests {
         assert_eq!(ids(&second)[0], "ns://t03");
     }
 
+    /// A short page tells its total only from the start of the set: the last
+    /// page after a cursor holds the rows after the cursor, not every row.
+    #[tokio::test]
+    async fn a_short_page_after_a_cursor_counts_every_row() {
+        let store = store();
+        let first = run(&store, json!({ "after": "", "limit": 8, "count": true }))
+            .await
+            .unwrap();
+        assert_eq!(first.instances.len(), 8);
+        assert_eq!(first.total_count, Some(10));
+        let last = run(
+            &store,
+            json!({ "after": first.next_cursor.unwrap(), "limit": 8, "count": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids(&last), vec!["ns://t08", "ns://t09"]);
+        assert!(last.next_cursor.is_none(), "a short page is the last");
+        assert_eq!(
+            last.total_count,
+            Some(10),
+            "not the 2 rows after the cursor"
+        );
+
+        // A short first cursor page is the whole set, as at offset 0.
+        let whole = run(&store, json!({ "after": "", "limit": 20, "count": true }))
+            .await
+            .unwrap();
+        assert_eq!(whole.instances.len(), 10);
+        assert_eq!(whole.total_count, Some(10));
+    }
+
     #[tokio::test]
     async fn no_after_means_no_next_cursor() {
         let store = store();

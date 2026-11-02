@@ -984,7 +984,13 @@ pub(super) async fn execute_model_query_inner(
     // drops rows (no post-hydration filter, no per-anchor slice), and the id phase groups by
     // `?source` over the same scope patterns the COUNT's `DISTINCT ?source` reads, so its page
     // length (not the hydrated instances) is the figure the COUNT would extend.
-    let page_total = if window_pushed {
+    //
+    // A page after a cursor is the exception: the rows before the cursor are skipped by the keyset,
+    // not by an `offset` the page could add back, so a short page there tells only how many rows
+    // follow the cursor. Such a page takes the COUNT; a first cursor page (`after: ""`) starts at
+    // the beginning, like offset 0, and keeps the shortcut.
+    let after_a_cursor = matches!(keyset, Some(Some(_)));
+    let page_total = if window_pushed && !after_a_cursor {
         pagination_source_order.as_ref().and_then(|page| {
             total_from_short_page(query_input.offset, query_input.limit, page.len())
         })

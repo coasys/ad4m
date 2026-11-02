@@ -814,6 +814,16 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
       expect(page.nextCursor).toBeUndefined();
     });
 
+    it("Ad4mModel.page() asks for no count: a cursor page returns no total", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [] });
+
+      await Recipe.page(mockPerspective, 5, "c1", { count: true } as any);
+
+      const q = sentQuery();
+      expect(q.after).toBe("c1");
+      expect(q.count).toBeUndefined();
+    });
+
     it("ModelQueryBuilder.page() sends the cursor instead of an offset", async () => {
       mockPerspective.modelQuery.mockResolvedValue({ instances: [], nextCursor: "c2" });
 
@@ -1528,17 +1538,16 @@ describe("subscriptions never send a cursor (P8)", () => {
     builder.dispose();
   });
 
-  it("paginateSubscribe() sends `after` neither to the subscription nor to its page reads", async () => {
+  it("paginateSubscribe() subscribes to its offset page without `after`", async () => {
     const p = perspective();
     const builder = CursorlessThing.query(p, withCursor);
     await builder.paginateSubscribe(10, 2, () => {});
-    expect(sentQueries(p.modelSubscribe)[0]).not.toHaveProperty("after");
-    const reads = sentQueries(p.modelQuery);
-    expect(reads.length).toBeGreaterThan(0);
-    for (const q of reads) {
-      expect(q).not.toHaveProperty("after");
-      expect(q.offset).toBe(10);
-    }
+    // The subscription is the page itself: no separate page read.
+    const [sub] = sentQueries(p.modelSubscribe);
+    expect(sub).not.toHaveProperty("after");
+    expect(sub.offset).toBe(10);
+    expect(sub.limit).toBe(10);
+    expect(sentQueries(p.modelQuery)).toHaveLength(0);
     builder.dispose();
   });
 });

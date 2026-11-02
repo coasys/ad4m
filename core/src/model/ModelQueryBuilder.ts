@@ -622,7 +622,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async page(pageSize: number, after?: string): Promise<CursorPage<T>> {
-    const { offset: _offset, ...rest } = this.queryParams || {};
+    // A cursor page returns no total, so `count` is dropped with `offset`: no COUNT runs for it.
+    const { offset: _offset, count: _count, ...rest } = this.queryParams || {};
     const { results, nextCursor } = await this.execute({ ...rest, limit: pageSize, after: after ?? '' });
     return { results, ...(nextCursor !== undefined ? { nextCursor } : {}), pageSize };
   }
