@@ -2294,13 +2294,13 @@ export class Ad4mModel {
   ): Promise<T> {
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
+    // Resolved before any write, so an invalid parent stages nothing.
+    const parent = options?.parent ? requireSingleParent(options.parent) : undefined;
 
     // In a caller's batch, the caller commits.
     if (options?.batchId) {
       await instance.save(options.batchId);
-      if (options.parent) {
-        await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, options.batchId);
-      }
+      if (parent) await linkToParent(perspective, parent, this, instance.id, options.batchId);
       return instance;
     }
 
@@ -2308,7 +2308,6 @@ export class Ad4mModel {
     // are committed together. If any step throws, the batch is discarded
     // (nothing is written, and it does not stay open on the executor) and the
     // original error is rethrown.
-    const parent = options?.parent ? requireSingleParent(options.parent) : undefined;
     const batchId = await perspective.createBatch();
     try {
       await instance.save(batchId);
@@ -2486,16 +2485,15 @@ export class Ad4mModel {
     fn: (tx: { batchId: string }) => Promise<R>,
   ): Promise<R> {
     const batchId = await perspective.createBatch();
-    let result: R;
     try {
-      result = await fn({ batchId });
+      const result = await fn({ batchId });
+      await perspective.commitBatch(batchId);
+      return result;
     } catch (e) {
-      // A failed discard must not hide the callback's error.
+      // A failed discard must not hide the original error.
       await perspective.discardBatch(batchId).catch(() => {});
       throw e;
     }
-    await perspective.commitBatch(batchId);
-    return result;
   }
 
   /**

@@ -3900,6 +3900,15 @@ describe("Ad4mModel.transaction()", () => {
       Ad4mModel.transaction(perspective, async () => { throw failure; }),
     ).rejects.toBe(failure);
   });
+
+  it("discards the batch and rethrows when the commit fails", async () => {
+    const { perspective, open } = makePerspective();
+    const failure = new Error("commit failed");
+    perspective.commitBatch.mockRejectedValue(failure);
+    await expect(Ad4mModel.transaction(perspective, async () => "done")).rejects.toBe(failure);
+    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(open.size).toBe(0);
+  });
 });
 
 describe("delete() and incoming links", () => {
@@ -4043,6 +4052,21 @@ describe("save() create path and its own batch", () => {
     await expect(new SaveBatchCard(perspective).save("caller-batch")).rejects.toBe(failure);
     expect(perspective.createBatch).not.toHaveBeenCalled();
     expect(perspective.discardBatch).not.toHaveBeenCalled();
+  });
+
+  it("create() in a caller's batch refuses a parent scope that is not one instance before it writes", async () => {
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "own"),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => true),
+    } as any;
+    const traverse = { ids: ["ad4m://a", "ad4m://b"] } as any;
+
+    await expect(
+      SaveBatchCard.create(perspective, {}, { parent: traverse, batchId: "caller-batch" }),
+    ).rejects.toThrow(/traverse scope/);
+    expect(perspective.createSubject).not.toHaveBeenCalled();
   });
 
   it("create() with a parent discards the batch it opened and rethrows when the parent link fails", async () => {
