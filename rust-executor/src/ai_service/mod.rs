@@ -1927,6 +1927,13 @@ impl AIService {
                     }
                     Err(e) => {
                         error!("couldn't build Bert model {model_id}: {e:?}");
+                        rt.block_on(publish_model_status(
+                            model_id.clone(),
+                            0.0,
+                            "Not loaded",
+                            false,
+                            false,
+                        ));
                         let _ = ready_tx.send(Err(anyhow!("couldn't build Bert model: {e:?}")));
                         return;
                     }
