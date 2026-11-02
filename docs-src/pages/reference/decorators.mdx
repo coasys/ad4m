@@ -170,6 +170,10 @@ A schema may be all-optional; no type flag is generated, and recognition then fa
 | `ensureSDNASubjectClass(Class)` / `ensureSubjectClasses([A, B])` | installs shapes; what `register` / `registerAll` call |
 | `addShacl(name, shape)` | installs a `SHACLShape` without a decorated class |
 | `getAllShacl()` | `Array<{ name, shape: SHACLShape }>` for every shape in the perspective |
+| `getShacl(name)` | one `SHACLShape`, or `null` |
+| `isSubjectInstance(id, classNameOrTemplate)` | whether the node is an instance of the class; a template object picks the first class whose properties match |
+| `getSubjectData(classNameOrTemplate, id)` | the instance's values as a plain object, read by the executor |
+| `getAllSubjectInstances(classNameOrTemplate)` | every instance of the class (or of each class matching a template object) |
 | `getClassShape(className)` | `{ className, shapeUri, properties: Array<{ name, predicate, datatype?, required, collection, writable, options? }> } \| null` |
 | `listRegisteredClasses()` | `string[]` of class names (`?class rdf://type ad4m://SubjectClass`) |
 | `subjectClassesOf(uris)` | `Record<uri, className[]>`: every class each node is an instance of |
