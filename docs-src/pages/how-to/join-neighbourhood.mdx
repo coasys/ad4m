@@ -58,12 +58,14 @@ Models work the same way: register your classes on `shared` and use `findAll` / 
 ## 4. Follow the others' changes
 
 ```typescript
+const myDid = (await ad4m.agent.me()).did;   // agent.me() returns an Agent
+
 shared.on("link-added", ({ link }) => {
   if (link.author !== myDid) console.log("from", link.author, link.data);
 });
 ```
 
-`link-added`, `link-removed` and `link-updated` fire for your own writes and for synced ones alike; filter on `link.author` (`await ad4m.agent.me()` gives your DID). For a query that stays current, use a model subscription or `subscribeQuery` ([Queries and live results](../concepts/queries.mdx)).
+`link-added`, `link-removed` and `link-updated` fire for your own writes and for synced ones alike; filter on `link.author` against your own DID, `(await ad4m.agent.me()).did`. For a query that stays current, use a model subscription or `subscribeQuery` ([Queries and live results](../concepts/queries.mdx)).
 
 ## 5. Who else is here
 
