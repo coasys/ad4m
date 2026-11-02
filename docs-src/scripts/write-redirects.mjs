@@ -20,6 +20,12 @@ function routeOfTarget(target, where) {
     problems.push(`${where}: anchor #${anchor} not found in ${file}`);
     return null;
   }
+  // The source slug is an approximation; the built page has the ids Nextra really wrote.
+  const built = path.join(OUT_DIR, (routeFor(abs) === "/" ? "/index" : routeFor(abs)) + ".html");
+  if (anchor && fs.existsSync(built) && !fs.readFileSync(built, "utf8").includes(` id="${anchor}"`)) {
+    problems.push(`${where}: anchor #${anchor} is not an id in the built ${path.relative(DOCS_SRC, built)}`);
+    return null;
+  }
   return routeFor(abs) + (anchor ? "#" + anchor : "");
 }
 

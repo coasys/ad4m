@@ -97,15 +97,23 @@ export function fileForRoute(route) {
   return null;
 }
 
-/** GitHub-style slug for a heading, as Nextra/rehype-slug produce it. */
+/**
+ * Slug for a heading, as Nextra 2 produces it with github-slugger: lowercase, drop
+ * punctuation and symbols but keep letters, marks, numbers, `_` and `-`, then turn
+ * EACH space into `-` without collapsing ("Firewall & Port" -> "firewall--port",
+ * "`ad4m_language!`" -> "ad4m_language"). Works on the heading's markdown source, so
+ * inline-code backticks and `*`/`~` emphasis markers are dropped first; `_` is kept,
+ * because in headings it is part of identifiers far more often than emphasis.
+ */
 export function slug(text) {
   return text
+    .replace(/\s*\[#[\w-]+\]\s*$/, "")
+    .trim()
     .toLowerCase()
     .replace(/<[^>]+>/g, "")
-    .replace(/[`*_~]/g, "")
-    .replace(/[^\p{L}\p{N}\s-]/gu, "")
-    .trim()
-    .replace(/\s+/g, "-");
+    .replace(/[`*~]/g, "")
+    .replace(/[^\p{L}\p{M}\p{N}\p{Pc}\s-]/gu, "")
+    .replace(/\s/g, "-");
 }
 
 export function fail(msgs, what) {

@@ -2,7 +2,7 @@
 // Exit 1 with a list of problems; exit 0 silently otherwise.
 import fs from "node:fs";
 import path from "node:path";
-import { PAGES_DIR, contentPages, readFrontmatter, stripCode, fail } from "./lib.mjs";
+import { PAGES_DIR, contentPages, readFrontmatter, stripCode, slug, fail } from "./lib.mjs";
 
 const ALLOWED_SOURCE = "nextra/components";
 const ALLOWED_NAMES = new Set(["Callout", "Tabs", "Tab"]);
@@ -81,7 +81,9 @@ for (const file of pages) {
       if (!fs.existsSync(abs)) problems.push(`${rel}:${n}: link target does not exist: ${url}`);
       else if (anchor && !isImage && /\.(mdx|md)$/.test(abs)) {
         const t = fs.readFileSync(abs, "utf8");
-        const headings = [...stripCode(readFrontmatter(t).body).matchAll(/^#{1,6}\s+(.+?)\s*$/gm)].map((h) => slugOf(h[1]));
+        // Fenced blocks only: inline code in a heading is part of its slug.
+        const fencesOut = readFrontmatter(t).body.replace(/```[\s\S]*?```/g, "").replace(/~~~[\s\S]*?~~~/g, "");
+        const headings = [...fencesOut.matchAll(/^#{1,6}\s+(.+?)\s*$/gm)].map((h) => slug(h[1]));
         const custom = [...t.matchAll(/\[#([\w-]+)\]/g)].map((c) => c[1]);
         if (!headings.includes(anchor) && !custom.includes(anchor)) {
           problems.push(`${rel}:${n}: anchor #${anchor} not found in ${target}`);
@@ -97,16 +99,6 @@ for (const file of pages) {
   });
 }
 
-function slugOf(text) {
-  return text
-    .toLowerCase()
-    .replace(/\s*\[#[\w-]+\]\s*$/, "")
-    .replace(/<[^>]+>/g, "")
-    .replace(/[`*_~]/g, "")
-    .replace(/[^\p{L}\p{N}\s-]/gu, "")
-    .trim()
-    .replace(/\s+/g, "-");
-}
 
 console.log(`checked ${pages.length} content pages`);
 fail(problems, "portability check");
