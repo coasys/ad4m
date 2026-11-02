@@ -660,13 +660,16 @@ mod tests {
 
     /// Both startup gates for multi-user mode, as `run()` applies them: the start flag
     /// (`check_admin_credential`) and the mode left on in the database
-    /// (`refuse_multi_user_from_db`). Without a credential either refuses; with one, both pass.
+    /// (`refuse_multi_user_from_db`). `run()` writes the flag into the database
+    /// (`apply_multi_user_flag`) before the database gate reads it, so `--enable-multi-user
+    /// false` starts even when the database had it on. Without a credential a mode that ends
+    /// up on refuses; with one, both pass.
     #[test]
     fn multi_user_gates_refuse_without_an_admin_credential() {
         // (credential, --enable-multi-user, on in the database, starts)
         let table = [
             (None, Some(true), false, false),
-            (None, Some(false), true, false),
+            (None, Some(false), true, true),
             (None, None, true, false),
             (Some("secret"), Some(true), false, true),
             (Some("secret"), None, true, true),
@@ -678,9 +681,11 @@ mod tests {
                 enable_multi_user: flag,
                 ..with_credential(credential, Some(true))
             };
-            let gates = config
-                .check_admin_credential()
-                .and_then(|()| refuse_multi_user_from_db(&config.admin_credential, db_on));
+            let gates = config.check_admin_credential().and_then(|()| {
+                // `apply_multi_user_flag` runs first and overwrites the database value.
+                let db_after_flag = flag.unwrap_or(db_on);
+                refuse_multi_user_from_db(&config.admin_credential, db_after_flag)
+            });
             assert_eq!(
                 gates.is_ok(),
                 starts,
