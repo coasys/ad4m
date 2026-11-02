@@ -100,7 +100,7 @@ The nested form is the one to use for authority checks. Anyone can add a link to
 
 ## Order, limit and offset
 
-`order: { createdAt: "DESC" }` sorts by a property or by `createdAt` / `updatedAt`. Two more key forms exist:
+`order: { createdAt: "DESC" }` sorts by a property or by `createdAt` / `updatedAt`. With a page (`limit` or `offset`), `updatedAt` sorts by creation time like `createdAt` and `timestamp` (`query.rs` maps all three to one timestamp key); only an unpaged query sorts by the real `updatedAt`. Two more key forms exist:
 
 - A dotted relation path, `order: { "pinnedComment.body": "ASC" }`, sorts by a property of a to-one relation's target. It needs `as any` in TypeScript.
 - A projection key, `order: { $commentCount: "DESC" }`, sorts by a `$` projection declared in `include`.

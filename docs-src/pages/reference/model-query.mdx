@@ -58,11 +58,11 @@ A per-link `author` is refused on a getter property, `timestamp` or `id`, and wh
 | Key | Example | Notes |
 |---|---|---|
 | property | `{ title: "ASC" }` | scalar properties of the class |
-| timestamp | `{ createdAt: "DESC" }`, `updatedAt`, `timestamp` | |
+| timestamp | `{ createdAt: "DESC" }`, `updatedAt`, `timestamp` | with `limit`/`offset` all three sort by creation time; only an unpaged query sorts `updatedAt` by the last update |
 | projection | `{ $commentCount: "DESC" }` | the `$` key must be declared in `include`; pair with `limit` |
 | relation path | `{ "pinnedComment.body": "ASC" }` | to-one relation then a scalar of its target; pair with `limit`; `as any` in TypeScript |
 
-Rows without a value sort last in both directions; ties break by id. In a traversal with `limitPerAnchor` or `levels`, `order` must be a single key the store can sort by, or the query is refused.
+With `limit` or `offset`, rows without a value sort last in both directions and ties break by id. Without a page, rows without a value sort last ascending and first descending (`sort_instances` in `filtering.rs`). In a traversal with `limitPerAnchor` or `levels`, `order` must be a single key the store can sort by, or the query is refused.
 
 ## Include and projections
 
