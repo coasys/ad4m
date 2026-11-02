@@ -4,7 +4,7 @@ use crate::types::ModelInput;
 use crate::types::RequestContext;
 #[allow(unused_imports)]
 use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
-use crate::types::{AITask, LocalModel, ModelApi, ModelApiType, ModelType};
+use crate::types::{AITask, LocalModel, Model, ModelApi, ModelApiType, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::{anyhow, Context};
 use candle_core::Device;
