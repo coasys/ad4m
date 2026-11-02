@@ -1,7 +1,15 @@
 {
   "$comment": "Every route that existed on docs.ad4m.dev before 2026-10-21, mapped to the file that now holds the content. `anchors` maps an old section anchor to a new file (top of page) or file#anchor; anchors not listed are kept as-is on the new page. scripts/write-redirects.mjs turns this into redirect pages; the same file feeds the domain move to docs.coasys.org/ad4m.",
   "redirects": {
-    "/installation": { "to": "start/build-an-app.mdx" },
+    "/installation": {
+      "to": "start/build-an-app.mdx",
+      "anchors": {
+        "ad4m-launcher": "start/run-an-executor.mdx#local-the-launcher",
+        "ad4m-cli-for-developers": "start/run-an-executor.mdx#headless-ad4m-executor-run",
+        "set-it-up": "start/run-an-executor.mdx#headless-ad4m-executor-run",
+        "system-requirements": "start/run-an-executor.mdx#requirements"
+      }
+    },
     "/monotonic-links": { "to": "concepts/monotonic-links.mdx" },
     "/spanning-layer": { "to": "concepts/what-ad4m-is.mdx" },
     "/auth": { "to": "concepts/agent-executor-capabilities.mdx" },

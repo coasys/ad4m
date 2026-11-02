@@ -15,7 +15,7 @@ You want an executor on a server or in CI, without the desktop Launcher. The bin
 
 ## 1. Get the binaries
 
-Each GitHub release carries the executor and the CLI client for Linux x64, macOS arm64 and Windows x64 (`.github/workflows/publish.yml`):
+Each GitHub release carries the executor and the CLI client for Linux x64 and macOS arm64; the Windows build is switched off in `.github/workflows/publish.yml`:
 
 ```bash
 TAG=$(curl -s https://api.github.com/repos/coasys/ad4m/releases/latest | grep '"tag_name"' | sed 's/.*"tag_name": "//;s/".*//')
@@ -25,7 +25,7 @@ curl -L -o ad4m          "https://github.com/coasys/ad4m/releases/download/${TAG
 chmod +x ad4m-executor ad4m
 ```
 
-On macOS the names end in `-macos-${VERSION}-aarch64`, on Windows in `-windows-${VERSION}-x64.exe`. To build from a checkout instead: `pnpm install && pnpm build-dapp && (cd core && pnpm install) && pnpm run build-deno-snapshot && (cd cli && cargo build --release)` puts both binaries in `target/release/`.
+On macOS the names end in `-macos-${VERSION}-aarch64`. To build from a checkout instead: `pnpm install && pnpm build-dapp && (cd core && pnpm install) && pnpm run build-deno-snapshot && (cd cli && cargo build --release)` puts both binaries in `target/release/`.
 
 ## 2. Initialize the data directory
 

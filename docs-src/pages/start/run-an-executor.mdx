@@ -97,6 +97,22 @@ Back up the data directory as a whole: the keys and the database belong together
 | MCP | `3001` (TLS: `+ 1`) | `--mcp-port` |
 | Holochain admin / app | first free from `2000` / `1337` | `--hc-admin-port`, `--hc-app-port` |
 
+## Two executors on one machine
+
+For development and tests, a second executor needs its own data directory and its own ports:
+
+```bash
+ad4m-executor init --data-path ~/.ad4m2
+ad4m-executor run --app-data-path ~/.ad4m2 --port 14000 --hc-app-port 9888 --run-dapp-server false
+ad4m -e http://127.0.0.1:14000 -a "$(cat <admin-credential-file>)" agent me
+```
+
+Both read their admin credential as above. Turn the dapp server off on the second one (or the first), since both would take port 8080, and give each its own `--mcp-port` when MCP is on. The `ad4m` client reads `~/.ad4m/executor-port` and falls back to 12000, so point it at the second executor with `-e`.
+
+## Requirements
+
+Release binaries exist for Linux x64 and macOS arm64 (the Launcher and the CLI); there is no Windows build at this revision. The SDK packages need Node.js 22 or later (`engines` in `core/package.json`). Building from source needs Node.js 22, pnpm 9 and the Rust toolchain pinned in `rust-toolchain.toml`.
+
 ## Next
 
 - [Headless executor](../how-to/headless-executor.mdx), [Multi-user host](../how-to/multi-user-host.mdx)
