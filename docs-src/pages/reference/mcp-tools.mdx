@@ -89,7 +89,7 @@ These build a query; they do not subscribe. A host registers the query as a live
 | Tool | Parameters | What it does | Handler | Auth | OpenClaw |
 |---|---|---|---|---|---|
 | `generate_waker_query` | `perspective_id`, `class_name`, `parent?`, `predicate?`, `target_value?` | With `parent`: a model query over the built-in `ad4m://Container` (returned in `query_class`) for that node's children. Otherwise a SPARQL query over the class's predicates, or over `predicate`/`target_value`. | `subscriptions.rs` | yes | no |
-| `get_mention_waker_config` | `perspective_id`, `name_override?` | One subscription entry matching links whose target contains the agent's profile names or DID as a whole word, case-insensitively, skipping the agent's own links. | `subscriptions.rs` | yes | no |
+| `get_mention_waker_config` | `perspective_id` | Two model queries and a subscription entry: `query` over `ad4m://TextContent` for text containing the agent's profile names or DID, `mention_query` over `ad4m://Mentioning` for records whose `mentions` link the DID, both skipping the agent's own links; `terms` for the waker's whole-word filter. | `subscriptions.rs` | yes | no |
 
 ## Authentication
 
@@ -138,5 +138,5 @@ The plugin registers these itself; they are not executor tools (`plugins/ad4m/in
 | `ad4m_get_sample_config` | — | A sample plugin configuration. |
 
 <Callout type="info">
-Permission denial on a perspective reads as `Perspective not found: <id>`, the same answer as a perspective that does not exist, so a caller cannot probe for perspectives it may not read (`mod.rs`, `get_readable_perspective`).
+Permission denial on a perspective reads as `Perspective <id> not found` with `status: 404`, the same answer as a perspective that does not exist, so a caller cannot probe for perspectives it may not read (`api/guards.rs`; `mod.rs`, `get_readable_perspective`).
 </Callout>

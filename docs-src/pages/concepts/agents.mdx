@@ -66,7 +66,7 @@ A record can sit under several holders; containment is a graph, not a tree. See 
 An agent cannot poll every channel. A waker is a live query subscription on the executor whose result changes wake the agent. The executor provides two query builders over MCP; the subscription itself is registered over the RPC WebSocket API, so MCP alone cannot hold one.
 
 - **Children of a node.** `generate_waker_query(perspective_id, class_name, parent=<id>)` returns a model query over the built-in `ad4m://Container` (in `query_class`): the node's children, whatever their class and however the node holds them.
-- **Mentions.** `get_mention_waker_config(perspective_id, name_override?)` returns one SPARQL query that matches any link whose target contains one of the agent's profile names or its DID as a whole word, case-insensitively, and skips links the agent wrote itself.
+- **Mentions.** `get_mention_waker_config(perspective_id)` returns two model queries and a list of terms (`rust-executor/src/mcp/tools/subscriptions.rs`). `query` runs over the built-in `ad4m://TextContent` and finds text that contains one of the agent's profile names or its DID; `mention_query` runs over the built-in `ad4m://Mentioning` and finds records whose `mentions` relation links the agent's DID, text or not. Both skip links the agent wrote itself. The text query matches substrings, so the waker keeps only whole-word matches of `terms`.
 
 The SDK's `WakerSubscriptionManager` holds such subscriptions. The OpenClaw plugin uses the same class (`plugins/ad4m/wakerSubscriptionManager.ts` re-exports it) behind its `ad4m_subscribe_to_mentions` and `ad4m_subscribe_to_children` tools, and subscribes to mentions on its own after a neighbourhood join or publish. In your own host:
 
@@ -84,15 +84,20 @@ const manager = new WakerSubscriptionManager({
 
 // `config` is the parsed result of get_mention_waker_config
 await manager.subscribe({
-  id: "mentions-" + perspectiveUuid,
+  id: config.subscription.id,
   type: "mention",
   perspective: perspectiveUuid,
   channel: "",
+  className: config.class,              // ad4m://TextContent
   query: config.query,
+  terms: config.terms,                  // the waker's whole-word filter
+  did: config.did,
+  mentionClass: config.mention_class,   // ad4m://Mentioning
+  mentionQuery: config.mention_query,
 });
 ```
 
-What the manager does for you: it debounces wakes (2000 ms by default), remembers which items it has already reported, and for a mention it looks up every container holding the mentioned item, plus their ancestors up to `ancestorDepth` (default 3), with one model query on `Container`. A children subscription passes `className: "ad4m://Container"` so the query runs as a model subscription. When the executor rejects a subscription, for example because it is locked after a restart, the manager re-attempts it every 30 s (`retryPendingMs`); `getPending()` lists those.
+What the manager does for you: it debounces wakes (2000 ms by default), remembers which items it has already reported, and for a mention it looks up every container holding the mentioned item, plus their ancestors up to `ancestorDepth` (default 3), with one model query on `Container`. A children subscription passes `className: "ad4m://Container"` so the query runs as a model subscription. When the executor rejects a subscription, for example because it is locked after a restart, the manager re-attempts it with backoff: the first wait is up to 30 s (`retryPendingMs`), and each round doubles it, up to 300 s (`maxRetryPendingMs`), with jitter. `getPending()` lists those subscriptions.
 
 ## Capabilities for agents
 
@@ -102,7 +107,7 @@ An agent authenticates like any other client, with the same capability system ([
 - On a local node, `request_capability` asks for all capabilities and `generate_jwt` stores the resulting token in the MCP session. The code that `generate_jwt` needs is returned inline only to a session that may permit; otherwise the operator approves the request in the Launcher.
 - On a hosted node, `login_email` gives a token scoped to that user's DID and perspectives.
 
-A perspective the token may not read answers `Perspective not found: <id>`, the same as one that does not exist. The tools that need no authentication, and the bind rules for the MCP port, are on [Run the MCP server](../how-to/mcp-server.mdx).
+A perspective the token may not read answers `Perspective <id> not found` with `status: 404`, the same as one that does not exist (`rust-executor/src/api/guards.rs`). The tools that need no authentication, and the bind rules for the MCP port, are on [Run the MCP server](../how-to/mcp-server.mdx).
 
 ## Interpretation inside the executor
 
