@@ -815,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn an_owner_this_node_does_not_act_for_is_skipped() {
+    fn an_owner_this_executor_does_not_act_for_is_skipped() {
         // A peer that joined from its own executor, or a removed user: its
         // bookkeeping lives on its own executor. Skipped, never silently swept as
         // the main agent — that would file one agent's state under another.

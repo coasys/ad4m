@@ -138,6 +138,12 @@ Every requested entry is present (as `[]` when empty). Unknown names and reverse
 
 Both filters apply to hydration and to selection (`where`, flags, counts, the order behind a page, `parent`, `$` projections). A hand-written `getter` runs as written and obeys neither.
 
+The `status` field (`"SHARED"` or `"LOCAL"`, as `perspective.get()` spells it) is not signed: it says where this executor holds the link, not who wrote it.
+
+A link that arrives from a Neighbourhood is checked before it is stored. If its signature does not verify against its `author`, the executor drops it, so no query returns it, not even with `includeUnverified`. A copy of a link this agent holds as Local is dropped too, and so is a removal of one. Once a link is stored with a signature that verifies, a later copy of it (same author, source, predicate, target and timestamp) does not replace its signature, key or signed target bytes, whichever way it arrives ([#1146](https://github.com/coasys/ad4m/issues/1146)).
+
+> **Links stored before [#1141](https://github.com/coasys/ad4m/pull/1141):** a link whose literal target was not encoded the way the SDK encodes it (a raw space as in `literal:string:Write the guide`, raw `literal:json:{"a":1}`, or `-_.~` escaped by `expression.create(_, "literal")`) and that was stored before #1141 reads back in the canonical encoding. The executor that signed it still returns it, but the copy it publishes to a Neighbourhood does not verify, so joiners drop it when it arrives and do not return it even with `includeUnverified`. Literals written by the SDK (`Literal.from(v).toUrl()`) and links written after #1141 are not affected.
+
 ## Builder
 
 `Model.query(perspective, query?)` returns a `ModelQueryBuilder<T>`; `Ad4mModel.queryOf(perspective, classes)` returns one over several classes.

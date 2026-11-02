@@ -157,7 +157,7 @@ async fn subscribe(p: &PerspectiveInstance, class: &str, query: Value) -> (Strin
     let mut query = query;
     query["includeUnverified"] = json!(true);
     let (id, _revision, result) = p
-        .model_subscribe_and_query(class.into(), query.to_string(), "c".into())
+        .model_subscribe_and_query(class.into(), query.to_string(), "c".into(), None)
         .await
         .expect("model subscribe");
     (id, serde_json::from_str(&result).expect("result JSON"))
@@ -213,7 +213,8 @@ async fn an_included_records_edit_reruns_the_including_subscription() {
 /// trigger: the edit re-runs nothing and no update arrives.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_edit_to_a_record_in_the_first_result_sends_update_revision_1() {
-    use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+    use crate::events::Topic;
+    use crate::pubsub::get_global_pubsub;
     let mut p = blog().await;
     record(&mut p, "ns://p1", "Post", &[]).await;
     record(&mut p, "ns://c1", "Comment", &[]).await;
@@ -222,18 +223,18 @@ async fn an_edit_to_a_record_in_the_first_result_sends_update_revision_1() {
 
     let (id, first) = subscribe(&p, "Post", json!({ "include": { "comments": true } })).await;
     assert!(first.to_string().contains("ns://c1"), "{first}");
-    let mut rx = get_global_pubsub()
-        .await
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
+    let mut rx = get_global_pubsub().await.subscribe_events();
 
     add(&mut p, "ns://c1", "ns://text", "literal:string:edited").await;
     check(&p).await;
 
     let update = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let msg = rx.recv().await.expect("pubsub receiver closed");
-            let update: Value = serde_json::from_str(&msg).expect("update JSON");
+            let event = rx.recv().await.expect("pubsub receiver closed");
+            if event.topic != Topic::PerspectiveQuerySubscription {
+                continue;
+            }
+            let update = event.payload.clone();
             if update["perspectiveUuid"] == json!(p.uuid) && update["subscriptionId"] == json!(id) {
                 return update;
             }
@@ -519,6 +520,70 @@ async fn an_edit_moving_a_record_in_a_relation_property_order_reruns() {
         vec!["ns://p1", "ns://p2"],
         "a < k"
     );
+}
+
+/// The same edit as an_edit_moving_a_record_in_a_relation_property_order_reruns,
+/// but the moved post is outside a one-row page, so it is not in the last result.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_moving_a_record_into_a_relation_property_ordered_page_reruns() {
+    let mut p = blog().await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    record(&mut p, "ns://c1", "Comment", &[]).await;
+    let old_text = add(&mut p, "ns://c1", "ns://text", "literal:string:m").await;
+    add(&mut p, "ns://p1", "ns://comment", "ns://c1").await;
+    record(&mut p, "ns://p2", "Post", &[]).await;
+    record(&mut p, "ns://c2", "Comment", &[("ns://text", "k")]).await;
+    add(&mut p, "ns://p2", "ns://comment", "ns://c2").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Post",
+        json!({ "order": [["comments.text", "ASC"]], "limit": 1, "count": true }),
+    )
+    .await;
+    assert_eq!(ids(&first), vec!["ns://p2"], "k < m: {first}");
+
+    p.remove_link(old_text.into(), None)
+        .await
+        .expect("remove_link");
+    add(&mut p, "ns://c1", "ns://text", "literal:string:a").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1, "c1's text moves p1 onto the page"); // fails: 0
+    assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p1"], "a < k");
+}
+
+/// As above, but c1 has no Comment flag: the sort reads `text` on every
+/// linked target, so its edit still moves p1 onto the page, and no class scan
+/// sees a node without the flag.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_on_an_unflagged_target_moving_a_record_into_an_ordered_page_reruns() {
+    let mut p = blog().await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    let old_text = add(&mut p, "ns://c1", "ns://text", "literal:string:m").await;
+    add(&mut p, "ns://p1", "ns://comment", "ns://c1").await;
+    record(&mut p, "ns://p2", "Post", &[]).await;
+    record(&mut p, "ns://c2", "Comment", &[("ns://text", "k")]).await;
+    add(&mut p, "ns://p2", "ns://comment", "ns://c2").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Post",
+        json!({ "order": [["comments.text", "ASC"]], "limit": 1, "count": true }),
+    )
+    .await;
+    assert_eq!(ids(&first), vec!["ns://p2"], "k < m: {first}");
+
+    p.remove_link(old_text.into(), None)
+        .await
+        .expect("remove_link");
+    add(&mut p, "ns://c1", "ns://text", "literal:string:a").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1, "c1's text moves p1 onto the page");
+    assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p1"], "a < k");
 }
 
 /// Task (steps → Step, conformance requires Step's `label`; `open` → Step

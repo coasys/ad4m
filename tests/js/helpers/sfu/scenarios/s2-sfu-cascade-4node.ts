@@ -51,7 +51,7 @@ export const s2SfuCascade4Node: Scenario = {
         executorBin: ctx.executorPath!,
         nodeCount: 4,
         maxParticipantsPerNode: MAX_PER_NODE,
-        wsBasePort: 16400,
+        workDir: ctx.tmpDirBase,
       });
 
       const didToNode = new Map<string, CascadeNode>();

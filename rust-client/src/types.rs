@@ -86,6 +86,9 @@ pub struct Apps {
     pub auth: serde_json::Value,
     pub request_id: String,
     pub revoked: Option<bool>,
+    /// Always empty: the executor does not keep app tokens. Defaults, so a list without the
+    /// field still reads.
+    #[serde(default)]
     pub token: String,
 }
 

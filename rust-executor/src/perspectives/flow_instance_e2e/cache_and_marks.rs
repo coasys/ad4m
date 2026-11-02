@@ -1,7 +1,9 @@
 use super::*;
+use crate::events::{Audience, Event, Topic};
 use crate::perspectives::flow_instance::replica_state::FlowStateChangedEvent;
 use crate::perspectives::perspective_instance::SubjectClassOption;
-use crate::pubsub::{get_global_pubsub, FLOW_STATE_CHANGED_TOPIC};
+use crate::pubsub::get_global_pubsub;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // The cache is a cache
@@ -307,6 +309,44 @@ async fn a_synced_vote_triggers_this_replicas_own_pass() {
     assert!(bookkeeping_links(&f).await.is_empty(), "and writes no link");
 }
 
+/// The vote's author retracting it through sync moves the cache back the
+/// same way (#1176): the vote the tombstone ends reaches the trigger as a
+/// removal, so the tombstone alone queues this replica's pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_synced_retraction_triggers_this_replicas_own_pass() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let minted = f.mint_one().await;
+    let bob = TestSigner::generate();
+    let vote = LinkExpression::from(
+        bob.sign(
+            Link {
+                source: minted.clone(),
+                predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+                target: bob.did.clone(),
+            }
+            .normalize(),
+        ),
+    );
+    sync_in(&f, vec![vote.clone()]).await;
+    assert!(
+        cache_reaches(&f, "scoped").await,
+        "precondition: Bob's vote settled the edge"
+    );
+
+    let retraction = bob.sign(
+        crate::perspectives::monotonic::retraction_for(&vote)
+            .expect("tombstone")
+            .normalize(),
+    );
+    sync_in(&f, vec![LinkExpression::from(retraction)]).await;
+
+    assert!(
+        cache_reaches(&f, "identified").await,
+        "the synced retraction must trigger the pass that heals the cache back"
+    );
+}
+
 /// A peer's change to the flow's definition re-derives every instance: the
 /// fold reads the rules the reader holds now, so the recorded state must
 /// follow when they change. Raising Scoped's rule to `{n: 2}` after one vote
@@ -539,10 +579,7 @@ async fn after_an_upgrade_the_first_pass_is_a_silent_catch_up() {
     }
     forget_bookkeeping(&f);
 
-    let mut events = get_global_pubsub()
-        .await
-        .subscribe(&FLOW_STATE_CHANGED_TOPIC)
-        .await;
+    let mut events = get_global_pubsub().await.subscribe_events();
     let first = consensus_pass(&mut f).await;
     assert!(first.is_empty(), "no flood after an upgrade: {first:?}");
     assert_eq!(
@@ -689,35 +726,41 @@ async fn a_synced_instance_is_not_seeded() {
 // flow-state-changed
 // ---------------------------------------------------------------------------
 
-/// [`flow_events`] as the JSON the socket carries.
+/// [`flow_events`] as the JSON the socket carries. Every `flow-state-changed`
+/// goes to the agent it names, which owns the perspective here, and needs the
+/// query capability on the perspective.
 fn raw_flow_events(
-    rx: &mut tokio::sync::broadcast::Receiver<String>,
+    rx: &mut tokio::sync::broadcast::Receiver<Arc<Event>>,
     uuid: &str,
 ) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
-    while let Ok(msg) = rx.try_recv() {
-        let event: serde_json::Value = serde_json::from_str(&msg).expect("JSON");
-        if event["perspectiveUuid"] == uuid {
-            out.push(event);
+    while let Ok(event) = rx.try_recv() {
+        if event.topic != Topic::FlowStateChanged || event.perspective.as_deref() != Some(uuid) {
+            continue;
         }
+        let agent = event.payload["agentDid"]
+            .as_str()
+            .expect("agentDid")
+            .to_string();
+        assert_eq!(event.audience, Audience::Dids(vec![agent]));
+        assert_eq!(
+            event.capability,
+            crate::agent::capabilities::perspective_query_capability(vec![uuid.to_string()])
+        );
+        out.push(event.payload.clone());
     }
     out
 }
 
 /// The events on `rx` so far that belong to `uuid`, oldest first.
 fn flow_events(
-    rx: &mut tokio::sync::broadcast::Receiver<String>,
+    rx: &mut tokio::sync::broadcast::Receiver<Arc<Event>>,
     uuid: &str,
 ) -> Vec<FlowStateChangedEvent> {
-    let mut out = Vec::new();
-    while let Ok(msg) = rx.try_recv() {
-        let event: FlowStateChangedEvent =
-            serde_json::from_str(&msg).expect("a FlowStateChangedEvent");
-        if event.perspective_uuid == uuid {
-            out.push(event);
-        }
-    }
-    out
+    raw_flow_events(rx, uuid)
+        .into_iter()
+        .map(|payload| serde_json::from_value(payload).expect("a FlowStateChangedEvent"))
+        .collect()
 }
 
 /// One event per change, naming the agent, the move and the newly fired
@@ -725,10 +768,7 @@ fn flow_events(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_settle_publishes_one_flow_state_changed_event() {
     let mut f = seed_satisfied_fixture(None).await;
-    let mut events = get_global_pubsub()
-        .await
-        .subscribe(&FLOW_STATE_CHANGED_TOPIC)
-        .await;
+    let mut events = get_global_pubsub().await.subscribe_events();
     let minted = f.mint_one().await;
     assert_eq!(consensus_pass(&mut f).await.len(), 1);
 
@@ -760,10 +800,7 @@ async fn a_regression_publishes_an_event_without_fired_proposals() {
     let mut f = seed_satisfied_fixture(None).await;
     let minted = f.mint_one().await;
     assert_eq!(consensus_pass(&mut f).await.len(), 1);
-    let mut events = get_global_pubsub()
-        .await
-        .subscribe(&FLOW_STATE_CHANGED_TOPIC)
-        .await;
+    let mut events = get_global_pubsub().await.subscribe_events();
 
     let ctx = f.ctx.clone();
     reject_flow_proposal(&mut f.perspective, &minted, &ctx)
@@ -804,10 +841,7 @@ async fn a_seeded_row_at_genesis_records_the_genesis_and_publishes_nothing() {
         "the fold is at genesis"
     );
 
-    let mut events = get_global_pubsub()
-        .await
-        .subscribe(&FLOW_STATE_CHANGED_TOPIC)
-        .await;
+    let mut events = get_global_pubsub().await.subscribe_events();
     let outcomes = consensus_pass(&mut f).await;
     assert!(outcomes.is_empty(), "nothing settled: {outcomes:?}");
     assert_eq!(

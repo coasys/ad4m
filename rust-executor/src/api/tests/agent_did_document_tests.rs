@@ -22,7 +22,8 @@ use crate::agent::capabilities::ALL_CAPABILITY;
 use crate::agent::AgentService;
 use crate::api::agent_ws::register_ws_handlers;
 use crate::api::ws_handler::HandlerMap;
-use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC};
+use crate::events::{Audience, Topic};
+use crate::pubsub::get_global_pubsub;
 use crate::test_utils::{
     assert_no_private_keys, private_key_values, setup_agent, setup_wallet,
     wallet_private_key_values,
@@ -106,10 +107,7 @@ async fn lock_reply_status_changed_event_and_unlock_carry_no_private_key() {
     setup_agent();
     let secrets = wallet_private_key_values("main");
     let did = main_did();
-    let mut events = get_global_pubsub()
-        .await
-        .subscribe(&AGENT_STATUS_CHANGED_TOPIC)
-        .await;
+    let mut events = get_global_pubsub().await.subscribe_events();
 
     let lock_reply = handlers()
         .dispatch(
@@ -120,10 +118,19 @@ async fn lock_reply_status_changed_event_and_unlock_carry_no_private_key() {
         .await
         .expect("agent.lock")
         .to_string();
-    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
-        .await
-        .expect("agent.lock publishes agent-status-changed")
-        .expect("event");
+    let event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.expect("event");
+            if event.topic == Topic::AgentStatusChanged {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("agent.lock publishes agent-status-changed");
+    // The main agent's status goes to the sessions that act as the main agent.
+    assert_eq!(event.audience, Audience::Dids(vec![did.clone()]));
+    let event = event.payload.to_string();
     // Unlock before asserting, so a failure here leaves the wallet usable.
     let unlocked = AgentService::with_mutable_global_instance(|s| s.unlock("pw-1229".into()));
     let unlock_reply =

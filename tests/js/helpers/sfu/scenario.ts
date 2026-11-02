@@ -25,7 +25,11 @@ export interface ScenarioContext {
   adminToken: string;
   /** Path to the AD4M repo (for building/cloning) */
   adamRepoPath: string;
-  /** Base directory for temporary files */
+  /**
+   * This scenario run's own directory (`<tmpdir>/ad4m-sfu-test-<id>-XXXXXX`)
+   * for data dirs and logs.  Kept on failure for CI to collect, removed on
+   * success.
+   */
   tmpDirBase: string;
   /**
    * Absolute path to the executor binary the runner started for this branch.

@@ -22,6 +22,7 @@ export {
     agentSigningKeyId,
     agentSign,
     agentSignStringHex,
+    agentOpenSealed,
     agentCreateSignedExpression,
     agentGetAllLocalUserDids,
     agentCreateSignedExpressionForUser,

@@ -4,7 +4,7 @@
  */
 
 import { spawn, ChildProcess, execSync } from "child_process";
-import { mkdirSync, existsSync, writeFileSync, rmSync, readFileSync, copyFileSync, statSync } from "fs";
+import { mkdirSync, existsSync, writeFileSync, rmSync, readFileSync, copyFileSync, statSync, openSync, writeSync, closeSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import WebSocket from "ws";
@@ -66,6 +66,8 @@ export interface ExecutorConfig {
   buildDir: string;
   /** Extra CLI args appended to the `run` invocation (e.g. ["--language-language-only","true"]). */
   extraArgs?: string[];
+  /** When set, the executor's stdout + stderr are written to this file. */
+  logPath?: string;
 }
 
 export interface ExecutorInstance {
@@ -205,6 +207,15 @@ export async function startExecutor(
     env: { ...process.env, RUST_LOG: "info" },
   });
 
+  if (config.logPath) {
+    const fd = openSync(config.logPath, "w");
+    proc.stdout?.on("data", (d) => writeSync(fd, d));
+    proc.stderr?.on("data", (d) => writeSync(fd, d));
+    proc.on("close", () => {
+      try { closeSync(fd); } catch { /* already closed */ }
+    });
+  }
+
   proc.stdout?.on("data", (d) => {
     const line = d.toString().trim();
     if (line && process.env.VERBOSE) console.log(`[exec:${config.port}:out] ${line}`);
@@ -270,10 +281,13 @@ async function checkWsReady(port: number, token: string, timeoutMs: number): Pro
 }
 
 export function stopExecutor(proc: ChildProcess): void {
-  if (proc && !proc.killed) {
+  // `proc.killed` turns true as soon as a signal is sent, so it cannot tell
+  // whether SIGTERM worked; the exit code and signal can.
+  const running = () => proc.exitCode === null && proc.signalCode === null;
+  if (proc && running()) {
     proc.kill("SIGTERM");
     setTimeout(() => {
-      if (!proc.killed) proc.kill("SIGKILL");
+      if (running()) proc.kill("SIGKILL");
     }, 5000);
   }
 }

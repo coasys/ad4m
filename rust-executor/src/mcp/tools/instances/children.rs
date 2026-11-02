@@ -8,6 +8,10 @@
 //! that answer from the executor and look up no predicate themselves.
 //! `instance_create(parent=…)` and `instance_query(parent=…)` read and write
 //! the same containment for one class.
+//!
+//! Both admit the caller through `get_writable_perspective` /
+//! `get_readable_perspective`, the guards of the perspective RPC methods that
+//! write and read.
 
 use super::{
     error_json, link_target, pretty, run_model_query, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT,

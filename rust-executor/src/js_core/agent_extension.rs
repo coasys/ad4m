@@ -3,8 +3,9 @@ use crate::js_core::error::AnyhowWrapperError;
 use crate::languages::language_runtime::get_runtime_agent_context;
 use crate::{
     agent::{
-        create_signed_expression, did, did_document, did_for_context, sign_for_context,
-        sign_string_hex_for_context, signing_key_id_for_context, AgentService,
+        create_signed_expression, did, did_document, did_for_context,
+        sealed_box::{open_sealed_for_context, SealedBox},
+        sign_for_context, sign_string_hex_for_context, signing_key_id_for_context, AgentService,
     },
     types::Agent,
 };
@@ -65,9 +66,9 @@ fn agent_create_signed_expression_for_user(
 }
 
 /// Signs `data` as `user_email`, but only while the language runs for that user. Language
-/// code comes from third parties: without this check, any language on a multi-user node
+/// code comes from third parties: without this check, any language on a multi-user executor
 /// signs anything as any managed user. The host contract names users by email; the email
-/// resolves to the user's agent here.
+/// resolves to the user's agent (its DID) here, once, and the check compares DIDs.
 fn create_signed_expression_for_user(
     user_email: &str,
     data: &serde_json::Value,
@@ -148,6 +149,16 @@ fn agent_sign_string_hex(#[string] payload: String) -> Result<String, AnyhowWrap
         .map_err(AnyhowWrapperError::from)
 }
 
+/// Opens a box sealed to the agent the language runs for, and returns the plaintext as
+/// hex. Fails for a box sealed to any other DID.
+#[op2]
+#[string]
+fn agent_open_sealed(#[serde] sealed: SealedBox) -> Result<String, AnyhowWrapperError> {
+    open_sealed_for_context(&sealed, &get_runtime_agent_context())
+        .map(hex::encode)
+        .map_err(AnyhowWrapperError::from)
+}
+
 #[op2(fast)]
 fn agent_is_initialized() -> Result<bool, AnyhowWrapperError> {
     AgentService::with_global_instance(|agent_service| Ok(agent_service.is_initialized()))
@@ -176,11 +187,12 @@ fn agent() -> Result<Agent, AnyhowWrapperError> {
 }
 
 // Languages sign and read through these ops. Unlocking, locking, reloading the keystore
-// and overwriting the node's profile stay out: any language could otherwise probe the
-// passphrase, lock the node under a passphrase of its own, or rewrite the node's profile.
+// and overwriting the main agent's profile stay out: any language could otherwise probe the
+// passphrase, lock the executor under a passphrase of its own, or rewrite the main agent's
+// profile.
 deno_core::extension!(
     agent_service,
-    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_is_initialized, agent_is_unlocked, agent],
+    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_open_sealed, agent_is_initialized, agent_is_unlocked, agent],
     esm_entry_point = "ext:agent_service/agent_extension.js",
     esm = [dir "src/js_core", "agent_extension.js"]
 );
@@ -207,15 +219,15 @@ mod tests {
         let other = create_signed_expression_for_user(&bob, &data);
         let nobody = create_signed_expression_for_user("nobody@example.org", &data);
         set_runtime_agent_context(&AgentContext::main_agent());
-        let from_the_node = create_signed_expression_for_user(&alice, &data);
+        let from_the_main_agent = create_signed_expression_for_user(&alice, &data);
 
         let own = own.expect("a language signs as the user it runs for");
         assert_eq!(own["author"], json!(alice_did));
         assert!(other.is_err(), "a language signed as another user");
         assert!(nobody.is_err(), "a language signed as an email no user has");
         assert!(
-            from_the_node.is_err(),
-            "a language that runs for the node signed as a user"
+            from_the_main_agent.is_err(),
+            "a language that runs for the main agent signed as a user"
         );
     }
 }

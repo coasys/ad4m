@@ -1,14 +1,12 @@
 //! Perspective and link operation tools
 //!
-//! Tools for managing perspectives (knowledge graphs) and raw links.
+//! Tools for managing perspectives (knowledge graphs) and raw links. Each tool calls the RPC
+//! method that does its job (`perspective.all`, `.create`, `.addLink`, `.queryLinks`,
+//! `.addSdna`) through the handler map, so the method's guard decides who may call it.
 
 use super::instances::{normalize_legacy_literal, other_literal_spelling};
-use super::Ad4mMcpHandler;
-use crate::agent::capabilities::defs::PERSPECTIVE_CREATE_CAPABILITY;
-use crate::perspectives::perspective_instance::SdnaType;
-use crate::perspectives::{add_perspective, all_perspectives};
-use crate::types::Link;
-use crate::types::{LinkQuery, LinkStatus, PerspectiveHandle};
+use super::{labelled, method_error, Ad4mMcpHandler};
+use crate::types::{DecoratedLinkExpression, PerspectiveHandle};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -151,28 +149,23 @@ impl Ad4mMcpHandler {
         description = "List all AD4M perspectives. A perspective is a subjective graph database — a personal collection of links (RDF-like triples: source → predicate → target) that can be queried, modified, and optionally shared as a 'neighbourhood' for real-time P2P collaboration. Each has a UUID and a human-readable name."
     )]
     pub async fn list_perspectives(&self, _params: Parameters<ListPerspectivesParams>) -> String {
-        let _agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let perspectives = all_perspectives();
-        let mut result: Vec<serde_json::Value> = Vec::new();
-        for p in perspectives.iter() {
-            let handle = p.persisted.lock().await.clone();
-
-            // Multi-user isolation: only show perspectives the user can access
-            if !self.can_access_perspective(&handle).await {
-                continue;
-            }
-
-            result.push(json!({
-                "uuid": handle.uuid,
-                "name": handle.name,
-                "shared_url": handle.shared_url,
-                "has_neighbourhood": handle.neighbourhood.is_some(),
-            }));
-        }
+        // `perspective.all` lists the caller's own perspectives (every one to the operator).
+        let handles: Vec<PerspectiveHandle> =
+            match self.call("perspective.all", json!({}), method_error).await {
+                Ok(handles) => handles,
+                Err(e) => return e,
+            };
+        let result: Vec<serde_json::Value> = handles
+            .iter()
+            .map(|handle| {
+                json!({
+                    "uuid": handle.uuid,
+                    "name": handle.name,
+                    "shared_url": handle.shared_url,
+                    "has_neighbourhood": handle.neighbourhood.is_some(),
+                })
+            })
+            .collect();
         serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
     }
 
@@ -183,39 +176,24 @@ impl Ad4mMcpHandler {
     pub async fn add_perspective(&self, params: Parameters<AddPerspectiveParams>) -> String {
         let p = &params.0;
 
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = crate::agent::capabilities::check_capability(
-            &capabilities,
-            &PERSPECTIVE_CREATE_CAPABILITY,
-        ) {
-            return format!("Capability error: {}", e);
-        }
-
-        // In multi-user mode, set the creating user as owner (reuses REST pattern)
-        let owner_did = agent_context.managed_did().map(str::to_string);
-
-        let handle = if let Some(owner) = &owner_did {
-            PerspectiveHandle::new_with_owner(p.name.clone(), owner.clone())
-        } else {
-            PerspectiveHandle::new_from_name(p.name.clone())
-        };
-        let uuid = handle.uuid.clone();
-
-        match add_perspective(handle, None).await {
-            Ok(_) => {
+        // The caller's user owns the new perspective; the operator's and an app's have no owner.
+        let created = self
+            .call::<PerspectiveHandle>(
+                "perspective.create",
+                json!({ "name": p.name }),
+                labelled("Error creating perspective"),
+            )
+            .await;
+        match created {
+            Ok(handle) => {
                 let result = json!({
                     "success": true,
-                    "uuid": uuid,
+                    "uuid": handle.uuid,
                     "name": p.name,
                 });
                 serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
             }
-            Err(e) => format!("Error creating perspective: {}", e),
+            Err(e) => e,
         }
     }
 
@@ -226,38 +204,35 @@ impl Ad4mMcpHandler {
     pub async fn add_link(&self, params: Parameters<AddLinkParams>) -> String {
         let p = &params.0;
 
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((mut perspective, agent_context)) => {
-                // The legacy `literal://…` spelling the old example advertised
-                // is not a parseable IRI, so storing it verbatim poisons every
-                // SPARQL read of the link. Normalise to the single-colon form
-                // (what the TypeScript SDK's `Literal` now requires too) and
-                // echo the stored target back so the caller sees it.
-                let link = Link {
-                    source: normalize_legacy_literal(&p.source).into_owned(),
-                    predicate: Some(p.predicate.clone()),
-                    target: normalize_legacy_literal(&p.target).into_owned(),
-                };
-
-                match perspective
-                    .add_link(link, LinkStatus::Shared, None, &agent_context)
-                    .await
-                {
-                    Ok(decorated) => {
-                        let result = json!({
-                            "success": true,
-                            "link": {
-                                "source": decorated.data.source,
-                                "predicate": decorated.data.predicate,
-                                "target": decorated.data.target,
-                                "timestamp": decorated.timestamp,
-                            }
-                        });
-                        serde_json::to_string_pretty(&result)
-                            .unwrap_or_else(|e| format!("Error: {}", e))
+        // The legacy `literal://…` spelling the old example advertised is not a parseable
+        // IRI, so storing it verbatim poisons every SPARQL read of the link. Normalise to the
+        // single-colon form (what the TypeScript SDK's `Literal` now requires too) and echo
+        // the stored target back so the caller sees it.
+        let link = json!({
+            "source": normalize_legacy_literal(&p.source),
+            "predicate": p.predicate,
+            "target": normalize_legacy_literal(&p.target),
+        });
+        let params = json!({ "uuid": p.perspective_id, "link": link, "status": "shared" });
+        let added = self
+            .call::<DecoratedLinkExpression>(
+                "perspective.addLink",
+                params,
+                labelled("Error adding link"),
+            )
+            .await;
+        match added {
+            Ok(decorated) => {
+                let result = json!({
+                    "success": true,
+                    "link": {
+                        "source": decorated.data.source,
+                        "predicate": decorated.data.predicate,
+                        "target": decorated.data.target,
+                        "timestamp": decorated.timestamp,
                     }
-                    Err(e) => format!("Error adding link: {}", e),
-                }
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
             }
             Err(e) => e,
         }
@@ -299,52 +274,53 @@ impl Ad4mMcpHandler {
         // which covers a caller using one spelling.
         let filters = link_filter_variants(&p.source, &p.predicate, &p.target);
 
-        match self.get_readable_perspective(&p.perspective_id).await {
-            Ok(perspective) => {
-                let mut result: Vec<serde_json::Value> = Vec::new();
-                let mut seen: std::collections::HashSet<(String, String, String, String)> =
-                    std::collections::HashSet::new();
+        let mut result: Vec<serde_json::Value> = Vec::new();
+        let mut seen: std::collections::HashSet<(String, String, String, String)> =
+            std::collections::HashSet::new();
 
-                for (source, predicate, target) in filters {
-                    let query = LinkQuery {
-                        source,
-                        predicate,
-                        target,
-                        ..Default::default()
-                    };
+        for (source, predicate, target) in filters {
+            let params = json!({
+                "uuid": p.perspective_id,
+                "source": source,
+                "predicate": predicate,
+                "target": target,
+            });
+            let links: Vec<DecoratedLinkExpression> = match self
+                .call(
+                    "perspective.queryLinks",
+                    params,
+                    labelled("Error querying links"),
+                )
+                .await
+            {
+                Ok(links) => links,
+                Err(e) => return e,
+            };
 
-                    let links = match perspective.get_links(&query).await {
-                        Ok(links) => links,
-                        Err(e) => return format!("Error querying links: {}", e),
-                    };
-
-                    for l in &links {
-                        // Two filters can match the same link only if the store
-                        // holds both spellings; dedupe so the caller never sees
-                        // a row twice because of how it spelled the filter.
-                        let key = (
-                            l.data.source.clone(),
-                            l.data.predicate.clone().unwrap_or_default(),
-                            l.data.target.clone(),
-                            l.timestamp.clone(),
-                        );
-                        if !seen.insert(key) {
-                            continue;
-                        }
-                        result.push(json!({
-                            "source": l.data.source,
-                            "predicate": l.data.predicate,
-                            "target": l.data.target,
-                            "timestamp": l.timestamp,
-                            "author": l.author,
-                        }));
-                    }
+            for l in &links {
+                // Two filters can match the same link only if the store
+                // holds both spellings; dedupe so the caller never sees
+                // a row twice because of how it spelled the filter.
+                let key = (
+                    l.data.source.clone(),
+                    l.data.predicate.clone().unwrap_or_default(),
+                    l.data.target.clone(),
+                    l.timestamp.clone(),
+                );
+                if !seen.insert(key) {
+                    continue;
                 }
-
-                serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
+                result.push(json!({
+                    "source": l.data.source,
+                    "predicate": l.data.predicate,
+                    "target": l.data.target,
+                    "timestamp": l.timestamp,
+                    "author": l.author,
+                }));
             }
-            Err(e) => e,
         }
+
+        serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
     }
 
     /// Add a model (subject class definition) to a perspective
@@ -358,32 +334,93 @@ impl Ad4mMcpHandler {
             return message;
         }
 
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((mut perspective, agent_context)) => {
-                match perspective
-                    .add_sdna(
-                        p.class_name.clone(),
-                        String::new(),
-                        SdnaType::SubjectClass,
-                        Some(p.shacl_json.clone()),
-                        &agent_context,
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        let result = json!({
-                            "success": true,
-                            "perspective_id": p.perspective_id,
-                            "class_name": p.class_name,
-                        });
-                        serde_json::to_string_pretty(&result)
-                            .unwrap_or_else(|e| format!("Error: {}", e))
-                    }
-                    Err(e) => format!("Error adding SDNA: {}", e),
-                }
+        let params = json!({
+            "uuid": p.perspective_id,
+            "name": p.class_name,
+            "sdnaType": "subject_class",
+            "shaclJson": p.shacl_json,
+        });
+        let added = self
+            .call::<serde_json::Value>("perspective.addSdna", params, labelled("Error adding SDNA"))
+            .await;
+        match added {
+            Ok(_) => {
+                let result = json!({
+                    "success": true,
+                    "perspective_id": p.perspective_id,
+                    "class_name": p.class_name,
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
             }
             Err(e) => e,
         }
+    }
+}
+
+/// What the method matrix through MCP does not pin: a capability scoped to another
+/// perspective, and the operator's list (#851). The rows of every caller on every perspective
+/// are in `api::tests::method_matrix_mcp_tests`.
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use crate::agent::capabilities::{perspective_query_capability, perspective_update_capability};
+    use crate::mcp::tools::test_support::{app, handler_as, operator, perspective, setup, status};
+
+    // Writes checked PERSPECTIVE_CREATE on every perspective; the method checks the update
+    // capability on the one it names.
+    #[tokio::test]
+    async fn add_link_needs_the_update_capability_on_that_perspective() {
+        setup();
+        let uuid = perspective(None).await;
+        let other = perspective(None).await;
+        let handler = handler_as(app(vec![perspective_update_capability(
+            vec![other.clone()],
+        )]));
+        let refused = handler
+            .add_link(Parameters(AddLinkParams {
+                perspective_id: uuid.clone(),
+                source: "test://s".into(),
+                predicate: "test://p".into(),
+                target: "test://t".into(),
+            }))
+            .await;
+        assert_eq!(status(&refused), Some(403), "{refused}");
+
+        let added = handler
+            .add_link(Parameters(AddLinkParams {
+                perspective_id: other.clone(),
+                source: "test://s".into(),
+                predicate: "test://p".into(),
+                target: "literal://string:legacy".into(),
+            }))
+            .await;
+        let added: serde_json::Value = serde_json::from_str(&added).expect(&added);
+        assert_eq!(added["success"], true, "{added}");
+        assert_eq!(added["link"]["target"], "literal:string:legacy");
+        for uuid in [uuid, other] {
+            crate::perspectives::remove_perspective(&uuid).await;
+        }
+    }
+
+    // The operator saw only the unowned and the main agent's perspectives, as an app does.
+    #[tokio::test]
+    async fn the_operator_lists_every_perspective() {
+        setup();
+        let users = perspective(Some(vec!["did:key:mcp-lister".into()])).await;
+        let listed = handler_as(operator())
+            .list_perspectives(Parameters(ListPerspectivesParams {}))
+            .await;
+        assert!(listed.contains(&users), "{listed}");
+
+        let app_listed = handler_as(app(vec![perspective_query_capability(vec!["*".into()])]))
+            .list_perspectives(Parameters(ListPerspectivesParams {}))
+            .await;
+        assert!(!app_listed.contains(&users), "{app_listed}");
+        let refused = handler_as(app(vec![]))
+            .list_perspectives(Parameters(ListPerspectivesParams {}))
+            .await;
+        assert_eq!(status(&refused), Some(403), "{refused}");
+        crate::perspectives::remove_perspective(&users).await;
     }
 }
 

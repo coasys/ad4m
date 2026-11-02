@@ -9,11 +9,13 @@
 //!
 //! ## Architecture
 //!
-//! - [`server`] — HTTP transport setup and auth middleware
+//! - [`server`] — HTTP transport setup
+//! - [`caller`] — the `Session` of each MCP session
 //! - [`shacl`] — SHACL class/property parsing from perspective links
 //! - `tools` — MCP tool definitions (static + dynamic SHACL-generated)
 //! - `docs/` — the markdown served by the `get_documentation` tool
 
+pub mod caller;
 pub mod server;
 pub mod shacl;
 pub mod tools;

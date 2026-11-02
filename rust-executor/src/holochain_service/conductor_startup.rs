@@ -27,9 +27,10 @@ use super::{
     SERVICE_WAIT,
 };
 use crate::agent::AgentService;
+use crate::events::Event;
 use crate::languages::error::LanguageError;
 use crate::languages::LanguageController;
-use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC};
+use crate::pubsub::get_global_pubsub;
 
 /// Set while a startup task is running. A second generate/unlock arriving before the
 /// conductor is up would otherwise see no Holochain service and start a second conductor
@@ -256,14 +257,7 @@ async fn announce_startup_failure(message: String) {
     status.error = Some(message);
     get_global_pubsub()
         .await
-        .publish(
-            &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&status).unwrap_or_else(|e| {
-                error!("Failed to serialize agent for pubsub: {e}");
-                String::new()
-            }),
-        )
-        .await;
+        .publish_event(Event::agent_status(&status));
 }
 
 #[cfg(test)]

@@ -96,7 +96,7 @@ These build a query; they do not subscribe. A host registers the query as a live
 | Tool | Parameters | What it does | Handler | Auth | OpenClaw |
 |---|---|---|---|---|---|
 | `auth_status` | — | Whether the session holds a token, and whether the executor is locked. | `auth.rs` | none | yes |
-| `request_capability` | `app_name`, `app_desc`, `app_domain?`, `app_url?` | Creates a capability request for all capabilities. Returns `request_id`, and the `code` only when the session may permit (the admin credential or a token holding `PERMIT`, or a node without an admin credential). | `auth.rs` | none | no |
+| `request_capability` | `app_name`, `app_desc`, `app_domain?`, `app_url?` | Creates a capability request for all capabilities. Returns `request_id`, and the `code` only when the session may permit (the admin credential or a token holding `PERMIT`, or an executor without an admin credential). | `auth.rs` | none | no |
 | `generate_jwt` | `request_id`, `code` | Exchanges the permitted request for a JWT and stores it in the session. | `auth.rs` | none | no |
 | `login_email` | `email`, `password` | Multi-user login; stores the JWT in the session. | `auth.rs` | none | yes |
 | `signup` | `email`, `password` | Creates a multi-user account; sends a verification email. | `auth.rs` | none | yes |

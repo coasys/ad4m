@@ -9,7 +9,9 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 use super::{PerspectiveInstance, SubscribedQuery};
-use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+use crate::agent::{did_for_context, AgentContext};
+use crate::events::{Audience, Event, Topic};
+use crate::pubsub::get_global_pubsub;
 
 impl PerspectiveInstance {
     /// Resync after a revision gap (`perspective.resyncSubscription`): the
@@ -51,14 +53,25 @@ impl PerspectiveInstance {
             .lock()
             .await
             .insert(id.clone(), query);
-        let result = match first_result.await {
+        // A call the client cancels (`request.cancel`, or its connection closing) drops this
+        // future while the first result computes. Take the subscription out again then, or it
+        // stays registered and re-runs on every change for a query nobody holds (#1595).
+        let mut unregister = UnregisterOnDrop {
+            queries: self.subscribed_queries.clone(),
+            id: Some(id.clone()),
+        };
+        let first = first_result.await;
+        // Disarm only with the lock held: a call dropped while it waits for the lock gets no
+        // reply either, so nobody would ever hold its subscription.
+        let mut queries = self.subscribed_queries.lock().await;
+        unregister.id = None;
+        let result = match first {
             Ok(result) => result,
             Err(e) => {
-                self.subscribed_queries.lock().await.remove(&id);
+                queries.remove(&id);
                 return Err(e);
             }
         };
-        let mut queries = self.subscribed_queries.lock().await;
         Ok(match queries.get_mut(&id) {
             Some(q) if q.revision > 0 => (id, q.revision, q.last_result.clone()),
             Some(q) => {
@@ -75,15 +88,23 @@ impl PerspectiveInstance {
         })
     }
 
-    /// Publish one update on the `query-subscription-update` topic:
+    /// Publish one `query-subscription-update` event:
     /// `{ perspectiveUuid, uuid, subscriptionId, revision, ... }`
-    /// (`QuerySubscriptionUpdate`) plus the change (see
-    /// [`result_delta`]) plus `connectionId`, which the RPC socket uses to
-    /// deliver it to the subscription's own connection only.
-    pub(super) async fn send_delta_update(
+    /// (`QuerySubscriptionUpdate`) plus the change (see [`result_delta`]).
+    ///
+    /// It goes to the socket of the RPC connection that opened the query
+    /// (`Event::for_connection`), and there only if that socket's session is
+    /// in the audience and may query the perspective. The audience is the
+    /// subscriber (`SubscribedQuery::subscriber`, `None` for the main agent)
+    /// while it is one of the perspective's owners
+    /// ([`super::super::event_recipients`], read here): the query ran as the
+    /// subscriber, so a co-owner does not get its results, and an agent that
+    /// lost the perspective gets nothing more.
+    pub(crate) async fn send_delta_update(
         &self,
         subscription_id: String,
         connection_id: String,
+        subscriber: Option<String>,
         revision: u64,
         mut payload: Map<String, Value>,
     ) {
@@ -91,14 +112,19 @@ impl PerspectiveInstance {
         payload.insert("uuid".into(), json!(self.uuid));
         payload.insert("subscriptionId".into(), json!(subscription_id));
         payload.insert("revision".into(), json!(revision));
-        payload.insert("connectionId".into(), json!(connection_id));
-        get_global_pubsub()
-            .await
-            .publish(
-                &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
-                &Value::Object(payload).to_string(),
-            )
-            .await;
+        let main = || did_for_context(&AgentContext::main_agent()).ok();
+        let subscriber = subscriber.or_else(main);
+        let audience = super::super::event_recipients(&*self.persisted.lock().await)
+            .into_iter()
+            .filter(|owner| Some(owner) == subscriber.as_ref())
+            .collect();
+        let event = Event::new(
+            Topic::PerspectiveQuerySubscription,
+            Audience::Dids(audience),
+            Value::Object(payload),
+        )
+        .for_connection(connection_id);
+        get_global_pubsub().await.publish_event(event);
     }
 
     /// End one subscription that `connection_id` opened. `false` when there
@@ -224,13 +250,39 @@ fn rows_delta(old: &Value, new: &Value) -> Option<Map<String, Value>> {
     ]))
 }
 
+/// Removes subscription `id` from `queries` when dropped, unless `id` was taken
+/// first: what `open_subscription` leaves behind when its caller drops it before
+/// the first result is in.
+struct UnregisterOnDrop {
+    queries: std::sync::Arc<tokio::sync::Mutex<HashMap<String, SubscribedQuery>>>,
+    id: Option<String>,
+}
+
+impl Drop for UnregisterOnDrop {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else { return };
+        // Drop cannot await the lock: take it if free, else remove from a task.
+        if let Ok(mut queries) = self.queries.try_lock() {
+            queries.remove(&id);
+            return;
+        }
+        let queries = self.queries.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                queries.lock().await.remove(&id);
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::ChangedPredicates;
     use super::result_delta;
     use crate::agent::AgentContext;
+    use crate::events::Topic;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
-    use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+    use crate::pubsub::get_global_pubsub;
     use crate::types::{Link, LinkStatus};
     use serde_json::{json, Value};
     use std::time::Duration;
@@ -320,21 +372,23 @@ mod tests {
         .unwrap();
     }
 
-    /// Updates published for `id` after one subscription check.
+    /// Updates published for `id` after one subscription check: each payload,
+    /// with the event's routing key (`Event::connection`) as `connectionId`.
     async fn updates_after_check(p: &super::PerspectiveInstance, id: &str) -> Vec<Value> {
-        let mut rx = get_global_pubsub()
-            .await
-            .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-            .await;
+        let mut rx = get_global_pubsub().await.subscribe_events();
         p.check_subscribed_queries(ChangedPredicates::CheckAll)
             .await;
         let mut out = vec![];
         let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
-        while let Ok(Ok(msg)) = tokio::time::timeout_at(deadline, rx.recv()).await {
-            let v: Value = serde_json::from_str(&msg).unwrap();
-            if v["subscriptionId"] == id {
-                out.push(v);
+        while let Ok(Ok(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            if event.topic != Topic::PerspectiveQuerySubscription
+                || event.payload["subscriptionId"] != id
+            {
+                continue;
             }
+            let mut v = event.payload.clone();
+            v["connectionId"] = json!(event.connection);
+            out.push(v);
         }
         out
     }
@@ -344,7 +398,7 @@ mod tests {
         let (mut p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
         let query = r#"{"includeUnverified": true}"#.to_string();
         let (id, _, initial) = p
-            .model_subscribe_and_query("Todo".into(), query.clone(), "c".into())
+            .model_subscribe_and_query("Todo".into(), query.clone(), "c".into(), None)
             .await
             .unwrap();
         let initial: Value = serde_json::from_str(&initial).unwrap();
@@ -385,7 +439,10 @@ mod tests {
     async fn resync_state_matches_the_last_update() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (id, _, _) = p.subscribe_and_query(q.clone(), "c".into()).await.unwrap();
+        let (id, _, _) = p
+            .subscribe_and_query(q.clone(), "c".into(), None)
+            .await
+            .unwrap();
         let (revision, result) = p.subscription_state(&id, "c").await.unwrap();
         assert_eq!((revision, super::result_json(&result)), (0, json!([])));
 
@@ -407,7 +464,7 @@ mod tests {
     async fn a_write_while_the_first_result_is_computed_is_reported() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let query = super::SubscribedQuery::new(q.clone(), "c".into());
+        let query = super::SubscribedQuery::new(q.clone(), "c".into(), None);
         // The first result is read, then a write and its check land before
         // the subscribe completes.
         let stale = p.sparql_query(q).unwrap();
@@ -429,14 +486,17 @@ mod tests {
     async fn each_subscriber_gets_its_own_subscription_from_revision_zero() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (first, _, _) = p.subscribe_and_query(q.clone(), "c".into()).await.unwrap();
+        let (first, _, _) = p
+            .subscribe_and_query(q.clone(), "c".into(), None)
+            .await
+            .unwrap();
         add(&mut p, "test://a", "test://p", "test://b").await;
         assert_eq!(
             updates_after_check(&p, &first).await[0]["revision"],
             json!(1)
         );
 
-        let (second, _, _) = p.subscribe_and_query(q, "c".into()).await.unwrap();
+        let (second, _, _) = p.subscribe_and_query(q, "c".into(), None).await.unwrap();
         assert_ne!(first, second, "not shared");
         assert_eq!(p.subscription_state(&second, "c").await.unwrap().0, 0);
     }
@@ -445,10 +505,59 @@ mod tests {
     async fn a_prolog_live_query_is_refused_and_not_registered() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let err = p
-            .subscribe_and_query(r#"triple(X, _, "test://b")."#.into(), "c".into())
+            .subscribe_and_query(r#"triple(X, _, "test://b")."#.into(), "c".into(), None)
             .await
             .expect_err("a Prolog live query is refused");
         assert_eq!(err.to_string(), super::super::PROLOG_LIVE_QUERY_UNSUPPORTED);
+        assert!(p.subscribed_queries.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_subscribe_dropped_before_its_first_result_is_not_left_registered() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let query = super::SubscribedQuery::new(
+            "SELECT ?s ?o WHERE { ?s <test://p> ?o }".into(),
+            "c".into(),
+            None,
+        );
+        // The client cancels (or its connection closes) while the first
+        // result is still being computed: the call future is dropped (#1595).
+        let never = std::future::pending::<Result<String, deno_core::error::AnyError>>();
+        let opening = p.open_subscription(query, never);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), opening)
+                .await
+                .is_err(),
+            "still computing when dropped"
+        );
+        tokio::task::yield_now().await;
+        assert!(p.subscribed_queries.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_subscribe_dropped_while_it_stores_its_first_result_is_not_left_registered() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let query = super::SubscribedQuery::new(
+            "SELECT ?s ?o WHERE { ?s <test://p> ?o }".into(),
+            "c".into(),
+            None,
+        );
+        let (computed, first_result) = tokio::sync::oneshot::channel();
+        let mut opening =
+            Box::pin(p.open_subscription(query, async move { first_result.await.unwrap() }));
+        let short = std::time::Duration::from_millis(20);
+        assert!(tokio::time::timeout(short, opening.as_mut()).await.is_err());
+        // A check of the live queries holds the registry as the first result comes in,
+        // and the client cancels while the call waits for it.
+        let held = p.subscribed_queries.lock().await;
+        computed.send(Ok("[]".to_string())).unwrap();
+        assert!(
+            tokio::time::timeout(short, opening.as_mut()).await.is_err(),
+            "waiting for the registry"
+        );
+        drop(opening);
+        drop(held);
+        tokio::time::sleep(short).await;
         assert!(p.subscribed_queries.lock().await.is_empty());
     }
 }

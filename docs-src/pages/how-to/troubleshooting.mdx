@@ -57,7 +57,7 @@ The agent's keys live in memory only, so every restart locks the executor again;
 ad4m agent unlock --passphrase '<passphrase>'
 ```
 
-or in the Launcher, or with `client.agent.unlock(passphrase)` from the SDK (`core/src/agent/AgentClient.ts`). `ad4m agent status` shows `is_unlocked`. A waker subscription refused for this reason is re-attempted on its own once the node is unlocked; its log line ends with a hint that says so (`hintFor` in `core/src/perspectives/WakerSubscriptionManager.ts`).
+or in the Launcher, or with `client.agent.unlock(passphrase)` from the SDK (`core/src/agent/AgentClient.ts`). `ad4m agent status` shows `is_unlocked`. A waker subscription refused for this reason is re-attempted on its own once the executor is unlocked; its log line ends with a hint that says so (`hintFor` in `core/src/perspectives/WakerSubscriptionManager.ts`).
 
 ## A call is refused
 

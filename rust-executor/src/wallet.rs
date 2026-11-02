@@ -47,7 +47,7 @@ struct KeystoreEnvelope {
 const KEYSTORE_VERSION: u8 = 2;
 // Argon2id with the argon2 crate's defaults, OWASP's minimum: 19 MiB, 2 passes, 1 lane.
 // The legacy format paid exactly this cost on every save, without using the result, so
-// the fix changes no node's memory or CPU profile. The envelope records the parameters,
+// the fix changes no executor's memory or CPU profile. The envelope records the parameters,
 // so they can rise later without breaking existing files.
 const KDF_MEMORY_KIB: u32 = 19 * 1024;
 const KDF_PASSES: u32 = 2;

@@ -12,13 +12,33 @@ import { LinkQuery } from "@coasys/ad4m";
 import { v4 as uuidv4 } from 'uuid';
 import { NotificationInput, TriggeredNotification } from '@coasys/ad4m';
 import sinon from 'sinon';
+import { linkLanguagesAttached } from './test-context';
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
 
+/** Exchange two executors' Holochain agent infos until `met()` holds. An
+ *  exchange reaches only cells that exist (wait for `linkLanguagesAttached`
+ *  first), and peers learn of each other on their own schedule, so each
+ *  check exchanges again. */
+async function exchangeAgentInfosUntil(
+    [a, b]: [Ad4mClient, Ad4mClient],
+    met: () => Promise<boolean>,
+    label: string,
+) {
+    await pollUntil(async () => {
+        const [aInfos, bInfos] = await Promise.all([a.runtime.hcAgentInfos(), b.runtime.hcAgentInfos()]);
+        await Promise.all([a.runtime.hcAddAgentInfos(bInfos), b.runtime.hcAddAgentInfos(aInfos)]);
+        return met();
+    }, { timeoutMs: 120000, intervalMs: 500, label });
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
+/** The admin credentials of the multi-user executors (node 1 and node 2). */
+const ADMIN_CREDENTIAL = "multi-user-simple-admin";
+const NODE2_ADMIN_CREDENTIAL = "multi-user-simple-node2-admin";
 
 describe("Multi-User Simple integration tests", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
@@ -56,10 +76,12 @@ describe("Multi-User Simple integration tests", () => {
         localServicesProcess = localServices.process;
 
         // Start executor with local services
+        // Multi-user mode needs an admin credential: without one a caller with no token is
+        // the operator, which a multi-user executor must not have.
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            apiPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
+            apiPort, hcAdminPort, hcAppPort, false, ADMIN_CREDENTIAL, proxyUrl!, bootstrapUrl!);
 
-        adminAd4mClient = new Ad4mClient(baseUrl(apiPort))
+        adminAd4mClient = new Ad4mClient(baseUrl(apiPort), ADMIN_CREDENTIAL)
 
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")
@@ -476,7 +498,9 @@ describe("Multi-User Simple integration tests", () => {
                 expect.fail("User 2 should not be able to add links to User 1's perspective");
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                expect(errorMessage).to.include("Access denied");
+                // Not yours answers as missing does (404), so a user cannot learn which
+                // perspectives exist.
+                expect(errorMessage).to.include(`Perspective ${perspective1.uuid} not found`);
                 console.log("✅ Cross-user perspective access properly denied");
             }
         });
@@ -1997,12 +2021,12 @@ describe("Multi-User Simple integration tests", () => {
                 node2HcAdminPort,
                 node2HcAppPort,
                 false,
-                undefined,
+                NODE2_ADMIN_CREDENTIAL,
                 proxyUrl!,
                 bootstrapUrl!
             );
 
-            node2AdminClient = new Ad4mClient(baseUrl(node2GqlPort));
+            node2AdminClient = new Ad4mClient(baseUrl(node2GqlPort), NODE2_ADMIN_CREDENTIAL);
             await node2AdminClient.agent.generate("passphrase");
             await node2AdminClient.runtime.setMultiUserEnabled(true);
 
@@ -2093,130 +2117,24 @@ describe("Multi-User Simple integration tests", () => {
             console.log("Published neighbourhood:", neighbourhoodUrl);
 
             // All other users join the neighbourhood
-            console.log("Node 1 User 2 joining...");
-            await node1User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            await sleep(2000); // K2 space initialization after DNA install
-
-            console.log("Node 2 User 1 joining...");
-            await node2User1Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            await sleep(2000); // K2 space initialization after DNA install
-
-            console.log("Node 2 User 2 joining...");
-            await node2User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            await sleep(2000); // K2 space initialization after DNA install
-
-            // Re-exchange agent infos with retry to handle K2 space initialization
-            // delays (Holochain 0.7.0). After users join and link language installs,
-            // new DNA/K2 spaces get created. Repeated exchanges (not breaking on
-            // first success) push additional K2 agent info that the DHT needs to
-            // gossip peer keys across nodes. The inter-attempt sleep also serves as
-            // propagation time — there is no observable "K2 ready" state to poll for.
-            console.log("Re-exchanging agent infos for K2 space readiness...");
-            for (let attempt = 1; attempt <= 5; attempt++) {
-                try {
-                    console.log(`Agent info exchange attempt ${attempt}/5`);
-                    const node1AgentInfos = await adminAd4mClient!.runtime.hcAgentInfos();
-                    const node2AgentInfos = await node2AdminClient!.runtime.hcAgentInfos();
-                    await adminAd4mClient!.runtime.hcAddAgentInfos(node2AgentInfos);
-                    await node2AdminClient!.runtime.hcAddAgentInfos(node1AgentInfos);
-                    console.log(`✅ Agent info exchange attempt ${attempt} successful`);
-                } catch (error) {
-                    console.log(`⚠️ Agent info exchange attempt ${attempt} failed:`, error);
-                }
-                if (attempt < 5) {
-                    await sleep(3000);
-                }
+            const members: [Ad4mClient, string, string][] = [[node1User1Client!, perspective.uuid, node1User1Did]];
+            for (const [client, did] of [[node1User2Client!, node1User2Did], [node2User1Client!, node2User1Did], [node2User2Client!, node2User2Did]] as const) {
+                members.push([client, (await client.neighbourhood.joinFromUrl(neighbourhoodUrl)).uuid, did]);
             }
+            await linkLanguagesAttached(members.map(([client, uuid]) => [client, uuid]));
+            const proxies = await Promise.all(members.map(async ([client, uuid]) =>
+                (await client.perspective.byUUID(uuid))!.getNeighbourhoodProxy()));
 
-            // DHT gossip propagation: the K2 network needs time to distribute
-            // agent keys and owners lists across nodes after the exchanges above.
-            // No observable state exists to poll — otherAgents() IS that poll,
-            // and it needs this preceding propagation window.
-            console.log("Waiting for neighbourhood sync and owners list updates...");
-            await sleep(15000);
+            // Each user sees the other three
+            const others: string[][] = [];
+            await exchangeAgentInfosUntil([adminAd4mClient!, node2AdminClient!], async () => {
+                others.splice(0, others.length, ...await Promise.all(proxies.map(p => p.otherAgents())));
+                return members.every(([, , did], i) => members.every(([, , other]) => other === did || others[i].includes(other)));
+            }, "every user sees the other three");
 
-            // Get neighbourhood proxies for each user
-            const node1User1Perspectives = await node1User1Client!.perspective.all();
-            const node1User1Neighbourhood = node1User1Perspectives.find(p => p.sharedUrl === neighbourhoodUrl);
-            expect(node1User1Neighbourhood).to.not.be.undefined;
-            const node1User1Proxy = await node1User1Neighbourhood!.getNeighbourhoodProxy();
-
-            const node1User2Perspectives = await node1User2Client!.perspective.all();
-            const node1User2Neighbourhood = node1User2Perspectives.find(p => p.sharedUrl === neighbourhoodUrl);
-            expect(node1User2Neighbourhood).to.not.be.undefined;
-            const node1User2Proxy = await node1User2Neighbourhood!.getNeighbourhoodProxy();
-
-            const node2User1Perspectives = await node2User1Client!.perspective.all();
-            const node2User1Neighbourhood = node2User1Perspectives.find(p => p.sharedUrl === neighbourhoodUrl);
-            expect(node2User1Neighbourhood).to.not.be.undefined;
-            const node2User1Proxy = await node2User1Neighbourhood!.getNeighbourhoodProxy();
-
-            const node2User2Perspectives = await node2User2Client!.perspective.all();
-            const node2User2Neighbourhood = node2User2Perspectives.find(p => p.sharedUrl === neighbourhoodUrl);
-            expect(node2User2Neighbourhood).to.not.be.undefined;
-            const node2User2Proxy = await node2User2Neighbourhood!.getNeighbourhoodProxy();
-
-            // Check 'others()' for each user - should see all other users' DIDs
-            // Poll with retries to account for DHT gossip delays
-            console.log("\nChecking 'others()' for each user:");
-
-            // Helper function to poll until all expected DIDs are seen
-            const pollUntilAllSeen = async (proxy: any, expectedDids: string[], userLabel: string) => {
-                let others: string[] = [];
-                await pollUntil(async () => {
-                    others = await proxy.otherAgents();
-                    const allFound = expectedDids.every((did: string) => others.includes(did));
-                    if (!allFound) console.log(`${userLabel} waiting for DHT gossip... sees ${others.length}/${expectedDids.length} DIDs`);
-                    else console.log(`✅ ${userLabel} sees all expected users!`);
-                    return allFound;
-                }, { timeoutMs: 150000, intervalMs: 2000, label: `${userLabel} sees all expected DIDs` });
-                return others;
-            };
-
-            const node1User1Others = await pollUntilAllSeen(
-                node1User1Proxy!,
-                [node1User2Did, node2User1Did, node2User2Did],
-                "Node 1 User 1"
-            );
-            expect(node1User1Others).to.include(node1User2Did, "Node 1 User 1 should see Node 1 User 2");
-            expect(node1User1Others).to.include(node2User1Did, "Node 1 User 1 should see Node 2 User 1");
-            expect(node1User1Others).to.include(node2User2Did, "Node 1 User 1 should see Node 2 User 2");
-            expect(node1User1Others).to.have.lengthOf(3, "Node 1 User 1 should see exactly 3 other users");
-
-            const node1User2Others = await pollUntilAllSeen(
-                node1User2Proxy!,
-                [node1User1Did, node2User1Did, node2User2Did],
-                "Node 1 User 2"
-            );
-            console.log("Node 1 User 2 sees others:", node1User2Others);
-            expect(node1User2Others).to.include(node1User1Did, "Node 1 User 2 should see Node 1 User 1");
-            expect(node1User2Others).to.include(node2User1Did, "Node 1 User 2 should see Node 2 User 1");
-            expect(node1User2Others).to.include(node2User2Did, "Node 1 User 2 should see Node 2 User 2");
-            expect(node1User2Others).to.have.lengthOf(3, "Node 1 User 2 should see exactly 3 other users");
-
-            const node2User1Others = await pollUntilAllSeen(
-                node2User1Proxy!,
-                [node1User1Did, node1User2Did, node2User2Did],
-                "Node 2 User 1"
-            );
-            console.log("Node 2 User 1 sees others:", node2User1Others);
-            expect(node2User1Others).to.include(node1User1Did, "Node 2 User 1 should see Node 1 User 1");
-            expect(node2User1Others).to.include(node1User2Did, "Node 2 User 1 should see Node 1 User 2");
-            expect(node2User1Others).to.include(node2User2Did, "Node 2 User 1 should see Node 2 User 2");
-            expect(node2User1Others).to.have.lengthOf(3, "Node 2 User 1 should see exactly 3 other users");
-
-            const node2User2Others = await pollUntilAllSeen(
-                node2User2Proxy!,
-                [node1User1Did, node1User2Did, node2User1Did],
-                "Node 2 User 2"
-            );
-            console.log("Node 2 User 2 sees others:", node2User2Others);
-            expect(node2User2Others).to.include(node1User1Did, "Node 2 User 2 should see Node 1 User 1");
-            expect(node2User2Others).to.include(node1User2Did, "Node 2 User 2 should see Node 1 User 2");
-            expect(node2User2Others).to.include(node2User1Did, "Node 2 User 2 should see Node 2 User 1");
-            expect(node2User2Others).to.have.lengthOf(3, "Node 2 User 2 should see exactly 3 other users");
-
-            console.log("\n✅ All users correctly see all other users via others()");
+            members.forEach(([, , did], i) => {
+                expect([...others[i]].sort(), `others() of ${did}`).to.deep.equal(members.map(([, , d]) => d).filter(d => d !== did).sort());
+            });
         });
 
         it("should route p2p signals correctly between users across nodes", async function() {
@@ -2311,14 +2229,10 @@ describe("Multi-User Simple integration tests", () => {
 
             // Now test the reverse: Node 2 User 1 sends to Node 1 User 1
             const node1User1ReceivedSignals: any[] = [];
-            node1User1Proxy!.addSignalHandler((signal) => {
+            await node1User1Proxy!.addSignalHandler((signal) => {
                 console.log("Node 1 User 1 received signal from:", signal.author);
                 node1User1ReceivedSignals.push(signal);
             });
-
-            // Subscription-init delay: addSignalHandler() does not wait for the
-            // server to register the subscription, and signals are not redelivered.
-            await sleep(1500);
 
             console.log(`\nNode 2 User 1 (${node2User1Did.substring(0, 20)}...) sending signal to Node 1 User 1 (${node1User1Did.substring(0, 20)}...)`);
             await node2User1Proxy!.sendSignalU(node1User1Did, new PerspectiveUnsignedInput([
@@ -2528,31 +2442,23 @@ describe("Multi-User Simple integration tests", () => {
                 DIFF_SYNC_OFFICIAL, JSON.stringify({ uid: uuidv4(), name: "Mixed Call" }));
             const neighbourhoodUrl = await node1User1Client!.neighbourhood.publishFromPerspective(
                 perspective.uuid, linkLanguage.address, new Perspective([]));
-            await node1User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            await node2User1Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            await sleep(2000); // K2 space initialization after DNA install
-
-            // Same agent-info exchange as the tests above: no observable "K2 ready" state.
-            for (let attempt = 1; attempt <= 5; attempt++) {
-                try {
-                    const node1AgentInfos = await adminAd4mClient!.runtime.hcAgentInfos();
-                    const node2AgentInfos = await node2AdminClient!.runtime.hcAgentInfos();
-                    await adminAd4mClient!.runtime.hcAddAgentInfos(node2AgentInfos);
-                    await node2AdminClient!.runtime.hcAddAgentInfos(node1AgentInfos);
-                } catch (error) {
-                    console.log(`⚠️ Agent info exchange attempt ${attempt} failed:`, error);
-                }
-                if (attempt < 5) await sleep(3000);
+            const joined: [Ad4mClient, string][] = [[node1User1Client!, perspective.uuid]];
+            for (const client of [node1User2Client!, node2User1Client!]) {
+                joined.push([client, (await client.neighbourhood.joinFromUrl(neighbourhoodUrl)).uuid]);
             }
+            await linkLanguagesAttached(joined);
+            const [aliceProxy, bobProxy, carolProxy] = await Promise.all(joined.map(async ([client, uuid]) =>
+                (await client.perspective.byUUID(uuid))!.getNeighbourhoodProxy()));
 
-            const proxyFor = async (client: Ad4mClient) => {
-                const p = (await client.perspective.all()).find(p => p.sharedUrl === neighbourhoodUrl);
-                expect(p).to.not.be.undefined;
-                return await p!.getNeighbourhoodProxy();
-            };
-            const alice = await joinCall(await proxyFor(node1User1Client!), "mixed-room");
-            const bob = await joinCall(await proxyFor(node1User2Client!), "mixed-room");
-            const carol = await joinCall(await proxyFor(node2User1Client!), "mixed-room");
+            // The two executors know each other before anyone joins the call.
+            await exchangeAgentInfosUntil([adminAd4mClient!, node2AdminClient!], async () =>
+                (await aliceProxy.otherAgents()).includes(node2User1Did) &&
+                (await carolProxy.otherAgents()).includes(node1User1Did),
+                "node 1 and node 2 users see each other");
+
+            const alice = await joinCall(aliceProxy, "mixed-room");
+            const bob = await joinCall(bobProxy, "mixed-room");
+            const carol = await joinCall(carolProxy, "mixed-room");
             const sees = (call: { roster: Set<string> }, dids: string[]) => dids.every(d => call.roster.has(d));
             try {
                 await pollUntil(() =>
@@ -2560,7 +2466,7 @@ describe("Multi-User Simple integration tests", () => {
                     sees(bob, [node1User1Did, node2User1Did]) &&
                     sees(carol, [node1User1Did, node1User2Did]),
                 {
-                    timeoutMs: 180000, intervalMs: 2000,
+                    timeoutMs: 180000,
                     label: "every call roster lists the other two",
                 });
                 // Carol is on node 2, so `auto` must not use node 1's SFU.
@@ -3122,7 +3028,9 @@ describe("Multi-User Simple integration tests", () => {
                 await managedClient.runtime.grantNotification(notificationId);
                 expect.fail("Managed user should not be able to call grantNotification");
             } catch (error: any) {
-                expect(error.message).to.include("Permission denied");
+                // runtime.grantNotification is Guard::Operator: only the admin credential.
+                expect(error.message).to.include("403");
+                expect(error.message).to.include("Admin credential required");
                 console.log("✅ Managed user correctly blocked from calling grantNotification");
             }
         });
@@ -3259,32 +3167,11 @@ describe("Multi-User Simple integration tests", () => {
             expect(remoteNH).to.not.be.undefined;
             const remoteProxy = await remoteNH!.getNeighbourhoodProxy();
 
-            // Exchange agent infos and poll until the two main agents discover each other
-            console.log("Exchanging agent infos and waiting for main agents to sync...");
-            const pollUntilSeen = async (proxy: any, expectedDids: string[], label: string, timeoutMs = 100000) => {
-                let others: string[] = [];
-                await pollUntil(async () => {
-                    others = await proxy.otherAgents();
-                    return expectedDids.every((did: string) => others.includes(did));
-                }, { timeoutMs, intervalMs: 2000, label: `${label} sees expected agents` });
-                console.log(`${label} sees all expected agents`);
-                return others;
-            };
-
-            await pollUntil(async () => {
-                try {
-                    const localInfos = await adminAd4mClient!.runtime.hcAgentInfos();
-                    const remoteInfos = await node3MainClient!.runtime.hcAgentInfos();
-                    await adminAd4mClient!.runtime.hcAddAgentInfos(remoteInfos);
-                    await node3MainClient!.runtime.hcAddAgentInfos(localInfos);
-                } catch (error) {
-                    console.log("Agent info exchange failed:", error);
-                }
-                const localOthers = await localMainProxy!.otherAgents();
-                const remoteOthers = await remoteProxy!.otherAgents();
-                return localOthers.includes(remoteMainAgentDid) && remoteOthers.includes(localMainAgentDid);
-            }, { timeoutMs: 120000, intervalMs: 3000, label: "main agents see each other after info exchange" });
-            console.log("Main agents synced and see each other.");
+            await linkLanguagesAttached([[adminAd4mClient!, localMainNH!.uuid], [node3MainClient!, remoteNH!.uuid]]);
+            await exchangeAgentInfosUntil([adminAd4mClient!, node3MainClient!], async () =>
+                (await localMainProxy!.otherAgents()).includes(remoteMainAgentDid) &&
+                (await remoteProxy!.otherAgents()).includes(localMainAgentDid),
+                "main agents see each other");
 
             // Step 3: NOW create the managed user (simulating late signup in Flux)
             // This is the critical difference: the managed user does not exist yet
@@ -3301,29 +3188,14 @@ describe("Multi-User Simple integration tests", () => {
 
             // Step 4: Managed user joins the neighbourhood
             console.log("Managed user joining neighbourhood (late joiner)...");
-            await localManagedUserClient!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            const localManagedNH = await localManagedUserClient!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await linkLanguagesAttached([[localManagedUserClient!, localManagedNH.uuid]]);
+            const localManagedProxy = await (await localManagedUserClient!.perspective.byUUID(localManagedNH.uuid))!.getNeighbourhoodProxy();
 
-            // Get managed user's neighbourhood proxy
-            const localManagedPerspectives = await localManagedUserClient!.perspective.all();
-            const localManagedNH = localManagedPerspectives.find(p => p.sharedUrl === neighbourhoodUrl);
-            expect(localManagedNH).to.not.be.undefined;
-            const localManagedProxy = await localManagedNH!.getNeighbourhoodProxy();
-
-            // Re-exchange agent infos and poll until managed user is discovered
-            console.log("Re-exchanging agent infos and waiting for managed user DID gossip...");
-            await pollUntil(async () => {
-                try {
-                    const localInfos = await adminAd4mClient!.runtime.hcAgentInfos();
-                    const remoteInfos = await node3MainClient!.runtime.hcAgentInfos();
-                    await adminAd4mClient!.runtime.hcAddAgentInfos(remoteInfos);
-                    await node3MainClient!.runtime.hcAddAgentInfos(localInfos);
-                } catch (error) {
-                    console.log("Post-managed-join agent info exchange failed:", error);
-                }
-                const remoteOthers = await remoteProxy!.otherAgents();
-                const managedOthers = await localManagedProxy!.otherAgents();
-                return remoteOthers.includes(localManagedUserDid) && managedOthers.includes(remoteMainAgentDid);
-            }, { timeoutMs: 120000, intervalMs: 3000, label: "managed user and remote agent discover each other" });
+            await exchangeAgentInfosUntil([adminAd4mClient!, node3MainClient!], async () =>
+                (await remoteProxy!.otherAgents()).includes(localManagedUserDid) &&
+                (await localManagedProxy!.otherAgents()).includes(remoteMainAgentDid),
+                "managed user and remote agent discover each other");
 
             // Remote main agent should see the managed user
             const remoteOthers = await remoteProxy!.otherAgents();
@@ -3342,21 +3214,19 @@ describe("Multi-User Simple integration tests", () => {
             const remoteReceivedSignals: any[] = [];
             const localMainReceivedSignals: any[] = [];
 
-            localManagedProxy!.addSignalHandler((signal: any) => {
+            // addSignalHandler resolves once the executor has applied the subscription.
+            await localManagedProxy!.addSignalHandler((signal: any) => {
                 console.log("  [RECV] Managed user got signal from:", signal.author);
                 managedReceivedSignals.push(signal);
             });
-            remoteProxy!.addSignalHandler((signal: any) => {
+            await remoteProxy!.addSignalHandler((signal: any) => {
                 console.log("  [RECV] Remote main agent got signal from:", signal.author);
                 remoteReceivedSignals.push(signal);
             });
-            localMainProxy!.addSignalHandler((signal: any) => {
+            await localMainProxy!.addSignalHandler((signal: any) => {
                 console.log("  [RECV] Local main agent got signal from:", signal.author);
                 localMainReceivedSignals.push(signal);
             });
-            // Subscription-init delay: addSignalHandler() does not wait for the
-            // server to register the subscription, and signals are not redelivered.
-            await sleep(3000);
 
             // A miss must not throw here: the A-E summary below decides.
             const waitForSignal = async (signals: any[], label: string) => {

@@ -21,7 +21,7 @@ ad4m-executor run --enable-mcp true --mcp-port 3001
 It serves Streamable HTTP at `http://<host>:3001/mcp`. Where it binds follows from whether anything gates access:
 
 - **With an admin credential** (`AD4M_ADMIN_CREDENTIAL_FILE` or `AD4M_ADMIN_CREDENTIAL`), it binds `0.0.0.0`; callers authenticate with the credential, a capability JWT or a multi-user login.
-- **Without one**, it defaults to `127.0.0.1` and treats every caller on loopback as the node's owner.
+- **Without one**, it defaults to `127.0.0.1` and treats every caller on loopback as the executor's owner.
 - `MCP_HOST=<ip>` in the environment overrides the bind address either way (it is an IP literal, not a hostname). Credentials a caller presents are still checked. There is no `--mcp-host` flag.
 
 If the executor has TLS configured and an admin credential, MCP is also served over HTTPS on `--mcp-port + 1`, reachable from other machines. Once that HTTPS listener is up, the plain HTTP listener narrows to `127.0.0.1` unless `MCP_HOST` is set, so a remote client uses `https://<host>:<mcp-port + 1>/mcp`. Details, authentication modes and the per-class tool option are on [Run the MCP server](../how-to/mcp-server.mdx).
@@ -33,11 +33,11 @@ Any MCP client that speaks Streamable HTTP can connect. Two that are used with A
 - **OpenClaw** with the AD4M plugin, which bridges the executor's tools under an `ad4m_` prefix and adds waker tools of its own.
 - **Claude Code** with an `mcpServers` entry pointing at `http://localhost:3001/mcp`.
 
-Snippets for both are on [Connect an agent framework](../how-to/connect-an-agent-framework.mdx). When the executor has an admin credential, send it as `Authorization: Bearer <credential>` on every call, or authenticate once inside the session with `request_capability` and `generate_jwt` (local node) or `login_email` (multi-user host). `auth_status` reports only a session JWT: a session that holds the admin credential reads `authenticated: false` there while every other tool works.
+Snippets for both are on [Connect an agent framework](../how-to/connect-an-agent-framework.mdx). When the executor has an admin credential, send it as `Authorization: Bearer <credential>` on every call, or authenticate once inside the session with `request_capability` and `generate_jwt` (local executor) or `login_email` (multi-user host). `auth_status` reports only a session JWT: a session that holds the admin credential reads `authenticated: false` there while every other tool works.
 
 ## 3. The first session (executor)
 
-Call `get_documentation(topic="overview")` first; the executor compiles its own documentation into the binary, so what it tells you matches the node you are talking to.
+Call `get_documentation(topic="overview")` first; the executor compiles its own documentation into the binary, so what it tells you matches the executor you are talking to.
 
 **Find a perspective.** `list_perspectives()` returns your local perspectives with their `uuid`, `name`, `has_neighbourhood` and, when shared, the neighbourhood URL in `shared_url`. A perspective UUID is local to this executor; the neighbourhood URL is what two executors have in common.
 

@@ -13,7 +13,7 @@ const LOCKED_WALLET = "Cannot extractByTags from a ciphered wallet. You must unl
 /** How the executor's close reason (code 1013) and 503 begin when its wallet is locked. */
 const EXECUTOR_LOCKED = "Executor is locked";
 
-/** Whether `error` says the node's wallet is locked: a state of the node, so the token stays. */
+/** Whether `error` says the executor's wallet is locked: a state of the executor, so the token stays. */
 const saysLocked = (error: any): boolean => {
   const text = errorText(error);
   return text === LOCKED_WALLET || (typeof text === 'string' && text.startsWith(EXECUTOR_LOCKED));

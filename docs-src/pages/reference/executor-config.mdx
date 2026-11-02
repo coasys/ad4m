@@ -113,6 +113,10 @@ The Launcher keeps its own state in `~/.ad4m/launcher-state.json` (`LauncherStat
 When `run` refuses to start for lack of an admin credential, its error mentions `adminCredential` "in the config". The config file refuses that key; use `AD4M_ADMIN_CREDENTIAL_FILE`.
 </Callout>
 
+<Callout type="warning">
+Multi-user mode requires an admin credential. Without one, a caller with no token on a loopback listener is the operator and could act as every user: `run` refuses `multi_user_config.enabled: true` (and a data directory whose database already has multi-user on) when no admin credential is set, even with `--insecure-no-admin-credential`. `user.setMultiUserEnabled(true)` answers 403 for the same reason.
+</Callout>
+
 ## How it is built
 
 The file format and its validation are `rust-executor/src/config_file.rs`; the flags, variables and merge order are `cli/src/run_config.rs`; the executor's runtime struct and its defaults (`Ad4mConfig::prepare`) are `rust-executor/src/config.rs`.

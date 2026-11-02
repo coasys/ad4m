@@ -78,6 +78,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
   let ownStop: (() => Promise<void>) | null = null;
   let ad4m: Ad4mClient;
   let apiPort: number;
+  let adminCredential: string;
   let perspective: PerspectiveProxy;
 
   before(async () => {
@@ -85,10 +86,12 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     if (shared) {
       ad4m = shared.client;
       apiPort = shared.apiPort;
+      adminCredential = shared.adminCredential;
     } else {
       const agent = await startAgent("model-subscriptions");
       ad4m = agent.client;
       apiPort = agent.apiPort;
+      adminCredential = agent.adminCredential;
       ownStop = agent.stop;
     }
     perspective = await ad4m.perspective.add("model-subscriptions-test");
@@ -226,7 +229,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
         sockets.push(this);
       }
     }
-    const client = new Ad4mClient(baseUrl(apiPort), undefined, { webSocketImpl: TrackedWebSocket });
+    const client = new Ad4mClient(baseUrl(apiPort), adminCredential, { webSocketImpl: TrackedWebSocket });
     const builder = TestPost.query((await client.perspective.byUUID(perspective.uuid))!);
     try {
       const all: TestPost[][] = [];

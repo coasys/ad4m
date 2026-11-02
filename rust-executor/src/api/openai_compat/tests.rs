@@ -583,7 +583,7 @@ fn init_test_db() {
 fn test_router() -> Router {
     init_test_db();
     let state = AppState {
-        admin_credential: Some(TEST_ADMIN_TOKEN.to_string()),
+        admin_credential: Some(TEST_ADMIN_TOKEN.into()),
     };
     super::router::router().with_state(state)
 }
@@ -1172,7 +1172,7 @@ fn model_at(base_url: &str, api_key: &str) -> crate::types::ModelInput {
         name: "m".into(),
         api: Some(crate::types::ModelApiInput {
             base_url: base_url.into(),
-            api_key: api_key.into(),
+            api_key: Some(api_key.into()),
             model: "m".into(),
             api_type: "ANTHROPIC".into(),
             max_num_ctx: None,
@@ -1514,4 +1514,43 @@ fn usage_counts_cached_input_as_prompt_tokens() {
 fn usage_a_provider_did_not_report_reads_as_zero() {
     let usage = native_tools::usage_of(&ChatUsage::default());
     assert_eq!(usage.total_tokens, 0);
+}
+
+fn app_session() -> crate::agent::session::Session {
+    use crate::agent::session::{Principal, Session};
+    Session::for_test(Principal::Agent(crate::agent::AgentContext::main_agent()))
+}
+
+// A transcription delta used to go out without a check, so a revoked or expired token kept
+// receiving transcripts until the client sent a message.
+#[test]
+fn a_transcription_delta_goes_out_only_while_the_token_holds() {
+    use crate::agent::session::AuthError;
+    let session = app_session();
+    let frame = super::realtime::delta_frame(&session, "hello")
+        .unwrap()
+        .unwrap();
+    assert!(frame.contains("hello"), "{frame}");
+    assert_eq!(super::realtime::delta_frame(&session, "").unwrap(), None);
+
+    session.grant().unwrap().ended.cancel();
+    assert_eq!(
+        super::realtime::delta_frame(&session, "hello"),
+        Err(AuthError::Revoked)
+    );
+}
+
+// The SSE chat stream used to run to its end after a revocation.
+#[tokio::test]
+async fn a_chat_stream_ends_when_its_session_is_revoked() {
+    let session = app_session();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let forwarder = super::chat::spawn_until_over(&session, async move {
+        let _tx = tx;
+        std::future::pending::<()>().await
+    });
+    session.grant().unwrap().ended.cancel();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
+    assert_eq!(ended, Ok(None), "the stream's sender is dropped");
+    forwarder.await.unwrap();
 }

@@ -49,9 +49,9 @@ Eight tools need no authentication: `get_documentation`, `auth_status`, `request
 
 | Mode | How |
 |---|---|
-| **Admin credential** (the node's operator) | Send it as `Authorization: Bearer <credential>` on each call. The first call with a valid header stores it in the session. |
-| **Capability token** (a local, single-user node) | `request_capability(app_name, app_desc)` returns `request_id` and, when the caller may permit (no admin credential set, or the session already holds admin rights), the `code`; `generate_jwt(request_id, code)` stores the JWT in the session. On a node with an admin credential and no such session, the request is created but the code must come from the operator, who approves the request in the Launcher dialog. |
-| **Multi-user account** (a hosted node) | `signup(email, password)` once, then `login_email(email, password)`; `verify_email_code(email, code, verification_type)` only if the host enforces email verification. |
+| **Admin credential** (the executor's operator) | Send it as `Authorization: Bearer <credential>` on each call. The first call with a valid header stores it in the session. |
+| **Capability token** (a local, single-user executor) | `request_capability(app_name, app_desc)` returns `request_id` and, when the caller may permit (no admin credential set, or the session already holds admin rights), the `code`; `generate_jwt(request_id, code)` stores the JWT in the session. On an executor with an admin credential and no such session, the request is created but the code must come from the operator, who approves the request in the Launcher dialog. |
+| **Multi-user account** (a hosted executor) | `signup(email, password)` once, then `login_email(email, password)`; `verify_email_code(email, code, verification_type)` only if the host enforces email verification. |
 
 `auth_status()` reports only a session JWT, plus `executor_locked`. A session that holds the admin credential reads `authenticated: false` there while every other tool works; that is not a wrong credential. Both JWT paths need an unlocked executor: after a restart, `login_email` and `generate_jwt` fail with `Executor is locked: ...` until the operator runs `ad4m agent unlock` ([Troubleshooting](./troubleshooting.mdx#the-executor-is-locked)).
 

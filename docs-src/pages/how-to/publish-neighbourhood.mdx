@@ -12,21 +12,21 @@ You have a perspective and want other agents to see and write the same links. Th
 ## 1. Pick a link language template
 
 ```typescript
+// knownLinkLanguageTemplates() returns LanguageMeta[], each with address, name,
+// description, and possibleTemplateParams — no separate meta call needed.
 const templates = await ad4m.runtime.knownLinkLanguageTemplates();
-// ["Qm…", …] — the bootstrap seed's known link languages plus any you added, sorted by address
 
-// Pick by meta, not by position: the Holochain template declares "uid".
-const metas = await Promise.all(templates.map((address) => ad4m.languages.meta(address)));
-const template = metas.find((m) => m.possibleTemplateParams?.includes("uid"))!.address;
+// Pick by possibleTemplateParams, not by position: the Holochain template declares "uid".
+const template = templates.find((m) => m.possibleTemplateParams?.includes("uid"))!;
 ```
 
-`knownLinkLanguageTemplates()` returns addresses, sorted and deduplicated (`core/src/runtime/RuntimeClient.ts`; `rust-executor/src/runtime_service/mod.rs`). `languages.meta(address)` returns the Language's `LanguageMeta`, including `name` and `possibleTemplateParams` (`core/src/language/LanguageClient.ts`). The mainnet seed lists two templates (`cli/seed_proto.json`): perspective-diff-sync (Holochain, parameters `uid`, `name`, `description`) and the server link language (`SERVER_URL`, `UID`). A seed generated from the local bootstrap languages (`bootstrap-languages/local/generate-seed.mjs`, for `--run-holochain false`, Docker and tests) lists its one link language.
+`knownLinkLanguageTemplates()` returns `LanguageMeta[]`, sorted and deduplicated (`core/src/runtime/RuntimeClient.ts`; `rust-executor/src/runtime_service/mod.rs`). Each entry has `address`, `name`, `description` and `possibleTemplateParams`. The mainnet seed lists two templates (`cli/seed_proto.json`): perspective-diff-sync (Holochain, parameters `uid`, `name`, `description`) and the server link language (`SERVER_URL`, `UID`). A seed generated from the local bootstrap languages (`bootstrap-languages/local/generate-seed.mjs`, for `--run-holochain false`, Docker and tests) lists its one link language.
 
 ## 2. Create this neighbourhood's own instance
 
 ```typescript
 const linkLanguage = await ad4m.languages.applyTemplateAndPublish(
-  template,
+  template.address,
   JSON.stringify({ uid: crypto.randomUUID(), name: "Team space sync" }),
 );
 linkLanguage.address;   // the new Language's address

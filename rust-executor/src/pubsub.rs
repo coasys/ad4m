@@ -1,186 +1,35 @@
-use crate::types::domain::GetFilter;
-use crate::types::domain::GetValue;
-use futures::Stream;
-use futures::StreamExt;
-use log::error;
-use serde::de::DeserializeOwned;
-use std::collections::HashMap;
+use crate::events::Event;
 use std::collections::HashSet;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use tokio::sync::broadcast;
-use tokio::sync::Mutex;
-use tokio_stream::wrappers::BroadcastStream;
-
-type Topic = String;
-type Message = String;
 
 pub struct PubSub {
-    subscribers: Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
-    subscribers_sync: std::sync::Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
+    /// Typed events, every topic on one channel: each socket decides per event.
+    events: broadcast::Sender<Arc<Event>>,
 }
 
 impl PubSub {
     pub fn new() -> Self {
         Self {
-            subscribers: Mutex::new(HashMap::new()),
-            subscribers_sync: std::sync::Mutex::new(HashMap::new()),
+            events: broadcast::channel(10000).0,
         }
     }
 
-    pub async fn subscribe(&self, topic: &Topic) -> broadcast::Receiver<Message> {
-        let mut subscribers = self.subscribers.lock().await;
-        let mut subscribers_sync = self.subscribers_sync.lock().unwrap();
-        let sender = subscribers
-            .entry(topic.to_owned())
-            .or_insert_with(|| broadcast::channel(10000).0);
-        // Keep sync map in sync
-        subscribers_sync
-            .entry(topic.to_owned())
-            .or_insert_with(|| sender.clone());
-        sender.subscribe()
+    /// Sends `event` to every event stream. Takes no lock and needs no runtime, so sync
+    /// and async publishers call the same function.
+    pub fn publish_event(&self, event: Event) {
+        let _ = self.events.send(Arc::new(event)); // Ignore if no receivers
     }
 
-    pub async fn publish(&self, topic: &Topic, message: &Message) {
-        let subscribers = self.subscribers.lock().await;
-        if let Some(sender) = subscribers.get(topic) {
-            let _ = sender.send(message.clone()); // Ignore if no receivers
-        }
+    /// Every typed event published from now on.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<Arc<Event>> {
+        self.events.subscribe()
     }
-
-    /// Synchronous publish that doesn't require tokio runtime.
-    /// Uses a separate std::sync::Mutex to avoid blocking the async runtime.
-    pub fn publish_sync(&self, topic: &Topic, message: &Message) {
-        let subscribers = self.subscribers_sync.lock().unwrap();
-        if let Some(sender) = subscribers.get(topic) {
-            let _ = sender.send(message.clone());
-        }
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) async fn subscribe_and_process<
-    T: DeserializeOwned + Send + 'static + std::fmt::Debug + GetValue + GetFilter,
->(
-    pubsub: Arc<PubSub>,
-    topic: Topic,
-    filter: Option<String>,
-) -> Pin<Box<dyn Stream<Item = Result<T::Value, Box<dyn std::error::Error + Send>>> + Send>> {
-    let receiver = pubsub.subscribe(&topic).await;
-    let receiver_stream = BroadcastStream::new(receiver);
-
-    let mapped_stream = receiver_stream.filter_map(move |result| {
-        match result {
-            Ok(msg) => match serde_json::from_str::<T>(&msg) {
-                Ok(data) => {
-                    if let Some(filter) = &filter {
-                        let data_filter = data
-                            .get_filter()
-                            .expect("Could not get filter on T where we expected to filter");
-                        if &data_filter != filter {
-                            log::debug!(
-                                "PubSub filter mismatch on topic {}: data_filter and subscription_filter differ",
-                                topic
-                            );
-                            return futures::future::ready(None);
-                        }
-                    }
-                    let value = data.get_value();
-                    futures::future::ready(Some(Ok(value)))
-                }
-                Err(e) => {
-                    let type_name = std::any::type_name::<T>();
-                    error!("Failed to deserialize pubsub message: {:?}", e);
-                    error!("Type: {}", type_name);
-                    error!("Message: {:?}", msg);
-
-                    let field_error: Box<dyn std::error::Error + Send> = Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Failed to deserialize: {}", e),
-                    ));
-                    futures::future::ready(Some(Err(field_error)))
-                }
-            },
-            Err(e) => {
-                error!("Broadcast stream error: {:?}", e);
-                // Skip lagged messages
-                futures::future::ready(None)
-            }
-        }
-    });
-
-    Box::pin(mapped_stream)
 }
 
 lazy_static::lazy_static! {
     static ref GLOBAL_PUB_SUB: Arc<PubSub> = Arc::new(PubSub::new());
-
-    pub static ref AGENT_STATUS_CHANGED_TOPIC: String = "agent-status-changed-topic".to_owned();
-    pub static ref APPS_CHANGED: String = "apps-changed".to_owned();
-    pub static ref AGENT_UPDATED_TOPIC: String = "agent-updated-topic".to_owned();
-    pub static ref EXCEPTION_OCCURRED_TOPIC: String = "exception-occurred-topic".to_owned();
-    pub static ref NEIGHBOURHOOD_SIGNAL_TOPIC: String = "neighbourhood-signal-received-topic".to_owned();
-    pub static ref PERSPECTIVE_ADDED_TOPIC: String = "perspective-added-topic".to_owned();
-    pub static ref PERSPECTIVE_LINK_ADDED_TOPIC: String = "perspective-link-added-topic".to_owned();
-    pub static ref PERSPECTIVE_LINK_REMOVED_TOPIC: String = "perspective-link-removed-topic".to_owned();
-    pub static ref PERSPECTIVE_LINK_UPDATED_TOPIC: String = "perspective-link-updated-topic".to_owned();
-    pub static ref PERSPECTIVE_REMOVED_TOPIC: String = "perspective-removed-topic".to_owned();
-    pub static ref PERSPECTIVE_UPDATED_TOPIC: String = "perspective-updated-topic".to_owned();
-    pub static ref PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC: String = "perspective-sync-state-change-topic".to_owned();
-    pub static ref RUNTIME_MESSAGED_RECEIVED_TOPIC: String = "runtime-messaged-received-topic".to_owned();
-    pub static ref RUNTIME_NOTIFICATION_TRIGGERED_TOPIC: String = "runtime-notification-triggered-topic".to_owned();
-    pub static ref AI_TRANSCRIPTION_TEXT_TOPIC: String = "ai-transcription-text-topic".to_owned();
-    pub static ref AI_MODEL_LOADING_STATUS: String = "ai-model-loading-status".to_owned();
-    pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
-    pub static ref HOSTING_USER_INFO_CHANGED_TOPIC: String = "hosting-user-info-changed-topic".to_owned();
-    pub static ref AUTO_PROCESSOR_EVENT_TOPIC: String = "auto-processor-event-topic".to_owned();
-    /// Neighbourhood observation of an auto-processor pass: fires when THIS
-    /// executor claims, finishes, or abandons a batch. Payload is a
-    /// perspective-scoped `AutoProcessorNeighbourhoodState` — no batch
-    /// payload, no LLM I/O — so anyone with perspective read access can see
-    /// "someone is auto-processing" without seeing WHAT they are processing.
-    /// Cross-executor sync (e.g. a peer's claim reaching us via Holochain)
-    /// is not covered here; consumers who need cross-peer visibility can
-    /// subscribe to `link-added` and filter for `has_claim`.
-    pub static ref AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC: String =
-        "auto-processor-neighbourhood-state-topic".to_owned();
-    /// SFU pushes a fresh SDP offer to one specific participant when
-    /// the relay's set of outbound tracks changes (a new peer joins
-    /// the same room).  Payload is a JSON [`crate::sfu::types::SfuCallRenegotiationOffer`].
-    pub static ref SFU_CALL_RENEGOTIATION_OFFER_TOPIC: String = "sfu-call-renegotiation-offer-topic".to_owned();
-    /// SFU emits a fresh SDP offer for a *pipe-bound* renegotiation
-    /// (the local end of an inter-SFU pipe transport gained outbound
-    /// tracks and needs the remote SFU to renegotiate).  Payload is a
-    /// JSON [`crate::sfu::types::SfuPipeRenegotiationOffer`].  Consumed
-    /// only by the SFU service's internal cascade router — never fans
-    /// out to clients.
-    pub static ref SFU_PIPE_RENEGOTIATION_OFFER_TOPIC: String = "sfu-pipe-renegotiation-offer-topic".to_owned();
-    /// Counterpart of [`SFU_PIPE_RENEGOTIATION_OFFER_TOPIC`] — the SFU
-    /// event loop publishes an SDP answer for a pipe-renegotiation
-    /// offer it just received and applied.  The cascade router relays
-    /// it back over gossip.  Payload is a JSON
-    /// [`crate::sfu::types::SfuPipeRenegotiationAnswer`].
-    pub static ref SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC: String = "sfu-pipe-renegotiation-answer-topic".to_owned();
-    /// Cascade rebalancer tells a specific participant to leave this
-    /// node and rejoin on a less-loaded peer.  Payload is a JSON
-    /// [`crate::sfu::types::SfuMigrateEvent`].  Filtered by `targetDid`
-    /// in the events_ws fanout — only the named participant receives it.
-    pub static ref SFU_MIGRATE_TOPIC: String = "sfu-migrate-topic".to_owned();
-    /// SFU data channel relay.  When a participant sends data on a
-    /// WebRTC data channel, the SFU publishes it here so events_ws can
-    /// fan it out to subscribers.  Payload carries `senderDid`,
-    /// `channelLabel`, `binary`, and `data` (base64 for binary, UTF-8
-    /// text otherwise).  Filtered by room membership in the events_ws
-    /// fanout.
-    pub static ref SFU_DATA_CHANNEL_TOPIC: String = "sfu-data-channel-topic".to_owned();
-    /// A call room's participants changed (`SfuRoomRoster`). Delivered to
-    /// the participants it lists.
-    pub static ref SFU_ROOM_ROSTER_TOPIC: String = "sfu-room-roster-topic".to_owned();
-    /// A flow instance's derived state moved on one agent's replica
-    /// (`FlowStateChangedEvent`). Per-agent bookkeeping (#1424), so the event
-    /// stream delivers it to that agent's sockets only.
-    pub static ref FLOW_STATE_CHANGED_TOPIC: String = "flow-state-changed-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.
@@ -202,4 +51,29 @@ pub async fn get_global_pubsub() -> Arc<PubSub> {
 
 pub fn get_global_pubsub_sync() -> Arc<PubSub> {
     GLOBAL_PUB_SUB.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::{Audience, Topic};
+
+    #[test]
+    fn a_typed_event_reaches_every_subscriber_once_without_a_runtime() {
+        let pubsub = PubSub::new();
+        let mut first = pubsub.subscribe_events();
+        let mut second = pubsub.subscribe_events();
+        let payload = serde_json::json!({ "model": "m" });
+        pubsub.publish_event(Event::new(
+            Topic::AiModelLoadingStatus,
+            Audience::Everyone,
+            &payload,
+        ));
+        for rx in [&mut first, &mut second] {
+            let event = rx.try_recv().expect("the event arrives");
+            assert_eq!(event.topic, Topic::AiModelLoadingStatus);
+            assert_eq!(event.payload, payload);
+            assert!(rx.try_recv().is_err(), "exactly once");
+        }
+    }
 }
