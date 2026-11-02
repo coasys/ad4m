@@ -18,7 +18,10 @@ and can be listed at runtime:
 
 ```js
 const templates = await ad4m.runtime.knownLinkLanguageTemplates();
-const templateAddress = templates[0];
+// Each entry is a LanguageMeta. Pick the Perspective Diff Sync template, the one
+// that takes a `uid` parameter; the list is sorted, so its position is not fixed.
+const template = templates.find((m) => m.possibleTemplateParams?.includes("uid"));
+const templateAddress = template.address;
 ```
 
 #### Creating our unique LinkLanguage clone through templating
