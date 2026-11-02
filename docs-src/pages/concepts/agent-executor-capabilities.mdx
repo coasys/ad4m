@@ -22,7 +22,7 @@ me.directMessageLanguage;   // address of the language that delivers DMs to this
 
 `agent.me()` returns an `Agent`. The public `perspective` is the agent's profile: a small set of links (name, bio, picture) that the bundled agent language serves to anyone who resolves the DID with `agent.byDID(did)`. `agent.updatePublicPerspective(perspective)` replaces it. A new agent is created with `agent.generate(passphrase)` and unlocked after every executor start with `agent.unlock(passphrase)`; while locked, the executor cannot sign.
 
-Signing is implicit: `expression.create(content, languageAddress)` returns the address of a new expression signed by you; `runtime.friendSendMessage(did, perspective)` delivers a signed perspective to another agent through their direct-message language.
+Signing is implicit: `expression.create(content, languageAddress)` returns the address of a new expression signed by you. Direct messages between agents are not implemented yet: `runtime.friendSendMessage(did, perspective)` is refused as not implemented and `runtime.messageInbox()` always returns an empty list (`send_friend_message` and `get_inbox` in `rust-executor/src/api/runtime_ws.rs`). Agents talk through a shared neighbourhood instead.
 
 ## The executor box
 
