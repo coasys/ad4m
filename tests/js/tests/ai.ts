@@ -318,6 +318,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(status).to.have.property('model');
                 expect(status).to.have.property('status');
                 // The default embedding model loads on the first embed, not at start.
+                expect(status.status).to.equal("Not loaded");
                 expect(status.loaded).to.equal(false);
             })
 
