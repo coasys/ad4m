@@ -29,7 +29,7 @@ or `AD4M_ENABLE_MCP=true` and `AD4M_MCP_PORT`, or `"mcp_enabled": true` and `"mc
 | yes | unset | `0.0.0.0` | `0.0.0.0:<mcp-port + 1>` when the executor has TLS; the plain listener then narrows to `127.0.0.1` |
 | either | `<ip>` | that IP, as given | as above, without the narrowing |
 
-`MCP_HOST` is an environment variable, not a flag, and takes an IP literal (`localhost` does not parse). Setting it beyond loopback on a node without a credential logs a warning: every caller that can reach the address is then authenticated. Credentials a caller presents are checked in every mode.
+`MCP_HOST` is an environment variable, not a flag, and takes an IP literal (`localhost` does not parse). Setting it beyond loopback on an executor without a credential logs a warning: the listener is then a network one, so callers without a token are anonymous on it, local ones included, and must log in or present a capability token. Credentials a caller presents are checked in every mode.
 
 The TLS listener uses the certificate and key the RPC port uses (`--tls-cert-file`, `--tls-key-file`); there is no separate MCP certificate. It is not started without an admin credential, when `--mcp-port + 1` is the RPC TLS port, or when that port is taken; each case logs why.
 
