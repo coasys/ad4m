@@ -53,7 +53,7 @@ Eight tools need no authentication: `get_documentation`, `auth_status`, `request
 | **Capability token** (a local, single-user executor) | `request_capability(app_name, app_desc)` returns `request_id` and, when the caller may permit (no admin credential set, or the session already holds admin rights), the `code`; `generate_jwt(request_id, code)` stores the JWT in the session. On an executor with an admin credential and no such session, the request is created but the code must come from the operator, who approves the request in the Launcher dialog. |
 | **Multi-user account** (a hosted executor) | `signup(email, password)` once, then `login_email(email, password)`; `verify_email_code(email, code, verification_type)` only if the host enforces email verification. |
 
-`auth_status()` reports only a session JWT, plus `executor_locked`. A session that holds the admin credential reads `authenticated: false` there while every other tool works; that is not a wrong credential. Both JWT paths need an unlocked executor: after a restart, `login_email` and `generate_jwt` fail with `Executor is locked: ...` until the operator runs `ad4m agent unlock` ([Troubleshooting](./troubleshooting.mdx#the-executor-is-locked)).
+`auth_status()` reports `authenticated`, `principal` (`operator` for the admin credential, `app` or `user` for a token, `anonymous` without one), the session's `did` and capabilities, and `executor_locked` (`auth_status_json` in `rust-executor/src/mcp/tools/auth.rs`). Both JWT paths need an unlocked executor: after a restart, `login_email` and `generate_jwt` fail with `Executor is locked: ...` until the operator runs `ad4m agent unlock` ([Troubleshooting](./troubleshooting.mdx#the-executor-is-locked)).
 
 ## 3. Connect a client
 

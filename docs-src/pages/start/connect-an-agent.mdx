@@ -33,7 +33,7 @@ Any MCP client that speaks Streamable HTTP can connect. Two that are used with A
 - **OpenClaw** with the AD4M plugin, which bridges the executor's tools under an `ad4m_` prefix and adds waker tools of its own.
 - **Claude Code** with an `mcpServers` entry pointing at `http://localhost:3001/mcp`.
 
-Snippets for both are on [Connect an agent framework](../how-to/connect-an-agent-framework.mdx). When the executor has an admin credential, send it as `Authorization: Bearer <credential>` on every call, or authenticate once inside the session with `request_capability` and `generate_jwt` (local executor) or `login_email` (multi-user host). `auth_status` reports only a session JWT: a session that holds the admin credential reads `authenticated: false` there while every other tool works.
+Snippets for both are on [Connect an agent framework](../how-to/connect-an-agent-framework.mdx). When the executor has an admin credential, send it as `Authorization: Bearer <credential>` on every call, or authenticate once inside the session with `request_capability` and `generate_jwt` (local executor) or `login_email` (multi-user host). `auth_status` reports who the session is: `principal` is `operator` for the admin credential, `app` or `user` for a token, `anonymous` without one.
 
 ## 3. The first session (executor)
 

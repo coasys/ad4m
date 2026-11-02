@@ -62,7 +62,7 @@ Claude Code reads an `mcpServers` map (in `.mcp.json`). Give it the endpoint and
 Without a header on a node that has no admin credential, every call from loopback is accepted as the node's owner. Without a header on a node that has one, authenticate inside the session: `request_capability` then `generate_jwt`, or `login_email` on a hosted node.
 
 <Callout type="info">
-The executor adopts a valid header into the session on the first call. `auth_status` reports only a JWT, so with the admin credential in the header it answers `authenticated: false` while every other call succeeds.
+The executor adopts a valid header into the session on the first call. With the admin credential in the header, `auth_status` answers `authenticated: true` and `principal: "operator"`, also on later calls without the header.
 </Callout>
 
 ## Any other MCP client
