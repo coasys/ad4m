@@ -67,6 +67,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 ad4m-ldk = { path = "../ad4m/ad4m-ldk/rust" }   # path to your AD4M checkout
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"   # ad4m_language! exports async fns
 serde_json = "1.0"
 serde-wasm-bindgen = "0.6"
 ```
