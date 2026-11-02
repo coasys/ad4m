@@ -2262,7 +2262,10 @@ export class Ad4mModel {
    *     be used to create an incoming link from the parent to the new instance.
    *   - `batchId` — an existing batch id; when provided the link write and
    *     `save()` are added to the batch instead of committed immediately.
-   * @returns The saved model instance
+   * @returns The saved model instance. Without a `batchId` it is read back
+   *   after the commit; if that read fails, the instance is still returned
+   *   with the values it wrote and the read error goes to `console.warn`.
+   * @throws If a write or the commit fails (the batch it opened is discarded)
    *
    * @example
    * ```typescript
@@ -2292,36 +2295,39 @@ export class Ad4mModel {
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
 
-    // When a parent scope is provided without a caller-supplied batch, open a
-    // new batch ourselves so that the instance creation and the parent→child
-    // link are committed atomically.  If any step throws, the batch is
-    // discarded (nothing is written, and it does not stay open on the
-    // executor) and the original error is rethrown.
-    if (options?.parent && !options?.batchId) {
-      const parent = requireSingleParent(options.parent);
-      const batchId = await perspective.createBatch();
-      try {
-        await instance.save(batchId);
-        await linkToParent(perspective, parent, this, instance.id, batchId);
-        await perspective.commitBatch(batchId);
-      } catch (e) {
-        // A failed discard must not hide the original error.
-        await perspective.discardBatch(batchId).catch(() => {});
-        throw e;
+    // In a caller's batch, the caller commits.
+    if (options?.batchId) {
+      await instance.save(options.batchId);
+      if (options.parent) {
+        await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, options.batchId);
       }
-      // Hydrate the instance now that the batch has been committed (mirrors the
-      // behaviour of save() when it manages its own batch).
-      await instance.refresh();
       return instance;
     }
 
-    await instance.save(options?.batchId);
-
-    // Create parent → child link if a parent scope was provided
-    if (options?.parent) {
-      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, options?.batchId);
+    // Otherwise open a batch so that the instance and the parent→child link
+    // are committed together. If any step throws, the batch is discarded
+    // (nothing is written, and it does not stay open on the executor) and the
+    // original error is rethrown.
+    const parent = options?.parent ? requireSingleParent(options.parent) : undefined;
+    const batchId = await perspective.createBatch();
+    try {
+      await instance.save(batchId);
+      if (parent) await linkToParent(perspective, parent, this, instance.id, batchId);
+      await perspective.commitBatch(batchId);
+    } catch (e) {
+      // A failed discard must not hide the original error.
+      await perspective.discardBatch(batchId).catch(() => {});
+      throw e;
     }
 
+    // The record now exists. Rejecting would leave the caller no instance, and
+    // a retry would create a second record: if the re-read fails, return the
+    // instance with the values it wrote (its snapshot is already taken).
+    try {
+      await instance.refresh();
+    } catch (e) {
+      console.warn(`${this.name}.create(): ${instance.id} was created, but reading it back failed`, e);
+    }
     return instance;
   }
 

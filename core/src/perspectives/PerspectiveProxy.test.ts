@@ -486,6 +486,15 @@ describe('PerspectiveProxy.getSingleTarget', () => {
     expect(client.queryLinks.mock.calls[0][1].target).toBeUndefined();
     expect(query.target).toBe('literal://old');
   });
+
+  it('passes an explicit limit of 0 on to the executor', async () => {
+    // The executor answers limit 0 with no links, as Perspective.get does.
+    const client = { queryLinks: jest.fn().mockResolvedValue([]) } as any;
+    const query = new LinkQuery({ source: 's://1', predicate: 'p://name', limit: 0 });
+
+    await expect(createProxy(client).getSingleTarget(query)).resolves.toBeNull();
+    expect(client.queryLinks.mock.calls[0][1].limit).toBe(0);
+  });
 });
 
 // A read right after an awaited write must not be served from the query

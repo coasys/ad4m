@@ -4083,6 +4083,69 @@ describe("save() create path and its own batch", () => {
     expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
     expect(perspective.add).not.toHaveBeenCalled();
   });
+
+  // Once the commit succeeded the record exists: a create() that rejected
+  // would leave the caller no instance, and a retry would make a second record.
+  describe("create() when the re-read after a committed write fails", () => {
+    @Model({ name: "ReadBackCard" })
+    class ReadBackCard extends Ad4mModel {
+      @Flag({ through: "rb://kind", value: "rb://card" })
+      kind: string = "";
+      @Property({ through: "rb://title" })
+      title: string = "";
+    }
+
+    const reread = new Error("read failed");
+    const makePerspective = () => ({
+      uuid: "p",
+      createBatch: jest.fn(async () => "batch-1"),
+      commitBatch: jest.fn(async () => ({})),
+      discardBatch: jest.fn(async () => true),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "ReadBackCard"),
+      createSubject: jest.fn(async () => {}),
+      executeAction: jest.fn(async () => {}),
+      setSingleTarget: jest.fn(async () => {}),
+      add: jest.fn(async () => {}),
+      modelQuery: jest.fn(async () => { throw reread; }),
+    }) as any;
+
+    let warn: jest.SpyInstance;
+    beforeEach(() => { warn = jest.spyOn(console, "warn").mockImplementation(() => {}); });
+    afterEach(() => warn.mockRestore());
+
+    it("returns the instance it wrote and warns with the read error", async () => {
+      const perspective = makePerspective();
+
+      const card = await ReadBackCard.create(perspective, { title: "written" });
+
+      expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+      expect(perspective.modelQuery).toHaveBeenCalled();
+      expect(card.id).toBeTruthy();
+      expect(card.title).toBe("written");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(card.id), reread);
+    });
+
+    it("returns the instance with a parent too", async () => {
+      const perspective = makePerspective();
+
+      const card = await ReadBackCard.create(
+        perspective, { title: "written" }, { parent: { id: "rb://parent", predicate: "rb://child" } },
+      );
+
+      expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+      expect(card.title).toBe("written");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(card.id), reread);
+    });
+
+    it("still rejects when the commit fails, and does not read", async () => {
+      const perspective = makePerspective();
+      const failure = new Error("commit failed");
+      perspective.commitBatch.mockRejectedValue(failure);
+
+      await expect(ReadBackCard.create(perspective, { title: "written" })).rejects.toBe(failure);
+      expect(perspective.modelQuery).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("get() and update() on a missing instance", () => {
