@@ -11,7 +11,7 @@ Split plan: spec item 9 (`mod.rs`), item 7 (`harness/` → `agentic/`).
 | ~330–510 | construction, model load/add/status, background tasks, global instance |
 | ~510–1120 | LLM: candle device selection, `build_local_llama`, `build_remote_client` (a `providers::RemoteChat` per protocol), `spawn_llm_model` (per-model worker thread + channel) |
 | ~1120–1670 | AI tasks CRUD, `prompt` / `prompt_messages` / `prompt_messages_stream`, billing hooks (`bill_prompt_if_authed`) |
-| ~1670–1775 | embeddings: one `Embedder` per model id (the endpoint's `providers::embed` client, or a Bert thread for a model without an endpoint); `embed_batch` resolves an id or a name and sends one request per batch |
+| ~1670–1775 | embeddings: one `Embedder` per model id (the endpoint's `providers::embed` client, or a Bert thread for a model without an endpoint); `embed_batch` resolves an id or a name and sends one request per batch. `default_embedding.rs`: the Bert (`bert` / `bert-id`, not a row) of an executor without models, loaded by the first embed that resolves to it |
 | ~1775–2440 | transcription streams: open (endpoint or local Whisper), feed, close, ownership |
 | rest | tests |
 
