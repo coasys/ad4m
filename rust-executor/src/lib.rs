@@ -504,13 +504,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     .expect("Failed to initialize Ad4mDb");
 
     // Set multi-user mode before starting services to avoid race condition
-    if let Some(enable_multi_user) = config.enable_multi_user {
-        if enable_multi_user {
-            info!("Enabling multi-user mode...");
-            Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true))
-                .expect("Failed to enable multi-user mode");
-        }
-    }
+    crate::user_management::apply_multi_user_flag(config.enable_multi_user)
+        .expect("Failed to set multi-user mode");
     // `check_admin_credential` refused `--enable-multi-user` without a credential; the mode
     // may also be on in the database, from `user.setMultiUserEnabled` on an earlier run.
     if let Err(reason) = crate::config::refuse_multi_user_from_db(

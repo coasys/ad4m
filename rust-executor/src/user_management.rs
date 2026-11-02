@@ -41,6 +41,18 @@ pub fn is_multi_user_enabled() -> bool {
     Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false))
 }
 
+/// Applies `Ad4mConfig::enable_multi_user` at start.
+pub fn apply_multi_user_flag(enable_multi_user: Option<bool>) -> Result<(), String> {
+    if let Some(enable_multi_user) = enable_multi_user {
+        if enable_multi_user {
+            log::info!("Enabling multi-user mode...");
+            Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true))
+                .map_err(|e| format!("Failed to enable multi-user mode: {}", e))?;
+        }
+    }
+    Ok(())
+}
+
 /// Create a verification code for the given email and type ("signup" or "login").
 pub fn create_verification_code(email: &str, verification_type: &str) -> Result<String, String> {
     let db = Ad4mDb::global_instance();
@@ -473,6 +485,26 @@ mod tests {
             adopt_shared_user("new@example.org", "did:key:z6MkSharedNew", "hash").unwrap(),
             "did:key:z6MkSharedNew"
         );
+    }
+
+    /// `--enable-multi-user false` turns multi-user off at start, `true` turns it on, and no
+    /// flag leaves the database as it was. Turning it off keeps the people in the database.
+    #[test]
+    fn the_start_flag_sets_multi_user_both_ways_and_none_keeps_it() {
+        Ad4mDb::init_global_instance(":memory:").expect("init in-memory DB");
+        Ad4mDb::with_global_instance(|db| db.add_user("dana@example.org", "did:key:z6MkDana", "pw"))
+            .unwrap();
+
+        apply_multi_user_flag(Some(true)).unwrap();
+        assert!(is_multi_user_enabled());
+        apply_multi_user_flag(None).unwrap();
+        assert!(is_multi_user_enabled(), "no flag keeps it on");
+
+        apply_multi_user_flag(Some(false)).unwrap();
+        assert!(!is_multi_user_enabled(), "false turns it off");
+        apply_multi_user_flag(None).unwrap();
+        assert!(!is_multi_user_enabled(), "no flag keeps it off");
+        assert!(Ad4mDb::with_global_instance(|db| db.get_user("dana@example.org")).is_ok());
     }
 
     /// D15: a capability request may come from anyone, so resolving the email it names reads

@@ -752,6 +752,21 @@ mod tests {
         assert_eq!(config.port, Some(12400));
     }
 
+    /// `multi_user_config.enabled` is a required key, so `false` is also what the launcher
+    /// and a TLS-only file write when they have no multi-user setting. It leaves the
+    /// database's multi-user flag as it is (`None`); only `--enable-multi-user false`
+    /// turns it off.
+    #[test]
+    fn multi_user_config_enabled_false_leaves_the_mode_unchanged() {
+        let file = parse(r#"{"multi_user_config": {"enabled": false}}"#).unwrap();
+        let config = file.to_ad4m_config(&ExecutorSecrets::default()).unwrap();
+        assert_eq!(config.enable_multi_user, None);
+
+        let file = parse("{}").unwrap();
+        let config = file.to_ad4m_config(&ExecutorSecrets::default()).unwrap();
+        assert_eq!(config.enable_multi_user, None);
+    }
+
     #[test]
     fn enabled_smtp_without_a_password_is_an_error() {
         let file = parse(SMTP_FILE).unwrap();
