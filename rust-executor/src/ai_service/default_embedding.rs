@@ -97,10 +97,12 @@ impl AIService {
                     api: None,
                 };
                 let sender = (default.loader)(model).await?;
+                // A model added under this name while we loaded keeps serving it.
                 self.embedding_channel
                     .lock()
                     .await
-                    .insert(model_id.to_string(), sender);
+                    .entry(model_id.to_string())
+                    .or_insert(sender);
                 Ok::<(), anyhow::Error>(())
             })
             .await?;
@@ -209,5 +211,43 @@ mod tests {
             .await
             .expect("a later embed uses the loaded model");
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn default_embedding_keeps_a_bert_model_added_while_it_loads() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = AIService::with_embedding_loader(counting_embedding_loader(calls.clone(), 0))
+            .expect("initialization to work");
+        service.load().await.expect("load to work");
+
+        // A configured model named "bert" arrives while the default loads.
+        let (configured_tx, mut configured_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
+        tokio::spawn(async move {
+            while let Some(request) = configured_rx.recv().await {
+                let _ = request.result_sender.send(Ok(vec![9.0]));
+            }
+        });
+        let (_, first) = tokio::join!(
+            async {
+                sleep(Duration::from_millis(50)).await;
+                service
+                    .embedding_channel
+                    .lock()
+                    .await
+                    .insert(DEFAULT_EMBEDDING_MODEL.to_string(), configured_tx);
+            },
+            service.embed("bert".into(), "one".into(), None),
+        );
+        first.expect("first embed");
+        let later = service
+            .embed("bert".into(), "two".into(), None)
+            .await
+            .expect("later embed");
+        assert_eq!(
+            later.embeddings,
+            vec![9.0],
+            "the configured model serves it"
+        );
     }
 }
