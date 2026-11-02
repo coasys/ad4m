@@ -159,7 +159,6 @@ function roomDetail(ctx: OperatorContext, roomId: string) {
     members: ctx.db.getAcl(roomId).map((a) => ({
       did: a.did,
       addedAt: a.added_at,
-      hasX25519Key: !!a.x25519_public_key,
       online: online.has(a.did),
       addedBy: addedBy.get(a.did) ?? null,
     })),

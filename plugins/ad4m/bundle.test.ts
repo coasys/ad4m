@@ -70,7 +70,13 @@ describe("shipped bundle", () => {
         type: "mention",
         perspective: "fake-uuid",
         channel: "",
-        query: "SELECT * FROM link",
+        // What get_mention_waker_config returns.
+        className: "ad4m://TextContent",
+        query: "{}",
+        terms: ["Data", "did:key:zAgent"],
+        did: "did:key:zAgent",
+        mentionClass: "ad4m://Mentioning",
+        mentionQuery: "{}",
       }),
     ).rejects.toThrow(/main key not found/);
 
@@ -112,7 +118,13 @@ describe("shipped bundle", () => {
         type: "mention",
         perspective: "fake-uuid",
         channel: "",
-        query: "SELECT * FROM link",
+        // What get_mention_waker_config returns.
+        className: "ad4m://TextContent",
+        query: "{}",
+        terms: ["Data", "did:key:zAgent"],
+        did: "did:key:zAgent",
+        mentionClass: "ad4m://Mentioning",
+        mentionQuery: "{}",
       }),
     ).rejects.toThrow(/timed out after 50ms/);
 
@@ -153,6 +165,7 @@ describe("shipped bundle", () => {
       "perspective-uuid",
       "ad4m://TextContent",
       '{"limit":50}',
+      { signal: expect.any(AbortSignal) },
     );
     expect(client.subscribeQuery).not.toHaveBeenCalled();
     expect(proxy.id).toBe("sub-1");

@@ -138,7 +138,7 @@ pub(crate) async fn get_perspective_with_access(
 
 /// Refuses a write whose managed agent's account has no credits left. `agent_did` is the
 /// managed agent the request acts as; the main agent pays nothing.
-fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
+pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
     if global_free {
@@ -193,12 +193,12 @@ const DEFAULT_LINK_WRITE: f64 = 0.25;
 /// fire-and-forget deduction that logs on `InsufficientCredits` but
 /// doesn't halt the loop. A pass that ends with zero bases used to be
 /// free regardless of how many completions it burned.
-struct WsHarnessCreditGate {
+pub(super) struct WsHarnessCreditGate {
     agent_did: Option<String>,
 }
 
 impl WsHarnessCreditGate {
-    fn new(agent_did: Option<String>) -> Self {
+    pub(super) fn new(agent_did: Option<String>) -> Self {
         Self { agent_did }
     }
 }
@@ -2029,10 +2029,23 @@ async fn flow_states_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(serde_json::to_value(entries)?)
 }
 
+/// Most instances one `perspective.flowFired` call may name: their marks are
+/// read under one database lock.
+pub(crate) const MAX_FLOW_FIRED_INSTANCES: usize = 200;
+
+/// `perspective.flowFired { instances }`: more than
+/// [`MAX_FLOW_FIRED_INSTANCES`] instances → 400.
 async fn flow_fired_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
     let body: PerspectiveFlowFiredParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    if body.instances.len() > MAX_FLOW_FIRED_INSTANCES {
+        return Err(WsRpcError::bad_request(format!(
+            "`instances` holds {} entries; the limit is {}",
+            body.instances.len(),
+            MAX_FLOW_FIRED_INSTANCES
+        )));
+    }
     let agent_did = flow_bookkeeping_agent(&ctx)?;
     let fired =
         crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instances(

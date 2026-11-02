@@ -17,6 +17,7 @@ pub mod ws_rpc;
 mod tests;
 
 // ── WS-native handler modules ──
+pub mod agent_session_ws;
 pub mod agent_ws;
 pub mod ai_ws;
 pub mod expressions_ws;

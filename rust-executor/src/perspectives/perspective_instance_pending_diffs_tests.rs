@@ -251,3 +251,229 @@ async fn the_backoff_starts_again_after_a_success() {
         attempts
     );
 }
+
+/// A slow link-language commit must not block `set_immediate_commits`, and
+/// the burst limit still holds: with one immediate commit allowed and that one
+/// in flight, a second commit goes to the pending queue, not to the language.
+///
+/// The test seam's commit is synchronous, so the slow commit blocks a worker
+/// thread on a std channel; the multi-thread runtime keeps the others free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_commit_does_not_block_set_immediate_commits() {
+    use std::sync::mpsc;
+
+    Ad4mDb::init_global_instance(":memory:").unwrap();
+    let perspective = PerspectiveInstance::new(
+        PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("slow commit".to_string()),
+            shared_url: Some("neighbourhood://test".to_string()),
+            neighbourhood: Some(DecoratedNeighbourhoodExpression::default()),
+            state: PerspectiveState::Synced,
+            owners: None,
+        },
+        None,
+    );
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let entered_tx = std::sync::Mutex::new(entered_tx);
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in_language = calls.clone();
+    *perspective.link_language.write().await = Some(Language::with_test_commit(
+        "slow-link-language".to_string(),
+        Arc::new(move |_diff| {
+            calls_in_language.fetch_add(1, Ordering::SeqCst);
+            entered_tx.lock().unwrap().send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30))
+                .map_err(|_| anyhow!("never released"))?;
+            Ok(None)
+        }),
+    ));
+    perspective.set_immediate_commits(1).await;
+
+    let slow = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.commit(&add("slow")).await })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the first commit reaches the language");
+
+    // A second commit waits for the first to be sent or queued (see
+    // a_slow_failed_commit_stays_ahead_of_later_diffs); callers spawn commits.
+    let second = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.commit(&add("second")).await })
+    };
+    let reset = tokio::time::timeout(
+        Duration::from_secs(2),
+        perspective.set_immediate_commits(IMMEDIATE_COMMITS_COUNT),
+    )
+    .await;
+    // Undo the reset so the second commit still finds the burst limit at 0.
+    perspective.set_immediate_commits(0).await;
+
+    release_tx.send(()).unwrap();
+    slow.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+
+    reset.expect("set_immediate_commits waited for the slow language call");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the second commit found the burst limit at 0 and skipped the language"
+    );
+    assert_eq!(pending(&perspective), 1, "the second commit was queued");
+}
+
+/// A link language whose first commit blocks until `release` and then fails
+/// (a link server that times out), and which records every later commit as
+/// `+target` / `-target`.
+fn slow_then_failing_language(
+    release: std::sync::mpsc::Receiver<()>,
+) -> (
+    Language,
+    std::sync::mpsc::Receiver<()>,
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let entered_tx = std::sync::Mutex::new(entered_tx);
+    let release = std::sync::Mutex::new(release);
+    let first_call = AtomicBool::new(true);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_in_language = seen.clone();
+    let language = Language::with_test_commit(
+        "slow-then-failing-link-language".to_string(),
+        Arc::new(move |diff| {
+            if first_call.swap(false, Ordering::SeqCst) {
+                entered_tx.lock().unwrap().send(()).unwrap();
+                let _ = release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(30));
+                return Err(anyhow!("link server timed out"));
+            }
+            let mut seen = seen_in_language.lock().unwrap();
+            seen.extend(diff.additions.iter().map(|l| format!("+{}", l.data.target)));
+            seen.extend(diff.removals.iter().map(|l| format!("-{}", l.data.target)));
+            Ok(None)
+        }),
+    );
+    (language, entered_rx, seen)
+}
+
+fn slow_commit_perspective() -> PerspectiveInstance {
+    Ad4mDb::init_global_instance(":memory:").unwrap();
+    PerspectiveInstance::new(
+        PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("slow failing commit".to_string()),
+            shared_url: Some("neighbourhood://test".to_string()),
+            neighbourhood: Some(DecoratedNeighbourhoodExpression::default()),
+            state: PerspectiveState::Synced,
+            owners: None,
+        },
+        None,
+    )
+}
+
+fn queued_targets(perspective: &PerspectiveInstance) -> Vec<String> {
+    let (queued, _) =
+        Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&perspective.uuid, None)).unwrap();
+    queued
+        .additions
+        .iter()
+        .map(|l| l.data.target.clone())
+        .collect()
+}
+
+/// An immediate commit that is slow and then fails is queued ahead of a diff
+/// committed while it was in flight, whether that diff found the burst limit
+/// at 0 (budget 1) or had a slot of its own (budget 2): the later diff never
+/// reaches the language first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_failed_commit_stays_ahead_of_later_diffs() {
+    for budget in [1, 2] {
+        let perspective = slow_commit_perspective();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (language, entered_rx, seen) = slow_then_failing_language(release_rx);
+        *perspective.link_language.write().await = Some(language);
+        perspective.set_immediate_commits(budget).await;
+
+        let first = {
+            let p = perspective.clone();
+            tokio::spawn(async move { p.commit(&add("first")).await })
+        };
+        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .expect("the first commit reaches the language");
+        let second = {
+            let p = perspective.clone();
+            tokio::spawn(async move { p.commit(&add("second")).await })
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        release_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "budget {}: the later diff reached the language before the failed one",
+            budget
+        );
+        assert_eq!(
+            queued_targets(&perspective),
+            vec!["first", "second"],
+            "budget {}: pending queue order",
+            budget
+        );
+    }
+}
+
+/// End to end through the pending loop: a link added by a slow immediate
+/// commit that fails, then removed while that call is in flight, reaches the
+/// language as +x before -x. In the other order peers keep x.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removal_does_not_overtake_a_slow_failed_addition() {
+    let perspective = slow_commit_perspective();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (language, entered_rx, seen) = slow_then_failing_language(release_rx);
+    *perspective.link_language.write().await = Some(language);
+    perspective.set_immediate_commits(1).await;
+    let task = start_loop(&perspective);
+
+    let add_x = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.commit(&add("x")).await })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the addition reaches the language");
+    let remove_x = {
+        let p = perspective.clone();
+        let diff = PerspectiveDiff {
+            additions: vec![],
+            removals: vec![link("did:key:alice", "x")],
+        };
+        tokio::spawn(async move { p.commit(&diff).await })
+    };
+    // Longer than the loop's 1 s of inactivity: with the removal queued
+    // first, the loop sends it alone before the addition fails.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    release_tx.send(()).unwrap();
+    add_x.await.unwrap().unwrap();
+    remove_x.await.unwrap().unwrap();
+    run_until(Duration::from_secs(10), || pending(&perspective) == 0)
+        .await
+        .expect("the queue drains");
+    task.abort();
+
+    assert_eq!(*seen.lock().unwrap(), vec!["+x", "-x"]);
+}

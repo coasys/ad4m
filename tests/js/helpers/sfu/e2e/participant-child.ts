@@ -157,4 +157,9 @@ process.on("message", async ({ id, command }: { id: number; command: Command }) 
     process.send!({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 });
+// The channel closes when the run that forked this process ends, however it ends (mocha
+// `--exit`, a crash, a SIGKILLed CI job), and nobody is left to close this participant. Mid-join,
+// its open sockets would keep it running, holding the CI log pipe open until the job's time
+// limit (#1485).
+process.on("disconnect", () => process.exit(0));
 process.send!({ ready: true });

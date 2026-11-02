@@ -1,11 +1,11 @@
-//! What language code can sign, asked from inside a real language runtime.
+//! What language code can sign and open, asked from inside a real language runtime.
 //!
 //! Every JS runtime is a language runtime, and language code sees every service extension
 //! as a global. So these tests run JS through `LanguageRuntimeHandle` (bootstrap and all
 //! extensions), as a managed user, instead of calling the ops' Rust bodies.
 
 use super::language_runtime_handle::LanguageRuntimeHandle;
-use crate::agent::AgentContext;
+use crate::agent::{sealed_box::seal_to_did, AgentContext};
 use serde_json::{json, Value};
 
 fn init_v8_platform() {
@@ -93,6 +93,56 @@ async fn a_language_signs_only_as_the_user_it_runs_for() {
     assert_eq!(reach["entanglementService"], json!("undefined"));
     assert_eq!(reach["holochainSignString"], json!("undefined"));
     assert_eq!(reach["rawOps"], json!([]));
+
+    let _ = handle.teardown().await;
+}
+
+/// `AGENT.openSealed` opens only what was sealed to the agent the language runs for, the
+/// node or a managed user.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_language_opens_only_boxes_sealed_to_the_agent_it_runs_for() {
+    init_v8_platform();
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let alice =
+        crate::test_utils::create_test_user(&format!("alice.{}@example.org", uuid::Uuid::new_v4()));
+    let main = AgentContext::main_agent();
+    let as_alice = AgentContext::managed(alice.clone());
+    let main_did = crate::agent::did_for_context(&main).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let handle =
+        LanguageRuntimeHandle::spawn("QmSealedBoxTest".into(), dir.path().to_path_buf(), false)
+            .unwrap();
+
+    let sealed = json!({
+        "toMain": seal_to_did(&main_did, &[0x00, 0xff, 0x10]).unwrap(),
+        "toAlice": seal_to_did(&alice, &[0xc0, 0xff, 0xee]).unwrap(),
+    });
+
+    let open = |sealed: &Value| {
+        format!(
+            r#"(() => {{
+  try {{ return JSON.stringify(AGENT.openSealed({sealed})); }}
+  catch (e) {{ return JSON.stringify("refused"); }}
+}})()"#
+        )
+    };
+    for (context, own, other, plaintext) in [
+        (&as_alice, "toAlice", "toMain", "c0ffee"),
+        (&main, "toMain", "toAlice", "00ff10"),
+    ] {
+        assert_eq!(
+            run_as(&handle, context, &open(&sealed[own])).await,
+            json!(plaintext),
+            "{context:?} opens the box sealed to its DID"
+        );
+        assert_eq!(
+            run_as(&handle, context, &open(&sealed[other])).await,
+            json!("refused"),
+            "{context:?} opened a box sealed to another agent"
+        );
+    }
 
     let _ = handle.teardown().await;
 }

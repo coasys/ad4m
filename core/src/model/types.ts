@@ -519,6 +519,12 @@ export interface LinkRow {
   timestamp: string;
   data: { source: string; predicate: string; target: string };
   proof: { key: string; signature: string; valid: boolean; invalid: boolean };
+  /**
+   * Where this executor holds the link, spelled as `perspective.get()` spells
+   * it. Absent only when the store recorded none. Not signed: it says nothing
+   * about who wrote the link.
+   */
+  status?: "SHARED" | "LOCAL";
 }
 
 /** `instance.__links`: requested entry (spelled as requested) → its rows, oldest first. */
@@ -778,13 +784,20 @@ export type GetOptions = Pick<Query, 'include' | 'properties'>;
 // ---------------------------------------------------------------------------
 
 export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: number };
-export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number; nextCursor?: string };
+/**
+ * A model query's rows; `totalCount` is set when the query asked for it
+ * (`count: true`), `nextCursor` when a cursor query (`after`) got a full page.
+ */
+export type QueryResults<T> = { results: T[]; totalCount?: number; nextCursor?: string };
+/** The result of `findAllAndCount()`, which always asks for the count. */
+export type ResultsWithTotalCount<T> = { results: T[]; totalCount: number };
 /**
  * One cursor page. `nextCursor` is present while a full page came back; pass
  * it to the next `page()` call. Its absence means this was the last page.
  */
 export type CursorPage<T> = { results: T[]; nextCursor?: string; pageSize: number };
-export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
+/** The result of `paginate()` and `paginateSubscribe()`, which always ask for the count. */
+export type PaginationResult<T> = { results: T[]; totalCount: number; pageSize: number; pageNumber: number };
 
 // ---------------------------------------------------------------------------
 // Internal value transport

@@ -72,6 +72,18 @@ pub struct TemplateToolParams {
     pub arguments: Map<String, Value>,
 }
 
+/// Tools the bundle declares that MCP does not offer yet. Every other tool the bundle declares has a
+/// `#[tool]` method below; a test fails on one that is in neither place.
+///
+/// - `template_create` makes a new Template record, and its `place` argument chooses where: the
+///   caller's own `library` or the `space`. The executor has no rule yet for which perspective is
+///   a caller's library, so the tool waits for one. The bundle's documentation says the tool is
+///   there only where the host offers it.
+///
+/// Only the test reads it: a tool without a `#[tool]` method is never listed anyway.
+#[cfg(test)]
+pub(crate) const NOT_OFFERED: &[&str] = &["template_create"];
+
 /// A template tool as MCP lists it: the bundle's description, and its arguments with the two that
 /// name the record. The attribute the `#[tool]` macro generates stands only if the bundle has no
 /// tool of that name, which the tests rule out.

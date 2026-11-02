@@ -13,6 +13,17 @@ declare module "ad4m:host" {
     export function agentSigningKeyId(): string;
     export function agentSign(payload: Uint8Array): Uint8Array;
     export function agentSignStringHex(payload: string): string;
+    // A box sealed to a DID's Ed25519 key; every field is hex (see
+    // docs-src/host-contract.md, "Sealed boxes").
+    export interface SealedBox {
+        ephemeralPublicKey: string;
+        nonce: string;
+        ciphertext: string;
+    }
+    // Opens a box sealed to the calling agent (the node or the managed user
+    // the call runs for) and returns the plaintext as hex. Throws for a box
+    // sealed to any other DID, or an altered one.
+    export function agentOpenSealed(sealed: SealedBox): string;
     export function agentCreateSignedExpression(data: unknown): object;
     export function agentGetAllLocalUserDids(): string[];
     export function agentCreateSignedExpressionForUser(userEmail: string, data: unknown): object;

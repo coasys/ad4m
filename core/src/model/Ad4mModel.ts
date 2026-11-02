@@ -19,7 +19,7 @@ import {
 } from "./hydration";
 import type {
   Scope, TraverseScope, IncludeMap, Query,
-  GetOptions, AllInstancesResult, ResultsWithTotalCount,
+  GetOptions, AllInstancesResult, QueryResults, ResultsWithTotalCount,
   PaginationResult, CursorPage, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf, LinksMap,
@@ -1244,6 +1244,20 @@ export class Ad4mModel {
     return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
   }
 
+  /**
+   * Snapshot freshly built instances for dirty tracking, with the relations
+   * `include` loaded (its `$`-prefixed projection keys are not relations).
+   * Used by every query path, and by ModelQueryBuilder for pushed results.
+   * @internal
+   */
+  static takeSnapshots(instances: Ad4mModel[], include?: IncludeMap): void {
+    const relations = include
+      ? Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')))
+      : undefined;
+    const snapshot = relations && Object.keys(relations).length > 0 ? relations : undefined;
+    for (const inst of instances) inst.takeSnapshot?.(snapshot);
+  }
+
 
   // ── One query over several classes (#1238) ────────────────────────────────
 
@@ -1354,18 +1368,11 @@ export class Ad4mModel {
     classes: (typeof Ad4mModel)[],
     query: Query = {},
     options?: CallOptions,
-  ): Promise<ResultsWithTotalCount<Ad4mModel>> {
+  ): Promise<QueryResults<Ad4mModel>> {
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
     const result = await perspective.modelQuery(classNames, queryJson, options);
     const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
-    const snapshotRelations = query.include
-      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    for (const inst of results) {
-      (inst as any).takeSnapshot?.(
-        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
-      );
-    }
+    Ad4mModel.takeSnapshots(results, query.include);
     return { results, totalCount: result.totalCount };
   }
 
@@ -1440,7 +1447,7 @@ export class Ad4mModel {
     query: Query = {},
     classNameOverride?: string | null,
     options?: CallOptions,
-  ): Promise<ResultsWithTotalCount<T>> {
+  ): Promise<QueryResults<T>> {
     // Delegate query input building to the shared prepareModelQueryParams
     // helper.  The executor resolves the shape from SHACL server-side.
     const { className, queryJson } = this.prepareModelQueryParams(
@@ -1455,15 +1462,7 @@ export class Ad4mModel {
       return jsonToModelInstance(this, perspective, json, query.include, query.properties);
     });
 
-    // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
-    const snapshotRelations = query.include
-      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    for (const inst of instances) {
-      (inst as Ad4mModel).takeSnapshot(
-        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
-      );
-    }
+    Ad4mModel.takeSnapshots(instances, query.include);
 
     return {
       results: instances,
@@ -1564,8 +1563,8 @@ export class Ad4mModel {
     query?: Q,
     options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const out = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), count: true }, undefined, options);
-    return out as ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>;
+    const { results, totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), count: true }, undefined, options);
+    return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount: totalCount ?? 0 };
   }
 
   /**
@@ -1597,7 +1596,7 @@ export class Ad4mModel {
     const { after: _after, ...base } = (query ?? {}) as Query;
     const paginationQuery = { ...base, limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
-    return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount, pageSize, pageNumber };
+    return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount: totalCount ?? 0, pageSize, pageNumber };
   }
 
   /**
@@ -1669,7 +1668,7 @@ export class Ad4mModel {
     options?: CallOptions,
   ): Promise<number> {
     const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0, count: true }, undefined, options);
-    return totalCount;
+    return totalCount ?? 0;
   }
 
   /** The `executeAction` write that sets property `key` to `value`; none for an empty value. */

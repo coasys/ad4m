@@ -341,6 +341,38 @@ async fn agents_by_dids_checks_params_and_capability() {
     assert_eq!(err.code, 403);
 }
 
+// ── perspective.flowFired ───────────────────────────
+
+#[tokio::test]
+async fn flow_fired_rejects_more_than_the_cap() {
+    use crate::api::perspectives_ws::MAX_FLOW_FIRED_INSTANCES;
+    init_agent();
+    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
+    let at_cap: Vec<String> = (0..MAX_FLOW_FIRED_INSTANCES)
+        .map(|i| format!("test://run-{i}"))
+        .collect();
+    let reply = call(
+        "perspective.flowFired",
+        json!({ "uuid": p.0, "instances": at_cap }),
+        admin_ctx(),
+    )
+    .await
+    .expect("the cap itself is allowed");
+    assert_eq!(reply.as_array().unwrap().len(), MAX_FLOW_FIRED_INSTANCES);
+
+    // Duplicates count toward the cap: it bounds the reply, not the reads.
+    let over: Vec<&str> = vec!["test://same"; MAX_FLOW_FIRED_INSTANCES + 1];
+    let err = call(
+        "perspective.flowFired",
+        json!({ "uuid": p.0, "instances": over }),
+        admin_ctx(),
+    )
+    .await
+    .expect_err("over the cap");
+    assert_eq!(err.code, 400);
+    assert!(err.message.contains("the limit is"), "{}", err.message);
+}
+
 #[tokio::test]
 async fn agents_by_dids_rejects_more_than_the_cap() {
     use crate::api::agent_ws::MAX_AGENTS_BY_DIDS;

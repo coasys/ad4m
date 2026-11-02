@@ -18,8 +18,10 @@ import { AIClient } from "../ai/AIClient";
 
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { AllInstancesResult } from "../model/types";
-import { LiveQuery, Subscribed } from "./LiveQuery";
+import { LiveQuery, LiveQueryStatus, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
+import type { AgentMessage } from "../generated/api/AgentMessage";
+import type { AgentReply } from "../generated/api/AgentReply";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
 import { SHACLShape } from "../shacl/SHACLShape";
@@ -66,8 +68,8 @@ export class QuerySubscriptionProxy {
      *  `{ instances, totalCount }`. Without it, `query` is SPARQL. */
     constructor(uuid: string, query: string, client: PerspectiveClient, className?: string | string[]) {
         const open = className === undefined
-            ? () => client.subscribeQuery(uuid, query)
-            : () => client.modelSubscribe(uuid, className, query);
+            ? (signal: AbortSignal) => client.subscribeQuery(uuid, query, { signal })
+            : (signal: AbortSignal) => client.modelSubscribe(uuid, className, query, { signal });
         this.#live = new LiveQuery(client, uuid, open, result => this.#deliver(result));
         this.#initialized = new Promise<boolean>((resolve, reject) => {
             this.#initResolve = resolve;
@@ -110,6 +112,20 @@ export class QuerySubscriptionProxy {
         return () => this.#callbacks.delete(callback);
     }
 
+    /** Whether the query lost its subscription (a reconnect, a failed
+     *  resync), could not open it again yet and is retrying: `result` is then
+     *  not live. */
+    get reopening(): boolean {
+        return this.#live.reopening;
+    }
+
+    /** Call `listener` on each failed re-open of the subscription and when a
+     *  re-open succeeds after one failed (see {@link LiveQueryStatus}).
+     *  Returns a remover. */
+    onStatus(listener: (status: LiveQueryStatus) => void): () => void {
+        return this.#live.onStatus(listener);
+    }
+
     #deliver(result: AllInstancesResult) {
         this.#initResolve?.(true);
         this.#initResolve = this.#initReject = undefined;
@@ -122,9 +138,11 @@ export class QuerySubscriptionProxy {
         }
     }
 
-    /** End the subscription on the executor and drop all callbacks. */
-    dispose() {
-        this.#live.dispose();
+    /** End the subscription on the executor and drop all callbacks. With
+     *  `cancelOpening`, a `subscribe()` still waiting on the executor is
+     *  cancelled too, and rejects. */
+    dispose(options: { cancelOpening?: boolean } = {}) {
+        this.#live.dispose(options);
         this.#callbacks.clear();
     }
 }
@@ -434,6 +452,24 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Ask a model something about this perspective, or ask it to change something, with the
+     * executor's own tools — including the tools apps install for their records. It reads freely;
+     * it writes only with the tools named in `settings.writeTools`, as you. Answers with the
+     * model's final reply.
+     *
+     * @param messages the conversation so far, the person's request last
+     * @param settings `context` (what the person is looking at), `writeTools`, `model`, `maxToolCalls`
+     * @param options `signal` / `timeoutMs` (default {@link LONG_TIMEOUT_MS})
+     */
+    async runAgent(
+        messages: AgentMessage[],
+        settings?: Parameters<PerspectiveClient['runAgent']>[2],
+        options?: CallOptions,
+    ): Promise<AgentReply> {
+        return await this.#client.runAgent(this.#handle.uuid, messages, settings, options)
+    }
+
+    /**
      * Register a neighbourhood auto-processor on this perspective. The executor
      * then runs interpretation automatically over new source items (like Flux
      * per channel), coordinating which peer processes each batch. Returns the
@@ -582,7 +618,9 @@ export class PerspectiveProxy {
     /**
      * For each of `instances`, in order, the proposals whose votes settled an
      * edge, as this agent's executor recorded them — the flow's history,
-     * sorted by URI (`fired: []` when none). One call for all of them.
+     * sorted by URI (`fired: []` when none). One call covers up to 200
+     * instances (the executor refuses more with a 400); split a longer list
+     * into batches of 200.
      * Replaces the `resolvedAs` property proposals used to carry.
      */
     async flowFired(instances: string[]): Promise<FlowFiredEntry[]> {
@@ -825,6 +863,12 @@ export class PerspectiveProxy {
 
         /**
      * Adds a pre-signed LinkExpression to the perspective.
+     *
+     * The executor checks the signature against `link.author` and stores the
+     * verdict as `proof.valid`. If the same link (author, source, predicate,
+     * target and timestamp) is already stored with a signature that verifies,
+     * its stored proof is kept. The expression passed here is still returned
+     * and, when Shared, committed to the neighbourhood as given.
      * 
      * @param link - The signed LinkExpression to add
      * @param status - Whether the link should be shared
@@ -1494,15 +1538,11 @@ export class PerspectiveProxy {
     async stringOrTemplateObjectToSubjectClassName<T>(subjectClass: T): Promise<string> {
         if(typeof subjectClass === "string")
             return subjectClass
-        else {
-            let subjectClasses = await this.subjectClassesByTemplate(subjectClass as object)
-            if(subjectClasses[0]) {
-                return subjectClasses[0]
-            } else {
-                //@ts-ignore
-                return subjectClass.className
-            }
-        }
+        // The @Model decorator names the class, as in createSubject: no lookup.
+        // Only an undecorated object is matched by its properties.
+        const obj = subjectClass as any;
+        return obj.className || obj.constructor?.className || obj.constructor?.prototype?.className
+            || (await this.subjectClassesByTemplate(obj))[0]
     }
 
     /**
@@ -2261,7 +2301,14 @@ export class PerspectiveProxy {
      *  refuses a Prolog query (400): Prolog live queries are not supported. */
     async subscribeQuery(query: string): Promise<QuerySubscriptionProxy> {
         const subscription = new QuerySubscriptionProxy(this.uuid, query, this.#client);
-        await subscription.subscribe();
+        try {
+            await subscription.subscribe();
+        } catch (e) {
+            // Nobody gets the proxy, so nobody can dispose it: left as is, it
+            // would re-open on every reconnect and retry for good (#1595).
+            subscription.dispose({ cancelOpening: true });
+            throw e;
+        }
         return subscription;
     }
 
