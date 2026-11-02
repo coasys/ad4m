@@ -79,7 +79,7 @@ This is the same call [Publish a neighbourhood](./publish-neighbourhood.mdx) use
 The `ad4m` binary has the same operations (`cli/src/languages.rs`, `cli/src/expression.rs`, `cli/src/runtime.rs`):
 
 ```bash
-ad4m languages publish ./build/bundle.js -n note-store -d "Notes in the KV store" -p uid -s https://github.com/you/note-store
+ad4m languages publish "$PWD/build/bundle.js" -n note-store -d "Notes in the KV store" -p uid -s https://github.com/you/note-store
 ad4m languages by-address <address>       # install if needed, then show
 ad4m languages meta <address>
 ad4m languages apply-template-and-publish <address> '{"uid":"team-a"}'
@@ -88,5 +88,7 @@ ad4m runtime add-trusted-agents <did>
 ad4m expression create <address> '"Buy milk"'
 ad4m expression get <url>
 ```
+
+Pass `languages publish` an absolute path. The client only checks that the file exists and sends the path as given; the executor reads it from its own working directory (`publish_language` in `rust-executor/src/api/languages_ws.rs`), so a relative path fails against the Launcher or any executor started elsewhere, and the executor must be able to read the file.
 
 `publish` prompts for any of `--name`, `--description`, `--possible-template-params` (comma-separated) and `--source-code-link` you leave out. Unlike the SDK, the CLI also reads the file locally first, to fail early on a wrong path; the executor still reads it from its own filesystem. `expression create` sends `content` as JSON when it parses as JSON, else as a string. All commands: [CLI reference](../reference/cli.mdx).
