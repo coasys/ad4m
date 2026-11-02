@@ -58,7 +58,7 @@ const shared = await ad4m.perspective.byUUID(handle.uuid);
 
 ### Sync state
 
-A published perspective's `state` moves from `PRIVATE` through `NEIGHBOURHOOD_CREATION_INITIATED` and `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED` to `SYNCED`. A joined one starts at `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED`, or at `LINK_LANGUAGE_FAILED_TO_INSTALL` when the link language could not be installed (`install_neighbourhood_with_context`, `rust-executor/src/neighbourhoods.rs`), and reaches `SYNCED` after its first successful sync; a failed sync sets it back to `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED` (`PerspectiveState`, `core/src/perspectives/PerspectiveHandle.ts`). `perspective.on("sync-state-change", ({ state }) => …)` reports changes. A just-joined perspective is usable before it reaches `SYNCED`; it fills in as diffs arrive.
+A published perspective's `state` moves from `PRIVATE` through `NEIGHBOURHOOD_CREATION_INITIATED` and `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED` to `SYNCED`. A joined one starts at `NEIGHBOURHOOD_JOIN_INITIATED` (`install_neighbourhood_with_context`, `rust-executor/src/neighbourhoods.rs`), moves to `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED` once the perspective has installed the link language, or to `LINK_LANGUAGE_FAILED_TO_INSTALL` while it cannot (`ensure_link_language`, `rust-executor/src/perspectives/perspective_instance.rs`), and reaches `SYNCED` after its first successful sync; a failed sync sets it back to `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED` (`PerspectiveState`, `core/src/perspectives/PerspectiveHandle.ts`). `perspective.on("sync-state-change", ({ state }) => …)` reports changes. A just-joined perspective is usable before it reaches `SYNCED`; it fills in as diffs arrive.
 
 ## What sync does and does not check
 
