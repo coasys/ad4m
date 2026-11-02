@@ -137,8 +137,8 @@ type EmbeddingLoader = Arc<
 
 /// The default embedding model of an executor without configured models. `load()` only
 /// enables it; the first `embed` call naming it loads it (downloading it on a fresh node),
-/// and concurrent first calls wait on that one load. A failed load leaves `ready` empty,
-/// so the error reaches the callers and the next call tries again.
+/// and concurrent first calls wait on that load. A failed load leaves `ready` empty: its
+/// error goes to the call that ran it, and the next waiting or later call loads again.
 struct DefaultEmbedding {
     enabled: std::sync::atomic::AtomicBool,
     ready: tokio::sync::OnceCell<()>,
@@ -1911,12 +1911,17 @@ impl AIService {
                         })
                         .await;
 
-                    publish_model_status(model_id.clone(), 100.0, "Loaded", true, false).await;
-
                     bert
                 });
                 let model = match model {
                     Ok(model) => {
+                        rt.block_on(publish_model_status(
+                            model_id.clone(),
+                            100.0,
+                            "Loaded",
+                            true,
+                            false,
+                        ));
                         let _ = ready_tx.send(Ok(()));
                         model
                     }
@@ -2923,7 +2928,7 @@ mod tests {
     async fn default_embedding_load_error_reaches_caller_and_next_call_retries() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let service = AIService::with_embedding_loader(counting_embedding_loader(calls.clone(), 1))
+        let service = AIService::with_embedding_loader(counting_embedding_loader(calls.clone(), 2))
             .expect("initialization to work");
         service.load().await.expect("load to work");
 
@@ -2934,11 +2939,24 @@ mod tests {
             format!("{error:#}").contains("download failed"),
             "{error:#}"
         );
+
+        // The second load fails too: the call that ran it gets the error, the waiting call
+        // loads again and succeeds.
+        let (a, b) = tokio::join!(
+            service.embed("bert".into(), "two".into(), None),
+            service.embed("bert".into(), "three".into(), None),
+        );
+        let errors: Vec<String> = [&a, &b]
+            .iter()
+            .filter_map(|r| r.as_ref().err().map(|e| format!("{e:#}")))
+            .collect();
+        assert_eq!(errors.len(), 1, "exactly one call sees the failed load");
+        assert!(errors[0].contains("download failed"), "{}", errors[0]);
         service
-            .embed("bert".into(), "two".into(), None)
+            .embed("bert".into(), "four".into(), None)
             .await
-            .expect("the next embed loads again");
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+            .expect("a later embed uses the loaded model");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[ignore]
