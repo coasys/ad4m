@@ -65,13 +65,13 @@ The MCP bind address has no flag: it is the `MCP_HOST` environment variable ([Ru
 | `--run-holochain <bool>` | `true` | Start the bundled Holochain conductor. `false` means no p2p link languages and no bootstrap traffic. |
 | `--hc-app-port <u16>` | first free from `1337` | Conductor app interface port. |
 | `--hc-admin-port <u16>` | first free from `2000` | Accepted; the conductor opens no admin interface. |
-| `--hc-use-bootstrap <bool>` | `true` | Use the bootstrap service. |
+| `--hc-use-bootstrap <bool>` | `true` | `false` does not turn bootstrap off: the conductor then uses `http://bootstrap.ad4m.dev:4433` and ignores `--hc-bootstrap-url` (`rust-executor/src/holochain_service/mod.rs`). Only `--run-holochain false` stops bootstrap traffic. |
 | `--hc-bootstrap-url <url>` | `http://bootstrap.ad4m.dev:4433` | Bootstrap service. |
 | `--hc-use-proxy <bool>` | `true` | Use a relay proxy. |
 | `--hc-proxy-url <url>` | `ws://bootstrap.ad4m.dev:4433` | Relay proxy. With the proxy on and this set, it is the relay. |
 | `--hc-relay-url <url>` | none | Relay used when the proxy is off or has no URL. |
-| `--hc-use-local-proxy <bool>` | `false` | Local proxy. |
-| `--hc-use-mdns <bool>` | `false` | mDNS discovery. |
+| `--hc-use-local-proxy <bool>` | `false` | Accepted and stored, never read: no effect at this revision. |
+| `--hc-use-mdns <bool>` | `false` | Accepted and stored, never read: no effect at this revision. |
 | `-c, --connect-holochain <bool>` | `false` | Accepted; no effect at this revision. |
 | `--log-holochain-metrics <bool>` | `true` | Accepted; no effect at this revision. |
 
