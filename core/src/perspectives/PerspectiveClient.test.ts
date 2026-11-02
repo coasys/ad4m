@@ -335,6 +335,8 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
                 'perspective.removeLinks': [added],
                 'perspective.linkMutations': { additions: [added], removals: [] },
                 'perspective.commitBatch': { additions: [added], removals: [] },
+                'perspective.addSdna': true,
+                'perspective.rejectFlowProposal': { retractedLinks: 1 },
             }
             return Promise.resolve(method in replies ? replies[method] : added)
         })
@@ -393,6 +395,22 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
             () => client.updateSubject('u', 'C', 'expr', '{}'),
             () => client.removeSubject('u', 'C', 'expr'),
             () => client.commitBatch('u', 'b'),
+            // Executor methods whose handlers write links themselves (SHACL
+            // and SDNA links, overlays, flow proposals, votes, fired marks,
+            // receipts, processor configs).
+            () => client.addSdna('u', 'C', undefined, 'subject_class', '{}'),
+            () => client.addSdnaBatch('u', [{ name: 'C', sdnaType: 'subject_class', shaclJson: '{}' }]),
+            () => client.runInterpretation('u', [], 'base://'),
+            () => client.runInterpretationWithHarness('u', [], 'base://', 5),
+            () => client.runAgent('u', [], { writeTools: ['add_link'] }),
+            () => client.addAutoProcessor('u', { processorId: 'p' } as any),
+            () => client.removeAutoProcessor('u', 'p'),
+            () => client.acceptInterpretation('u', 'base://1'),
+            () => client.rejectInterpretation('u', 'base://1'),
+            () => client.proposeFlowTransition('u', 'flow://1', 'done'),
+            () => client.acceptFlowProposal('u', 'proposal://1'),
+            () => client.rejectFlowProposal('u', 'proposal://1'),
+            () => client.mintFlowReceipt('u', 'flow://1'),
         ]
         for (const write of writes) {
             const executor = executorAnsweringAtSendTime()
@@ -401,9 +419,61 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
             await write()
             const after = client.querySparql('u', QUERY)
             executor.settleQueries()
-            await Promise.all([before, after])
+            expect([write.toString(), await after]).toEqual([write.toString(), [{ s: 'old' }, { s: 'new' }]])
+            await before
             expect([write.toString(), sparqlCalls()]).toEqual([write.toString(), 2])
         }
+    })
+
+    it('a write that fails still starts a new generation', async () => {
+        const executor = executorAnsweringAtSendTime()
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const before = client.querySparql('u', QUERY)
+        // The executor may have written part of it before failing.
+        mockCall.mockImplementationOnce(() => Promise.reject(new Error('write failed')))
+        await expect(client.addLinks('u', [{ source: 'a', target: 'new' }])).rejects.toThrow('write failed')
+        const after = client.querySparql('u', QUERY)
+        executor.settleQueries()
+        await Promise.all([before, after])
+        expect(sparqlCalls()).toBe(2)
+    })
+
+    it('the generation moves when the write settles, not when it starts', async () => {
+        let rows = [{ s: 'old' }]
+        const pendingQueries: Array<() => void> = []
+        let settleWrite = () => {}
+        const added = { author: 'did:test', timestamp: '2026-01-01T00:00:00Z', data: { source: 'a', target: 'new' }, proof: { key: 'k', signature: 's' } }
+        mockCall.mockImplementation((method: string) => {
+            if (method === 'perspective.querySparql') {
+                const answer = JSON.stringify(rows)
+                return new Promise(resolve => pendingQueries.push(() => resolve(answer)))
+            }
+            return new Promise(resolve => {
+                settleWrite = () => { rows = [{ s: 'old' }, { s: 'new' }]; resolve([added]) }
+            })
+        })
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const write = client.addLinks('u', [{ source: 'a', target: 'new' }])
+        // Sent while the write is still running: may answer before it lands.
+        const during = client.querySparql('u', QUERY)
+        settleWrite()
+        await write
+        const after = client.querySparql('u', QUERY)
+        pendingQueries.splice(0).forEach(resolve => resolve())
+        expect(await during).toEqual([{ s: 'old' }])
+        expect(await after).toEqual([{ s: 'old' }, { s: 'new' }])
+        expect(sparqlCalls()).toBe(2)
+    })
+
+    it('a read-only agent session keeps the sharing', async () => {
+        const executor = executorAnsweringAtSendTime()
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const first = client.querySparql('u', QUERY)
+        await client.runAgent('u', [])
+        const second = client.querySparql('u', QUERY)
+        executor.settleQueries()
+        await Promise.all([first, second])
+        expect(sparqlCalls()).toBe(1)
     })
 })
 

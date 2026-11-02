@@ -272,7 +272,7 @@ export class PerspectiveClient {
         observe?: RunInterpretationObserveOptions,
         options?: CallOptions,
     ): Promise<string[]> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.runInterpretation',
             {
                 uuid, transcript, basePrefix, classes, existingScope, mintScope,
@@ -280,7 +280,7 @@ export class PerspectiveClient {
                 emitDebugEvents: observe?.emitDebugEvents,
             },
             options,
-        )
+        ))
     }
 
     /**
@@ -314,7 +314,7 @@ export class PerspectiveClient {
         emitDebugEvents?: boolean,
         options?: CallOptions,
     ): Promise<string[]> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.runInterpretationWithHarness',
             {
                 uuid,
@@ -328,7 +328,7 @@ export class PerspectiveClient {
                 emitDebugEvents,
             },
             options,
-        )
+        ))
     }
 
     /**
@@ -356,7 +356,9 @@ export class PerspectiveClient {
         },
         options?: CallOptions,
     ): Promise<AgentReply> {
-        return this.#apiClient.call('perspective.runAgent', { uuid, messages, ...settings }, options)
+        const reply = this.#apiClient.call('perspective.runAgent', { uuid, messages, ...settings }, options)
+        // Without write tools the session only reads.
+        return settings?.writeTools?.length ? this.#wrote(uuid, reply) : reply
     }
 
     /**
@@ -368,16 +370,16 @@ export class PerspectiveClient {
      * Returns the processor id.
      */
     async addAutoProcessor(uuid: string, config: AddAutoProcessorConfig): Promise<string> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.addAutoProcessor', { ...config, uuid },
-        )
+        ))
     }
 
     /** Delete an auto-processor's config. `false` when there was none to delete. */
     async removeAutoProcessor(uuid: string, processorId: string): Promise<boolean> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.removeAutoProcessor', { uuid, processorId },
-        )
+        ))
     }
 
     /** Pending interpretation overlays (LLM suggestions awaiting human accept/reject). */
@@ -393,17 +395,17 @@ export class PerspectiveClient {
     /** Accept an overlay's suggestion(s): the LLM value becomes the real value and
      *  the overlay is deleted. Omit `property` to accept the whole base. */
     async acceptInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.acceptInterpretation', { uuid, base, property },
-        )
+        ))
     }
 
     /** Reject an overlay's suggestion(s). Omit `property` to reject the whole base
      *  (a rejected `create` deletes the suggested instance). */
     async rejectInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.rejectInterpretation', { uuid, base, property },
-        )
+        ))
     }
 
     async proposeFlowTransition(
@@ -413,15 +415,15 @@ export class PerspectiveClient {
         rationale?: string,
         outputs?: FlowOutputRef[],
     ): Promise<FlowProposeResult> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale, outputs },
-        )
+        ))
     }
 
     async acceptFlowProposal(uuid: string, proposalUri: string): Promise<FlowFireOutcome[]> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.acceptFlowProposal', { uuid, proposalUri },
-        )
+        ))
     }
 
     /**
@@ -430,9 +432,9 @@ export class PerspectiveClient {
      * proposal this agent opened.
      */
     async rejectFlowProposal(uuid: string, proposalUri: string): Promise<number> {
-        const result = await this.#apiClient.call(
+        const result = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.rejectFlowProposal', { uuid, proposalUri },
-        )
+        ))
         return result.retractedLinks
     }
 
@@ -460,8 +462,9 @@ export class PerspectiveClient {
     }
 
     /** For each of `instances`, in order, the proposals the calling agent's
-     *  replica recorded as fired, sorted. One call for all of them, at most
-     *  200 instances (more → 400). */
+     *  replica recorded as fired, sorted. One call covers up to 200
+     *  instances (more is refused with a 400); split a longer list into
+     *  batches of 200. */
     async flowFired(uuid: string, instances: string[]): Promise<FlowFiredEntry[]> {
         return this.#apiClient.call(
             'perspective.flowFired', { uuid, instances },
@@ -472,9 +475,9 @@ export class PerspectiveClient {
      *  run has not settled into a terminal state, and when an output's
      *  content no longer matches what the quorum committed to. */
     async mintFlowReceipt(uuid: string, instanceUri: string): Promise<FlowMintedReceipt> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.mintFlowReceipt', { uuid, instanceUri },
-        )
+        ))
     }
 
     async addLinkExpression(uuid: string, link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
@@ -499,16 +502,16 @@ export class PerspectiveClient {
     }
 
     async addSdna(uuid: string, name: string, sdnaCode: string | undefined, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
-        const result = await this.#apiClient.call(
+        const result = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.addSdna', { uuid, name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
-        )
+        ))
         return typeof result === 'boolean' ? result : result.every(Boolean)
     }
 
     async addSdnaBatch(uuid: string, entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
-        const result = await this.#apiClient.call(
+        const result = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.addSdna', { uuid, entries: entries.map(e => ({ ...e, sdnaCode: e.sdnaCode || "" })) }
-        )
+        ))
         return typeof result === 'boolean' ? [result] : result
     }
 

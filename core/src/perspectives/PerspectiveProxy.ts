@@ -618,8 +618,9 @@ export class PerspectiveProxy {
     /**
      * For each of `instances`, in order, the proposals whose votes settled an
      * edge, as this agent's executor recorded them — the flow's history,
-     * sorted by URI (`fired: []` when none). One call for all of them, at
-     * most 200 instances: the executor refuses more with a 400.
+     * sorted by URI (`fired: []` when none). One call covers up to 200
+     * instances (the executor refuses more with a 400); split a longer list
+     * into batches of 200.
      * Replaces the `resolvedAs` property proposals used to carry.
      */
     async flowFired(instances: string[]): Promise<FlowFiredEntry[]> {
