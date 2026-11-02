@@ -898,7 +898,10 @@ pub(crate) mod tests {
         assert_eq!(mode(&[], &[]), None);
         assert_eq!(mode(&["--enable-multi-user", "false"], &[]), Some(false));
         assert_eq!(mode(&["--enable-multi-user", "true"], &[]), Some(true));
-        assert_eq!(mode(&[], &[("AD4M_ENABLE_MULTI_USER", "false")]), Some(false));
+        assert_eq!(
+            mode(&[], &[("AD4M_ENABLE_MULTI_USER", "false")]),
+            Some(false)
+        );
 
         assert_eq!(mode(&["--config", &on], &[]), Some(true));
         assert_eq!(
@@ -911,7 +914,10 @@ pub(crate) mod tests {
             Some(true)
         );
         assert_eq!(
-            mode(&["--tls-cert-file", "c.pem", "--tls-key-file", "k.pem"], &[]),
+            mode(
+                &["--tls-cert-file", "c.pem", "--tls-key-file", "k.pem"],
+                &[]
+            ),
             None
         );
         std::fs::remove_dir_all(&dir).unwrap();

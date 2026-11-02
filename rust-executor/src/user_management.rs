@@ -491,8 +491,10 @@ mod tests {
     #[test]
     fn the_start_flag_sets_multi_user_both_ways_and_none_keeps_it() {
         Ad4mDb::init_global_instance(":memory:").expect("init in-memory DB");
-        Ad4mDb::with_global_instance(|db| db.add_user("dana@example.org", "did:key:z6MkDana", "pw"))
-            .unwrap();
+        Ad4mDb::with_global_instance(|db| {
+            db.add_user("dana@example.org", "did:key:z6MkDana", "pw")
+        })
+        .unwrap();
 
         apply_multi_user_flag(Some(true)).unwrap();
         assert!(is_multi_user_enabled());
