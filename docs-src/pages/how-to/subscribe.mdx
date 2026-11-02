@@ -57,13 +57,13 @@ pager.dispose();
 
 - `subscribe` resolves to `Task[]`; later calls pass the whole new `Task[]`, already merged from the change the executor sent (records added, updated and removed, plus the new total).
 - `countSubscribe` resolves to a `number`; `paginateSubscribe` to `{ results, totalCount, pageSize, pageNumber }`.
-- `subscribe` skips a callback whose result equals the previous one, so a write that changes nothing you read does not re-render your list. `countSubscribe` and `paginateSubscribe` call back on every update, including a reconnect or resync that brings back the same result, and `paginateSubscribe` on any change to the whole result set even when the page you show did not change. Make their callbacks cheap or compare before re-rendering.
+- `subscribe` and `paginateSubscribe` skip a callback whose result equals the previous one (for a page: the same rows and the same `totalCount`), so a write that changes nothing you read, a resync or a reconnect does not re-render your list. `countSubscribe` calls back on every update, including one that brings back the same count; make its callback cheap or compare before re-rendering (`core/src/model/ModelQueryBuilder.ts`).
 
 ## What triggers an update
 
 The executor re-runs the query when a write could change its result: a record of the class created, edited or deleted, an edit to a record pulled in by `include`, a related record that starts or stops matching a `some`/`none` quantifier, a link on a requested `links` entry. It does not re-run for unrelated classes: creating a `Note` does not wake a `Task` subscription. A subscription over an [abstract class](../concepts/abstract-classes-and-aliases.mdx) also picks up classes installed after it opened.
 
-`paginateSubscribe` watches the whole result set without the page window and re-reads the page after each change, so a new record on page 1 shifts what you see on page 2.
+`paginateSubscribe` subscribes to the page itself (`limit` and `offset`, with `count`). The executor still re-runs it when a record outside the page starts or stops matching, so a new record on page 1 shifts what you see on page 2, and each push carries the rows of the page and the new total.
 
 ## Rules
 

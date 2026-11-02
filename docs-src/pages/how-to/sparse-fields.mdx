@@ -94,7 +94,7 @@ Check for a field with `Object.hasOwn(row, "body")`, not `"body" in row`: the de
 
 ## What it does not do
 
-- **It does not make the query cheaper on the executor.** The executor hydrates each row in full, evaluates getters, and removes the unrequested fields just before it answers. `properties` saves transfer and object size. To skip getter-backed scalar properties during hydration, set `deepQuery: false` (getter-backed relations still run).
+- **It makes the query only partly cheaper on the executor.** The executor still reads every row's plain links, but it evaluates getters only for the returned fields, and resolves a language-backed value only where the query returns it or the `where`/`order` reads it (`evaluate_getters` in `model_query/getters.rs`; `model_query/query.rs`). The rest are stripped before it answers. To skip getter-backed scalar properties even when returned, set `deepQuery: false` (getter-backed relations still run).
 - **It does not filter rows.** Use `where` for that.
 
 <Callout type="warning">
