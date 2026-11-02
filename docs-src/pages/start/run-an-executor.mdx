@@ -52,7 +52,13 @@ Every flag of `run` also reads an `AD4M_<FLAG>` variable (`--mcp-port` reads `AD
 
 The complete list, with the config-file keys and the environment variables, is on [Executor config](../reference/executor-config.mdx). A systemd unit, Docker and unlocking at startup are on [Headless executor](../how-to/headless-executor.mdx).
 
-Unlock the agent after every start: `ad4m agent unlock` (the `ad4m` client prompts for the passphrase), or set `AD4M_UNLOCK_PASSPHRASE_FILE` so `run` does it itself.
+Unlock the agent after every start. The simplest way is to set `AD4M_UNLOCK_PASSPHRASE_FILE` so `run` does it itself. By hand, pass the admin credential to the `ad4m` client, which then prompts for the passphrase:
+
+```bash
+ad4m -a "$(cat /etc/ad4m/secrets/admin-credential)" agent unlock
+```
+
+Without `-a` the client sends an empty token for `agent unlock` (`cli/src/ad4m.rs`), and an executor with an admin credential refuses an empty token for it. The credential is visible in `ps` while the command runs.
 
 ## Hosted: a multi-user node
 

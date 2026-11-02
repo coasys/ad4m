@@ -103,7 +103,7 @@ ad4m [-a <admin credential>] [-e <executor url>] [-n] <subcommand>
 | `-a, --admin-credential <value>` | Send the admin credential instead of a capability token. |
 | `-n, --no-capability` | Send an empty token. |
 
-The global flags go before the subcommand. Without `-a` or `-n`, the client uses the capability token in `~/.ad4m-cli/cap_token`. When it is missing or no longer valid, the client requests a capability for "AD4M cli" with full rights and asks for the six-digit code ("Enter the 6-digit 2FA number from AD4M UI"): the Launcher shows it; a headless executor with auto-permit logs it only with `AD4M_LOG_SECRETS=1`, so against a headless executor use `-a`. `agent lock`, `agent unlock`, `agent generate` and `log` send an empty token.
+The global flags go before the subcommand. Without `-a` or `-n`, the client uses the capability token in `~/.ad4m-cli/cap_token`. When it is missing or no longer valid, the client requests a capability for "AD4M cli" with full rights and asks for the six-digit code ("Enter the 6-digit 2FA number from AD4M UI"): the Launcher shows it; a headless executor with auto-permit logs it only with `AD4M_LOG_SECRETS=1`, so against a headless executor use `-a`. `agent lock`, `agent unlock`, `agent generate` and `log` send an empty token, so an executor with an admin credential refuses the three agent commands unless you pass `-a <credential>`.
 
 ### `ad4m agent`
 
@@ -112,7 +112,7 @@ The global flags go before the subcommand. Without `-a` or `-n`, the client uses
 | `me` | The agent's DID, public perspective and direct-message language. |
 | `status` | Whether the agent exists and is unlocked. |
 | `generate [-p, --passphrase <p>]` | Create the agent. Prompts twice without `-p`. |
-| `unlock [-p, --passphrase <p>] [--holochain <bool>]` | Unlock the keys; prompts without `-p`. `--holochain` defaults to `true`. |
+| `unlock [-p, --passphrase <p>] [--holochain <bool>]` | Unlock the keys; prompts without `-p` (`-p` puts the passphrase in the argument list). `--holochain` has no effect: the executor ignores it (`UnlockAgentRequest.holochain` in `rust-executor/src/api/types.rs`). |
 | `lock` | Lock the keys; always prompts for the passphrase. |
 | `by-did <did>` | Resolve another agent. |
 | `generate-jwt <request_id> <rand>` | Exchange a capability request id and code for a JWT. |

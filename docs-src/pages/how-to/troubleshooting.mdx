@@ -54,10 +54,10 @@ Sources: `rust-executor/src/agent/capabilities/token.rs` (issuing a token); the 
 The agent's keys live in memory only, so every restart locks the executor again; nothing can sign, log in or mint a token until the operator unlocks it with the agent passphrase:
 
 ```bash
-ad4m agent unlock --passphrase '<passphrase>'
+ad4m -a "$(cat <admin-credential-file>)" agent unlock   # prompts for the passphrase
 ```
 
-or in the Launcher, or with `client.agent.unlock(passphrase)` from the SDK (`core/src/agent/AgentClient.ts`). `ad4m agent status` shows `is_unlocked`. A waker subscription refused for this reason is re-attempted on its own once the executor is unlocked; its log line ends with a hint that says so (`hintFor` in `core/src/perspectives/WakerSubscriptionManager.ts`).
+(`-a` is needed: without it the client sends an empty token for `agent unlock`, which an executor with an admin credential refuses), or with `AD4M_UNLOCK_PASSPHRASE_FILE` at startup ([Headless executor](./headless-executor.mdx)), or in the Launcher, or with `client.agent.unlock(passphrase)` from the SDK (`core/src/agent/AgentClient.ts`). `ad4m agent status` shows `is_unlocked`. A waker subscription refused for this reason is re-attempted on its own once the executor is unlocked; its log line ends with a hint that says so (`hintFor` in `core/src/perspectives/WakerSubscriptionManager.ts`).
 
 ## A call is refused
 
