@@ -99,7 +99,7 @@ A Language imports executor services from the synthetic module `ad4m:host` (or f
 
 | Group | Imports |
 |---|---|
-| Agent | `agentDid`, `agentSigningKeyId`, `agentSign`, `agentSignStringHex`, `agentCreateSignedExpression`, and the multi-user variants `agentGetAllLocalUserDids`, `agentDidForUser`, `agentCreateSignedExpressionForUser` |
+| Agent | `agentDid`, `agentSigningKeyId`, `agentSign`, `agentSignStringHex`, `agentOpenSealed` (opens a box sealed to the calling agent), `agentCreateSignedExpression`, and the multi-user variants `agentGetAllLocalUserDids`, `agentDidForUser`, `agentCreateSignedExpressionForUser` |
 | Language context | `languageAddress`, `languageSettings`, `languageStorageDirectory` |
 | Key-value storage | `storageGet`, `storagePut`, `storageDelete`, `storageListKeys` |
 | Events to the executor | `emitPerspectiveDiff`, `emitSyncStateChange`, `emitTelepresenceSignal`, `emitSignal` |
@@ -122,7 +122,7 @@ A Language can mark variables as template parameters with a `//!@ad4m-template-v
 
 ## Trust and installation
 
-An executor installs a Language it does not have by address. It fetches the meta and the bundle from the **language language** (the system Language that stores bundles), checks the signature on the meta, checks that the bundle hashes to the address, and then checks who published it: the bundle is installed only if its author is the agent itself or one of its trusted agents, or if it is a template of a Language whose author is trusted and re-applying the template reproduces the hash (`language_by_ref` in `rust-executor/src/languages/mod.rs`). Otherwise installation fails and the executor emits an `AgentIsUntrusted` exception. Trusted agents are managed with `runtime.addTrustedAgents`.
+An executor installs a Language it does not have by address. When an app or agent asks for a Language by its address (`languages.byAddress`), the executor fetches the meta and the bundle from the **language language** (the system Language that stores bundles), checks the signature on the meta, checks that the bundle hashes to the address, and then checks who published it: the bundle is installed only if its author is the agent itself or one of its trusted agents, or if it is a template of a Language whose author is trusted and re-applying the template reproduces the hash (`language_by_ref` in `rust-executor/src/languages/mod.rs`). Otherwise installation fails and the executor emits an `AgentIsUntrusted` exception. Trusted agents are managed with `runtime.addTrustedAgents`. Joining a neighbourhood is different: its link language is installed with `install_language`, which checks only that the bundle hashes to the address, not who published it ([Neighbourhoods](./neighbourhoods.mdx#trust-and-templates)).
 
 ## Security model
 
