@@ -99,6 +99,5 @@ Defined in `rust-executor/src/mcp/tools/instances/` (`children.rs`, `transcript.
 | `add_child(perspective_id, parent, child)` | `Container` | the holder's own `children` adder when it has one, else an `ad4m://has_child` link; neither node needs to be an instance |
 | `instance_create(..., parent)` | `Container` | creates, then attaches the same way |
 | `instance_query(class_name, parent?)` | `Container` | `parent` is the `{ id }` scope |
-| `describe_perspective` | | reports which property of each class answers to `TextContent.text` |
 
 The MCP documentation topics compiled into the executor describe the same surface for an agent at runtime: [overview](./mcp-topics/overview.md), [usage](./mcp-topics/usage.md).

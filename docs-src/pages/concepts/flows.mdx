@@ -204,7 +204,7 @@ Four more flow-level fields exist on `SHACLFlow` (`core/src/shacl/SHACLFlow.ts`)
 | `inputTypes` | `string[]` | the subject classes a run may be anchored on; read by `availableFlows` and by the spawn pass below |
 | `outputTypes` | `string[]` | the classes a completed run is expected to leave linked to its subject. For a flow with states it is documentation; for a flow with **no** states it is the completion condition the engine would check. Zero-state flows are not spawned or fired by anything yet (`flow_spawn.rs` skips them). |
 | `creationHint` | `string?` | one English sentence for a future LLM-driven spawn decision ("spawn when someone commits to a concrete task"). Stored and carried; nothing reads it yet (`flow_spawn.rs` is deterministic by design). |
-| `context` | `ModelQuery[]?` | background queries whose matches are threaded into the interpreting LLM's prompt as context. They never count toward a `requires` guard. |
+| `context` | `ModelQuery[]?` | background queries meant as context for a future LLM pass, never as evidence for a `requires` guard. Stored and carried; nothing evaluates them yet (only `shacl_parser.rs` reads and writes the field). |
 
 Starting a run and rendering it:
 
