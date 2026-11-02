@@ -34,6 +34,19 @@ class RoundTripCall extends Ad4mModel {
   attachments: string[] = [];
 }
 
+// Two relations over one predicate.
+@Model({ name: "RoundTripShared" })
+class RoundTripShared extends Ad4mModel {
+  @Property({ through: "rt://title", required: true, initial: "literal://string:untitled" })
+  title: string = "";
+
+  @HasMany({ through: "rt://tag" })
+  tags: string[] = [];
+
+  @HasMany({ through: "rt://tag" })
+  labels: string[] = [];
+}
+
 const link = (source: string, predicate: string, target: string) => ({
   author: "did:test:agent",
   timestamp: "1",
@@ -157,6 +170,21 @@ describe("RPCs per write", () => {
     expect(commands).toHaveLength(2);
     expect(commands[1]).toContain("collectionSetter");
     expect(commands[1]).toContain("rt://tag");
+  });
+
+  it("create still clears an empty relation whose predicate a sibling relation wrote to", async () => {
+    // collectionSetter clears by predicate, so a write through `tags` can hold
+    // links that an empty `labels` (same predicate) cleared before.
+    const { proxy, sent } = countingProxy([RoundTripShared]);
+    const shared = new RoundTripShared(proxy);
+    await (shared as any).addTags("rt://tag/a");
+    shared.title = "standup";
+    shared.tags = undefined as any;
+    shared.labels = [];
+    await shared.save();
+    const commands = commandsSent(sent);
+    expect(commands).toHaveLength(2);
+    expect(commands[1]).toContain("collectionSetter");
   });
 
   it("update of an existing record with [] still clears the relation", async () => {
