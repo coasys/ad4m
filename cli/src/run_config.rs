@@ -413,6 +413,11 @@ impl RunArgs {
         }
 
         let mut config = file.to_ad4m_config(&secrets)?;
+        // The file's `multi_user_config.enabled: false` leaves the mode as it
+        // is; `--enable-multi-user` / `AD4M_ENABLE_MULTI_USER` sets it either way.
+        if let Some(enabled) = self.enable_multi_user {
+            config.enable_multi_user = Some(enabled);
+        }
         config.network_bootstrap_seed = self.network_bootstrap_seed;
         config.language_language_only = self.language_language_only;
         config.hc_use_bootstrap = self.hc_use_bootstrap;

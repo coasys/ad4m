@@ -111,6 +111,8 @@ pub struct Ad4mConfig {
     pub auto_permit_cap_requests: Option<bool>,
     pub tls: Option<TlsConfig>,
     pub log_holochain_metrics: Option<bool>,
+    /// Multi-user mode at start: `Some` sets it in the database, `None` keeps
+    /// what the database holds from an earlier run.
     pub enable_multi_user: Option<bool>,
     pub smtp_config: Option<SmtpConfig>,
     /// Log level per crate over [`crate::logging::get_default_log_config`];

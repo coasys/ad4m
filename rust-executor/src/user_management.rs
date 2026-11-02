@@ -41,14 +41,13 @@ pub fn is_multi_user_enabled() -> bool {
     Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false))
 }
 
-/// Applies `Ad4mConfig::enable_multi_user` at start.
+/// Applies `Ad4mConfig::enable_multi_user` at start: `Some` sets the mode in the database
+/// (as `setMultiUserEnabled` does; users stay in it), `None` keeps what an earlier run left.
 pub fn apply_multi_user_flag(enable_multi_user: Option<bool>) -> Result<(), String> {
-    if let Some(enable_multi_user) = enable_multi_user {
-        if enable_multi_user {
-            log::info!("Enabling multi-user mode...");
-            Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true))
-                .map_err(|e| format!("Failed to enable multi-user mode: {}", e))?;
-        }
+    if let Some(enabled) = enable_multi_user {
+        log::info!("Setting multi-user mode to {enabled}...");
+        Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(enabled))
+            .map_err(|e| format!("Failed to set multi-user mode: {}", e))?;
     }
     Ok(())
 }

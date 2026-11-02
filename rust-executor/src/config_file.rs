@@ -507,7 +507,11 @@ impl ExecutorConfigFile {
             run_dapp_server: self.run_dapp_server,
             auto_permit_cap_requests: self.auto_permit_cap_requests,
             tls,
-            enable_multi_user: multi_user.map(|m| m.enabled),
+            // `enabled` is a required key, so `false` is also what a file with
+            // only TLS or SMTP holds, and what the launcher sends when it has no
+            // multi-user settings: it leaves the database's mode as it is.
+            // `--enable-multi-user false` turns it off (`RunArgs::resolve`).
+            enable_multi_user: multi_user.filter(|m| m.enabled).map(|_| true),
             smtp_config,
             log_config: self.log_config.clone(),
             enable_mcp: self.mcp_enabled,
