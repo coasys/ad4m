@@ -1,5 +1,5 @@
 import { Ad4mModel } from "./Ad4mModel";
-import { Model, Property } from "./decorators";
+import { HasMany, Model, Property } from "./decorators";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { clearQueryCache } from "./query-cache";
 
@@ -16,6 +16,22 @@ class RoundTripNote extends Ad4mModel {
 class RoundTripReadable extends Ad4mModel {
   @Property({ through: "rt://title" })
   title: string = "";
+}
+
+// Every relation defaults to [], as WE's generated classes declare them.
+@Model({ name: "RoundTripCall" })
+class RoundTripCall extends Ad4mModel {
+  @Property({ through: "rt://title", required: true, initial: "literal://string:untitled" })
+  title: string = "";
+
+  @HasMany({ through: "rt://participant" })
+  participants: string[] = [];
+
+  @HasMany({ through: "rt://tag" })
+  tags: string[] = [];
+
+  @HasMany({ through: "rt://attachment" })
+  attachments: string[] = [];
 }
 
 const link = (source: string, predicate: string, target: string) => ({
@@ -90,6 +106,56 @@ describe("RPCs per write", () => {
     const { proxy, calls } = countingProxy([RoundTripNote]);
     await createNote(proxy);
     expect(calls).toEqual(["createBatch", "createSubject", "commitBatch", "modelQuery"]);
+  });
+
+  // The commands each executeCommands carried, as one string per call.
+  const commandsSent = (sent: any[][]) =>
+    sent.filter((c) => c[0] === "executeCommands").map((c) => JSON.stringify(c.slice(1)));
+
+  it("create sends no setter for an empty relation", async () => {
+    const { proxy, calls } = countingProxy([RoundTripCall]);
+    const call = new RoundTripCall(proxy);
+    call.title = "standup";
+    await call.save();
+    expect(calls).toEqual(["createBatch", "createSubject", "commitBatch", "modelQuery"]);
+  });
+
+  it("Model.create sends no setter for an empty relation", async () => {
+    const { proxy, calls } = countingProxy([RoundTripCall]);
+    await RoundTripCall.create(proxy, { title: "standup" });
+    expect(calls).toEqual(["createBatch", "createSubject", "commitBatch", "modelQuery"]);
+  });
+
+  it("create still writes a non-empty relation, and only that one", async () => {
+    const { proxy, calls, sent } = countingProxy([RoundTripCall]);
+    await RoundTripCall.create(proxy, { title: "standup", tags: ["rt://tag/a", "rt://tag/b"] });
+    expect(calls).toEqual(["createBatch", "createSubject", "executeCommands", "commitBatch", "modelQuery"]);
+    const [tags] = commandsSent(sent);
+    expect(tags).toContain("rt://tag");
+    expect(tags).toContain("rt://tag/a");
+    expect(tags).toContain("rt://tag/b");
+  });
+
+  it("create under a caller-supplied id still clears an empty relation", async () => {
+    // The id may name a record that already has links; [] keeps meaning "clear".
+    const { proxy, sent } = countingProxy([RoundTripCall]);
+    const call = new RoundTripCall(proxy, "rt://call/1");
+    call.title = "standup";
+    await call.save();
+    expect(commandsSent(sent)).toHaveLength(3);
+  });
+
+  it("update of an existing record with [] still clears the relation", async () => {
+    const { proxy, calls, sent } = countingProxy([RoundTripCall]);
+    const call = new RoundTripCall(proxy, "rt://call/1");
+    call.tags = ["rt://tag/a"];
+    (call as any).takeSnapshot();
+    call.tags = [];
+    await call.save("batch-1");
+    expect(calls).toEqual(["executeCommands"]);
+    const [cleared] = commandsSent(sent);
+    expect(cleared).toContain("collectionSetter");
+    expect(cleared).toContain("rt://tag");
   });
 
   it("delete of a decorated model sends no class-list lookup", async () => {
@@ -194,7 +260,7 @@ const rtt = Number(process.env.SDK_RTT_MS || 0);
     let rpcs = 0;
     for (let i = 0; i < runs; i++) {
       clearQueryCache();
-      const { proxy, calls } = countingProxy([RoundTripNote, RoundTripReadable], rtt);
+      const { proxy, calls } = countingProxy([RoundTripNote, RoundTripReadable, RoundTripCall], rtt);
       const start = performance.now();
       await write(proxy);
       ms.push(performance.now() - start);
@@ -206,6 +272,7 @@ const rtt = Number(process.env.SDK_RTT_MS || 0);
   it("wall time", async () => {
     const rows = {
       "create (save)": await time(createNote),
+      "create with 3 empty relations": await time((p) => RoundTripCall.create(p, { title: "standup" })),
       "delete": await time((p) => new RoundTripNote(p, "rt://note/1").delete()),
       "delete through abstract class": await time((p) => new RoundTripReadable(p, "rt://note/1").delete()),
       "createSubject(decorated instance)": await time((p) => p.createSubject(new RoundTripNote(undefined as any), "rt://n")),

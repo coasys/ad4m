@@ -520,6 +520,8 @@ export class Ad4mModel {
   private _baseExpression: string;
   private _perspective: PerspectiveProxy;
   private _snapshot: Record<string, any> | null = null;
+  /** True when the constructor minted the id: no record can hold links yet. */
+  private _idMinted: boolean = false;
   author: string;
   createdAt: any;
   updatedAt: any;
@@ -760,6 +762,7 @@ export class Ad4mModel {
     // IRIs, so relation links like `<post> --has_comment--> <comment-id>`
     // round-trip correctly through the SPARQL store.
     this._baseExpression = baseExpression ? baseExpression : `ad4m://obj/${makeRandomId(24)}`;
+    this._idMinted = !baseExpression;
     this._perspective = perspective;
   }
 
@@ -1997,7 +2000,10 @@ export class Ad4mModel {
               break;
           }
         } else if (Array.isArray(value)) {
-          // Handle all arrays as relations, including empty ones (which clears the relation)
+          // Handle all arrays as relations, including empty ones (which clears the relation).
+          // A record being created under an id minted here has no links to
+          // clear, so an empty relation there costs a round trip and writes nothing.
+          if (value.length === 0 && !this._snapshot && this._idMinted) continue;
           await this.setRelationValues(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
           // A scalar handed to a relation field is a single-member relation.
