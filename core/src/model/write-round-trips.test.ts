@@ -145,6 +145,20 @@ describe("RPCs per write", () => {
     expect(commandsSent(sent)).toHaveLength(3);
   });
 
+  it("create still clears an empty relation the instance already wrote to", async () => {
+    // addTags writes its link before save; [] on save must remove it again.
+    const { proxy, sent } = countingProxy([RoundTripCall]);
+    const call = new RoundTripCall(proxy);
+    await (call as any).addTags("rt://tag/a");
+    call.title = "standup";
+    call.tags = [];
+    await call.save();
+    const commands = commandsSent(sent);
+    expect(commands).toHaveLength(2);
+    expect(commands[1]).toContain("collectionSetter");
+    expect(commands[1]).toContain("rt://tag");
+  });
+
   it("update of an existing record with [] still clears the relation", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripCall]);
     const call = new RoundTripCall(proxy, "rt://call/1");

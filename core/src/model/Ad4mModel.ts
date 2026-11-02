@@ -522,6 +522,8 @@ export class Ad4mModel {
   private _snapshot: Record<string, any> | null = null;
   /** True when the constructor minted the id: no record can hold links yet. */
   private _idMinted: boolean = false;
+  /** Relations this instance has already written links to (`add*`/`set*`), so they may hold links. */
+  private _relationsWritten = new Set<string>();
   author: string;
   createdAt: any;
   updatedAt: any;
@@ -1688,6 +1690,7 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    this._relationsWritten.add(key);
     const abstractName = this.abstractName();
     if (abstractName) {
       if (value != null) await this.relationThroughAbstract(abstractName, key, 'setter', value, batchId);
@@ -1717,6 +1720,7 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    this._relationsWritten.add(key);
     const abstractName = this.abstractName();
     if (abstractName) {
       if (value != null) await this.relationThroughAbstract(abstractName, key, 'adder', value, batchId);
@@ -2003,7 +2007,7 @@ export class Ad4mModel {
           // Handle all arrays as relations, including empty ones (which clears the relation).
           // A record being created under an id minted here has no links to
           // clear, so an empty relation there costs a round trip and writes nothing.
-          if (value.length === 0 && !this._snapshot && this._idMinted) continue;
+          if (value.length === 0 && !this._snapshot && this._idMinted && !this._relationsWritten.has(key)) continue;
           await this.setRelationValues(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
           // A scalar handed to a relation field is a single-member relation.
