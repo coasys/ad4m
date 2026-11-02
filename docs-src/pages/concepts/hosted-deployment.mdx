@@ -81,7 +81,7 @@ Before login a caller with no token may only request a capability, read whether 
 
 ## What a user token may do
 
-The JWT a login returns carries the executor's **default user capability set**, whatever the app listed in `capabilities` (`get_user_default_capabilities`, `rust-executor/src/agent/capabilities/defs.rs`). It covers perspectives, neighbourhoods, languages, expressions, the user's own agent, friends and messages, hosting info and AI prompting and transcription. It leaves out `agent` `LOCK`/`UNLOCK`/`PERMIT`, `runtime` `QUIT`, AI model management (`UPDATE`/`DELETE`) and listing users. The domain table is on [Agent, executor and capabilities](./agent-executor-capabilities.mdx#reference-domains-and-verbs).
+The JWT a login returns carries the executor's **default user capability set**, whatever the app listed in `capabilities` (`get_user_default_capabilities`, `rust-executor/src/agent/capabilities/defs.rs`). It covers perspectives, neighbourhoods, languages, expressions, the user's own agent, friends and messages, hosting info and AI prompting and transcription. It includes `agent` `PERMIT`, limited to requests for the user's own agent, and leaves out `agent` `LOCK`/`UNLOCK`, `runtime` `QUIT`, AI model management (`UPDATE`/`DELETE`) and listing users. The domain table is on [Agent, executor and capabilities](./agent-executor-capabilities.mdx#reference-domains-and-verbs).
 
 On top of capabilities, calls that act on the node itself (the main agent's identity, wallet, files or executor-wide settings) refuse a user session outright (`rust-executor/src/api/guards.rs`). Turning multi-user mode on and off and granting a user free access need the admin credential.
 

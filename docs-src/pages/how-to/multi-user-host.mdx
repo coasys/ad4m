@@ -171,7 +171,7 @@ await ad4m.runtime.setFreeHostingEnabled(false);          // writes and AI calls
 await ad4m.runtime.setUserFreeAccess("alice@example.com", true);
 ```
 
-`listUsers` needs `runtime.user_management` `READ`, which user tokens do not carry; `setFreeHostingEnabled` needs `runtime` `QUIT` and `setUserFreeAccess` the admin credential (`rust-executor/src/api/runtime_ws.rs`, `users_ws.rs`). In the Launcher, the Hosting tab's Users sub-tab shows the same list. Paid hosting in wHOT and registration with the hosting index (`https://hosting.ad4m.dev` by default, listed in the connect dialog's host browser) are set up in the Launcher's Hosting tab: "Paid hosting via wHOT" and "Host Index Registration". The hosting index needs the host reachable over TLS first.
+`listUsers` needs `runtime.user_management` `READ`, which user tokens do not carry; `setFreeHostingEnabled` needs the operator or a grant on the main agent holding every capability (`Guard::Executor(ALL_CAPABILITY)`), and `setUserFreeAccess` the admin credential (`rust-executor/src/api/runtime_ws.rs`, `users_ws.rs`). In the Launcher, the Hosting tab's Users sub-tab shows the same list. Paid hosting in wHOT and registration with the hosting index (`https://hosting.ad4m.dev` by default, listed in the connect dialog's host browser) are set up in the Launcher's Hosting tab: "Paid hosting via wHOT" and "Host Index Registration". The hosting index needs the host reachable over TLS first.
 
 <Callout type="warning">
   The admin credential is the executor and every user on it. Use it only against the loopback listener (`http://127.0.0.1:12000`); a token travels in the WebSocket URL, and proxies log URLs.

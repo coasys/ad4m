@@ -78,7 +78,7 @@ Against a local executor the app and the agent are the same person, and the capa
 
 ## How it is built
 
-Capability definitions are the constants in `rust-executor/src/agent/capabilities/defs.rs`; the check that every RPC method runs is `check_capability` in `rust-executor/src/agent/capabilities/mod.rs`. The SDK side is `core/src/agent/AgentClient.ts`; the browser handshake is `connect/src/core.ts`.
+Capability definitions are the constants in `rust-executor/src/agent/capabilities/defs.rs`; every RPC method is admitted by its guard, `Guard::admit` in `rust-executor/src/api/guards.rs`, which calls `Session::require` (`rust-executor/src/agent/session.rs`) and so `require_capability` in `rust-executor/src/agent/capabilities/mod.rs`. The SDK side is `core/src/agent/AgentClient.ts`; the browser handshake is `connect/src/core.ts`.
 
 ## Next
 
@@ -108,4 +108,4 @@ Domain names and verbs as defined in `defs.rs`. Which RPC method requires which 
 | `runtime.hosting` | `READ`, `UPDATE` |
 | `artificial intelligence` | `READ`, `CREATE`, `UPDATE`, `DELETE`, `PROMPT`, `TRANSCRIBE` |
 
-A multi-user host grants each user a default set (`get_user_default_capabilities`): everything above except `agent` `LOCK`/`UNLOCK`/`PERMIT`, `runtime` `QUIT`, AI `UPDATE`/`DELETE`, and the whole `runtime.user_management` domain. A caller without a token gets `agent` `AUTHENTICATE` and `runtime.user_management` `READ` on `enabled`, plus `CREATE`, `LOGIN` and `VERIFY` there when multi-user mode is on (`anonymous_capabilities` in `capabilities/mod.rs`).
+A multi-user host grants each user a default set (`get_user_default_capabilities`): everything above except `agent` `LOCK`/`UNLOCK`, `runtime` `QUIT`, AI `UPDATE`/`DELETE`, and the whole `runtime.user_management` domain. A caller without a token gets `agent` `AUTHENTICATE` and `runtime.user_management` `READ` on `enabled`, plus `CREATE`, `LOGIN` and `VERIFY` there when multi-user mode is on (`anonymous_capabilities` in `capabilities/mod.rs`). A user's `agent` `PERMIT` approves only requests that name the user's own agent (the `Owns` guard on `agent.permitCapability`).
