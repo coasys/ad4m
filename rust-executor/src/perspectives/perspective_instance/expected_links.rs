@@ -52,7 +52,7 @@ impl PerspectiveInstance {
 
     fn links_held(&self, source: &str, predicate: &str) -> Result<Vec<HeldLink>, AnyError> {
         let mut links: Vec<HeldLink> = self
-            .sparql_store
+            .store()
             .query_links(Some(source), Some(predicate), None, None, None, None)?
             .into_iter()
             .map(|l| (l.author, l.timestamp, l.data.target))

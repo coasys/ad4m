@@ -32,7 +32,17 @@ impl Ad4mMcpHandler {
         let mut tools = Vec::new();
         let mut seen_classes = std::collections::HashSet::new();
 
+        let scoped = self.context.perspective_scope.is_some();
         for uuid in uuids {
+            // Unscoped, a deferred perspective offers no tools until something opens it:
+            // listing tools must not open (download) every perspective the caller may
+            // read. This check comes before the access check, because that check opens
+            // the perspective it admits. A scoped context names its one perspective, so
+            // its first listing opens it.
+            if !scoped && get_perspective(&uuid).is_some_and(|p| !p.is_hydrated()) {
+                continue;
+            }
+
             if !self.may_read_perspective(&uuid).await {
                 continue;
             }
@@ -1477,4 +1487,50 @@ mod tests {
 
     // Integration tests for full login flow would need the database initialized
     // See tests/js/tests/mcp-auth.test.ts for full integration tests
+
+    /// A deferred perspective (multi-tenant start-up), registered without background tasks.
+    fn deferred_perspective() -> crate::perspectives::perspective_instance::PerspectiveInstance {
+        let handle = crate::types::PerspectiveHandle {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            ..Default::default()
+        };
+        let p =
+            crate::perspectives::perspective_instance::PerspectiveInstance::new_deferred(handle);
+        crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
+        p
+    }
+
+    /// Listing the tools does not open the deferred perspectives the caller may read: the
+    /// access check, which opens what it admits, never runs for them.
+    #[tokio::test]
+    async fn listing_tools_leaves_deferred_perspectives_deferred() {
+        use super::super::test_support::{handler_as, operator, setup};
+        setup();
+        let p = deferred_perspective();
+        handler_as(operator()).generate_dynamic_tools().await;
+        let hydrated = p.is_hydrated();
+        crate::perspectives::unregister_perspective(&p.uuid);
+        assert!(!hydrated, "listing the tools opened a deferred perspective");
+    }
+
+    /// A context scoped to one perspective opens it on its first listing, so its classes
+    /// can become tools.
+    #[tokio::test]
+    async fn a_scoped_listing_opens_its_deferred_perspective() {
+        use super::super::test_support::{operator, setup};
+        use crate::agent::capabilities::ListenerReach;
+        use crate::mcp::server::McpContext;
+        setup();
+        let p = deferred_perspective();
+        let handler = Ad4mMcpHandler::new(
+            McpContext::new(Some("test-admin".into()), ListenerReach::Network, false)
+                .with_session(Arc::new(operator()))
+                .scoped_to(&p.uuid),
+        );
+        handler.generate_dynamic_tools().await;
+        let hydrated = p.is_hydrated();
+        p.teardown_background_tasks().await;
+        crate::perspectives::unregister_perspective(&p.uuid);
+        assert!(hydrated, "the scoped listing did not open its perspective");
+    }
 }

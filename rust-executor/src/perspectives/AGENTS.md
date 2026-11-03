@@ -76,6 +76,18 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `sparql_store_fd_tests.rs` (Linux, `/proc/self/fd`) pins the option through the OPTIONS
   file, measures a typical store against the budget, and checks the release on drop. Never open a second `SparqlStore` on a path that
   is already open: RocksDB's LOCK refuses it, and `PerspectiveInstance::new` panics.
+- **Lazy loading** (`perspective_instance/hydration.rs`). With the shared DB backend
+  (`opens_deferred`), `initialize_from_db` registers each stored perspective deferred
+  (`new_deferred`): an empty in-memory store, `is_hydrated() == false`, no background task.
+  `hydrate()` opens it: downloads its archive when snapshots are on, opens the persistent store,
+  runs `prepare_opened_store` (the start-up checks of an eager perspective), swaps the store
+  under `persist_lock`, then starts the background tasks. A failure leaves it deferred; a
+  torn-down perspective does not open. Read the store through `store()` and hold the `Arc`
+  for one operation only. The API opens a perspective in `get_perspective_with_access`, after
+  the access check, so every guarded method sees the real store. **Code that reads or writes a
+  perspective outside the guarded API calls `hydrate()` first** (link-language diffs,
+  `sfu::config_store`); MCP tool discovery skips deferred perspectives instead, so it does not
+  open all of them.
 
 ## Do / don't
 

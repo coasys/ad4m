@@ -177,7 +177,7 @@ async fn shacl_add_sdna_links_verify_after_a_read_back() {
     let (perspective, _, _) =
         setup_perspective_no_llm(&[("Belief", BELIEF_SDNA), ("Task", TASK_WITH_RELATION_SDNA)])
             .await;
-    let store = &perspective.sparql_store;
+    let store = &perspective.store();
     assert!(
         store
             .get_all_links()

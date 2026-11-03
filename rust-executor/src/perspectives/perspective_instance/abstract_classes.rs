@@ -92,7 +92,7 @@ impl PerspectiveInstance {
             }
             cache.generation
         };
-        let index = Arc::new(AbstractIndex::load(&self.sparql_store)?);
+        let index = Arc::new(AbstractIndex::load(&self.store())?);
         let mut cache = self.abstract_cache.write().unwrap();
         // Computed against shapes that changed meanwhile: answer, don't keep.
         if cache.generation == generation {
@@ -131,7 +131,7 @@ impl PerspectiveInstance {
         let index = self.abstract_index()?;
         let (alias_key, shape) = self.abstract_shape(abstract_class)?;
         let mut resolution = abstract_classes::resolve(
-            &self.sparql_store,
+            &self.store(),
             &self.shape_resolver(),
             &index,
             alias_key,

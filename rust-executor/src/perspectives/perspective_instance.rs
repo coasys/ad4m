@@ -29,6 +29,7 @@ use crate::types::{
 };
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
+use arc_swap::ArcSwap;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -75,7 +76,10 @@ mod subscription_triggers;
 mod local_agents;
 // Committing a batch only if the links it expects still stand.
 mod expected_links;
+// Lazy loading: deferred perspectives and their hydration.
+mod hydration;
 pub use expected_links::{ExpectedLinks, LinksChanged};
+pub(crate) use hydration::store_data_path;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -96,6 +100,10 @@ mod join_tests;
 #[cfg(test)]
 #[path = "perspective_instance_pending_diffs_tests.rs"]
 mod pending_diffs_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance_lazy_tests.rs"]
+mod lazy_tests;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -639,8 +647,17 @@ pub struct PerspectiveInstance {
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
-    pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
-    /// Held by every write to `sparql_store` ([`Self::persist_link_diff`]), and by
+    /// This perspective's SPARQL store, read through [`Self::store`]. A slot, so lazy
+    /// loading can replace a deferred perspective's in-memory store with its persistent one
+    /// ([`Self::hydrate`]); every clone shares the slot, and a reader keeps the store it
+    /// loaded until it drops it.
+    store_slot: Arc<ArcSwap<crate::perspectives::sparql_store::SparqlStore>>,
+    /// False while the perspective is deferred: its store is an empty in-memory one and no
+    /// background task runs. [`Self::hydrate`] sets it.
+    hydrated: Arc<AtomicBool>,
+    /// Held by [`Self::hydrate`], so two first accesses open the persistent store once.
+    hydration_lock: Arc<Mutex<()>>,
+    /// Held by every write to the store ([`Self::persist_link_diff`]), and by
     /// [`Self::commit_batch_if`] from checking what it expects through its write, so no other
     /// write lands in between. A std mutex: held for store calls, never across an await.
     pub(super) persist_lock: Arc<std::sync::Mutex<()>>,
@@ -730,7 +747,7 @@ fn links_missing_remotely(
 /// store and memoizes the result.
 struct PerspectiveShapeResolver<'a> {
     cache: &'a std::sync::RwLock<HashMap<String, Arc<ModelShape>>>,
-    store: &'a crate::perspectives::sparql_store::SparqlStore,
+    store: Arc<crate::perspectives::sparql_store::SparqlStore>,
 }
 
 impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
@@ -738,7 +755,7 @@ impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
         if let Some(shape) = self.cache.read().unwrap().get(class_name).cloned() {
             return Ok(shape);
         }
-        let shape = load_shape_from_store(self.store, class_name)?;
+        let shape = load_shape_from_store(&self.store, class_name)?;
         let arc = Arc::new(shape);
         self.cache
             .write()
@@ -749,15 +766,22 @@ impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
 }
 
 impl PerspectiveInstance {
+    /// A perspective with its persistent store open (in memory when no app data path is
+    /// set).
     pub fn new(handle: PerspectiveHandle, created_from_join: Option<bool>) -> Self {
-        // Build per-perspective data path for persistent SPARQL store
-        let sparql_data_path = crate::perspectives::get_app_data_path().map(|base| {
-            let p = std::path::PathBuf::from(&base)
-                .join("perspectives")
-                .join(&handle.uuid);
-            p.to_string_lossy().to_string()
-        });
+        let store = crate::perspectives::sparql_store::SparqlStore::new(
+            store_data_path(&handle.uuid).as_deref(),
+        )
+        .expect("Failed to create per-perspective SPARQL service");
+        Self::with_store(handle, created_from_join, store, true)
+    }
 
+    fn with_store(
+        handle: PerspectiveHandle,
+        created_from_join: Option<bool>,
+        store: crate::perspectives::sparql_store::SparqlStore,
+        hydrated: bool,
+    ) -> Self {
         PerspectiveInstance {
             persisted: Arc::new(Mutex::new(handle.clone())),
             uuid: handle.uuid.clone(),
@@ -782,10 +806,9 @@ impl PerspectiveInstance {
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
-            sparql_store: Arc::new(
-                crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
-                    .expect("Failed to create per-perspective SPARQL service"),
-            ),
+            store_slot: Arc::new(ArcSwap::from_pointee(store)),
+            hydrated: Arc::new(AtomicBool::new(hydrated)),
+            hydration_lock: Arc::new(Mutex::new(())),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
             receipt_verdict_memo: Arc::new(Default::default()),
@@ -903,7 +926,7 @@ impl PerspectiveInstance {
     fn shape_resolver(&self) -> PerspectiveShapeResolver<'_> {
         PerspectiveShapeResolver {
             cache: &self.shape_cache,
-            store: &self.sparql_store,
+            store: self.store(),
         }
     }
 
@@ -1092,7 +1115,7 @@ impl PerspectiveInstance {
                 .sum();
             (count, links)
         };
-        let quad_count = self.sparql_store.quad_count();
+        let quad_count = self.store().quad_count();
         let name = self.persisted.lock().await.name.clone().unwrap_or_default();
 
         PerspectiveMemoryStats {
@@ -1127,7 +1150,7 @@ impl PerspectiveInstance {
                 .sum();
             (count, links)
         };
-        let quad_count = self.sparql_store.quad_count();
+        let quad_count = self.store().quad_count();
         let name = self
             .persisted
             .blocking_lock()
@@ -1168,7 +1191,7 @@ impl PerspectiveInstance {
                 le
             })
             .collect();
-        self.sparql_store.reload(link_exprs)?;
+        self.store().reload(link_exprs)?;
         self.clear_shape_cache();
         Ok(())
     }
@@ -1556,7 +1579,7 @@ impl PerspectiveInstance {
 
         if let Some(mut link_language) = link_language_clone {
             // Query SPARQL store for all links
-            let decorated_links = match self.sparql_store.get_all_links() {
+            let decorated_links = match self.store().get_all_links() {
                 Ok(links) => links,
                 Err(e) => {
                     log::error!(
@@ -2022,7 +2045,7 @@ impl PerspectiveInstance {
 
             // Query SPARQL store
             let decorated_link = self
-                .sparql_store
+                .store()
                 .get_link(
                     &link_expression.data.source,
                     link_expression.data.predicate.as_deref(),
@@ -2042,7 +2065,7 @@ impl PerspectiveInstance {
             let _handle = self.persisted.lock().await.clone();
 
             // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
+            if let Some(decorated_link) = self.store().get_link(
                 &link_expression.data.source,
                 link_expression.data.predicate.as_deref(),
                 &link_expression.data.target,
@@ -2309,7 +2332,7 @@ impl PerspectiveInstance {
             .into_iter()
             .map(|removal| {
                 let link = LinkExpression::try_from(removal)?;
-                let stored = self.sparql_store.get_link(
+                let stored = self.store().get_link(
                     &link.data.source,
                     link.data.predicate.as_deref(),
                     &link.data.target,
@@ -2418,7 +2441,7 @@ impl PerspectiveInstance {
         let handle = self.persisted.lock().await.clone();
 
         // Query SPARQL store
-        let decorated_link_option = self.sparql_store.get_link(
+        let decorated_link_option = self.store().get_link(
             &old_link.data.source,
             old_link.data.predicate.as_deref(),
             &old_link.data.target,
@@ -2537,7 +2560,7 @@ impl PerspectiveInstance {
         let mut existing_links = Vec::new();
         for link in link_expressions {
             // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
+            if let Some(decorated_link) = self.store().get_link(
                 &link.data.source,
                 link.data.predicate.as_deref(),
                 &link.data.target,
@@ -2734,7 +2757,7 @@ impl PerspectiveInstance {
             dt.to_rfc3339()
         });
 
-        Ok(self.sparql_store.query_links(
+        Ok(self.store().query_links(
             query.source.as_deref(),
             query.predicate.as_deref(),
             query.target.as_deref(),
@@ -2806,7 +2829,7 @@ impl PerspectiveInstance {
                 let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
                 dt.to_rfc3339()
             });
-            return Ok(self.sparql_store.query_links_top_n_by_timestamp(
+            return Ok(self.store().query_links_top_n_by_timestamp(
                 query.source.as_deref(),
                 query.predicate.as_deref(),
                 query.target.as_deref(),
@@ -3785,7 +3808,7 @@ impl PerspectiveInstance {
     /// `query` (no wire-format re-encoding of coincidentally-named
     /// `?target`/`?t` bindings; see `SparqlStore::query_arbitrary`).
     pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query_arbitrary(&query)
+        self.store().query_arbitrary(&query)
     }
 
     /// Resolve each URI to every subject class it is an instance of, most
@@ -3807,7 +3830,7 @@ impl PerspectiveInstance {
         uris: &[String],
     ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
         let resolver = self.shape_resolver();
-        super::subject_classes_of::subject_classes_of(&self.sparql_store, &resolver, uris)
+        super::subject_classes_of::subject_classes_of(&self.store(), &resolver, uris)
     }
 
     /// Cancellation-aware async variant of [`Self::sparql_query`].
@@ -3821,7 +3844,7 @@ impl PerspectiveInstance {
         query: String,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query_cancellable(&query, cancel).await
+        self.store().query_cancellable(&query, cancel).await
     }
 
     /// The ordering strategy declared for `(source, predicate)`, if any.
@@ -3862,7 +3885,7 @@ impl PerspectiveInstance {
         let pending = self.staged_triples_for(source, batch_id).await;
         let resolver = self.shape_resolver();
         let classes = super::subject_classes_of::subject_classes_of_with_pending(
-            &self.sparql_store,
+            &self.store(),
             &resolver,
             &[source.to_string()],
             &pending,
@@ -4252,7 +4275,7 @@ impl PerspectiveInstance {
             let run = match classes {
                 super::model_query::QueryClasses::One(_) => {
                     super::model_query::execute_model_query(
-                        &self.sparql_store,
+                        &self.store(),
                         shapes[0].1.as_ref(),
                         &query_input,
                         &resolver,
@@ -4261,7 +4284,7 @@ impl PerspectiveInstance {
                 }
                 super::model_query::QueryClasses::Union(names) => {
                     super::model_query::execute_union_query_with_views(
-                        &self.sparql_store,
+                        &self.store(),
                         names,
                         &query_input,
                         &resolver,
@@ -4304,7 +4327,7 @@ impl PerspectiveInstance {
     ) -> Result<String, deno_core::anyhow::Error> {
         let shape = self.get_shape(class_name)?;
         let result = super::model_query::evaluate_getters_batch(
-            &self.sparql_store,
+            &self.store(),
             shape.as_ref(),
             instance_ids,
             property_names,
@@ -4348,13 +4371,13 @@ impl PerspectiveInstance {
 
         // Removals first
         for removal in diff.removals.iter().cloned().chain(retracted) {
-            if let Err(e) = self.sparql_store.remove_link(&removal) {
+            if let Err(e) = self.store().remove_link(&removal) {
                 log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
         for addition in diff.additions.iter().filter(|a| !effects.covers(a)) {
-            if let Err(e) = self.sparql_store.add_link(addition) {
+            if let Err(e) = self.store().add_link(addition) {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
         }
@@ -4607,7 +4630,7 @@ impl PerspectiveInstance {
                 // One failing trigger must not silence the other notifications.
                 match {
                     let query = n.trigger.clone();
-                    let result_json = self.sparql_store.query(&query);
+                    let result_json = self.store().query(&query);
                     match result_json {
                         Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
                             .map_err(|e| anyhow::anyhow!(e)),
@@ -5411,7 +5434,7 @@ impl PerspectiveInstance {
         let _uuid = self.uuid.clone();
 
         let links = self
-            .sparql_store
+            .store()
             .get_links_by_predicate_and_source_suffix(predicate, &shape_suffix)?;
 
         // Return the first match
@@ -5434,7 +5457,7 @@ impl PerspectiveInstance {
         let _uuid = self.uuid.clone();
 
         let links = self
-            .sparql_store
+            .store()
             .get_links_by_predicate_and_source_suffix(predicate, &prop_suffix)?;
 
         // Return the first match
@@ -5464,7 +5487,7 @@ impl PerspectiveInstance {
         let prop_suffix = format!("{}.{}", class_name, property);
 
         let links = self
-            .sparql_store
+            .store()
             .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
 
         if let Some(link) = links.first() {
@@ -6198,8 +6221,11 @@ impl PerspectiveInstance {
                 .collect::<Vec<_>>()
         };
 
-        // Store reads the model triggers make, shared by every subscription.
-        let mut trigger_lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+        // Store reads the model triggers make, shared by every subscription. The store is
+        // held for the whole check: a hydration that swaps it meanwhile does not change
+        // what this check reads.
+        let store = self.store();
+        let mut trigger_lookups = subscription_triggers::StoreLookups::new(&store);
 
         // Create futures for each query check
         for (id, query_string, sub_predicates, model_params) in queries {
@@ -8075,7 +8101,7 @@ mod tests {
         };
         let body = |perspective: &PerspectiveInstance| {
             perspective
-                .sparql_store
+                .store()
                 .query_links(
                     Some("test://record"),
                     Some("test://body"),
@@ -9035,7 +9061,7 @@ mod tests {
             let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
             let mut link = LinkExpression::from(signed);
             link.status = Some(crate::types::LinkStatus::Shared);
-            perspective.sparql_store.add_link(&link).expect("add link");
+            perspective.store().add_link(&link).expect("add link");
         }
     }
 
@@ -9598,7 +9624,7 @@ mod tests {
             let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
             let mut link = LinkExpression::from(signed);
             link.status = Some(crate::types::LinkStatus::Shared);
-            perspective.sparql_store.add_link(&link).expect("add link");
+            perspective.store().add_link(&link).expect("add link");
         }
 
         let query_json = format!(
@@ -9694,7 +9720,7 @@ mod tests {
             let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
             let mut link = LinkExpression::from(signed);
             link.status = Some(crate::types::LinkStatus::Shared);
-            perspective.sparql_store.add_link(&link).expect("add_link");
+            perspective.store().add_link(&link).expect("add_link");
         }
 
         let query_json = format!(
@@ -9900,7 +9926,7 @@ mod tests {
         // `get_links` no longer routes through this path, the equivalence
         // assertion below catches drift between the two implementations.
         let direct = perspective
-            .sparql_store
+            .store()
             .query_links_top_n_by_timestamp(None, None, None, None, None, 5, false)
             .unwrap();
         assert_eq!(

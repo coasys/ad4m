@@ -141,7 +141,7 @@ pub(crate) async fn list_overlays(
     let mut by_base: BTreeMap<String, Vec<DecoratedLinkExpression>> = BTreeMap::new();
     if !iri_bases.is_empty() {
         let rows = perspective
-            .sparql_store
+            .store()
             .query_decorated_links(&overlay_links_query(&iri_bases))?;
         for l in rows {
             by_base.entry(l.data.source.clone()).or_default().push(l);
@@ -638,7 +638,7 @@ mod tests {
     /// Write a link straight into the store with a chosen author and
     /// timestamp, to force timestamp ties and out-of-order inserts.
     fn put(p: &PerspectiveInstance, base: &str, pred: &str, target: &str, author: &str, ts: &str) {
-        p.sparql_store
+        p.store()
             .add_link(&LinkExpression {
                 author: author.into(),
                 timestamp: ts.into(),
@@ -974,7 +974,7 @@ mod tests {
     async fn list_overlays_300_overlays_same_result_and_faster() {
         let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
         let dir = tempfile::tempdir().unwrap();
-        p.sparql_store = std::sync::Arc::new(
+        p.swap_store(
             crate::perspectives::sparql_store::SparqlStore::new(Some(dir.path().to_str().unwrap()))
                 .unwrap(),
         );
@@ -1001,7 +1001,7 @@ mod tests {
     async fn list_overlays_non_iri_base_does_not_scan() {
         let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
         let dir = tempfile::tempdir().unwrap();
-        p.sparql_store = std::sync::Arc::new(
+        p.swap_store(
             crate::perspectives::sparql_store::SparqlStore::new(Some(dir.path().to_str().unwrap()))
                 .unwrap(),
         );
@@ -1045,15 +1045,12 @@ mod tests {
                 r#"STR(?source) IN ("{flux}") && (?predicate = <{OVERLAY_KIND_PRED}> || ?predicate = <{OVERLAY_RUN_PRED}> || STRSTARTS(STR(?predicate), "{INFERRED_PREFIX}"))"#
             ),
         );
-        assert_eq!(
-            p.sparql_store.query_decorated_links(&scan).unwrap().len(),
-            3
-        );
+        assert_eq!(p.store().query_decorated_links(&scan).unwrap().len(), 3);
 
         let reps = 5;
         let t = std::time::Instant::now();
         for _ in 0..reps {
-            p.sparql_store.query_decorated_links(&scan).unwrap();
+            p.store().query_decorated_links(&scan).unwrap();
         }
         let scan_ms = t.elapsed().as_secs_f64() * 1000.0 / f64::from(reps);
         let t = std::time::Instant::now();
@@ -1091,9 +1088,7 @@ mod tests {
                 let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
                 let dir = tempfile::tempdir().unwrap();
                 if rocks {
-                    p.sparql_store = std::sync::Arc::new(
-                        SparqlStore::new(Some(dir.path().to_str().unwrap())).unwrap(),
-                    );
+                    p.swap_store(SparqlStore::new(Some(dir.path().to_str().unwrap())).unwrap());
                 }
                 seed_overlays(&mut p, &ctx, n, extra).await;
                 let (old_ms, new_ms) = time_both(&p, n, 5).await;

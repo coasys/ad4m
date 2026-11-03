@@ -397,7 +397,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     }
 
     // Initialise the database backend.
-    // "shared" mode delegates to the platform Worker's internal DB API;
+    // Multi-tenant mode delegates to the remote DB API;
     // everything else uses the in-process Ad4mDb (LocalDb).
     {
         use std::sync::Arc;
@@ -426,11 +426,19 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         crate::db_backend::init_db_backend(backend);
     }
 
-    // Restore perspective data from the platform backend if running in shared mode.
-    // Downloads the tar.gz snapshot and extracts to the data directory
-    // before perspectives initialise (so OxiGraph opens with restored data).
-    if config.wallet_backend.as_deref() == Some("shared") {
-        match crate::perspective_snapshot::restore_perspectives(&config) {
+    // Restore perspective data from the remote snapshot backend in multi-tenant mode.
+    //
+    // Deferred perspectives (shared DB backend): download the manifest only. Each
+    // archive downloads when its perspective hydrates (first access), so the executor
+    // reports /health ready before downloading large stores. Perspectives that open
+    // eagerly need every archive before they open.
+    if crate::perspective_snapshot::snapshots_enabled(&config) {
+        let restored = if crate::perspectives::opens_deferred(&config) {
+            crate::perspective_snapshot::restore_perspectives_lazy(&config)
+        } else {
+            crate::perspective_snapshot::restore_perspectives(&config)
+        };
+        match restored {
             Ok(true) => info!("Restored perspectives from remote snapshot"),
             Ok(false) => info!("No remote snapshot found — starting with fresh perspectives"),
             Err(e) => log::warn!("Perspective restore failed (continuing without): {}", e),
@@ -440,7 +448,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // ── Token separation assertion ──────────────────────────────────────
     // internal_api_token (executor → Worker) must differ from admin_credential
     // (client → executor) to maintain trust boundary separation. Same value
-    // means compromise of any admin-capable client leaks platform-internal auth.
+    // means compromise of any admin-capable client leaks backend-internal auth.
     if config.wallet_backend.as_deref() == Some("shared") {
         if let (Some(internal), Some(admin)) =
             (&config.internal_api_token, &config.admin_credential)
@@ -658,7 +666,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     perspectives::initialize_from_db();
 
     // Start periodic perspective snapshots in shared mode.
-    if config.wallet_backend.as_deref() == Some("shared") {
+    if crate::perspective_snapshot::snapshots_enabled(&config) {
         crate::perspective_snapshot::spawn_periodic_backup(config.clone());
     }
 

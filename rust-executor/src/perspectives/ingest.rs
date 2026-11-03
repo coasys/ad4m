@@ -76,7 +76,7 @@ impl PerspectiveInstance {
         // removals need no Local check; `fold_into` publishes them.
         for retracted in &effects.retracted {
             if let Err(e) = self
-                .sparql_store
+                .store()
                 .remove_link(&LinkExpression::from(retracted.clone()))
             {
                 log::warn!("Failed to remove retracted link from SPARQL store: {:?}", e);
@@ -85,13 +85,13 @@ impl PerspectiveInstance {
         let removals = diff
             .removals
             .into_iter()
-            .filter(|l| applied("removal", l, self.sparql_store.remove_remote_link(l)))
+            .filter(|l| applied("removal", l, self.store().remove_remote_link(l)))
             .collect();
         let additions = diff
             .additions
             .into_iter()
             .filter(|l| !effects.covers(l))
-            .filter(|l| applied("addition", l, self.sparql_store.add_remote_link(l)))
+            .filter(|l| applied("addition", l, self.store().add_remote_link(l)))
             .collect();
         Ok((
             PerspectiveDiff {

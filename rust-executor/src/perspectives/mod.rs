@@ -93,7 +93,100 @@ fn sweep_link_metadata(p: &PerspectiveInstance) -> Result<usize, deno_core::anyh
             "induced metadata-vocabulary sweep failure"
         ));
     }
-    p.sparql_store.purge_link_metadata_links()
+    p.store().purge_link_metadata_links()
+}
+
+/// The checks and repairs a stored perspective's store gets when it opens: at start-up for a
+/// perspective that opens eagerly, at its first access for a deferred one
+/// ([`PerspectiveInstance::hydrate`]). An `Err` means the perspective must not open.
+pub(crate) async fn prepare_opened_store(p: &PerspectiveInstance) -> Result<(), String> {
+    // Run literal:// → literal: URI migration (idempotent)
+    match migration::migrate_links_from_rusqlite_to_sparql(&p.uuid, &p.store()) {
+        Ok(result) if result.migrated > 0 => {
+            log::info!(
+                "🔄 Migration for {}: {} migrated, {} literal conversions",
+                p.uuid,
+                result.migrated,
+                result.literal_conversions
+            );
+        }
+        Ok(_) => {} // Already migrated or nothing to migrate
+        Err(e) => log::warn!("Migration check for {}: {}", p.uuid, e),
+    }
+
+    // A store written before it refused links in its metadata
+    // vocabulary may hold some (#1564): remove them. A perspective
+    // whose store could not be swept does not open, so nothing reads
+    // provenance from it; the next start tries again.
+    match sweep_link_metadata(p) {
+        Ok(0) => {}
+        Ok(removed) => log::warn!(
+            "Removed {} link(s) in the metadata vocabulary from perspective {}",
+            removed,
+            p.uuid
+        ),
+        Err(e) => {
+            return Err(format!("its metadata-vocabulary sweep failed: {}", e));
+        }
+    }
+
+    // No named-graph → reifier migration. The named-graph storage model
+    // never shipped: `git tag --contains` on the commit that replaced it
+    // (`7aeeb8982`) is empty, and the last release tag carrying
+    // `perspectives/` has no `sparql_store.rs` at all. Carrying a
+    // migration for a format nobody holds meant carrying a third
+    // `proofValid` read path, and with it the "never evaluated" verdict
+    // it decoded (#1046).
+
+    // No literal-encoding migration on boot. A scalar rides the API as a
+    // `literal:*` wire target and is stored as a native typed RDF literal
+    // by the write path (`target_to_storage_term`, applied uniformly to
+    // every link — model properties, raw `addLink`, and SHACLFlow
+    // bookkeeping alike); reads render it back to the same wire form
+    // (`storage_term_to_target_string`). Fresh writes therefore land in
+    // the indexed shape by construction, so there is nothing to migrate.
+    // A store-sweep migration would sit below this wire-format boundary
+    // and could not tell a model property value from a SHACLFlow
+    // bookkeeping link — see the git history of this file for the removed
+    // v3/v4 sweeps. If real pre-typed-literal stores ever need upgrading,
+    // reintroduce a migration keyed on SHACL property shapes, never a
+    // blanket rewrite.
+
+    // Rebuild SPARQL index from existing links
+    // Skip SPARQL rebuild if persistent store already has data
+    if p.store().has_data() {
+        log::info!(
+            "✅ SPARQL store for perspective {} already has data, skipping rebuild",
+            p.uuid
+        );
+    } else {
+        match p.get_links(&LinkQuery::default()).await {
+            Ok(links) => {
+                if !links.is_empty() {
+                    log::info!(
+                        "🔄 SPARQL REBUILD: Syncing {} links for perspective {}",
+                        links.len(),
+                        p.uuid
+                    );
+                    if let Err(e) = p.sync_existing_links_to_sparql(&links) {
+                        log::error!(
+                            "Failed to sync links to SPARQL for perspective {}: {}",
+                            p.uuid,
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!(
+                    "Failed to get links for SPARQL sync in perspective {}: {}",
+                    p.uuid,
+                    e
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Set the application data path for perspective storage
@@ -117,6 +210,12 @@ pub(crate) fn get_app_data_path() -> Option<String> {
     APP_DATA_PATH.read().unwrap().clone()
 }
 
+/// Test seam: put back an app data path read with [`get_app_data_path`], `None` included.
+#[cfg(test)]
+pub(crate) fn restore_app_data_path(path: Option<String>) {
+    *APP_DATA_PATH.write().unwrap() = path;
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SerializedPerspective {
     #[serde(flatten)]
@@ -124,9 +223,25 @@ pub struct SerializedPerspective {
     pub links: Vec<LinkExpression>,
 }
 
+/// Whether stored perspectives open deferred (see [`initialize_from_db`]): with the shared
+/// DB backend, a multi-tenant executor.
+pub fn opens_deferred(config: &crate::config::Ad4mConfig) -> bool {
+    config.db_backend.as_deref() == Some("shared")
+}
+
 /// Open every perspective in the database, each in its own task. Returns the
 /// tasks, so a test can wait for them.
+///
+/// With the shared DB backend (a multi-tenant executor) a perspective opens deferred
+/// instead: it is registered at once with an empty in-memory store, and its persistent
+/// store opens on first access ([`PerspectiveInstance::hydrate`]). So the executor is
+/// ready before it has downloaded and opened every store.
 pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
+    let lazy = crate::config::GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(opens_deferred);
     let mut tasks = Vec::new();
     let handles = Ad4mDb::global_instance()
         .lock()
@@ -151,103 +266,24 @@ pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
             }
         }
 
+        if lazy {
+            let p = PerspectiveInstance::new_deferred(handle_clone.clone());
+            log::info!("📦 Deferred perspective {}", handle_clone.uuid);
+            PERSPECTIVES
+                .write()
+                .unwrap()
+                .entry(handle_clone.uuid.clone())
+                .or_insert_with(|| RwLock::new(p));
+            continue;
+        }
+
         // Spawn async task to initialize perspective
         tasks.push(tokio::spawn(async move {
             let p = PerspectiveInstance::new(handle_clone.clone(), None);
 
-            // Run literal:// → literal: URI migration (idempotent)
-            match migration::migrate_links_from_rusqlite_to_sparql(
-                &handle_clone.uuid,
-                &p.sparql_store,
-            ) {
-                Ok(result) if result.migrated > 0 => {
-                    log::info!(
-                        "🔄 Migration for {}: {} migrated, {} literal conversions",
-                        handle_clone.uuid,
-                        result.migrated,
-                        result.literal_conversions
-                    );
-                }
-                Ok(_) => {} // Already migrated or nothing to migrate
-                Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
-            }
-
-            // A store written before it refused links in its metadata
-            // vocabulary may hold some (#1564): remove them. A perspective
-            // whose store could not be swept does not open, so nothing reads
-            // provenance from it; the next start tries again.
-            match sweep_link_metadata(&p) {
-                Ok(0) => {}
-                Ok(removed) => log::warn!(
-                    "Removed {} link(s) in the metadata vocabulary from perspective {}",
-                    removed,
-                    handle_clone.uuid
-                ),
-                Err(e) => {
-                    log::error!(
-                        "Not opening perspective {}: its metadata-vocabulary sweep failed: {}",
-                        handle_clone.uuid,
-                        e
-                    );
-                    return;
-                }
-            }
-
-            // No named-graph → reifier migration. The named-graph storage model
-            // never shipped: `git tag --contains` on the commit that replaced it
-            // (`7aeeb8982`) is empty, and the last release tag carrying
-            // `perspectives/` has no `sparql_store.rs` at all. Carrying a
-            // migration for a format nobody holds meant carrying a third
-            // `proofValid` read path, and with it the "never evaluated" verdict
-            // it decoded (#1046).
-
-            // No literal-encoding migration on boot. A scalar rides the API as a
-            // `literal:*` wire target and is stored as a native typed RDF literal
-            // by the write path (`target_to_storage_term`, applied uniformly to
-            // every link — model properties, raw `addLink`, and SHACLFlow
-            // bookkeeping alike); reads render it back to the same wire form
-            // (`storage_term_to_target_string`). Fresh writes therefore land in
-            // the indexed shape by construction, so there is nothing to migrate.
-            // A store-sweep migration would sit below this wire-format boundary
-            // and could not tell a model property value from a SHACLFlow
-            // bookkeeping link — see the git history of this file for the removed
-            // v3/v4 sweeps. If real pre-typed-literal stores ever need upgrading,
-            // reintroduce a migration keyed on SHACL property shapes, never a
-            // blanket rewrite.
-
-            // Rebuild SPARQL index from existing links
-            // Skip SPARQL rebuild if persistent store already has data
-            if p.sparql_store.has_data() {
-                log::info!(
-                    "✅ SPARQL store for perspective {} already has data, skipping rebuild",
-                    handle_clone.uuid
-                );
-            } else {
-                match p.get_links(&LinkQuery::default()).await {
-                    Ok(links) => {
-                        if !links.is_empty() {
-                            log::info!(
-                                "🔄 SPARQL REBUILD: Syncing {} links for perspective {}",
-                                links.len(),
-                                handle_clone.uuid
-                            );
-                            if let Err(e) = p.sync_existing_links_to_sparql(&links) {
-                                log::error!(
-                                    "Failed to sync links to SPARQL for perspective {}: {}",
-                                    handle_clone.uuid,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "Failed to get links for SPARQL sync in perspective {}: {}",
-                            handle_clone.uuid,
-                            e
-                        );
-                    }
-                }
+            if let Err(e) = prepare_opened_store(&p).await {
+                log::error!("Not opening perspective {}: {}", handle_clone.uuid, e);
+                return;
             }
 
             // Atomically check-and-insert to prevent race condition
@@ -586,6 +622,16 @@ pub async fn handle_perspective_diff_from_link_language_impl(
     language_address: String,
 ) {
     if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
+        // A diff for a deferred perspective goes to its persistent store: written to the
+        // empty in-memory one, it would be lost when the perspective opens.
+        if let Err(e) = perspective.hydrate().await {
+            log::error!(
+                "Dropping diff from link language ({}): {}",
+                language_address,
+                e
+            );
+            return;
+        }
         if let Err(e) = perspective.diff_from_link_language(diff).await {
             log::error!(
                 "Failed to persist diff from link language ({}): {:?}",

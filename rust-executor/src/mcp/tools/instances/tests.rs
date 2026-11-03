@@ -3347,7 +3347,7 @@ async fn peer_links_cannot_write_or_erase_a_mentions_provenance() {
     // kept from before that, or written through `addLinkExpression`.
     unverified.status = Some(crate::types::LinkStatus::Shared);
     perspective
-        .sparql_store
+        .store()
         .add_link(&unverified)
         .expect("the unverified mention");
     let genuine = reifier_of(&perspective, "ad4m://post", WE_MENTION, &me.did);

@@ -61,7 +61,7 @@ impl PerspectiveInstance {
             .as_ref()
             .is_none_or(|p| p.iter().any(|k| k == "children"));
         containment::fill_container_rows(
-            &self.sparql_store,
+            &self.store(),
             &mut result.instances,
             &edges,
             selected,
@@ -84,7 +84,7 @@ impl PerspectiveInstance {
             return Ok(());
         }
         let edges = self.containment_edges()?;
-        containment::resolve_children_where(&self.sparql_store, query, &edges).await
+        containment::resolve_children_where(&self.store(), query, &edges).await
     }
 }
 

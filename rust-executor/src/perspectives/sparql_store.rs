@@ -3289,6 +3289,23 @@ mod tests {
             crate::perspectives::get_perspective(&self.uuid)
         }
 
+        /// Start the executor's perspectives as a multi-tenant executor (shared DB
+        /// backend) does, and return this one: registered deferred, nothing opened.
+        fn start_deferred(&self) -> crate::perspectives::perspective_instance::PerspectiveInstance {
+            use crate::config::GLOBAL_AD4M_CONFIG;
+            let previous = GLOBAL_AD4M_CONFIG
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let mut config = previous.clone().unwrap_or_default();
+            config.db_backend = Some("shared".to_string());
+            *GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = Some(config);
+            let tasks = crate::perspectives::initialize_from_db();
+            *GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = previous;
+            assert!(tasks.is_empty(), "a deferred start opens nothing");
+            crate::perspectives::get_perspective(&self.uuid).expect("registered deferred")
+        }
+
         fn forget(&self) {
             crate::perspectives::PERSPECTIVES
                 .write()
@@ -3316,7 +3333,7 @@ mod tests {
         let old = OldStore::new(|member| vec![swept_flag(member)]);
         let p = old.start().await.expect("the perspective opens");
         assert_eq!(
-            mention_rows(&p.sparql_store, &old.me.did),
+            mention_rows(&p.store(), &old.me.did),
             only_the_writers_mention(&old.writer)
         );
     }
@@ -3338,9 +3355,66 @@ mod tests {
             .retain(|uuid| uuid != &old.uuid);
         let p = old.start().await.expect("the perspective opens");
         assert_eq!(
-            mention_rows(&p.sparql_store, &old.me.did),
+            mention_rows(&p.store(), &old.me.did),
             only_the_writers_mention(&old.writer)
         );
+    }
+
+    /// A multi-tenant executor registers the perspective deferred, over an empty store;
+    /// its first access opens the stored one, with the start-up sweep applied.
+    #[tokio::test]
+    async fn a_deferred_perspective_opens_its_store_swept_on_hydration() {
+        let old = OldStore::new(|member| vec![swept_flag(member)]);
+        let p = old.start_deferred();
+        assert!(!p.is_hydrated());
+        assert_eq!(p.store().quad_count(), 0, "deferred over an empty store");
+
+        p.hydrate().await.expect("hydrates");
+        assert!(p.is_hydrated());
+        let registered = crate::perspectives::get_perspective(&old.uuid).unwrap();
+        assert_eq!(
+            mention_rows(&registered.store(), &old.me.did),
+            only_the_writers_mention(&old.writer),
+            "every clone sees the opened store"
+        );
+    }
+
+    /// A hydration whose sweep fails leaves the perspective deferred over its empty
+    /// store; the next access opens it swept.
+    #[tokio::test]
+    async fn hydration_does_not_open_a_perspective_whose_sweep_failed() {
+        let old = OldStore::new(|_| vec![]);
+        let p = old.start_deferred();
+        crate::perspectives::FAIL_METADATA_SWEEP
+            .lock()
+            .unwrap()
+            .push(old.uuid.clone());
+        assert!(p.hydrate().await.is_err(), "opened unswept");
+        assert!(!p.is_hydrated());
+        assert_eq!(p.store().quad_count(), 0, "still the deferred store");
+
+        crate::perspectives::FAIL_METADATA_SWEEP
+            .lock()
+            .unwrap()
+            .retain(|uuid| uuid != &old.uuid);
+        p.hydrate().await.expect("hydrates");
+        assert_eq!(
+            mention_rows(&p.store(), &old.me.did),
+            only_the_writers_mention(&old.writer)
+        );
+    }
+
+    /// Two first accesses at once open the store once (a second open of the same
+    /// RocksDB directory would fail on its lock) and share it.
+    #[tokio::test]
+    async fn concurrent_hydrations_open_the_store_once() {
+        let old = OldStore::new(|_| vec![]);
+        let p = old.start_deferred();
+        let other = p.clone();
+        let (a, b) = tokio::join!(p.hydrate(), other.hydrate());
+        a.expect("first hydrates");
+        b.expect("second hydrates");
+        assert!(std::sync::Arc::ptr_eq(&p.store(), &other.store()));
     }
 
     // ── Error messages ──

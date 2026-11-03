@@ -281,7 +281,7 @@ async fn ingest(
 }
 
 fn links_from(p: &PerspectiveInstance, source: &str) -> Vec<DecoratedLinkExpression> {
-    p.sparql_store
+    p.store()
         .get_all_links()
         .unwrap()
         .into_iter()
@@ -373,8 +373,8 @@ async fn ingest_leaves_a_local_link_written_after_the_filter_alone() {
         ("addition", vec![shared.clone()], vec![]),
         ("removal", vec![], vec![shared.clone()]),
     ] {
-        p.sparql_store.clear().unwrap();
-        let store = p.sparql_store.clone();
+        p.store().clear().unwrap();
+        let store = p.store();
         let concurrent = local.clone();
         *p.ingest_gap_hook.lock().unwrap() = Some(Box::new(move || {
             store.add_link(&concurrent).unwrap();

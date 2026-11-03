@@ -856,7 +856,8 @@ pub async fn run_one_pass(
     // shorter than that wait does not expire the claim we are still holding.
 
     // 2. Resolve shapes.
-    let store = &*perspective.sparql_store;
+    let store_arc = perspective.store();
+    let store = &*store_arc;
     let mut shapes = Vec::with_capacity(cfg.interpretation_classes.len());
     let mut missing = Vec::new();
     for class in &cfg.interpretation_classes {

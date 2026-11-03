@@ -31,7 +31,7 @@ fn add_links(p: &PerspectiveInstance, predicate: &str, range: std::ops::Range<us
         };
         let mut link = LinkExpression::from(signer.sign(data));
         link.status = Some(LinkStatus::Shared);
-        p.sparql_store.add_link(&link).expect("add link");
+        p.store().add_link(&link).expect("add link");
     }
 }
 

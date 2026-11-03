@@ -768,7 +768,7 @@ async fn a_create_does_not_read_around_its_flag_value() {
         // recorder.
         let mut link = LinkExpression::from(signer.sign_at(link, at));
         link.status = Some(LinkStatus::Shared);
-        p.sparql_store.add_link(&link).expect("add link");
+        p.store().add_link(&link).expect("add link");
     }
     let (id, _) = subscribe(&p, "Post", json!({})).await;
 
@@ -793,7 +793,8 @@ async fn a_literal_target_is_not_read_around() {
     let ChangedPredicates::Specific(writes) = take_writes(&p).await else {
         panic!("expected recorded links");
     };
-    let mut lookups = StoreLookups::new(&p.sparql_store);
+    let store = p.store();
+    let mut lookups = StoreLookups::new(&store);
     assert!(!trigger.matches(&writes, &mut lookups), "x9 is not a Post");
 
     let read: Vec<&String> = lookups
@@ -873,7 +874,7 @@ async fn a_trigger_over_two_classes_matches_a_create_of_either() {
 
     let matches = |trigger: &ModelTrigger, writes: &ChangedPredicates| match writes {
         ChangedPredicates::Specific(writes) => {
-            trigger.matches(writes, &mut StoreLookups::new(&p.sparql_store))
+            trigger.matches(writes, &mut StoreLookups::new(&p.store()))
         }
         _ => panic!("expected recorded links"),
     };

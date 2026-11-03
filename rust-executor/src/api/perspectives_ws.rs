@@ -38,7 +38,7 @@ pub(crate) async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInst
         return Ok(p);
     }
 
-    // Shared-backend fallback: try to rehydrate perspective from the platform DB
+    // Multi-tenant fallback: try to rehydrate perspective from the remote DB backend
     let config = crate::config::get_global_config();
     if config.db_backend.as_deref() == Some("shared") {
         let uuid_owned = uuid.to_string();
@@ -131,6 +131,10 @@ pub(crate) async fn get_perspective_with_access(
             return Err(perspective_not_found(uuid));
         }
     }
+
+    // A deferred perspective opens on its first access (after the access check, so a
+    // caller who may not reach it cannot make it download).
+    hydrate(&perspective).await?;
 
     Ok(perspective)
 }
@@ -286,7 +290,20 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
 /// `Guard::Owns` has already checked the caller's capability and access, so this only fetches
 /// it: 404 if it went away since (`null` for a method flagged `.or_null()`).
 pub(crate) async fn guarded_perspective(params: &Value) -> Result<PerspectiveInstance, WsRpcError> {
-    get_perspective_or_404(&crate::api::guards::UUID_PARAM.require(&params)?).await
+    let perspective =
+        get_perspective_or_404(&crate::api::guards::UUID_PARAM.require(&params)?).await?;
+    // The guard hydrated it; a no-op unless it did not run.
+    hydrate(&perspective).await?;
+    Ok(perspective)
+}
+
+/// Open a deferred perspective ([`PerspectiveInstance::hydrate`]). A failure answers 500
+/// without its detail (paths, backend URLs), which goes to the log.
+async fn hydrate(perspective: &PerspectiveInstance) -> Result<(), WsRpcError> {
+    perspective.hydrate().await.map_err(|e| {
+        log::error!("{}", e);
+        WsRpcError::internal(format!("Perspective {} could not open", perspective.uuid))
+    })
 }
 
 async fn get_perspective_handler(
