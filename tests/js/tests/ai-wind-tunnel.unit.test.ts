@@ -3,7 +3,8 @@
 // derivation. No executor and no model server: `pnpm run test-ai-wind-tunnel-unit`.
 
 import { expect } from "chai";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { loadHardwareClasses, loadManifest, loadMatrixPlan, type Manifest, type MatrixPlan } from "../helpers/ai-wind-tunnel/data.js";
 import { evidenceRelPath, loadAllEvidence, validateEvidence } from "../helpers/ai-wind-tunnel/evidence.js";
@@ -11,7 +12,11 @@ import { fingerprintId, gpuBudget, isIntegratedAmdName } from "../helpers/ai-win
 import { classify, fallbackClasses, memoryFit, type ClassInput } from "../helpers/ai-wind-tunnel/hardware-class.js";
 import { buildMatrix, parseList, resolveModel } from "../helpers/ai-wind-tunnel/matrix.js";
 import { DATA_DIR } from "../helpers/ai-wind-tunnel/paths.js";
-import { llamaVariants } from "../helpers/ai-wind-tunnel/providers/llama-server.js";
+import { spawnLogged, waitForHttp } from "../helpers/ai-wind-tunnel/procs.js";
+import { chatTranscriptionRequest, parseChatTranscript, parseSherpaResult, sherpaFrame, startAudioFront } from "../helpers/ai-wind-tunnel/providers/audio-front.js";
+import { containerMemoryArgs } from "../helpers/ai-wind-tunnel/providers/docker.js";
+import { llamaVariants, sttInstruction } from "../helpers/ai-wind-tunnel/providers/llama-server.js";
+import { runtimeVariants } from "../helpers/ai-wind-tunnel/providers/nemo-speech.js";
 import { ollamaBackendFromLog } from "../helpers/ai-wind-tunnel/providers/ollama.js";
 import { deriveRecommendations, parseParams } from "../helpers/ai-wind-tunnel/recommend.js";
 import { medianOf, quantile, summarize } from "../helpers/ai-wind-tunnel/stats.js";
@@ -107,6 +112,13 @@ describe("AI wind tunnel (unit)", () => {
     it("uses a provider's own name, the download as the memory floor", () => {
       expect(resolveModel({ remoteModel: "tiny:1b", sizeBytes: 50 }, manifest)).to.deep.equal({ remoteModel: "tiny:1b", sizeBytes: 50, memoryBytes: 50 });
     });
+    it("counts the files beside a model into its download size", () => {
+      const withFiles: Manifest = {
+        ...manifest,
+        models: { asr: { ...manifest.models["tiny-llm"], service: "stt", memoryBytes: 300, files: { mmproj: { url: "https://x/mmproj.gguf", sha256: "1".repeat(64), sizeBytes: 30 } } } },
+      };
+      expect(resolveModel({ modelId: "asr" }, withFiles).sizeBytes).to.equal(130);
+    });
     it("refuses a modelId the manifest lacks", () => {
       expect(() => resolveModel({ modelId: "nope" }, manifest)).to.throw(/nope/);
     });
@@ -154,7 +166,8 @@ describe("AI wind tunnel (unit)", () => {
     });
     it("names every runtime build <os>-<arch>-<backend> with a hash and a binary path", () => {
       for (const [id, rt] of Object.entries(m.runtimes)) {
-        expect(["llama-server", "whisper-server"]).to.include(rt.provider);
+        expect(["llama-server", "whisper-server", "nemo-speech", "sherpa-onnx"]).to.include(rt.provider);
+        expect(rt.provider, id).to.equal(id);
         for (const [key, b] of Object.entries(rt.builds)) {
           expect(key, `${id} ${key}`).to.match(/^(linux|macos|windows)-(x64|arm64)-(cpu|vulkan|rocm|cuda|metal)$/);
           expect(b.sha256, key).to.match(/^[0-9a-f]{64}$/);
@@ -162,6 +175,25 @@ describe("AI wind tunnel (unit)", () => {
           expect(b.binary, key).to.be.a("string").and.not.empty;
         }
       }
+    });
+    it("gives every further model file a hash, a size and a pinned URL", () => {
+      for (const [id, model] of Object.entries(m.models)) {
+        for (const [role, f] of Object.entries(model.files ?? {})) {
+          expect(f.sha256, `${id} ${role}`).to.match(/^[0-9a-f]{64}$/);
+          expect(f.sizeBytes, `${id} ${role}`).to.be.greaterThan(0);
+          expect(f.url, `${id} ${role}`).to.match(/^https:\/\/huggingface\.co\/[^/]+\/[^/]+\/resolve\/[0-9a-f]{40}\/[^/].*$/);
+        }
+        // What the runtime needs beside the model file.
+        if (model.provider === "sherpa-onnx") expect(Object.keys(model.files ?? {}).sort(), id).to.deep.equal(["decoder", "joiner", "tokens"]);
+        if (model.provider === "llama-server" && model.service === "stt") expect(model.files?.mmproj, id).to.be.an("object");
+      }
+    });
+    it("picks every build of a speech runtime this machine can run, GPU ones first, CPU kept", () => {
+      const ctx = (backends: any[], os: any = "linux", arch: any = "x64") => ({ fp: fp({ backends, os, arch }), manifest: m });
+      expect(runtimeVariants(ctx(["cpu", "rocm", "vulkan"]), "nemo-speech").map((v) => v.runtimeBuild)).to.deep.equal(["linux-x64-vulkan", "linux-x64-cpu"]);
+      expect(runtimeVariants(ctx(["cpu", "metal"], "macos", "arm64"), "nemo-speech").map((v) => v.runtimeBuild)).to.deep.equal(["macos-arm64-metal", "macos-arm64-cpu"]);
+      expect(runtimeVariants(ctx(["cpu", "vulkan"]), "sherpa-onnx").map((v) => v.runtimeBuild)).to.deep.equal(["linux-x64-cpu"]);
+      expect(runtimeVariants(ctx(["cpu"]), "no-such-runtime")).to.deep.equal([]);
     });
     it("picks the llama-server builds this machine's backends can run, GPU ones first", () => {
       const ctx = (backends: any[], llamaBuilds?: string[]) => ({ fp: fp({ backends }), manifest: m, llamaBuilds });
@@ -278,6 +310,88 @@ describe("AI wind tunnel (unit)", () => {
       const r = speechDurationRange(10);
       expect(r.min).to.equal(1.5);
       expect(r.max).to.equal(13.5);
+    });
+  });
+
+  describe("transcription fronts", () => {
+    it("frames an utterance as sherpa-onnx's offline server reads it", () => {
+      const f = sherpaFrame(new Float32Array([0.5, -0.25]), 16000);
+      expect(f.length).to.equal(16);
+      expect(f.readInt32LE(0)).to.equal(16000);
+      expect(f.readInt32LE(4)).to.equal(8);
+      expect(f.readFloatLE(8)).to.equal(0.5);
+      expect(f.readFloatLE(12)).to.equal(-0.25);
+    });
+    it("reads sherpa-onnx's result, with a language only when it names one", () => {
+      expect(parseSherpaResult('{"lang": "", "text": " Hello there.", "tokens": []}')).to.deep.equal({ text: "Hello there." });
+      expect(parseSherpaResult('{"lang": "<|en|>", "text": "Hi"}')).to.deep.equal({ text: "Hi", language: "<|en|>" });
+      expect(() => parseSherpaResult('{"error": "x"}')).to.throw(/no text/);
+    });
+    it("reads Qwen3-ASR's language prefix and passes other models' text through", () => {
+      expect(parseChatTranscript("language English<asr_text>The forecast says rain.")).to.deep.equal({ text: "The forecast says rain.", language: "English" });
+      expect(parseChatTranscript("language None<asr_text>")).to.deep.equal({ text: "" });
+      expect(parseChatTranscript("  The forecast says rain.\n")).to.deep.equal({ text: "The forecast says rain." });
+    });
+    it("asks llama-server for a greedy transcription with the audio as input_audio", () => {
+      const wav = Buffer.from("RIFF");
+      const r: any = chatTranscriptionRequest("m", wav, { system: "Only transcribe.", instruction: "Transcribe." });
+      expect(r.temperature).to.equal(0);
+      expect(r.messages[0]).to.deep.equal({ role: "system", content: "Only transcribe." });
+      expect(r.messages[1].content[0]).to.deep.equal({ type: "input_audio", input_audio: { data: wav.toString("base64"), format: "wav" } });
+      expect(r.messages[1].content[1]).to.deep.equal({ type: "text", text: "Transcribe." });
+      const bare: any = chatTranscriptionRequest("m", wav);
+      expect(bare.messages).to.have.length(1);
+      expect(bare.messages[0].content).to.have.length(1);
+      expect(sttInstruction("qwen3-asr-0.6b-q8_0")).to.equal(undefined);
+      expect(sttInstruction("voxtral-mini-3b-2507-q4_k_m")).to.have.keys("system", "instruction");
+    });
+    it("serves an OpenAI-shaped transcription route and model list", async () => {
+      const seen: Record<string, string>[] = [];
+      const front = await startAudioFront(0, "asr-model", async (audio, fields) => {
+        seen.push(fields);
+        return { text: `${decodeWav(audio).samples.length} samples`, language: "en" };
+      });
+      try {
+        const models: any = await fetch(`${front.baseUrl}/v1/models`).then((r) => r.json());
+        expect(models.data[0].id).to.equal("asr-model");
+        const upload = (format?: string) => {
+          const form = new FormData();
+          form.append("file", new Blob([new Uint8Array(encodeWav(new Float32Array(1600), 16000))], { type: "audio/wav" }), "a.wav");
+          form.append("model", "asr-model");
+          if (format) form.append("response_format", format);
+          return fetch(`${front.baseUrl}/v1/audio/transcriptions`, { method: "POST", body: form });
+        };
+        expect(await upload().then((r) => r.json())).to.deep.equal({ text: "1600 samples" });
+        expect(await upload("verbose_json").then((r) => r.json())).to.deep.equal({ task: "transcribe", language: "en", duration: 0.1, text: "1600 samples" });
+        expect(await upload("text").then((r) => r.text())).to.equal("1600 samples");
+        expect(seen[1]).to.deep.include({ model: "asr-model", response_format: "verbose_json" });
+        const missing = await fetch(`${front.baseUrl}/v1/audio/transcriptions`, { method: "POST", body: new FormData() });
+        expect(missing.status).to.equal(400);
+        expect((await fetch(`${front.baseUrl}/v1/chat/completions`, { method: "POST" })).status).to.equal(404);
+      } finally {
+        await front.close();
+      }
+    });
+  });
+
+  describe("processes", () => {
+    it("caps a container's memory and swap alike, or not at all", () => {
+      expect(containerMemoryArgs("8g")).to.deep.equal(["--memory", "8g", "--memory-swap", "8g"]);
+      expect(containerMemoryArgs("")).to.deep.equal([]);
+      expect(containerMemoryArgs(undefined)).to.deep.equal([]);
+      expect(() => containerMemoryArgs("lots")).to.throw(/not a docker memory size/);
+    });
+    it("stops waiting for a server that a signal killed", async () => {
+      // An aborting server (a GGML_ASSERT) ends by SIGABRT: no exit code, only a signal code.
+      const s = spawnLogged("sh", ["-c", "kill -ABRT $$"], path.join(mkdtempSync(path.join(os.tmpdir(), "ai-wt-unit-")), "abort.log"));
+      await s.exited;
+      expect(s.proc.exitCode).to.equal(null);
+      expect(s.running()).to.equal(false);
+      const t0 = Date.now();
+      let error = "";
+      await waitForHttp("http://127.0.0.1:9/", { timeoutMs: 30_000, alive: s.running, label: "aborted" }).catch((e) => (error = e.message));
+      expect(error).to.match(/aborted exited before it answered/);
+      expect(Date.now() - t0).to.be.below(5_000);
     });
   });
 

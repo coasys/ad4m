@@ -19,7 +19,8 @@ export function resolveModel(
     return {
       modelId: entry.modelId,
       remoteModel: entry.remoteModel ?? entry.modelId,
-      sizeBytes: m.sizeBytes,
+      // The download: the model file and the files beside it (a projector, a decoder).
+      sizeBytes: m.sizeBytes + Object.values(m.files ?? {}).reduce((a, f) => a + f.sizeBytes, 0),
       memoryBytes: m.memoryBytes,
       license: m.license,
       params: m.params,

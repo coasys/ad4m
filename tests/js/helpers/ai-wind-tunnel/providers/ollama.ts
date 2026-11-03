@@ -56,7 +56,7 @@ export const ollama: Driver = {
       baseUrl = `http://127.0.0.1:${port}`;
       pid = s.proc.pid;
       stop = () => s.stop();
-      await waitForHttp(`${baseUrl}/api/version`, { timeoutMs: 60_000, alive: () => s.proc.exitCode === null, label: "ollama serve" });
+      await waitForHttp(`${baseUrl}/api/version`, { timeoutMs: 60_000, alive: s.running, label: "ollama serve" });
     }
     const version = await fetch(`${baseUrl}/api/version`).then((r) => r.json()).then((j: any) => j.version as string).catch(() => undefined);
     ctx.log(`ollama ${version ?? "?"} at ${baseUrl}`);

@@ -36,10 +36,14 @@
         ],
         "embeddings": [
           { "modelId": "nomic-embed-text-v1.5-q8_0" }
+        ],
+        "stt": [
+          { "modelId": "qwen3-asr-0.6b-q8_0" },
+          { "modelId": "qwen3-asr-1.7b-q8_0" },
+          { "modelId": "voxtral-mini-3b-2507-q4_k_m" }
         ]
       },
       "unsupported": {
-        "stt": "llama-server serves no transcription API (/v1/audio/transcriptions)",
         "tts": "llama-server b11669 has no speech route: it lists no --model-vocoder option and no /tts or /v1/audio/speech path; OuteTTS runs only in the llama-tts CLI"
       }
     },
@@ -74,6 +78,34 @@
         "llm": "speaches serves only audio (transcription and speech)",
         "completion": "speaches serves only audio (transcription and speech)",
         "embeddings": "speaches serves only audio (transcription and speech)"
+      }
+    },
+    "nemo-speech": {
+      "endpointKind": "OPEN_AI_AUDIO",
+      "models": {
+        "stt": [
+          { "modelId": "parakeet-tdt-0.6b-v3-q8_0" },
+          { "modelId": "nemotron-3.5-asr-streaming-0.6b-q8_0" }
+        ]
+      },
+      "unsupported": {
+        "llm": "nemo-speech serves speech models only (ASR, TTS, diarization, translation)",
+        "completion": "nemo-speech serves speech models only (ASR, TTS, diarization, translation)",
+        "embeddings": "nemo-speech serves speech models only (ASR, TTS, diarization, translation)"
+      }
+    },
+    "sherpa-onnx": {
+      "endpointKind": "OPEN_AI_AUDIO",
+      "models": {
+        "stt": [
+          { "modelId": "parakeet-tdt-0.6b-v3-int8-onnx" }
+        ]
+      },
+      "unsupported": {
+        "llm": "sherpa-onnx serves speech models only",
+        "completion": "sherpa-onnx serves speech models only",
+        "embeddings": "sherpa-onnx serves speech models only",
+        "tts": "sherpa-onnx's servers speak WebSocket only; its offline TTS has no server binary"
       }
     },
     "vllm": {

@@ -101,6 +101,30 @@ export async function transcribe(v1: string, model: string, wav: Buffer, token?:
   return { ms: performance.now() - t0, value: String(j.text ?? "") };
 }
 
+/**
+ * Upload `wav` with no language hint, as the SDK's transcription stream sends it, asking for
+ * `verbose_json`: the text and the language the server says it heard (null when it says none).
+ */
+export async function transcribeNoHint(v1: string, model: string, wav: Buffer, token?: string): Promise<Timed<{ text: string; language: string | null }>> {
+  const form = new FormData();
+  form.append("file", new Blob([new Uint8Array(wav)], { type: "audio/wav" }), "audio.wav");
+  form.append("model", model);
+  form.append("response_format", "verbose_json");
+  const url = `${v1}/audio/transcriptions`;
+  const t0 = performance.now();
+  const res = await fetch(url, { method: "POST", headers: headers(token, false), body: form, signal: AbortSignal.timeout(600_000) });
+  if (!res.ok) throw await failure(res, url);
+  const raw = await res.text();
+  let text = raw;
+  let language: string | null = null;
+  try {
+    const j: any = JSON.parse(raw);
+    text = String(j.text ?? "");
+    language = typeof j.language === "string" && j.language ? j.language : (j.detected_language ?? null);
+  } catch {}
+  return { ms: performance.now() - t0, value: { text, language } };
+}
+
 export interface SpeechResult {
   ttfbMs: number;
   totalMs: number;

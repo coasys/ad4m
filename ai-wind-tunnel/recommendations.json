@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-03T02:09:43.806Z",
+  "generatedAt": "2026-11-03T04:46:52.883Z",
   "rules": {
     "llm": {
       "floor": [
@@ -224,31 +224,28 @@
         "overFloor": 3
       },
       "stt": {
-        "provider": "whisper-server",
-        "modelId": "whisper-small-q5_1",
-        "runtimeBuild": "linux-x64-cpu",
-        "backend": "cpu",
+        "provider": "nemo-speech",
+        "modelId": "parakeet-tdt-0.6b-v3-q8_0",
+        "runtimeBuild": "linux-x64-vulkan",
+        "backend": "vulkan",
         "serverFlags": [
-          "--request-path",
-          "/v1/audio",
-          "--inference-path",
-          "/transcriptions",
-          "-t",
-          "8"
+          "--device",
+          "vulkan",
+          "--no-ui"
         ],
         "metrics": {
-          "werMean": 0.054,
-          "rtf": 0.219,
-          "latencyMs": 1002.5,
-          "streamLatencyMs": 991,
-          "firstRequestMs": 953,
-          "peakRssBytes": 434806784
+          "werMean": 0.018,
+          "rtf": 0.02,
+          "latencyMs": 90.281,
+          "streamLatencyMs": 104.2,
+          "firstRequestMs": 144,
+          "peakRssBytes": 142987264
         },
         "evidence": [
-          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd.json"
+          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd-stt-nemo-speech.json"
         ],
-        "candidates": 3,
-        "overFloor": 3
+        "candidates": 13,
+        "overFloor": 13
       },
       "tts": {
         "provider": "speaches",

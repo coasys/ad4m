@@ -36,6 +36,10 @@ export interface Served {
   backend?(): string | undefined;
   /** Server flags that shape serving (context, offload, thinking), without paths or ports. */
   flags?: string[];
+  /** The endpoint kind the executor registers, when it differs from the session's (an audio front on llama-server). */
+  kind?: EndpointKindId;
+  /** What stands between the executor and the server, when something does (an OpenAI-shaped front). */
+  adapter?: string;
   release(): Promise<void>;
 }
 

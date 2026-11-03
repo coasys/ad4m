@@ -48,6 +48,17 @@ function hfCache(): string {
   return dir;
 }
 
+/**
+ * A hard memory cap for every container the run starts: AI_WT_CONTAINER_MEMORY (a docker
+ * size such as `8g`) becomes `--memory` and `--memory-swap` alike, so the container can
+ * neither grow past it nor swap. Unset: no cap.
+ */
+export function containerMemoryArgs(cap = process.env.AI_WT_CONTAINER_MEMORY): string[] {
+  if (!cap) return [];
+  if (!/^\d+(\.\d+)?[bkmg]?$/i.test(cap)) throw new Error(`AI_WT_CONTAINER_MEMORY '${cap}' is not a docker memory size (e.g. 8g)`);
+  return ["--memory", cap, "--memory-swap", cap];
+}
+
 export const speaches: Driver = {
   id: "speaches",
   async plan(ctx) {
@@ -73,7 +84,7 @@ export const speaches: Driver = {
       }
       const port = await freePort();
       name = `ai-wt-${ctx.runId}-speaches`;
-      const args = ["run", "-d", "--name", name, "-p", `127.0.0.1:${port}:8000`, "-v", `${hfCache()}:/home/ubuntu/.cache/huggingface/hub`];
+      const args = ["run", "-d", "--name", name, "-p", `127.0.0.1:${port}:8000`, "-v", `${hfCache()}:/home/ubuntu/.cache/huggingface/hub`, ...containerMemoryArgs()];
       if (variant.backend === "cuda") args.push("--gpus", "all");
       await docker([...args, image]);
       baseUrl = `http://127.0.0.1:${port}`;
@@ -162,7 +173,7 @@ export const vllm: Driver = {
             typeof process.getuid === "function"
               ? ["--user", `${process.getuid()}:${process.getgid!()}`, "-e", "HOME=/tmp", "-e", "USER=vllm", "-e", "LOGNAME=vllm", "-e", "TORCHINDUCTOR_CACHE_DIR=/tmp/inductor"]
               : [];
-          const args = ["run", "-d", "--name", name, "-p", `127.0.0.1:${port}:8000`, "-v", `${hfCache()}:/hf`, "-e", "HF_HUB_CACHE=/hf", "--ipc=host", ...user];
+          const args = ["run", "-d", "--name", name, "-p", `127.0.0.1:${port}:8000`, "-v", `${hfCache()}:/hf`, "-e", "HF_HUB_CACHE=/hf", "--ipc=host", ...containerMemoryArgs(), ...user];
           if (variant.backend === "cuda") args.push("--gpus", "all", image);
           else {
             args.push("--device", "/dev/kfd", "--device", "/dev/dri", "--security-opt", "seccomp=unconfined");

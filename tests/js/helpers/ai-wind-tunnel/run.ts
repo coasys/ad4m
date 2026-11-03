@@ -5,7 +5,7 @@
  *   pnpm run ai-wind-tunnel -- --providers ollama,llama-server --services llm,embeddings --repeat 3
  *
  * Options:
- *   --providers a,b       ollama, llama-server, vllm, whisper-server, speaches (default: all)
+ *   --providers a,b       ollama, llama-server, vllm, whisper-server, speaches, nemo-speech, sherpa-onnx (default: all)
  *   --services x,y        llm, completion, embeddings, stt, tts (default: all)
  *   --repeat N            repetitions per measurement (default 3)
  *   --concurrency 1,4     parallel streams for the LLM throughput (default 1,4)
@@ -37,6 +37,8 @@ import { checkOffload } from "./verify.js";
 import { ollama } from "./providers/ollama.js";
 import { llamaServer } from "./providers/llama-server.js";
 import { whisperServer } from "./providers/whisper-server.js";
+import { nemoSpeech } from "./providers/nemo-speech.js";
+import { sherpaOnnx } from "./providers/sherpa-onnx.js";
 import { speaches, vllm } from "./providers/docker.js";
 import { SkipError, type Driver, type RunContext, type Served, type Session, type Variant } from "./providers/types.js";
 import {
@@ -53,7 +55,7 @@ import {
   type Service,
 } from "./types.js";
 
-const DRIVERS: Record<ProviderId, Driver> = { ollama, "llama-server": llamaServer, vllm, "whisper-server": whisperServer, speaches };
+const DRIVERS: Record<ProviderId, Driver> = { ollama, "llama-server": llamaServer, vllm, "whisper-server": whisperServer, speaches, "nemo-speech": nemoSpeech, "sherpa-onnx": sherpaOnnx };
 const MODEL_TYPE: Record<Service, ModelType> = { llm: "LLM", completion: "LLM", embeddings: "EMBEDDING", stt: "TRANSCRIPTION", tts: "SPEECH" };
 const CELL_FN: Record<Service, (env: CellEnv) => Promise<CellOutcome>> = { llm: llmCell, completion: completionCell, embeddings: embeddingsCell, stt: sttCell, tts: ttsCell };
 const CELL_TIMEOUT_MS = Number(process.env.AI_WT_CELL_TIMEOUT_MS ?? 1_800_000);
@@ -222,7 +224,7 @@ async function main() {
           let endpointId: string;
           let endpointHealth: string | undefined;
           try {
-            const ep = await ex!.endpoint(endpointName, kind, served.baseUrl);
+            const ep = await ex!.endpoint(endpointName, served.kind ?? kind, served.baseUrl);
             endpointId = ep.id;
             endpointHealth = ep.health?.state;
             if (session.pullsThroughExecutor) {
@@ -242,7 +244,7 @@ async function main() {
             }
           } catch (e: any) {
             log(`${provider} ${modelKey(model)}: registering failed: ${e.message}`);
-            for (const c of group) record(c, "fail", `registering with the executor failed: ${e.message}`, variant, kind);
+            for (const c of group) record(c, "fail", `registering with the executor failed: ${e.message}`, variant, served.kind ?? kind);
             await served.release().catch(() => {});
             continue;
           }
@@ -261,7 +263,7 @@ async function main() {
                 modelName: name,
                 modelId,
                 remoteModel: served.remoteModel,
-                kind,
+                kind: served.kind ?? kind,
                 directV1: opts.direct ? `${served.baseUrl}/v1` : null,
                 repeat: opts.repeat,
                 concurrency: opts.concurrency,
@@ -281,6 +283,7 @@ async function main() {
             const peak = sampler.stop();
             const metrics: Record<string, Metric> = { ...outcome.metrics, peakRssBytes: peak.peakRssBytes, peakGpuBytes: peak.peakGpuBytes };
             if (served.readyMs !== undefined) metrics.serverReadyMs = served.readyMs;
+            if (served.adapter) metrics.adapter = served.adapter;
             if (pullMs !== null) metrics.pullMs = pullMs;
             // How the executor saw the endpoint when it was added (a server that lists no models is not REACHABLE).
             if (endpointHealth) metrics.endpointHealth = endpointHealth;
@@ -297,7 +300,7 @@ async function main() {
               model,
               ...(variant.runtimeBuild ? { runtimeBuild: variant.runtimeBuild } : {}),
               backend: served.backend?.() ?? variant.backend,
-              endpointKind: kind,
+              endpointKind: served.kind ?? kind,
               ...(served.flags ? { serverFlags: served.flags } : {}),
               checks: outcome.checks,
               metrics,
