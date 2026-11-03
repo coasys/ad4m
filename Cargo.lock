@@ -167,6 +167,7 @@ dependencies = [
  "url2",
  "urlencoding",
  "uuid 1.24.1",
+ "voice_activity_detector",
  "webbrowser",
  "x509-parser 0.16.0",
  "zeroize",
