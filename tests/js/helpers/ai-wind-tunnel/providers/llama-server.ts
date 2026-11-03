@@ -5,12 +5,28 @@
  * (AI_WT_LLAMA_SERVER_URL, serving whatever model it was started with).
  */
 
+import { existsSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { platformKey } from "../fingerprint.js";
 import { installModel, installRuntime } from "../install.js";
 import { assertNotReserved, freePort, spawnLogged, waitForHttp } from "../procs.js";
 import { envUrl, type Driver, type RunContext, type Session, type Variant } from "./types.js";
+
+/**
+ * Library directories a ROCm build needs on Linux: the build's HIP backend links the system
+ * ROCm runtime (libamdhip64, rocBLAS, hipBLAS), which a ROCm install often keeps off the
+ * default search path. Without them llama-server finds no device and runs on the CPU.
+ * AI_WT_ROCM_LIB overrides.
+ */
+export function rocmLibDirs(): string[] {
+  if (process.env.AI_WT_ROCM_LIB) return process.env.AI_WT_ROCM_LIB.split(":");
+  const dirs = ["/opt/rocm/lib"];
+  try {
+    for (const d of readdirSync("/opt/rocm")) if (/^core-[\d.]+$/.test(d)) dirs.push(path.join("/opt/rocm", d, "lib"));
+  } catch {}
+  return dirs.filter((d) => existsSync(d));
+}
 
 /** The manifest builds for this machine whose backend it can use, narrowed by `--llama-builds`. */
 export function llamaVariants(ctx: Pick<RunContext, "fp" | "manifest" | "llamaBuilds">): Variant[] {
@@ -70,7 +86,7 @@ export const llamaServer: Driver = {
         const args = ["-m", file, "--host", "127.0.0.1", "--port", String(port), "--alias", model.remoteModel, "-t", String(Math.min(16, os.cpus().length)), ...flags];
         const started = Date.now();
         const s = spawnLogged(binary!, args, path.join(ctx.runDir, `llama-server-${variant.label}-${model.modelId}.log`), {
-          LD_LIBRARY_PATH: [path.dirname(binary!), process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
+          LD_LIBRARY_PATH: [path.dirname(binary!), ...(variant.backend === "rocm" ? rocmLibDirs() : []), process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
         });
         try {
           // 503 while the model loads, 200 once it serves.

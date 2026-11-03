@@ -33,6 +33,7 @@ import { buildMatrix, parseList } from "./matrix.js";
 import { REPO_ROOT } from "./paths.js";
 import { MemorySampler, stopAllSpawned } from "./procs.js";
 import { medianOf } from "./stats.js";
+import { checkOffload } from "./verify.js";
 import { ollama } from "./providers/ollama.js";
 import { llamaServer } from "./providers/llama-server.js";
 import { whisperServer } from "./providers/whisper-server.js";
@@ -283,6 +284,8 @@ async function main() {
             if (pullMs !== null) metrics.pullMs = pullMs;
             // How the executor saw the endpoint when it was added (a server that lists no models is not REACHABLE).
             if (endpointHealth) metrics.endpointHealth = endpointHealth;
+            const offload = checkOffload(served.backend?.() ?? variant.backend, peak.peakGpuBytes, model.sizeBytes);
+            if (offload && !error) outcome.checks.push(offload);
             const failed = outcome.checks.filter((k) => !k.pass);
             const status = error || failed.length || outcome.checks.length === 0 ? "fail" : "pass";
             const modelBytes = model.memoryBytes ?? model.sizeBytes;

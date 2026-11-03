@@ -235,3 +235,24 @@ export function rms(samples: Float32Array): number {
 export function speechDurationRange(words: number): { min: number; max: number } {
   return { min: words * 0.15, max: words * 1.2 + 1.5 };
 }
+
+/**
+ * A GPU build must hold the model in GPU memory: a build that finds no device runs on the
+ * CPU without saying so, and its numbers would pass for the GPU's. Null (no check) for a CPU
+ * backend, an unknown model size, or where GPU memory is not readable (`peakGpuBytes` null).
+ */
+export function checkOffload(
+  backend: string | undefined,
+  peakGpuBytes: number | null,
+  modelBytes: number | undefined,
+): { name: string; pass: boolean; detail: string; value: number; threshold: string } | null {
+  if (!backend || backend === "cpu" || !modelBytes || peakGpuBytes === null) return null;
+  const pass = peakGpuBytes >= modelBytes * 0.5;
+  return {
+    name: `model runs on the GPU (${backend})`,
+    pass,
+    detail: `${(peakGpuBytes / 1e9).toFixed(2)} GB of GPU memory held for a ${(modelBytes / 1e9).toFixed(2)} GB model${pass ? "" : ": the build fell back to the CPU"}`,
+    value: peakGpuBytes,
+    threshold: ">= half the model size",
+  };
+}

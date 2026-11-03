@@ -17,6 +17,7 @@ import { deriveRecommendations, parseParams } from "../helpers/ai-wind-tunnel/re
 import { medianOf, quantile, summarize } from "../helpers/ai-wind-tunnel/stats.js";
 import { PROVIDERS, SERVICES, type CellResult, type Evidence, type Fingerprint } from "../helpers/ai-wind-tunnel/types.js";
 import {
+  checkOffload,
   checkToolCall,
   consistentDimension,
   cosine,
@@ -245,6 +246,14 @@ describe("AI wind tunnel (unit)", () => {
       expect(resample(new Float32Array(24000), 24000, 16000).length).to.equal(16000);
       const same = new Float32Array([1, 2]);
       expect(resample(same, 16000, 16000)).to.equal(same);
+    });
+    it("fails a GPU build that kept the model off the GPU", () => {
+      expect(checkOffload("rocm", 0, 8e8)!.pass).to.be.false;
+      expect(checkOffload("rocm", 0, 8e8)!.detail).to.match(/fell back to the CPU/);
+      expect(checkOffload("vulkan", 2.7e9, 8e8)!.pass).to.be.true;
+      expect(checkOffload("cpu", 0, 8e8)).to.equal(null);
+      expect(checkOffload("rocm", null, 8e8)).to.equal(null);
+      expect(checkOffload(undefined, 0, 8e8)).to.equal(null);
     });
     it("bounds a plausible speech duration", () => {
       const r = speechDurationRange(10);

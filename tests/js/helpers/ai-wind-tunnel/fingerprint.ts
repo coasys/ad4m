@@ -124,7 +124,11 @@ function linuxFingerprint(): Omit<Fingerprint, "id"> {
   }
   if (gpus.some((g) => g.vendor === "amd") && existsSync("/dev/kfd")) {
     backends.push("rocm");
-    const rocm = read("/opt/rocm/.info/version");
+    let rocm = read("/opt/rocm/.info/version");
+    if (!rocm && existsSync("/opt/rocm")) {
+      const core = readdirSync("/opt/rocm").filter((d) => /^core-[\d.]+$/.test(d)).sort().pop();
+      rocm = core ? read(path.join("/opt/rocm", core, ".info", "version")) ?? core.slice(5) : null;
+    }
     if (rocm) drivers.rocm = rocm;
   }
   if (gpus.some((g) => g.vendor === "amd")) {

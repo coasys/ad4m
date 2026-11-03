@@ -217,7 +217,9 @@ export class MemorySampler {
   stop(): MemoryPeak {
     if (this.#timer) clearInterval(this.#timer);
     if (this.#samples === 0) return { peakRssBytes: null, peakGpuBytes: null };
-    return { peakRssBytes: this.#rss, peakGpuBytes: this.#gpu || null };
+    // 0 is a reading (nothing on the GPU) where GPU memory is readable; elsewhere there is none.
+    const readable = process.platform === "linux" && (existsSync("/dev/dri") || this.cuda);
+    return { peakRssBytes: this.#rss, peakGpuBytes: readable ? this.#gpu : null };
   }
 }
 

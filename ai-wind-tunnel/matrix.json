@@ -80,10 +80,10 @@
       "endpointKind": "VLLM",
       "models": {
         "llm": [
-          { "remoteModel": "Qwen/Qwen3.5-0.8B", "sizeBytes": 1750000000, "license": "Apache-2.0", "params": "0.8B", "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B" }
+          { "remoteModel": "Qwen/Qwen3.5-0.8B", "sizeBytes": 1769980465, "license": "Apache-2.0", "params": "0.8B", "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B" }
         ],
         "completion": [
-          { "remoteModel": "Qwen/Qwen3.5-0.8B", "sizeBytes": 1750000000, "license": "Apache-2.0", "params": "0.8B", "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B" }
+          { "remoteModel": "Qwen/Qwen3.5-0.8B", "sizeBytes": 1769980465, "license": "Apache-2.0", "params": "0.8B", "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B" }
         ]
       },
       "unsupported": {
