@@ -82,6 +82,10 @@ pub use expected_links::{ExpectedLinks, LinksChanged};
 mod subscription_tests;
 
 #[cfg(test)]
+#[path = "perspective_instance_subscription_recheck_tests.rs"]
+mod subscription_recheck_tests;
+
+#[cfg(test)]
 #[path = "perspective_instance_abstract_tests.rs"]
 mod abstract_tests;
 
@@ -6115,9 +6119,8 @@ impl PerspectiveInstance {
         // First, so the queries collected below carry the new class lists.
         let reresolved = self.refresh_abstract_subscriptions().await;
 
-        let mut query_futures: Vec<
-            std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>,
-        > = Vec::new();
+        let mut query_futures: Vec<future::BoxFuture<'static, Option<(String, String)>>> =
+            Vec::new();
 
         // Collect only the minimal data needed: ID, query string, predicates,
         // and model_query_params (if this is a model subscription).
@@ -6189,7 +6192,7 @@ impl PerspectiveInstance {
             let query_future = Box::pin(async move {
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
                 // With no shape wait: every subscription on the perspective is
-                // re-checked under one `join_all` below, so a wait here for one
+                // re-checked in the one pass below, so a wait here for one
                 // subscription's unsynced class would hold back every other
                 // subscription's update. A class still missing fails this pass
                 // at once and is retried on the next one.
@@ -6222,8 +6225,13 @@ impl PerspectiveInstance {
             query_futures.push(query_future);
         }
 
-        // Run all queries concurrently — no lock contention during execution
-        let results = future::join_all(query_futures).await;
+        // Run the re-checks off the async workers, a bounded number at once
+        // across the executor (the store reads are blocking). No lock is
+        // held meanwhile. Each subscription runs at most once per pass and
+        // passes run one after another, so the results compared below are
+        // the newest.
+        let results =
+            subscriptions::run_rechecks(query_futures, &subscriptions::RECHECK_SLOTS).await;
 
         // Single lock acquisition to compare and update all results
         let mut delta_updates = Vec::new();
@@ -9179,7 +9187,7 @@ mod tests {
         assert_one_budget_spent(&err, elapsed, "Task");
     }
 
-    /// Subscription re-checks run under one `join_all`, so a model
+    /// Subscription re-checks run in one pass, so a model
     /// subscription waiting for an include target that never syncs must not
     /// hold back another subscription's update on the same perspective.
     #[tokio::test(flavor = "multi_thread")]
