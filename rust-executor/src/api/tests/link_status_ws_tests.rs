@@ -114,6 +114,36 @@ async fn a_write_with_status_spelled_as_the_enum_lands_shared() {
 }
 
 #[tokio::test]
+async fn a_write_without_status_lands_shared() {
+    let p = registered_perspective(&[]).await;
+
+    let source = "status://omitted/addLink";
+    let added = call(
+        "perspective.addLink",
+        json!({ "uuid": p.0, "link": link(source) }),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("addLink without status: {e:?}"));
+    assert_eq!(added["status"], json!("SHARED"), "{added}");
+    assert_eq!(
+        stored_statuses(&p.0, source).await,
+        vec![Some(LinkStatus::Shared)]
+    );
+
+    let source = "status://omitted/addLinks";
+    call(
+        "perspective.addLinks",
+        json!({ "uuid": p.0, "links": [link(source)] }),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("addLinks without status: {e:?}"));
+    assert_eq!(
+        stored_statuses(&p.0, source).await,
+        vec![Some(LinkStatus::Shared)]
+    );
+}
+
+#[tokio::test]
 async fn a_write_with_an_unknown_status_is_refused_and_writes_nothing() {
     let p = registered_perspective(&[]).await;
     let source = "status://typo";
