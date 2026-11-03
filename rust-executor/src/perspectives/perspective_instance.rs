@@ -692,6 +692,29 @@ pub struct PerspectiveInstance {
     force_shape_sync_wait: Arc<AtomicBool>,
 }
 
+/// The local Shared links the remote render lacks, without the links of parked diffs.
+/// Links compare by author, timestamp, source, predicate and target.
+fn links_missing_remotely(
+    local_links: &[(LinkExpression, LinkStatus)],
+    remote_links: &[LinkExpression],
+    parked: &[LinkExpression],
+) -> Vec<LinkExpression> {
+    let same = |a: &LinkExpression, b: &LinkExpression| {
+        a.author == b.author
+            && a.timestamp == b.timestamp
+            && a.data.source == b.data.source
+            && a.data.target == b.data.target
+            && a.data.predicate == b.data.predicate
+    };
+    local_links
+        .iter()
+        .map(|(link, _)| link)
+        .filter(|link| !remote_links.iter().any(|r| same(r, link)))
+        .filter(|link| !parked.iter().any(|p| same(p, link)))
+        .cloned()
+        .collect()
+}
+
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
 /// lifetime of a single query.  On miss it parses SHACL from the perspective's
 /// store and memoizes the result.
@@ -1598,18 +1621,19 @@ impl PerspectiveInstance {
                 },
             };
 
-            let mut links_to_commit = Vec::new();
-            for (local_link, _) in &local_links {
-                if !remote_links.iter().any(|e| {
-                    e.author == local_link.author
-                        && e.timestamp == local_link.timestamp
-                        && e.data.source == local_link.data.source
-                        && e.data.target == local_link.data.target
-                        && e.data.predicate == local_link.data.predicate
-                }) {
-                    links_to_commit.push(local_link.clone());
+            // A parked diff's links stay Shared in the store, but the queue took them out
+            // for good: sending them here would put them behind their successors.
+            let parked = match Ad4mDb::with_global_instance(|db| db.get_parked_additions(&uuid)) {
+                Ok(parked) => parked,
+                Err(e) => {
+                    log::warn!(
+                        "ensure_public_links_are_shared: could not read parked diffs for perspective {}: {} — skipping this sync attempt",
+                        uuid, e
+                    );
+                    return false;
                 }
-            }
+            };
+            let links_to_commit = links_missing_remotely(&local_links, &remote_links, &parked);
 
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();

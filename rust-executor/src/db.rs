@@ -2130,6 +2130,25 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// The additions of the perspective's parked diffs (`is_pending = 0`). Their links
+    /// stay in the store as Shared, but must not reach the link language again.
+    pub fn get_parked_additions(
+        &self,
+        perspective_uuid: &str,
+    ) -> Ad4mDbResult<Vec<LinkExpression>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT additions FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![perspective_uuid, false], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut additions = Vec::new();
+        for row in rows {
+            additions.extend(serde_json::from_str::<Vec<LinkExpression>>(&row?)?);
+        }
+        Ok(additions)
+    }
+
     // Expression Methods
 
     pub fn _add_expression<T: Serialize>(

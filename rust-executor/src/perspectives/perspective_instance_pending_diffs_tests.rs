@@ -312,6 +312,36 @@ async fn a_refused_diff_does_not_block_the_diffs_behind_it() {
     assert_eq!(parked_targets(&perspective), vec![REFUSED]);
 }
 
+/// The fallback sync sends the Shared links the remote lacks, but never the
+/// links of a parked diff: they stay Shared in the store, and sending them
+/// would put them behind the diffs that went through after them.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_does_not_send_a_parked_diff_again() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add(REFUSED));
+    enqueue(&perspective, &add("after"));
+    let task = start_loop(&perspective);
+    run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    task.abort();
+
+    let parked =
+        Ad4mDb::with_global_instance(|db| db.get_parked_additions(&perspective.uuid)).unwrap();
+    assert_eq!(parked, vec![link("did:key:alice", REFUSED)]);
+
+    let local = [
+        (link("did:key:alice", REFUSED), LinkStatus::Shared),
+        (link("did:key:alice", "after"), LinkStatus::Shared),
+        (link("did:key:alice", "missing"), LinkStatus::Shared),
+    ];
+    let remote = [link("did:key:alice", "after")];
+    let to_send: Vec<String> = links_missing_remotely(&local, &remote, &parked)
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect();
+    assert_eq!(to_send, vec!["missing"]);
+}
+
 /// Two healthy diffs; the batch and the oldest alone fail on a transient
 /// outage, and the newer one goes through once it is over. The oldest was
 /// never refused for good, so it must be kept (parked), not deleted.
