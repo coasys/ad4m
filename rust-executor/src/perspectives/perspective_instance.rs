@@ -607,7 +607,9 @@ pub struct PerspectiveInstance {
     sdna_change_mutex: Arc<Mutex<()>>,
     /// Serialises `ensure_public_links_are_shared`: a publish and the link
     /// language loop it wakes both call it, and two concurrent calls would
-    /// each find the remote empty and commit every shared link.
+    /// each find the remote empty and commit every shared link. The commit
+    /// loop holds it from sending the rest of a batch to parking the oldest
+    /// diff, so a fallback sync either runs before the rest or sees the park.
     share_links_mutex: Arc<Mutex<()>>,
     /// Serialises `register_local_agents`. server-link-language replaces its
     /// local agent list (p-diff-sync adds to it), so a registration that
@@ -1447,6 +1449,12 @@ impl PerspectiveInstance {
                         match link_language.commit(oldest.clone()).await {
                             Ok(_) => oldest_ids,
                             Err(refusal) => {
+                                // From the moment the rest may reach the language until
+                                // the park lands, the fallback sync must not run: it
+                                // would read no parked row and send the oldest diff's
+                                // links after the rest. It holds this lock across its
+                                // read and commit, and never waits on this loop.
+                                let _sharing = self.share_links_mutex.lock().await;
                                 // The batch concatenates its diffs oldest first.
                                 let rest = PerspectiveDiff {
                                     additions: pending_diffs.additions[oldest.additions.len()..]

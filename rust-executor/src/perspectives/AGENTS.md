@@ -50,6 +50,9 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `is_pending = 0` (`Ad4mDb::park_pending_diffs`; the export lists it), logged at
   error level by row id (its links stay local). The failure may have been transient, so the row
   is kept, but it is never sent again after its successors: that would reorder it behind newer diffs.
+  The fallback sync (`ensure_public_links_are_shared`) skips parked additions; the commit loop
+  holds `share_links_mutex` from sending the rest of the batch to the park, so a fallback sync
+  runs either before the rest or after the park.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
