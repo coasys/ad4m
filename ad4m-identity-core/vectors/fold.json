@@ -2145,6 +2145,182 @@
     {
       "error": {
         "code": "policy",
+        "format": "BadHash",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "not-a-multihash",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z25URgHgoF9h5pAQLk3Mk682r8pYSr9ccpsHa3pGHSkjC1Ffj5uWzMteuvJtWg1KQVAXFwf5epLyJCKKdj7vjhWeF",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmcnAS4p1p69uEw8GxBygFYJuMmxGYz7HNx87kysqgTUax#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z9yg8ner5AhkeMB6Csw4YyBnzDAxoJ5pfkwHtnYeeLmyH8QkXyDTpnit5DTU9dS26DXby4rxCawEVZTpcxbovDHM",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmcnAS4p1p69uEw8GxBygFYJuMmxGYz7HNx87kysqgTUax#d1"
+            }
+          ],
+          "scid": "QmcnAS4p1p69uEw8GxBygFYJuMmxGYz7HNx87kysqgTUax",
+          "seq": 0
+        }
+      ],
+      "name": "incept whose next is not a multihash",
+      "rule": "2"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "BadHash",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "format": "coasys/1",
+          "master": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
+          "next": "not-a-multihash",
+          "op": "rotate",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z5KYPiE6qj67KLqo9iTD4fVpqXknuPYJdVFcrP6kmhexEF3FBYojea6UTPXos8nRA4Mreezfq9SyoUSpsbfDPZvhV",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m1"
+            }
+          ],
+          "salt": "7DqbanfBGH8JLz4xeScbj2",
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "rotate whose next is not a multihash",
+      "rule": "5"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "format": "EmptyRevoke",
+        "reason": "Format"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "format": "coasys/1",
+          "op": "revoke",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3y72kNaRUWjAY535BCoyz3ogume3k3Doq7LxDfyPz5peqXNbrhB5FpRzVEd4KqozP8L4yNTt8pDH8ouQ7qxcut1o",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "revoke": [],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        }
+      ],
+      "name": "revoke of no key",
+      "rule": "4"
+    },
+    {
+      "error": {
+        "code": "policy",
         "reason": "Ended"
       },
       "events": [
@@ -2309,5 +2485,19 @@
       "rule": "2"
     }
   ],
-  "description": "One invalid log per rule; `error` is the pinned part of the ChainErrorCode."
+  "description": "One invalid log per rule; `error` is the pinned part of the ChainErrorCode. In `textCases` each event is JSON text, parsed before the fold.",
+  "textCases": [
+    {
+      "error": {
+        "code": "policy",
+        "format": "DuplicateMember",
+        "reason": "Format"
+      },
+      "events": [
+        "{\"add\":[{\"enc\":\"z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz\",\"id\":\"d1\",\"sign\":\"z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ\"}],\"format\":\"coasys/1\",\"kind\":\"human\",\"master\":\"z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq\",\"next\":\"QmVvFnLYvMzZ2XJuoBvyZsqt9qn6hZo4MUTMC8Fj9aHJXd\",\"next\":\"QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n\",\"op\":\"incept\",\"prev\":null,\"proof\":[{\"cryptosuite\":\"eddsa-jcs-2022\",\"domain\":\"coasys:kel\",\"proofPurpose\":\"assertionMethod\",\"proofValue\":\"zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv\",\"type\":\"DataIntegrityProof\",\"verificationMethod\":\"did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0\"},{\"cryptosuite\":\"eddsa-jcs-2022\",\"domain\":\"coasys:kel\",\"proofPurpose\":\"assertionMethod\",\"proofValue\":\"z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43\",\"type\":\"DataIntegrityProof\",\"verificationMethod\":\"did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1\"}],\"scid\":\"QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p\",\"seq\":0}"
+      ],
+      "name": "duplicate member name",
+      "rule": "10"
+    }
+  ]
 }

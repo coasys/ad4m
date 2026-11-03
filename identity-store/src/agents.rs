@@ -1,7 +1,7 @@
 //! Agent records: today's agent profile under a
 //! `did:key` or a `did:scid`.
 //!
-//! The record signature uses the `coasys:link` scheme over `{profile, version, anchor}`
+//! The record signature is the `coasys:agent-record` domain over `{profile, version, anchor}`
 //! (`anchor` is `null` for a `did:key` record), by the device key `signedBy` names. A
 //! `did:key` record is signed by that key itself and needs no signed request; a bot key may
 //! write it only while its scope is in force (the bot-scope check). A `did:scid` record comes
@@ -16,14 +16,24 @@
 //! arrives after the revocation is refused, whatever anchor it names. The key id comes from
 //! the log, the person from the record's did, so the anchor carries neither.
 //!
+//! `version` is unix milliseconds, and the store takes a record only when its version is
+//! above the stored one and at most [`MAX_VERSION_AHEAD_S`] ahead of the store's clock. Without
+//! that ceiling one write at a huge version, by a key that was valid then (a stolen device key
+//! before its revocation; for a `did:key`, any code the agent's key signs for), would freeze
+//! the record for good, since every later write needs a higher version. With it the owner
+//! can write `stored + 1` at the latest one second after the stored write: the stored version
+//! was at most the ceiling of its own write, and the ceiling grows with the clock. Revoking
+//! the stolen key then stops it writing, and the owner's next record replaces its last one.
+//! The rule needs no revocation, so it covers a `did:key` record too.
+//!
 //! The store does not read `profile`: the record signature covers it whatever it holds. The
 //! agent language puts a `did:key` agent's Agent there as that agent's signed AD4M expression,
 //! which the executor verifies on every read.
 
-use ad4m_hash_chain::{decode_ed25519_multikey, decode_proof_value, MAX_SAFE_INTEGER};
-use ad4m_identity_core::{scid_of, verify_signed, LINK_DOMAIN};
+use ad4m_hash_chain::{decode_ed25519_multikey, decode_proof_value};
+use ad4m_identity_core::{scid_of, verify_signed, AGENT_RECORD_DOMAIN};
 use ad4m_ldk::identity::AgentRecord;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 
 use crate::db::{self, from_sql, to_sql};
@@ -31,12 +41,22 @@ use crate::error::ApiError;
 use crate::request::{Incoming, Signer};
 use crate::Store;
 
-/// True when `record.sig` is `key`'s `coasys:link` signature of `record.signed_value()`.
+/// How far a record's `version` (unix milliseconds) may lie ahead of the store's clock.
+pub const MAX_VERSION_AHEAD_S: u64 = 300;
+
+/// The highest `version` the store takes at `now` (unix seconds): `now` plus
+/// [`MAX_VERSION_AHEAD_S`], in milliseconds.
+pub fn version_ceiling(now: u64) -> u64 {
+    now.saturating_add(MAX_VERSION_AHEAD_S).saturating_mul(1000)
+}
+
+/// True when `record.sig` is `key`'s `coasys:agent-record` signature of
+/// `record.signed_value()`.
 fn record_signed_by(record: &AgentRecord, key: &str) -> bool {
     let Some(sig) = decode_proof_value(&record.sig) else {
         return false;
     };
-    verify_signed(LINK_DOMAIN, &record.signed_value(), key, &sig)
+    verify_signed(AGENT_RECORD_DOMAIN, &record.signed_value(), key, &sig)
 }
 
 fn signature_refused() -> ApiError {
@@ -58,7 +78,9 @@ impl Store {
             .transpose()
     }
 
-    /// `PUT /v1/agents/{did}`.
+    /// `PUT /v1/agents/{did}`. The signer checks, the version check and the write run in one
+    /// immediate transaction, so an append that revokes the signer commits either before the
+    /// check (and the record is refused) or after the write.
     pub fn put_agent(
         &self,
         did: &str,
@@ -71,13 +93,17 @@ impl Store {
                 "the record names another did",
             ));
         }
-        if record.version > MAX_SAFE_INTEGER {
+        let now = self.now();
+        let ceiling = version_ceiling(now);
+        if record.version > ceiling {
             return Err(ApiError::invalid(
-                "malformed",
-                "version is not a safe integer",
+                "version",
+                format!("version is unix milliseconds, at most {ceiling} by the store's clock"),
             ));
         }
-        let now = self.now();
+        let text = serde_json::to_string(record).map_err(|e| ApiError::internal(e.to_string()))?;
+        let mut conn = self.db.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(key) = did.strip_prefix("did:key:") {
             if decode_ed25519_multikey(key).is_none() {
                 return Err(ApiError::invalid(
@@ -94,9 +120,9 @@ impl Store {
             if !record_signed_by(record, key) {
                 return Err(signature_refused());
             }
-            self.check_bot_writer(key, now)?;
+            check_bot_writer(&tx, key, now)?;
         } else if let Some(scid) = scid_of(did) {
-            let verified = self.verify_request(incoming, Some(did), Signer::AnyKey)?;
+            let verified = self.verify_request_in(&tx, incoming, Some(did), Signer::AnyKey)?;
             let anchor = record.anchor.ok_or_else(|| {
                 ApiError::invalid("malformed", "a did:scid record names its anchor")
             })?;
@@ -141,9 +167,6 @@ impl Store {
             ));
         }
 
-        let text = serde_json::to_string(record).map_err(|e| ApiError::internal(e.to_string()))?;
-        let mut conn = self.db.lock()?;
-        let tx = conn.transaction()?;
         let stored: Option<i64> = tx
             .query_row(
                 "SELECT version FROM agents WHERE did = ?1",
@@ -168,23 +191,23 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
 
-    /// The bot-scope check: a bot key writes its own record only while its scope is in force.
-    fn check_bot_writer(&self, key: &str, now: u64) -> Result<(), ApiError> {
-        let conn = self.db.lock()?;
-        let Some(scid) = db::key_owner(&conn, key)? else {
-            return Ok(());
-        };
-        let chain = db::load_chain(&conn, &scid)?
-            .ok_or_else(|| ApiError::internal("key without its log"))?;
-        let state = chain.state();
-        let head = chain.head().seq;
-        if state.bot_scope_at(key, head).is_some() && !state.key_valid_at_time(key, head, now) {
-            return Err(ApiError::forbidden(
-                "writer",
-                "the bot key's scope is not in force",
-            ));
-        }
-        Ok(())
+/// The bot-scope check: a bot key writes its own record only while its scope is in force. Runs
+/// in the write's transaction.
+fn check_bot_writer(conn: &Connection, key: &str, now: u64) -> Result<(), ApiError> {
+    let Some(scid) = db::key_owner(conn, key)? else {
+        return Ok(());
+    };
+    let chain =
+        db::load_chain(conn, &scid)?.ok_or_else(|| ApiError::internal("key without its log"))?;
+    let state = chain.state();
+    let head = chain.head().seq;
+    if state.bot_scope_at(key, head).is_some() && !state.key_valid_at_time(key, head, now) {
+        return Err(ApiError::forbidden(
+            "writer",
+            "the bot key's scope is not in force",
+        ));
     }
+    Ok(())
 }

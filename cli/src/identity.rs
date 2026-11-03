@@ -31,6 +31,35 @@ pub fn record_operator(db: &Path, did: &str) -> Result<()> {
     Ok(())
 }
 
+/// `ad4m-executor init [--operator <did>]`: `init` runs the executor's init (`data_path`,
+/// `seed`). On a data folder `init` made before (it holds the seed), `--operator` records (or refuses) the operator
+/// first, and without `--network-bootstrap-seed` it stops there: the folder keeps its seed
+/// and everything else, and a refused operator changes nothing. On a new folder `init` makes
+/// it, then the operator is recorded.
+pub fn init_with_operator(
+    data_path: Option<String>,
+    seed: Option<String>,
+    operator: Option<&str>,
+    init: impl FnOnce(Option<String>, Option<String>) -> Result<()>,
+) -> Result<()> {
+    let db = database_path(data_path.as_deref());
+    // Initialized: `init` wrote the seed.
+    let existing = db
+        .parent()
+        .is_some_and(|dir| dir.join("mainnet_seed.seed").exists());
+    if let (Some(operator), true) = (operator, existing) {
+        record_operator(&db, operator)?;
+        if seed.is_none() {
+            return Ok(());
+        }
+    }
+    init(data_path, seed)?;
+    if let (Some(operator), false) = (operator, existing) {
+        record_operator(&db, operator)?;
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Claimed {
@@ -81,35 +110,72 @@ pub async fn claim(
         );
         return Ok(());
     }
-    let deadline = claimed.expires + CONFIRM_GRACE_S;
-    loop {
-        let join: Join = client
-            .call(
+    let offer_id = claimed.offer_id.clone();
+    let joined = follow_join(
+        &claimed,
+        || {
+            client.call::<Join>(
                 "identity.joinStatus",
-                json!({ "offerId": claimed.offer_id }),
+                json!({ "offerId": offer_id.clone() }),
             )
-            .await?;
+        },
+        unix_now,
+        Duration::from_secs(2),
+    )
+    .await?;
+    println!("{joined}");
+    Ok(())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Follows the claim through `join_status` every `poll` until the holder confirms it (the
+/// "Joined …" line), the offer ends, or its confirm window (`expires + CONFIRM_GRACE_S` by
+/// `now`) closes. Each call is cut off at the window's end, so an executor that never answers
+/// cannot hold the command past it. A spent offer whose log does not list this executor's key
+/// (`keyId: null`) is an error: the executor did not join.
+async fn follow_join<F, Fut>(
+    claimed: &Claimed,
+    mut join_status: F,
+    now: impl Fn() -> u64,
+    poll: Duration,
+) -> Result<String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Join>>,
+{
+    let closed = || anyhow!("the holder did not confirm before the offer's confirm window closed");
+    let deadline = claimed.expires.saturating_add(CONFIRM_GRACE_S);
+    loop {
+        let left = deadline.saturating_sub(now());
+        if left == 0 {
+            return Err(closed());
+        }
+        let join = tokio::time::timeout(Duration::from_secs(left), join_status())
+            .await
+            .map_err(|_| closed())??;
         match join.state.as_str() {
             "claimed" => {}
             "spent" => {
-                println!(
-                    "Joined {} as {} (event {}).",
-                    join.did.unwrap_or(claimed.did),
-                    join.key_id.unwrap_or_else(|| "?".into()),
+                let did = join.did.unwrap_or_else(|| claimed.did.clone());
+                let Some(key_id) = join.key_id else {
+                    bail!(
+                        "the offer was spent, but the log of {did} does not list this executor's key"
+                    );
+                };
+                return Ok(format!(
+                    "Joined {did} as {key_id} (event {}).",
                     join.seq.map_or_else(|| "?".to_string(), |s| s.to_string())
-                );
-                return Ok(());
+                ));
             }
             other => bail!("the offer ended unconfirmed: it is {other}"),
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if now > deadline {
-            bail!("the holder did not confirm before the offer's confirm window closed");
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(poll).await;
     }
 }
 
@@ -231,6 +297,128 @@ mod tests {
             "{err}"
         );
         assert!(record_operator(&db, "did:key:z6Mk").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn claimed(expires: u64) -> Claimed {
+        Claimed {
+            did: A.into(),
+            offer_id: "o1".into(),
+            match_code: "R7K Q2M".into(),
+            kind: "node".into(),
+            expires,
+        }
+    }
+
+    fn join(state: &str, key_id: Option<&str>) -> Join {
+        Join {
+            state: state.into(),
+            did: Some(A.into()),
+            key_id: key_id.map(str::to_string),
+            seq: Some(1),
+        }
+    }
+
+    /// A spent offer joins only with the key's id; `keyId: null` is an error.
+    #[tokio::test]
+    async fn a_spent_offer_without_this_executors_key_is_an_error() {
+        let now = || 100;
+        let answers =
+            std::cell::RefCell::new(vec![join("spent", Some("d2")), join("claimed", None)]);
+        let next = || {
+            let answer = answers.borrow_mut().pop().unwrap();
+            async move { Ok(answer) }
+        };
+        let joined = follow_join(&claimed(200), next, now, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(joined, format!("Joined {A} as d2 (event 1)."));
+
+        let refused = follow_join(
+            &claimed(200),
+            || async { Ok(join("spent", None)) },
+            now,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(refused.is_err(), "{refused:?}");
+        let ended = follow_join(
+            &claimed(200),
+            || async { Ok(join("expired", None)) },
+            now,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(ended.unwrap_err().to_string().contains("expired"));
+    }
+
+    /// An executor that never answers `identity.joinStatus` cannot hold `claim` past the
+    /// confirm window, and an `expires` near `u64::MAX` does not wrap the window.
+    #[tokio::test]
+    async fn claim_follows_the_join_no_longer_than_the_confirm_window() {
+        let start = std::time::Instant::now();
+        let t0 = unix_now();
+        let silent = follow_join(
+            &claimed(t0 + 1 - CONFIRM_GRACE_S),
+            std::future::pending::<Result<Join>>,
+            unix_now,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(silent.is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+
+        let far = follow_join(
+            &claimed(u64::MAX),
+            || async { Ok(join("spent", Some("d2"))) },
+            || 100,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(far.is_ok(), "{far:?}");
+    }
+
+    /// On an existing data folder `--operator` records or refuses before init runs, and init
+    /// (which rewrites the seed) runs only with a new seed; on a new folder init runs first.
+    #[test]
+    fn init_with_an_operator_on_an_existing_folder_keeps_its_seed() {
+        let dir = std::env::temp_dir().join(format!("ad4m-cli-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mainnet_seed.seed"), "{}").unwrap();
+        let path = Some(dir.to_str().unwrap().to_string());
+        let ran = std::cell::Cell::new(0);
+        let init = |_: Option<String>, _: Option<String>| {
+            ran.set(ran.get() + 1);
+            Ok(())
+        };
+
+        init_with_operator(path.clone(), None, Some(A), init).unwrap();
+        assert_eq!(ran.get(), 0, "an existing folder keeps its seed");
+        let refused = init_with_operator(path.clone(), None, Some(B), init);
+        assert!(refused.is_err());
+        let refused = init_with_operator(path.clone(), Some("seed".into()), Some(B), init);
+        assert!(refused.is_err());
+        assert_eq!(ran.get(), 0, "a refused operator runs no init");
+        init_with_operator(path.clone(), Some("seed".into()), Some(A), init).unwrap();
+        assert_eq!(ran.get(), 1, "a new seed is written");
+        init_with_operator(path, None, None, init).unwrap();
+        assert_eq!(ran.get(), 2, "init without --operator runs as before");
+
+        // A new folder: init makes it, then the operator is recorded.
+        let fresh = dir.join("new");
+        let fresh_path = Some(fresh.to_str().unwrap().to_string());
+        init_with_operator(fresh_path.clone(), None, Some(A), |_, _| {
+            std::fs::create_dir_all(&fresh)?;
+            std::fs::write(fresh.join("mainnet_seed.seed"), "{}")?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(record_operator(&database_path(fresh_path.as_deref()), B).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

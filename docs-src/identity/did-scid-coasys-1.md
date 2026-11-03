@@ -125,7 +125,10 @@ rule. Each rule names the error that the reference implementation returns
 - **P5** `kind` of an `incept` is `human`; `group` is reserved (`Format(UnsupportedKind)`).
 - **P6** The event serialises back to exactly the JSON it came from: an empty `proof` or an
   empty `revoke` on `rotate` is left out, never written as `[]` (`Format(NotCanonical)`).
-  Without this, a receiver's hash could differ from the sender's.
+  Without this, a receiver's hash could differ from the sender's. The event's text is I-JSON
+  (RFC 7493): no object in it names a member twice (`Format(DuplicateMember)`), checked on the
+  text before it is parsed into a value, since a parser keeping the first of two members and one
+  keeping the last would read two different events from the same bytes.
 - **P7** The canonical JSON text of the event (section 4), proofs included, is at most
   65 536 bytes (`Format(TooLarge)`). `offer`, `coSig` and `can` have no length limit of their
   own (`salt` has: K13), so this limit stops one signed event from growing without bound.
@@ -233,11 +236,13 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
 3. **Verification.** The resolver folds the events with the rules of section 5, each event
    parsed as JSON under P1–P7. Event #0 must give the SCID of the DID. Any failure means the
    source gave no valid log: the resolver skips it and tries the next source. It may stop at
-   the first source that gives a valid log or read further sources for a longer one; either
-   way it keeps the longest valid log it holds. A shorter valid log never replaces a longer one
-   (it is a prefix, or a fork). Two valid logs that differ at one seq are a fork: the resolver
-   answers with the log it held first, and reports the fork in the DID resolution metadata
-   (`coasys:fork`: the seq and the two event hashes).
+   the first source that gives a valid log or read further sources for a longer one. Of two
+   valid logs where one is a prefix of the other, it keeps the longer. Two valid logs that
+   differ at one seq are a fork: the resolver keeps the log it held first, whichever is longer,
+   and reports the fork in the DID resolution metadata (`coasys:fork`: the seq and the two
+   event hashes). Both must be valid: the competing event must replay on the prefix below it,
+   proofs included. A different event there that does not is no fork (anyone can write one
+   without a key); the source gave no valid log and is skipped.
 4. **The DID document.** The resolver derives the DID document (section 9) from the state
    after the head. With `versionId=<seq>`, it derives it from the state after that seq.
    DID Core defines `versionId` only as an identifier of a version of the DID document and
@@ -256,8 +261,9 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
    time, so the resolver does not support `versionTime` and refuses it with `invalidDidUrl`;
    `created` and `updated` are absent for the same reason. A host's `appendedAt` is the host's
    claim, not part of the verifiable history.
-6. **What a host can do.** A host can withhold events or serve an older head. It cannot forge
-   one: every event carries proofs by keys the state before it names, and event #0 hashes to
+6. **What a host can do.** A host can withhold events or serve an older head, signed or not (a
+   signed head proves the host held it, not that it is the latest, section 13). It cannot forge
+   an event: every event carries proofs by keys the state before it names, and event #0 hashes to
    the SCID in the DID. The resolver must not trust a host for anything except the bytes it
    returns, and checks every byte itself.
 
@@ -380,15 +386,15 @@ clocks.
 
 - A signature by a device key `k` of identity X, anchored at seq `s`, holds only when X's log
   lists `k` and `key_valid_at(k, s)` (section 6). A key revoked at *N* signs nothing valid
-  anchored at or after *N*; content anchored below *N* that was admitted before the revocation
-  stays valid.
+  anchored at or after *N*; content anchored below *N* stays valid.
 - An anchor past the head of the log the verifier holds is refused.
 - The signer picks the anchor, so the anchor alone cannot stop a holder of a revoked key from
-  backdating new content to a seq below *N*. The host that admits signed content (for an agent
-  record, the store that takes the `PUT`) orders arrivals: when the content arrives it also
-  checks `k` listed and valid at the head of the log it holds, and refuses the content
-  otherwise, whatever anchor it names. A revoked key so cannot backdate new content past that
-  host. Readers check at the anchor and rely on that host's admission for arrival order.
+  backdating new content to a seq below *N*. A host that admits signed content can order
+  arrivals, as host policy (section 14): when the content arrives it also checks `k` listed
+  and valid at the head of the log it holds, and refuses the content otherwise, whatever
+  anchor it names. The Coasys identity store does so for agent records. A revoked key so
+  cannot backdate new content past such a host; readers check at the anchor and may rely on
+  its admission for arrival order. Admission never changes whether a signature holds.
 - A reader that first sees a signature after the key's revocation, anchored before it, and
   did not get it through such a host, may flag it. That is the reader's policy; the signature
   holds.
@@ -397,8 +403,9 @@ The anchor carries no DID, key id or hash. The identity is known from the conten
 keyed by its did:scid, and a link's author key maps to its identity through a key lookup that
 the verifier confirms against the log (a key enters a log only with its own co-signature). The
 key id is read from the log, which lists the signing key. A hash would only tell forked
-branches apart, and a fork is only detected, never resolved (sections 8 and 11): it already
-freezes the identity, so a hash would add bytes to every record and link and enable no check.
+branches apart, and a fork is only detected, never resolved (sections 8 and 11): the store
+keeps the branch it held, and a fork by the current master freezes the identity there until a
+`rotate` (section 14), so a hash would add bytes to every record and link and enable no check.
 
 The anchor is not a parameter of the signer's `did:key`. A `did:key` has one fixed DID
 document, so a version of it means nothing, and the `did:key` method defines no DID parameters.
@@ -451,7 +458,7 @@ DID URL from the identity, the anchor and the key id that the log lists for the 
 | File | Holds |
 |---|---|
 | `log.json` | a valid log with every op and every key life: events, SCID, DID, hashes, the folded state, `key_valid_at` and `key_valid_at_time` for every key, seq and two times |
-| `fold.json` | one invalid log per rule with the pinned error `{code, reason, format}` |
+| `fold.json` | one invalid log per rule with the pinned error `{code, reason, format}`; in `textCases` the events are JSON text (a duplicate member name, P6) |
 | `proofs.json` | every proof of `log.json` with its proof config, config hash, signing input and event hash; a tampered body, a wrong key, another domain |
 | `commitment.json` | entropy, words, seed, masters 0–3 with path, key, salt and commitment, and the recovery public key |
 | `pow.json` | proofs at 8, 12 and 16 bits for the SCID of `log.json`, with their hashes |
@@ -485,7 +492,12 @@ GET /v1/logs/<scid>?from=<n>
     past the head gives an empty `events`.
   - `head`: the host's head `{scid, seq, hash, …}`. A host may sign it (the Coasys identity
     store signs it under `coasys:head` with `time`, `store` and `sig`); a resolver that does
-    not trust the host's key reads it only as a hint of how far to page.
+    not trust the host's key reads it only as a hint of how far to page. A signed head proves
+    authenticity, not freshness: its `time` is when the host stored that head, not when it was
+    read, so a host (or anyone replaying its answer) can serve an older signed head, and with
+    the prefix of the log it covers it verifies as well as the current one. A reader that
+    trusts the key learns that the host held at least that log, never that the log ends there;
+    it reads over an authenticated channel (HTTPS) and never takes a head below one it holds.
   - `appendedAt`: one unix time per event, when the host stored it. It is the host's claim
     and no part of the verifiable history.
 
@@ -523,8 +535,24 @@ Coasys identity store adds these checks:
 - **One key per identity.** A host may require that a signing key appears in at most one log
   it holds (rule K8 already holds within one log). Revoked keys count: a log that ever listed
   the key keeps it, so a revoked key can never enter another log on that host.
+- **Signers valid at the head.** The store takes an agent record only when its signing key is
+  valid at the head of the log it holds when the record arrives (section 10, anchors).
 - **Expiry window.** The store refuses a bot scope's `expires` in the past or more than 400
   days ahead.
+- **Forks by the current master freeze.** An append whose event sits at a seq the store holds,
+  differs from the stored event and replays on the events before it is a fork (section 11).
+  The store keeps a fork as evidence with the competing event, one per signing master (a
+  further competing event by a master that already has a recorded fork is answered with that
+  fork), answers it with the fork, and serves the log it held. The identity is frozen only
+  while the competing event's signing master is the current master at the head of the held
+  log; a competing `rotate` is signed by the master it names, so it freezes once the held log
+  rotates onto that master, until a further `rotate`. A fork signed by a master the held
+  log has rotated away from (at the fork's seq or later) freezes nothing: rotation is the remedy
+  for a stolen master, and a retired master must not be able to lock the identity out. While
+  frozen the store takes no signed request and one kind of append only: a `rotate`, which the
+  committed next key signs (a holder of the current master alone cannot). Once it is appended
+  the competing event's signer is no longer current, so the freeze ends by the same rule. The
+  store derives the freeze from the recorded fork and the held log; it stores no flag.
 - **Proof of work for a log with no vouching note**, below.
 
 ### Proof of work for a log with no vouching note
@@ -560,8 +588,8 @@ of the system signs, so that wallets and apps interoperate.
 Every domain other than `coasys:kel` (section 7) signs `JCS(value + {"domain": domain})` with
 Ed25519 (the value is an object without a `domain` member). The registry is
 `ad4m_identity_core::domain::SIGNING_DOMAINS`:
-`coasys:kel`, `coasys:link`, `coasys:store-request`, `coasys:head`, `coasys:vouch`,
-`coasys:offer`, `coasys:claim`, `coasys:pause`, `coasys:inbox`, `coasys:session`,
-`coasys:account`, `coasys:room-key`, `coasys:bot-grant`. These labels enter a hash or a key
+`coasys:kel`, `coasys:link`, `coasys:agent-record`, `coasys:store-request`, `coasys:head`,
+`coasys:vouch`, `coasys:offer`, `coasys:claim`, `coasys:pause`, `coasys:inbox`,
+`coasys:session`, `coasys:account`, `coasys:room-key`, `coasys:bot-grant`. These labels enter a hash or a key
 derivation and are never signing domains; every signing API refuses them: `coasys:pow`,
 `coasys:pair-id:1`, `coasys:pair-key:1`, `coasys:match`, `coasys:wrap:1`, `coasys:auth:1`.

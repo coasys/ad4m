@@ -151,6 +151,32 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(log.events).to.deep.equal(page.events);
     });
 
+    it("agent.lock and agent.unlock answer, and announce, the identity A speaks for", async () => {
+        // A hook that takes the event as the new status (`useMe`) would otherwise show
+        // `identity: null` after every lock or unlock.
+        const events: any[] = [];
+        const stop = a.client.on("agent-status-changed", (event) => events.push(event));
+        try {
+            const locked = await a.client.agent.lock("passphrase");
+            expect(locked.isUnlocked).to.be.false;
+            expect(locked.identity).to.equal(did);
+            await pollUntil(() => events.length >= 1, { timeoutMs: 10_000, intervalMs: 100, label: "agent-status-changed on lock" });
+            expect(events[0].agent.isUnlocked).to.be.false;
+            expect(events[0].agent.identity).to.equal(did);
+        } finally {
+            const unlocked = await a.client.agent.unlock("passphrase", false);
+            expect(unlocked.isUnlocked).to.be.true;
+            expect(unlocked.identity).to.equal(did);
+        }
+        await pollUntil(
+            () => events.some((e) => e.agent.isUnlocked),
+            { timeoutMs: 10_000, intervalMs: 100, label: "agent-status-changed on unlock" },
+        );
+        stop();
+        const announced = events.find((e) => e.agent.isUnlocked);
+        expect(announced.agent.identity).to.equal(did);
+    });
+
     it("links B, started with --operator, through `ad4m-executor claim`", async () => {
         b = await startNode("b", ["--operator", did]);
         const opened = await holder.send({ cmd: "open", did, store: store.url });
@@ -216,12 +242,12 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(String(refused?.message ?? refused)).to.contain("no-operator");
 
         // With an operator recorded for another identity, the first link must come from it.
-        execSync(`${executorBinary()} init --data-path ${executorDataPath(c.dataPath)} --network-bootstrap-seed ${SEED_PATH} --operator ${STRANGER}`);
+        execSync(`"${executorBinary()}" init --data-path "${executorDataPath(c.dataPath)}" --network-bootstrap-seed "${SEED_PATH}" --operator ${STRANGER}`);
         refused = await c.client.identity.claimOffer(opened.link).then(() => null, (e) => e);
         expect(String(refused?.message ?? refused)).to.contain("first-link");
         // `init` never replaces a recorded operator.
         expect(() => execSync(
-            `${executorBinary()} init --data-path ${executorDataPath(c.dataPath)} --network-bootstrap-seed ${SEED_PATH} --operator ${did}`,
+            `"${executorBinary()}" init --data-path "${executorDataPath(c.dataPath)}" --network-bootstrap-seed "${SEED_PATH}" --operator ${did}`,
             { stdio: "pipe" },
         )).to.throw(/This executor's operator is/);
         expect((await c.client.identity.status()).did).to.be.null;
@@ -239,6 +265,10 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(bStatus.did).to.equal(did);
         expect(bStatus.keyId).to.equal("d2");
         expect(bStatus.revoked).to.equal(2);
+        // The binding stays, but B's key no longer speaks for the person: agent.status (and
+        // agent.get, which reads the same check) names no identity.
+        expect((await b.client.agent.status()).identity).to.be.null;
+        expect((await a.client.agent.status()).identity).to.equal(did);
         const devices = await a.client.identity.devices();
         expect(devices.find((d) => d.keyId === "d2")!.revokedSeq).to.equal(2);
         expect((await a.client.identity.status()).revoked).to.be.null;

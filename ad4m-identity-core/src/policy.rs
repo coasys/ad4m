@@ -34,6 +34,10 @@ pub enum FormatError {
     UnknownAction(String),
     #[error("not canonical: {0}")]
     NotCanonical(String),
+    #[error("the text is not JSON: {0}")]
+    NotJson(String),
+    #[error("an object names the member {0:?} twice")]
+    DuplicateMember(String),
     #[error("bad proof member: {0}")]
     Proof(String),
     #[error("{0:?} is not a sha2-256 multihash")]
@@ -50,7 +54,10 @@ pub enum FormatError {
     EmptyAdd,
     #[error("a revoke must name at least one key")]
     EmptyRevoke,
-    #[error("the event is {0} bytes of canonical JSON, above the limit of 65536")]
+    #[error(
+        "the event is {0} bytes of canonical JSON, above the limit of {limit}",
+        limit = crate::EVENT_MAX_BYTES
+    )]
     TooLarge(usize),
 }
 
@@ -106,6 +113,8 @@ impl FormatError {
             FormatError::UnsupportedKind(_) => "UnsupportedKind",
             FormatError::UnknownAction(_) => "UnknownAction",
             FormatError::NotCanonical(_) => "NotCanonical",
+            FormatError::NotJson(_) => "NotJson",
+            FormatError::DuplicateMember(_) => "DuplicateMember",
             FormatError::Proof(_) => "Proof",
             FormatError::BadHash(_) => "BadHash",
             FormatError::BadSalt(_) => "BadSalt",

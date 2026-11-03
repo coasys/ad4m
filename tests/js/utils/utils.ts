@@ -268,7 +268,7 @@ export async function startExecutor(dataPath: string,
     }
     rmSync(dataPath, { recursive: true, force: true })
     rmSync(effectiveDataPath, { recursive: true, force: true })
-    execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath} ${initArgs.join(' ')}`, {cwd: process.cwd()})
+    execSync(`"${command}" init --data-path "${effectiveDataPath}" --network-bootstrap-seed "${bootstrapSeedPath}" ${initArgs.join(' ')}`, {cwd: process.cwd()})
 
     // Shared mode for the local language-language and neighbourhood store,
     // so executors see each other's published languages and neighbourhoods

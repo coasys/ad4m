@@ -1,5 +1,6 @@
 import { Perspective } from "../perspectives/Perspective";
 import type { Agent as WireAgent } from "../generated/api/Agent";
+import type { AgentWithIdentity } from "../generated/api/AgentWithIdentity";
 import { ExpressionGeneric } from "../expression/Expression";
 
 /**  AD4M's representation of an Agent
@@ -35,6 +36,10 @@ export class Agent {
   /** Address of the Language by which the Agent will receive DMs */
   directMessageLanguage?: string;
 
+  /** The `did:scid` this agent speaks for (`agent.me()`), or `null`; absent on agents read
+   * from the agent language. `did` stays the device `did:key`. */
+  identity?: string | null;
+
   constructor(did: string, perspective?: Perspective) {
     this.did = did;
     if (perspective) {
@@ -45,9 +50,12 @@ export class Agent {
   }
 
   /** Build an Agent (with its perspective's query helpers) from the executor's wire shape. */
-  static fromWire(wire: WireAgent): Agent {
+  static fromWire(wire: WireAgent | AgentWithIdentity): Agent {
     const agent = new Agent(wire.did, Perspective.fromWire(wire.perspective));
     agent.directMessageLanguage = wire.directMessageLanguage;
+    if ("identity" in wire) {
+      agent.identity = wire.identity;
+    }
     return agent;
   }
 }

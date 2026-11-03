@@ -88,6 +88,23 @@ fn revoked_key_valid_before_and_invalid_from_its_revocation() {
 }
 
 #[test]
+fn encryption_keys_leave_out_bots() {
+    // A bot has no inbox (the document's `keyAgreement` rule): sealing to the person through
+    // `encryption_keys_at` must never seal to a bot, though the bot's record carries `enc`.
+    let mut log = Log::new();
+    let bot_id = log.add(bot(&["read"], 2_000_000_000)); // d2 at 1
+    let state = log.chain.state();
+    assert!(state.key_valid_at(&bot_id, 1));
+    assert!(state.record(&bot_id).unwrap().enc.is_some());
+    let ids: Vec<&str> = state
+        .encryption_keys_at(1)
+        .into_iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert_eq!(ids, ["d1"]);
+}
+
+#[test]
 fn content_signers_resolve_device_keys_only() {
     // A master never signs for the person (spec section 9): `device_key_id_of` answers no
     // master, current or replaced, while `key_id_of` still finds every key of the log.
@@ -155,6 +172,43 @@ fn bot_key_lapses_and_comes_back_with_a_later_scope() {
         log.try_push(&scope),
         Err(ChainError::Policy(FoldError::RevokedKey(id)))
     );
+}
+
+#[test]
+fn a_scope_names_a_listed_bot_key_and_known_actions() {
+    let mut log = Log::new();
+    let bot_id = log.add(bot(&["read"], 2_000_000_000));
+    let scope = |can: &[&str]| BotScope {
+        can: can.iter().map(|s| s.to_string()).collect(),
+        expires: 2_100_000_000,
+    };
+    let signed = |log: &Log, key: &str, can: &[&str]| {
+        let mut event = build::scope_unsigned(&log.chain, &key.to_string(), &scope(can)).unwrap();
+        sign(&mut event, "m0", &master(0));
+        event
+    };
+    assert_eq!(
+        log.try_push(&signed(&log, "d9", &["read"])),
+        Err(ChainError::Policy(FoldError::UnknownKey("d9".into())))
+    );
+    assert_eq!(
+        log.try_push(&signed(&log, &bot_id, &[])),
+        Err(ChainError::Policy(FoldError::EmptyScope))
+    );
+    assert_eq!(
+        log.try_push(&signed(&log, &bot_id, &["read", "admin"])),
+        Err(ChainError::Policy(FoldError::Format(
+            ad4m_identity_core::FormatError::UnknownAction("admin".into())
+        )))
+    );
+    // Every listed action folds, `join` included.
+    log.scope(&bot_id, &["join"], 2_100_000_000);
+    let at = log.seq();
+    assert_eq!(
+        log.chain.state().bot_scope_at(&bot_id, at).unwrap().can,
+        vec!["join".to_string()]
+    );
+    log.scope(&bot_id, &["read", "write", "join"], 2_200_000_000);
 }
 
 #[test]
