@@ -379,6 +379,9 @@ interface FieldWrite {
   parameters: { name: string; value: any }[];
 }
 
+/** The most writes `sendWrites` joins into one `executeAction` call. */
+const MAX_WRITES_PER_CALL = 200;
+
 /**
  * Put `childId` under `parent`. A containment scope `{ id }` writes through the
  * built-in `Container` (#1446): the executor runs the adder of the parent's own
@@ -1693,7 +1696,9 @@ export class Ad4mModel {
    * executor runs a call's commands in order, so consecutive writes share one
    * call, each with its own parameter names. A `collectionSetter` takes every
    * parameter of its call as a member, so it goes in a call of its own. A
-   * command's `local` flag is per command, so Local and Shared links mix.
+   * command's `local` flag is per command, so Local and Shared links mix. The
+   * executor tries every parameter name at each position of each command, so
+   * a call holds at most `MAX_WRITES_PER_CALL` writes.
    */
   private async sendWrites(writes: FieldWrite[], batchId?: string): Promise<void> {
     let group: FieldWrite[] = [];
@@ -1724,6 +1729,7 @@ export class Ad4mModel {
         await flush();
       } else {
         group.push(write);
+        if (group.length >= MAX_WRITES_PER_CALL) await flush();
       }
     }
     await flush();

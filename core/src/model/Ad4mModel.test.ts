@@ -3773,6 +3773,19 @@ describe("Model writes: one executeAction call per write (P4)", () => {
     ]);
   });
 
+  it("a long run of writes is split into calls of at most 200 writes, in order", async () => {
+    const perspective = makePerspective();
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    const tags = Array.from({ length: 450 }, (_, i) => `t${i}`);
+    card.tags = { action: "adder", value: tags };
+    await card.innerUpdate(true, "batch-1");
+
+    const tagCalls = perspective.executeAction.mock.calls.filter(([commands]: any[]) => commands[0].action === "addLink");
+    expect(tagCalls.map((call: any[]) => call[2].length)).toEqual([200, 200, 50]);
+    const added = resolved(perspective).filter((c: any) => c.action === "addLink");
+    expect(added.map((c: any) => c.target)).toEqual(tags);
+  });
+
   it("a single write is sent as before, with its `value` parameter", async () => {
     const perspective = makePerspective();
     const card = new P4Card(perspective, "p4://card/1") as any;
