@@ -455,7 +455,8 @@ async fn a_removal_of_another_expression_of_the_triple_keeps_the_addition() {
 /// `add_link_expression`, which queues it as `Some("")`, then removes it
 /// through `remove_link` with the link as read back from the store, which
 /// queues the store's `None`. Both writes wait in one pending batch. They are
-/// one link, so the batch does not add it and a peer ends without it.
+/// one link, so the batch removes it without adding it, and a peer that held
+/// it ends without it.
 #[tokio::test(start_paused = true)]
 async fn a_link_added_with_an_empty_predicate_and_removed_does_not_reach_peers() {
     // `add_link_expression` and `remove_link` read the global agent service.
@@ -468,6 +469,9 @@ async fn a_link_added_with_an_empty_predicate_and_removed_does_not_reach_peers()
 
     let mut added = link("did:key:alice", "x");
     added.data.predicate = Some(String::new());
+    // A peer already holds x, so only a sent removal takes it away: a merge
+    // that dropped both writes would leave x with the peer.
+    fake.held.lock().unwrap().push(added.clone());
     perspective
         .add_link_expression(added, LinkStatus::Shared, None)
         .await
@@ -523,10 +527,10 @@ async fn a_link_added_with_an_empty_predicate_and_removed_does_not_reach_peers()
         1,
         "one commit per batch"
     );
-    assert!(
-        !fake.committed().contains(&"+x".to_string()),
-        "the batch adds x: {:?}",
-        fake.committed()
+    assert_eq!(
+        fake.committed(),
+        vec!["-x"],
+        "the batch removes x and does not add it"
     );
     assert_eq!(fake.held_targets(), Vec::<String>::new());
 }
