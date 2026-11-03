@@ -183,7 +183,8 @@ impl ChatModel {
     async fn chat(&self, turns: Vec<ChatTurn>, tools: Vec<ToolSpec>) -> Result<ChatReply> {
         let _slot = endpoints::request_slot(&self.endpoint).await;
         let request = ChatRequest::new(self.remote_model.clone(), turns).with_tools(tools);
-        self.client.chat(request).await
+        let reply = self.client.chat(request).await;
+        self.after(reply)
     }
 
     /// [`Self::chat`] with the text sent to `tokens` as the model writes it (in one chunk
@@ -195,7 +196,15 @@ impl ChatModel {
     ) -> Result<ChatReply> {
         let _slot = endpoints::request_slot(&self.endpoint).await;
         let request = ChatRequest::new(self.remote_model.clone(), turns);
-        self.client.chat_stream(request, tokens).await
+        let reply = self.client.chat_stream(request, tokens).await;
+        self.after(reply)
+    }
+
+    /// `reply`, once a failure is acted on (`endpoints::after_failed_request`).
+    fn after(&self, reply: Result<ChatReply>) -> Result<ChatReply> {
+        reply.inspect_err(|e| {
+            endpoints::after_failed_request(&self.endpoint.id, &self.remote_model, e)
+        })
     }
 }
 
@@ -988,13 +997,18 @@ impl AIService {
             let _slot = endpoints::request_slot(&embedder.endpoint).await;
             embedder.client.embed(&embedder.remote_model, &texts).await
         };
-        let reply = tokio::time::timeout(timeout, call).await.map_err(|_| {
-            providers::http::UpstreamUnreachable {
+        let reply = match tokio::time::timeout(timeout, call).await {
+            Ok(reply) => reply,
+            Err(_) => Err(providers::http::UpstreamUnreachable {
                 url: embedder.endpoint.base_url.to_string(),
                 timed_out: true,
                 detail: format!("no answer within {}s", timeout.as_secs()),
             }
-        })??;
+            .into()),
+        }
+        .inspect_err(|e| {
+            endpoints::after_failed_request(&embedder.endpoint.id, &embedder.remote_model, e)
+        })?;
         let token_count = reply.prompt_tokens.map_or(estimate, |n| n as usize);
         let vectors = reply.vectors;
         log::debug!(
@@ -1024,12 +1038,13 @@ impl AIService {
         model_id: String,
         caller: &RequestContext,
     ) -> Result<String> {
-        let (client, remote_model) = transcription::endpoint_transcriber(&model_id)?;
+        let (client, remote_model, endpoint_id) = transcription::endpoint_transcriber(&model_id)?;
         let (agent_did, user_did) = transcription_stream_owner(caller.acts_as())?;
         Ok(self
             .open_remote_stream(
                 model_id,
                 remote_model,
+                endpoint_id,
                 Arc::new(client),
                 agent_did,
                 user_did,
@@ -1038,11 +1053,13 @@ impl AIService {
     }
 
     /// Open a stream whose utterances `client` transcribes with the upstream model
-    /// `remote_model`, billed as `model_id` to `agent_did`, its text sent to `user_did`.
+    /// `remote_model` on endpoint `endpoint_id`, billed as `model_id` to `agent_did`, its text
+    /// sent to `user_did`.
     async fn open_remote_stream(
         &self,
         model_id: String,
         remote_model: String,
+        endpoint_id: String,
         client: Arc<dyn providers::audio::RemoteTranscribe>,
         agent_did: Option<String>,
         user_did: String,
@@ -1055,6 +1072,7 @@ impl AIService {
             stream_id: stream_id.clone(),
             model_id,
             remote_model,
+            endpoint_id,
             client,
             agent_did: agent_did.clone(),
             user_did,
@@ -1583,6 +1601,99 @@ mod tests {
             assert_eq!(client.most.load(Ordering::SeqCst), expected, "cap {cap:?}");
         }
     }
+
+    /// A loopback URL nothing listens on: a request to it is refused.
+    pub(super) fn dead_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// An OpenAI endpoint at a dead URL whose last check found it up, serving `served`.
+    pub(super) fn endpoint_that_went_down(served: &str) -> Endpoint {
+        endpoint_of_kind_that_went_down(EndpointKind::OpenAi, served)
+    }
+
+    fn endpoint_of_kind_that_went_down(kind: EndpointKind, served: &str) -> Endpoint {
+        let mut endpoint = Endpoint::for_test("went-down", kind, &dead_url(), "");
+        endpoint.health = crate::types::EndpointHealth {
+            state: crate::types::EndpointState::Reachable,
+            checked_at: Some(1),
+            detail: None,
+            served_models: vec![served.to_string()],
+        };
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        endpoint
+    }
+
+    /// Waits until the stored health of `endpoint` is no longer `REACHABLE` (a re-check ran).
+    pub(super) async fn rechecked(endpoint: &Endpoint) -> bool {
+        for _ in 0..100 {
+            let stored = Ad4mDb::with_global_instance(|db| db.get_endpoint(&endpoint.id))
+                .unwrap()
+                .unwrap();
+            if stored.health.state != crate::types::EndpointState::Reachable {
+                return true;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    // WE showed a model READY with its Ollama stopped: a failed `ai.prompt` left the status
+    // to the 60 s health loop, where a failed `/v1` request re-checks the endpoint at once.
+    #[tokio::test]
+    async fn a_failed_prompt_re_checks_its_endpoint() {
+        // Each chat client: a refused connection keeps its type, or nothing can tell it.
+        for kind in [
+            EndpointKind::OpenAi,
+            EndpointKind::Ollama,
+            EndpointKind::Anthropic,
+        ] {
+            let service = service();
+            let endpoint = endpoint_of_kind_that_went_down(kind, "qwen3");
+            let model_id = service
+                .add_model(model_on(&endpoint, ModelType::Llm, "qwen3"))
+                .await
+                .unwrap();
+            let task = service
+                .add_task(
+                    AITaskInput {
+                        name: "t".into(),
+                        model_id,
+                        system_prompt: String::new(),
+                        prompt_examples: vec![],
+                        meta_data: None,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+
+            assert!(service
+                .prompt(task.task_id, "hi".into(), None)
+                .await
+                .is_err());
+            assert!(rechecked(&endpoint).await, "{kind:?}: not re-checked");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_embed_re_checks_its_endpoint() {
+        let service = service();
+        let endpoint = endpoint_that_went_down("bge-m3");
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Embedding, "bge-m3"))
+            .await
+            .unwrap();
+
+        assert!(service.embed(model_id, "text".into(), None).await.is_err());
+        assert!(
+            rechecked(&endpoint).await,
+            "the endpoint was not re-checked"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1750,6 +1861,7 @@ mod remote_stream_tests {
             .open_remote_stream(
                 "m".into(),
                 "remote-model".into(),
+                "e".into(),
                 Arc::new(Upstream),
                 agent_did.map(str::to_string),
                 "did:key:owner".into(),
@@ -1874,6 +1986,35 @@ mod remote_stream_tests {
         );
         assert_eq!(event.payload["streamId"], id.as_str());
         assert_eq!(event.payload["text"], "5 samples");
+    }
+
+    // Not paused: the re-check is a real request to a dead port.
+    #[tokio::test]
+    async fn a_failed_utterance_re_checks_its_endpoint() {
+        let service = AIService::empty();
+        let _ = Ad4mDb::init_global_instance(":memory:");
+        let endpoint = super::tests::endpoint_that_went_down("whisper");
+        let client = providers::audio::OpenAiTranscribe::for_endpoint(&endpoint).unwrap();
+        let id = service
+            .open_remote_stream(
+                "m".into(),
+                "whisper".into(),
+                endpoint.id.clone(),
+                Arc::new(client),
+                None,
+                "did:key:owner".into(),
+            )
+            .await;
+
+        let operator = RequestContext::operator_for_test();
+        assert!(service
+            .feed_transcription_stream(&id, vec![0.1; 5], &operator)
+            .await
+            .is_err());
+        assert!(
+            super::tests::rechecked(&endpoint).await,
+            "the endpoint was not re-checked"
+        );
     }
 
     #[tokio::test(start_paused = true)]

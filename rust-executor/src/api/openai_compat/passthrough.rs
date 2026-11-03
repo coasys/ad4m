@@ -29,16 +29,14 @@ use tokio::time::Instant;
 
 use super::errors::OpenAIError;
 use super::model_selector::Resolved;
-use crate::ai_service::endpoints::{
-    check_health, publish_model_status, request_slot, request_timeout,
-};
+use crate::ai_service::endpoints::{after_failed_request, request_slot, request_timeout};
 use crate::ai_service::estimate_token_count;
 use crate::ai_service::providers::http::{
     credentialed_http, is_transport_safe, versioned_endpoint, UpstreamStatus, UpstreamUnreachable,
     CLEARTEXT_KEY_REFUSAL,
 };
 use crate::billing::check_compute_credits;
-use crate::types::{Endpoint, EndpointKind, Model, ModelState, ModelStatus, RequestContext};
+use crate::types::{Endpoint, EndpointKind, Model, RequestContext};
 
 /// How long a stream may take to start answering (plan §5.4).
 const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -132,30 +130,8 @@ pub(super) fn upstream_failure(
     error: anyhow::Error,
 ) -> OpenAIError {
     log::warn!("AI endpoint {:?} ({remote_model}): {error}", endpoint.name);
-    let mapped = OpenAIError::from_upstream(&error);
-    match mapped.error.code.as_deref() {
-        Some("upstream_unavailable" | "upstream_auth") => {
-            let endpoint = endpoint.clone();
-            tokio::spawn(async move {
-                if let Err(e) = check_health(&endpoint).await {
-                    log::warn!("AI endpoint health after a failed request: {e}");
-                }
-            });
-        }
-        Some("model_not_found") => {
-            let (endpoint_id, remote_model) = (endpoint.id.clone(), remote_model.to_string());
-            tokio::spawn(async move {
-                let status = ModelStatus {
-                    state: ModelState::Missing,
-                    progress: None,
-                    detail: Some("The endpoint does not serve this model".into()),
-                };
-                publish_model_status(&endpoint_id, &remote_model, status).await;
-            });
-        }
-        _ => {}
-    }
-    mapped
+    after_failed_request(&endpoint.id, remote_model, &error);
+    OpenAIError::from_upstream(&error)
 }
 
 /// An upstream answer with a success status, and the slot it holds until it is read.

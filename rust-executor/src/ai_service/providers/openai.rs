@@ -58,10 +58,7 @@ impl OpenAiChat {
             request = request.bearer_auth(&self.api_key);
         }
         let response = request.send().await.map_err(|e| {
-            anyhow!(
-                "Error connecting to remote LLM API: {}",
-                super::http::scrub(&e.to_string(), &self.api_key)
-            )
+            super::http::UpstreamUnreachable::new(&self.endpoint, &e, &self.api_key)
         })?;
         if !response.status().is_success() {
             return Err(
@@ -597,7 +594,13 @@ mod wire_tests {
             .chat(ChatRequest::new("m", vec![]))
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("Error connecting"), "{error}");
+        // Typed, so a caller can tell the endpoint is down (and re-check it).
+        assert!(
+            error
+                .downcast_ref::<crate::ai_service::providers::http::UpstreamUnreachable>()
+                .is_some(),
+            "{error}"
+        );
 
         let error = OpenAiChat::new("sk-test", url(&server.url()))
             .chat(ChatRequest::new("m", vec![]))

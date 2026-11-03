@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 
 use super::providers::discovery::{discover_for, endpoint_capabilities, health_of, PROBE_TIMEOUT};
-use super::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
+use super::providers::http::{
+    is_transport_safe, UpstreamStatus, UpstreamUnreachable, CLEARTEXT_KEY_REFUSAL,
+};
 use super::providers::ollama;
 use super::{AIService, Result};
 use crate::agent::AgentService;
@@ -185,6 +187,70 @@ pub async fn check_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
         publish_health(&endpoint.id, &health).await;
     }
     Ok(health)
+}
+
+/// What a failed request says about its endpoint.
+#[derive(Debug, PartialEq)]
+enum FailureSays {
+    /// No connection, or the key refused: the endpoint's health may have changed.
+    CheckEndpoint,
+    /// The endpoint answered 404: it does not serve the model.
+    ModelMissing,
+}
+
+impl FailureSays {
+    fn of(error: &anyhow::Error) -> Option<Self> {
+        if let Some(unreachable) = error.downcast_ref::<UpstreamUnreachable>() {
+            return (!unreachable.timed_out).then_some(Self::CheckEndpoint);
+        }
+        if let Some(answered) = error.downcast_ref::<UpstreamStatus>() {
+            return match answered.status.as_u16() {
+                401 | 403 => Some(Self::CheckEndpoint),
+                404 => Some(Self::ModelMissing),
+                _ => None,
+            };
+        }
+        // A client that keeps reqwest's error (transcription) rather than wrapping it.
+        let refused = error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+            .any(reqwest::Error::is_connect);
+        refused.then_some(Self::CheckEndpoint)
+    }
+}
+
+/// Act, in the background, on what a failed request for `remote_model` on endpoint
+/// `endpoint_id` says: down or refusing the key re-checks the endpoint's health (which
+/// publishes the change), a missing model is published `MISSING`. The one rule for `/v1`,
+/// prompts, embeddings and transcription streams, so a status does not wait for the health
+/// loop.
+pub fn after_failed_request(endpoint_id: &str, remote_model: &str, error: &anyhow::Error) {
+    let Some(says) = FailureSays::of(error) else {
+        return;
+    };
+    let (endpoint_id, remote_model) = (endpoint_id.to_string(), remote_model.to_string());
+    tokio::spawn(async move {
+        match says {
+            FailureSays::CheckEndpoint => {
+                // The stored endpoint: a client's copy holds the health of when it was built.
+                let checked = match stored_endpoint(&endpoint_id) {
+                    Ok(endpoint) => check_health(&endpoint).await.map(drop),
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = checked {
+                    log::warn!("AI endpoint health after a failed request: {e}");
+                }
+            }
+            FailureSays::ModelMissing => {
+                let status = ModelStatus {
+                    state: ModelState::Missing,
+                    progress: None,
+                    detail: Some("The endpoint does not serve this model".into()),
+                };
+                publish_model_status(&endpoint_id, &remote_model, status).await;
+            }
+        }
+    });
 }
 
 /// Check every endpoint now and then every [`HEALTH_INTERVAL`], for as long as the
