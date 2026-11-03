@@ -520,6 +520,10 @@ export class Ad4mModel {
   private _baseExpression: string;
   private _perspective: PerspectiveProxy;
   private _snapshot: Record<string, any> | null = null;
+  /** True when the constructor minted the id: no record can hold links yet. */
+  private _idMinted: boolean = false;
+  /** Predicates this instance has already written relation links under (`add*`/`set*`), so they may hold links. */
+  private _relationsWritten = new Set<string>();
   author: string;
   createdAt: any;
   updatedAt: any;
@@ -760,6 +764,7 @@ export class Ad4mModel {
     // IRIs, so relation links like `<post> --has_comment--> <comment-id>`
     // round-trip correctly through the SPARQL store.
     this._baseExpression = baseExpression ? baseExpression : `ad4m://obj/${makeRandomId(24)}`;
+    this._idMinted = !baseExpression;
     this._perspective = perspective;
   }
 
@@ -1238,6 +1243,20 @@ export class Ad4mModel {
     return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
   }
 
+  /**
+   * Snapshot freshly built instances for dirty tracking, with the relations
+   * `include` loaded (its `$`-prefixed projection keys are not relations).
+   * Used by every query path, and by ModelQueryBuilder for pushed results.
+   * @internal
+   */
+  static takeSnapshots(instances: Ad4mModel[], include?: IncludeMap): void {
+    const relations = include
+      ? Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')))
+      : undefined;
+    const snapshot = relations && Object.keys(relations).length > 0 ? relations : undefined;
+    for (const inst of instances) inst.takeSnapshot?.(snapshot);
+  }
+
 
   // ── One query over several classes (#1238) ────────────────────────────────
 
@@ -1352,14 +1371,7 @@ export class Ad4mModel {
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
     const result = await perspective.modelQuery(classNames, queryJson, options);
     const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
-    const snapshotRelations = query.include
-      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    for (const inst of results) {
-      (inst as any).takeSnapshot?.(
-        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
-      );
-    }
+    Ad4mModel.takeSnapshots(results, query.include);
     return { results, totalCount: result.totalCount };
   }
 
@@ -1449,15 +1461,7 @@ export class Ad4mModel {
       return jsonToModelInstance(this, perspective, json, query.include, query.properties);
     });
 
-    // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
-    const snapshotRelations = query.include
-      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    for (const inst of instances) {
-      (inst as Ad4mModel).takeSnapshot(
-        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
-      );
-    }
+    Ad4mModel.takeSnapshots(instances, query.include);
 
     return {
       results: instances,
@@ -1686,6 +1690,7 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    this._relationsWritten.add(metadata.predicate);
     const abstractName = this.abstractName();
     if (abstractName) {
       if (value != null) await this.relationThroughAbstract(abstractName, key, 'setter', value, batchId);
@@ -1715,6 +1720,7 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    this._relationsWritten.add(metadata.predicate);
     const abstractName = this.abstractName();
     if (abstractName) {
       if (value != null) await this.relationThroughAbstract(abstractName, key, 'adder', value, batchId);
@@ -1998,7 +2004,10 @@ export class Ad4mModel {
               break;
           }
         } else if (Array.isArray(value)) {
-          // Handle all arrays as relations, including empty ones (which clears the relation)
+          // Handle all arrays as relations, including empty ones (which clears the relation).
+          // A record being created under an id minted here has no links to
+          // clear, so an empty relation there costs a round trip and writes nothing.
+          if (value.length === 0 && !this._snapshot && this._idMinted && !this._relationsWritten.has(this.getRelationOptions(key)?.predicate ?? key)) continue;
           await this.setRelationValues(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
           // A scalar handed to a relation field is a single-member relation.
