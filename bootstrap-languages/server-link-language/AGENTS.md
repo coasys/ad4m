@@ -94,6 +94,17 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   trigger or refresh cooldown. Never make delivery depend on a one-shot
   request succeeding (BUG-103: a single `/render` timeout after a key grant
   lost a member's history).
+- **The startup render is retried until it succeeds.** `init` calls
+  `needRender()`. Until `bootstrap()` succeeds in this run, `catchUp` ends
+  with `retryRenderIfDue()`, the same shape as the `/keys` re-read above. It
+  starts the render in the background (one at a time, without catch-up
+  waiting for it), after a 10 s backoff that doubles per failure up to
+  5 min, and follows a success with a catch-up from the snapshot's sequence.
+  This is not the deleted key-ring re-bootstrap: it runs only while no
+  render has succeeded, and stops at the first success. Catch-up resumes
+  from the stored cursor, so without this a cursor past a hole never fills
+  it (BUG-115). The host's `httpFetch` deadline is a fixed 10 s for every
+  call, and the language cannot raise it for `/render`.
 - **A link the key it names does not open costs that link only.** Its
   ciphertext or payload is malformed, and a key version is fixed by its
   rotation's commitment, so no key ever opens it: `openWireLink` logs it and

@@ -568,6 +568,11 @@ export function _resetBatchStateForTests(): void {
     _inflight = Promise.resolve();
     if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
     _retryDelay = 2_500;
+    _renderNeeded = false;
+    _renderDueAt = 0;
+    _renderRetryDelay = RENDER_RETRY_BASE_MS;
+    _renderInflight = null;
+    _renderRetry = null;
 }
 
 /** Test-only: await the current in-flight flush without the drain loop.
@@ -582,6 +587,62 @@ export async function _awaitInflightForTests(): Promise<void> {
 // Cold-start bootstrap — full snapshot instead of replaying every diff
 // ---------------------------------------------------------------------------
 
+/** The wait before the first retry of a failed render; it doubles per failure. */
+export const RENDER_RETRY_BASE_MS = 10_000;
+/** The longest wait between render attempts. */
+const RENDER_RETRY_MAX_MS = 5 * 60 * 1000;
+
+/** True until a render succeeds, once one was asked for (`needRender`) or failed. */
+let _renderNeeded = false;
+/** `Date.now()` before which catch-up does not retry the render. */
+let _renderDueAt = 0;
+let _renderRetryDelay = RENDER_RETRY_BASE_MS;
+/** The render in flight, from `init` or a retry: there is never a second one. */
+let _renderInflight: Promise<void> | null = null;
+/** The retry in flight (its render, then a catch-up), for the test hook. */
+let _renderRetry: Promise<void> | null = null;
+
+/**
+ * Marks the room's snapshot as not loaded in this run: catch-up runs the
+ * render until one succeeds. `init` calls it before its startup sequence, so
+ * a render that never ran (authentication failed first) is retried too.
+ */
+export function needRender(): void {
+    _renderNeeded = true;
+}
+
+/**
+ * While the render is needed and its backoff has elapsed, starts it in the
+ * background and returns: catch-up does not wait for it. A render that
+ * succeeds is followed by a catch-up from the snapshot's sequence, which
+ * re-applies any diff that landed while the render was in flight.
+ */
+function retryRenderIfDue(): void {
+    if (!_renderNeeded || _renderInflight || _renderRetry || Date.now() < _renderDueAt) return;
+    console.log("[server-link-language] retrying the room render that has not succeeded in this run");
+    const p = bootstrap()
+        .then(
+            async () => {
+                console.log("[server-link-language] room render succeeded on retry");
+                try {
+                    await catchUp();
+                } catch (err) {
+                    console.error("[server-link-language] catch-up after the render failed:", err);
+                }
+            },
+            (err) => console.error("[server-link-language] render retry failed; catch-up tries again after a backoff:", err),
+        )
+        .finally(() => {
+            if (_renderRetry === p) _renderRetry = null;
+        });
+    _renderRetry = p;
+}
+
+/** Test-only: await the retried render in flight, if any. */
+export async function _awaitRenderRetryForTests(): Promise<void> {
+    await _renderRetry;
+}
+
 /**
  * Loads the server's current link set (`/render`) as the authoritative state:
  * stored links it lacks are removed, its links are added, both emitted. Held
@@ -589,8 +650,35 @@ export async function _awaitInflightForTests(): Promise<void> {
  * snapshot's own links that no key opens yet are held. A stored link whose
  * encrypted copy is held stays: the key ring not being loaded yet must not
  * delete links the executor holds.
+ *
+ * Single-flight: a call while a render is out joins it. A failure leaves the
+ * render needed: catch-up retries it with backoff until one succeeds
+ * (`retryRenderIfDue`). A success ends the retries.
  */
-export async function bootstrap(): Promise<void> {
+export function bootstrap(): Promise<void> {
+    if (!_renderInflight) {
+        const p = renderOnce().finally(() => {
+            if (_renderInflight === p) _renderInflight = null;
+        });
+        _renderInflight = p;
+    }
+    return _renderInflight;
+}
+
+async function renderOnce(): Promise<void> {
+    try {
+        await applyRender();
+    } catch (err) {
+        _renderNeeded = true;
+        _renderDueAt = Date.now() + _renderRetryDelay;
+        _renderRetryDelay = Math.min(_renderRetryDelay * 2, RENDER_RETRY_MAX_MS);
+        throw err;
+    }
+    _renderNeeded = false;
+    _renderRetryDelay = RENDER_RETRY_BASE_MS;
+}
+
+async function applyRender(): Promise<void> {
     const { config } = deps();
 
     const rendered = await withToken((token) => api.fetchRender(config, token));
@@ -666,6 +754,9 @@ export async function catchUp(): Promise<PerspectiveDiff> {
         }
     }
     collect(retryHeld());
+    // Like the key ring above: while the room's snapshot has not loaded in
+    // this run, every catch-up retries it, gated by its backoff.
+    retryRenderIfDue();
 
     emitSyncStateSafe("Synced");
     return emitted;

@@ -5,7 +5,7 @@
  * this wrong), and must not lose a link it cannot decrypt yet.
  */
 
-import { describe, it } from "node:test";
+import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 
 import type { RoomConfig, StorageAdapter, Transport, TransportResponse } from "../src/adapters.js";
@@ -1306,5 +1306,181 @@ describe("sync: a link no key opens costs that link only", () => {
         assert.equal(added.get("a"), 1);
         assert.equal(added.get("c"), 1, "the entry after the unopenable one is applied");
         assert.equal(store.getSequence(), 3);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// The startup render is retried until it succeeds (BUG-115)
+// ---------------------------------------------------------------------------
+
+describe("sync: a failed startup render is retried", () => {
+    afterEach(() => mock.timers.reset());
+
+    /** A transport whose `/render` answers come from `renders`, one per call
+     *  (an Error is thrown, as the host's httpFetch does on its deadline), and
+     *  whose `/sync` reports the head at `head` with no new diffs. */
+    function renderServer(renders: Array<Error | object | Promise<TransportResponse>>, head: number) {
+        const transport = new MockTransport();
+        setup(transport);
+        let renderCalls = 0;
+        transport.route(
+            (url, method) => method === "GET" && url.endsWith("/render"),
+            () => {
+                const next = renders[Math.min(renderCalls, renders.length - 1)];
+                renderCalls++;
+                if (next instanceof Error) throw next;
+                if (next instanceof Promise) return next as unknown as TransportResponse;
+                return jsonResponse(next);
+            },
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => jsonResponse({ diffs: [], revision: `rev-${head}`, sequence: head }),
+        );
+        return { transport, renderCalls: () => renderCalls };
+    }
+
+    const timeout = () => new Error("httpFetch GET https://server.example/rooms/room-1/render timed out after 10000 ms");
+
+    it("a render that fails then succeeds is retried by catch-up, and its links are emitted", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        const early = makeLink({ source: "early" });
+        const late = makeLink({ source: "late" });
+        const server = renderServer([timeout(), { links: [early, late], revision: "rev-9", sequence: 9 }], 9);
+        // The cursor already sits past the hole: catch-up alone never fetches `early`.
+        syncModule.applyInboundWireDiff({ additions: [late], removals: [] }, 9, "rev-9");
+
+        await assert.rejects(syncModule.bootstrap(), /timed out/);
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(server.renderCalls(), 1, "no retry before the backoff elapses");
+
+        mock.timers.tick(syncModule.RENDER_RETRY_BASE_MS);
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+
+        assert.equal(server.renderCalls(), 2);
+        assert.equal(emitCounts("additions").get("early"), 1, "the history the cursor skipped is emitted");
+        assert.equal(emitCounts("additions").get("late"), 1, "a link already held is not emitted again");
+        assert.deepEqual(store.allLinks().links.map((l) => l.data.source).sort(), ["early", "late"]);
+        assert.equal(store.getSequence(), 9);
+
+        // Once a render succeeded it is never asked for again.
+        mock.timers.tick(60 * 60 * 1000);
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(server.renderCalls(), 2);
+    });
+
+    it("a successful first render is not retried", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        const server = renderServer([{ links: [makeLink({ source: "a" })], revision: "rev-1", sequence: 1 }], 1);
+        syncModule.needRender();
+
+        await syncModule.bootstrap();
+        for (let i = 0; i < 3; i++) {
+            mock.timers.tick(60 * 60 * 1000);
+            await syncModule.catchUp();
+            await syncModule._awaitRenderRetryForTests();
+        }
+
+        assert.equal(server.renderCalls(), 1);
+        assert.equal(emitCounts("additions").get("a"), 1);
+    });
+
+    it("backs off: each failure doubles the wait before the next attempt", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        const base = syncModule.RENDER_RETRY_BASE_MS;
+        const server = renderServer([timeout(), timeout(), { links: [], revision: "rev-0", sequence: 0 }], 0);
+        const attempt = async (ms: number) => {
+            mock.timers.tick(ms);
+            await syncModule.catchUp();
+            await syncModule._awaitRenderRetryForTests();
+            return server.renderCalls();
+        };
+
+        await assert.rejects(syncModule.bootstrap());
+        assert.equal(await attempt(base), 2, "first retry after the base delay");
+        assert.equal(await attempt(base), 2, "the second wait is twice as long");
+        assert.equal(await attempt(base), 3);
+        assert.equal(await attempt(10 * base), 3, "no attempt after a success");
+    });
+
+    it("a render that never ran at startup (authentication failed first) is run by catch-up", async () => {
+        const a = makeLink({ source: "a" });
+        const server = renderServer([{ links: [a], revision: "rev-1", sequence: 1 }], 1);
+
+        syncModule.needRender();
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+
+        assert.equal(server.renderCalls(), 1);
+        assert.equal(emitCounts("additions").get("a"), 1);
+    });
+
+    it("a catch-up while the startup render is still out does not start a second one", async () => {
+        let answerRender!: (res: TransportResponse) => void;
+        const slowRender = new Promise<TransportResponse>((resolve) => { answerRender = resolve; });
+        const server = renderServer([slowRender], 1);
+        syncModule.needRender();
+
+        const startup = syncModule.bootstrap();
+        await new Promise((resolve) => setImmediate(resolve));
+        await syncModule.catchUp();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(server.renderCalls(), 1);
+
+        answerRender(jsonResponse({ links: [makeLink({ source: "a" })], revision: "rev-1", sequence: 1 }));
+        await startup;
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(server.renderCalls(), 1);
+        assert.equal(emitCounts("additions").get("a"), 1);
+    });
+
+    it("catch-up does not wait for a retried render: new diffs are applied while it is in flight", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        let answerRender!: (res: TransportResponse) => void;
+        const slowRender = new Promise<TransportResponse>((resolve) => { answerRender = resolve; });
+        const transport = new MockTransport();
+        setup(transport);
+        let renderCalls = 0;
+        transport.route(
+            (url, method) => method === "GET" && url.endsWith("/render"),
+            () => {
+                renderCalls++;
+                if (renderCalls === 1) throw timeout();
+                return slowRender as unknown as TransportResponse;
+            },
+        );
+        const fresh = makeLink({ source: "fresh" });
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=0"),
+            () => jsonResponse({ diffs: [{ additions: [fresh], removals: [], sequence: 1 }], revision: "rev-1", sequence: 1 }),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => jsonResponse({ diffs: [], revision: "rev-1", sequence: 1 }),
+        );
+
+        await assert.rejects(syncModule.bootstrap());
+        mock.timers.tick(syncModule.RENDER_RETRY_BASE_MS);
+        const emitted = await syncModule.catchUp();
+        await new Promise((resolve) => setImmediate(resolve));
+
+        assert.equal(renderCalls, 2, "the retry is in flight");
+        assert.deepEqual(emitted.additions, [fresh], "catch-up returned its diffs without waiting for the render");
+        assert.equal(emitCounts("additions").get("fresh"), 1);
+
+        // A second catch-up while the render is still out does not start another.
+        mock.timers.tick(60 * 60 * 1000);
+        await syncModule.catchUp();
+        assert.equal(renderCalls, 2);
+
+        const old = makeLink({ source: "old" });
+        answerRender(jsonResponse({ links: [old, fresh], revision: "rev-1", sequence: 1 }));
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(emitCounts("additions").get("old"), 1);
+        assert.equal(emitCounts("additions").get("fresh"), 1);
     });
 });

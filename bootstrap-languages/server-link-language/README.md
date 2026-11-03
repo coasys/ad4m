@@ -194,11 +194,18 @@ costs that one link, not the rest of its batch or the other held links.
 
 ### Sync strategy
 
-- `init()` runs a one-shot `bootstrap()`: fetch the full `/render` snapshot,
+- `init()` runs `bootstrap()`: fetch the full `/render` snapshot,
   apply it to the local store as the room's current state (emitting what it
   adds and removes), and record the sequence cursor — far cheaper than
   replaying the room's entire diff history on every fresh instance. A stored
   link whose encrypted copy in the snapshot no key opens yet is kept.
+- Until a render succeeds in this run (it timed out, or authentication
+  failed before it), every catch-up starts it again in the background, the
+  way catch-up re-reads `/keys` while links are held. The first retry waits
+  10 s, each failure doubles the wait up to 5 min, and the first success
+  ends the retries. Catch-up does not wait for it, and a catch-up from the
+  snapshot's sequence follows it. Catch-up alone cannot fill a hole behind
+  the stored cursor; the render can.
 - The WebSocket pushes live diffs. On every (re)connect, `ws-client.ts`'s
   `onOpen` handler also triggers an HTTP catch-up (`GET /sync?since=<cursor>`)
   as a belt-and-braces gap-fill for whatever happened while offline.
