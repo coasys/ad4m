@@ -134,8 +134,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         did?: string;
         challenge?: string;
         signature?: string;
-        /** Sent by the current language build: create the room E2E. Ignored for an existing room. */
-        e2e?: boolean;
       } | null;
 
       if (!body || typeof body.did !== "string") {
@@ -156,9 +154,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       if (typeof body.challenge !== "string" || typeof body.signature !== "string") {
         return reply.code(400).send({ error: "challenge and signature are required" });
       }
-      if (body.e2e !== undefined && typeof body.e2e !== "boolean") {
-        return reply.code(400).send({ error: "e2e must be a boolean" });
-      }
 
       // Step 2: verify the signed challenge.
       const challengeValid = ctx.challenges.consume(roomId, body.did, body.challenge);
@@ -176,8 +171,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
       const room = ctx.db.getRoom(roomId);
       if (!room) {
-        // Older language builds send no flag: their rooms stay legacy (plaintext until the admin rotates).
-        ctx.db.createRoom(roomId, body.did, body.e2e === true);
+        ctx.db.createRoom(roomId, body.did);
         ctx.db.addAcl(roomId, body.did);
       } else if (!ctx.db.isMember(roomId, body.did)) {
         if (ctx.autoAdmit) {
@@ -224,19 +218,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return reply.code(400).send({ error: "commit must contain at least one addition or removal" });
       }
 
-      // Enforce E2E: a room created E2E, or a legacy room its admin has
-      // rotated a key into, rejects plaintext links.
-      const room = ctx.db.getRoom(claims.roomId);
-      if (room && room.e2e_enabled) {
-        for (const link of [...additions, ...removals]) {
-          if (link && typeof link === "object" && link.data && !isEncryptedLinkData(link.data)) {
-            return reply.code(400).send({
-              error: "this room requires end-to-end encryption; plaintext links are not accepted",
-            });
-          }
-        }
-      }
-
+      // Every room is end-to-end encrypted from creation: refuse plaintext links.
       for (const link of [...additions, ...removals]) {
         if (!link || typeof link !== "object") {
           return reply.code(400).send({ error: "each link must be an object" });
@@ -244,19 +226,13 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         if (!link.data || typeof link.data !== "object") {
           return reply.code(400).send({ error: "each link must have a data object" });
         }
-        if (isEncryptedLinkData(link.data)) {
-          if (!link.link_hash || typeof link.link_hash !== "string") {
-            return reply.code(400).send({ error: "encrypted links must include a link_hash" });
-          }
-        } else {
-          if (link.author !== claims.did) {
-            return reply
-              .code(400)
-              .send({ error: "every link's author must match the authenticated DID" });
-          }
-          if (typeof link.timestamp !== "string") {
-            return reply.code(400).send({ error: "each link must have a string timestamp" });
-          }
+        if (!isEncryptedLinkData(link.data)) {
+          return reply.code(400).send({
+            error: "this room requires end-to-end encryption; plaintext links are not accepted",
+          });
+        }
+        if (!link.link_hash || typeof link.link_hash !== "string") {
+          return reply.code(400).send({ error: "encrypted links must include a link_hash" });
         }
       }
 
@@ -377,24 +353,15 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const room = ctx.db.getRoom(claims.roomId);
-      const e2eEnabled = !!(room && room.e2e_enabled);
+      // An empty list: the admin has not rotated a key in yet, or no holder
+      // has granted this agent one.
       const rows = ctx.db.getAllRoomKeys(claims.roomId, claims.did);
-      if (rows.length === 0 && !e2eEnabled) {
-        // A legacy room (created by an older language build) that has never
-        // had a key: older builds read this 404 as "plaintext room".
-        return reply.code(404).send({ error: "no room key available for this agent yet" });
-      }
-      // Room has E2E (agent may or may not have keys yet). Return the
-      // e2e_enabled flag so the client can distinguish "no E2E" (404)
-      // from "E2E but keys pending" (200, empty keys array).
       return reply.send({
         keys: rows.map((r) => ({
           encryptedKey: JSON.parse(r.encrypted_key),
           version: r.version,
           commitment: r.commitment ?? undefined,
         })),
-        e2e_enabled: e2eEnabled,
       });
     }
   );
@@ -452,7 +419,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         );
         recipients.push(entry.did);
       }
-      ctx.db.setE2eEnabled(claims.roomId, true);
 
       return reply.send({ version, recipients, membersNeedingHistoricalKeys: membersMissingKeys(ctx, claims.roomId) });
     }

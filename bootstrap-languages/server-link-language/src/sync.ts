@@ -111,7 +111,7 @@ const UNOPENABLE = Symbol("unopenable");
 /**
  * The link a wire link carries, or null when it is encrypted with a key
  * version this agent does not hold (yet). A plaintext link is `UNOPENABLE`:
- * no member of a room this build runs can commit one. A link the key it names
+ * the link server refuses plaintext in every room, so no member committed it. A link the key it names
  * does not open (malformed ciphertext or payload) is logged and `UNOPENABLE`: a key
  * version is fixed by its rotation's commitment, so no later key opens it
  * either, and it costs that one link, not the diff, the catch-up batch or

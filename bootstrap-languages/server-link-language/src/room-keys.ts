@@ -35,6 +35,26 @@ export function adminRotates(status: KeyRingStatus, rotatedThisRun: boolean): bo
     return !rotatedThisRun && status === "pending";
 }
 
+/** What the room's ACL says this agent is: its admin, a member, or "unknown" (the read failed). */
+export type RoomRole = "admin" | "member" | "unknown";
+
+/**
+ * The next step for an agent that may have to mint a room key. "read-acl"
+ * only while a rotation is due and the role is unknown: a member the ACL
+ * already named is not re-read on every commit (each read counts against the
+ * room's rate limit), and an admin whose startup read failed still finds out
+ * and rotates.
+ */
+export function adminRotationStep(
+    status: KeyRingStatus,
+    rotatedThisRun: boolean,
+    role: RoomRole,
+): "rotate" | "read-acl" | "none" {
+    if (!adminRotates(status, rotatedThisRun)) return "none";
+    if (role === "admin") return "rotate";
+    return role === "unknown" ? "read-acl" : "none";
+}
+
 /**
  * The key ring after a `/keys` read or open failed (network, server, a locked
  * agent). The keys already held are still the room's keys: a loaded ring

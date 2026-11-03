@@ -9,6 +9,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ed25519, x25519 } from "@noble/curves/ed25519";
+import { gcm } from "@noble/ciphers/aes";
 
 import type { AgentAdapter } from "../src/adapters.js";
 import {
@@ -212,6 +213,19 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
     it("throws when asked to decrypt a wire link with no encrypted data in data field", () => {
         const roomKey = generateRoomKey();
         assert.throws(() => decryptLinkFromWire({ author: "a", timestamp: "t", proof: { signature: "s", key: "k" } } as any, roomKey));
+    });
+
+    it("throws when the key opens the ciphertext but the payload is only a link's data", () => {
+        // Author, timestamp and proof always travel inside the ciphertext: a data-only payload is not a link.
+        const roomKey = generateRoomKey();
+        const nonce = randomBytes(12);
+        const payload = new TextEncoder().encode(JSON.stringify({ source: "s", predicate: "p", target: "t" }));
+        const wire = {
+            author: "did:key:z6MkCleartext",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            data: { ciphertext: bytesToHex(gcm(roomKey, nonce).encrypt(payload)), nonce: bytesToHex(nonce) },
+        };
+        assert.throws(() => decryptLinkFromWire(wire, roomKey), /not \{author, timestamp, proof, data\}/);
     });
 
     it("attaches key_version when provided", () => {

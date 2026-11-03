@@ -19,21 +19,25 @@ function answering(response: TransportResponse): void {
 afterEach(() => resetAdapters());
 
 describe("api: fetchRoomKeys", () => {
-    it("reads a 404 as holding no key: the agent waits for one, it never means plaintext", async () => {
-        // An older link server, or a room an older build created, answers 404
-        // to a member without a key.
-        answering({ status: 404, headers: {}, body: "{\"error\":\"no room key available for this agent yet\"}" });
+    it("reads an empty list as holding no key: the agent waits for one", async () => {
+        answering({ status: 200, headers: {}, body: JSON.stringify({ keys: [] }) });
         assert.deepEqual(await api.fetchRoomKeys(config, "token"), { keys: [] });
     });
 
     it("returns the sealed versions the server holds for this agent", async () => {
         const entry = { encryptedKey: { ephemeralPublicKey: "aa", nonce: "bb", ciphertext: "cc" }, version: 1 };
-        answering({ status: 200, headers: {}, body: JSON.stringify({ keys: [entry], e2e_enabled: true }) });
+        answering({ status: 200, headers: {}, body: JSON.stringify({ keys: [entry] }) });
         assert.deepEqual(await api.fetchRoomKeys(config, "token"), { keys: [entry] });
     });
 
-    it("propagates any other failure", async () => {
-        answering({ status: 500, headers: {}, body: "boom" });
-        await assert.rejects(() => api.fetchRoomKeys(config, "token"), (err) => err instanceof api.ApiError && err.status === 500);
+    it("throws on any error status, a 404 included: it is never read as holding no key", async () => {
+        for (const status of [404, 500]) {
+            answering({ status, headers: {}, body: "{\"error\":\"x\"}" });
+            await assert.rejects(
+                () => api.fetchRoomKeys(config, "token"),
+                (err) => err instanceof api.ApiError && err.status === status,
+            );
+            resetAdapters();
+        }
     });
 });

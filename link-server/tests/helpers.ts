@@ -1,19 +1,24 @@
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as ed from "@noble/ed25519";
+import { gcm } from "@noble/ciphers/aes.js";
 import WebSocket from "ws";
 import { hashMessageForVerify, publicKeyToDid, signHex } from "../src/auth.js";
 import { generateRoomKey, roomKeyCommitment, sealToDid } from "./sealed-box.js";
 import { buildServer, type ServerOptions } from "../src/server.js";
 import {
   canonicalLinkPayload,
+  isEncryptedLinkData,
   linkHash as computeLinkHash,
-  type EncryptedLinkData,
+  sha256Hex,
   type LinkData,
   type LinkExpression,
 } from "../src/types.js";
+
+const { bytesToHex, hexToBytes } = ed.etc;
 
 /** Everything needed to act as an AD4M agent in tests: identity + signing key. */
 export interface TestAgent {
@@ -36,19 +41,42 @@ export async function signChallenge(agent: TestAgent, challenge: string): Promis
   return signHex(agent.privateKey, hashed);
 }
 
-/** Builds a fully-signed LinkExpression as a real AD4M client would. */
+/** The room key the helpers encrypt links with, for tests that do not rotate their own. The server never sees it. */
+export const TEST_ROOM_KEY = generateRoomKey();
+
+/** A LinkExpression as an agent holds it, before encryption or after `openLink`. */
+export type PlainLink = LinkExpression & { data: LinkData };
+
+/**
+ * Builds a signed LinkExpression and encrypts it for the wire, as the server link language does
+ * (`encryptLinkForWire`): the server receives only `{data: {ciphertext, nonce}, link_hash, key_version}`,
+ * where `link_hash` is the SHA-256 of the canonical plaintext fields. Open it with `openLink`.
+ */
 export async function createSignedLink(
   agent: TestAgent,
-  data: LinkData | EncryptedLinkData,
-  timestamp: string = new Date().toISOString()
+  data: LinkData,
+  timestamp: string = new Date().toISOString(),
+  roomKey: Uint8Array = TEST_ROOM_KEY,
+  keyVersion = 1
 ): Promise<LinkExpression> {
-  const unsigned = { author: agent.did, timestamp, data } as LinkExpression;
+  const unsigned: PlainLink = { author: agent.did, timestamp, data };
   const payload = canonicalLinkPayload(unsigned);
   const signature = await signHex(agent.privateKey, payload);
+  const signed: PlainLink = { ...unsigned, proof: { signature, key: `${agent.did}#primary` } };
+  const nonce = new Uint8Array(randomBytes(12));
+  const ciphertext = gcm(roomKey, nonce).encrypt(new TextEncoder().encode(JSON.stringify(signed)));
   return {
-    ...unsigned,
-    proof: { signature, key: `${agent.did}#primary` },
+    data: { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) },
+    link_hash: sha256Hex(payload),
+    key_version: keyVersion,
   };
+}
+
+/** Decrypts a wire link `createSignedLink` built back to the signed LinkExpression. */
+export function openLink(link: LinkExpression, roomKey: Uint8Array = TEST_ROOM_KEY): PlainLink {
+  if (!isEncryptedLinkData(link.data)) throw new Error("openLink: not an encrypted link");
+  const plaintext = gcm(roomKey, hexToBytes(link.data.nonce)).decrypt(hexToBytes(link.data.ciphertext));
+  return JSON.parse(new TextDecoder().decode(plaintext)) as PlainLink;
 }
 
 export function linkHashOf(link: LinkExpression): string {
@@ -120,16 +148,11 @@ export async function getJson<T = unknown>(url: string, token?: string): Promise
   return { status: res.status, body: (text ? JSON.parse(text) : undefined) as T };
 }
 
-/**
- * Full DID challenge-response flow. Returns the issued JWT. Room is auto-created if this is the first agent:
- * a plaintext-capable room as older language builds create it, or, with `{ e2e: true }`, an E2E room as the
- * current build creates it.
- */
+/** Full DID challenge-response flow. Returns the issued JWT. Room is auto-created if this is the first agent. */
 export async function authenticateAgent(
   serverUrl: string,
   roomId: string,
-  agent: TestAgent,
-  opts: { e2e?: boolean } = {}
+  agent: TestAgent
 ): Promise<string> {
   const step1 = await postJson<{ challenge?: string; error?: string }>(
     `${serverUrl}/rooms/${roomId}/auth`,
@@ -141,7 +164,7 @@ export async function authenticateAgent(
   const signature = await signChallenge(agent, step1.body.challenge);
   const step2 = await postJson<{ token?: string; error?: string }>(
     `${serverUrl}/rooms/${roomId}/auth`,
-    { did: agent.did, challenge: step1.body.challenge, signature, ...(opts.e2e ? { e2e: true } : {}) }
+    { did: agent.did, challenge: step1.body.challenge, signature }
   );
   if (step2.status !== 200 || !step2.body.token) {
     throw new Error(`auth verify failed: ${step2.status} ${JSON.stringify(step2.body)}`);

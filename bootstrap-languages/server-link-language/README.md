@@ -5,8 +5,10 @@ self-hosted [**link-server**](../../link-server/README.md)
 instance — HTTP for auth, commit, and catch-up sync; a native WebSocket for
 real-time diff push, presence, and telepresence. Every AD4M link-language capability is implemented:
 `perspective-commit`, `perspective-sync`, `perspective-query`, `peers`, and
-`telepresence`. Every room is end-to-end encrypted from creation: links
-leave the agent only as ciphertext, and there is no plaintext mode.
+`telepresence`. Every room's links are end-to-end encrypted from creation:
+they leave the agent only as ciphertext, and there is no plaintext mode.
+Presence and telepresence signals are not encrypted (`src/telepresence.ts`):
+the link server relays them as sent.
 
 Built on the modern [ALDK](https://github.com/coasys/ad4m/tree/dev/ad4m-ldk)
 (`@coasys/ad4m-ldk`) pattern — see
@@ -111,14 +113,14 @@ self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 
 | Method & path | Purpose |
 |---|---|
-| `POST /rooms/:roomId/auth` | DID challenge-response. Step 1: `{did}` → `{challenge}`. Step 2: `{did, challenge, signature, e2e: true}` → `{token}`; the call that creates the room creates it E2E, refusing plaintext before any key exists |
-| `POST /rooms/:roomId/commit` | Push a `{additions, removals}` diff |
+| `POST /rooms/:roomId/auth` | DID challenge-response. Step 1: `{did}` → `{challenge}`. Step 2: `{did, challenge, signature}` → `{token}`; the call that creates the room makes the caller its admin |
+| `POST /rooms/:roomId/commit` | Push a `{additions, removals}` diff of encrypted links; the server refuses a plaintext link (400) in every room |
 | `GET /rooms/:roomId/sync?since=<sequence>` | Pull diffs newer than `sequence` → `{diffs[], revision, sequence}` |
 | `GET /rooms/:roomId/render` | Full current snapshot → `{links[], revision}` |
 | `GET /rooms/:roomId/peers` | Connected agent DIDs → `{peers: string[]}` |
 | `GET /rooms/:roomId/revision` | `{revision, sequence}` |
 | `GET /rooms/:roomId/acl` | `{admin, members: [{did}]}` |
-| `GET /rooms/:roomId/keys` | This agent's sealed room key versions → `{keys: [{encryptedKey, version, commitment}], e2e_enabled}`. No keys (an empty list, or the 404 of a legacy room) means this agent waits for one |
+| `GET /rooms/:roomId/keys` | This agent's sealed room key versions → `{keys: [{encryptedKey, version, commitment}]}`. An empty list means this agent waits for one; an error status, 404 included, is an error |
 | `POST /rooms/:roomId/keys/rotate` | Room admin: `{keys, commitment}`, a new version sealed to every ACL member and the commitment to its key (`roomKeyCommitment`) |
 | `DELETE /rooms/:roomId/keys/:version` | Any member: drops its own box for a version whose key does not match the commitment, so a holder grants it again |
 | `GET /rooms/:roomId/keys/missing` | Any member: `{membersNeedingHistoricalKeys: [{did, missingVersions}]}` |
@@ -262,20 +264,15 @@ inert mode (logs and returns without attempting any network I/O).
 neighbourhood name lives in the language meta (`name` field), not in the
 source code.
 
-Every room is E2E from creation. The agent that creates the room (its admin:
-it is the first to sign in) asks for an E2E room in that sign-in
-(`e2e: true`), so the link server refuses plaintext before any key exists,
-and its `init()` mints key version 1 before its first commit (the commit path
-rotates too, if `init()` could not). Members receive keys from any member
+Every room is E2E from creation: the link server refuses plaintext links in
+every room, before any key exists. The agent that creates the room (its
+admin: it is the first to sign in) mints key version 1 in its `init()`,
+before its first commit; the commit path rotates too, if `init()` could not,
+and reads the ACL again first only if the read at `init()` failed. Members receive keys from any member
 holding them (grants run on `peer-joined`, at init and after every sync); a
 member without a key commits nothing until it has one, re-checks `/keys` on
 every commit and on every sync while it holds links it cannot open, and a
 `keys-granted` push re-checks at once. There is no plaintext mode.
-
-Rooms created by builds before this one started plaintext, until their
-admin's first rotation. This build never runs them: a neighbourhood keeps the
-language build it was published with, and this build reads only encrypted
-links.
 
 ## Publishing
 

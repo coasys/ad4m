@@ -79,9 +79,9 @@ export async function requestChallenge(config: RoomConfig, did: string): Promise
 }
 
 /**
- * Step 2: POST {did, challenge, signature, e2e: true} -> {token}. When this
- * call creates the room, `e2e` makes it refuse plaintext from creation, before
- * the admin's first key exists. A link server that predates the flag ignores it.
+ * Step 2: POST {did, challenge, signature} -> {token}. The call that creates
+ * the room makes this agent its admin; every room refuses plaintext from
+ * creation.
  */
 export async function verifyChallenge(
     config: RoomConfig,
@@ -93,7 +93,7 @@ export async function verifyChallenge(
         roomUrl(config, "/auth"),
         "POST",
         jsonHeaders(),
-        JSON.stringify({ did, challenge, signature, e2e: true }),
+        JSON.stringify({ did, challenge, signature }),
     );
     return res.token;
 }
@@ -102,8 +102,8 @@ export async function verifyChallenge(
 // Perspective sync / commit
 // ---------------------------------------------------------------------------
 
-/** Where the server put an accepted commit in the room's diff log. Fields
- *  are absent when the server's answer carries none (older servers). */
+/** Where the server put an accepted commit in the room's diff log. A field
+ *  the answer does not carry is absent. */
 export interface CommitResult {
     sequence?: number;
     revision?: string;
@@ -188,19 +188,13 @@ export async function deleteRoomKey(config: RoomConfig, token: string, version: 
 }
 
 /**
- * Fetches the room key versions sealed to this agent. No keys means the agent
- * waits for one: a 404 is what a room an older build created, or an older
- * link server, answers when there is none for this agent. It never means
- * "plaintext room" to this build.
+ * Fetches the room key versions sealed to this agent. The server answers 200
+ * with an empty list when it holds none: the agent waits for one. Any error
+ * status, 404 included, throws.
  */
 export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<KeysResponse> {
-    try {
-        const res = await request<Partial<KeysResponse> | undefined>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
-        return { keys: res?.keys ?? [] };
-    } catch (err) {
-        if (err instanceof ApiError && err.status === 404) return { keys: [] };
-        throw err;
-    }
+    const res = await request<Partial<KeysResponse> | undefined>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
+    return { keys: res?.keys ?? [] };
 }
 
 // ---------------------------------------------------------------------------

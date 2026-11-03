@@ -167,53 +167,15 @@ test("revision converges regardless of add order (content hash, not sequence-dep
   });
 });
 
-test("commit rejects a link whose author does not match the authenticated DID", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const agent = await createTestAgent();
-    const other = await createTestAgent();
-    const token = await authenticateAgent(server.url, roomId, agent);
-
-    const link = await createSignedLink(other, { source: "a", predicate: "rel", target: "b" });
-    const res = await postJson<{ error: string }>(
-      `${server.url}/rooms/${roomId}/commit`,
-      { additions: [link], removals: [] },
-      token
-    );
-    assert.equal(res.status, 400);
-  });
-});
-
-test("commit accepts a link with a tampered signature (server relays signatures as metadata)", async () => {
-  // The server does not verify link signatures — it stores and relays them
-  // as-is. JWT auth (bound to the agent's DID) handles identity at the
-  // transport layer. Consumers downstream can verify if they choose.
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const agent = await createTestAgent();
-    const token = await authenticateAgent(server.url, roomId, agent);
-
-    const link = await createSignedLink(agent, { source: "a", predicate: "rel", target: "b" });
-    const tampered: LinkExpression = { ...link, data: { ...link.data as { source: string; predicate: string | null; target: string }, target: "hacked" } };
-
-    const res = await postJson<{ error: string }>(
-      `${server.url}/rooms/${roomId}/commit`,
-      { additions: [tampered], removals: [] },
-      token
-    );
-    assert.equal(res.status, 200);
-  });
-});
-
 test("commit rejects entirely if any single link in the batch is invalid (atomic)", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const agent = await createTestAgent();
-    const other = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
     const good = await createSignedLink(agent, { source: "a", predicate: "rel", target: "b" });
-    const bad = await createSignedLink(other, { source: "x", predicate: "rel", target: "y" });
+    // Encrypted, but without the link_hash the server content-addresses it by.
+    const { link_hash: _dropped, ...bad } = await createSignedLink(agent, { source: "x", predicate: "rel", target: "y" });
 
     const res = await postJson(
       `${server.url}/rooms/${roomId}/commit`,

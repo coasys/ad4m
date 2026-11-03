@@ -5,7 +5,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { initAdapters, getConfig, resetAdapters } from "../src/adapters.js";
-import { adminRotates, afterFailedKeyRead } from "../src/room-keys.js";
+import { adminRotates, adminRotationStep, afterFailedKeyRead } from "../src/room-keys.js";
 import { generateRoomKey } from "../src/encryption.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -100,6 +100,30 @@ describe("adminRotates", () => {
     it("does not rotate while it holds a key, or when the key ring errored", () => {
         assert.strictEqual(adminRotates("ready", false), false);
         assert.strictEqual(adminRotates("error", false), false);
+    });
+});
+
+describe("adminRotationStep", () => {
+    it("an admin without a key rotates without reading the ACL again", () => {
+        assert.strictEqual(adminRotationStep("pending", false, "admin"), "rotate");
+    });
+
+    it("re-reads the ACL when the read at init failed, so an admin that missed its role still rotates", () => {
+        assert.strictEqual(adminRotationStep("pending", false, "unknown"), "read-acl");
+        // After the re-read names it the admin, the same check rotates.
+        assert.strictEqual(adminRotationStep("pending", false, "admin"), "rotate");
+    });
+
+    it("does not re-read the ACL on every commit for a member the ACL already named", () => {
+        assert.strictEqual(adminRotationStep("pending", false, "member"), "none");
+    });
+
+    it("neither reads nor rotates while a key is held, after this run rotated, or when the key ring errored", () => {
+        for (const role of ["admin", "member", "unknown"] as const) {
+            assert.strictEqual(adminRotationStep("ready", false, role), "none");
+            assert.strictEqual(adminRotationStep("pending", true, role), "none");
+            assert.strictEqual(adminRotationStep("error", false, role), "none");
+        }
     });
 });
 

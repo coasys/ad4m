@@ -22,7 +22,14 @@ import * as syncModule from "./src/sync.js";
 import * as telepresenceModule from "./src/telepresence.js";
 import { WsClient } from "./src/ws-client.js";
 import { buildKeyRing, opensOwnBoxes, type KeyRing } from "./src/encryption.js";
-import { adminRotates, afterFailedKeyRead, grantMissingRoomKeys, rotateRoomKey, type KeyRingStatus } from "./src/room-keys.js";
+import {
+    adminRotationStep,
+    afterFailedKeyRead,
+    grantMissingRoomKeys,
+    rotateRoomKey,
+    type KeyRingStatus,
+    type RoomRole,
+} from "./src/room-keys.js";
 
 import {
     initAdapters,
@@ -68,14 +75,14 @@ let keyRing: KeyRing | null = null;
  * Every room is end-to-end encrypted: commits wait for "ready".
  * - "pending": this agent holds no key it can open: the admin has not
  *   rotated one in yet, no member holding one has been online since it
- *   joined, or none of its boxes opens (an older format). An admin in this
+ *   joined, or none of its boxes opens (a spoiled grant). An admin in this
  *   state rotates; a member waits for a grant.
  * - "ready": key ring acquired and decrypted — encrypted commits ready.
  * - "error": we could not get/open the keys.
  */
 let keyRingStatus: KeyRingStatus = "pending";
-/** True when this agent has been identified as the room admin. */
-let isRoomAdmin = false;
+/** What the ACL said this agent is at init; "unknown" while that read has not succeeded. */
+let roomRole: RoomRole = "unknown";
 /** Set once this run has minted a room key version (see `rotateIfAdminWithoutKey`). */
 let rotatedThisRun = false;
 /** In-flight setupKeyRing promise for single-flight deduplication. */
@@ -134,8 +141,8 @@ async function setupKeyRing(): Promise<void> {
         if (gen !== lifecycleGen) return;
         keyRing = ring;
         if (keyRing.size === 0) {
-            // Boxes sealed to this agent, none of which open (sealed in an older
-            // format, or a spoiled grant): the same as holding none.
+            // Boxes sealed to this agent, none of which open (spoiled grants):
+            // the same as holding none.
             keyRingStatus = "pending";
             keyRing = null;
             console.log("[server-link-language] no room key version opens for this agent — waiting for a new one");
@@ -164,25 +171,28 @@ async function setupKeyRing(): Promise<void> {
     }
 }
 
-/** Whether this agent is the room's admin, as the server's ACL says now. */
-async function readIsRoomAdmin(): Promise<boolean> {
+/** This agent's role, as the server's ACL says now; "unknown" when the read fails. */
+async function readRoomRole(): Promise<RoomRole> {
     try {
         const aclInfo = await api.fetchAclInfo(getConfig(), await auth.getValidToken());
-        return aclInfo.admin === myDid;
-    } catch {
-        return false;
+        return aclInfo.admin === myDid ? "admin" : "member";
+    } catch (err) {
+        console.error("[server-link-language] could not read the room's ACL — retrying before the next rotation check:", err);
+        return "unknown";
     }
 }
 
 /**
- * The admin mints a room key when it holds none it can open (`adminRotates`).
- * With no plaintext mode, an admin that missed its admin status at startup
- * (the ACL read failed) would never commit: re-read it while a key is missing.
+ * The admin mints a room key when it holds none it can open
+ * (`adminRotationStep`). An admin whose ACL read at init failed would never
+ * commit, so the ACL is read again while a key is missing and the role is
+ * still unknown; a member the ACL already named is not re-read.
  */
 async function rotateIfAdminWithoutKey(): Promise<void> {
-    if (!adminRotates(keyRingStatus, rotatedThisRun)) return;
-    if (!isRoomAdmin) isRoomAdmin = await readIsRoomAdmin();
-    if (!isRoomAdmin) return;
+    if (adminRotationStep(keyRingStatus, rotatedThisRun, roomRole) === "read-acl") {
+        roomRole = await readRoomRole();
+    }
+    if (adminRotationStep(keyRingStatus, rotatedThisRun, roomRole) !== "rotate") return;
     console.log(`[server-link-language] admin holds no room key (${keyRingStatus}) — generating a new one`);
     await performRotation();
 }
@@ -216,7 +226,7 @@ async function performKeyGrants(): Promise<void> {
  * touches plaintext key material. Called from the language's init flow.
  */
 async function performRotation(): Promise<void> {
-    if (!isRoomAdmin) return;
+    if (roomRole !== "admin") return;
     try {
         const token = await auth.getValidToken();
         const result = await rotateRoomKey(getConfig(), token);
@@ -365,7 +375,7 @@ const language = defineLanguage({
             await auth.authenticate();
 
             // Determine admin status — only the admin rotates the room key.
-            isRoomAdmin = await readIsRoomAdmin();
+            roomRole = await readRoomRole();
 
             await setupKeyRingCoalesced();
             // The admin that just created the room (E2E from creation, no key
@@ -420,7 +430,7 @@ const language = defineLanguage({
         localAgents = [];
         keyRing = null;
         keyRingStatus = "pending";
-        isRoomAdmin = false;
+        roomRole = "unknown";
         rotatedThisRun = false;
         keyRingInflight = null;
         auth.resetAuth();

@@ -228,14 +228,25 @@ describe("integration: auth against real server", () => {
   });
 });
 
-describe("integration: a room this language creates is end-to-end encrypted from creation", () => {
-  it("the creating sign-in makes the room E2E, and a member with no key commits nothing", async () => {
+describe("integration: a room is end-to-end encrypted from creation", () => {
+  it("the server refuses plaintext before any key exists, and a member with no key commits nothing", async () => {
     const server = await bootServer();
     const roomId = "e2e-from-creation-room";
     const admin = RealAgent.create();
     wireClient(server.url, roomId, admin, new MemoryStorage(), null);
-    await auth.getValidToken();
-    assert.equal(server.built.db.getRoom(roomId)?.e2e_enabled, 1, "E2E before any key or commit exists");
+    const adminToken = await auth.getValidToken();
+    // Plaintext sent straight to the server, past the language: refused before any key or commit exists.
+    await assert.rejects(
+      () => api.commitDiff({ serverUrl: server.url, roomId }, adminToken, {
+        additions: [{
+          author: admin.did(),
+          timestamp: new Date().toISOString(),
+          data: { source: "test://plain", predicate: "test://p", target: "test://t" },
+        }],
+        removals: [],
+      }),
+      (err) => err instanceof api.ApiError && err.status === 400,
+    );
 
     // A member signs in before the admin rotated a key in: it holds none.
     const member = RealAgent.create();
