@@ -8,6 +8,16 @@ use wasm_bindgen::prelude::*;
 
 use crate::{compare, entry_hash_json, Compare};
 
+#[wasm_bindgen]
+extern "C" {
+    /// `Array.isArray`, with what it throws (a revoked Proxy) as `Err`.
+    #[wasm_bindgen(catch, js_namespace = Array, js_name = isArray)]
+    fn is_array(value: &JsValue) -> Result<bool, JsValue>;
+    /// `Array.from`, with what the caller's iterator, getter or trap throws as `Err`.
+    #[wasm_bindgen(catch, js_namespace = Array, js_name = from)]
+    fn array_from(value: &JsValue) -> Result<js_sys::Array, JsValue>;
+}
+
 fn malformed(reason: &str) -> JsValue {
     let code = serde_json::json!({"code": "malformed", "reason": reason});
     js_sys::JSON::parse(&code.to_string()).unwrap_or_else(|_| JsValue::from_str(reason))
@@ -58,11 +68,15 @@ pub fn compare_js(
 
 /// The strings of a JavaScript array; `malformed` for anything else, so a caller gets the
 /// crate's `ChainErrorCode` and not wasm-bindgen's conversion error.
+/// `Array.isArray` and `Array.from` run caller code (a Proxy trap, an iterator, a getter) and
+/// throw for a revoked Proxy; whatever they throw becomes `malformed` too.
 fn hashes_of(list: &JsValue, name: &str) -> Result<Vec<String>, JsValue> {
-    if !js_sys::Array::is_array(list) {
-        return Err(malformed(&format!("{name} must be an array of strings")));
+    let refused = || malformed(&format!("{name} must be an array of strings"));
+    if !is_array(list).map_err(|_| refused())? {
+        return Err(refused());
     }
-    js_sys::Array::from(list)
+    array_from(list)
+        .map_err(|_| refused())?
         .iter()
         .map(|item| {
             item.as_string()
