@@ -7,6 +7,7 @@ use std::time::Duration;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
+use crate::billing_backend::billing_backend;
 use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
 use crate::perspectives::model_query::QueryClasses;
@@ -135,44 +136,51 @@ pub(crate) async fn get_perspective_with_access(
     Ok(perspective)
 }
 
+/// Whether the managed agent `agent_did` computes without paying: global free hosting or
+/// the account's free access. A billing backend that cannot answer is an error, never "free".
+fn computes_for_free(agent_did: &str) -> Result<bool, WsRpcError> {
+    let billing = billing_backend();
+    if billing
+        .get_free_hosting_enabled()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+    {
+        return Ok(true);
+    }
+    billing
+        .get_agent_free_access(agent_did)
+        .map_err(|e| WsRpcError::internal(e.to_string()))
+}
+
 /// Refuses a write whose managed agent's account has no credits left. `agent_did` is the
 /// managed agent the request acts as; the main agent pays nothing.
 pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
-    if global_free {
+    let Some(did) = agent_did else {
+        return Ok(());
+    };
+    if computes_for_free(did)? {
         return Ok(());
     }
-    if let Some(did) = agent_did {
-        let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(did))
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
-        if !free {
-            let credits = Ad4mDb::with_global_instance(|db| db.get_agent_credits(did))
-                .map_err(|e| WsRpcError::internal(e.to_string()))?;
-            if credits <= 0.0 {
-                return Err(WsRpcError::forbidden("Insufficient compute credits"));
-            }
-        }
+    let credits = billing_backend()
+        .get_agent_credits(did)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    if credits <= 0.0 {
+        return Err(WsRpcError::forbidden("Insufficient compute credits"));
     }
     Ok(())
 }
 
 fn reserve_credits(agent_did: Option<&str>, amount: f64) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
-    if global_free {
+    let Some(did) = agent_did else {
+        return Ok(());
+    };
+    if computes_for_free(did)? {
         return Ok(());
     }
-    if let Some(did) = agent_did {
-        let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(did))
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
-        if !free {
-            let email = Ad4mDb::with_global_instance(|db| {
-                db.deduct_agent_credits_if_available(did, amount)
-            })
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
-            mark_credits_dirty(&email);
-        }
+    let email = billing_backend()
+        .deduct_agent_credits_if_available(did, amount)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    if !email.is_empty() {
+        mark_credits_dirty(&email);
     }
     Ok(())
 }

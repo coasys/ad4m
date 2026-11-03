@@ -8,6 +8,7 @@ use ts_rs::TS;
 use crate::agent::capabilities::*;
 use crate::ai_service::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
 use crate::ai_service::AIService;
+use crate::billing_backend::billing_backend;
 use crate::db::Ad4mDb;
 use crate::types::{
     AIModelLoadingStatus, AITask, AITaskInput, Model, ModelInput, ModelType, ModelView,
@@ -21,21 +22,27 @@ use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 /// Refuses a request whose user has no compute credits left. A caller without a user
 /// (the operator, an app) pays nothing. `agent_did` is the managed agent the request acts as.
+/// A billing backend that cannot answer refuses the request: an error is never "free".
 fn check_compute_credits_ws(agent_did: Option<&str>) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
-    if global_free {
+    let Some(did) = agent_did else {
+        return Ok(());
+    };
+    let billing = billing_backend();
+    if billing
+        .get_free_hosting_enabled()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+    {
         return Ok(());
     }
-    if let Some(did) = agent_did {
-        let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(did))
+    let free = billing
+        .get_agent_free_access(did)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    if !free {
+        let credits = billing
+            .get_agent_credits(did)
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
-        if !free {
-            let credits = Ad4mDb::with_global_instance(|db| db.get_agent_credits(did))
-                .map_err(|e| WsRpcError::internal(e.to_string()))?;
-            if credits <= 0.0 {
-                return Err(WsRpcError::forbidden("Insufficient compute credits"));
-            }
+        if credits <= 0.0 {
+            return Err(WsRpcError::forbidden("Insufficient compute credits"));
         }
     }
     Ok(())
@@ -870,6 +877,7 @@ mod compute_credit_tests {
     // takes the user the request resolved, so it needs no token.
     #[test]
     fn the_check_reads_the_credits_of_the_requests_user() {
+        crate::test_utils::setup_billing();
         if Ad4mDb::global_instance().lock().unwrap().is_none() {
             Ad4mDb::init_global_instance(":memory:").unwrap();
         }

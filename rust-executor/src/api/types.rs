@@ -855,6 +855,16 @@ pub struct UnytVersionInfo {
     pub install_error: Option<String>,
 }
 
+/// The outcome of `runtime.unytSendHot`: the outgoing proposal on the Unyt DHT. The
+/// executor accepts it when the recipient commits.
+#[derive(Serialize, Deserialize, TS, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UnytSendHotResult {
+    /// Action hash (base64) of the proposal.
+    pub proposal_hash: String,
+}
+
 // ── Hosting wallet ──
 
 #[derive(Deserialize, TS)]

@@ -55,7 +55,8 @@ async fn list_users(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
 async fn get_user_wallet(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let email = params.require_str("email")?;
 
-    let wallet = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email))
+    let wallet = crate::billing_backend::billing_backend()
+        .get_user_hot_wallet(&email)
         .map_err(|e| WsRpcError::internal(e.to_string()))?
         .ok_or_else(|| WsRpcError::not_found("Wallet not found"))?;
 
@@ -70,16 +71,16 @@ async fn set_user_free_access(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
-    Ad4mDb::with_global_instance(|db| db.set_user_free_access(&email, body.enabled)).map_err(
-        |e| {
+    crate::billing_backend::billing_backend()
+        .set_user_free_access(&email, body.enabled)
+        .map_err(|e| {
             let message = e.to_string();
             if message.contains("User not found") {
                 WsRpcError::not_found(message)
             } else {
                 WsRpcError::internal(message)
             }
-        },
-    )?;
+        })?;
 
     Ok(Value::Bool(true))
 }
@@ -341,12 +342,25 @@ async fn revoke_all_sessions(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(Value::Bool(true))
 }
 
+/// user.credits — sets the credit balance of the user account named by `email`. The guard
+/// admits only the operator.
 async fn users_credits(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    // Stub — not yet implemented
-    let _ = params;
-    Err(WsRpcError::not_implemented(
-        "POST /users/credits is not yet implemented on the server",
-    ))
+    let body: UsersSetCreditsParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let email = body.email.trim().to_lowercase();
+    crate::billing_backend::billing_backend()
+        .set_user_credits(&email, body.amount)
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.starts_with("User not found") {
+                WsRpcError::not_found("No user has this email")
+            } else if msg.starts_with("Invalid credit amount") {
+                WsRpcError::bad_request(msg)
+            } else {
+                WsRpcError::internal(msg)
+            }
+        })?;
+    Ok(Value::Bool(true))
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -389,9 +403,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Operator);
     map.method::<SetUserFreeAccessRequest, bool>("user.freeAccess", set_user_free_access)
         .guard(Guard::Operator);
-    // Always errors: setting credits has no implementation yet. The operator gets the 501,
-    // every other caller the guard's 403. The contract is the SDK's call.
-    // Operator until implemented: set the real guard with the handler.
+    // Sets a user account's credit balance, named by email: a billing decision for the
+    // whole executor.
     map.method::<UsersSetCreditsParams, bool>("user.credits", users_credits)
         .guard(Guard::Operator);
     // Any user's hot-wallet address, named by email (404 when none).
@@ -561,21 +574,53 @@ mod operator_tests {
         }
     }
 
-    // `user.credits` has no implementation yet: the operator reaches the handler and gets
-    // its 501.
+    // `user.credits` sets the named account's balance through the billing backend; an
+    // email no account has is a 404, a negative amount a 400.
     #[tokio::test]
-    async fn user_credits_answers_the_operator_not_implemented() {
+    async fn user_credits_sets_the_named_accounts_balance_for_the_operator() {
+        crate::test_utils::ensure_test_db();
+        let id = uuid::Uuid::new_v4();
+        let email = format!("credits-{id}@example.org");
+        crate::db::Ad4mDb::with_global_instance(|db| {
+            db.add_user(&email, &format!("did:key:credits-{id}"), "pw")
+        })
+        .unwrap();
         let mut map = HandlerMap::new();
         super::register_ws_handlers(&mut map);
-        let err = map
+        let operator = || Arc::new(RequestContext::operator_for_test());
+
+        let set = map
             .dispatch(
                 "user.credits",
-                json!({ "email": "a@example.org", "amount": 1.0 }),
-                Arc::new(RequestContext::operator_for_test()),
+                json!({ "email": email.to_uppercase(), "amount": 7.5 }),
+                operator(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(set, json!(true));
+        let credits =
+            crate::db::Ad4mDb::with_global_instance(|db| db.get_user_credits(&email)).unwrap();
+        assert_eq!(credits, 7.5);
+
+        let missing = map
+            .dispatch(
+                "user.credits",
+                json!({ "email": format!("nobody-{id}@example.org"), "amount": 1.0 }),
+                operator(),
             )
             .await
             .unwrap_err();
-        assert_eq!(err.code, 501, "{}", err.message);
+        assert_eq!(missing.code, 404, "{}", missing.message);
+
+        let negative = map
+            .dispatch(
+                "user.credits",
+                json!({ "email": email, "amount": -1.0 }),
+                operator(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(negative.code, 400, "{}", negative.message);
     }
 
     // Without an admin credential a caller with no token on a loopback listener is the

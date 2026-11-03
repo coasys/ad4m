@@ -27,6 +27,7 @@ pub mod wallet;
 pub mod agent;
 pub mod ai_service;
 pub mod billing;
+pub mod billing_backend;
 mod dapp_server;
 pub mod db;
 pub mod db_backend;
@@ -437,11 +438,49 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
     }
 
+    // Initialise the billing backend.
+    // "shared" mode delegates billing operations to the platform Worker;
+    // everything else uses the in-process Ad4mDb billing tables (LocalBillingBackend).
+    {
+        use std::sync::Arc;
+        let backend: Arc<dyn crate::billing_backend::BillingBackend> =
+            match config.billing_backend.as_deref() {
+                Some("shared") => {
+                    let url = config
+                        .billing_backend_url
+                        .as_ref()
+                        .expect("BILLING_BACKEND_URL required when billing_backend = shared");
+                    let token = config
+                        .internal_api_token
+                        .as_ref()
+                        .expect("INTERNAL_API_TOKEN required for shared backends");
+                    info!("Initialising shared billing backend at {}", url);
+                    // The Worker's bearer token: the shared billing backend sends it on every call.
+                    Arc::new(crate::billing_backend::SharedBillingBackend::new(
+                        url.clone(),
+                        token.expose().to_string(),
+                    ))
+                }
+                _ => {
+                    info!("Initialising local billing backend");
+                    Arc::new(crate::billing_backend::LocalBillingBackend::new())
+                }
+            };
+        crate::billing_backend::init_billing_backend(backend);
+    }
+
     // ── Token separation assertion ──────────────────────────────────────
     // internal_api_token (executor → Worker) must differ from admin_credential
     // (client → executor) to maintain trust boundary separation. Same value
     // means compromise of any admin-capable client leaks platform-internal auth.
-    if config.wallet_backend.as_deref() == Some("shared") {
+    let any_shared = [
+        config.wallet_backend.as_deref(),
+        config.db_backend.as_deref(),
+        config.billing_backend.as_deref(),
+    ]
+    .iter()
+    .any(|b| *b == Some("shared"));
+    if any_shared {
         if let (Some(internal), Some(admin)) =
             (&config.internal_api_token, &config.admin_credential)
         {
@@ -722,7 +761,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // When any credit mutation marks a user dirty, this drains the set
     // and publishes updated HostingUserInfo only for affected users.
     tokio::spawn(async {
-        use crate::db::Ad4mDb;
         use crate::events::Event;
         use crate::pubsub::{get_global_pubsub, DIRTY_CREDIT_USERS};
 
@@ -746,8 +784,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             }
 
             let pubsub = get_global_pubsub().await;
-            let global_free = match Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
-            {
+            let bb = crate::billing_backend::billing_backend();
+            let global_free = match bb.get_free_hosting_enabled() {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Credit flush: get_free_hosting_enabled failed: {}", e);
@@ -758,7 +796,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 let free_access = if global_free {
                     true
                 } else {
-                    match Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)) {
+                    match bb.get_user_free_access(email) {
                         Ok(v) => v,
                         Err(e) => {
                             error!(
@@ -772,7 +810,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 let remaining_credits = if free_access {
                     "unlimited".to_string()
                 } else {
-                    match Ad4mDb::with_global_instance(|db| db.get_user_credits(email)) {
+                    match bb.get_user_credits(email) {
                         Ok(credits) => format!("{}", credits),
                         Err(e) => {
                             error!("Credit flush: get_user_credits failed for {}: {}", email, e);
@@ -780,17 +818,16 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                         }
                     }
                 };
-                let hot_wallet_address =
-                    match Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email)) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            error!(
-                                "Credit flush: get_user_hot_wallet failed for {}: {}",
-                                email, e
-                            );
-                            continue;
-                        }
-                    };
+                let hot_wallet_address = match bb.get_user_hot_wallet(email) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!(
+                            "Credit flush: get_user_hot_wallet failed for {}: {}",
+                            email, e
+                        );
+                        continue;
+                    }
+                };
 
                 let info = crate::types::HostingUserInfo {
                     email: email.clone(),

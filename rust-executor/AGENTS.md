@@ -45,6 +45,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `agent/` | Agent keys/DID, signing, multi-user (managed agents by DID; a user's email is only the login name), `capabilities/` (auth tokens, capability defs) | — |
 | `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
 | `db_backend.rs` | `SharedDb` HTTP backend for stateless/hosted mode; only used when `config.db_backend == "shared"` | — |
+| `billing_backend.rs` | `BillingBackend` trait, read through `billing_backend()`: `LocalBillingBackend` (the `Ad4mDb` billing tables) or `SharedBillingBackend` (HTTP to the platform Worker) when `config.billing_backend == "shared"` | — |
 | `pubsub.rs` | Global broadcast bus: one channel of typed events (`events.rs`: `Topic`, `Audience`, `Event`) for every event (live query updates too, as `Event::for_connection`); feeds `api/events_ws.rs` | `src/api/AGENTS.md` |
 | `types/` | `core.rs` = domain types (Link, Expression, Perspective…), `domain.rs` = wire/input types; some duplicates, see spec item 5 | — |
 | `runtime_service/`, `entanglement_service/`, `neighbourhoods.rs`, `billing.rs`, `email_service.rs`, `user_management.rs`, `unyt_service.rs`, `wallet.rs`, `perspective_snapshot.rs`, `logging.rs` | Smaller services; `unyt_service.rs` = Unyt/mHOT currency DNA + payments | — |
@@ -103,7 +104,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   email-named keys exists: data from before D16 is not supported.
 - **Billing** is per agent: `billing::bill_compute(agent_did, ..)`, `compute_log.agent_did`,
   `payment_requests.agent_did`. Credits stay on the user's `users` row, reached by
-  DID (`get_agent_credits`, `deduct_credits_and_log`).
+  DID (`get_agent_credits`, `deduct_credits_and_log`). Billing code reads and writes them
+  through `billing_backend()`, never `Ad4mDb` directly. A backend that cannot answer refuses
+  the compute: an error is never "free" and never a zero rate.
 - **Capabilities**: every WS method declares a guard where it registers (`api/guards.rs`); the
   dispatcher checks its capability (`agent/capabilities/defs.rs`) and ownership rule before the
   handler runs. A handler calls `ctx.require(&X_CAPABILITY)` only for a check its guard does not

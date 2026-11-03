@@ -55,6 +55,7 @@ export type { SignMessageRequest } from "./SignMessageRequest";
 export type { TranscriptTurn } from "./TranscriptTurn";
 export type { TrustedAgentsRequest } from "./TrustedAgentsRequest";
 export type { UnlockAgentRequest } from "./UnlockAgentRequest";
+export type { UnytSendHotResult } from "./UnytSendHotResult";
 export type { UnytVersionInfo } from "./UnytVersionInfo";
 export type { UpdateLinkRequest } from "./UpdateLinkRequest";
 export type { UpdatePerspectiveRequest } from "./UpdatePerspectiveRequest";

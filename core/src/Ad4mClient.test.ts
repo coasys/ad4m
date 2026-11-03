@@ -254,12 +254,12 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.setHostRates': true,
     'runtime.unytAgentKey': 'unyt-agent-key-123',
     'runtime.unytHotAgentPubkey': 'unyt-hot-pubkey-456',
-    'runtime.unytWalletBalance': '1000.50',
-    'runtime.unytWalletHistory': '[]',
+    'runtime.unytWalletBalance': { '0': '1000.50' },
+    'runtime.unytWalletHistory': [{ id: 'tx-1', tx_type: 'Accept' }],
     'runtime.unytVersionInfo': { installed: null, bundled: '0.61.0', installError: 'install failed' },
     'runtime.setUnytMembraneProof': true,
-    'runtime.unytReinstallDna': { success: true, message: 'reinstalled' },
-    'runtime.unytSendHot': { success: true, message: 'sent' },
+    'runtime.unytReinstallDna': true,
+    'runtime.unytSendHot': { proposalHash: 'uhCkk-proposal' },
 };
 
 // ===================== MOCK WEBSOCKET =====================
@@ -1425,14 +1425,20 @@ describe('Unyt Integration', () => {
         expect(key).toBe('unyt-hot-pubkey-456');
     });
 
-    test('unytWalletBalance() returns balance', async () => {
+    test('unytWalletBalance() returns the ledger as JSON', async () => {
         const balance = await ad4m.runtime.unytWalletBalance();
-        expect(balance).toBe('1000.50');
+        expect(lastRpcCall!.type).toBe('runtime.unytWalletBalance');
+        expect(balance).toEqual({ '0': '1000.50' });
     });
 
-    test('unytWalletHistory() returns history', async () => {
+    test('unytWalletHistory() returns the history as JSON and sends only the given paging', async () => {
         const history = await ad4m.runtime.unytWalletHistory();
-        expect(history).toBe('[]');
+        expect(history).toEqual([{ id: 'tx-1', tx_type: 'Accept' }]);
+        expect(lastRpcCall!.params).toEqual({});
+        await ad4m.runtime.unytWalletHistory(undefined, 50);
+        expect(lastRpcCall!.params).toEqual({ perPage: 50 });
+        await ad4m.runtime.unytWalletHistory(7, 10);
+        expect(lastRpcCall!.params).toEqual({ page: 7, perPage: 10 });
     });
 
     test('unytVersionInfo() returns version info and the install error', async () => {
@@ -1450,14 +1456,17 @@ describe('Unyt Integration', () => {
 
     test('unytReinstallDna() reinstalls DNA', async () => {
         const result = await ad4m.runtime.unytReinstallDna();
-        expect(result.success).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.unytReinstallDna');
+        expect(result).toBe(true);
     });
 
-    test('unytSendHot() sends HOT tokens', async () => {
+    test('unytSendHot() sends HOT tokens and returns the proposal', async () => {
         const result = await ad4m.runtime.unytSendHot('recipient-123', '50');
-        expect(result.success).toBe(true);
-        expect(lastRpcCall!.params.recipient).toBe('recipient-123');
-        expect(lastRpcCall!.params.amount).toBe('50');
+        expect(result).toEqual({ proposalHash: 'uhCkk-proposal' });
+        expect(lastRpcCall!.type).toBe('runtime.unytSendHot');
+        expect(lastRpcCall!.params).toEqual({ recipient: 'recipient-123', amount: '50' });
+        await ad4m.runtime.unytSendHot('recipient-123', '50', 'rent');
+        expect(lastRpcCall!.params).toEqual({ recipient: 'recipient-123', amount: '50', note: 'rent' });
     });
 });
 

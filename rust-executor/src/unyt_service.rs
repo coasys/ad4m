@@ -1059,16 +1059,19 @@ fn credit_and_complete(request: &crate::db::PaymentRequest) {
         }
     };
 
-    let email =
-        match Ad4mDb::with_global_instance(|db| db.add_agent_credits(&request.agent_did, amount)) {
-            Ok(email) => email,
-            Err(e) => {
-                error!("Failed to credit agent {}: {}", request.agent_did, e);
-                return;
-            }
-        };
+    let email = match crate::billing_backend::billing_backend()
+        .add_agent_credits(&request.agent_did, amount)
+    {
+        Ok(email) => email,
+        Err(e) => {
+            error!("Failed to credit agent {}: {}", request.agent_did, e);
+            return;
+        }
+    };
 
-    mark_credits_dirty(&email);
+    if !email.is_empty() {
+        mark_credits_dirty(&email);
+    }
     info!("Credited user {} with {} HOT", email, amount);
 
     if let Some(ref action_hash) = request.proposal_action_hash {
@@ -1300,7 +1303,8 @@ pub async fn handle_signal(payload_json: &JsonValue) {
     };
 
     // Look up user by their mHOT wallet address (= agent pubkey)
-    let user = Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(counterparty));
+    let user =
+        crate::billing_backend::billing_backend().get_user_by_hot_wallet_address(counterparty);
 
     match user {
         Ok(Some((email, agent_did))) => match hot_amount.parse::<f64>() {
@@ -1329,7 +1333,7 @@ pub async fn handle_signal(payload_json: &JsonValue) {
 
                 // Credit user first, then mark completed only on success
                 if let Err(e) =
-                    Ad4mDb::with_global_instance(|db| db.add_user_credits(&email, amount_f64))
+                    crate::billing_backend::billing_backend().add_user_credits(&email, amount_f64)
                 {
                     error!(
                         "Failed to credit user {} with {} HOT: {}",

@@ -2195,45 +2195,16 @@ impl AIService {
                             let word_count = text.split_whitespace().count();
                             if word_count > 0 {
                                 if let Some(ref billed_did) = billing_agent {
-                                    let rate_key =
-                                        crate::db::Ad4mDb::with_global_instance(|db| {
-                                            db.get_model(billing_model_id.clone())
-                                        })
-                                        .ok()
-                                        .flatten()
-                                        .map(|m| m.name)
-                                        .unwrap_or_else(|| billing_model_id.clone());
-
-                                    let rate =
-                                        crate::db::Ad4mDb::with_global_instance(|db| {
-                                            db.get_host_rate(&rate_key)
-                                        })
-                                        .ok()
-                                        .flatten()
-                                        .unwrap_or(0.0);
-                                    let cost = word_count as f64 * rate;
-                                    match crate::billing::bill_compute(
+                                    // The rate comes from the billing backend, as for every
+                                    // other AI operation. `bill_ai_operation` logs a failure,
+                                    // and the already-computed text is delivered either way.
+                                    let _ = crate::billing::bill_ai_operation(
                                         billed_did,
-                                        cost,
+                                        &billing_model_id,
                                         "ai_transcription",
-                                        Some(&format!(
-                                            "{} words (model: {})",
-                                            word_count, billing_model_id,
-                                        )),
-                                    ) {
-                                        Err(
-                                            crate::billing::BillingError::InsufficientCredits,
-                                        ) => {
-                                            log::warn!("Transcription: insufficient credits for agent {} — delivering already-computed text, future feeds will be rejected", billed_did);
-                                        }
-                                        Err(e) => {
-                                            log::warn!(
-                                                "Transcription billing failed: {:?}",
-                                                e
-                                            );
-                                        }
-                                        Ok(()) => {}
-                                    }
+                                        word_count,
+                                        "words",
+                                    );
                                 }
                             }
 

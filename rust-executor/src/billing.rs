@@ -1,3 +1,4 @@
+use crate::billing_backend::billing_backend;
 use crate::db::Ad4mDb;
 use crate::pubsub::mark_credits_dirty;
 
@@ -100,12 +101,19 @@ pub mod test_seam {
 
 const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // credits per link write
 
-/// Look up the link write rate from the host_rates DB table, falling back to the default.
+/// Look up the link write rate from the billing backend, falling back to the default.
+/// A backend error also falls back to the default (never to zero), and is logged.
 pub fn get_link_write_rate() -> f64 {
-    Ad4mDb::with_global_instance(|db| db.get_host_rate("link write"))
-        .ok()
-        .flatten()
-        .unwrap_or(DEFAULT_LINK_WRITE_RATE)
+    match billing_backend().get_rate("link write") {
+        Ok(rate) => rate.unwrap_or(DEFAULT_LINK_WRITE_RATE),
+        Err(e) => {
+            log::warn!(
+                "link write rate unavailable from the billing backend, using the default: {}",
+                e
+            );
+            DEFAULT_LINK_WRITE_RATE
+        }
+    }
 }
 
 /// Bill a single AI compute operation using the shared `host_rates` table.
@@ -141,16 +149,28 @@ pub fn bill_ai_operation(
         return Ok(());
     }
 
+    // Model name lookup still goes through Ad4mDb — the model registry
+    // belongs to the DB backend, not the billing backend.
     let rate_key = Ad4mDb::with_global_instance(|db| db.get_model(model_id.to_string()))
         .ok()
         .flatten()
         .map(|m| m.name)
         .unwrap_or_else(|| model_id.to_string());
 
-    let rate = Ad4mDb::with_global_instance(|db| db.get_host_rate(&rate_key))
-        .ok()
-        .flatten()
-        .unwrap_or(0.0);
+    // An unpriced model is `Ok(None)` and costs nothing. A backend that cannot answer is
+    // an error, not a zero rate: the operation is not logged as metered when it was not.
+    let rate = match billing_backend().get_rate(&rate_key) {
+        Ok(rate) => rate.unwrap_or(0.0),
+        Err(e) => {
+            log::warn!(
+                "{}: no rate for model {} from the billing backend: {}",
+                operation,
+                rate_key,
+                e
+            );
+            return Err(BillingError::Other(e));
+        }
+    };
 
     let cost = unit_count as f64 * rate;
     if cost <= 0.0 {
@@ -195,17 +215,17 @@ pub fn bill_ai_operation(
 /// it can afford compute. Used as a pre-check before link operations; the actual deduction
 /// happens after the operation via bill_compute with the exact cost.
 /// No-ops (allows) if free hosting is enabled or user has free access.
+///
+/// A billing backend that cannot answer refuses the compute: an error is never "free".
 pub fn check_compute_credits(agent_did: &str) -> Result<(), anyhow::Error> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
-    if global_free {
+    let backend = billing_backend();
+    if backend.get_free_hosting_enabled()? {
         return Ok(());
     }
-    let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(agent_did))?;
-    if free {
+    if backend.get_agent_free_access(agent_did)? {
         return Ok(());
     }
-    let credits = Ad4mDb::with_global_instance(|db| db.get_agent_credits(agent_did))?;
+    let credits = backend.get_agent_credits(agent_did)?;
     if credits <= 0.0 {
         return Err(anyhow::anyhow!("Insufficient compute credits"));
     }
@@ -235,32 +255,19 @@ pub fn bill_compute(
         }
     }
 
-    let global_free = Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())?;
+    let backend = billing_backend();
+
+    let global_free = backend.get_free_hosting_enabled()?;
     if global_free {
         return Ok(());
     }
-    let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(agent_did))?;
-    if free {
+    if backend.get_agent_free_access(agent_did)? {
         return Ok(());
     }
-    let result = Ad4mDb::with_global_instance(|db| {
-        db.deduct_credits_and_log(agent_did, amount, operation, summary)
-    });
 
-    match result {
-        Ok((_, _, email)) => {
-            mark_credits_dirty(&email);
-            Ok(())
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("Insufficient compute credits") {
-                Err(BillingError::InsufficientCredits)
-            } else if msg.starts_with("User not found") {
-                Err(BillingError::UserNotFound(agent_did.to_string()))
-            } else {
-                Err(BillingError::Other(e))
-            }
-        }
+    let (_, _, email) = backend.deduct_credits_and_log(agent_did, amount, operation, summary)?;
+    if !email.is_empty() {
+        mark_credits_dirty(&email);
     }
+    Ok(())
 }

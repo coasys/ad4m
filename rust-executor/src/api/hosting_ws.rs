@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
-use crate::db::Ad4mDb;
+use crate::billing_backend::billing_backend;
 use crate::types::RequestContext;
 
 use super::guards::Guard;
@@ -14,22 +14,20 @@ use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 
 async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    let billing = billing_backend();
+    // Display only: a backend that cannot answer does not show free hosting as on.
+    let global_free = billing.get_free_hosting_enabled().unwrap_or(false);
     // The account of the session's managed agent: its email is the address shown to the user.
     let account = ctx
         .user_did()
         .and_then(|did| crate::agent::AgentService::email_for_did(did).ok());
     let user_info = if let Some(user_email) = account {
-        let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email)).ok();
-        let hot_wallet_address =
-            Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
-                .ok()
-                .flatten();
+        let credits = billing.get_user_credits(&user_email).ok();
+        let hot_wallet_address = billing.get_user_hot_wallet(&user_email).ok().flatten();
         let free_access = if global_free {
             true
         } else {
-            Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email)).unwrap_or(false)
+            billing.get_user_free_access(&user_email).unwrap_or(false)
         };
         Some(HostingInfoUser {
             email: user_email,
@@ -41,7 +39,7 @@ async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
         None
     };
 
-    let rates = Ad4mDb::with_global_instance(|db| db.get_host_rates()).ok();
+    let rates = billing.get_rates().ok();
 
     let (dna_hash, build_version) = crate::unyt_service::version_info();
     let version = HostingVersionInfo {
@@ -107,7 +105,8 @@ async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let email = crate::agent::AgentService::email_for_did(did)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    Ad4mDb::with_global_instance(|db| db.set_user_hot_wallet(&email, &body.address))
+    billing_backend()
+        .set_user_hot_wallet(&email, &body.address)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(Value::Bool(true))
