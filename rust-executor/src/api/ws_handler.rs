@@ -511,6 +511,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::agent_ws::register_ws_handlers(&mut map);
     super::perspectives_ws::register_ws_handlers(&mut map);
     super::agent_session_ws::register_ws_handlers(&mut map);
+    super::agent_reply_ws::register_ws_handlers(&mut map);
     super::runtime_ws::register_ws_handlers(&mut map);
     super::languages_ws::register_ws_handlers(&mut map);
     super::expressions_ws::register_ws_handlers(&mut map);
