@@ -169,6 +169,10 @@ async fn install_with_retries(installed: &mut bool) -> Result<(), AnyError> {
     // but DNA installation with network join can take longer.
     let mut last_err = None;
     for attempt in 1..=5 {
+        // A conductor that stopped since the last attempt will not come back for a retry.
+        if maybe_get_holochain_service().await.is_none() {
+            return Err(HolochainNotRunning.into());
+        }
         match install_alliance_dna(&data_path).await {
             Ok(()) => {
                 *installed = true;
@@ -852,6 +856,9 @@ async fn running_holochain_service() -> Result<HolochainServiceInterface, AnyErr
 /// waits only for a conductor start in progress (`holochain_service_once_started`). Only
 /// the background install at start-up waits for the conductor without a limit.
 async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue, AnyError> {
+    // Before the install lock: an install in progress must not hold up a call that
+    // can already see the conductor is gone.
+    running_holochain_service().await?;
     ensure_installed().await?;
     let hc = running_holochain_service().await?;
 
