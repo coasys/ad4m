@@ -1075,7 +1075,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 41, "every flag of run has a variable");
+        assert_eq!(checked, 42, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

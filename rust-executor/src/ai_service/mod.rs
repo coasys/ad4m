@@ -1601,6 +1601,9 @@ mod tests {
     // the default, on an executor with no transcription model, has local AI set one up.
     #[tokio::test]
     async fn a_default_transcription_stream_is_set_up_by_local_ai_on_first_use() {
+        // The stream's owner is the main agent.
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         let calls = Arc::new(AtomicUsize::new(0));
         let upstream = mockito::Server::new_async().await;
         let service = service();
