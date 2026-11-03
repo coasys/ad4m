@@ -221,11 +221,17 @@ impl crate::ai_service::harness::CreditGate for WsHarnessCreditGate {
     }
 }
 
-fn parse_link_status(s: Option<&str>) -> LinkStatus {
+/// The `status` of a link write: `shared` or `local` in any casing, `Shared` when absent.
+/// Any other value is refused (400) rather than read as Local: a mistyped status would keep
+/// a link meant for the neighbourhood on this executor, with no error.
+pub(crate) fn parse_link_status(s: Option<&str>) -> Result<LinkStatus, WsRpcError> {
     match s {
-        Some("shared" | "SHARED") => LinkStatus::Shared,
-        Some(_) => LinkStatus::Local,
-        None => LinkStatus::Shared,
+        None => Ok(LinkStatus::Shared),
+        Some(v) if v.eq_ignore_ascii_case("shared") => Ok(LinkStatus::Shared),
+        Some(v) if v.eq_ignore_ascii_case("local") => Ok(LinkStatus::Local),
+        Some(v) => Err(WsRpcError::bad_request(format!(
+            "Unknown link status {v:?}: expected \"shared\" or \"local\" (any casing)"
+        ))),
     }
 }
 
@@ -408,7 +414,7 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     let mut perspective = guarded_perspective(&params).await?;
     let agent_context = ctx.acts_as();
 
-    let status = parse_link_status(body.status.as_deref());
+    let status = parse_link_status(body.status.as_deref())?;
 
     let result = perspective
         .add_link(Link::from(body.link), status, body.batch_id, &agent_context)
@@ -439,7 +445,7 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let mut perspective = guarded_perspective(&params).await?;
     let agent_context = ctx.acts_as();
 
-    let status = parse_link_status(body.status.as_deref());
+    let status = parse_link_status(body.status.as_deref())?;
 
     let mutations = LinkMutations {
         additions: body.links,
@@ -508,7 +514,7 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let mut perspective = guarded_perspective(&params).await?;
     let agent_context = ctx.acts_as();
 
-    let status = parse_link_status(body.status.as_deref());
+    let status = parse_link_status(body.status.as_deref())?;
 
     let diff = perspective
         .link_mutations(body.mutations, status, &agent_context)
@@ -540,7 +546,7 @@ async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
 
     let mut perspective = guarded_perspective(&params).await?;
 
-    let status = parse_link_status(body.status.as_deref());
+    let status = parse_link_status(body.status.as_deref())?;
 
     let result = perspective
         .add_link_expression(body.link, status, body.batch_id)

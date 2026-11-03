@@ -615,7 +615,9 @@ pub struct PerspectiveInstance {
     sdna_change_mutex: Arc<Mutex<()>>,
     /// Serialises `ensure_public_links_are_shared`: a publish and the link
     /// language loop it wakes both call it, and two concurrent calls would
-    /// each find the remote empty and commit every shared link.
+    /// each find the remote empty and commit every shared link. The commit
+    /// loop holds it from sending the rest of a batch to parking the oldest
+    /// diff, so a fallback sync either runs before the rest or sees the park.
     share_links_mutex: Arc<Mutex<()>>,
     /// Serialises `register_local_agents`. server-link-language replaces its
     /// local agent list (p-diff-sync adds to it), so a registration that
@@ -713,25 +715,29 @@ pub struct PerspectiveInstance {
     force_shape_sync_wait: Arc<AtomicBool>,
 }
 
-/// The local Shared links the remote render lacks, without the links of parked diffs.
-/// Links compare by author, timestamp, source, predicate and target.
+/// The local Shared links the remote render lacks, without the links of the diffs the
+/// queue still holds (queued or parked). Links compare by author, timestamp, source,
+/// predicate and target; one set of those identities for remote and unsent keeps the
+/// pass linear.
 fn links_missing_remotely(
     local_links: &[(LinkExpression, LinkStatus)],
     remote_links: &[LinkExpression],
-    parked: &[LinkExpression],
+    unsent: &[LinkExpression],
 ) -> Vec<LinkExpression> {
-    let same = |a: &LinkExpression, b: &LinkExpression| {
-        a.author == b.author
-            && a.timestamp == b.timestamp
-            && a.data.source == b.data.source
-            && a.data.target == b.data.target
-            && a.data.predicate == b.data.predicate
-    };
+    fn identity(l: &LinkExpression) -> (&str, &str, &str, Option<&str>, &str) {
+        (
+            &l.author,
+            &l.timestamp,
+            &l.data.source,
+            l.data.predicate.as_deref(),
+            &l.data.target,
+        )
+    }
+    let known: HashSet<_> = remote_links.iter().chain(unsent).map(identity).collect();
     local_links
         .iter()
         .map(|(link, _)| link)
-        .filter(|link| !remote_links.iter().any(|r| same(r, link)))
-        .filter(|link| !parked.iter().any(|p| same(p, link)))
+        .filter(|link| !known.contains(&identity(link)))
         .cloned()
         .collect()
 }
@@ -1442,6 +1448,12 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
+                // From the first send until the clear or the park lands, the fallback
+                // sync must not run: it would send the same pending links again, or,
+                // reading no parked row yet, send the oldest diff's links after the
+                // rest. It holds this lock across its read and commit, and never
+                // waits on this loop.
+                let _sharing = self.share_links_mutex.lock().await;
                 log::debug!("💾 committing {} pending diffs...", pending_ids.len());
                 let committed_ids = match link_language.commit(pending_diffs.clone()).await {
                     // Spec §5.2 splits perspective-commit (write) from
@@ -1648,19 +1660,19 @@ impl PerspectiveInstance {
                 },
             };
 
-            // A parked diff's links stay Shared in the store, but the queue took them out
-            // for good: sending them here would put them behind their successors.
-            let parked = match Ad4mDb::with_global_instance(|db| db.get_parked_additions(&uuid)) {
-                Ok(parked) => parked,
+            // A queued or parked diff's links stay Shared in the store, but the queue owns
+            // them: a queued one would be sent twice, a parked one after its successors.
+            let unsent = match Ad4mDb::with_global_instance(|db| db.get_unsent_additions(&uuid)) {
+                Ok(unsent) => unsent,
                 Err(e) => {
                     log::warn!(
-                        "ensure_public_links_are_shared: could not read parked diffs for perspective {}: {} — skipping this sync attempt",
+                        "ensure_public_links_are_shared: could not read queued and parked diffs for perspective {}: {} — skipping this sync attempt",
                         uuid, e
                     );
                     return false;
                 }
             };
-            let links_to_commit = links_missing_remotely(&local_links, &remote_links, &parked);
+            let links_to_commit = links_missing_remotely(&local_links, &remote_links, &unsent);
 
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();
