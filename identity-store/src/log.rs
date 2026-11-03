@@ -236,15 +236,22 @@ impl Store {
                         "a vouching token or a proof of work comes only with event #0",
                     ));
                 }
-                // A forked identity is frozen: the store takes no event after a fork.
-                if let Some(fork) = db::first_fork(&tx, scid)? {
-                    return Err(ApiError::forked(&current_head(&tx, scid)?, &fork));
+                // A fork signed by the held log's current master freezes the identity. The one
+                // append a frozen identity takes is a `rotate`: it is signed by the committed
+                // next key, which the rival's signer alone does not hold, and once appended the
+                // rival's signer is no longer current, so the freeze ends.
+                if !matches!(first.op, Op::Rotate { .. }) {
+                    if let Some(fork) = db::freezing_fork(&tx, scid, &existing)? {
+                        return Err(ApiError::forked(&current_head(&tx, scid)?, &fork));
+                    }
                 }
                 let head = existing.head();
                 if first.seq != head.seq + 1 || first.prev.as_ref() != Some(&head.hash) {
                     // A validly signed event at a seq the store holds, other than the stored
                     // one, is a fork: the store records it (with the event, so anyone can check
-                    // it) and freezes the identity. Anything else is a plain conflict.
+                    // it) and answers `409 forked`. It freezes the identity only when its signer
+                    // is the held log's current master (`db::freezing_fork`). Anything else is a
+                    // plain conflict.
                     if let Some(fork) = competing_event(&tx, scid, &existing, first)? {
                         let theirs = ad4m_hash_chain::entry_json(first)
                             .map_err(|e| ApiError::invalid("malformed", e.to_string()))?;

@@ -161,8 +161,9 @@ impl Store {
         }
         let chain = db::load_chain(conn, scid)?
             .ok_or_else(|| refuse("the store holds no log of the identity"))?;
-        // A forked identity is frozen: no key of it speaks for it at this store any more.
-        if let Some(fork) = db::first_fork(conn, scid)? {
+        // A frozen identity (a fork signed by the current master, `db::freezing_fork`): no key
+        // of it speaks for it at this store until a `rotate` ends the freeze.
+        if let Some(fork) = db::freezing_fork(conn, scid, &chain)? {
             let head = db::signed_head(conn, scid)?
                 .ok_or_else(|| ApiError::internal(format!("log {scid} has no head")))?;
             return Err(ApiError::forked(&head, &fork));

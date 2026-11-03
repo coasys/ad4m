@@ -151,7 +151,7 @@ tests name them by these names.
   the head check is what stops a revoked key from backdating a new record below N: the store
   orders arrivals, a record it took before the revocation stays valid (readers check at the
   anchor), and one that arrives after it is refused whatever anchor it names. It carries no DID (the record is keyed by its did:scid), no key id (the log lists the
-  key) and no hash (a hash only tells forked branches apart, and a fork freezes the identity).
+  key) and no hash (a hash only tells forked branches apart, and the store keeps one branch).
   The old four-field anchor object does not parse: `400 malformed`. Offers' `by` and signed
   requests keep `kelSeq`/`kelHash`: they prove freshness at the head, once per action.
 - **No brake yet**: a `#0` without a note is admitted with `admitted_by = 'brake'`; a `pow`
@@ -170,11 +170,20 @@ tests name them by these names.
 - **Forks**: an event at a seq the store holds, with another hash than the stored one, that
   replays on the stored events before it (every proof checked) is a fork. The store records it
   in `chain_forks` with the event's JSON (`SqliteChainStore::record_fork_in`) and answers
-  `409 {error:"forked", head, fork:{seq, ours, theirs}}`. A fork freezes the identity: every
-  later append and signed request for it answers the same `409 forked`; its log and head stay
-  readable as held. Only the master signs events, so a fork means two master-signed events
-  at one seq: duplicity, or two wallets with the same words racing. A resent stored event,
-  an event past the head and one that does not replay are plain `409 {head}`.
+  `409 {error:"forked", head, fork:{seq, ours, theirs}}`. Only the master signs events, so a
+  fork means two master-signed events at one seq: duplicity, two wallets with the same words
+  racing, or a retired (stolen) master signing on the prefix where it was current. A resent
+  stored event, an event past the head and one that does not replay are plain `409 {head}`.
+- **The freeze** (`db::freezing_fork`, derived from the fork rows and the held log each time,
+  no stored flag): the identity is frozen only while a recorded fork's signing master (the
+  rival event replayed on the stored prefix again; the last master of that state) is the
+  current master at the held head. A fork by a master the held log rotated away from at the
+  fork's seq or later is kept and answered as evidence but freezes nothing, so a thief with a
+  retired master cannot lock the identity out after the owner rotates. While frozen, every
+  signed request and every append whose first event is not a `rotate` answers `409 forked`; a
+  `rotate` (signed by the committed next key, which the current master alone does not give)
+  is taken, retires the rival's signer and so ends the freeze. The log and head stay readable
+  as held throughout.
 - Never store or answer an offer's secret `s`: `tests/offers.rs` scans every table and response.
 
 ## Configuration

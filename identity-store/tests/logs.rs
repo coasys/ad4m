@@ -70,7 +70,7 @@ async fn an_append_on_the_head_passes_the_same_seq_again_and_a_gap_get_409_with_
 }
 
 #[tokio::test]
-async fn a_validly_signed_competing_event_is_recorded_as_a_fork_and_freezes_the_identity() {
+async fn a_fork_by_the_current_master_freezes_the_identity_until_a_rotate() {
     let t = TestStore::new();
     let mut alice = Person::new("alice");
     t.publish(&alice).await;
@@ -110,24 +110,15 @@ async fn a_validly_signed_competing_event_is_recorded_as_a_fork_and_freezes_the_
     assert_eq!(reply.body["error"], "forked");
     assert_eq!(t.count("chain_forks"), 1);
 
-    // Frozen: an event that continues the head is refused, and so is a signed request.
+    // Frozen (the rival's signer, m0, is the current master): an event that continues the head
+    // and is not a `rotate` is refused, and so is a signed request.
     let revoke = alice.revoke(&["d2"]);
     let reply = t.append(&alice.scid(), &[&revoke]).await;
     assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
     assert_eq!(reply.body["error"], "forked");
+    assert_eq!(reply.body["fork"]["theirs"], json!(theirs));
     assert_eq!(t.store.head(&alice.scid()).unwrap().unwrap().seq, 1);
-    let path = format!("/v1/agents/{}", alice.did());
-    let record = alice.agent_record(&alice.device_key(1), json!({ "perspective": {} }), 1);
-    let body = serde_json::to_vec(&record).unwrap();
-    let header = alice.request(
-        "d1",
-        &alice.device_key(1),
-        "PUT",
-        &path,
-        &body,
-        t.now() + 60,
-    );
-    let reply = t.send("PUT", &path, Some(body), Some(header)).await;
+    let reply = put_own_record(&t, &alice, 1).await;
     assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
     assert_eq!(reply.body["error"], "forked");
     // The log stays readable as the store held it.
@@ -138,6 +129,76 @@ async fn a_validly_signed_competing_event_is_recorded_as_a_fork_and_freezes_the_
     // Another identity is not affected.
     let bob = Person::new("bob");
     t.publish(&bob).await;
+
+    // The one append a frozen identity takes: a `rotate`, signed by the committed next key.
+    // It retires m0, the rival's signer, so the freeze ends.
+    let rotate = alice.rotate(&[]);
+    let reply = t.append_push(&mut alice, rotate).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(head_of(&reply.body).seq, 2);
+    let revoke = alice.revoke(&["d2"]);
+    let reply = t.append_push(&mut alice, revoke).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(head_of(&reply.body).seq, 3);
+    let reply = put_own_record(&t, &alice, 1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    // The fork stays recorded as evidence.
+    assert_eq!(t.count("chain_forks"), 1);
+}
+
+/// `PUT /v1/agents/{did}` of `person`'s record at `version`, signed by `d1`.
+async fn put_own_record(t: &TestStore, person: &Person, version: u64) -> common::Reply {
+    let path = format!("/v1/agents/{}", person.did());
+    let record = person.agent_record(&person.device_key(1), json!({ "perspective": {} }), version);
+    let body = serde_json::to_vec(&record).unwrap();
+    let header = person.request(
+        "d1",
+        &person.device_key(1),
+        "PUT",
+        &path,
+        &body,
+        t.now() + 60,
+    );
+    t.send("PUT", &path, Some(body), Some(header)).await
+}
+
+#[tokio::test]
+async fn a_fork_signed_by_a_retired_master_is_recorded_but_does_not_freeze_the_identity() {
+    // Alice rotates to m1 at seq 2 because m0 was stolen. The thief signs a revoke at seq 2
+    // with m0: it replays on seqs 0-1, where m0 was current, so it is a fork. m0 is no longer
+    // the held log's current master, so the identity is not frozen.
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let phone = Device::new("alice phone");
+    t.link(&mut alice, &phone, OfferKind::Device, None).await;
+    let mut thief = Person::new("alice");
+    thief.push(alice.events[1].clone());
+    let rotate = alice.rotate(&[]);
+    let reply = t.append_push(&mut alice, rotate).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let rotated_hash = alice.chain.head().hash;
+
+    let rival = thief.revoke(&["d2"]);
+    assert_eq!(rival.seq, 2);
+    let reply = t.append(&alice.scid(), &[&rival]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.body["error"], "forked");
+    assert_eq!(reply.body["fork"]["seq"], 2);
+    assert_eq!(reply.body["fork"]["ours"], json!(rotated_hash));
+    assert_eq!(
+        reply.body["fork"]["theirs"],
+        json!(ad4m_identity_core::event_hash(&rival).unwrap())
+    );
+    assert_eq!(t.count("chain_forks"), 1);
+
+    // Alice's next append on m1 and her signed requests pass.
+    let revoke = alice.revoke(&["d2"]);
+    let reply = t.append_push(&mut alice, revoke).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(head_of(&reply.body).seq, 3);
+    let reply = put_own_record(&t, &alice, 1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
 }
 
 #[tokio::test]
@@ -1126,6 +1187,33 @@ async fn a_version_past_the_store_clock_is_refused_so_a_revoked_thief_cannot_fre
         t.get(&path).await.body,
         serde_json::to_value(&mine).unwrap()
     );
+}
+
+#[tokio::test]
+async fn the_version_ceiling_is_300_seconds_ahead_of_the_store_clock_in_milliseconds() {
+    // Literal versions, not `version_ceiling`: they pin the 300 s and the millisecond unit. A
+    // version at or below `T * 1000 + 300_000` passes, one above it is `400 version`.
+    let t = TestStore::new();
+    assert_eq!(t.now(), T0);
+    let guest = key("guest");
+    let profile = json!({ "perspective": { "links": [] } });
+    let path = format!("/v1/agents/{}", did_key(&guest));
+    let send = |version: u64| {
+        let record = did_key_record(&guest, profile.clone(), version);
+        t.send(
+            "PUT",
+            &path,
+            Some(serde_json::to_vec(&record).unwrap()),
+            None,
+        )
+    };
+    let reply = send(T0 * 1000 + 299_999).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let reply = send(T0 * 1000 + 300_000).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let reply = send(T0 * 1000 + 300_001).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "version");
 }
 
 #[tokio::test]

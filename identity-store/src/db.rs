@@ -9,8 +9,8 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use ad4m_hash_chain::store::SqliteChainStore;
-use ad4m_hash_chain::{ChainType, ForkEvidence};
-use ad4m_identity_core::{fold, Event, KelChain, KeyState};
+use ad4m_hash_chain::{ChainType, ForkEvidence, Multikey};
+use ad4m_identity_core::{fold, Event, KelChain, KelPolicy, KeyState};
 use ad4m_ldk::identity::{KeyIndexEntry, SignedHead};
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -155,11 +155,71 @@ pub fn load_chain_before(
     Ok(Some(chain))
 }
 
-/// The first fork recorded for `scid`, if any: the store froze the identity then.
-pub fn first_fork(conn: &Connection, scid: &str) -> Result<Option<ForkEvidence>, ApiError> {
-    Ok(SqliteChainStore::forks_in(conn, KEL, &scid.to_string())?
-        .into_iter()
-        .next())
+/// The recorded fork that freezes `scid`, if any (the fork rule of `identity-store/AGENTS.md`,
+/// section 13 of `docs-src/identity/did-scid-coasys-1.md`): a fork whose rival event was signed
+/// by the master that is current at the head of the held log `held`. A fork signed by a master
+/// the held log has rotated away from (at the fork's seq or later) stays recorded and served as
+/// evidence but freezes nothing, so a retired (stolen) master cannot lock the identity out. A
+/// `rotate` appended on the held log retires the rival's signer and so ends the freeze. Derived
+/// from the fork rows and `held` each time: nothing about a freeze is stored.
+pub fn freezing_fork(
+    conn: &Connection,
+    scid: &str,
+    held: &KelChain,
+) -> Result<Option<ForkEvidence>, ApiError> {
+    let Some(current) = held.state().current_master() else {
+        return Ok(None);
+    };
+    let mut stmt = conn.prepare_cached(
+        "SELECT seq, ours, theirs, theirs_json FROM chain_forks
+         WHERE type = ?1 AND chain = ?2 ORDER BY seq, rowid",
+    )?;
+    let rows = stmt
+        .query_map(params![KEL, scid], |row| {
+            Ok((
+                from_sql(row.get(0)?),
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (seq, ours, theirs, json) in rows {
+        if rival_signer(conn, scid, seq, &json)? == current.sign {
+            return Ok(Some(ForkEvidence {
+                chain: scid.to_string(),
+                seq,
+                ours,
+                theirs,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// The master key that signed the rival event `json` recorded at `seq`: the event is replayed
+/// again on the stored events before `seq`, and the last master of the resulting state is its
+/// signer (an `incept` or `rotate` is signed by the master it names, every other event by the
+/// master current before it).
+fn rival_signer(conn: &Connection, scid: &str, seq: u64, json: &str) -> Result<Multikey, ApiError> {
+    let broken = |e: String| ApiError::internal(format!("recorded fork of {scid} at {seq}: {e}"));
+    let rival = Event::from_json_text(json).map_err(|e| broken(e.to_string()))?;
+    let after = if seq == 0 {
+        KelChain::genesis(&KelPolicy, &rival).map_err(|e| broken(e.to_string()))?
+    } else {
+        let mut prefix = load_chain_before(conn, scid, seq)?
+            .ok_or_else(|| broken("no stored events before it".into()))?;
+        prefix
+            .append(&KelPolicy, &rival)
+            .map_err(|e| broken(e.to_string()))?;
+        prefix
+    };
+    after
+        .state()
+        .masters
+        .last()
+        .map(|m| m.sign.clone())
+        .ok_or_else(|| broken("it names no master".into()))
 }
 
 /// Up to `limit` stored events of `scid` from `from`: their JSON and when they were stored.
