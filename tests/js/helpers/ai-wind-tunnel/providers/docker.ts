@@ -156,24 +156,37 @@ export const vllm: Driver = {
         if (!c) {
           const port = await freePort();
           const name = `ai-wt-${ctx.runId}-vllm-${n++}`;
-          const args = ["run", "-d", "--name", name, "-p", `127.0.0.1:${port}:8000`, "-v", `${hfCache()}:/root/.cache/huggingface/hub`, "--ipc=host"];
+          // As this user, so the weights it downloads into the cache stay this user's files.
+          // The image has no passwd entry for the uid: USER and LOGNAME stand in for it.
+          const user =
+            typeof process.getuid === "function"
+              ? ["--user", `${process.getuid()}:${process.getgid!()}`, "-e", "HOME=/tmp", "-e", "USER=vllm", "-e", "LOGNAME=vllm", "-e", "TORCHINDUCTOR_CACHE_DIR=/tmp/inductor"]
+              : [];
+          const args = ["run", "-d", "--name", name, "-p", `127.0.0.1:${port}:8000`, "-v", `${hfCache()}:/hf`, "-e", "HF_HUB_CACHE=/hf", "--ipc=host", ...user];
           if (variant.backend === "cuda") args.push("--gpus", "all", image);
           else {
             args.push("--device", "/dev/kfd", "--device", "/dev/dri", "--security-opt", "seccomp=unconfined");
-            if (existsSync("/dev/kfd")) args.push("--group-add", String(statSync("/dev/kfd").gid));
-            args.push("-e", "HF_HUB_CACHE=/root/.cache/huggingface/hub", "--entrypoint", "vllm", image);
+            const gids = new Set(["/dev/kfd", "/dev/dri/renderD128"].filter(existsSync).map((d) => String(statSync(d).gid)));
+            for (const g of gids) args.push("--group-add", g);
+            args.push("--entrypoint", "vllm", image);
           }
-          const flags = ["--max-model-len", "8192", "--gpu-memory-utilization", process.env.AI_WT_VLLM_GPU_UTIL ?? "0.3"];
+          const flags = ["--max-model-len", "8192", "--gpu-memory-utilization", process.env.AI_WT_VLLM_GPU_UTIL ?? "0.15"];
           const serveArgs = variant.backend === "cuda" ? [] : ["serve"];
           serveArgs.push(model.remoteModel, "--host", "0.0.0.0", "--port", "8000", "--served-model-name", model.remoteModel, ...flags);
           const started = Date.now();
+          ctx.log(`vLLM: starting ${name} (${image}) for ${model.remoteModel}`);
           await docker([...args, ...serveArgs]);
           const baseUrl = `http://127.0.0.1:${port}`;
+          // The container's state, polled: a container that exits ends the wait.
+          let running = true;
+          const watch = setInterval(() => {
+            docker(["inspect", "-f", "{{.State.Running}}", name]).then((s) => (running = s === "true"), () => (running = false));
+          }, 3000);
           try {
             await waitForHttp(`${baseUrl}/health`, {
               timeoutMs: 1_200_000,
               label: `vLLM ${model.remoteModel}`,
-              alive: () => true,
+              alive: () => running,
             });
           } catch (e: any) {
             await saveLogs(name, ctx);
@@ -181,6 +194,8 @@ export const vllm: Driver = {
             await removeContainer(name, ctx);
             // A GPU stack that does not start here is this machine's limit, not a failed cell.
             throw new SkipError(`vLLM (${image}) did not start ${model.remoteModel} on ${variant.backend}: ${e.message}; container ${state}; log in ${name}.log`);
+          } finally {
+            clearInterval(watch);
           }
           version ??= await fetch(`${baseUrl}/version`).then((r) => r.json()).then((j: any) => j.version).catch(() => undefined);
           session.version = version;
