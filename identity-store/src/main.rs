@@ -11,25 +11,32 @@
 //! | `POW_BITS` | `22` | the proof-of-work cost `GET /v1/pow` publishes |
 //! | `CORS_ORIGINS` | none | comma-separated origins allowed from a browser |
 //! | `FEED_TOKEN` | none | the mirror token of `GET /v1/feed` |
+//! | `IDENTITY_BURST` | `5` | writes per identity at once (the identity bucket) |
+//! | `IDENTITY_REFILL_S` | `60` | seconds per write the identity bucket refills |
 //!
+//! `serve` sweeps expired inbox messages and requests every minute.
 //! On start, `serve` prints `identity-store listening on http://<addr> store-key <multikey>`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use identity_store::{db::Db, router, system_clock, Settings, Store, StoreKey};
+use identity_store::{db::Db, router, system_clock, Settings, Store, StoreKey, SWEEP_EVERY_S};
 
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
-fn settings() -> Result<Settings, String> {
-    let pow_bits = match std::env::var("POW_BITS") {
+fn number<T: std::str::FromStr>(name: &str, default: T) -> Result<T, String> {
+    match std::env::var(name) {
         Ok(v) => v
-            .parse::<u8>()
-            .map_err(|_| format!("POW_BITS={v} is not a number of bits"))?,
-        Err(_) => Settings::default().pow_bits,
-    };
+            .parse::<T>()
+            .map_err(|_| format!("{name}={v} is not a whole number")),
+        Err(_) => Ok(default),
+    }
+}
+
+fn settings() -> Result<Settings, String> {
+    let defaults = Settings::default();
     let cors_origins = std::env::var("CORS_ORIGINS")
         .map(|v| {
             v.split(',')
@@ -40,9 +47,11 @@ fn settings() -> Result<Settings, String> {
         .unwrap_or_default();
     let feed_token = std::env::var("FEED_TOKEN").ok().filter(|t| !t.is_empty());
     Ok(Settings {
-        pow_bits,
+        pow_bits: number("POW_BITS", defaults.pow_bits)?,
         feed_token,
         cors_origins,
+        identity_burst: number("IDENTITY_BURST", defaults.identity_burst)?,
+        identity_refill_s: number("IDENTITY_REFILL_S", defaults.identity_refill_s)?,
     })
 }
 
@@ -61,6 +70,16 @@ async fn serve() -> Result<(), String> {
         "identity-store listening on http://{addr} store-key {}",
         store.key.multikey()
     );
+    let sweeper = store.clone();
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(SWEEP_EVERY_S));
+        loop {
+            every.tick().await;
+            if let Err(e) = sweeper.sweep() {
+                eprintln!("identity-store: sweep failed: {:?}", e.body);
+            }
+        }
+    });
     axum::serve(listener, router(store))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

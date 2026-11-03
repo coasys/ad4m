@@ -3,7 +3,8 @@
 //! The closed beta's agent language: agent profiles and the identity interface on
 //! the shared identity store, on the Rust ALDK; `pnpm build` ships it.
 //!
-//! - [`store`]: the identity calls, one store route each; the language signs nothing.
+//! - [`store`]: the identity calls, one store route each (logs, offers, the device inbox, the
+//!   private record, the request box); the language signs nothing and opens nothing.
 //! - [`agents`]: `expressionCreate`/`expressionGet` on the store's `/v1/agents/{did}`, in
 //!   place of mock.ad4m.dev.
 //!
@@ -15,8 +16,10 @@ pub mod agents;
 pub mod store;
 
 use ad4m_ldk::identity::{
-    AgentRecord, AppendRequest, Claim, ClaimReceipt, KeyIndexEntry, LogPage, OfferListing,
-    OfferOpened, OfferProgress, PowParams, SignedHead, SignedOffer, SignedRequest, VouchNote,
+    AgentRecord, AppendRequest, Claim, ClaimReceipt, DeviceRequest, InboxAddress, InboxAuth,
+    InboxMessage, InboxStored, InboxWrite, KeyIndexEntry, LogPage, OfferListing, OfferOpened,
+    OfferProgress, PostedRequest, PowParams, RecordStored, RequestPosted, SealedRecord, SignedHead,
+    SignedOffer, SignedRequest, VouchNote,
 };
 use ad4m_ldk::imports as rt;
 use ad4m_ldk::prelude::*;
@@ -185,6 +188,77 @@ impl IdentityCapability for CentralizedAgentLanguage {
         wait_s: u8,
     ) -> LanguageResult<OfferProgress> {
         self.store.offer_state(&did, &offer_id, &key, wait_s).await
+    }
+
+    async fn identity_inbox_put(
+        &mut self,
+        address: InboxAddress,
+        write: InboxWrite,
+        req: SignedRequest,
+    ) -> LanguageResult<InboxStored> {
+        self.store.inbox_put(&address, &write, &req).await
+    }
+
+    async fn identity_inbox_list(
+        &mut self,
+        address: InboxAddress,
+        auth: InboxAuth,
+        wait_s: u8,
+    ) -> LanguageResult<Vec<InboxMessage>> {
+        self.store.inbox_list(&address, &auth, wait_s).await
+    }
+
+    async fn identity_inbox_ack(
+        &mut self,
+        address: InboxAddress,
+        id: String,
+        auth: InboxAuth,
+    ) -> LanguageResult<()> {
+        self.store.inbox_ack(&address, &id, &auth).await
+    }
+
+    async fn identity_get_record(
+        &mut self,
+        did: String,
+        req: SignedRequest,
+    ) -> LanguageResult<Option<SealedRecord>> {
+        self.store.get_record(&did, &req).await
+    }
+
+    async fn identity_put_record(
+        &mut self,
+        did: String,
+        record: SealedRecord,
+        req: SignedRequest,
+    ) -> LanguageResult<RecordStored> {
+        self.store.put_record(&did, &record, &req).await
+    }
+
+    async fn identity_post_request(
+        &mut self,
+        did: String,
+        post: PostedRequest,
+        req: SignedRequest,
+    ) -> LanguageResult<RequestPosted> {
+        self.store.post_request(&did, &post, &req).await
+    }
+
+    async fn identity_list_requests(
+        &mut self,
+        did: String,
+        since: u64,
+        req: SignedRequest,
+    ) -> LanguageResult<Vec<DeviceRequest>> {
+        self.store.list_requests(&did, since, &req).await
+    }
+
+    async fn identity_delete_request(
+        &mut self,
+        did: String,
+        id: String,
+        req: SignedRequest,
+    ) -> LanguageResult<()> {
+        self.store.delete_request(&did, &id, &req).await
     }
 }
 

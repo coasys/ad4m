@@ -1,13 +1,14 @@
 //! `identity-store`: the shared store of `did:scid:coasys:1` key logs with the offers and
-//! claims of device linking.
+//! claims of device linking, the device inbox, the private details record and the request box.
 //!
 //! One SQLite file holds the hash-chain module's tables (`chain_heads`, `chain_entries`,
 //! `chain_forks`, type `coasys:kel`) and the store's own (`logs`, `heads`, `keys`, `agents`,
-//! `nonces`, `feed`, `offers`, `claims`). The store replays every event with the identity core
-//! before it appends, and commits each append with its head, key-index rows, feed items and
-//! the claim it spends in one transaction (the one-transaction rule of
+//! `nonces`, `feed`, `offers`, `claims`, `inbox`, `records`, `requests`, `buckets`). The store
+//! replays every event with the identity core before it appends, and commits each append with
+//! its head, key-index rows, feed items, the claim it spends and the inbox messages and
+//! requests it ends in one transaction (the one-transaction rule of
 //! `identity-store/AGENTS.md`). It can withhold an event, never forge one: every client checks
-//! the events' own signatures again.
+//! the events' own signatures again. Of inbox messages and records it keeps only ciphertext.
 //!
 //! The store has no brake buckets, vouching notes or sign-up pairing yet:
 //! see [`log::admit_new_log`] for where the brake attaches.
@@ -22,9 +23,13 @@ pub mod agents;
 pub mod db;
 pub mod error;
 pub mod head;
+pub mod inbox;
+pub mod limits;
 pub mod log;
 pub mod offers;
+pub mod private;
 pub mod request;
+pub mod request_box;
 pub mod routes;
 
 pub use error::ApiError;
@@ -54,6 +59,11 @@ pub struct Settings {
     pub feed_token: Option<String>,
     /// `CORS_ORIGINS`: the origins allowed to call from a browser (the auth domain, the web app).
     pub cors_origins: Vec<String>,
+    /// `IDENTITY_BURST`: writes per identity at once (offer opens, inbox writes, record writes,
+    /// request posts), the identity bucket's size (default 5).
+    pub identity_burst: u32,
+    /// `IDENTITY_REFILL_S`: seconds per write the identity bucket refills (default 60).
+    pub identity_refill_s: u64,
 }
 
 impl Default for Settings {
@@ -62,6 +72,8 @@ impl Default for Settings {
             pow_bits: 22,
             feed_token: None,
             cors_origins: Vec::new(),
+            identity_burst: 5,
+            identity_refill_s: 60,
         }
     }
 }
@@ -155,7 +167,22 @@ impl Store {
             }
         }
     }
+
+    /// Deletes the inbox messages and requests whose time has passed, and nonces older than
+    /// their window. `serve` runs it every [`SWEEP_EVERY_S`]; reads never answer an expired
+    /// row in between. Answers the rows it deleted.
+    pub fn sweep(&self) -> Result<usize, ApiError> {
+        let now = db::to_sql(self.now())?;
+        let conn = self.db.lock()?;
+        let mut gone = conn.execute("DELETE FROM inbox WHERE expires <= ?1", [now])?;
+        gone += conn.execute("DELETE FROM requests WHERE expires <= ?1", [now])?;
+        let window = db::to_sql(request::NONCE_WINDOW_S)?;
+        gone += conn.execute("DELETE FROM nonces WHERE seen_at <= ?1 - ?2", [now, window])?;
+        Ok(gone)
+    }
 }
 
 /// The longest `wait` a read accepts: a language's `httpFetch` gives up after 10 s.
 pub const MAX_WAIT_S: u64 = 8;
+/// How often `serve` runs [`Store::sweep`].
+pub const SWEEP_EVERY_S: u64 = 60;

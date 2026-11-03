@@ -1008,8 +1008,8 @@ async fn an_unknown_log_is_not_stored_by_caches() {
 async fn logs_and_heads_are_readable_from_any_origin_and_writes_only_from_the_configured_ones() {
     let t = TestStore::with_settings(Settings {
         pow_bits: 8,
-        feed_token: None,
         cors_origins: vec!["https://app.example".into()],
+        ..Settings::default()
     });
     let alice = Person::new("alice");
     let incept = serde_json::to_vec(&json!({ "events": [alice.json(0)] })).unwrap();

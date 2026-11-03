@@ -279,7 +279,8 @@
     "coasys:pair-key:1",
     "coasys:match",
     "coasys:wrap:1",
-    "coasys:auth:1"
+    "coasys:auth:1",
+    "coasys:record"
   ],
   "refused": [
     {
@@ -304,6 +305,10 @@
     },
     {
       "domain": "coasys:auth:1",
+      "error": "Label"
+    },
+    {
+      "domain": "coasys:record",
       "error": "Label"
     },
     {

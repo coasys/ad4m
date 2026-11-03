@@ -209,7 +209,9 @@ pub async fn holochain_call_typed<T: Serialize + ?Sized>(
 pub fn agent_create_signed_expression_typed<T: Serialize + ?Sized>(
     data: &T,
 ) -> crate::errors::LanguageResult<JsValue> {
-    Ok(agent_create_signed_expression(crate::__serde::to_js(data)?)?)
+    Ok(agent_create_signed_expression(crate::__serde::to_js(
+        data,
+    )?)?)
 }
 
 /// Response from `http_fetch_typed`.
@@ -244,16 +246,16 @@ pub async fn http_fetch_typed(
         .ok()
         .and_then(|b| b.as_string())
         .unwrap_or_default();
-    Ok(HttpFetchResponse { status, body: resp_body })
+    Ok(HttpFetchResponse {
+        status,
+        body: resp_body,
+    })
 }
 
 /// POST a JSON-serializable body to `url` and return the response body as
 /// a String. Sets `Content-Type: application/json` automatically. Returns
 /// `Err` on non-2xx status codes or network failures.
-pub async fn http_post_json<T: Serialize + ?Sized>(
-    url: &str,
-    body: &T,
-) -> Result<String, JsValue> {
+pub async fn http_post_json<T: Serialize + ?Sized>(url: &str, body: &T) -> Result<String, JsValue> {
     let body_s = serde_json::to_string(body)
         .map_err(|e| JsValue::from_str(&format!("http_post_json serialize: {}", e)))?;
     let headers = "{\"Content-Type\":\"application/json\"}";

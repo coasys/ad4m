@@ -15,6 +15,12 @@ import {
     type AppendRequest,
     type Claim,
     type IdentitySpec,
+    type InboxAddress,
+    type InboxMessage,
+    type InboxWrite,
+    type PostedRequest,
+    type PreInboxAuth,
+    type SealedRecord,
     type JsonObject,
     type LogPage,
     type SignedHead,
@@ -62,6 +68,14 @@ const signedOffer: SignedOffer = {
     offer: { scid: "zScid", offerId: "zOffer", kind: "device", commit: "zCommit", expires: 1_700_000_300 },
     by: { keyId: "m1", kelSeq: 1, kelHash: "zHash1" },
     sig: "zOfferSig",
+};
+
+const message: InboxMessage = {
+    id: "zMsg",
+    sealed: "AAAA",
+    writer: { kind: "master", scid: "zScid", keyId: "m1" },
+    storedAt: 1_700_000_000,
+    expires: 1_702_592_000,
 };
 
 const transfer: TokenTransfer = {
@@ -117,6 +131,29 @@ function testLanguage() {
             this.calls.push(["offerState", [did, offerId, key, waitSec]]);
             return { state: "spent", seq: 2 };
         },
+        async inboxPut(address, write, req) {
+            this.calls.push(["inboxPut", [address, write, req]]);
+            return { id: "zMsg", expires: 1_700_000_300 };
+        },
+        async inboxList(address, auth, waitSec) {
+            this.calls.push(["inboxList", [address, auth, waitSec]]);
+            return [message];
+        },
+        async inboxAck(address, id, auth) { this.calls.push(["inboxAck", [address, id, auth]]); },
+        async getRecord(did, req) { this.calls.push(["getRecord", [did, req]]); return null; },
+        async putRecord(did, record, req) {
+            this.calls.push(["putRecord", [did, record, req]]);
+            return { version: record.version };
+        },
+        async postRequest(did, post, req) {
+            this.calls.push(["postRequest", [did, post, req]]);
+            return { id: "zReq" };
+        },
+        async listRequests(did, since, req) {
+            this.calls.push(["listRequests", [did, since, req]]);
+            return [];
+        },
+        async deleteRequest(did, id, req) { this.calls.push(["deleteRequest", [did, id, req]]); },
     };
     const token: TokenSpec & { calls: typeof calls } = {
         calls,
@@ -143,6 +180,9 @@ test("identity and token: flat exports carry the interface's names", () => {
         "identityPowParams", "identityAttachNote", "identityPutAgent",
         "identityOpenOffer", "identityListOffers", "identityCancelOffer",
         "identityClaimOffer", "identityOfferState",
+        "identityInboxPut", "identityInboxList", "identityInboxAck",
+        "identityGetRecord", "identityPutRecord",
+        "identityPostRequest", "identityListRequests", "identityDeleteRequest",
     ];
     const tokenNames = ["tokenAssets", "tokenBalance", "tokenSend", "tokenReceived", "tokenOnTransfer"];
     for (const name of [...identityNames, ...tokenNames]) {
@@ -213,6 +253,36 @@ test("identity: offer and claim calls", async () => {
     assert.deepEqual(await identityClaimOffer!("did:scid:zScid", "zOffer", claim), { state: "claimed", kind: "device", expires: 1_700_000_300 });
     assert.equal(calls.at(-1)![1][2], claim);
     assert.deepEqual(await identityOfferState!("did:scid:zScid", "zOffer", "z6MkNew", 2), { state: "spent", seq: 2 });
+});
+
+test("identity: inbox, record and request-box calls pass their arguments through", async () => {
+    const { lang, calls } = testLanguage();
+    const { identityInboxPut, identityInboxList, identityInboxAck, identityGetRecord,
+        identityPutRecord, identityPostRequest, identityListRequests, identityDeleteRequest } = lang;
+    const pre: InboxAddress = { pre: "zPre" };
+    const joined: InboxAddress = { scid: "zScid", keyId: "d2" };
+    const write: InboxWrite = { sealed: "AAAA", bind: { scid: "zScid", offerId: "zOffer", sign: "z6MkDev", r: "zR" } };
+    assert.deepEqual(await identityInboxPut!(pre, write, request), { id: "zMsg", expires: 1_700_000_300 });
+    assert.equal(calls.at(-1)![1][1], write);
+    const auth: PreInboxAuth = {
+        address: "zPre", sign: "z6MkDev", r: "zR", store: "did:key:z6MkStore", method: "GET", path: "/v1/inbox/pre/zPre",
+        nonce: "zNonce", expires: 1_700_000_060, sig: "zSig",
+    };
+    assert.deepEqual(await identityInboxList!(pre, auth, 8), [message]);
+    assert.deepEqual(calls.at(-1), ["inboxList", [pre, auth, 8]]);
+    await identityInboxAck!(joined, "zMsg", request);
+    assert.deepEqual(calls.at(-1), ["inboxAck", [joined, "zMsg", request]]);
+    assert.equal(await identityGetRecord!("did:scid:zScid", request), null);
+    const record: SealedRecord = { version: 2, wrapped: { d1: "AAAA", recovery: "BBBB" }, recoveryKey: "z6LSRec", nonce: "zN", ciphertext: "CCCC" };
+    assert.deepEqual(await identityPutRecord!("did:scid:zScid", record, request), { version: 2 });
+    assert.equal(calls.at(-1)![1][1], record);
+    const post: PostedRequest = { body: { kind: "confirm-revoke", keyIds: ["d2"], rotate: false }, expires: 5 };
+    assert.deepEqual(await identityPostRequest!("did:scid:zScid", post, request), { id: "zReq" });
+    assert.equal(calls.at(-1)![1][1], post);
+    assert.deepEqual(await identityListRequests!("did:scid:zScid", 7, request), []);
+    assert.deepEqual(calls.at(-1), ["listRequests", ["did:scid:zScid", 7, request]]);
+    await identityDeleteRequest!("did:scid:zScid", "zReq", request);
+    assert.deepEqual(calls.at(-1), ["deleteRequest", ["did:scid:zScid", "zReq", request]]);
 });
 
 test("token: calls and the transfer callback", async () => {

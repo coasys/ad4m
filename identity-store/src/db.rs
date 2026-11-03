@@ -78,6 +78,44 @@ CREATE TABLE IF NOT EXISTS claims (
     claimed_at INTEGER NOT NULL,
     PRIMARY KEY (scid, offer_id)
 );
+CREATE TABLE IF NOT EXISTS inbox (
+    id         TEXT PRIMARY KEY,
+    address    TEXT NOT NULL,
+    scid       TEXT NOT NULL,
+    key_id     TEXT,
+    offer_id   TEXT,
+    writer_key TEXT NOT NULL,
+    sealed     TEXT NOT NULL,
+    stored_at  INTEGER NOT NULL,
+    expires    INTEGER NOT NULL,
+    CHECK ((key_id IS NULL) <> (offer_id IS NULL))
+);
+CREATE INDEX IF NOT EXISTS inbox_address ON inbox(address, stored_at);
+CREATE INDEX IF NOT EXISTS inbox_scid ON inbox(scid);
+CREATE INDEX IF NOT EXISTS inbox_expires ON inbox(expires);
+CREATE TABLE IF NOT EXISTS records (
+    scid      TEXT PRIMARY KEY,
+    sealed    TEXT NOT NULL,
+    version   INTEGER NOT NULL,
+    stored_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS requests (
+    id      TEXT PRIMARY KEY,
+    scid    TEXT NOT NULL,
+    by_key  TEXT NOT NULL,
+    kind    TEXT NOT NULL CHECK (kind IN ('send-master', 'confirm-revoke')),
+    posted  TEXT NOT NULL,
+    signed  TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    expires INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS requests_scid ON requests(scid, created);
+CREATE INDEX IF NOT EXISTS requests_expires ON requests(expires);
+CREATE TABLE IF NOT EXISTS buckets (
+    bucket      TEXT PRIMARY KEY,
+    tokens      INTEGER NOT NULL,
+    refilled_at INTEGER NOT NULL
+);
 ";
 
 /// The store's database.
@@ -207,6 +245,11 @@ pub fn key_owner(conn: &Connection, sign: &str) -> Result<Option<String>, ApiErr
             |row| row.get(0),
         )
         .optional()?)
+}
+
+/// A fresh id for a stored row: 16 random bytes, base58btc.
+pub(crate) fn new_id() -> String {
+    bs58::encode(rand::random::<[u8; 16]>()).into_string()
 }
 
 /// Writes the key-index rows of every key of `state` as they stand at `head_seq`.

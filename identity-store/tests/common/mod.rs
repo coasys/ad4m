@@ -62,12 +62,20 @@ impl TestStore {
         Settings {
             pow_bits: 8,
             feed_token: Some("mirror-token".into()),
-            cors_origins: Vec::new(),
+            ..Settings::default()
         }
     }
 
     pub fn with_settings(settings: Settings) -> TestStore {
         Self::with_key_and_settings(agent::TEST_STORE_SECRET, settings)
+    }
+
+    /// A store whose identity bucket holds `burst` writes, for tests of another limit.
+    pub fn with_identity_burst(burst: u32) -> TestStore {
+        Self::with_settings(Settings {
+            identity_burst: burst,
+            ..Self::settings()
+        })
     }
 
     /// A second store under its own key (the key a person's requests name is the default

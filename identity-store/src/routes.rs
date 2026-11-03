@@ -4,13 +4,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ad4m_identity_core::link::{Claim, SignedOffer};
-use ad4m_ldk::identity::{AgentRecord, AppendRequest, PowParams};
+use ad4m_identity_core::record::SealedRecord;
+use ad4m_identity_core::requests::PostedRequest;
+use ad4m_ldk::identity::{AgentRecord, AppendRequest, InboxWrite, PowParams};
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use rusqlite::params;
 use serde::de::DeserializeOwned;
@@ -19,6 +21,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::db::{from_sql, to_sql};
 use crate::error::ApiError;
+use crate::inbox::{joined_address, pre_text, PRE_INBOX_HEADER};
 use crate::offers::ClaimAnswer;
 use crate::request::{Incoming, Signer, REQUEST_HEADER};
 use crate::{Store, MAX_WAIT_S};
@@ -51,6 +54,7 @@ pub fn router(store: Arc<Store>) -> Router {
         .allow_headers([
             header::CONTENT_TYPE,
             header::HeaderName::from_static(REQUEST_HEADER),
+            header::HeaderName::from_static(PRE_INBOX_HEADER),
         ]);
     // The public did:scid host profile: anyone may read a log and its head from any origin,
     // so a browser or another resolver needs no AD4M. Writes keep the configured origins.
@@ -73,6 +77,19 @@ pub fn router(store: Arc<Store>) -> Router {
         .route("/v1/offers/{scid}/{offer_id}", delete(cancel_offer))
         .route("/v1/offers/{scid}/{offer_id}/claim", post(claim_offer))
         .route("/v1/offers/{scid}/{offer_id}/state", get(offer_state))
+        .route(
+            "/v1/inbox/pre/{address}",
+            put(inbox_put_pre).get(inbox_list_pre),
+        )
+        .route("/v1/inbox/pre/{address}/{id}", delete(inbox_ack_pre))
+        .route(
+            "/v1/inbox/{scid}/{key_id}",
+            put(inbox_put_joined).get(inbox_list_joined),
+        )
+        .route("/v1/inbox/{scid}/{key_id}/{id}", delete(inbox_ack_joined))
+        .route("/v1/private/{scid}", get(get_record).put(put_record))
+        .route("/v1/requests/{scid}", post(post_request).get(list_requests))
+        .route("/v1/requests/{scid}/{id}", delete(delete_request))
         .route("/v1/feed", get(feed))
         .layer(cors)
         .merge(public_reads)
@@ -357,6 +374,168 @@ async fn offer_state(
         })
         .await?;
     ok(changed.unwrap_or(first))
+}
+
+async fn inbox_put_pre(
+    State(store): Shared,
+    Path(address): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    bytes: Result<Bytes, BytesRejection>,
+) -> Answer {
+    let bytes = body(bytes)?;
+    let write: InboxWrite = json_body(&bytes)?;
+    let stored =
+        store.inbox_put_pre(&address, &write, &incoming(&headers, &method, &uri, &bytes))?;
+    Ok((StatusCode::CREATED, Json(stored)).into_response())
+}
+
+async fn inbox_put_joined(
+    State(store): Shared,
+    Path((scid, key_id)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    bytes: Result<Bytes, BytesRejection>,
+) -> Answer {
+    let bytes = body(bytes)?;
+    let write: InboxWrite = json_body(&bytes)?;
+    let stored = store.inbox_put_joined(
+        &scid,
+        &key_id,
+        &write,
+        &incoming(&headers, &method, &uri, &bytes),
+    )?;
+    Ok((StatusCode::CREATED, Json(stored)).into_response())
+}
+
+fn pre_header(headers: &HeaderMap) -> Option<&str> {
+    headers.get(PRE_INBOX_HEADER).and_then(|v| v.to_str().ok())
+}
+
+/// The live messages at `address`; with `wait`, held until one is there or the time is up.
+async fn messages(store: &Store, address: &str, wait: u64) -> Answer {
+    let found = store
+        .wait_for(wait, || {
+            let list = store.inbox_list(address)?;
+            Ok((!list.is_empty()).then_some(list))
+        })
+        .await?;
+    ok(found.unwrap_or_default())
+}
+
+async fn inbox_list_pre(
+    State(store): Shared,
+    Path(address): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Answer {
+    let wait = wait_of(&q)?;
+    store.check_pre_reader(&address, pre_header(&headers), method.as_str(), uri.path())?;
+    messages(&store, &pre_text(&address), wait).await
+}
+
+async fn inbox_list_joined(
+    State(store): Shared,
+    Path((scid, key_id)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Answer {
+    let wait = wait_of(&q)?;
+    store.check_joined_reader(&scid, &key_id, &incoming(&headers, &method, &uri, &[]))?;
+    messages(&store, &joined_address(&scid, &key_id), wait).await
+}
+
+async fn inbox_ack_pre(
+    State(store): Shared,
+    Path((address, id)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Answer {
+    store.check_pre_reader(&address, pre_header(&headers), method.as_str(), uri.path())?;
+    store.inbox_ack(&pre_text(&address), &id)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn inbox_ack_joined(
+    State(store): Shared,
+    Path((scid, key_id, id)): Path<(String, String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Answer {
+    store.check_joined_reader(&scid, &key_id, &incoming(&headers, &method, &uri, &[]))?;
+    store.inbox_ack(&joined_address(&scid, &key_id), &id)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn get_record(
+    State(store): Shared,
+    Path(scid): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Answer {
+    match store.get_record(&scid, &incoming(&headers, &method, &uri, &[]))? {
+        Some(record) => ok(record),
+        None => Err(ApiError::not_found("no record yet")),
+    }
+}
+
+async fn put_record(
+    State(store): Shared,
+    Path(scid): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    bytes: Result<Bytes, BytesRejection>,
+) -> Answer {
+    let bytes = body(bytes)?;
+    let record: SealedRecord = json_body(&bytes)?;
+    ok(store.put_record(&scid, &record, &incoming(&headers, &method, &uri, &bytes))?)
+}
+
+async fn post_request(
+    State(store): Shared,
+    Path(scid): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    bytes: Result<Bytes, BytesRejection>,
+) -> Answer {
+    let bytes = body(bytes)?;
+    let post: PostedRequest = json_body(&bytes)?;
+    let posted = store.post_request(&scid, &post, &incoming(&headers, &method, &uri, &bytes))?;
+    Ok((StatusCode::CREATED, Json(posted)).into_response())
+}
+
+async fn list_requests(
+    State(store): Shared,
+    Path(scid): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Answer {
+    let since = number(&q, "since")?.unwrap_or(0);
+    ok(store.list_requests(&scid, since, &incoming(&headers, &method, &uri, &[]))?)
+}
+
+async fn delete_request(
+    State(store): Shared,
+    Path((scid, id)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Answer {
+    store.delete_request(&scid, &id, &incoming(&headers, &method, &uri, &[]))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// `a == b` in a time that depends on the lengths only, so the feed token cannot be guessed

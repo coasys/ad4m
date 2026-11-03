@@ -49,8 +49,7 @@ impl TestStore {
             system_clock(),
             Settings {
                 pow_bits: 8,
-                feed_token: None,
-                cors_origins: Vec::new(),
+                ..Settings::default()
             },
         );
         Arc::new(TestStore {

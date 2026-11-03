@@ -11,7 +11,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 
 use crate::db::{self, to_sql, KEL};
 use crate::error::ApiError;
-use crate::offers;
+use crate::{inbox, offers};
 use crate::{Fault, Store};
 
 /// Events per append.
@@ -206,8 +206,8 @@ impl Store {
             }
         }
 
-        // The one-transaction rule: the events, the head, the key index, the feed and the spent
-        // claims in one transaction.
+        // The one-transaction rule: the events, the head, the key index, the feed, the spent
+        // claims and the purges in one transaction.
         let entries = events
             .iter()
             .map(|e| StoredEntry::from_entry(e, now))
@@ -255,6 +255,9 @@ impl Store {
         if supersede {
             offers::supersede(&tx, scid, now)?;
         }
+        // The inboxes and requests of keys this append ended, and the messages of a replaced
+        // master, go with it.
+        inbox::purge_ended(&tx, chain.state(), head.seq)?;
         let signed = self.key.sign_head(scid, head.seq, &head.hash, now);
         db::put_head(&tx, &signed)?;
         tx.commit()?;
