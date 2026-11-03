@@ -4,6 +4,10 @@
 #
 # Build args:
 #   INCLUDE_WE=true       — bundle WE web frontend (served on port 8081)
+#   INCLUDE_MODELS=false  — ship local AI in the image: the llama-server and nemo-speech
+#                           runtimes and the models `ai.localInstall` picks (several GB),
+#                           started with the executor, no download at run time
+#   LOCAL_AI_DEVICE=cpu   — the device those builds are for: cpu, cuda, vulkan, rocm
 #   RUN_HOLOCHAIN=true    — include Holochain conductor (false = standalone mode)
 # =============================================================================
 
@@ -11,6 +15,8 @@ ARG RUST_VERSION=1.92
 ARG NODE_MAJOR=24
 ARG GO_VERSION=1.24.6
 ARG INCLUDE_WE=true
+ARG INCLUDE_MODELS=false
+ARG LOCAL_AI_DEVICE=cpu
 
 # =============================================================================
 # Stage 1: Builder
@@ -325,6 +331,30 @@ RUN mkdir -p /flux-dist && \
     fi
 
 # =============================================================================
+# Stage 2b: Local AI runtimes and models (conditional)
+# =============================================================================
+# The executor's own installer (`ad4m-executor local-ai install`): the plan for this
+# build machine held to LOCAL_AI_DEVICE, downloaded and checked against the manifest's
+# sha256s, and the selection the executor starts at run time.
+FROM ubuntu:24.04 AS local-ai-fetcher
+
+ARG INCLUDE_MODELS
+ARG LOCAL_AI_DEVICE
+
+COPY --from=builder /home/builder/ad4m-executor-bin /usr/local/bin/ad4m-executor
+
+RUN mkdir -p /opt/ad4m/local-ai /opt/ad4m/local-ai-state && \
+    if [ "${INCLUDE_MODELS}" = "true" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates libssl3 libgtk-3-0 libwebkit2gtk-4.1-0 \
+        libjavascriptcoregtk-4.1-0 libasound2t64 && \
+      rm -rf /var/lib/apt/lists/* && \
+      ad4m-executor local-ai install \
+        --store /opt/ad4m/local-ai --state /opt/ad4m/local-ai-state \
+        --device "${LOCAL_AI_DEVICE}"; \
+    fi
+
+# =============================================================================
 # Stage 3: Runtime
 # =============================================================================
 FROM ubuntu:24.04 AS runtime
@@ -342,6 +372,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libwebkit2gtk-4.1-0 \
     libjavascriptcoregtk-4.1-0 \
     libasound2t64 \
+    libgomp1 \
+    libzstd1 \
+    zlib1g \
     gosu \
     && rm -rf /var/lib/apt/lists/*
 
@@ -377,6 +410,13 @@ COPY --from=we-builder /flux-dist/ /opt/ad4m/flux-dist/
 RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data \
     && chown -R ad4m:ad4m /opt/ad4m/we-dist/ \
     && chown -R ad4m:ad4m /opt/ad4m/flux-dist/
+
+# Local AI runtimes, models and their selection (empty dirs if INCLUDE_MODELS=false);
+# docker-entrypoint.sh hands them to the executor. Owned by ad4m so a later
+# `ai.localInstall` in the container can add to the store (a chown after the copy would
+# copy the layer again).
+COPY --from=local-ai-fetcher --chown=ad4m:ad4m /opt/ad4m/local-ai/ /opt/ad4m/local-ai/
+COPY --from=local-ai-fetcher --chown=ad4m:ad4m /opt/ad4m/local-ai-state/ /opt/ad4m/local-ai-state/
 
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
