@@ -76,7 +76,7 @@ export const whisperServer: Driver = {
         running.push(s);
         const baseUrl = `http://127.0.0.1:${port}`;
         // It answers 404 on `/` once listening; the model is loaded before it listens.
-        await waitForHttp(`${baseUrl}/`, { timeoutMs: 120_000, ok: () => true, alive: () => s.proc.exitCode === null, label: `whisper-server ${model.modelId}` });
+        await waitForHttp(`${baseUrl}/`, { timeoutMs: 120_000, ok: () => true, alive: s.running, label: `whisper-server ${model.modelId}` });
         const readyMs = Date.now() - started;
         const problem = await servesOpenAiPath(baseUrl);
         if (problem) throw new Error(`whisper-server ${version ?? ""}: ${problem}`);

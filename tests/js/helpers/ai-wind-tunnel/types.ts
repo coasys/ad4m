@@ -11,7 +11,7 @@ export const RECOMMENDATIONS_SCHEMA_VERSION = 1;
 export const SERVICES = ["llm", "completion", "embeddings", "stt", "tts"] as const;
 export type Service = (typeof SERVICES)[number];
 
-export const PROVIDERS = ["ollama", "llama-server", "vllm", "whisper-server", "speaches"] as const;
+export const PROVIDERS = ["ollama", "llama-server", "vllm", "whisper-server", "speaches", "nemo-speech", "sherpa-onnx"] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
 
 /**

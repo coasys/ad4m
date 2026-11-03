@@ -6,7 +6,7 @@
  */
 
 import { PROMPTS, WEATHER_TOOL, loadAudio, loadRetrieval, loadSttFixtures, type LoadedAudio } from "./fixtures.js";
-import { postJson, speech, streamCompletion, transcribe, type StreamResult } from "./http.js";
+import { postJson, speech, streamCompletion, transcribe, transcribeNoHint, type StreamResult } from "./http.js";
 import type { WtExecutor } from "./executor.js";
 import { summarize } from "./stats.js";
 import type { Check, EndpointKindId, Metric, Stat } from "./types.js";
@@ -294,7 +294,7 @@ export async function sttCell(env: CellEnv): Promise<CellOutcome> {
   const checks: Check[] = [];
   const metrics: Record<string, Metric> = {};
   const clips = sttFixtures();
-  const wers: number[] = [], rtf: number[] = [], lat: number[] = [], streamLat: number[] = [], direct: number[] = [];
+  const wers: number[] = [], streamWers: number[] = [], rtf: number[] = [], lat: number[] = [], streamLat: number[] = [], direct: number[] = [];
   let first = true;
   for (const clip of clips) {
     await attempt(checks, `transcribes ${clip.name} (/v1/audio/transcriptions)`, async () => {
@@ -316,11 +316,24 @@ export async function sttCell(env: CellEnv): Promise<CellOutcome> {
         streamLat.push(performance.now() - t0);
         const text = texts.join(" ");
         const w = wer(clip.transcript, text);
+        streamWers.push(w);
         return { pass: w <= clip.maxWer, detail: `WER ${w.toFixed(3)}: ${JSON.stringify(text.trim().slice(0, 160))}`, value: Math.round(w * 1000) / 1000, threshold: clip.maxWer };
       } finally {
         await ex.client.ai.closeTranscriptionStream(streamId).catch(() => {});
       }
     });
+    // Language detection: the stream sends no language hint, so the model decides what it
+    // hears. The noisy clip is where a model mistakes the language; record what it said.
+    if (clip.noise) {
+      try {
+        const r = await transcribeNoHint(ex.v1, env.modelName, clip.wav16k, ex.token);
+        metrics.noisyLanguage = r.value.language ?? "not reported";
+        metrics.noisyNoHintWer = Math.round(wer(clip.transcript, r.value.text) * 1000) / 1000;
+        metrics.noisyNoHintText = r.value.text.trim().slice(0, 200);
+      } catch (e: any) {
+        metrics.noisyLanguage = `failed: ${String(e?.message ?? e).slice(0, 200)}`;
+      }
+    }
     for (let i = 0; i < env.repeat; i++) {
       const r = await transcribe(ex.v1, env.modelName, clip.wav16k, ex.token);
       lat.push(r.ms);
@@ -331,6 +344,8 @@ export async function sttCell(env: CellEnv): Promise<CellOutcome> {
   metrics.wer = summarize(wers);
   // The mean over clips: the median of mostly clean clips is 0 for every model, the mean is not.
   metrics.werMean = wers.length ? Math.round((wers.reduce((a, b) => a + b, 0) / wers.length) * 1000) / 1000 : null;
+  // The same over the SDK stream, which sends no language hint.
+  metrics.streamWerMean = streamWers.length ? Math.round((streamWers.reduce((a, b) => a + b, 0) / streamWers.length) * 1000) / 1000 : null;
   metrics.rtf = summarize(rtf);
   metrics.latencyMs = summarize(lat);
   metrics.streamLatencyMs = summarize(streamLat);

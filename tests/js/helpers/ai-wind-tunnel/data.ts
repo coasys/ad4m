@@ -19,7 +19,7 @@ export interface RuntimeBuild extends RuntimeArchive {
 }
 
 export interface Runtime {
-  provider: "llama-server" | "whisper-server";
+  provider: "llama-server" | "whisper-server" | "nemo-speech" | "sherpa-onnx";
   version: string;
   license?: string;
   source?: string;
@@ -37,6 +37,12 @@ export interface ManifestModel {
   params?: string;
   /** Resident memory when served (weights, context, buffers). */
   memoryBytes: number;
+  /**
+   * Further files the model needs beside `url`, by the role the runtime takes them in
+   * (llama-server: `mmproj`; sherpa-onnx: `decoder`, `joiner`, `tokens`). A model with
+   * files is installed into a directory of its own.
+   */
+  files?: Record<string, RuntimeArchive>;
 }
 
 export interface Manifest {

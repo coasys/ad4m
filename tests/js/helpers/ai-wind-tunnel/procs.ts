@@ -32,6 +32,11 @@ export interface Spawned {
   proc: ChildProcess;
   /** Resolves when the process has exited. */
   exited: Promise<void>;
+  /**
+   * Whether it still runs. A process a signal ended (an abort, a crash) has no exit code,
+   * only a signal code, so `exitCode === null` alone takes it for running.
+   */
+  running(): boolean;
   stop(): Promise<void>;
 }
 
@@ -47,6 +52,7 @@ export function spawnLogged(cmd: string, args: string[], logFile: string, env: R
   const spawned: Spawned = {
     proc,
     exited,
+    running: () => proc.exitCode === null && proc.signalCode === null,
     async stop() {
       live.delete(spawned);
       if (proc.exitCode !== null || proc.signalCode !== null) return;

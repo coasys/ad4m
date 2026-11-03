@@ -72,7 +72,8 @@ async function extract(archive: string, into: string): Promise<void> {
     if (process.platform === "linux") await execFileP("unzip", ["-o", "-q", archive, "-d", into]);
     else await execFileP("tar", ["-xf", archive, "-C", into]);
   } else {
-    await execFileP("tar", ["-xzf", archive, "-C", into]);
+    // GNU tar and bsdtar both tell gzip from bzip2 themselves.
+    await execFileP("tar", ["-xf", archive, "-C", into]);
   }
 }
 
@@ -98,7 +99,21 @@ export async function installRuntime(manifest: Manifest, id: string, build: stri
 
 /** The file of manifest model `modelId`, downloaded into the cache. */
 export async function installModel(manifest: Manifest, modelId: string, log: (s: string) => void): Promise<string> {
+  return (await installModelFiles(manifest, modelId, log)).file;
+}
+
+/**
+ * Manifest model `modelId` with its further files (`files`, by role), downloaded into the
+ * cache. A model with further files gets a directory of its own: their names (`tokens.txt`,
+ * `decoder.int8.onnx`) are not unique across models.
+ */
+export async function installModelFiles(manifest: Manifest, modelId: string, log: (s: string) => void): Promise<{ file: string; files: Record<string, string> }> {
   const m = manifest.models[modelId];
   if (!m) throw new Error(`the manifest has no model '${modelId}'`);
-  return fetchVerified(m, path.join(cacheDir(), "models", path.basename(new URL(m.url).pathname)), log);
+  const dir = m.files ? path.join(cacheDir(), "models", modelId) : path.join(cacheDir(), "models");
+  const at = (url: string) => path.join(dir, path.basename(new URL(url).pathname));
+  const file = await fetchVerified(m, at(m.url), log);
+  const files: Record<string, string> = {};
+  for (const [role, f] of Object.entries(m.files ?? {})) files[role] = await fetchVerified(f, at(f.url), log);
+  return { file, files };
 }

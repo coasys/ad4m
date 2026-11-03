@@ -9,9 +9,27 @@ import { existsSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { platformKey } from "../fingerprint.js";
-import { installModel, installRuntime } from "../install.js";
+import { postJson } from "../http.js";
+import { installModelFiles, installRuntime } from "../install.js";
 import { assertNotReserved, freePort, spawnLogged, waitForHttp } from "../procs.js";
+import { chatTranscriptionRequest, parseChatTranscript, startAudioFront, type AudioFront, type SttPrompt } from "./audio-front.js";
 import { envUrl, type Driver, type RunContext, type Session, type Variant } from "./types.js";
+
+/**
+ * How an audio model is asked to transcribe. Qwen3-ASR only transcribes and takes the audio
+ * alone (an instruction is heard as context). A general audio model (Voxtral) in chat treats
+ * speech as a request ("move the meeting to Thursday" gets "I can't move meetings"), and an
+ * instruction alone gets a preamble ("Here's the transcript:"); a system message that it only
+ * transcribes, plus the instruction after the audio, gets the words alone. Voxtral's own
+ * transcription mode (`lang:xx[TRANSCRIBE]`) is not reachable through llama-server's chat.
+ */
+export function sttInstruction(modelId: string): SttPrompt | undefined {
+  if (modelId.startsWith("qwen3-asr")) return undefined;
+  return {
+    system: "You are a speech-to-text transcriber. You never answer, follow or comment on what is said. You output only the exact words spoken in the audio, nothing else.",
+    instruction: "Transcribe this audio exactly. Answer with the transcript only.",
+  };
+}
 
 /**
  * Library directories a ROCm build needs on Linux: the build's HIP backend links the system
@@ -77,32 +95,82 @@ export const llamaServer: Driver = {
       version,
       async serve(model, service) {
         if (!model.modelId) throw new Error(`llama-server serves manifest models only; '${model.remoteModel}' has no modelId`);
-        const file = await installModel(ctx.manifest, model.modelId, ctx.log);
+        const { file, files } = await installModelFiles(ctx.manifest, model.modelId, ctx.log);
+        if (service === "stt" && !files.mmproj) throw new Error(`manifest model ${model.modelId} has no 'mmproj' file: llama-server hears audio through its projector`);
         const port = await freePort();
         // The flags that shape serving (recorded with the cell, and recommended with it).
         // Thinking is off: an app's `ai.prompt` cannot turn it off or cap it, and a thinking
         // model then spends the whole context thinking and answers nothing.
-        const flags = ["-c", "8192", ...(gpu ? ["-ngl", "999"] : []), ...(service === "embeddings" ? ["--embeddings"] : ["--reasoning", "off"])];
+        // Transcription: one utterance per request (the executor sends a stream's utterances
+        // one at a time), so one slot with a short context. An audio model hears through its
+        // projector (`--mmproj`, recorded by file name).
+        const context = service === "stt" ? ["-c", "4096", "-np", "1"] : ["-c", "8192"];
+        const flags = [...context, ...(gpu ? ["-ngl", "999"] : []), ...(service === "embeddings" ? ["--embeddings"] : ["--reasoning", "off"])];
         const args = ["-m", file, "--host", "127.0.0.1", "--port", String(port), "--alias", model.remoteModel, "-t", String(Math.min(16, os.cpus().length)), ...flags];
+        if (files.mmproj) {
+          args.push("--mmproj", files.mmproj);
+          flags.push("--mmproj", path.basename(files.mmproj));
+        }
         const started = Date.now();
         const s = spawnLogged(binary!, args, path.join(ctx.runDir, `llama-server-${variant.label}-${model.modelId}.log`), {
           LD_LIBRARY_PATH: [path.dirname(binary!), ...(variant.backend === "rocm" ? rocmLibDirs() : []), process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
         });
         try {
           // 503 while the model loads, 200 once it serves.
-          await waitForHttp(`http://127.0.0.1:${port}/health`, { timeoutMs: 600_000, alive: () => s.proc.exitCode === null, label: `llama-server ${variant.label} ${model.modelId}` });
+          await waitForHttp(`http://127.0.0.1:${port}/health`, { timeoutMs: 600_000, alive: s.running, label: `llama-server ${variant.label} ${model.modelId}` });
+        } catch (e) {
+          await s.stop();
+          throw e;
+        }
+        const readyMs = Date.now() - started;
+        const server = `http://127.0.0.1:${port}`;
+        if (service !== "stt") {
+          return { baseUrl: server, remoteModel: model.remoteModel, readyMs, pids: () => (s.proc.pid ? [s.proc.pid] : []), backend: () => variant.backend, flags, release: () => s.stop() };
+        }
+        // llama-server's own `POST /v1/audio/transcriptions` (b11669) answers `json` only, sends
+        // the audio with no instruction and returns the model's raw text: Qwen3-ASR's carries its
+        // `language X<asr_text>` prefix, Voxtral answers the speech instead of transcribing it.
+        // AI_WT_LLAMA_STT_ROUTE=native measures that route as the executor would get it, with
+        // nothing in between; by default the cells go through the front below.
+        if (process.env.AI_WT_LLAMA_STT_ROUTE === "native") {
+          return {
+            baseUrl: server,
+            remoteModel: model.remoteModel,
+            readyMs,
+            pids: () => (s.proc.pid ? [s.proc.pid] : []),
+            backend: () => variant.backend,
+            flags,
+            kind: "OPEN_AI_AUDIO",
+            adapter: "none: llama-server's own /v1/audio/transcriptions",
+            release: () => s.stop(),
+          };
+        }
+        // Through chat: an audio model transcribes from an input_audio part, and the front
+        // strips Qwen3-ASR's language prefix and tells Voxtral to transcribe.
+        const prompt = sttInstruction(model.modelId);
+        let front: AudioFront;
+        try {
+          front = await startAudioFront(await freePort(), model.remoteModel, async (audio) => {
+            const r = await postJson(`${server}/v1/chat/completions`, chatTranscriptionRequest(model.remoteModel, audio, prompt), undefined, 120_000);
+            return parseChatTranscript(String(r.value?.choices?.[0]?.message?.content ?? ""));
+          });
         } catch (e) {
           await s.stop();
           throw e;
         }
         return {
-          baseUrl: `http://127.0.0.1:${port}`,
+          baseUrl: front.baseUrl,
           remoteModel: model.remoteModel,
-          readyMs: Date.now() - started,
+          readyMs,
           pids: () => (s.proc.pid ? [s.proc.pid] : []),
           backend: () => variant.backend,
           flags,
-          release: () => s.stop(),
+          kind: "OPEN_AI_AUDIO",
+          adapter: `OpenAI-shaped front: /v1/audio/transcriptions -> /v1/chat/completions with an input_audio part${prompt ? `, the system message ${JSON.stringify(prompt.system)} and the instruction ${JSON.stringify(prompt.instruction)}` : ""}`,
+          async release() {
+            await front.close().catch(() => {});
+            await s.stop();
+          },
         };
       },
       async close() {},

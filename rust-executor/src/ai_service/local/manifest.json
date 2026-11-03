@@ -138,6 +138,100 @@
           "binary": "Release/whisper-server.exe"
         }
       }
+    },
+    "nemo-speech": {
+      "provider": "nemo-speech",
+      "version": "0.3.0",
+      "license": "Apache-2.0",
+      "source": "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/tag/v0.3.0",
+      "builds": {
+        "linux-x64-cpu": {
+          "url": "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v0.3.0/nemo-speech-0.3.0-linux-x86_64-cpu.tar.gz",
+          "sha256": "255f12b722ab15b2a38a51cf125d56e3fa97058b528f7e895b39d6a473deb06e",
+          "sizeBytes": 9605101,
+          "binary": "nemo-speech-0.3.0-linux-x86_64-cpu/bin/nemo-speech"
+        },
+        "linux-x64-vulkan": {
+          "url": "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v0.3.0/nemo-speech-0.3.0-linux-x86_64-vulkan.tar.gz",
+          "sha256": "2a8b2ca4610b6ea5d659ba10794526f6e5a77fb1623d52c35272a9fd1f74abac",
+          "sizeBytes": 19482397,
+          "binary": "nemo-speech-0.3.0-linux-x86_64-vulkan/bin/nemo-speech"
+        },
+        "linux-x64-cuda": {
+          "url": "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v0.3.0/nemo-speech-0.3.0-linux-x86_64-cuda.tar.gz",
+          "sha256": "eca00a1f67d3ca200ddba11dd71c4f3d67e044cc0939d17d073978e40b995917",
+          "sizeBytes": 703984313,
+          "binary": "nemo-speech-0.3.0-linux-x86_64-cuda/bin/nemo-speech"
+        },
+        "linux-arm64-cpu": {
+          "url": "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v0.3.0/nemo-speech-0.3.0-linux-aarch64-cpu.tar.gz",
+          "sha256": "56858eaf50d19b05902c043f65d0057352bdc107ae380c41053bfbddfc204bf1",
+          "sizeBytes": 9064856,
+          "binary": "nemo-speech-0.3.0-linux-aarch64-cpu/bin/nemo-speech"
+        },
+        "linux-arm64-vulkan": {
+          "url": "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v0.3.0/nemo-speech-0.3.0-linux-aarch64-vulkan.tar.gz",
+          "sha256": "0de233655dd579117f8f0cfd6c9dc77fe53bf11673cc44b5c42017a1fb2b8140",
+          "sizeBytes": 18935014,
+          "binary": "nemo-speech-0.3.0-linux-aarch64-vulkan/bin/nemo-speech"
+        },
+        "macos-arm64-metal": {
+          "url": "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v0.3.0/nemo-speech-0.3.0-macos-aarch64-metal.tar.gz",
+          "sha256": "2b972ed8b5dba07492212acf8cb75cbf34ecb141198ffa1997febe84b7c4d9ed",
+          "sizeBytes": 7239335,
+          "binary": "nemo-speech-0.3.0-macos-aarch64-metal/bin/nemo-speech"
+        },
+        "macos-arm64-cpu": {
+          "url": "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v0.3.0/nemo-speech-0.3.0-macos-aarch64-cpu.tar.gz",
+          "sha256": "2c3a7a719b778daeb14f147e011891f16e4b2ac62388d8b8d8b365cc2eebdf15",
+          "sizeBytes": 6895976,
+          "binary": "nemo-speech-0.3.0-macos-aarch64-cpu/bin/nemo-speech"
+        },
+        "macos-x64-cpu": {
+          "url": "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v0.3.0/nemo-speech-0.3.0-macos-x86_64-cpu.tar.gz",
+          "sha256": "97e98aa5eb82dffa4f513f26336b5301d792c9fb43f720ac8f9520a0e92ffe3f",
+          "sizeBytes": 7742012,
+          "binary": "nemo-speech-0.3.0-macos-x86_64-cpu/bin/nemo-speech"
+        }
+      }
+    },
+    "sherpa-onnx": {
+      "provider": "sherpa-onnx",
+      "version": "v2.0.1",
+      "license": "Apache-2.0",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/tag/v2.0.1",
+      "builds": {
+        "linux-x64-cpu": {
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-linux-x64-shared-no-tts.tar.bz2",
+          "sha256": "b3b095f619059d54914027ff38f8a0a132ea3bbc5df32a212a9743a8bd1467b2",
+          "sizeBytes": 25289904,
+          "binary": "sherpa-onnx-v2.0.1-linux-x64-shared-no-tts/bin/sherpa-onnx-offline-websocket-server"
+        },
+        "linux-x64-cuda": {
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-cuda-12.x-cudnn-9.x-onnxruntime1.28.2-linux-x64-gpu.tar.bz2",
+          "sha256": "2aa541a65c1e7d921a053283419b70b30c1f6ae0a0f52f64b947ebe88c5f2a77",
+          "sizeBytes": 393636488,
+          "binary": "sherpa-onnx-v2.0.1-cuda-12.x-cudnn-9.x-onnxruntime1.28.2-linux-x64-gpu/bin/sherpa-onnx-offline-websocket-server"
+        },
+        "linux-arm64-cpu": {
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-linux-aarch64-shared-cpu.tar.bz2",
+          "sha256": "a8fc9fb3940d1aa3f83136767742b05068f00253f560d53c4f5aeb75ab4cb350",
+          "sizeBytes": 27889232,
+          "binary": "sherpa-onnx-v2.0.1-linux-aarch64-shared-cpu/bin/sherpa-onnx-offline-websocket-server"
+        },
+        "macos-arm64-cpu": {
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-osx-arm64-shared-no-tts.tar.bz2",
+          "sha256": "4fcc6c77c8d8d2e2f04cfdc17c6fd224c01469b78529370eb9d8e0e5ec97ac79",
+          "sizeBytes": 18663994,
+          "binary": "sherpa-onnx-v2.0.1-osx-arm64-shared-no-tts/bin/sherpa-onnx-offline-websocket-server"
+        },
+        "macos-x64-cpu": {
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-osx-x64-shared-no-tts.tar.bz2",
+          "sha256": "029b5ea0a4bd2f0c034a337c0043019323fd06491728d7fc712592e3b558be52",
+          "sizeBytes": 21058330,
+          "binary": "sherpa-onnx-v2.0.1-osx-x64-shared-no-tts/bin/sherpa-onnx-offline-websocket-server"
+        }
+      }
     }
   },
   "models": {
@@ -200,6 +294,104 @@
       "license": "MIT",
       "params": "74M",
       "memoryBytes": 300000000
+    },
+    "parakeet-tdt-0.6b-v3-q8_0": {
+      "service": "stt",
+      "provider": "nemo-speech",
+      "url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/541d1f99c6b0c3cd0b11a95167540bb8edefd82b/parakeet-tdt-0.6b-v3.q8_0.gguf",
+      "sha256": "e3880d0aaaaf2c308ea2c35016b2b895c423eb3fda924c1b463d1c19b7f4d32e",
+      "sizeBytes": 713975456,
+      "license": "CC-BY-4.0",
+      "params": "0.6B",
+      "memoryBytes": 800000000
+    },
+    "nemotron-3.5-asr-streaming-0.6b-q8_0": {
+      "service": "stt",
+      "provider": "nemo-speech",
+      "url": "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b/resolve/ea30d66debe3740a08b573244286791d423d6b3e/nemotron-3.5-asr-streaming-0.6b.q8_0.gguf",
+      "sha256": "3fc991d3badad7277c11030a7519832cddaf2057aafed6d4b25147e953a070b1",
+      "sizeBytes": 742090464,
+      "license": "OpenMDW-1.1",
+      "params": "0.6B",
+      "memoryBytes": 800000000
+    },
+    "parakeet-tdt-0.6b-v3-int8-onnx": {
+      "service": "stt",
+      "provider": "sherpa-onnx",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/encoder.int8.onnx",
+      "sha256": "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247",
+      "sizeBytes": 652184281,
+      "files": {
+        "decoder": {
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/decoder.int8.onnx",
+          "sha256": "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e",
+          "sizeBytes": 11845275
+        },
+        "joiner": {
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/joiner.int8.onnx",
+          "sha256": "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3",
+          "sizeBytes": 6355277
+        },
+        "tokens": {
+          "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/tokens.txt",
+          "sha256": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
+          "sizeBytes": 93939
+        }
+      },
+      "license": "CC-BY-4.0",
+      "params": "0.6B",
+      "memoryBytes": 2000000000
+    },
+    "qwen3-asr-0.6b-q8_0": {
+      "service": "stt",
+      "provider": "llama-server",
+      "url": "https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/928ab958557df9aa2ef1c93e0e83c7ad0933fae2/Qwen3-ASR-0.6B-Q8_0.gguf",
+      "sha256": "bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971",
+      "sizeBytes": 804749248,
+      "files": {
+        "mmproj": {
+          "url": "https://huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF/resolve/928ab958557df9aa2ef1c93e0e83c7ad0933fae2/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
+          "sha256": "41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d",
+          "sizeBytes": 214392480
+        }
+      },
+      "license": "Apache-2.0",
+      "params": "0.6B",
+      "memoryBytes": 1500000000
+    },
+    "qwen3-asr-1.7b-q8_0": {
+      "service": "stt",
+      "provider": "llama-server",
+      "url": "https://huggingface.co/ggml-org/Qwen3-ASR-1.7B-GGUF/resolve/36a678687ba7d07a74ca70ccb0e36902e005fb80/Qwen3-ASR-1.7B-Q8_0.gguf",
+      "sha256": "58e22d0532d4eacaf034cfac17a6fed159f37c41390c710186783be439d1fc57",
+      "sizeBytes": 2165034944,
+      "files": {
+        "mmproj": {
+          "url": "https://huggingface.co/ggml-org/Qwen3-ASR-1.7B-GGUF/resolve/36a678687ba7d07a74ca70ccb0e36902e005fb80/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf",
+          "sha256": "46c1d533af3f354ceb37ce855dbceff7da7fa7cf1e6a523df3b13440bd164c0d",
+          "sizeBytes": 355709344
+        }
+      },
+      "license": "Apache-2.0",
+      "params": "1.7B",
+      "memoryBytes": 3200000000
+    },
+    "voxtral-mini-3b-2507-q4_k_m": {
+      "service": "stt",
+      "provider": "llama-server",
+      "url": "https://huggingface.co/ggml-org/Voxtral-Mini-3B-2507-GGUF/resolve/20616573013f28229fff61de74359d3eeff61f6a/Voxtral-Mini-3B-2507-Q4_K_M.gguf",
+      "sha256": "4705be8ec22ca23d12632f4b4a3691faa95917d90a06d3cf3c3ec0e91958f1a8",
+      "sizeBytes": 2473001920,
+      "files": {
+        "mmproj": {
+          "url": "https://huggingface.co/ggml-org/Voxtral-Mini-3B-2507-GGUF/resolve/20616573013f28229fff61de74359d3eeff61f6a/mmproj-Voxtral-Mini-3B-2507-Q8_0.gguf",
+          "sha256": "4f24c4ef3ce929d02ed9d1cfb050ae9a7365f057c0ddec0d489580982ebe0d02",
+          "sizeBytes": 715714080
+        }
+      },
+      "license": "Apache-2.0",
+      "params": "3B",
+      "memoryBytes": 4000000000
     }
   }
 }
