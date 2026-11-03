@@ -7,7 +7,6 @@ use std::time::Duration;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
-use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
 use crate::perspectives::model_query::QueryClasses;
 use crate::perspectives::perspective_instance::{
@@ -92,11 +91,7 @@ fn rehydrate_perspective_from_backend(uuid: &str) -> Result<Option<PerspectiveIn
     };
 
     // Store in local DB
-    Ad4mDb::global_instance()
-        .lock()
-        .expect("Couldn't get write lock on Ad4mDb")
-        .as_ref()
-        .expect("Ad4mDb not initialized")
+    crate::db_backend::db_backend()
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
@@ -138,16 +133,19 @@ pub(crate) async fn get_perspective_with_access(
 /// Refuses a write whose managed agent's account has no credits left. `agent_did` is the
 /// managed agent the request acts as; the main agent pays nothing.
 pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    let global_free = crate::db_backend::db_backend()
+        .get_free_hosting_enabled()
+        .unwrap_or(true);
     if global_free {
         return Ok(());
     }
     if let Some(did) = agent_did {
-        let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(did))
+        let free = crate::db_backend::db_backend()
+            .get_agent_free_access(did)
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
-            let credits = Ad4mDb::with_global_instance(|db| db.get_agent_credits(did))
+            let credits = crate::db_backend::db_backend()
+                .get_agent_credits(did)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             if credits <= 0.0 {
                 return Err(WsRpcError::forbidden("Insufficient compute credits"));
@@ -158,19 +156,20 @@ pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
 }
 
 fn reserve_credits(agent_did: Option<&str>, amount: f64) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    let global_free = crate::db_backend::db_backend()
+        .get_free_hosting_enabled()
+        .unwrap_or(true);
     if global_free {
         return Ok(());
     }
     if let Some(did) = agent_did {
-        let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(did))
+        let free = crate::db_backend::db_backend()
+            .get_agent_free_access(did)
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
-            let email = Ad4mDb::with_global_instance(|db| {
-                db.deduct_agent_credits_if_available(did, amount)
-            })
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            let email = crate::db_backend::db_backend()
+                .deduct_agent_credits_if_available(did, amount)
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
             mark_credits_dirty(&email);
         }
     }
