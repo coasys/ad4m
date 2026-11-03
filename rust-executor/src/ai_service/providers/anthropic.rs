@@ -358,7 +358,9 @@ impl AnthropicChat {
             .json(body)
             .send()
             .await
-            .map_err(|e| anyhow!("Error connecting to remote LLM API: {:?}", e))?;
+            .map_err(|e| {
+                super::http::UpstreamUnreachable::new(&self.endpoint, &e, &self.api_key)
+            })?;
 
         let status = response.status();
         if !status.is_success() {

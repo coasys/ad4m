@@ -71,6 +71,7 @@ async fn a_streamed_utterance_is_accepted_and_answered() {
         .open_remote_stream(
             "e2e".into(),
             model,
+            "e2e-endpoint".into(),
             Arc::new(client),
             None,
             "did:key:e2e".into(),

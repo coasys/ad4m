@@ -209,8 +209,9 @@ async fn delete_upstream_model(
     Ok(Value::Bool(true))
 }
 
-/// The answer to a refused model write: the caller's mistake (an endpoint that does not
-/// exist, an empty remote model, an endpoint that cannot serve the type) is a bad request.
+/// The answer to a refused model or task write: the caller's mistake (an endpoint that does
+/// not exist, an empty remote model, an endpoint that cannot serve the type, a task on a
+/// model that is not an LLM) is a bad request.
 fn model_error(e: anyhow::Error) -> WsRpcError {
     if e.downcast_ref::<crate::db::InvalidModel>().is_some() {
         WsRpcError::bad_request(e.to_string())
@@ -352,7 +353,7 @@ async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     let result = service
         .add_task(task, ctx.user_did())
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(model_error)?;
 
     Ok(serde_json::to_value(result)?)
 }
@@ -368,10 +369,7 @@ async fn update_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let result = service
-        .update_task(task)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let result = service.update_task(task).await.map_err(model_error)?;
 
     Ok(serde_json::to_value(result)?)
 }
@@ -393,6 +391,41 @@ async fn remove_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
 
 // ── Prompt & Embed ──
 
+/// The answer to a failed prompt or embed. A managed user does not read endpoints
+/// (`ai.endpoints` refuses them, and their model statuses carry no detail), so the URLs of
+/// the endpoints leave the message they get: a provider's "could not reach" error names
+/// the URL it called.
+fn upstream_failure(e: &anyhow::Error, ctx: &RequestContext) -> WsRpcError {
+    if e.downcast_ref::<crate::db::InvalidModel>().is_some() {
+        // The task's model is not an LLM: no endpoint was called.
+        return WsRpcError::bad_request(e.to_string());
+    }
+    let message = e.to_string();
+    if ctx.user_did().is_none() {
+        return WsRpcError::internal(message);
+    }
+    let endpoints = Ad4mDb::with_global_instance(|db| db.get_endpoints()).unwrap_or_default();
+    WsRpcError::internal(without_endpoint_urls(&message, &endpoints))
+}
+
+/// `message` with each endpoint's base URL, and then its origin (a provider calls paths
+/// under it), replaced by a neutral phrase.
+fn without_endpoint_urls(message: &str, endpoints: &[crate::types::Endpoint]) -> String {
+    const REPLACEMENT: &str = "<the model's endpoint>";
+    let mut message = message.to_string();
+    for endpoint in endpoints {
+        let base = endpoint.base_url.as_str().trim_end_matches('/').to_string();
+        let origin = endpoint.base_url.origin();
+        let origin = origin.is_tuple().then(|| origin.ascii_serialization());
+        for needle in std::iter::once(base).chain(origin) {
+            if !needle.is_empty() {
+                message = message.replace(&needle, REPLACEMENT);
+            }
+        }
+    }
+    message
+}
+
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_compute_credits_ws(ctx.user_did())?;
 
@@ -408,7 +441,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     let result = service
         .prompt(task_id, body.prompt, ctx.user_did().map(str::to_string))
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| upstream_failure(&e, &ctx))?;
 
     Ok(Value::String(result.text))
 }
@@ -426,7 +459,7 @@ async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     let embedding = service
         .embed(body.model_id, body.text, ctx.user_did().map(str::to_string))
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| upstream_failure(&e, &ctx))?;
 
     let json_string = serde_json::to_string(&embedding.embeddings)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -899,6 +932,51 @@ mod model_view_tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, 400, "{}", err.message);
+    }
+
+    // A task on a model that is not an LLM is the caller's mistake, as the other refusals of
+    // a model's type are: 400, not "No LLM with id … is loaded" as a 500.
+    #[tokio::test]
+    async fn a_task_on_a_model_that_is_not_an_llm_is_a_bad_request() {
+        let (endpoint, _) = model_on_a_keyed_endpoint();
+        AIService::init_global_instance().await.unwrap();
+        let (embedding, task_id) = Ad4mDb::with_global_instance(|db| {
+            let embedding = db.add_model(&ModelInput {
+                name: "Embed".to_string(),
+                model_type: ModelType::Embedding,
+                endpoint_id: endpoint.id.clone(),
+                remote_model: "bge-m3".to_string(),
+                native_tools: None,
+            })?;
+            // A task stored before its model became an embedding model.
+            let task_id = db.add_task(
+                "t".into(),
+                embedding.clone(),
+                String::new(),
+                vec![],
+                None,
+                None,
+            )?;
+            Ok::<_, anyhow::Error>((embedding, task_id))
+        })
+        .unwrap();
+        AIService::global_instance()
+            .await
+            .unwrap()
+            .load()
+            .await
+            .unwrap();
+        let ctx = Arc::new(RequestContext::operator_for_test());
+
+        let task = serde_json::json!({ "task": {
+            "name": "t", "modelId": embedding, "systemPrompt": "", "promptExamples": []
+        } });
+        let added = add_task(task, ctx.clone()).await.unwrap_err();
+        assert_eq!(added.code, 400, "ai.addTask: {}", added.message);
+
+        let prompt = serde_json::json!({ "taskId": task_id, "prompt": "hi" });
+        let prompted = ai_prompt(prompt, ctx).await.unwrap_err();
+        assert_eq!(prompted.code, 400, "ai.prompt: {}", prompted.message);
     }
 }
 

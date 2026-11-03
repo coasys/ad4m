@@ -21,9 +21,9 @@ use crate::types::{ModelType, TranscriptionTextFilter};
 /// What every feed carries: 16 kHz mono `f32`.
 pub(crate) const SAMPLE_RATE: u32 = 16_000;
 
-/// The client of the endpoint that serves transcription model `model_id`, and the id the
-/// endpoint knows the model by.
-pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<(OpenAiTranscribe, String)> {
+/// The client of the endpoint that serves transcription model `model_id`, the id the
+/// endpoint knows the model by, and the endpoint's id.
+pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<(OpenAiTranscribe, String, String)> {
     let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.to_string()))?
         .ok_or_else(|| anyhow!("No transcription model has the id '{model_id}'"))?;
     if model.model_type != ModelType::Transcription {
@@ -42,6 +42,7 @@ pub(crate) fn endpoint_transcriber(model_id: &str) -> Result<(OpenAiTranscribe, 
     Ok((
         OpenAiTranscribe::for_endpoint(&endpoint)?,
         model.remote_model,
+        endpoint.id,
     ))
 }
 
@@ -118,6 +119,8 @@ pub(super) struct RemoteStream {
     pub model_id: String,
     /// The id the upstream knows.
     pub remote_model: String,
+    /// The endpoint `client` calls.
+    pub endpoint_id: String,
     pub client: Arc<dyn RemoteTranscribe>,
     pub agent_did: Option<String>,
     pub user_did: String,
@@ -135,8 +138,9 @@ impl RemoteStream {
         log::info!("Transcription stream {} closed", self.stream_id);
     }
 
-    /// One upstream call. A failure is logged and returned to the feed; nothing is
-    /// published or billed.
+    /// One upstream call. A failure is logged, acted on for the endpoint
+    /// (`endpoints::after_failed_request`) and returned to the feed; no text is published
+    /// or billed.
     async fn transcribe(&self, samples: Vec<f32>) -> Result<()> {
         if samples.is_empty() {
             return Ok(());
@@ -160,6 +164,7 @@ impl RemoteStream {
                     self.stream_id,
                     self.remote_model
                 );
+                super::endpoints::after_failed_request(&self.endpoint_id, &self.remote_model, &e);
                 return Err(anyhow!(TranscribeFailure::of(&e).to_string()));
             }
         };

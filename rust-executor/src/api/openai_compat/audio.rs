@@ -81,7 +81,7 @@ pub async fn transcriptions(
         file.ok_or_else(|| OpenAIError::invalid_request("Missing required form field: file"))?;
     let model_id = resolve_model(&model, ModelType::Transcription).await?;
     // The model resolved: what is left to refuse is an endpoint that cannot transcribe.
-    let (client, remote_model) = transcription::endpoint_transcriber(&model_id)
+    let (client, remote_model, _endpoint_id) = transcription::endpoint_transcriber(&model_id)
         .map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
 
     if let Some(agent_did) = auth.user_did() {
