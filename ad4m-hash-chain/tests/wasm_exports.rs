@@ -3,7 +3,7 @@
 
 use ad4m_hash_chain::wasm::{compare_js, entry_hash_js};
 use serde_json::{json, Value};
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::wasm_bindgen_test;
 
 fn js(value: &Value) -> JsValue {
@@ -62,6 +62,38 @@ fn compare_export_throws_a_chain_error_code_for_non_string_hashes() {
         assert_eq!(rust(&err)["code"], "malformed", "{bad}");
         let err = compare_js(list(&["Qma"]), js(&bad), 0.0, "c".into()).unwrap_err();
         assert_eq!(rust(&err)["code"], "malformed", "{bad}");
+    }
+}
+
+/// What the caller's JavaScript throws while the list is read reaches it as `malformed`.
+#[wasm_bindgen_test]
+fn compare_export_throws_a_chain_error_code_when_reading_the_list_throws() {
+    use js_sys::{Array, Function, Object, Proxy, Reflect, Symbol};
+    let thrower = Function::new_no_args("throw new Error('boom')");
+    // An array whose iterator throws.
+    let iterator = Array::of1(&"Qma".into());
+    Reflect::set(&iterator, &Symbol::iterator(), &thrower).unwrap();
+    // A Proxy of an array whose `get` trap throws (Array.from reads Symbol.iterator).
+    let handler = Object::new();
+    Reflect::set(&handler, &"get".into(), &thrower).unwrap();
+    let trapped = Proxy::new(&Array::of1(&"Qma".into()), &handler);
+    // A revoked Proxy: Array.isArray itself throws.
+    let revocable = Proxy::revocable(&Array::new(), &Object::new());
+    let revoked = Reflect::get(&revocable, &"proxy".into()).unwrap();
+    Reflect::get(&revocable, &"revoke".into())
+        .unwrap()
+        .unchecked_into::<Function>()
+        .call0(&JsValue::UNDEFINED)
+        .unwrap();
+    for (name, bad) in [
+        ("iterator", JsValue::from(iterator)),
+        ("trap", JsValue::from(trapped)),
+        ("revoked", revoked),
+    ] {
+        let err = compare_js(bad.clone(), list(&["Qma"]), 0.0, "c".into()).unwrap_err();
+        assert_eq!(rust(&err)["code"], "malformed", "{name}");
+        let err = compare_js(list(&["Qma"]), bad, 0.0, "c".into()).unwrap_err();
+        assert_eq!(rust(&err)["code"], "malformed", "{name}");
     }
 }
 

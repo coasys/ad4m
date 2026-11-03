@@ -6,7 +6,9 @@
 //! `chain_forks(type, chain, seq, ours, theirs, theirs_json, seen_at)`.
 
 use async_trait::async_trait;
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -145,6 +147,36 @@ impl SqliteChainStore {
     }
 }
 
+/// The error of the head-row write. A deferred transaction that read before another
+/// connection committed cannot write (`SQLITE_BUSY_SNAPSHOT`), and its own snapshot still
+/// shows the old head; so the head is read on a fresh read-only connection to the same file.
+/// It is a `Conflict` carrying that head when the head is not `expect`; otherwise the commit
+/// that went past the snapshot did not touch this chain, and the error stays `Backend` (a
+/// new transaction may retry).
+fn stale_snapshot(
+    tx: &Transaction<'_>,
+    ty: ChainType,
+    chain: &ChainId,
+    expect: Option<&Head>,
+    e: rusqlite::Error,
+) -> StoreError {
+    let busy_snapshot = e
+        .sqlite_error()
+        .is_some_and(|f| f.extended_code == rusqlite::ffi::SQLITE_BUSY_SNAPSHOT);
+    let path = tx.path().filter(|p| !p.is_empty());
+    let (true, Some(path)) = (busy_snapshot, path) else {
+        return backend(e);
+    };
+    let fresh = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|conn| conn.busy_timeout(Duration::from_secs(5)).map(|()| conn))
+        .map_err(backend)
+        .and_then(|conn| SqliteChainStore::head_in(&conn, ty, chain));
+    match fresh {
+        Ok(current) if current.as_ref() != expect => StoreError::Conflict(current),
+        _ => backend(e),
+    }
+}
+
 fn append_steps(
     tx: &Transaction<'_>,
     ty: ChainType,
@@ -179,13 +211,13 @@ fn append_steps(
                     old.hash
                 ],
             )
-            .map_err(backend)?,
+            .map_err(|e| stale_snapshot(tx, ty, chain, expect, e))?,
         None => tx
             .execute(
                 "INSERT OR IGNORE INTO chain_heads (type, chain, seq, hash) VALUES (?1, ?2, ?3, ?4)",
                 params![ty, chain, to_sql(head.seq)?, head.hash],
             )
-            .map_err(backend)?,
+            .map_err(|e| stale_snapshot(tx, ty, chain, expect, e))?,
     };
     if changed != 1 {
         return Err(StoreError::Conflict(SqliteChainStore::head_in(
