@@ -3,6 +3,82 @@
     {
       "domain": "test:chain",
       "entry": {
+        "@context": [
+          "https://www.w3.org/ns/credentials/v2"
+        ],
+        "body": "x",
+        "chain": "vector-chain",
+        "prev": null,
+        "seq": 0
+      },
+      "key": "z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2",
+      "name": "an entry with @context: the proof config holds it",
+      "proof": {
+        "cryptosuite": "eddsa-jcs-2022",
+        "domain": "test:chain",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "zf87kugdAZQRBSQkysYfceoaLdQQyyJBAAghRFhhgzP7XwTnxFvBsbBBTwKET2goMMiJDaYdHER6Kz1i7ouuTdai",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "test:vector-chain#k"
+      },
+      "result": "ok"
+    },
+    {
+      "domain": "test:chain",
+      "entry": {
+        "@context": [
+          "https://example.org/other"
+        ],
+        "body": "x",
+        "chain": "vector-chain",
+        "prev": null,
+        "seq": 0
+      },
+      "key": "z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2",
+      "name": "another @context after signing",
+      "proof": {
+        "cryptosuite": "eddsa-jcs-2022",
+        "domain": "test:chain",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "zf87kugdAZQRBSQkysYfceoaLdQQyyJBAAghRFhhgzP7XwTnxFvBsbBBTwKET2goMMiJDaYdHER6Kz1i7ouuTdai",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "test:vector-chain#k"
+      },
+      "result": "signature"
+    },
+    {
+      "domain": "test:chain",
+      "entry": {
+        "body": "entry 1",
+        "chain": "vector-chain",
+        "prev": "QmfE6sbYECvQfC64KXLbQGF9kaRwCUoyMUdephxvd5a23v",
+        "proof": [
+          {
+            "cryptosuite": "eddsa-jcs-2022",
+            "domain": "test:chain",
+            "proofPurpose": "assertionMethod",
+            "proofValue": "z4uWWRHPEuD9adNiYXPe7VojhGUjRevqdyZNLWXwJw7rhTPEdos6C7uLUMHBqG5AyWYNaKUs3ZYd4YAr2Siiu9CtG",
+            "type": "DataIntegrityProof",
+            "verificationMethod": "test:vector-chain#z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2"
+          }
+        ],
+        "seq": 1
+      },
+      "key": "z6MkeXATEjyXENzBXBxgC5EHk2JE5aqd7qMGGtDpLUH1e2Sj",
+      "name": "small-order key and R (verify accepts, verify_strict refuses)",
+      "proof": {
+        "cryptosuite": "eddsa-jcs-2022",
+        "domain": "test:chain",
+        "proofPurpose": "assertionMethod",
+        "proofValue": "z2AFv15MNPuA84RmU66xw2uMzGipcVxNpzAffoacGVvjFue3CBmf633fAWuiP9cwL9C3z3CJiGgRSFjJfeEcA6QX",
+        "type": "DataIntegrityProof",
+        "verificationMethod": "test:vector-chain#z6MkvRXNYcE7MMduynWTgeKbDaT1iijDSC8pZqXZc8rHPrf2"
+      },
+      "result": "signature"
+    },
+    {
+      "domain": "test:chain",
+      "entry": {
         "body": "entry 1",
         "chain": "vector-chain",
         "prev": "QmfE6sbYECvQfC64KXLbQGF9kaRwCUoyMUdephxvd5a23v",

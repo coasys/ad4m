@@ -18,7 +18,8 @@ ad4m-identity-core = { path = "../../../ad4m-identity-core" }
 wasm-bindgen = "=0.2.118"
 wasm-bindgen-futures = "0.4"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `raw_value`: `identityLog` reads each event of a page from its own text.
+serde_json = { version = "1.0", features = ["raw_value"] }
 serde-wasm-bindgen = "0.6"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["console"] }

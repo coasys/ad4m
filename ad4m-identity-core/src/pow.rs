@@ -80,7 +80,9 @@ pub fn solve_range(scid: &str, bits: u8, start: u128, tries: u64) -> Option<Pow>
 }
 
 /// Finds a proof for `scid` at `bits`. Deterministic: the first nonce counted from 0.
-/// About 2^bits hashes on average; the store's default is 22 bits.
+/// About 2^bits hashes on average; the store's default is 22 bits. It does not return until it
+/// finds one, so a caller that takes `bits` from a store (`GET /v1/pow`) refuses a value it
+/// cannot afford first: a hostile store that asks for 200 bits would otherwise hang it.
 pub fn solve(scid: &str, bits: u8) -> Pow {
     let mut start = 0u128;
     loop {

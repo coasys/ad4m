@@ -21,7 +21,7 @@ use crate::db::{from_sql, to_sql};
 use crate::error::ApiError;
 use crate::offers::ClaimAnswer;
 use crate::request::{Incoming, Signer, REQUEST_HEADER};
-use crate::{Store, MAX_WAIT_S};
+use crate::{Store, Topic, MAX_WAIT_S};
 
 /// The largest body a route takes.
 pub const MAX_BODY: usize = ad4m_ldk::identity::MAX_STORE_BODY;
@@ -187,7 +187,7 @@ async fn append(
 ) -> Answer {
     let bytes = body(bytes)?;
     let req: AppendRequest = json_body(&bytes)?;
-    let head = store.append(&scid, &req)?;
+    let head = store.append(&scid, &req, &bytes)?;
     ok(json!({ "head": head }))
 }
 
@@ -204,7 +204,9 @@ async fn key_owner(
     Query(q): Query<HashMap<String, String>>,
 ) -> Answer {
     let wait = wait_of(&q)?;
-    let found = store.wait_for(wait, || store.key_entry(&multikey)).await?;
+    let found = store
+        .wait_for(Topic::key(&multikey), wait, || store.key_entry(&multikey))
+        .await?;
     match found {
         Some(entry) => ok(entry),
         None => Err(ApiError::not_found("the key is in no log")),
@@ -292,7 +294,7 @@ async fn list_offers(
         return ok(first);
     }
     let changed = store
-        .wait_for(wait, || {
+        .wait_for(Topic::offers(&scid), wait, || {
             let now = store.list_offers(&scid)?;
             Ok((now != first).then_some(now))
         })
@@ -351,7 +353,7 @@ async fn offer_state(
         return ok(first);
     }
     let changed = store
-        .wait_for(wait, || {
+        .wait_for(Topic::offers(&scid), wait, || {
             let now = store.offer_progress(&scid, &offer_id, &key)?;
             Ok(now.filter(|n| *n != first))
         })

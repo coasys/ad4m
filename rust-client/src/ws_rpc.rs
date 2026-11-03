@@ -72,7 +72,14 @@ impl WsRpcClient {
         };
         let (ws_stream, _) = connect_async_with_config(&url, Some(ws_config), false)
             .await
-            .map_err(|e| anyhow!("WebSocket connection to {} failed: {}", url, e))?;
+            // Named without the token: callers print this error.
+            .map_err(|e| {
+                anyhow!(
+                    "WebSocket connection to {} failed: {}",
+                    to_ws_url(executor_url, ""),
+                    e
+                )
+            })?;
         let (write, mut read) = ws_stream.split();
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
@@ -214,6 +221,21 @@ mod tests {
     fn to_ws_url_encodes_special_chars_in_token() {
         let url = to_ws_url("http://localhost:12000", "tok en+special=chars&more");
         assert!(url.contains("token=tok%20en%2Bspecial%3Dchars%26more"));
+    }
+
+    /// A failed connect names the executor but never the token (the URL carries it).
+    #[tokio::test]
+    async fn a_failed_connect_never_shows_the_token() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let error = WsRpcClient::connect(&format!("http://127.0.0.1:{port}"), "secret-cap-token")
+            .await
+            .err()
+            .expect("nothing listens on the port")
+            .to_string();
+        assert!(!error.contains("secret-cap-token"), "{error}");
+        assert!(error.contains(&format!("127.0.0.1:{port}")), "{error}");
     }
 
     #[test]

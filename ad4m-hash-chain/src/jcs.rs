@@ -4,8 +4,10 @@
 //! ±(2^53 − 1) (section 2 of `docs-src/identity/did-scid-coasys-1.md`). With floats refused,
 //! JCS reduces to: no whitespace, object members sorted by the UTF-16 code units of their
 //! names, strings escaped as ECMAScript's `JSON.stringify` escapes them, integers in plain
-//! decimal.
+//! decimal. A received text is accepted only when it is already that form (`entry_from_json`).
 
+use serde::de::DeserializeOwned;
+use serde::ser::{self, Serialize};
 use serde_json::{Map, Value};
 
 /// The largest integer a canonical value may hold: 2^53 − 1 (`Number.MAX_SAFE_INTEGER`).
@@ -22,6 +24,224 @@ pub enum CanonError {
     NotObject,
     #[error("serialisation failed: {0}")]
     Serde(String),
+    /// A received text is not the JCS text of the entry it parses into (whitespace, member
+    /// order, a duplicate member name, a `null` the entry type drops, `1e2`, `-0`, …).
+    #[error("the text is not the canonical form of the entry it parses into")]
+    NotCanonical,
+}
+
+/// The JSON value of a typed entry. Refuses every float before the conversion, so a
+/// non-finite float (which `serde_json::to_value` turns into `null`) is refused too.
+pub(crate) fn to_value<T: Serialize + ?Sized>(value: &T) -> Result<Value, CanonError> {
+    value.serialize(FloatCheck).map_err(|e| match e {
+        Refused::Float(f) => CanonError::Float(f),
+        Refused::Other(s) => CanonError::Serde(s),
+    })?;
+    serde_json::to_value(value).map_err(|e| CanonError::Serde(e.to_string()))
+}
+
+/// Parses `text` as an entry of type `T`, and refuses it unless `text` is exactly the JCS
+/// text of the parsed value. So one accepted text has one parse and one hash, whatever the
+/// target: no member the type drops, no float, no duplicate member name, no other spelling.
+pub(crate) fn from_canonical_text<T: Serialize + DeserializeOwned>(
+    text: &str,
+) -> Result<T, CanonError> {
+    let parsed: T = serde_json::from_str(text).map_err(|e| CanonError::Serde(e.to_string()))?;
+    let value = to_value(&parsed)?;
+    if !value.is_object() {
+        return Err(CanonError::NotObject);
+    }
+    if canonical_json(&value)? != text {
+        return Err(CanonError::NotCanonical);
+    }
+    Ok(parsed)
+}
+
+#[derive(Debug)]
+enum Refused {
+    Float(String),
+    Other(String),
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::Float(x) | Refused::Other(x) => f.write_str(x),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
+
+impl ser::Error for Refused {
+    fn custom<M: std::fmt::Display>(msg: M) -> Self {
+        Refused::Other(msg.to_string())
+    }
+}
+
+/// A serializer that writes nothing and fails on the first `f32` or `f64`.
+struct FloatCheck;
+
+macro_rules! accept {
+    ($($name:ident: $ty:ty),*) => {
+        $(fn $name(self, _: $ty) -> Result<(), Refused> { Ok(()) })*
+    };
+}
+
+impl ser::Serializer for FloatCheck {
+    type Ok = ();
+    type Error = Refused;
+    type SerializeSeq = FloatCheck;
+    type SerializeTuple = FloatCheck;
+    type SerializeTupleStruct = FloatCheck;
+    type SerializeTupleVariant = FloatCheck;
+    type SerializeMap = FloatCheck;
+    type SerializeStruct = FloatCheck;
+    type SerializeStructVariant = FloatCheck;
+
+    accept!(serialize_bool: bool, serialize_i8: i8, serialize_i16: i16, serialize_i32: i32,
+        serialize_i64: i64, serialize_i128: i128, serialize_u8: u8, serialize_u16: u16,
+        serialize_u32: u32, serialize_u64: u64, serialize_u128: u128, serialize_char: char,
+        serialize_str: &str, serialize_bytes: &[u8], serialize_unit_struct: &'static str);
+
+    fn serialize_f32(self, v: f32) -> Result<(), Refused> {
+        Err(Refused::Float(v.to_string()))
+    }
+    fn serialize_f64(self, v: f64) -> Result<(), Refused> {
+        Err(Refused::Float(v.to_string()))
+    }
+    fn serialize_none(self) -> Result<(), Refused> {
+        Ok(())
+    }
+    fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<(), Refused> {
+        value.serialize(self)
+    }
+    fn serialize_unit(self) -> Result<(), Refused> {
+        Ok(())
+    }
+    fn serialize_unit_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+    ) -> Result<(), Refused> {
+        Ok(())
+    }
+    fn serialize_newtype_struct<T: Serialize + ?Sized>(
+        self,
+        _: &'static str,
+        value: &T,
+    ) -> Result<(), Refused> {
+        value.serialize(self)
+    }
+    fn serialize_newtype_variant<T: Serialize + ?Sized>(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        value: &T,
+    ) -> Result<(), Refused> {
+        value.serialize(self)
+    }
+    fn serialize_seq(self, _: Option<usize>) -> Result<FloatCheck, Refused> {
+        Ok(self)
+    }
+    fn serialize_tuple(self, _: usize) -> Result<FloatCheck, Refused> {
+        Ok(self)
+    }
+    fn serialize_tuple_struct(self, _: &'static str, _: usize) -> Result<FloatCheck, Refused> {
+        Ok(self)
+    }
+    fn serialize_tuple_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<FloatCheck, Refused> {
+        Ok(self)
+    }
+    fn serialize_map(self, _: Option<usize>) -> Result<FloatCheck, Refused> {
+        Ok(self)
+    }
+    fn serialize_struct(self, _: &'static str, _: usize) -> Result<FloatCheck, Refused> {
+        Ok(self)
+    }
+    fn serialize_struct_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<FloatCheck, Refused> {
+        Ok(self)
+    }
+}
+
+macro_rules! compound {
+    ($($trait:ident :: $method:ident),*) => {
+        $(impl ser::$trait for FloatCheck {
+            type Ok = ();
+            type Error = Refused;
+            fn $method<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Refused> {
+                value.serialize(FloatCheck)
+            }
+            fn end(self) -> Result<(), Refused> {
+                Ok(())
+            }
+        })*
+    };
+}
+
+compound!(
+    SerializeSeq::serialize_element,
+    SerializeTuple::serialize_element,
+    SerializeTupleStruct::serialize_field,
+    SerializeTupleVariant::serialize_field
+);
+
+impl ser::SerializeMap for FloatCheck {
+    type Ok = ();
+    type Error = Refused;
+    fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Refused> {
+        key.serialize(FloatCheck)
+    }
+    fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Refused> {
+        value.serialize(FloatCheck)
+    }
+    fn end(self) -> Result<(), Refused> {
+        Ok(())
+    }
+}
+
+impl ser::SerializeStruct for FloatCheck {
+    type Ok = ();
+    type Error = Refused;
+    fn serialize_field<T: Serialize + ?Sized>(
+        &mut self,
+        _: &'static str,
+        value: &T,
+    ) -> Result<(), Refused> {
+        value.serialize(FloatCheck)
+    }
+    fn end(self) -> Result<(), Refused> {
+        Ok(())
+    }
+}
+
+impl ser::SerializeStructVariant for FloatCheck {
+    type Ok = ();
+    type Error = Refused;
+    fn serialize_field<T: Serialize + ?Sized>(
+        &mut self,
+        _: &'static str,
+        value: &T,
+    ) -> Result<(), Refused> {
+        value.serialize(FloatCheck)
+    }
+    fn end(self) -> Result<(), Refused> {
+        Ok(())
+    }
 }
 
 /// The JCS text of `value`.

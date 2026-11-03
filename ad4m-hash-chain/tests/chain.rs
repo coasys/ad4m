@@ -5,10 +5,12 @@ mod common;
 
 use ad4m_hash_chain::{
     compare, entry_hash, entry_hash_json, fold, import, verify_proof, CanonError, Chain,
-    ChainError, Compare, ForkEvidence, ImportOutcome, ProofError,
+    ChainError, ChainId, ChainPolicy, ChainType, Compare, ForkEvidence, ImportOutcome, ProofError,
 };
 use common::*;
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn snapshot(chain: &TestChain) -> serde_json::Value {
     chain_json(chain)
@@ -142,6 +144,61 @@ fn policy_failure_changes_nothing() {
     assert_eq!(snapshot(&chain), before);
 }
 
+/// `TestPolicy` with a state that counts its own clones: the work a fold spends copying state.
+struct Counting(Arc<AtomicUsize>);
+
+struct CountedState {
+    inner: TestState,
+    clones: Arc<AtomicUsize>,
+}
+
+impl Clone for CountedState {
+    fn clone(&self) -> Self {
+        self.clones.fetch_add(1, Ordering::SeqCst);
+        CountedState {
+            inner: self.inner.clone(),
+            clones: self.clones.clone(),
+        }
+    }
+}
+
+impl ChainPolicy for Counting {
+    type Entry = TestEntry;
+    type State = CountedState;
+    type Error = TestError;
+    const TYPE: ChainType = <TestPolicy as ChainPolicy>::TYPE;
+    const DOMAIN: &'static str = DOMAIN;
+
+    fn genesis(&self, entry: &TestEntry) -> Result<(ChainId, CountedState), TestError> {
+        let (id, inner) = TestPolicy.genesis(entry)?;
+        let clones = self.0.clone();
+        Ok((id, CountedState { inner, clones }))
+    }
+
+    fn chain_of(&self, entry: &TestEntry) -> ChainId {
+        TestPolicy.chain_of(entry)
+    }
+
+    fn apply(&self, state: &mut CountedState, entry: &TestEntry) -> Result<(), TestError> {
+        TestPolicy.apply(&mut state.inner, entry)
+    }
+}
+
+#[test]
+fn fold_never_copies_the_state_and_append_copies_it_once() {
+    // A state that grows with the chain makes a copy per entry quadratic: fold copies none,
+    // whatever the length, so its work is linear. `append` copies once, to change nothing
+    // when the entry is refused.
+    let clones = Arc::new(AtomicUsize::new(0));
+    let policy = Counting(clones.clone());
+    let entries = make_chain("c", 1, 65);
+    let mut chain = fold(&policy, &entries[..64]).unwrap();
+    assert_eq!(chain.state().inner.count, 63);
+    assert_eq!(clones.load(Ordering::SeqCst), 0);
+    chain.append(&policy, &entries[64]).unwrap();
+    assert_eq!(clones.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn policy_hooks_follow_the_key_named_in_entry_zero_and_rotations() {
     let k1 = signing_key(1);
@@ -186,6 +243,28 @@ fn entry_with_float_or_unsafe_integer_is_malformed() {
         x: 0.5,
     };
     assert!(matches!(entry_hash(&float), Err(CanonError::Float(_))));
+    // A non-finite float would turn into `null` on the way to JSON: refused before that.
+    for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let loose = Loose {
+            seq: 0,
+            prev: None,
+            x,
+        };
+        assert!(matches!(entry_hash(&loose), Err(CanonError::Float(_))));
+        assert!(matches!(
+            ad4m_hash_chain::entry_json(&loose),
+            Err(CanonError::Float(_))
+        ));
+        let proof = ad4m_hash_chain::Proof::unsigned("test:c#k", "assertionMethod", DOMAIN);
+        assert!(matches!(
+            ad4m_hash_chain::signing_input(&loose, &proof),
+            Err(CanonError::Float(_))
+        ));
+        assert!(matches!(
+            ad4m_hash_chain::verify_proof(&loose, &proof, &multikey(&signing_key(1)), DOMAIN),
+            Err(ProofError::Encoding)
+        ));
+    }
     let mut big = make_chain("c", 1, 1)[0].clone();
     big.seq = 1 << 53;
     assert!(matches!(entry_hash(&big), Err(CanonError::Integer(_))));
@@ -202,6 +281,195 @@ fn entry_with_float_or_unsafe_integer_is_malformed() {
         Chain::genesis(&TestPolicy, &big).unwrap_err(),
         ChainError::Malformed(_)
     ));
+}
+
+/// An entry type whose accessors need not agree with its JSON.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Liar {
+    #[serde(flatten)]
+    json: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip)]
+    seq: u64,
+    #[serde(skip)]
+    prev: Option<String>,
+    #[serde(skip)]
+    proofs: Vec<ad4m_hash_chain::Proof>,
+}
+
+impl ad4m_hash_chain::Entry for Liar {
+    fn seq(&self) -> u64 {
+        self.seq
+    }
+    fn prev(&self) -> Option<&String> {
+        self.prev.as_ref()
+    }
+    fn proofs(&self) -> &[ad4m_hash_chain::Proof] {
+        &self.proofs
+    }
+}
+
+/// Accepts every entry; chain id "c".
+struct AnyPolicy;
+
+impl ad4m_hash_chain::ChainPolicy for AnyPolicy {
+    type Entry = Liar;
+    type State = ();
+    type Error = TestError;
+    const TYPE: &'static str = "test:any";
+    const DOMAIN: &'static str = "test:any";
+    fn genesis(&self, _: &Liar) -> Result<(String, ()), TestError> {
+        Ok(("c".into(), ()))
+    }
+    fn chain_of(&self, _: &Liar) -> String {
+        "c".into()
+    }
+    fn apply(&self, _: &mut (), _: &Liar) -> Result<(), TestError> {
+        Ok(())
+    }
+}
+
+fn liar(json: serde_json::Value, seq: u64, prev: Option<&str>) -> Liar {
+    Liar {
+        json: json.as_object().unwrap().clone(),
+        seq,
+        prev: prev.map(str::to_string),
+        proofs: Vec::new(),
+    }
+}
+
+fn malformed_reason(e: ChainError<TestError>) -> String {
+    match e {
+        ChainError::Malformed(reason) => reason,
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_entry_whose_json_disagrees_with_its_accessors_is_malformed() {
+    let honest = liar(json!({"seq": 0, "prev": null}), 0, None);
+    let chain = Chain::genesis(&AnyPolicy, &honest).unwrap();
+    let h0 = chain.head().hash;
+
+    // The `seq` member against Entry::seq: another number, or none.
+    for json in [json!({"seq": 1, "prev": null}), json!({"prev": null})] {
+        let reason =
+            malformed_reason(Chain::genesis(&AnyPolicy, &liar(json, 0, None)).unwrap_err());
+        assert!(reason.contains("`seq`"), "{reason}");
+    }
+    // The `prev` member against Entry::prev: null against a hash, a hash against none,
+    // another hash, or no member.
+    let cases = [
+        (json!({"seq": 0, "prev": null}), Some(h0.as_str())),
+        (json!({"seq": 0, "prev": h0}), None),
+        (json!({"seq": 0}), None),
+    ];
+    for (json, prev) in cases {
+        let reason =
+            malformed_reason(Chain::genesis(&AnyPolicy, &liar(json, 0, prev)).unwrap_err());
+        assert!(reason.contains("`prev`"), "{reason}");
+    }
+    let other = entry_hash_json(&json!({"x": 1})).unwrap();
+    let mut next = chain.clone();
+    let reason = malformed_reason(
+        next.append(
+            &AnyPolicy,
+            &liar(json!({"seq": 1, "prev": other}), 1, Some(h0.as_str())),
+        )
+        .unwrap_err(),
+    );
+    assert!(reason.contains("`prev`"), "{reason}");
+    // `proof` must be an array when present.
+    for proof in [json!({}), json!("p"), json!(null)] {
+        let entry = liar(json!({"seq": 0, "prev": null, "proof": proof}), 0, None);
+        let reason = malformed_reason(Chain::genesis(&AnyPolicy, &entry).unwrap_err());
+        assert!(reason.contains("`proof`"), "{reason}");
+    }
+    // The `proof` member against Entry::proofs: a signature the JSON leaves out (with or
+    // without an empty list), one it adds, or another value of one field.
+    let signature = ad4m_hash_chain::Proof {
+        r#type: ad4m_hash_chain::PROOF_TYPE.into(),
+        cryptosuite: ad4m_hash_chain::CRYPTOSUITE.into(),
+        verification_method: "did:key:z#z".into(),
+        proof_purpose: "assertionMethod".into(),
+        domain: "test:any".into(),
+        proof_value: "zSig".into(),
+    };
+    let listed = serde_json::to_value(&signature).unwrap();
+    let mut altered = signature.clone();
+    altered.proof_value = "zOther".into();
+    let cases = [
+        (json!({"seq": 0, "prev": null}), vec![signature.clone()]),
+        (
+            json!({"seq": 0, "prev": null, "proof": []}),
+            vec![signature.clone()],
+        ),
+        (json!({"seq": 0, "prev": null, "proof": [listed]}), vec![]),
+        (
+            json!({"seq": 0, "prev": null, "proof": [listed]}),
+            vec![altered],
+        ),
+    ];
+    for (json, proofs) in cases {
+        let mut entry = liar(json, 0, None);
+        entry.proofs = proofs;
+        let reason = malformed_reason(Chain::genesis(&AnyPolicy, &entry).unwrap_err());
+        assert!(reason.contains("`proof`"), "{reason}");
+        let mut next = chain.clone();
+        let mut appended = entry.clone();
+        appended.json.insert("seq".into(), json!(1));
+        appended.json.insert("prev".into(), json!(h0));
+        appended.seq = 1;
+        appended.prev = Some(h0.clone());
+        let reason = malformed_reason(next.append(&AnyPolicy, &appended).unwrap_err());
+        assert!(reason.contains("`proof`"), "{reason}");
+        assert_eq!(next.head(), chain.head());
+    }
+    // The JSON and Entry::proofs listing the same signature agree.
+    let mut signed = liar(json!({"seq": 0, "prev": null, "proof": [listed]}), 0, None);
+    signed.proofs = vec![signature];
+    assert_eq!(Chain::genesis(&AnyPolicy, &signed).unwrap().head().hash, h0);
+    // The honest entry with an empty proof array is fine.
+    let with_proofs = liar(json!({"seq": 0, "prev": null, "proof": []}), 0, None);
+    assert_eq!(
+        Chain::genesis(&AnyPolicy, &with_proofs)
+            .unwrap()
+            .head()
+            .hash,
+        h0
+    );
+}
+
+/// The test chain type, except that `genesis` answers a chain id other than `chain_of`.
+struct SplitIdPolicy;
+
+impl ad4m_hash_chain::ChainPolicy for SplitIdPolicy {
+    type Entry = TestEntry;
+    type State = TestState;
+    type Error = TestError;
+    const TYPE: &'static str = "test:split";
+    const DOMAIN: &'static str = DOMAIN;
+    fn genesis(&self, entry: &TestEntry) -> Result<(String, TestState), TestError> {
+        let (id, state) = TestPolicy.genesis(entry)?;
+        Ok((format!("{id}-genesis"), state))
+    }
+    fn chain_of(&self, entry: &TestEntry) -> String {
+        TestPolicy.chain_of(entry)
+    }
+    fn apply(&self, state: &mut TestState, entry: &TestEntry) -> Result<(), TestError> {
+        TestPolicy.apply(state, entry)
+    }
+}
+
+#[test]
+fn genesis_refuses_an_entry_that_names_another_chain_than_the_policy_gives() {
+    let e0 = make_chain("c", 1, 1)[0].clone();
+    assert_eq!(
+        Chain::genesis(&SplitIdPolicy, &e0).unwrap_err(),
+        ChainError::WrongChain {
+            want: "c-genesis".into(),
+            got: "c".into()
+        }
+    );
 }
 
 // ------------------------------------------------------------------ tampering
@@ -325,6 +593,29 @@ fn proof_refuses_unknown_members() {
     let mut v = serde_json::to_value(&entries[0].proof[0]).unwrap();
     v["created"] = json!("2026-10-24T00:00:00Z");
     assert!(serde_json::from_value::<ad4m_hash_chain::Proof>(v).is_err());
+}
+
+#[test]
+fn a_small_order_key_and_r_pass_verify_but_not_verify_strict() {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let entry = make_chain("c", 1, 2)[1].clone();
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut signature = [0u8; 64];
+    signature[..32].copy_from_slice(&identity);
+    let mut proof = entry.proof[0].clone();
+    proof.proof_value = ad4m_hash_chain::encode_proof_value(&signature);
+    let input = ad4m_hash_chain::signing_input(&entry, &proof).unwrap();
+    // The plain check accepts it, so the fixture tells the two apart.
+    VerifyingKey::from_bytes(&identity)
+        .unwrap()
+        .verify(&input, &Signature::from_bytes(&signature))
+        .unwrap();
+    let key = ad4m_hash_chain::encode_ed25519_multikey(&identity);
+    assert_eq!(
+        verify_proof(&entry, &proof, &key, DOMAIN),
+        Err(ProofError::Signature)
+    );
 }
 
 // ---------------------------------------------------------------------- forks
@@ -478,7 +769,7 @@ fn a_shuffled_batch_imports_as_the_sorted_batch() {
         got,
         ImportOutcome::Appended {
             head: sorted_chain.head(),
-            count: 6
+            entries: entries[2..].to_vec()
         }
     );
     assert_eq!(snapshot(&shuffled_chain), snapshot(&sorted_chain));
@@ -505,12 +796,12 @@ fn a_batch_past_our_head_is_a_gap_until_the_missing_entries_arrive() {
                 seq: 3,
                 hash: entry_hash(&entries[3]).unwrap()
             },
-            count: 2
+            entries: entries[2..4].to_vec()
         }
     );
     assert!(matches!(
         import(&mut chain, &TestPolicy, &entries[4..]).unwrap(),
-        ImportOutcome::Appended { count: 2, .. }
+        ImportOutcome::Appended { entries: e, .. } if e == entries[4..]
     ));
     assert_eq!(chain.head().seq, 5);
 }
@@ -521,7 +812,7 @@ fn a_repeated_batch_is_already_have() {
     let mut chain = fold(&TestPolicy, &entries[..1]).unwrap();
     assert!(matches!(
         import(&mut chain, &TestPolicy, &entries).unwrap(),
-        ImportOutcome::Appended { count: 3, .. }
+        ImportOutcome::Appended { entries: e, .. } if e == entries[1..]
     ));
     assert_eq!(
         import(&mut chain, &TestPolicy, &entries).unwrap(),
@@ -562,6 +853,125 @@ fn import_changes_nothing_when_a_later_entry_fails() {
 }
 
 #[test]
+fn import_keeps_the_copy_of_an_entry_whose_proof_holds() {
+    let full = make_chain("c", 1, 5);
+    let mut stripped = full[3].clone();
+    stripped.proof.clear();
+    let mut forged = full[3].clone();
+    forged.proof = next_entry(&full[2], "x", &signing_key(9), None).proof;
+    assert_eq!(
+        entry_hash(&stripped).unwrap(),
+        entry_hash(&full[3]).unwrap()
+    );
+
+    // Copies at head + 1 that fail come first in the batch; the valid one still appends.
+    for batch in [
+        vec![stripped.clone(), full[3].clone(), full[4].clone()],
+        vec![
+            full[4].clone(),
+            forged.clone(),
+            stripped.clone(),
+            full[3].clone(),
+        ],
+        vec![full[3].clone(), stripped.clone(), full[4].clone()],
+    ] {
+        let mut chain = fold(&TestPolicy, &full[..3]).unwrap();
+        assert_eq!(
+            import(&mut chain, &TestPolicy, &batch).unwrap(),
+            ImportOutcome::Appended {
+                head: chain.head(),
+                entries: full[3..].to_vec()
+            }
+        );
+        assert_eq!(
+            snapshot(&chain),
+            snapshot(&fold(&TestPolicy, &full).unwrap())
+        );
+    }
+
+    // No copy holds: the first copy's error, and nothing changes.
+    let mut chain = fold(&TestPolicy, &full[..3]).unwrap();
+    let before = snapshot(&chain);
+    let err = import(
+        &mut chain,
+        &TestPolicy,
+        &[stripped, forged, full[4].clone()],
+    )
+    .unwrap_err();
+    assert_eq!(policy_err(&err), Some(&TestError::MissingProof));
+    assert_eq!(snapshot(&chain), before);
+}
+
+#[test]
+fn appended_names_the_copy_with_the_proof_not_the_first_in_the_batch() {
+    // Stripping a proof needs no key and keeps the hash: a caller that stores its own pick
+    // from the batch (the first copy at each seq) stores an entry the next fold refuses.
+    let full = make_chain("c", 1, 3);
+    let mut stripped = full[1].clone();
+    stripped.proof.clear();
+    for batch in [
+        vec![stripped.clone(), full[1].clone()],
+        vec![full[1].clone(), stripped.clone()],
+        vec![stripped.clone(), full[1].clone(), stripped.clone()],
+    ] {
+        let mut chain = fold(&TestPolicy, &full[..1]).unwrap();
+        let ImportOutcome::Appended { head, entries } =
+            import(&mut chain, &TestPolicy, &batch).unwrap()
+        else {
+            panic!("expected Appended");
+        };
+        assert_eq!(head, chain.head());
+        assert_eq!(entries, vec![full[1].clone()]);
+        assert_eq!(entries[0].proof.len(), 1);
+        // What a cold load folds: the held entry 0, then what the outcome says to store.
+        let reload = [full[0].clone(), entries[0].clone()];
+        assert_eq!(
+            snapshot(&fold(&TestPolicy, &reload).unwrap()),
+            snapshot(&chain)
+        );
+    }
+}
+
+#[test]
+fn appended_serializes_its_count_of_entries() {
+    let entries = make_chain("c", 1, 4);
+    let mut chain = fold(&TestPolicy, &entries[..1]).unwrap();
+    let outcome = import(&mut chain, &TestPolicy, &entries[1..]).unwrap();
+    assert_eq!(
+        serde_json::to_value(&outcome).unwrap(),
+        json!({"kind": "appended", "head": chain.head(), "count": 3})
+    );
+}
+
+/// The clones of the state that `import` of `batch` makes on a chain holding `held`.
+fn import_clones(held: &[TestEntry], batch: &[TestEntry]) -> usize {
+    let clones = Arc::new(AtomicUsize::new(0));
+    let policy = Counting(clones.clone());
+    let mut chain = fold(&policy, held).unwrap();
+    clones.store(0, Ordering::SeqCst);
+    assert!(matches!(
+        import(&mut chain, &policy, batch).unwrap(),
+        ImportOutcome::Appended { .. }
+    ));
+    clones.load(Ordering::SeqCst)
+}
+
+#[test]
+fn import_clones_the_state_once_per_batch_and_once_per_extra_copy() {
+    let entries = make_chain("c", 1, 65);
+    // 64 entries with one copy each: the staged state only.
+    assert!(import_clones(&entries[..1], &entries[1..]) <= 1);
+
+    // A second copy of one entry: one more clone, for the copy that has another to fall
+    // back on.
+    let mut stripped = entries[10].clone();
+    stripped.proof.clear();
+    let mut batch = entries[1..].to_vec();
+    batch.insert(9, stripped);
+    assert!(import_clones(&entries[..1], &batch) <= 2);
+}
+
+#[test]
 fn import_refuses_another_chain_before_comparing_hashes() {
     let entries = make_chain("c", 1, 3);
     let other = make_chain("d", 1, 3);
@@ -588,7 +998,7 @@ fn chain_error_codes_have_the_typescript_shape() {
     let e: ChainError<TestError> = ChainError::Policy(TestError::NoKey);
     assert_eq!(e.code(), json!({"code": "policy", "reason": "NoKey"}));
     assert_eq!(e.to_string(), "NoKey");
-    let outcome = ImportOutcome::Gap { have: 1, first: 4 };
+    let outcome: ImportOutcome<TestEntry> = ImportOutcome::Gap { have: 1, first: 4 };
     assert_eq!(
         serde_json::to_value(&outcome).unwrap(),
         json!({"kind": "gap", "have": 1, "first": 4})

@@ -25,7 +25,8 @@ pub use codec::{
 };
 pub use jcs::{canonical_json, CanonError, MAX_SAFE_INTEGER};
 pub use proof::{
-    signing_input, verify_proof, verify_proof_json, Proof, ProofError, CRYPTOSUITE, PROOF_TYPE,
+    signing_input, signing_input_json, verify_proof, verify_proof_json, Proof, ProofError,
+    CRYPTOSUITE, PROOF_TYPE,
 };
 
 /// The id of one chain, given by the chain type: the KEL uses the SCID.
@@ -43,10 +44,9 @@ pub trait Entry: Serialize + DeserializeOwned + Clone {
 }
 
 /// `multihash_b58(sha256(JCS(entry without "proof")))`. Fails when the entry has no
-/// canonical form (a float, an integer outside ±(2^53 − 1), or not an object).
+/// canonical form (a float, finite or not, an integer outside ±(2^53 − 1), or not an object).
 pub fn entry_hash<E: Entry>(entry: &E) -> Result<Hash, CanonError> {
-    let value = serde_json::to_value(entry).map_err(|e| CanonError::Serde(e.to_string()))?;
-    entry_hash_json(&value)
+    entry_hash_json(&jcs::to_value(entry)?)
 }
 
 /// [`entry_hash`] over an entry given as JSON (any object: the module reads no field).
@@ -59,11 +59,21 @@ pub fn entry_hash_json(entry: &Value) -> Result<Hash, CanonError> {
 
 /// The JCS text of a whole entry, proofs included: the form on the wire and on disk.
 pub fn entry_json<E: Entry>(entry: &E) -> Result<String, CanonError> {
-    let value = serde_json::to_value(entry).map_err(|e| CanonError::Serde(e.to_string()))?;
+    let value = jcs::to_value(entry)?;
     if !value.is_object() {
         return Err(CanonError::NotObject);
     }
     canonical_json(&value)
+}
+
+/// Parses an entry received as text (from a peer, a file or a store). The text must be the
+/// entry's JCS text, [`entry_json`], byte for byte, else it is refused (`NotCanonical`, or
+/// the parse or float error that comes first). That refuses a duplicate member name
+/// (I-JSON, RFC 7493), a member the entry type drops on parsing (`"key": null` for a
+/// skipped `None`) and other spellings of a number (`1e2`, `-0`, `100.0`), so one accepted
+/// text has one hash on every target.
+pub fn entry_from_json<E: Entry>(text: &str) -> Result<E, CanonError> {
+    jcs::from_canonical_text(text)
 }
 
 /// The rules of one chain type. The module calls it after the order and link checks pass.
@@ -246,9 +256,10 @@ impl<P: ChainPolicy> Chain<P> {
 }
 
 /// The entry's hash, after checking that its JSON is an object whose `seq` and `prev`
-/// members agree with the `Entry` accessors and whose `prev` is a sha2-256 multihash.
+/// members agree with the `Entry` accessors, whose `prev` is a sha2-256 multihash and whose
+/// `proof` list (none when left out) is canonically the list `Entry::proofs` returns.
 fn checked_hash<E: Entry, X>(entry: &E) -> Result<Hash, ChainError<X>> {
-    let value = serde_json::to_value(entry).map_err(|e| ChainError::Malformed(e.to_string()))?;
+    let value = jcs::to_value(entry)?;
     let map = value
         .as_object()
         .ok_or_else(|| ChainError::Malformed("an entry must be a JSON object".into()))?;
@@ -268,9 +279,20 @@ fn checked_hash<E: Entry, X>(entry: &E) -> Result<Hash, ChainError<X>> {
             ))
         }
     }
-    if !matches!(map.get("proof"), None | Some(Value::Array(_))) {
+    let listed = match map.get("proof") {
+        None => Value::Array(Vec::new()),
+        Some(list @ Value::Array(_)) => list.clone(),
+        Some(_) => {
+            return Err(ChainError::Malformed(
+                "the entry's `proof` member must be an array".into(),
+            ))
+        }
+    };
+    // What is stored is the JSON; what is checked is `proofs()`. They must be the same list,
+    // or an entry that passes here fails to load again.
+    if canonical_json(&listed)? != canonical_json(&jcs::to_value(entry.proofs())?)? {
         return Err(ChainError::Malformed(
-            "the entry's `proof` member must be an array".into(),
+            "the entry's `proof` member differs from Entry::proofs".into(),
         ));
     }
     Ok(entry_hash_json(&value)?)
@@ -309,7 +331,44 @@ fn step<P: ChainPolicy>(
     Ok(hash)
 }
 
-/// Replays `entries` in the order given: `genesis` on the first, `append` on each other.
+/// [`step`] on the first of `copies` (one entry, several proof sets) that passes; the first
+/// copy's error when none does. Gives the hash and the copy that passed.
+///
+/// `state` is the caller's staged state, so a failed step may leave it changed: the last
+/// (often the only) copy steps on it in place, and only a copy with others still to try
+/// steps on a clone.
+fn step_any<'e, P: ChainPolicy>(
+    policy: &P,
+    id: &ChainId,
+    head: &Head,
+    state: &mut P::State,
+    copies: &[&'e P::Entry],
+) -> Result<(Hash, &'e P::Entry), ChainError<P::Error>> {
+    let Some((last, others)) = copies.split_last() else {
+        return Err(ChainError::Empty);
+    };
+    let mut first_error = None;
+    for entry in others {
+        let mut attempt = state.clone();
+        match step(policy, id, head, &mut attempt, entry) {
+            Ok(hash) => {
+                *state = attempt;
+                return Ok((hash, entry));
+            }
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    match step(policy, id, head, state, last) {
+        Ok(hash) => Ok((hash, last)),
+        Err(e) => Err(first_error.unwrap_or(e)),
+    }
+}
+
+/// Replays `entries` in the order given: `genesis` on the first, then the checks of `append` on
+/// each other. A failure fails the whole replay, so the state is changed in place, never cloned:
+/// a long chain folds in time linear in its length (`append` copies the state per entry).
 pub fn fold<P: ChainPolicy>(
     policy: &P,
     entries: &[P::Entry],
@@ -317,7 +376,9 @@ pub fn fold<P: ChainPolicy>(
     let (first, rest) = entries.split_first().ok_or(ChainError::Empty)?;
     let mut chain = Chain::genesis(policy, first)?;
     for entry in rest {
-        chain.append(policy, entry)?;
+        let head = chain.head();
+        let hash = step(policy, &chain.id, &head, &mut chain.state, entry)?;
+        chain.hashes.push(hash);
     }
     Ok(chain)
 }
@@ -372,9 +433,12 @@ pub fn compare(ours: &[Hash], theirs: &[Hash], from: u64, chain: &ChainId) -> Op
 
 /// What [`import`] did with a batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ImportOutcome {
-    /// New entries continued our head.
-    Appended { head: Head, count: u32 },
+pub enum ImportOutcome<E> {
+    /// New entries continued our head. `entries` are the copies appended, owned and in seq
+    /// order, one per new seq: persist these, not the batch. Copies of one entry share a
+    /// hash, so a batch may hold one without its proof beside the one that passed; only the
+    /// one that passed is here. Never empty.
+    Appended { head: Head, entries: Vec<E> },
     /// Every entry matches what we hold.
     AlreadyHave,
     /// The first new entry does not continue our head: fetch from `have + 1`.
@@ -389,7 +453,13 @@ pub enum ImportOutcome {
 /// Checks, in order: every entry has a canonical form and names this chain; an entry at a
 /// seq we hold has the hash we hold (else `Fork`); the new entries start at head + 1 (else
 /// `Gap`); then each new entry passes the order, link and policy checks of `append`. Two
-/// different entries at one new seq within the batch are `Malformed`.
+/// different entries at one new seq within the batch are `Malformed`. Copies of one entry
+/// (same hash, other proofs) are all tried, in batch order: the first that passes appends,
+/// and the batch fails only when none does.
+///
+/// `Appended` carries the copies that were appended. A caller that persists the import
+/// stores those, never its own pick from the batch: a copy stripped of its proof hashes the
+/// same as the signed one, and stored, it fails the next `fold`.
 ///
 /// `Fork` is hash-only evidence: the competing entry has a canonical form and names this
 /// chain, but its proofs are not verified and the policy is not applied to it. Verify it
@@ -398,7 +468,7 @@ pub fn import<P: ChainPolicy>(
     chain: &mut Chain<P>,
     policy: &P,
     entries: &[P::Entry],
-) -> Result<ImportOutcome, ChainError<P::Error>> {
+) -> Result<ImportOutcome<P::Entry>, ChainError<P::Error>> {
     let mut items: Vec<(u64, Hash, &P::Entry)> = Vec::with_capacity(entries.len());
     for entry in entries {
         let hash = checked_hash(entry)?;
@@ -414,7 +484,9 @@ pub fn import<P: ChainPolicy>(
     items.sort_by_key(|(seq, _, _)| *seq);
 
     let head = chain.head();
-    let mut new: Vec<(u64, Hash, &P::Entry)> = Vec::new();
+    // Copies of one entry share a hash (it leaves out `proof`), so each new seq keeps every
+    // copy: the first one the checks accept is the one appended.
+    let mut new: Vec<(u64, Hash, Vec<&P::Entry>)> = Vec::new();
     for (seq, hash, entry) in items {
         if seq <= head.seq {
             let ours = &chain.hashes[seq as usize];
@@ -428,15 +500,16 @@ pub fn import<P: ChainPolicy>(
             }
             continue;
         }
-        match new.last() {
-            Some((last_seq, last_hash, _)) if *last_seq == seq => {
+        match new.last_mut() {
+            Some((last_seq, last_hash, copies)) if *last_seq == seq => {
                 if *last_hash != hash {
                     return Err(ChainError::Malformed(format!(
                         "two different entries at seq {seq} in one batch"
                     )));
                 }
+                copies.push(entry);
             }
-            _ => new.push((seq, hash, entry)),
+            _ => new.push((seq, hash, vec![entry])),
         }
     }
 
@@ -450,21 +523,26 @@ pub fn import<P: ChainPolicy>(
         });
     }
 
+    // One staged state for the whole batch: an error drops it, so a step may fail on it.
     let mut state = chain.state.clone();
     let mut at = head;
     let mut added = Vec::with_capacity(new.len());
-    for (_, _, entry) in &new {
-        let hash = step(policy, &chain.id, &at, &mut state, entry)?;
+    let mut accepted = Vec::with_capacity(new.len());
+    for (_, _, copies) in &new {
+        let (hash, entry) = step_any(policy, &chain.id, &at, &mut state, copies)?;
         at = Head {
             seq: at.seq + 1,
             hash: hash.clone(),
         };
         added.push(hash);
+        accepted.push(entry);
     }
-    let count = u32::try_from(added.len()).unwrap_or(u32::MAX);
     chain.state = state;
     chain.hashes.extend(added);
-    Ok(ImportOutcome::Appended { head: at, count })
+    Ok(ImportOutcome::Appended {
+        head: at,
+        entries: accepted.into_iter().cloned().collect(),
+    })
 }
 
 // The TypeScript shapes the wasm exports return: `{ kind: "same" }`, `{ kind: "fork", fork }`, …
@@ -491,14 +569,16 @@ impl Serialize for Compare {
     }
 }
 
-impl Serialize for ImportOutcome {
+/// `{ kind: "appended", head, count }`: the vectors pin the chain after the import, so the
+/// appended entries are given as their number only.
+impl<E> Serialize for ImportOutcome<E> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(None)?;
         match self {
-            ImportOutcome::Appended { head, count } => {
+            ImportOutcome::Appended { head, entries } => {
                 map.serialize_entry("kind", "appended")?;
                 map.serialize_entry("head", head)?;
-                map.serialize_entry("count", count)?;
+                map.serialize_entry("count", &entries.len())?;
             }
             ImportOutcome::AlreadyHave => map.serialize_entry("kind", "already-have")?,
             ImportOutcome::Gap { have, first } => {

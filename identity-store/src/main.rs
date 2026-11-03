@@ -62,11 +62,31 @@ async fn serve() -> Result<(), String> {
         store.key.multikey()
     );
     axum::serve(listener, router(store))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Resolves on SIGINT, or on SIGTERM (what `docker stop` and service managers send).
+async fn shutdown() {
+    let interrupt = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
+    }
 }
 
 fn keygen() -> Result<(), String> {

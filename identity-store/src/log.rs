@@ -2,9 +2,10 @@
 //! and the key index.
 
 use ad4m_hash_chain::store::{SqliteChainStore, StoreError, StoredEntry};
-use ad4m_hash_chain::Head;
+use ad4m_hash_chain::{ForkEvidence, Head, Multikey};
 use ad4m_identity_core::{
-    error_code, pow, ChainError, DeviceKey, Event, FoldError, KelChain, KelPolicy, KeyLife, Op,
+    error_code, event_hash, pow, ChainError, DeviceKey, Event, FoldError, KelChain, KelPolicy,
+    KeyLife, Op,
 };
 use ad4m_ldk::identity::{AppendRequest, KeyIndexEntry, LogPage, SignedHead};
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -12,7 +13,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 use crate::db::{self, to_sql, KEL};
 use crate::error::ApiError;
 use crate::offers;
-use crate::{Fault, Store};
+use crate::{Fault, Store, Topic};
 
 /// Events per append.
 pub const MAX_EVENTS: usize = 32;
@@ -33,12 +34,38 @@ fn chain_error(e: &ChainError<FoldError>) -> ApiError {
     ApiError::invalid(&name, e.to_string())
 }
 
+/// The events of an append body, each parsed from its own text with `Event::from_json_text`.
+/// A refused event is `400` with the format rule's name (`DuplicateMember`, `UnknownField`, …),
+/// or the `FoldError` name for any other refusal.
+fn events_of(body: &[u8]) -> Result<Vec<Event>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Texts<'a> {
+        #[serde(borrow)]
+        events: Vec<&'a serde_json::value::RawValue>,
+    }
+    let texts: Texts =
+        serde_json::from_slice(body).map_err(|e| ApiError::invalid("malformed", e.to_string()))?;
+    texts
+        .events
+        .iter()
+        .map(|text| {
+            Event::from_json_text(text.get()).map_err(|e| {
+                let name = match &e {
+                    FoldError::Format(format) => format.name(),
+                    other => other.name(),
+                };
+                ApiError::invalid(name, e.to_string())
+            })
+        })
+        .collect()
+}
+
 /// How a new log with no vouching note is admitted (section 14, host admission policy, of
 /// `docs-src/identity/did-scid-coasys-1.md`). There is no brake yet: no
 /// bucket per address, no store-wide ceiling and no required proof of work. A proof that is
 /// sent must still meet `POW_BITS`, so the request format and the client's work stay those
-/// of the format. The brake adds the buckets and makes the proof required here, before any
-/// replay.
+/// of the format. The brake adds the buckets and makes the proof required here; it runs once
+/// event #0 has replayed and before the rest of the append replays.
 pub fn admit_new_log(
     scid: &str,
     proof: Option<&ad4m_ldk::identity::Pow>,
@@ -100,6 +127,53 @@ fn listed_keys(event: &Event) -> Vec<&str> {
     }
 }
 
+/// The fork `event` makes with the stored log `stored` of `scid`, when it is one: an event at a
+/// seq the store holds, with another hash than the stored event there, that replays on the
+/// stored events before it (every proof checked by the identity core). Answers the evidence and
+/// the master that signed the event, read from that replay: the last master of the state after
+/// it (an `incept` or `rotate` is signed by the master it names, every other event by the master
+/// current before it). `None` for a resend of a stored event, an event past the head (a gap)
+/// and an event that does not replay.
+fn competing_event(
+    conn: &Connection,
+    scid: &str,
+    stored: &KelChain,
+    event: &Event,
+) -> Result<Option<(ForkEvidence, Multikey)>, ApiError> {
+    let Some(ours) = stored.hash_at(event.seq) else {
+        return Ok(None);
+    };
+    let Ok(theirs) = event_hash(event) else {
+        return Ok(None);
+    };
+    if &theirs == ours {
+        return Ok(None);
+    }
+    let after = if event.seq == 0 {
+        if event.scid != scid {
+            return Ok(None);
+        }
+        KelChain::genesis(&KelPolicy, event).ok()
+    } else {
+        match db::load_chain_before(conn, scid, event.seq)? {
+            Some(mut prefix) => prefix.append(&KelPolicy, event).is_ok().then_some(prefix),
+            None => None,
+        }
+    };
+    let Some(signer) = after.and_then(|a| a.state().masters.last().map(|m| m.sign.clone())) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        ForkEvidence {
+            chain: scid.to_string(),
+            seq: event.seq,
+            ours: ours.clone(),
+            theirs,
+        },
+        signer,
+    )))
+}
+
 fn current_head(conn: &Connection, scid: &str) -> Result<SignedHead, ApiError> {
     db::signed_head(conn, scid)?
         .ok_or_else(|| ApiError::internal(format!("log {scid} has no head")))
@@ -107,7 +181,15 @@ fn current_head(conn: &Connection, scid: &str) -> Result<SignedHead, ApiError> {
 
 impl Store {
     /// `POST /v1/logs/{scid}/events`.
-    pub fn append(&self, scid: &str, req: &AppendRequest) -> Result<SignedHead, ApiError> {
+    /// `body` is the text `req` was parsed from: the events are parsed again from their own
+    /// text there, so an event that names a member twice is refused (`DuplicateMember`), which
+    /// `req.events` (each a `Value`, holding only the last of the two) cannot show.
+    pub fn append(
+        &self,
+        scid: &str,
+        req: &AppendRequest,
+        body: &[u8],
+    ) -> Result<SignedHead, ApiError> {
         if req.events.is_empty() {
             return Err(ApiError::invalid(
                 "malformed",
@@ -126,11 +208,7 @@ impl Store {
                 "a new log carries a vouching token or a proof of work, not both",
             ));
         }
-        let events = req
-            .events
-            .iter()
-            .map(|v| Event::from_json(v).map_err(|e| ApiError::invalid(e.name(), e.to_string())))
-            .collect::<Result<Vec<_>, _>>()?;
+        let events = events_of(body)?;
         let now = self.now();
 
         let mut conn = self.db.lock()?;
@@ -170,8 +248,33 @@ impl Store {
                         "a vouching token or a proof of work comes only with event #0",
                     ));
                 }
+                // A fork signed by the held log's current master freezes the identity. The one
+                // append a frozen identity takes is a `rotate`: it is signed by the committed
+                // next key, which the rival's signer alone does not hold, and once appended the
+                // rival's signer is no longer current, so the freeze ends.
+                if !matches!(first.op, Op::Rotate { .. }) {
+                    if let Some(fork) = db::freezing_fork(&tx, scid, &existing)? {
+                        return Err(ApiError::forked(&current_head(&tx, scid)?, &fork));
+                    }
+                }
                 let head = existing.head();
                 if first.seq != head.seq + 1 || first.prev.as_ref() != Some(&head.hash) {
+                    // A validly signed event at a seq the store holds, other than the stored
+                    // one, is a fork: the store records it (with the event, so anyone can check
+                    // it) and answers `409 forked`. It freezes the identity only when its signer
+                    // is the held log's current master (`db::freezing_fork`). One fork is kept
+                    // per signing master: a further rival by the same master is answered with
+                    // the recorded fork and adds nothing. Anything else is a plain conflict.
+                    if let Some((fork, signer)) = competing_event(&tx, scid, &existing, first)? {
+                        let theirs = ad4m_hash_chain::entry_json(first)
+                            .map_err(|e| ApiError::invalid("malformed", e.to_string()))?;
+                        let fork = db::record_fork(&tx, fork, &theirs, &signer)?;
+                        let head = current_head(&tx, scid)?;
+                        tx.commit()?;
+                        drop(conn);
+                        self.changed(&[Topic::offers(scid)]);
+                        return Err(ApiError::forked(&head, &fork));
+                    }
                     return Err(ApiError::conflict(&current_head(&tx, scid)?));
                 }
                 chain = existing;
@@ -259,7 +362,11 @@ impl Store {
         db::put_head(&tx, &signed)?;
         tx.commit()?;
         drop(conn);
-        self.changed();
+        let mut topics = vec![Topic::offers(scid)];
+        for event in &events {
+            topics.extend(listed_keys(event).into_iter().map(Topic::key));
+        }
+        self.changed(&topics);
         Ok(signed)
     }
 

@@ -390,9 +390,14 @@ fn sorted(value: &Value) -> Value {
     }
 }
 
-/// The record signature (`coasys:link` over `{profile, version, anchor}`) by `signer`.
+/// The record signature (`coasys:agent-record` over `{profile, version, anchor}`) by `signer`.
 pub fn sign_record(record: &AgentRecord, signer: &SigningKey) -> String {
-    let bytes = signing_bytes(ad4m_identity_core::LINK_DOMAIN, &record.signed_value()).unwrap();
+    sign_record_in(ad4m_identity_core::AGENT_RECORD_DOMAIN, record, signer)
+}
+
+/// The record signature under `domain` (a test signs under another domain to see it refused).
+pub fn sign_record_in(domain: &str, record: &AgentRecord, signer: &SigningKey) -> String {
+    let bytes = signing_bytes(domain, &record.signed_value()).unwrap();
     encode_proof_value(&Signer::sign(signer, &bytes))
 }
 

@@ -6,7 +6,7 @@
 //!   `did:scid` and signed by the device key the way `create_signed_expression` signs, with
 //!   `proof.key` the bare device `did:key`;
 //! - `anchor`: the log's trusted seq ([`KelCache::trusted`](super::cache::KelCache::trusted));
-//! - `sig`: the device key's `coasys:link` signature over `{profile, version, anchor}`;
+//! - `sig`: the device key's `coasys:agent-record` signature over `{profile, version, anchor}`;
 //! - a signed request by the same device key at the trusted head, for the store that signed it.
 //!
 //! The store admits it, the agent language answers it with `proof.record`, and
@@ -14,7 +14,7 @@
 
 use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes};
 use ad4m_identity_core::build::Signer;
-use ad4m_identity_core::{did_of, signing_bytes, LINK_DOMAIN, REQUEST_DOMAIN};
+use ad4m_identity_core::{did_of, signing_bytes, AGENT_RECORD_DOMAIN, REQUEST_DOMAIN};
 use ad4m_ldk::identity::{AgentRecord, RequestBody, SignedHead, SignedRequest};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
@@ -37,8 +37,8 @@ pub struct PersonRecord {
 /// `key_id` of the log) and anchored at `head`, the accepted head at the log's trusted seq.
 /// `profile` is the Agent JSON of the did:key publish (`did`, `perspective`,
 /// `directMessageLanguage`); its `did` becomes `did`, and a missing perspective an empty one.
-/// `at` gives the expression's timestamp, the record's version (unix milliseconds) and the
-/// request's expiry.
+/// `at` gives the expression's timestamp and the request's expiry; the record's version is
+/// [`next_version`] of `at` and `stored`, the version the store holds for the record.
 pub fn person_record(
     signer: &WalletSigner,
     did: &str,
@@ -46,6 +46,7 @@ pub fn person_record(
     head: &SignedHead,
     profile: &Value,
     at: DateTime<Utc>,
+    stored: Option<u64>,
 ) -> Result<PersonRecord, String> {
     let device = format!("did:key:{}", signer.key());
     let mut data = profile.clone();
@@ -75,12 +76,16 @@ pub fn person_record(
     let mut record = AgentRecord {
         did: did.to_string(),
         profile: expression,
-        version: u64::try_from(at.timestamp_millis()).map_err(|e| e.to_string())?,
+        version: next_version(
+            u64::try_from(at.timestamp_millis()).map_err(|e| e.to_string())?,
+            stored,
+        ),
         signed_by: device,
         anchor: Some(head.seq),
         sig: String::new(),
     };
-    let bytes = signing_bytes(LINK_DOMAIN, &record.signed_value()).map_err(|e| e.to_string())?;
+    let bytes =
+        signing_bytes(AGENT_RECORD_DOMAIN, &record.signed_value()).map_err(|e| e.to_string())?;
     record.sig = encode_proof_value(&signer.sign(&bytes));
 
     // The agent language sends the record as its canonical JSON.
@@ -105,6 +110,13 @@ pub fn person_record(
         record,
         request: SignedRequest { req, sig },
     })
+}
+
+/// The version of a new agent record: `now_ms` (unix milliseconds), or one past `stored` (the
+/// version the store holds) when that is not below it. The store takes only a greater version,
+/// so a device whose clock runs ahead never blocks the person's other devices.
+pub fn next_version(now_ms: u64, stored: Option<u64>) -> u64 {
+    stored.map_or(now_ms, |stored| now_ms.max(stored.saturating_add(1)))
 }
 
 /// `value` without its null members, at any depth.
@@ -152,7 +164,16 @@ impl IdentityService {
             .ok_or_else(|| WsRpcError::internal("the accepted head moved while publishing"))?;
         let did = did_of(&scid);
         let signer = WalletSigner::new(agent).map_err(WsRpcError::internal)?;
-        let put = person_record(&signer, &did, &key_id, &head, profile, Utc::now())
+        // The store's version of the record; when it cannot be read the clock decides, and a
+        // put the store refuses as not newer fails as before.
+        let stored = match self.backend.agent_version(&did).await {
+            Ok(stored) => stored,
+            Err(e) => {
+                log::warn!("identity: could not read the agent record of {did}: {e}");
+                None
+            }
+        };
+        let put = person_record(&signer, &did, &key_id, &head, profile, Utc::now(), stored)
             .map_err(WsRpcError::internal)?;
         self.backend
             .put_agent(&put.record, Some(&put.request))
@@ -317,7 +338,7 @@ mod tests {
         );
         let sig = decode_proof_value(&record.sig).unwrap();
         assert!(verify_signed(
-            LINK_DOMAIN,
+            AGENT_RECORD_DOMAIN,
             &record.signed_value(),
             &world.key,
             &sig
@@ -397,7 +418,7 @@ mod tests {
         assert_eq!(puts.len(), 2, "one on binding, one on the publish");
         assert_eq!(puts[1].0.did, world.did());
         assert_eq!(puts[1].0.anchor, Some(1));
-        assert!(puts[1].0.version >= puts[0].0.version);
+        assert!(puts[1].0.version > puts[0].0.version);
 
         // Revoked at the trusted seq: the key speaks for no one there, so only the did:key
         // profile goes out.
@@ -407,6 +428,55 @@ mod tests {
         let (result, _) = world.publish(false).await;
         result.unwrap();
         assert_eq!(world.puts().len(), 2);
+    }
+
+    /// `agent.get` and `agent.status` name the person (`IdentityService::identity_of`) only while
+    /// the agent's device key speaks for it at the trusted seq: after a revocation of this key
+    /// reaches it they answer no identity, though the binding stays.
+    #[tokio::test]
+    async fn a_revoked_device_key_no_longer_names_its_person() {
+        let mut world = World::new(85);
+        assert_eq!(
+            world.service.identity_of(&world.agent_did).await,
+            None,
+            "unbound"
+        );
+        world.bind().await;
+        assert_eq!(
+            world.service.identity_of(&world.agent_did).await,
+            Some(world.did())
+        );
+
+        let event = revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        world.log.events.push(event);
+        accept_signed(&world.service.cache, &world.log.events).await;
+        assert_eq!(world.service.identity_of(&world.agent_did).await, None);
+        assert_eq!(
+            db(|db| db.agent_identity(&world.agent_did)).unwrap(),
+            Some(world.log.scid()),
+            "the binding stays"
+        );
+    }
+
+    /// Another device of the person wrote the record with a clock an hour ahead: this device's
+    /// next record goes one past the store's version, not its own clock, so the store takes it.
+    #[tokio::test]
+    async fn a_record_written_by_a_clock_ahead_does_not_block_the_next_put() {
+        let world = World::new(84);
+        world.bind().await;
+        let mut ahead = world.puts()[0].0.clone();
+        ahead.version += 3_600_000;
+        world.store.puts.lock().unwrap().push((ahead.clone(), None));
+
+        let (result, _) = world.publish(false).await;
+        result.unwrap();
+        let puts = world.puts();
+        assert_eq!(puts.len(), 3, "{puts:?}");
+        assert_eq!(puts[2].0.version, ahead.version + 1);
+        // Otherwise the clock decides.
+        assert_eq!(next_version(10, None), 10);
+        assert_eq!(next_version(10, Some(3)), 10);
+        assert_eq!(next_version(10, Some(10)), 11);
     }
 
     /// The person's profile failing leaves the did:key publish successful, and the next publish
