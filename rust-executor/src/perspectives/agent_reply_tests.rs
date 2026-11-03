@@ -90,6 +90,22 @@ fn answering(answer: &str, seen: Arc<Mutex<Vec<AgentMessage>>>) -> Runner {
     })
 }
 
+/// `answering`, held until told to go.
+fn answering_on_cue(
+    answer: &str,
+    seen: Arc<Mutex<Vec<AgentMessage>>>,
+) -> (Runner, tokio::sync::oneshot::Sender<()>) {
+    let (go, wait) = tokio::sync::oneshot::channel::<()>();
+    let answer = answering(answer, seen);
+    let run: Runner = Box::new(move |messages, steps| {
+        Box::pin(async move {
+            let _ = wait.await;
+            answer(messages, steps).await
+        })
+    });
+    (run, go)
+}
+
 /// A runner that answers only when told to.
 fn waiting() -> (Runner, tokio::sync::oneshot::Sender<()>) {
     let (go, wait) = tokio::sync::oneshot::channel::<()>();
@@ -142,14 +158,14 @@ async fn a_reply_runs_on_the_node_and_lands_in_the_conversation() {
     say(&mut f, "app://m/1", "rename the board").await;
     let seen = Arc::new(Mutex::new(Vec::new()));
 
-    let id = start(&f, answering("Renamed it.", seen.clone()))
-        .await
-        .unwrap();
+    let (run, go) = answering_on_cue("Renamed it.", seen.clone());
+    let id = start(&f, run).await.unwrap();
     assert_eq!(
         reply(&f, &id).await["status"],
         "running",
         "created before the run ends"
     );
+    go.send(()).unwrap();
 
     let done = until_status(&f, &id, ReplyStatus::Done).await;
     assert_eq!(done["text"], "Renamed it.");
@@ -557,4 +573,17 @@ fn a_step_fails_on_the_loops_error_or_the_tools_error_and_caps_the_message() {
     );
     let (_, long) = outcome_of(&format!("error: {}", "x".repeat(1000)));
     assert!(long.unwrap().chars().count() <= 301);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_answered_at_once_is_done_not_cancelled() {
+    let mut f = fixture().await;
+    for i in 0..20 {
+        say(&mut f, &format!("app://m/{i}"), "quick").await;
+        let id = start(&f, answering("at once", Arc::default()))
+            .await
+            .unwrap();
+        let ended = until_status(&f, &id, ReplyStatus::Done).await;
+        assert_eq!(ended["text"], "at once");
+    }
 }
