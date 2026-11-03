@@ -413,6 +413,11 @@ impl RunArgs {
         }
 
         let mut config = file.to_ad4m_config(&secrets)?;
+        // The file's `multi_user_config.enabled: false` leaves the mode as it
+        // is; `--enable-multi-user` / `AD4M_ENABLE_MULTI_USER` sets it either way.
+        if let Some(enabled) = self.enable_multi_user {
+            config.enable_multi_user = Some(enabled);
+        }
         config.network_bootstrap_seed = self.network_bootstrap_seed;
         config.language_language_only = self.language_language_only;
         config.hc_use_bootstrap = self.hc_use_bootstrap;
@@ -871,6 +876,50 @@ pub(crate) mod tests {
             .err()
             .expect("a certificate without a key is an error");
         assert!(err.to_string().contains("TLS needs both"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `--enable-multi-user` (or `AD4M_ENABLE_MULTI_USER`) sets the mode either way.
+    /// Without it, the mode stays as the database has it, even when a config file or
+    /// the TLS flags bring a `multi_user_config` with `enabled: false`; a file can
+    /// only turn it on.
+    #[test]
+    fn the_multi_user_flag_sets_the_mode_both_ways_and_no_flag_keeps_it() {
+        let _env = lock_env();
+        let dir = scratch_dir("multi-user");
+        let on = write_config(&dir, r#"{"multi_user_config": {"enabled": true}}"#);
+        let off_dir = dir.join("off");
+        std::fs::create_dir_all(&off_dir).unwrap();
+        let off = write_config(&off_dir, r#"{"multi_user_config": {"enabled": false}}"#);
+        let mode = |argv: &[&str], env: &[(&'static str, &str)]| {
+            resolve(argv, env).unwrap().config.enable_multi_user
+        };
+
+        assert_eq!(mode(&[], &[]), None);
+        assert_eq!(mode(&["--enable-multi-user", "false"], &[]), Some(false));
+        assert_eq!(mode(&["--enable-multi-user", "true"], &[]), Some(true));
+        assert_eq!(
+            mode(&[], &[("AD4M_ENABLE_MULTI_USER", "false")]),
+            Some(false)
+        );
+
+        assert_eq!(mode(&["--config", &on], &[]), Some(true));
+        assert_eq!(
+            mode(&["--config", &on, "--enable-multi-user", "false"], &[]),
+            Some(false)
+        );
+        assert_eq!(mode(&["--config", &off], &[]), None);
+        assert_eq!(
+            mode(&["--config", &off, "--enable-multi-user", "true"], &[]),
+            Some(true)
+        );
+        assert_eq!(
+            mode(
+                &["--tls-cert-file", "c.pem", "--tls-key-file", "k.pem"],
+                &[]
+            ),
+            None
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
