@@ -125,7 +125,10 @@ rule. Each rule names the error that the reference implementation returns
 - **P5** `kind` of an `incept` is `human`; `group` is reserved (`Format(UnsupportedKind)`).
 - **P6** The event serialises back to exactly the JSON it came from: an empty `proof` or an
   empty `revoke` on `rotate` is left out, never written as `[]` (`Format(NotCanonical)`).
-  Without this, a receiver's hash could differ from the sender's.
+  Without this, a receiver's hash could differ from the sender's. The event's text is I-JSON
+  (RFC 7493): no object in it names a member twice (`Format(DuplicateMember)`), checked on the
+  text before it is parsed into a value, since a parser keeping the first of two members and one
+  keeping the last would read two different events from the same bytes.
 - **P7** The canonical JSON text of the event (section 4), proofs included, is at most
   65 536 bytes (`Format(TooLarge)`). `offer`, `coSig` and `can` have no length limit of their
   own (`salt` has: K13), so this limit stops one signed event from growing without bound.
@@ -413,7 +416,7 @@ DID uses its caller's sources and its configured hosts.
 | File | Holds |
 |---|---|
 | `log.json` | a valid log with every op and every key life: events, SCID, DID, hashes, the folded state, `key_valid_at` and `key_valid_at_time` for every key, seq and two times |
-| `fold.json` | one invalid log per rule with the pinned error `{code, reason, format}` |
+| `fold.json` | one invalid log per rule with the pinned error `{code, reason, format}`; in `textCases` the events are JSON text (a duplicate member name, P6) |
 | `proofs.json` | every proof of `log.json` with its proof config, config hash, signing input and event hash; a tampered body, a wrong key, another domain |
 | `commitment.json` | entropy, words, seed, masters 0–3 with path, key, salt and commitment, and the recovery public key |
 | `pow.json` | proofs at 8, 12 and 16 bits for the SCID of `log.json`, with their hashes |

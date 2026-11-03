@@ -5,10 +5,12 @@ mod common;
 
 use ad4m_hash_chain::{
     compare, entry_hash, entry_hash_json, fold, import, verify_proof, CanonError, Chain,
-    ChainError, Compare, ForkEvidence, ImportOutcome, ProofError,
+    ChainError, ChainId, ChainPolicy, ChainType, Compare, ForkEvidence, ImportOutcome, ProofError,
 };
 use common::*;
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn snapshot(chain: &TestChain) -> serde_json::Value {
     chain_json(chain)
@@ -140,6 +142,61 @@ fn policy_failure_changes_nothing() {
         Some(&TestError::MissingProof)
     );
     assert_eq!(snapshot(&chain), before);
+}
+
+/// `TestPolicy` with a state that counts its own clones: the work a fold spends copying state.
+struct Counting(Arc<AtomicUsize>);
+
+struct CountedState {
+    inner: TestState,
+    clones: Arc<AtomicUsize>,
+}
+
+impl Clone for CountedState {
+    fn clone(&self) -> Self {
+        self.clones.fetch_add(1, Ordering::SeqCst);
+        CountedState {
+            inner: self.inner.clone(),
+            clones: self.clones.clone(),
+        }
+    }
+}
+
+impl ChainPolicy for Counting {
+    type Entry = TestEntry;
+    type State = CountedState;
+    type Error = TestError;
+    const TYPE: ChainType = <TestPolicy as ChainPolicy>::TYPE;
+    const DOMAIN: &'static str = DOMAIN;
+
+    fn genesis(&self, entry: &TestEntry) -> Result<(ChainId, CountedState), TestError> {
+        let (id, inner) = TestPolicy.genesis(entry)?;
+        let clones = self.0.clone();
+        Ok((id, CountedState { inner, clones }))
+    }
+
+    fn chain_of(&self, entry: &TestEntry) -> ChainId {
+        TestPolicy.chain_of(entry)
+    }
+
+    fn apply(&self, state: &mut CountedState, entry: &TestEntry) -> Result<(), TestError> {
+        TestPolicy.apply(&mut state.inner, entry)
+    }
+}
+
+#[test]
+fn fold_never_copies_the_state_and_append_copies_it_once() {
+    // A state that grows with the chain makes a copy per entry quadratic: fold copies none,
+    // whatever the length, so its work is linear. `append` copies once, to change nothing
+    // when the entry is refused.
+    let clones = Arc::new(AtomicUsize::new(0));
+    let policy = Counting(clones.clone());
+    let entries = make_chain("c", 1, 65);
+    let mut chain = fold(&policy, &entries[..64]).unwrap();
+    assert_eq!(chain.state().inner.count, 63);
+    assert_eq!(clones.load(Ordering::SeqCst), 0);
+    chain.append(&policy, &entries[64]).unwrap();
+    assert_eq!(clones.load(Ordering::SeqCst), 1);
 }
 
 #[test]

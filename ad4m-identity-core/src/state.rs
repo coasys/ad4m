@@ -124,11 +124,13 @@ impl KeyState {
         format!("m{}", self.masters.len())
     }
 
-    /// The device keys valid at `seq`, with their encryption keys.
+    /// The standing device keys valid at `seq`, with their encryption keys: the keys the DID
+    /// document lists in `keyAgreement`. Bot keys are left out (a bot has no inbox), so a caller
+    /// that seals to the person through this never seals to a bot.
     pub fn encryption_keys_at(&self, seq: u64) -> Vec<(&KeyId, &Multikey)> {
         self.keys
             .values()
-            .filter(|r| r.valid_at(seq))
+            .filter(|r| r.valid_at(seq) && r.scopes.is_empty())
             .filter_map(|r| r.enc.as_ref().map(|enc| (&r.id, enc)))
             .collect()
     }

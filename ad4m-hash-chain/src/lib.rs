@@ -309,7 +309,9 @@ fn step<P: ChainPolicy>(
     Ok(hash)
 }
 
-/// Replays `entries` in the order given: `genesis` on the first, `append` on each other.
+/// Replays `entries` in the order given: `genesis` on the first, then the checks of `append` on
+/// each other. A failure fails the whole replay, so the state is changed in place, never cloned:
+/// a long chain folds in time linear in its length (`append` copies the state per entry).
 pub fn fold<P: ChainPolicy>(
     policy: &P,
     entries: &[P::Entry],
@@ -317,7 +319,9 @@ pub fn fold<P: ChainPolicy>(
     let (first, rest) = entries.split_first().ok_or(ChainError::Empty)?;
     let mut chain = Chain::genesis(policy, first)?;
     for entry in rest {
-        chain.append(policy, entry)?;
+        let head = chain.head();
+        let hash = step(policy, &chain.id, &head, &mut chain.state, entry)?;
+        chain.hashes.push(hash);
     }
     Ok(chain)
 }

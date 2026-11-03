@@ -5,8 +5,11 @@
 //! which refuses unknown ops, unknown fields, floats, integers at or above 2^53, `kind` other
 //! than `human` and `bot`, and any JSON that would not serialise back to the same value. The
 //! last rule keeps the event hash a receiver computes equal to the hash of the bytes it got.
+//! Text is read by [`Event::from_json_text`] or the `Deserialize` impl, which also refuse an
+//! object that names one member twice: one text must not carry two events.
 
 use ad4m_hash_chain::{canonical_json, CanonError, Entry, Hash, Multikey, Proof};
+use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
@@ -202,8 +205,110 @@ impl Serialize for Event {
 
 impl<'de> Deserialize<'de> for Event {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
-        Event::from_json(&value).map_err(serde::de::Error::custom)
+        let read = Members::deserialize(deserializer)?;
+        Event::from_members(read).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A JSON value read from text, with the first member name an object repeated, if any. A
+/// `serde_json::Value` keeps only the last of two members of one name, so a duplicate (refused
+/// by I-JSON, RFC 7493 section 2.3, and by rule P6) must be seen while the text is read.
+struct Members {
+    value: Value,
+    duplicate: Option<String>,
+}
+
+impl Members {
+    fn leaf(value: Value) -> Self {
+        Members {
+            value,
+            duplicate: None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Members {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(MembersVisitor)
+    }
+}
+
+/// Builds the same `Value` as `serde_json`'s own visitor, and notes a repeated member name.
+struct MembersVisitor;
+
+impl<'de> Visitor<'de> for MembersVisitor {
+    type Value = Members;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Members, E> {
+        Ok(Members::leaf(Value::Bool(v)))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Members, E> {
+        Ok(Members::leaf(Value::from(v)))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Members, E> {
+        Ok(Members::leaf(Value::from(v)))
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Members, E> {
+        Ok(Members::leaf(
+            serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number),
+        ))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Members, E> {
+        Ok(Members::leaf(Value::String(v.to_string())))
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<Members, E> {
+        Ok(Members::leaf(Value::String(v)))
+    }
+
+    fn visit_unit<E>(self) -> Result<Members, E> {
+        Ok(Members::leaf(Value::Null))
+    }
+
+    fn visit_none<E>(self) -> Result<Members, E> {
+        Ok(Members::leaf(Value::Null))
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Members, D::Error> {
+        Members::deserialize(deserializer)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Members, A::Error> {
+        let mut items = Vec::new();
+        let mut duplicate = None;
+        while let Some(item) = seq.next_element::<Members>()? {
+            duplicate = duplicate.or(item.duplicate);
+            items.push(item.value);
+        }
+        Ok(Members {
+            value: Value::Array(items),
+            duplicate,
+        })
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Members, A::Error> {
+        let mut map = Map::new();
+        let mut duplicate = None;
+        while let Some(key) = access.next_key::<String>()? {
+            let item = access.next_value::<Members>()?;
+            duplicate = duplicate.or(item.duplicate);
+            if map.contains_key(&key) {
+                duplicate = duplicate.or(Some(key.clone()));
+            }
+            map.insert(key, item.value);
+        }
+        Ok(Members {
+            value: Value::Object(map),
+            duplicate,
+        })
     }
 }
 
@@ -213,8 +318,27 @@ const COMMON_FIELDS: &[&str] = &["format", "scid", "seq", "prev", "op", "proof"]
 const DEVICE_KEY_FIELDS: &[&str] = &["id", "sign", "enc", "kind", "can", "expires"];
 
 impl Event {
+    /// Parses one event from its JSON text: [`Event::from_json`], after refusing text that is
+    /// not JSON (`NotJson`) and an object anywhere in it that names one member twice
+    /// (`DuplicateMember`, rule P6). Text from outside goes through this (or the `Deserialize`
+    /// impl, which applies the same check): a `Value` parsed elsewhere has already dropped all
+    /// but one of two members of one name, and a parser keeping the other would read another event.
+    pub fn from_json_text(text: &str) -> Result<Event, FoldError> {
+        let read: Members = serde_json::from_str(text)
+            .map_err(|e| format_err(FormatError::NotJson(e.to_string())))?;
+        Event::from_members(read)
+    }
+
+    fn from_members(read: Members) -> Result<Event, FoldError> {
+        if let Some(name) = read.duplicate {
+            return Err(format_err(FormatError::DuplicateMember(name)));
+        }
+        Event::from_json(&read.value)
+    }
+
     /// Parses one event from JSON under the parsing rules P1–P7 of the format
-    /// spec.
+    /// spec. A `Value` cannot hold a duplicate member name; text is read with
+    /// [`Event::from_json_text`].
     pub fn from_json(value: &Value) -> Result<Event, FoldError> {
         check_canonical(value)?;
         let map = value

@@ -385,6 +385,71 @@ fn rotate_with_a_malformed_salt() {
 }
 
 #[test]
+fn incept_next_not_a_multihash() {
+    assert_eq!(
+        format_of(refuse("incept whose next is not a multihash")),
+        FormatError::BadHash("not-a-multihash".into())
+    );
+}
+
+#[test]
+fn rotate_next_not_a_multihash() {
+    assert_eq!(
+        format_of(refuse("rotate whose next is not a multihash")),
+        FormatError::BadHash("not-a-multihash".into())
+    );
+}
+
+#[test]
+fn revoke_of_no_key() {
+    assert_eq!(
+        format_of(refuse("revoke of no key")),
+        FormatError::EmptyRevoke
+    );
+}
+
+#[test]
+fn a_duplicate_member_name_is_refused_at_the_text() {
+    // The last `next` is the signed incept's: a `Value` keeps only it, so the check must read
+    // the text. Both text entry points refuse it.
+    let case = text_refusal_cases()
+        .into_iter()
+        .find(|c| c.name == "duplicate member name")
+        .unwrap();
+    assert_eq!(fold_texts(&case.events), Some(case.error));
+    let text = &case.events[0];
+    assert_eq!(
+        Event::from_json_text(text),
+        Err(FoldError::Format(FormatError::DuplicateMember(
+            "next".into()
+        )))
+    );
+    let serde = serde_json::from_str::<Event>(text).unwrap_err();
+    assert!(serde.to_string().contains("\"next\" twice"), "{serde}");
+    // In a list, or in an object nested in the event, too.
+    assert!(serde_json::from_str::<Vec<Event>>(&format!("[{text}]")).is_err());
+    let nested = Log::new().events[0].to_canonical_json().unwrap().replacen(
+        "\"id\":\"d1\"",
+        "\"id\":\"d1\",\"id\":\"d1\"",
+        1,
+    );
+    assert_eq!(
+        Event::from_json_text(&nested),
+        Err(FoldError::Format(FormatError::DuplicateMember("id".into())))
+    );
+    // The same text with one `next` parses to the event that folds.
+    let once = Log::new().events[0].to_canonical_json().unwrap();
+    assert_eq!(
+        Event::from_json_text(&once),
+        Ok(Log::new().events[0].clone())
+    );
+    assert!(matches!(
+        Event::from_json_text("{\"seq\":"),
+        Err(FoldError::Format(FormatError::NotJson(_)))
+    ));
+}
+
+#[test]
 fn event_after_the_end() {
     assert_eq!(policy_of(refuse("event after the end")), FoldError::Ended);
 }

@@ -35,7 +35,10 @@ identity core, not here).
   the crate itself needs it (the wasm export and the store hash JSON; `verify_proof`
   builds on `verify_proof_json`).
 - `Chain::append` and `import` change nothing when a check fails. Order of checks:
-  canonical form, `seq`, `prev`, chain id, then the policy.
+  canonical form, `seq`, `prev`, chain id, then the policy. `append` copies the state for
+  that; `fold` fails as a whole, so it applies every entry to one state in place and never
+  copies it (a state that grows with the chain would make a copy per entry quadratic;
+  `tests/chain.rs` counts the copies).
 - **Fork detection only.** Two entries at one seq give `ForkEvidence`; nothing appends;
   the store keeps both (`record_fork`). The module never truncates a chain, never picks a
   branch, and a shorter peer chain is `WeExtend` (the chain type decides if that alarms).
