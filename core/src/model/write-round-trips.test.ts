@@ -196,6 +196,24 @@ describe("RPCs per write", () => {
     expect(commandsSent(sent).some((c) => c.includes("collectionSetter") && c.includes("rt://tag"))).toBe(true);
   });
 
+  it("create still clears an empty relation whose predicate a scalar relation write in the same save wrote to", async () => {
+    // A scalar on `tags` is written as a one-member relation before `labels`
+    // (same predicate) is reached, so `labels: []` has a link to clear. The
+    // scalar's own write is a collectionSetter on rt://tag too, so look for
+    // the clear: the one with no values.
+    const { proxy, sent } = countingProxy([RoundTripShared]);
+    const shared = new RoundTripShared(proxy);
+    shared.title = "standup";
+    shared.tags = "rt://tag/a" as any;
+    shared.labels = [];
+    await shared.save();
+    const clears = sent.filter(
+      ([method, , commands, , params]) =>
+        method === "executeCommands" && commands.includes("collectionSetter") && commands.includes("rt://tag") && params === "[]",
+    );
+    expect(clears).toHaveLength(1);
+  });
+
   it("update of an existing record with [] still clears the relation", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripCall]);
     const call = new RoundTripCall(proxy, "rt://call/1");

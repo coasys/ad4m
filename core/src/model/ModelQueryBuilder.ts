@@ -113,10 +113,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     try {
       return { live, initial: await live.start() };
     } catch (e) {
-      live.dispose();
-      if (this.currentSubscription === live) this.currentSubscription = undefined;
+      this.endFailed(live);
       throw e;
     }
+  }
+
+  /** End `live` after its call failed. A later call may already own
+   *  `currentSubscription`, so only clear it if it is still `live`. */
+  private endFailed(live: LiveQuery): void {
+    live.dispose();
+    if (this.currentSubscription === live) this.currentSubscription = undefined;
   }
 
   /**
@@ -569,8 +575,21 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
     this.dispose();
-    const { initial } = await this.live({ ...this.queryParams, limit: 0, count: true }, (raw) => callback(requireTotalCount(raw)));
-    return requireTotalCount(initial);
+    // As paginateSubscribe: a push without the asked-for count is logged and
+    // skipped, since a throw here would reach the client's update dispatch.
+    const { live, initial } = await this.live({ ...this.queryParams, limit: 0, count: true }, (raw) => {
+      try {
+        callback(requireTotalCount(raw));
+      } catch (e) {
+        console.error('Count subscription error:', e);
+      }
+    });
+    try {
+      return requireTotalCount(initial);
+    } catch (e) {
+      this.endFailed(live);
+      throw e;
+    }
   }
 
   /**
@@ -701,7 +720,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       return { page: { results, totalCount: requireTotalCount(raw), pageSize, pageNumber }, fp };
     };
 
-    const { initial } = await this.live(paginatedQuery, (raw) => {
+    const { live, initial } = await this.live(paginatedQuery, (raw) => {
       try {
         const { page, fp } = toPage(raw);
         if (fp === lastFingerprint) return;
@@ -711,9 +730,15 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         console.error('Paginate subscription error:', e);
       }
     });
-    const { page, fp } = toPage(initial);
-    lastFingerprint = fp;
-    return page;
+    let first: { page: PaginationResult<T>; fp: string };
+    try {
+      first = toPage(initial);
+    } catch (e) {
+      this.endFailed(live);
+      throw e;
+    }
+    lastFingerprint = first.fp;
+    return first.page;
   }
 
   /**
