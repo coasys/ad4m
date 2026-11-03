@@ -1424,6 +1424,12 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
+                // From the first send until the clear or the park lands, the fallback
+                // sync must not run: it would send the same pending links again, or,
+                // reading no parked row yet, send the oldest diff's links after the
+                // rest. It holds this lock across its read and commit, and never
+                // waits on this loop.
+                let _sharing = self.share_links_mutex.lock().await;
                 log::debug!("💾 committing {} pending diffs...", pending_ids.len());
                 let committed_ids = match link_language.commit(pending_diffs.clone()).await {
                     // Spec §5.2 splits perspective-commit (write) from
@@ -1452,12 +1458,6 @@ impl PerspectiveInstance {
                         match link_language.commit(oldest.clone()).await {
                             Ok(_) => oldest_ids,
                             Err(refusal) => {
-                                // From the moment the rest may reach the language until
-                                // the park lands, the fallback sync must not run: it
-                                // would read no parked row and send the oldest diff's
-                                // links after the rest. It holds this lock across its
-                                // read and commit, and never waits on this loop.
-                                let _sharing = self.share_links_mutex.lock().await;
                                 // The batch concatenates its diffs oldest first.
                                 let rest = PerspectiveDiff {
                                     additions: pending_diffs.additions[oldest.additions.len()..]

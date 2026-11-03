@@ -438,6 +438,74 @@ async fn the_fallback_sync_waits_for_a_park_in_flight() {
     assert_eq!(fake.committed(), vec!["+b"]);
 }
 
+/// A fallback sync that starts while a pending batch is on its way to the
+/// language waits for it, and then sees its links in the render: the same
+/// links are not sent twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_fallback_sync_waits_for_a_pending_batch_in_flight() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("a"));
+    store_shared(&perspective, "a");
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let entered_tx = std::sync::Mutex::new(entered_tx);
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let first = AtomicBool::new(true);
+    let in_language = fake.clone();
+    let rendered = fake.clone();
+    *perspective.link_language.write().await = Some(
+        Language::with_test_commit(
+            "fake-link-language".to_string(),
+            Arc::new(move |diff| {
+                // Hold the commit loop's first send before the language takes it.
+                if first.swap(false, Ordering::SeqCst) {
+                    entered_tx.lock().unwrap().send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(30))
+                        .map_err(|_| anyhow!("never released"))?;
+                }
+                in_language.commit(diff)
+            }),
+        )
+        // The remote holds what the language accepted so far.
+        .with_test_render(Arc::new(move || {
+            Ok(Some(Perspective {
+                links: rendered
+                    .committed()
+                    .iter()
+                    .filter_map(|c| c.strip_prefix('+'))
+                    .map(|target| link("did:key:alice", target))
+                    .collect(),
+            }))
+        })),
+    );
+
+    let commit_loop = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.commit_pending_diffs().await })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the pending batch is on its way to the language");
+
+    let fallback = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.ensure_public_links_are_shared().await })
+    };
+    // Time for a fallback that does not wait for the batch to send its links.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    release_tx.send(()).unwrap();
+    commit_loop.await.unwrap().unwrap();
+    assert!(fallback.await.unwrap());
+
+    assert_eq!(fake.committed(), vec!["+a"]);
+}
+
 /// Two healthy diffs; the batch and the oldest alone fail on a transient
 /// outage, and the newer one goes through once it is over. The oldest was
 /// never refused for good, so it must be kept (parked), not deleted.
