@@ -229,6 +229,8 @@ pub(super) async fn attach_links(
         let local_status = local_status_filter(shape);
         let link_status = link_status_filter(link_status);
         let proof_valid = proof_valid_filter(include_unverified);
+        // Required patterns before the first OPTIONAL: oxigraph does not reorder joins inside
+        // an OPTIONAL chain that a required pattern follows, so they run as cartesian products.
         let sparql = format!(
             r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?rowStatus WHERE {{
     {source_constraint}
@@ -237,12 +239,12 @@ pub(super) async fn attach_links(
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-    OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
+{link_status}{proof_valid}    OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?rowStatus . }}
-{link_status}{proof_valid}{local_status}}}"#
+{local_status}}}"#
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
         for row in &rows {
@@ -564,5 +566,88 @@ mod tests {
             status: None,
         };
         assert!(link.compute_proof_valid(), "the row verifies as returned");
+    }
+
+    /// The `__links` read for one instance stays an indexed lookup on a large
+    /// perspective. With its required reifier patterns after the `OPTIONAL`s,
+    /// oxigraph joined the triple and reifier patterns without keys, as a
+    /// cartesian product: seconds on a few thousand links, which pushed the
+    /// flow engine's proposal reads past the 30 s RPC limit. Each required
+    /// pattern after the `OPTIONAL`s (the default `proofValid` cut, a
+    /// `linkStatus`) triggered it on its own, so both are checked.
+    #[tokio::test]
+    async fn links_for_one_instance_stay_fast_on_a_large_perspective() {
+        use super::super::test_helpers::{prop, shape};
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression};
+
+        // 400 instances with 10 links each over 40 distinct predicates, written
+        // through the normal add-link path (one reifier and its annotations per
+        // link).
+        let signer = TestSigner::generate();
+        let store = SparqlStore::new(None).unwrap();
+        for i in 0..4000 {
+            let e = signer.sign(
+                Link {
+                    source: format!("we://s{}", i / 10),
+                    predicate: Some(format!("we://p{}", i % 40)),
+                    target: format!("we://v{i}"),
+                }
+                .normalize(),
+            );
+            store
+                .add_link(&LinkExpression {
+                    author: e.author,
+                    timestamp: e.timestamp,
+                    data: e.data,
+                    proof: e.proof,
+                    status: Some(LinkStatus::Shared),
+                })
+                .unwrap();
+        }
+
+        let shape = shape("Thing", vec![prop("name", "we://name")]);
+        // we://s7 holds links 70..=79, on predicates p30..=p39.
+        let keys: Vec<(String, String)> = ["we://p31", "we://p35", "we://p0"]
+            .iter()
+            .map(|p| (p.to_string(), p.to_string()))
+            .collect();
+        for (status, include_unverified) in [(None, None), (Some(LinkStatus::Shared), Some(true))] {
+            let mut instances = vec![json!({ "id": "we://s7" })];
+            let started = std::time::Instant::now();
+            attach_links(
+                &store,
+                &shape,
+                &keys,
+                status.as_ref(),
+                include_unverified,
+                &mut instances,
+            )
+            .await
+            .unwrap();
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "__links for one instance took {elapsed:?} (status {status:?})"
+            );
+
+            let links = &instances[0][LINKS_KEY];
+            let targets = |key: &str| -> Vec<String> {
+                links[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["data"]["target"].as_str().unwrap().to_string())
+                    .collect()
+            };
+            assert_eq!(targets("we://p31"), vec!["we://v71"], "{links}");
+            assert_eq!(targets("we://p35"), vec!["we://v75"], "{links}");
+            assert!(targets("we://p0").is_empty(), "{links}");
+            let row = &links["we://p31"][0];
+            assert_eq!(row["data"]["source"], "we://s7");
+            assert_eq!(row["author"], signer.did.as_str());
+            assert_eq!(row["proof"]["valid"], true);
+            assert_eq!(row["status"], "SHARED");
+        }
     }
 }
