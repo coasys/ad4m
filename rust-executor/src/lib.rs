@@ -705,6 +705,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 info!("No Unyt membrane proof stored — skipping eager DNA install");
                 return;
             }
+            // Wait for the conductor without a limit: the agent unlock may take a while.
+            while !crate::holochain_service::maybe_get_holochain_service()
+                .await
+                .is_some_and(|service| !service.is_stopped())
+            {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            }
             match unyt_service::ensure_installed().await {
                 Ok(()) => info!("Unyt alliance DNA ready"),
                 Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),
