@@ -186,6 +186,64 @@ async fn a_user_reaches_only_their_own_ai_tasks() {
     assert_eq!(stored_prompt(&hers_id), None);
 }
 
+/// A managed user does not read endpoints (`ai.endpoints` refuses them), but a failed prompt
+/// or embed answered them with the provider's "could not reach" error, which names the URL
+/// it called. The operator's answer still names it.
+#[tokio::test]
+async fn a_users_failed_prompt_or_embed_names_no_endpoint_url() {
+    let executor = Executor::start().await;
+    let model = serve_unreachable_llm().await;
+    let endpoint = Ad4mDb::with_global_instance(|db| db.get_endpoints())
+        .expect("read endpoints")
+        .into_iter()
+        .next()
+        .expect("the unreachable endpoint");
+    let origin = endpoint.base_url.origin().ascii_serialization();
+    let embedder = Ad4mDb::with_global_instance(|db| {
+        db.add_model(&ModelInput {
+            name: "isolation-test-embed".to_string(),
+            model_type: ModelType::Embedding,
+            endpoint_id: endpoint.id.clone(),
+            remote_model: "isolation-test-embed".to_string(),
+            native_tools: None,
+        })
+    })
+    .expect("add embedding model");
+    AIService::global_instance()
+        .await
+        .expect("the service")
+        .load()
+        .await
+        .expect("the clients build");
+    let alice = executor.user("alice");
+    let task = add_task(&executor, &alice.session, "summarise", &model, "p").await;
+
+    for (op, params) in [
+        (
+            "ai.prompt",
+            json!({ "taskId": id_of(&task), "prompt": "Hello" }),
+        ),
+        ("ai.embed", json!({ "modelId": embedder, "text": "Hello" })),
+    ] {
+        let err = expect_code(
+            executor.call(op, params.clone(), &alice.session).await,
+            500,
+            &format!("alice calling {op} on an unreachable endpoint"),
+        );
+        assert!(
+            !err.message.contains(&origin),
+            "{op} named the endpoint URL to a user: {}",
+            err.message
+        );
+        let err = expect_code(
+            executor.call(op, params, &executor.admin()).await,
+            500,
+            &format!("the operator calling {op} on an unreachable endpoint"),
+        );
+        assert!(err.message.contains(&origin), "{}", err.message);
+    }
+}
+
 /// The operator reaches every task. An app on the main agent reaches the main agent's tasks
 /// (the operator's and apps', which belong to no user) and not a managed agent's: before the
 /// owner rule, a main-agent app listed, rewrote, deleted and prompted every user's task.

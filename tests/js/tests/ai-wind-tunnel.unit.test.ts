@@ -144,6 +144,14 @@ describe("AI wind tunnel (unit)", () => {
         expect(["llm", "embeddings", "stt", "tts"]).to.include(model.service);
       }
     });
+    it("pins every model download to a Hugging Face commit, never a branch", () => {
+      // An upstream re-upload on `main` would change the file under a fixed sha256
+      // and break every install; a commit URL keeps serving the hashed file.
+      for (const [id, model] of Object.entries(m.models)) {
+        expect(model.url, id).to.match(/^https:\/\/huggingface\.co\/[^/]+\/[^/]+\/resolve\/[0-9a-f]{40}\/[^/].*$/);
+        expect(model.url, id).not.to.include("/resolve/main/");
+      }
+    });
     it("names every runtime build <os>-<arch>-<backend> with a hash and a binary path", () => {
       for (const [id, rt] of Object.entries(m.runtimes)) {
         expect(["llama-server", "whisper-server"]).to.include(rt.provider);

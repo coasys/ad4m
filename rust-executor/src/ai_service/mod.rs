@@ -87,7 +87,11 @@ lazy_static! {
 struct TranscriptionSession {
     /// The worker's queue: it answers each utterance after the ones fed before it.
     utterances: mpsc::UnboundedSender<transcription::Utterance>,
+    /// When the stream was last fed, or last answered an utterance.
     last_activity: Arc<Mutex<std::time::Instant>>,
+    /// The utterances fed and not answered yet. A stream waiting for its upstream is not
+    /// idle, however long the upstream takes.
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
     /// The stream's text, for `/v1/realtime`.
     text_broadcast_tx: tokio::sync::broadcast::Sender<String>,
     /// The managed agent that opened the stream, by DID: it pays, and only it reaches the
@@ -96,6 +100,37 @@ struct TranscriptionSession {
 }
 
 type TranscriptionStreams = Arc<Mutex<HashMap<String, TranscriptionSession>>>;
+
+/// One utterance of a stream in flight, for as long as it lives: until its feed has its
+/// answer, or is dropped (its caller went away). Its end counts as activity, so a stream's
+/// idle time starts at its last answer.
+struct InFlight {
+    count: Arc<std::sync::atomic::AtomicUsize>,
+    last_activity: Arc<Mutex<std::time::Instant>>,
+}
+
+impl InFlight {
+    fn count(stream: &TranscriptionSession) -> Self {
+        stream
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        InFlight {
+            count: stream.in_flight.clone(),
+            last_activity: stream.last_activity.clone(),
+        }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        // Before the count drops, so the reaper cannot see the stream idle in between. When
+        // the reaper holds the lock, it sees the count above zero and keeps the stream.
+        if let Ok(mut last_activity) = self.last_activity.try_lock() {
+            *last_activity = std::time::Instant::now();
+        }
+        self.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 #[cfg(test)]
 impl TranscriptionSession {
@@ -106,6 +141,7 @@ impl TranscriptionSession {
         let session = TranscriptionSession {
             utterances,
             last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
+            in_flight: Default::default(),
             text_broadcast_tx,
             agent_did: owner.map(str::to_string),
         };
@@ -148,7 +184,8 @@ impl ChatModel {
     async fn chat(&self, turns: Vec<ChatTurn>, tools: Vec<ToolSpec>) -> Result<ChatReply> {
         let _slot = endpoints::request_slot(&self.endpoint).await;
         let request = ChatRequest::new(self.remote_model.clone(), turns).with_tools(tools);
-        self.client.chat(request).await
+        let reply = self.client.chat(request).await;
+        self.after(reply)
     }
 
     /// [`Self::chat`] with the text sent to `tokens` as the model writes it (in one chunk
@@ -160,7 +197,15 @@ impl ChatModel {
     ) -> Result<ChatReply> {
         let _slot = endpoints::request_slot(&self.endpoint).await;
         let request = ChatRequest::new(self.remote_model.clone(), turns);
-        self.client.chat_stream(request, tokens).await
+        let reply = self.client.chat_stream(request, tokens).await;
+        self.after(reply)
+    }
+
+    /// `reply`, once a failure is acted on (`endpoints::after_failed_request`).
+    fn after(&self, reply: Result<ChatReply>) -> Result<ChatReply> {
+        reply.inspect_err(|e| {
+            endpoints::after_failed_request(&self.endpoint.id, &self.remote_model, e)
+        })
     }
 }
 
@@ -307,8 +352,9 @@ impl AIService {
         let mut map_lock = streams.lock().await;
         let mut idle = Vec::new();
         for (id, stream) in map_lock.iter() {
-            if stream.last_activity.lock().await.elapsed()
-                > Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS)
+            if stream.in_flight.load(std::sync::atomic::Ordering::SeqCst) == 0
+                && stream.last_activity.lock().await.elapsed()
+                    > Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS)
             {
                 idle.push(id.clone());
             }
@@ -368,9 +414,11 @@ impl AIService {
         self.embedders.lock().await.remove(model_id);
     }
 
-    /// Add a model and build its client. A model whose client does not build (an embedding
-    /// model on an endpoint that serves none) is not kept.
+    /// Add a model and build its client. A model its endpoint cannot serve (a transcription
+    /// model on Ollama, an embedding model on Anthropic) is refused before it is written, so
+    /// the endpoint does not gain the capability either.
     pub async fn add_model(&self, input: ModelInput) -> Result<String> {
+        Self::check_endpoint_serves(&input)?;
         let model = Ad4mDb::with_global_instance(|db| {
             let id = db.add_model(&input)?;
             db.get_model(id)
@@ -381,6 +429,33 @@ impl AIService {
             return Err(crate::db::InvalidModel(format!("{e:#}")).into());
         }
         Ok(model.id)
+    }
+
+    /// Refuses `input` (as an [`InvalidModel`](crate::db::InvalidModel)) when its endpoint
+    /// has no route for the model's type, or would get a key over plain HTTP: the client the
+    /// model needs does not build. A missing endpoint is left to the database's refusal.
+    fn check_endpoint_serves(input: &ModelInput) -> Result<()> {
+        let Some(endpoint) =
+            Ad4mDb::with_global_instance(|db| db.get_endpoint(&input.endpoint_id))?
+        else {
+            return Ok(());
+        };
+        let served = match input.model_type {
+            ModelType::Llm => providers::chat_client(&endpoint).map(drop),
+            ModelType::Embedding => providers::embed::embed_client(&endpoint).map(drop),
+            ModelType::Transcription => {
+                providers::audio::OpenAiTranscribe::for_endpoint(&endpoint).map(drop)
+            }
+            ModelType::Speech if endpoint.kind.protocol() == crate::types::ModelApiType::OpenAi => {
+                Ok(())
+            }
+            ModelType::Speech => Err(anyhow!(
+                "Endpoint '{}' ({:?}) serves no /v1/audio/speech",
+                endpoint.name,
+                endpoint.kind
+            )),
+        };
+        served.map_err(|e| crate::db::InvalidModel(format!("Model {:?}: {e:#}", input.name)).into())
     }
 
     pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
@@ -473,14 +548,18 @@ impl AIService {
         })
     }
 
-    /// The client of the LLM `model_id` (an id, after `default` was resolved).
+    /// The client of the LLM `model_id` (an id, after `default` was resolved). None is the
+    /// caller's mistake (an [`InvalidModel`](crate::db::InvalidModel)): a task names a model
+    /// that is not an LLM, or none.
     async fn chat_model(&self, model_id: &str) -> Result<ChatModel> {
         self.llms
             .lock()
             .await
             .get(model_id)
             .cloned()
-            .ok_or_else(|| anyhow!("No LLM with id '{model_id}' is loaded"))
+            .ok_or_else(|| {
+                crate::db::InvalidModel(format!("No LLM with id '{model_id}' is loaded")).into()
+            })
     }
 
     /// Rewrites a task. Refused unless its model is a loaded LLM.
@@ -923,13 +1002,18 @@ impl AIService {
             let _slot = endpoints::request_slot(&embedder.endpoint).await;
             embedder.client.embed(&embedder.remote_model, &texts).await
         };
-        let reply = tokio::time::timeout(timeout, call).await.map_err(|_| {
-            providers::http::UpstreamUnreachable {
+        let reply = match tokio::time::timeout(timeout, call).await {
+            Ok(reply) => reply,
+            Err(_) => Err(providers::http::UpstreamUnreachable {
                 url: embedder.endpoint.base_url.to_string(),
                 timed_out: true,
                 detail: format!("no answer within {}s", timeout.as_secs()),
             }
-        })??;
+            .into()),
+        }
+        .inspect_err(|e| {
+            endpoints::after_failed_request(&embedder.endpoint.id, &embedder.remote_model, e)
+        })?;
         let token_count = reply.prompt_tokens.map_or(estimate, |n| n as usize);
         let vectors = reply.vectors;
         log::debug!(
@@ -959,12 +1043,13 @@ impl AIService {
         model_id: String,
         caller: &RequestContext,
     ) -> Result<String> {
-        let (client, remote_model) = transcription::endpoint_transcriber(&model_id)?;
+        let (client, remote_model, endpoint_id) = transcription::endpoint_transcriber(&model_id)?;
         let (agent_did, user_did) = transcription_stream_owner(caller.acts_as())?;
         Ok(self
             .open_remote_stream(
                 model_id,
                 remote_model,
+                endpoint_id,
                 Arc::new(client),
                 agent_did,
                 user_did,
@@ -973,11 +1058,13 @@ impl AIService {
     }
 
     /// Open a stream whose utterances `client` transcribes with the upstream model
-    /// `remote_model`, billed as `model_id` to `agent_did`, its text sent to `user_did`.
+    /// `remote_model` on endpoint `endpoint_id`, billed as `model_id` to `agent_did`, its text
+    /// sent to `user_did`.
     async fn open_remote_stream(
         &self,
         model_id: String,
         remote_model: String,
+        endpoint_id: String,
         client: Arc<dyn providers::audio::RemoteTranscribe>,
         agent_did: Option<String>,
         user_did: String,
@@ -990,6 +1077,7 @@ impl AIService {
             stream_id: stream_id.clone(),
             model_id,
             remote_model,
+            endpoint_id,
             client,
             agent_did: agent_did.clone(),
             user_did,
@@ -1002,6 +1090,7 @@ impl AIService {
             TranscriptionSession {
                 utterances,
                 last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
+                in_flight: Default::default(),
                 text_broadcast_tx,
                 agent_did,
             },
@@ -1019,7 +1108,7 @@ impl AIService {
         audio_samples: Vec<f32>,
         caller: &RequestContext,
     ) -> Result<()> {
-        let outcome = {
+        let (outcome, _in_flight) = {
             let map_lock = self.transcription_streams.lock().await;
             let stream = map_lock
                 .get(stream_id)
@@ -1037,7 +1126,9 @@ impl AIService {
                 .map_err(|e| {
                     AIServiceError::CrazyError(format!("Failed to feed stream {stream_id}: {e}"))
                 })?;
-            outcome
+            // Counted while the map is still locked, so the reaper never sees the utterance
+            // queued and not counted.
+            (outcome, InFlight::count(stream))
         };
         outcome
             .await
@@ -1111,6 +1202,7 @@ impl AIService {
         log::info!("Updating model: {} with: {:?}", model_id, model_config);
         Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
+        Self::check_endpoint_serves(&model_config)?;
         // `context`, not a new error, so the API can still tell an `InvalidModel`.
         Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model_config))
             .context("Failed to update model in database")?;
@@ -1335,6 +1427,97 @@ mod tests {
             .is_empty());
     }
 
+    /// The capabilities `endpoint` has in the database now.
+    fn stored_capabilities(endpoint: &Endpoint) -> Vec<crate::types::AiCapability> {
+        Ad4mDb::with_global_instance(|db| db.get_endpoint(&endpoint.id))
+            .unwrap()
+            .unwrap()
+            .capabilities
+    }
+
+    #[tokio::test]
+    async fn an_audio_model_on_an_endpoint_without_an_audio_route_is_refused_and_leaves_it_as_it_was(
+    ) {
+        // Ollama has no /v1/audio routes: a transcription model on it used to be saved as
+        // READY, gave the endpoint the transcription capability, and failed only when a
+        // stream was opened.
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Ollama, "http://127.0.0.1:11434");
+        let before = stored_capabilities(&endpoint);
+        for model_type in [ModelType::Transcription, ModelType::Speech] {
+            let error = service
+                .add_model(model_on(&endpoint, model_type, "qwen3:8b"))
+                .await
+                .expect_err("Ollama serves no audio");
+            assert!(
+                error.downcast_ref::<crate::db::InvalidModel>().is_some(),
+                "a bad request, not an internal error: {error}"
+            );
+            assert!(error.to_string().contains("/v1/audio/"), "{error}");
+        }
+        assert!(Ad4mDb::with_global_instance(|db| db.get_models())
+            .unwrap()
+            .is_empty());
+        assert_eq!(stored_capabilities(&endpoint), before);
+    }
+
+    #[tokio::test]
+    async fn a_refused_embedding_model_does_not_give_its_endpoint_the_capability() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Anthropic, "https://api.anthropic.com");
+        let before = stored_capabilities(&endpoint);
+        assert!(service
+            .add_model(model_on(&endpoint, ModelType::Embedding, "claude"))
+            .await
+            .is_err());
+        assert_eq!(stored_capabilities(&endpoint), before);
+    }
+
+    #[tokio::test]
+    async fn an_audio_server_takes_transcription_and_speech_models() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::OpenAiAudio, "http://127.0.0.1:8000");
+        for model_type in [ModelType::Transcription, ModelType::Speech] {
+            service
+                .add_model(model_on(
+                    &endpoint,
+                    model_type,
+                    "Systran/faster-whisper-small",
+                ))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            Ad4mDb::with_global_instance(|db| db.get_models())
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_to_a_type_the_endpoint_cannot_serve_is_refused_and_keeps_the_model() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Ollama, "http://127.0.0.1:11434");
+        let id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "qwen3:8b"))
+            .await
+            .unwrap();
+        let error = service
+            .update_model(
+                id.clone(),
+                model_on(&endpoint, ModelType::Transcription, "qwen3:8b"),
+            )
+            .await
+            .expect_err("Ollama serves no transcription");
+        assert!(error.downcast_ref::<crate::db::InvalidModel>().is_some());
+        let model = Ad4mDb::with_global_instance(|db| db.get_model(id.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.model_type, ModelType::Llm);
+        assert!(service.llms.lock().await.contains_key(&id));
+    }
+
     #[tokio::test]
     async fn a_model_updated_to_another_type_moves_to_that_types_clients() {
         let service = service();
@@ -1422,6 +1605,99 @@ mod tests {
             }
             assert_eq!(client.most.load(Ordering::SeqCst), expected, "cap {cap:?}");
         }
+    }
+
+    /// A loopback URL nothing listens on: a request to it is refused.
+    pub(super) fn dead_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// An OpenAI endpoint at a dead URL whose last check found it up, serving `served`.
+    pub(super) fn endpoint_that_went_down(served: &str) -> Endpoint {
+        endpoint_of_kind_that_went_down(EndpointKind::OpenAi, served)
+    }
+
+    fn endpoint_of_kind_that_went_down(kind: EndpointKind, served: &str) -> Endpoint {
+        let mut endpoint = Endpoint::for_test("went-down", kind, &dead_url(), "");
+        endpoint.health = crate::types::EndpointHealth {
+            state: crate::types::EndpointState::Reachable,
+            checked_at: Some(1),
+            detail: None,
+            served_models: vec![served.to_string()],
+        };
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        endpoint
+    }
+
+    /// Waits until the stored health of `endpoint` is no longer `REACHABLE` (a re-check ran).
+    pub(super) async fn rechecked(endpoint: &Endpoint) -> bool {
+        for _ in 0..100 {
+            let stored = Ad4mDb::with_global_instance(|db| db.get_endpoint(&endpoint.id))
+                .unwrap()
+                .unwrap();
+            if stored.health.state != crate::types::EndpointState::Reachable {
+                return true;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    // WE showed a model READY with its Ollama stopped: a failed `ai.prompt` left the status
+    // to the 60 s health loop, where a failed `/v1` request re-checks the endpoint at once.
+    #[tokio::test]
+    async fn a_failed_prompt_re_checks_its_endpoint() {
+        // Each chat client: a refused connection keeps its type, or nothing can tell it.
+        for kind in [
+            EndpointKind::OpenAi,
+            EndpointKind::Ollama,
+            EndpointKind::Anthropic,
+        ] {
+            let service = service();
+            let endpoint = endpoint_of_kind_that_went_down(kind, "qwen3");
+            let model_id = service
+                .add_model(model_on(&endpoint, ModelType::Llm, "qwen3"))
+                .await
+                .unwrap();
+            let task = service
+                .add_task(
+                    AITaskInput {
+                        name: "t".into(),
+                        model_id,
+                        system_prompt: String::new(),
+                        prompt_examples: vec![],
+                        meta_data: None,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+
+            assert!(service
+                .prompt(task.task_id, "hi".into(), None)
+                .await
+                .is_err());
+            assert!(rechecked(&endpoint).await, "{kind:?}: not re-checked");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_embed_re_checks_its_endpoint() {
+        let service = service();
+        let endpoint = endpoint_that_went_down("bge-m3");
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Embedding, "bge-m3"))
+            .await
+            .unwrap();
+
+        assert!(service.embed(model_id, "text".into(), None).await.is_err());
+        assert!(
+            rechecked(&endpoint).await,
+            "the endpoint was not re-checked"
+        );
     }
 }
 
@@ -1590,6 +1866,7 @@ mod remote_stream_tests {
             .open_remote_stream(
                 "m".into(),
                 "remote-model".into(),
+                "e".into(),
                 Arc::new(Upstream),
                 agent_did.map(str::to_string),
                 "did:key:owner".into(),
@@ -1618,6 +1895,78 @@ mod remote_stream_tests {
         assert_eq!(text.recv().await.unwrap(), "10 samples");
     }
 
+    /// Moves the last activity of stream `id` back past the reaper's timeout.
+    async fn backdate(service: &AIService, id: &str) {
+        let streams = service.transcription_streams.lock().await;
+        *streams[id].last_activity.lock().await =
+            std::time::Instant::now() - Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS + 1);
+    }
+
+    async fn is_open(service: &AIService, id: &str) -> bool {
+        service.transcription_streams.lock().await.contains_key(id)
+    }
+
+    // A slow upstream (a long utterance on a big model, or a server that stalls until the
+    // request times out) kept a stream busy past the reaper's timeout, and the reaper closed
+    // it mid-call: the next feed got "stream not found".
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_waiting_for_its_upstream_is_not_idle_and_its_answer_is_activity() {
+        let service = AIService::empty();
+        let id = open(&service, None).await;
+        let operator = RequestContext::operator_for_test();
+
+        let reaper = async {
+            // The utterance is upstream (500 ms), and was fed longer ago than the timeout.
+            sleep(Duration::from_millis(100)).await;
+            backdate(&service, &id).await;
+            AIService::close_idle_streams(&service.transcription_streams).await;
+            assert!(
+                is_open(&service, &id).await,
+                "the reaper closed a stream that was waiting for its upstream"
+            );
+        };
+        let (fed, ()) = tokio::join!(
+            service.feed_transcription_stream(&id, vec![0.1; 500], &operator),
+            reaper
+        );
+        fed.unwrap();
+
+        AIService::close_idle_streams(&service.transcription_streams).await;
+        assert!(
+            is_open(&service, &id).await,
+            "a stream answered a moment ago is not idle"
+        );
+        service
+            .feed_transcription_stream(&id, vec![0.1; 5], &operator)
+            .await
+            .expect("the stream still takes utterances");
+
+        backdate(&service, &id).await;
+        AIService::close_idle_streams(&service.transcription_streams).await;
+        assert!(
+            !is_open(&service, &id).await,
+            "a stream idle past the timeout is still closed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_feed_whose_caller_went_away_does_not_keep_its_stream_open() {
+        let service = AIService::empty();
+        let id = open(&service, None).await;
+        let operator = RequestContext::operator_for_test();
+        // The caller gives up while the utterance is upstream.
+        let gave_up = tokio::time::timeout(
+            Duration::from_millis(100),
+            service.feed_transcription_stream(&id, vec![0.1; 500], &operator),
+        )
+        .await;
+        assert!(gave_up.is_err());
+
+        backdate(&service, &id).await;
+        AIService::close_idle_streams(&service.transcription_streams).await;
+        assert!(!is_open(&service, &id).await);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn the_text_goes_to_the_owner_only() {
         let service = AIService::empty();
@@ -1642,6 +1991,35 @@ mod remote_stream_tests {
         );
         assert_eq!(event.payload["streamId"], id.as_str());
         assert_eq!(event.payload["text"], "5 samples");
+    }
+
+    // Not paused: the re-check is a real request to a dead port.
+    #[tokio::test]
+    async fn a_failed_utterance_re_checks_its_endpoint() {
+        let service = AIService::empty();
+        let _ = Ad4mDb::init_global_instance(":memory:");
+        let endpoint = super::tests::endpoint_that_went_down("whisper");
+        let client = providers::audio::OpenAiTranscribe::for_endpoint(&endpoint).unwrap();
+        let id = service
+            .open_remote_stream(
+                "m".into(),
+                "whisper".into(),
+                endpoint.id.clone(),
+                Arc::new(client),
+                None,
+                "did:key:owner".into(),
+            )
+            .await;
+
+        let operator = RequestContext::operator_for_test();
+        assert!(service
+            .feed_transcription_stream(&id, vec![0.1; 5], &operator)
+            .await
+            .is_err());
+        assert!(
+            super::tests::rechecked(&endpoint).await,
+            "the endpoint was not re-checked"
+        );
     }
 
     #[tokio::test(start_paused = true)]

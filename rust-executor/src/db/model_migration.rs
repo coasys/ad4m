@@ -66,7 +66,8 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<
 impl Ad4mDb {
     /// The id of the endpoint that serves `api`: the one with its protocol, URL and key,
     /// else a new one named by the URL's host (a suffix when the name is taken). The
-    /// endpoint gains `capability` when it lacks it.
+    /// endpoint gains `capability` when it lacks it, and `api`'s context ceiling when it has
+    /// none.
     pub(super) fn endpoint_for_legacy_api(
         &self,
         api: LegacyApi,
@@ -79,6 +80,14 @@ impl Ad4mDb {
         });
         if let Some(endpoint) = existing {
             self.add_endpoint_capability(&endpoint, capability)?;
+            // The first row on this endpoint may have had no ceiling: this row's is then the
+            // only one there is, and dropping it would depend on the order the rows were read.
+            if let (None, Some(max_num_ctx)) = (endpoint.max_num_ctx, api.max_num_ctx) {
+                self.conn.execute(
+                    "UPDATE ai_endpoints SET max_num_ctx = ?2 WHERE id = ?1",
+                    params![endpoint.id, max_num_ctx],
+                )?;
+            }
             return Ok(endpoint.id);
         }
         let (host_name, kind) = endpoint_for_api(&api.api_type, &api.base_url);
@@ -486,6 +495,39 @@ mod tests {
         assert_eq!(model.remote_model, "Qwen/Qwen3-8B");
         assert_eq!(model.native_tools, Some(true));
         assert_eq!(db.get_endpoints().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_context_ceiling_on_a_later_row_of_a_shared_endpoint_moves_to_it() {
+        // Two Ollama models on one server, only the second with a ceiling: the endpoint the
+        // first row creates has none, and the second row's used to be dropped.
+        let (_dir, path) = legacy_db(", api_max_num_ctx INTEGER");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for id in ["first", "second"] {
+                insert_api(
+                    &conn,
+                    id,
+                    "http://127.0.0.1:11434",
+                    "",
+                    "\"OLLAMA\"",
+                    "\"LLM\"",
+                );
+            }
+            conn.execute(
+                "UPDATE models SET api_max_num_ctx = 8192 WHERE id = 'second'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Ad4mDb::new(&path).unwrap();
+
+        let first = db.get_model("first".into()).unwrap().unwrap();
+        let second = db.get_model("second".into()).unwrap().unwrap();
+        assert_eq!(first.endpoint_id, second.endpoint_id);
+        let endpoint = db.get_endpoint(&first.endpoint_id).unwrap().unwrap();
+        assert_eq!(endpoint.max_num_ctx, Some(8192));
     }
 
     #[test]

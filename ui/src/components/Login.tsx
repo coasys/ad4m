@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useContext, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
@@ -35,7 +35,14 @@ const Login = () => {
   const [pendingSwitchAgent, setPendingSwitchAgent] = useState<any>(null);
   const [appState, setAppState] = useState<any>(null);
   const [holochain, setHolochain] = useState(true);
-  const [aiReady, setAIReady] = useState(false);
+  // What "Next" on the AI page runs first; null until the page has what it needs.
+  const [aiFinish, setAIFinish] = useState<(() => Promise<boolean>) | null>(null);
+  const [aiFinishing, setAIFinishing] = useState(false);
+  // A function given to a state setter would be called as an updater: wrap it.
+  const onAIReady = useCallback(
+    (finish: (() => Promise<boolean>) | null) => setAIFinish(() => finish),
+    []
+  );
 
   if (hasLoginError) setPasswordError("Invalid password");
 
@@ -429,7 +436,7 @@ const Login = () => {
             </j-text>
           </j-flex>
 
-          {client && <AISetup client={client} onReady={setAIReady} />}
+          {client && <AISetup client={client} onReady={onAIReady} />}
 
           <j-flex gap="500" j="center" wrap style={{ marginTop: 60 }}>
             <j-button size="xl" onClick={() => setCurrentIndex(4)}>
@@ -438,8 +445,15 @@ const Login = () => {
             <j-button
               variant="primary"
               size="xl"
-              onClick={() => setCurrentIndex(6)}
-              disabled={!aiReady}
+              onClick={async () => {
+                if (!aiFinish) return;
+                setAIFinishing(true);
+                const done = await aiFinish();
+                setAIFinishing(false);
+                if (done) setCurrentIndex(6);
+              }}
+              disabled={!aiFinish}
+              loading={aiFinishing}
             >
               Next
             </j-button>

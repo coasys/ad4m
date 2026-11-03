@@ -429,6 +429,15 @@ mod tests {
         assert!(usable > 0, "no recommendation this executor can run");
         for (id, model) in &data.manifest.models {
             assert_eq!(model.sha256.len(), 64, "{id}");
+            // A model URL on `main` serves whatever was uploaded last: pin a commit.
+            let pinned = model
+                .url
+                .as_str()
+                .split("/resolve/")
+                .nth(1)
+                .and_then(|rest| rest.split('/').next())
+                .is_some_and(|rev| rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(pinned, "{id}: pin a Hugging Face commit, not a branch");
         }
         for runtime in data.manifest.runtimes.values() {
             for (key, build) in &runtime.builds {

@@ -13,10 +13,20 @@ import {
 import { open } from "@tauri-apps/plugin-shell";
 import { useCallback, useEffect, useState } from "react";
 import "../index.css";
-import { endpointFor, kindLabel, registerModel, serves } from "./aiSetup";
+import {
+  chatModels,
+  endpointFor,
+  kindLabel,
+  preselectedChat,
+  registerModel,
+  serves,
+} from "./aiSetup";
 
 type Mode = "Local" | "Server" | "Skip";
 type ServerMode = "Detected" | "Remote";
+
+/** The chat model chosen on a detected server: registered when the person goes on. */
+type ChatChoice = { server: DetectedEndpoint; remoteModel: string };
 
 const REMOTE_KINDS: { kind: EndpointKind; label: string; baseUrl: string }[] = [
   { kind: "OPEN_AI", label: "OpenAI", baseUrl: "https://api.openai.com/v1" },
@@ -54,8 +64,12 @@ function describeDevice(hardware: LocalAiHardware): string {
  */
 export default function AISetup(props: {
   client: Ad4mClient;
-  /** Whether the page has what it needs to go on (a chat model, or skip). */
-  onReady: (ready: boolean) => void;
+  /**
+   * `null` while the page lacks what it needs to go on (a chat model, or skip); else what
+   * "Next" runs first: it registers the chat model chosen on a detected server and makes
+   * it the default, and answers whether that worked.
+   */
+  onReady: (finish: (() => Promise<boolean>) | null) => void;
 }) {
   const { client, onReady } = props;
   const [mode, setMode] = useState<Mode>("Local");
@@ -63,6 +77,9 @@ export default function AISetup(props: {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [registered, setRegistered] = useState<string[]>([]);
+  /** The chat models each detected server already serves, by base URL. */
+  const [servedChat, setServedChat] = useState<Record<string, string[]>>({});
+  const [chatChoice, setChatChoice] = useState<ChatChoice | null>(null);
 
   // Local AI
   const [hardware, setHardware] = useState<LocalAiHardware | null>(null);
@@ -99,7 +116,27 @@ export default function AISetup(props: {
     setDetecting(true);
     setError("");
     try {
-      setDetected(await client.ai.detectEndpoints());
+      const servers = await client.ai.detectEndpoints();
+      const chat: Record<string, string[]> = {};
+      await Promise.all(
+        servers
+          .filter((s) => s.capabilities.includes("chat"))
+          .map(async (s) => {
+            try {
+              chat[s.baseUrl] = chatModels(
+                await client.ai.discoverModels({ kind: s.kind, baseUrl: s.baseUrl })
+              );
+            } catch (e) {
+              // The server still offers the recommended download.
+              chat[s.baseUrl] = [];
+              setError(`Could not list the models of ${s.baseUrl}: ${e}`);
+            }
+          })
+      );
+      setServedChat(chat);
+      setDetected(servers);
+      // A choice the person made, or one made before, stays.
+      setChatChoice((chosen) => chosen ?? preselectedChat(servers, chat));
     } catch (e) {
       setError(`${e}`);
       setDetected([]);
@@ -111,6 +148,7 @@ export default function AISetup(props: {
     loadLocal();
   }, [loadLocal]);
 
+  const hasLlm = registered.some((r) => r.startsWith("LLM:"));
   useEffect(() => {
     if (mode === "Server" && detected === null) detect();
   }, [mode, detected, detect]);
@@ -118,12 +156,33 @@ export default function AISetup(props: {
   const localChatReady = !!localStatus?.models.some((m) => m.service === "llm" && m.model);
 
   useEffect(() => {
-    onReady(
-      mode === "Skip" ||
-        (mode === "Local" && localChatReady) ||
-        (mode === "Server" && registered.some((r) => r.startsWith("LLM:")))
-    );
-  }, [mode, registered, localChatReady, onReady]);
+    if (mode === "Server" && serverMode === "Detected" && chatChoice) {
+      onReady(() => commitChatChoice(chatChoice));
+    } else {
+      const ready =
+        mode === "Skip" || (mode === "Local" && localChatReady) || (mode === "Server" && hasLlm);
+      onReady(ready ? async () => true : null);
+    }
+    // commitChatChoice reads only its argument, `client` and stable setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, serverMode, chatChoice, hasLlm, localChatReady, onReady]);
+
+  /** Register the chosen chat model on its server and make it the default chat model. */
+  async function commitChatChoice({ server, remoteModel }: ChatChoice): Promise<boolean> {
+    setBusy(`LLM:${remoteModel}`);
+    setError("");
+    try {
+      const endpoint = await endpointFor(client, server.kind, server.baseUrl);
+      const id = await registerModel(client, endpoint, "LLM", remoteModel);
+      await client.ai.setDefaultModel("LLM", id);
+      return true;
+    } catch (e) {
+      setError(`${e}`);
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function installLocal() {
     setInstalling(true);
@@ -161,6 +220,7 @@ export default function AISetup(props: {
       }
       await registerModel(client, endpoint, modelType, remoteModel);
       setRegistered((r) => [...r, `${modelType}:${remoteModel}`]);
+      if (modelType === "LLM") setChatChoice({ server, remoteModel });
       await detect();
     } catch (e) {
       setError(`${e}`);
@@ -199,13 +259,21 @@ export default function AISetup(props: {
     setBusy(null);
   }
 
+  // A recommended chat model the server already serves is listed with its served models.
   const offers = (server: DetectedEndpoint) =>
     AI_RECOMMENDED_MODELS.filter((m) =>
       server.kind === "OLLAMA" ? !!m.ollama : server.kind === "OPEN_AI_AUDIO" && !!m.openAiAudio
-    ).map((m) => ({
-      ...m,
-      remote: (server.kind === "OLLAMA" ? m.ollama : m.openAiAudio) as string,
-    }));
+    )
+      .map((m) => ({
+        ...m,
+        remote: (server.kind === "OLLAMA" ? m.ollama : m.openAiAudio) as string,
+      }))
+      .filter(
+        (m) => m.modelType !== "LLM" || !serves(servedChat[server.baseUrl] ?? [], m.remote)
+      );
+
+  const isChosen = (server: DetectedEndpoint, remoteModel: string) =>
+    chatChoice?.server.baseUrl === server.baseUrl && chatChoice.remoteModel === remoteModel;
 
   const running = localStatus?.runtimes.filter((r) => r.phase === "running") ?? [];
   const localUp = !!localStatus?.installed && running.length === localStatus.runtimes.length && running.length > 0;
@@ -372,6 +440,30 @@ export default function AISetup(props: {
                       <j-text nomargin color="ui-0">
                         {kindLabel(server.kind)} at {server.baseUrl}
                       </j-text>
+                      {(servedChat[server.baseUrl] ?? []).length > 0 && (
+                        <j-text nomargin size="400">
+                          Chat models it already serves (the chosen one is added when you go on):
+                        </j-text>
+                      )}
+                      {(servedChat[server.baseUrl] ?? []).map((id) => {
+                        const chosen = isChosen(server, id);
+                        return (
+                          <j-flex key={`served:${id}`} a="center" j="between" gap="300">
+                            <j-text nomargin size="400">
+                              {id}
+                            </j-text>
+                            <j-button
+                              size="sm"
+                              variant={chosen ? "primary" : "subtle"}
+                              disabled={!!busy}
+                              loading={busy === `LLM:${id}`}
+                              onClick={() => setChatChoice({ server, remoteModel: id })}
+                            >
+                              {chosen ? "Chosen" : "Choose"}
+                            </j-button>
+                          </j-flex>
+                        );
+                      })}
                       {offers(server).map((m) => {
                         const done = registered.includes(`${m.modelType}:${m.remote}`);
                         const has = serves(server.servedModels, m.remote);

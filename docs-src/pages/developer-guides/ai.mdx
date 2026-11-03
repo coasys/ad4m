@@ -57,7 +57,7 @@ await ad4m.ai.localRemove(false);  // true also deletes the downloaded files
 
 ## Setting up model servers
 
-The launcher's onboarding (and Settings, AI) looks for model servers on this machine and offers the recommended models: a 4-8B instruct model that calls tools (`qwen3:8b`), an embedding model (`nomic-embed-text`) and, on a transcription server, `Systran/faster-whisper-small`. The SDK exports the list as `AI_RECOMMENDED_MODELS`.
+The launcher's onboarding (and Settings, AI) looks for model servers on this machine. Onboarding lists the chat models a server already serves first and preselects one, so a running server needs no download. It also offers the recommended models: a 4-8B instruct model that calls tools (`qwen3:8b`), an embedding model (`nomic-embed-text`) and, on a transcription server, `Systran/faster-whisper-small`. The SDK exports the list as `AI_RECOMMENDED_MODELS`.
 
 | Server | Kind | Serves | Default port |
 |---|---|---|---|

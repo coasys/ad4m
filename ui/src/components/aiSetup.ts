@@ -1,6 +1,7 @@
 import type {
   Ad4mClient,
   AiEndpoint,
+  DiscoveredModel,
   EndpointKind,
   ModelType,
 } from "@coasys/ad4m";
@@ -37,6 +38,27 @@ export function capabilityOf(modelType: ModelType) {
 /** Whether `served` lists `model` (Ollama lists `m` as `m:latest`). */
 export function serves(served: string[], model: string): boolean {
   return served.some((s) => s === model || s === `${model}:latest`);
+}
+
+/** The ids of the models discovery says chat. */
+export function chatModels(discovered: DiscoveredModel[]): string[] {
+  return discovered.filter((m) => m.capabilities.includes("chat")).map((m) => m.id);
+}
+
+/**
+ * The chat model onboarding preselects: the first one the first detected server already
+ * serves (`servedChat`, by base URL), so a person with a model server can go on without a
+ * download. `null` when none serves one.
+ */
+export function preselectedChat<S extends { baseUrl: string }>(
+  servers: S[],
+  servedChat: Record<string, string[]>
+): { server: S; remoteModel: string } | null {
+  for (const server of servers) {
+    const remoteModel = servedChat[server.baseUrl]?.[0];
+    if (remoteModel) return { server, remoteModel };
+  }
+  return null;
 }
 
 function sameUrl(a: string, b: string): boolean {

@@ -63,4 +63,28 @@ describe('AIClient transcription streams (L7)', () => {
     expect(received).toEqual([]);
     api.closeAll();
   });
+
+  // Closing the stream removes the last listener, so the client closes its socket. The
+  // executor ends the connection without answering the close frame, and Node's WebSocket
+  // reports that as an `error`: nothing went wrong, so nothing is printed.
+  it('a stream closed normally prints no WebSocket error', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { api, ai } = setup({
+        'ai.transcriptionOpen': { result: 'stream-1' },
+        'ai.transcriptionClose': { result: 'true' },
+      });
+      await ai.openTranscriptionStream('model', () => {});
+      const socket = FakeWebSocket.last;
+
+      await ai.closeTranscriptionStream('stream-1');
+      expect(socket.readyState).toBe(3);
+      socket.onerror?.({ type: 'error' });
+
+      expect(errorSpy).not.toHaveBeenCalled();
+      api.closeAll();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });

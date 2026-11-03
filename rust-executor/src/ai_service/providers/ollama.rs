@@ -583,7 +583,7 @@ impl RemoteChat for OllamaChat {
             .json(&body)
             .send()
             .await
-            .map_err(|e| anyhow!("Could not reach Ollama at {}: {e}", self.endpoint))?;
+            .map_err(|e| super::http::UpstreamUnreachable::new(&self.endpoint, &e, ""))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -641,7 +641,7 @@ impl RemoteChat for OllamaChat {
             .json(&body)
             .send()
             .await
-            .map_err(|e| anyhow!("Could not reach Ollama at {}: {e}", self.endpoint))?;
+            .map_err(|e| super::http::UpstreamUnreachable::new(&self.endpoint, &e, ""))?;
 
         let status = response.status();
         if !status.is_success() {

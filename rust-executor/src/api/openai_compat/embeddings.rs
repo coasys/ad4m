@@ -15,7 +15,6 @@ use super::errors::OpenAIJson;
 
 use super::errors::{OpenAIError, OpenAIResult};
 use super::model_selector::resolve;
-use super::passthrough::upstream_failure;
 use super::types::{EmbeddingItem, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage};
 use crate::agent::capabilities::AI_PROMPT_CAPABILITY;
 use crate::ai_service::AIService;
@@ -64,7 +63,11 @@ pub async fn embeddings(
             auth.user_did().map(str::to_string),
         )
         .await
-        .map_err(|e| upstream_failure(&resolved.endpoint, &resolved.model.remote_model, e))?;
+        .map_err(|e| {
+            // `embed_batch` already acted on what the failure says about the endpoint.
+            log::warn!("v1/embeddings model={}: {e}", resolved.model.name);
+            OpenAIError::from_upstream(&e)
+        })?;
     // One info line per batch; see rust-executor/LOGGING.md.
     log::info!(
         "🤖 embed batch model={} n={} tokens_in={} latency_total={}ms (openai-compat)",

@@ -41,13 +41,24 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
 
 - `mod.rs`: `ai.addEndpoint` / `updateEndpoint` / `removeEndpoint` (probe once before a
   save; an update reloads the models on it), `check_health` and the 60 s
-  health loop (`ai-endpoint-status`, to the main agent's sessions only), Ollama
+  health loop (`ai-endpoint-status`, to the main agent's sessions only; a change also
+  publishes `model-status`, to everyone, for each model on the endpoint whose status it
+  changes: that is how managed users see an endpoint go down or come back),
+  `after_failed_request` (a refused connection or key re-checks the endpoint at once, a
+  404 publishes the model `MISSING`; called by `/v1`, `ChatModel`, `embed_batch` and the
+  transcription stream worker, so a client keeps its connection error typed as
+  `http::UpstreamUnreachable`), Ollama
   `pull_model` / `delete_upstream_model` (`model-status`, at most 4/s), and the
   per-request limits: `request_timeout` (the endpoint's, else the route's default) and
   `request_slot` (a semaphore only when the operator set `max_concurrent`; none by default).
 - `detect.rs`: `ai.detectEndpoints`, loopback ports, classified by answer shape. Saves nothing.
 - `config.rs`: the config file's `ai_endpoints` / `ai_models` / `ai_defaults`, applied
   before the service loads; idempotent by name, keys only from env vars.
+
+`add_model` and `update_model` refuse (`InvalidModel`, a 400) a model whose endpoint has no
+route for its type, before anything is written: transcription and speech need an
+OpenAI-shaped server (not Ollama or Anthropic), embeddings a kind with an embeddings
+client. So a refused model never gives its endpoint the capability.
 
 A model's status (`ModelView::status`, `ai.modelStatus`) is computed from its endpoint's
 last health check (`Endpoint::model_status`): `READY` when the endpoint lists it,
@@ -104,7 +115,10 @@ The executor still runs no model in-process: `local/` installs and supervises mo
   `/v1/audio/transcriptions`); `publish_text` sends `transcription-text` to the owner's
   DID only. `transcription_is_billed_in_one_place` pins the first.
 - The idle reaper (`start_stream_reaper`) holds the stream map weakly: dropping a clone of
-  the service (every `global_instance()` call makes one) does not stop it.
+  the service (every `global_instance()` call makes one) does not stop it. A stream is idle
+  30 s after its last feed or answer, and never while an utterance is upstream
+  (`TranscriptionSession::in_flight`, counted by an `InFlight` guard that a dropped feed
+  releases too).
 - `transcription_e2e.rs`: real server, skipped unless `TRANSCRIPTION_E2E_BASE_URL` and
   `TRANSCRIPTION_E2E_MODEL` are set.
 

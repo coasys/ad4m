@@ -1008,6 +1008,29 @@ function linkAdded(perspectiveUuid: string, target = 'literal://x') {
 /** An `agent-updated` event exactly as the executor sends it. */
 const agentUpdated = { type: 'agent-updated', agent: { did: 'did:test:alice', directMessageLanguage: null, perspective: null } }
 
+describe('ApiClient socket errors', () => {
+    // Node's WebSocket fires `error` (then a 1006 close) when the server ends the connection
+    // without answering the client's close frame, as the executor does.
+    it('says nothing of a socket it closed itself, and logs an error of the open one', async () => {
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
+        try {
+            const off = client.on('agent-updated', () => {})
+            await flush()
+            const first = socket(0)
+            off() // the last handler: the client closes the socket
+            first.onerror?.({ type: 'error' })
+            expect(errorSpy).not.toHaveBeenCalled()
+
+            open()
+            await flush()
+            socket(1).onerror?.({ type: 'error' })
+            expect(errorSpy).toHaveBeenCalledWith('WebSocket error:', { type: 'error' })
+        } finally {
+            errorSpy.mockRestore()
+        }
+    })
+})
+
 describe('ApiClient.on', () => {
     it('delivers an event, as sent, to the handlers of its type only', async () => {
         const added: unknown[] = []
