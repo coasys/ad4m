@@ -28,7 +28,9 @@
 //!   `did:scid` profile that is not exactly an expression of that form is ignored.
 
 use ad4m_hash_chain::{decode_ed25519_multikey, decode_proof_value, encode_proof_value};
-use ad4m_identity_core::{fold_json, verify_signed, HeadStatement, KelChain, AGENT_RECORD_DOMAIN};
+use ad4m_identity_core::{
+    fold, verify_signed, Event, HeadStatement, KelChain, AGENT_RECORD_DOMAIN,
+};
 use ad4m_ldk::identity::{AgentRecord, AgentRecordProof, IdentityErrorCode};
 use ad4m_ldk::prelude::{Expression, LanguageError, LanguageResult};
 use serde_json::Value;
@@ -293,7 +295,8 @@ async fn verified<H: Http>(
 }
 
 /// The whole log of `did` from the store, replayed (every event's signatures checked).
-/// `None` when the store holds none, the events do not replay, they are another identity's
+/// `None` when the store holds none, an event does not parse from its text (one that names a
+/// member twice included), the events do not replay, they are another identity's
 /// log, or the log is not the one the store signed:
 /// - event #0 derives the SCID (spec section 8, step 3), and the folded log's DID must be
 ///   `did`, so a store that serves one identity's log under another's SCID gets no reader to
@@ -312,7 +315,13 @@ pub async fn read_log<H: Http>(store: &Store<H>, did: &str) -> LanguageResult<Op
     if trusted.is_empty() {
         return Ok(None);
     }
-    let mut events: Vec<Value> = Vec::new();
+    // A page's events, each read from its text by `Event`'s `Deserialize`, which refuses an
+    // object that names a member twice (`DuplicateMember`).
+    #[derive(serde::Deserialize)]
+    struct PageEvents {
+        events: Vec<Event>,
+    }
+    let mut events: Vec<Event> = Vec::new();
     let mut bytes = 0usize;
     let mut pages = 0usize;
     let head = loop {
@@ -320,20 +329,23 @@ pub async fn read_log<H: Http>(store: &Store<H>, did: &str) -> LanguageResult<Op
             return Err(invalid("too-large"));
         }
         pages += 1;
-        let Some((page, size)) = store.log_sized(did, events.len() as u64).await? else {
+        let Some((page, text)) = store.log_with_text(did, events.len() as u64).await? else {
             return Ok(None);
         };
-        bytes = bytes.saturating_add(size);
+        bytes = bytes.saturating_add(text.len());
         if bytes > MAX_LOG_READ_BYTES {
             return Err(invalid("too-large"));
         }
-        let empty = page.events.is_empty();
-        events.extend(page.events);
+        let Ok(read) = serde_json::from_str::<PageEvents>(&text) else {
+            return Ok(None);
+        };
+        let empty = read.events.is_empty();
+        events.extend(read.events);
         if empty || events.len() as u64 > page.head.seq {
             break page.head;
         }
     };
-    let Ok(chain) = fold_json(&events) else {
+    let Ok(chain) = fold(&events) else {
         return Ok(None);
     };
     let signed = HeadStatement {

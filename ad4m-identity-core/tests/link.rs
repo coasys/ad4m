@@ -181,6 +181,28 @@ fn the_holder_checks_the_stores_claim_view_before_signing_the_add() {
 }
 
 #[test]
+fn a_store_that_swaps_the_whole_key_of_a_bound_offer_is_refused() {
+    // The store answers its own deviceKey and encKey with a fresh co-signature over this offer's
+    // scid and offerId: the co-signature verifies, so only the offer's bound key can refuse it.
+    let log = Log::new();
+    let view = claim_view(&link_claim(&log, 2, true), LINK_NOW + 5);
+    let whole_swap = claim_view(&link_claim(&log, 3, true), LINK_NOW + 5);
+
+    let mut bound = link_offer(&log, OfferKind::Device, None);
+    bound.device_key = Some(mk(&dev(2)));
+    assert_eq!(verify_claim_view(&bound, &view), Ok(()));
+    assert_eq!(
+        verify_claim_view(&bound, &whole_swap),
+        Err(LinkError::Bound)
+    );
+
+    // An unbound offer names no key: any well-formed, co-signed view passes as before.
+    let unbound = link_offer(&log, OfferKind::Device, None);
+    assert_eq!(unbound.device_key, None);
+    assert_eq!(verify_claim_view(&unbound, &whole_swap), Ok(()));
+}
+
+#[test]
 fn a_claim_with_the_wrong_secret_fails_the_commit() {
     let log = Log::new();
     let offer = link_offer(&log, OfferKind::Device, None);

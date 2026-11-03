@@ -14,7 +14,7 @@ the signing domains other than `coasys:kel`), is informative.
 | File | What |
 |---|---|
 | `src/lib.rs` | `FORMAT`, `DID_PREFIX`, `KEL_DOMAIN`, `KelChain`, `fold`, `fold_json`, `import`, `import_json`, `event_hash`, `derive_scid`, `commitment`, `error_code`, `did_of`, `scid_of`; re-exports of the module (`Hash`, `Proof`, `Head`, `Chain`, `ChainError`, `ChainPolicy`, `Entry`, `ForkEvidence`, `ImportOutcome`) |
-| `src/event.rs` | `Event`, `Op`, `DeviceKey`, `KeyLife`, `BotScope`, `Kind`; the strict JSON parser `Event::from_json` (also behind `Deserialize`) |
+| `src/event.rs` | `Event`, `Op`, `DeviceKey`, `KeyLife`, `BotScope`, `Kind`; the strict JSON parser `Event::from_json`, and `Event::from_json_text` for text (also behind `Deserialize`; refuses a duplicate member name) |
 | `src/policy.rs` | `KelPolicy` (`genesis`, `apply`), `FoldError`, `FormatError` |
 | `src/state.rs` | `KeyState`, `KeyRecord`: `key_valid_at`, `key_valid_at_time`, `bot_scope_at`, `current_master`, `key_id_of`, `device_key_id_of` (content signers: device keys only), `next_device_id`, `encryption_keys_at` |
 | `src/keys.rs` | X25519 multikeys; key-type checks |
@@ -46,6 +46,13 @@ the signing domains other than `coasys:kel`), is informative.
   (or `fold_json`/`import_json`), which refuses unknown ops and fields, floats, integers at or
   above 2^53, other kinds, and JSON that does not serialise back to itself (an empty `proof`
   or rotate `revoke` must be left out). That keeps the receiver's hash equal to the sender's.
+  Event text goes through `Event::from_json_text` (or serde's `Deserialize` for `Event`), never
+  through a `serde_json::Value` first: those refuse an object that names a member twice
+  (`DuplicateMember`, rule P6), which a `Value` has already collapsed to its last member.
+- `encryption_keys_at` gives the standing keys only, as `keyAgreement` does: a bot has no inbox.
+- `verify_claim_view` refuses a view whose `deviceKey` is not a bound offer's `deviceKey`
+  (`Bound`): a store can swap the whole key with a fresh co-signature, which only the binding
+  catches.
 - Wrong `seq`, `prev` and `scid` are the module's `ChainError::Seq`, `Prev`, `WrongChain`; a
   typed event with an integer ≥ 2^53 is `ChainError::Malformed`. Every KEL rule is
   `ChainError::Policy(FoldError)`. `FoldError::name()` is the `reason` of the error code.
@@ -77,3 +84,6 @@ spend a claim.
 ended, past the head, member order); `vectors/document.json` pins the document and metadata
 of the log of `log.json` at the head and after every seq.
 `tests/fold.rs` has one test per refusal case and fails if a case in `refusal_cases()` has none.
+`vectors/fold.json` holds `cases` (events as JSON values) and `textCases` (events as JSON text,
+for what a value cannot hold: a duplicate member name), from `refusal_cases()` and
+`text_refusal_cases()`.

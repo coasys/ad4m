@@ -146,9 +146,7 @@ pub fn load_chain_before(
     let events = texts
         .iter()
         .map(|t| {
-            let value: serde_json::Value = serde_json::from_str(t)
-                .map_err(|e| ApiError::internal(format!("stored event of {scid}: {e}")))?;
-            Event::from_json(&value)
+            Event::from_json_text(t)
                 .map_err(|e| ApiError::internal(format!("stored event of {scid}: {e}")))
         })
         .collect::<Result<Vec<_>, _>>()?;

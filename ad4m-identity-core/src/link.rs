@@ -443,8 +443,18 @@ pub fn verify_claim(scid: &str, c: &Claim) -> Result<(), LinkError> {
 /// `device_key`, `enc_key` and `can_keep_master`. The match code covers `device_key` only, so
 /// without this check a store could answer a view with another `enc_key` (where the device's
 /// messages, and later the master key, are sealed to) or another `can_keep_master`, and the
-/// master would sign it into the log. A holder calls it before `build::add_claimed`. Needs no `s`.
+/// master would sign it into the log. The co-signature cannot stop a store that swaps the whole
+/// key (its own `device_key` and `enc_key` and a fresh co-signature), so for a bound offer the
+/// view must name the offer's `device_key` (`Bound`). A holder calls it before
+/// `build::add_claimed`. Needs no `s`.
 pub fn verify_claim_view(offer: &Offer, view: &ClaimView) -> Result<(), LinkError> {
+    if offer
+        .device_key
+        .as_ref()
+        .is_some_and(|k| k != &view.device_key)
+    {
+        return Err(LinkError::Bound);
+    }
     if !is_ed25519_multikey(&view.device_key) {
         return Err(malformed("deviceKey is an Ed25519 multikey"));
     }

@@ -187,7 +187,7 @@ async fn append(
 ) -> Answer {
     let bytes = body(bytes)?;
     let req: AppendRequest = json_body(&bytes)?;
-    let head = store.append(&scid, &req)?;
+    let head = store.append(&scid, &req, &bytes)?;
     ok(json!({ "head": head }))
 }
 

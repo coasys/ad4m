@@ -9,8 +9,9 @@
 
 use ad4m_hash_chain::{
     canonical_json, compare, encode_ed25519_multikey, encode_proof_value, entry_hash,
-    entry_hash_json, fold, import, sha256, signing_input, verify_proof, verify_proof_json,
-    CanonError, Chain, ChainError, ChainId, ChainPolicy, Entry, Hash, Multikey, Proof, ProofError,
+    entry_hash_json, fold, import, sha256, signing_input, signing_input_json, verify_proof,
+    verify_proof_json, CanonError, Chain, ChainError, ChainId, ChainPolicy, Entry, Hash, Multikey,
+    Proof, ProofError,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
@@ -303,11 +304,11 @@ fn entry_hash_cases() -> Value {
     })
 }
 
-/// The eddsa-jcs-2022 signing input over an entry given as JSON, built from the spec text
-/// (the vectors hold entries that no Rust entry type parses, such as one with `@context`):
-/// `sha256(JCS(proof without proofValue, plus the entry's @context)) || sha256(JCS(entry
-/// without "proof"))`.
-fn signing_input_json(entry: &Value, proof: &Proof) -> Result<Vec<u8>, CanonError> {
+/// The eddsa-jcs-2022 signing input over an entry given as JSON, built here from the spec
+/// text so that the vectors do not come from the code they check (the vectors hold entries
+/// that no Rust entry type parses, such as one with `@context`): `sha256(JCS(proof without
+/// proofValue, plus the entry's @context)) || sha256(JCS(entry without "proof"))`.
+fn spec_signing_input(entry: &Value, proof: &Proof) -> Result<Vec<u8>, CanonError> {
     let mut body = entry.as_object().ok_or(CanonError::NotObject)?.clone();
     let mut config = to_json(proof);
     let config_map = config.as_object_mut().unwrap();
@@ -364,7 +365,7 @@ fn signing_input_cases() -> Value {
     let cases: Vec<Value> = cases
         .into_iter()
         .map(|(name, entry, proof)| {
-            let input = signing_input_json(&entry, &proof).unwrap();
+            let input = spec_signing_input(&entry, &proof).unwrap();
             json!({"name": name, "entry": entry, "proof": proof, "signingInput": hex(&input)})
         })
         .collect();
@@ -400,7 +401,44 @@ fn proof_check_cases() -> Value {
     x25519.extend_from_slice(&[5u8; 32]);
     let x25519 = format!("z{}", bs58::encode(&x25519).into_string());
 
+    // An entry with `@context`, signed over the spec-built input: the crate must put the
+    // context into the proof config to verify it.
+    let with_context = json!({"@context": ["https://www.w3.org/ns/credentials/v2"],
+                              "chain": "vector-chain", "seq": 0, "prev": null, "body": "x"});
+    let mut context_proof = Proof::unsigned("test:vector-chain#k", "assertionMethod", DOMAIN);
+    let input = spec_signing_input(&with_context, &context_proof).unwrap();
+    context_proof.proof_value = encode_proof_value(&key.sign(&input).to_bytes());
+    let mut other_context = with_context.clone();
+    other_context["@context"] = json!(["https://example.org/other"]);
+
+    // Ed25519 `verify` accepts this and `verify_strict` refuses it: the key and R are both
+    // the identity point (small order) and s = 0, so [s]B = R + [k]A holds for every message.
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut weak_signature = [0u8; 64];
+    weak_signature[..32].copy_from_slice(&identity);
+    let mut weak = good.clone();
+    weak.proof_value = encode_proof_value(&weak_signature);
+
     let cases: Vec<(&str, Value, Proof, String)> = vec![
+        (
+            "an entry with @context: the proof config holds it",
+            with_context,
+            context_proof.clone(),
+            mk.clone(),
+        ),
+        (
+            "another @context after signing",
+            other_context,
+            context_proof,
+            mk.clone(),
+        ),
+        (
+            "small-order key and R (verify accepts, verify_strict refuses)",
+            to_json(&entry),
+            weak,
+            encode_ed25519_multikey(&identity),
+        ),
         ("valid proof", to_json(&entry), good.clone(), mk.clone()),
         ("changed proofValue", to_json(&entry), flipped, mk.clone()),
         ("changed body", to_json(&tampered), good.clone(), mk.clone()),
@@ -629,6 +667,7 @@ pub fn check_vector_file(name: &str, file: &Value) {
             }
             "signing-input" => {
                 let proof: Proof = serde_json::from_value(case["proof"].clone()).unwrap();
+                // The crate's own signing input, against the spec-built vector.
                 let input = signing_input_json(&case["entry"], &proof).unwrap();
                 assert_eq!(
                     hex(&input),

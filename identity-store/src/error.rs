@@ -19,7 +19,7 @@ impl ApiError {
         ApiError { status, body }
     }
 
-    /// `400 {error}`: malformed, or a `ChainError` / `FoldError` name.
+    /// `400 {error}`: malformed, or a `ChainError` / `FoldError` / `FormatError` name.
     pub fn invalid(error: &str, detail: impl Into<String>) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,

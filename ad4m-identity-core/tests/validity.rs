@@ -88,6 +88,23 @@ fn revoked_key_valid_before_and_invalid_from_its_revocation() {
 }
 
 #[test]
+fn encryption_keys_leave_out_bots() {
+    // A bot has no inbox (the document's `keyAgreement` rule): sealing to the person through
+    // `encryption_keys_at` must never seal to a bot, though the bot's record carries `enc`.
+    let mut log = Log::new();
+    let bot_id = log.add(bot(&["read"], 2_000_000_000)); // d2 at 1
+    let state = log.chain.state();
+    assert!(state.key_valid_at(&bot_id, 1));
+    assert!(state.record(&bot_id).unwrap().enc.is_some());
+    let ids: Vec<&str> = state
+        .encryption_keys_at(1)
+        .into_iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert_eq!(ids, ["d1"]);
+}
+
+#[test]
 fn content_signers_resolve_device_keys_only() {
     // A master never signs for the person (spec section 9): `device_key_id_of` answers no
     // master, current or replaced, while `key_id_of` still finds every key of the log.
