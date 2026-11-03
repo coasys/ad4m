@@ -2426,7 +2426,7 @@ impl AIService {
     ) -> Result<()> {
         let multi_user_enabled = crate::db_backend::db_backend()
             .get_multi_user_enabled()
-            .unwrap_or(false);
+            .map_err(|e| anyhow!("Failed to read the multi-user setting: {}", e))?;
 
         if !multi_user_enabled {
             // Single-user mode — no ownership enforcement
@@ -3129,6 +3129,16 @@ mod stream_ownership_tests {
             "an anonymous caller reaches none"
         );
         assert!(!reaches(&alices, &anonymous));
+    }
+
+    // On dev a closed database panicked the check. The read error must not count as
+    // single-user mode, which enforces no ownership: another user's stream would be reachable.
+    #[test]
+    fn a_closed_database_is_not_single_user_mode() {
+        let bob = RequestContext::user_for_test("did:key:bob", vec![]);
+        let alices = stream_of(Some("did:key:alice"));
+        let _closed = crate::test_utils::DbClosed::now();
+        assert!(AIService::verify_stream_ownership(&alices, &bob).is_err());
     }
 
     // An app on the main agent is not the operator: it reaches the main agent's streams, not

@@ -23,7 +23,7 @@ use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 fn check_compute_credits_ws(agent_did: Option<&str>) -> Result<(), WsRpcError> {
     let global_free = crate::db_backend::db_backend()
         .get_free_hosting_enabled()
-        .unwrap_or(true);
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
     if global_free {
         return Ok(());
     }
@@ -914,5 +914,13 @@ mod compute_credit_tests {
         assert_eq!(results.0.unwrap_err().code, 403, "a user without credits");
         assert!(results.1.is_ok(), "a user with credits");
         assert!(results.2.is_ok(), "a caller without a user pays nothing");
+    }
+
+    // On dev a closed database panicked the check, so the request failed. The read error
+    // must not count as free hosting: the request would run without a credit check.
+    #[test]
+    fn a_closed_database_is_not_free_hosting() {
+        let _closed = crate::test_utils::DbClosed::now();
+        assert!(check_compute_credits_ws(Some("did:key:z6MkClosedDbUser")).is_err());
     }
 }

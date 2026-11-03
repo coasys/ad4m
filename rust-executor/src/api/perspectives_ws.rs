@@ -135,7 +135,7 @@ pub(crate) async fn get_perspective_with_access(
 pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
     let global_free = crate::db_backend::db_backend()
         .get_free_hosting_enabled()
-        .unwrap_or(true);
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
     if global_free {
         return Ok(());
     }
@@ -158,7 +158,7 @@ pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
 fn reserve_credits(agent_did: Option<&str>, amount: f64) -> Result<(), WsRpcError> {
     let global_free = crate::db_backend::db_backend()
         .get_free_hosting_enabled()
-        .unwrap_or(true);
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
     if global_free {
         return Ok(());
     }
@@ -3173,4 +3173,22 @@ pub struct PerspectiveNamedShacl {
     pub name: String,
     pub shape_uri: String,
     pub links: Vec<ShaclLinkTriple>,
+}
+
+#[cfg(test)]
+mod credit_check_tests {
+    use super::*;
+
+    // On dev a closed database panicked these checks, so the write failed. The read error
+    // must not count as free hosting: the write would go through unchecked and uncharged.
+    #[test]
+    fn a_closed_database_is_not_free_hosting() {
+        let _closed = crate::test_utils::DbClosed::now();
+        let did = Some("did:key:z6MkClosedDbWriter");
+        assert!(check_credits(did).is_err(), "check_credits");
+        assert!(
+            reserve_credits(did, DEFAULT_LINK_WRITE).is_err(),
+            "reserve_credits"
+        );
+    }
 }

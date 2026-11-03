@@ -1299,7 +1299,8 @@ mod tests {
             "the shared record is not in this executor's SQLite before login"
         );
 
-        // Login adopts it into SQLite.
+        // Login adopts it into SQLite with `add_user_prehashed` (`adopt_shared_user`); the
+        // login path itself (`verify_credentials`) is not run here.
         db.add_user_prehashed(&email, &did, "hash").unwrap();
         assert_eq!(db.get_user(&email).unwrap().did, did);
 
