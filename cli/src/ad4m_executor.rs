@@ -157,7 +157,9 @@ enum LocalAiCommand {
     },
 }
 
-fn parse_device(value: &str) -> Result<rust_executor::ai_service::local::hardware::Backend, String> {
+fn parse_device(
+    value: &str,
+) -> Result<rust_executor::ai_service::local::hardware::Backend, String> {
     serde_json::from_value(serde_json::Value::String(value.to_string()))
         .map_err(|_| format!("`{value}` is not a device: cpu, cuda, metal, vulkan or rocm"))
 }

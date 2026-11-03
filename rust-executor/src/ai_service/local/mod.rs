@@ -492,6 +492,53 @@ async fn install_at(paths: &LocalPaths, params: &InstallParams) -> Result<()> {
     .await
 }
 
+/// Set up local AI's `service` for an executor with no model of its type, on its first use:
+/// what dev's default models were (Bert, Whisper), downloaded when something first needed
+/// them, not at start. The selection keeps what it had and gains `service`; the runtimes
+/// restart with it, and its model becomes the default of a type that has none (an
+/// operator's defaults stay). Off with `local_ai_autostart: false`. An install already
+/// running (the launcher's) is waited for first.
+pub async fn ensure_service(service: Service) -> Result<()> {
+    if !autostart_enabled() {
+        return Err(LocalAiRefused(format!(
+            "No {} model on this executor, and local_ai_autostart is off: set up local AI \
+             (ai.localInstall) or register a model on an endpoint",
+            service.as_str()
+        ))
+        .into());
+    }
+    while INSTALLING.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let paths = LocalPaths::from_config();
+    let mut services: Vec<Service> = Selection::load(&paths)
+        .map(|s| s.models.iter().map(|m| m.service).collect())
+        .unwrap_or_default();
+    if !services.contains(&service) {
+        services.push(service);
+    }
+    log::info!(
+        "No {} model on this executor: setting up local AI for it ({})",
+        service.as_str(),
+        services
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let params = InstallParams {
+        services: Some(services),
+        start: Some(false),
+    };
+    run_install(async {
+        install_at(&paths, &params).await?;
+        stop_all().await;
+        start_at(&paths, false).await
+    })
+    .await?;
+    Ok(())
+}
+
 /// `ai.localInstall` without an executor (`ad4m-executor local-ai install`, the Docker
 /// image's `INCLUDE_MODELS`): download what the plan for this device, held to `device`,
 /// names into `store` and keep the selection in `state`; start nothing. `progress` gets
@@ -2096,6 +2143,38 @@ mod tests {
         assert!(!finished.installing, "{finished:?}");
         assert!(failed.unwrap_err().to_string().contains("broke off"));
         assert!(!flag_after_failure);
+    }
+
+    // The first use of a missing default sets up local AI only where local AI may start on
+    // its own; with local_ai_autostart off it says what to do instead, and downloads nothing.
+    #[tokio::test]
+    async fn without_autostart_a_first_use_sets_nothing_up_and_says_how() {
+        use crate::config::{Ad4mConfig, GLOBAL_AD4M_CONFIG};
+        let store = tempfile::tempdir().unwrap();
+        let saved_config = GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        crate::config::set_global_config(Ad4mConfig {
+            local_ai_dir: Some(store.path().to_string_lossy().into_owned()),
+            app_data_path: Some(store.path().join("app").to_string_lossy().into_owned()),
+            local_ai_autostart: Some(false),
+            ..Default::default()
+        });
+        let outcome = ensure_service(Service::Embeddings).await;
+        *GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = saved_config;
+
+        let error = outcome.unwrap_err();
+        assert!(error.downcast_ref::<LocalAiRefused>().is_some(), "{error}");
+        assert!(
+            error.to_string().contains("local_ai_autostart is off"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_dir(store.path()).unwrap().count(),
+            0,
+            "nothing was downloaded"
+        );
     }
 
     #[test]

@@ -170,10 +170,15 @@ impl Ad4mDb {
                     )?;
                 }
                 None => {
+                    // dev's in-process models (its default `bert`, Whisper, Llama) map to
+                    // the type's default: an embed or a stream that names `default` on an
+                    // executor without a model of the type sets up local AI's
+                    // (`AIService::default_model`).
                     log::warn!(
                         "AI model {:?} ({}) ran in-process, which this executor no longer does: \
-                         it is deleted. Register a model on an endpoint (Ollama, llama-server, \
-                         speaches, ...) instead.",
+                         it is deleted. Name the model 'default' instead (local AI sets one up \
+                         on first use), or register a model on an endpoint (Ollama, \
+                         llama-server, speaches, ...).",
                         row.name,
                         row.model_type.trim_matches('"'),
                     );
@@ -467,6 +472,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status_table, 0);
+    }
+
+    // dev's default embedding model, stored: after the move an embed that names the default
+    // asks local AI for an embedding model, as dev's first embed loaded `bert`.
+    #[tokio::test]
+    async fn a_stored_bert_becomes_local_ais_embedding_model_on_first_use() {
+        let (_dir, path) = legacy_db("");
+        {
+            let conn = Connection::open(&path).unwrap();
+            insert_local(&conn, "bert", "\"EMBEDDING\"");
+            conn.execute(
+                "INSERT INTO default_models VALUES ('\"EMBEDDING\"', 'bert')",
+                [],
+            )
+            .unwrap();
+        }
+        Ad4mDb::init_global_instance(&path).unwrap();
+        Ad4mDb::with_global_instance(|db| {
+            assert!(db.get_models().unwrap().is_empty());
+            assert_eq!(db.get_default_model(ModelType::Embedding).unwrap(), None);
+        });
+
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = asked.clone();
+        let service = crate::ai_service::AIService::empty().with_local_setup(std::sync::Arc::new(
+            move |service: crate::ai_service::local::data::Service| {
+                recorded.lock().unwrap().push(service);
+                futures::FutureExt::boxed(async { Err(anyhow::anyhow!("no download in a test")) })
+            },
+        ));
+        let error = match service
+            .embed(crate::ai_service::DEFAULT_MODEL.into(), "text".into(), None)
+            .await
+        {
+            Ok(_) => panic!("the fake setup registers nothing"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("no download in a test"),
+            "{error}"
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![crate::ai_service::local::data::Service::Embeddings]
+        );
     }
 
     #[test]

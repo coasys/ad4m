@@ -813,7 +813,11 @@ mod tests {
         );
         assert_eq!(cpu.memory_budget_bytes, 28 * GIB);
         assert_ne!(cpu.hardware_class, detected.hardware_class);
-        assert!(cpu.reasons[0].starts_with("local_ai_device is cpu"), "{:?}", cpu.reasons);
+        assert!(
+            cpu.reasons[0].starts_with("local_ai_device is cpu"),
+            "{:?}",
+            cpu.reasons
+        );
 
         // Vulkan on an NVIDIA GPU: Vulkan builds for both runtimes.
         let vulkan = plan_with_device(&data, &hardware, Some(Backend::Vulkan), &nothing_installed);
