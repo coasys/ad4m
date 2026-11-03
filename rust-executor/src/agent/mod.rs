@@ -1242,12 +1242,13 @@ impl AgentService {
 }
 
 impl AgentStatus {
-    /// The status with `identity` read for its `did` from the executor database.
-    pub fn with_identity(mut self) -> AgentStatus {
-        self.identity = self
-            .did
-            .as_deref()
-            .and_then(crate::identity::service::identity_of_agent);
+    /// The status with `identity`: the `did:scid` its `did` speaks for
+    /// (`identity::service::identity_of_agent`: bound, and the key valid at the trusted seq).
+    pub async fn with_identity(mut self) -> AgentStatus {
+        self.identity = match self.did.as_deref() {
+            Some(did) => crate::identity::service::identity_of_agent(did).await,
+            None => None,
+        };
         self
     }
 }

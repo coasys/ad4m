@@ -239,6 +239,10 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(bStatus.did).to.equal(did);
         expect(bStatus.keyId).to.equal("d2");
         expect(bStatus.revoked).to.equal(2);
+        // The binding stays, but B's key no longer speaks for the person: agent.status (and
+        // agent.get, which reads the same check) names no identity.
+        expect((await b.client.agent.status()).identity).to.be.null;
+        expect((await a.client.agent.status()).identity).to.equal(did);
         const devices = await a.client.identity.devices();
         expect(devices.find((d) => d.keyId === "d2")!.revokedSeq).to.equal(2);
         expect((await a.client.identity.status()).revoked).to.be.null;

@@ -101,6 +101,8 @@ struct TestExecutor {
     lose_publish_answer: Cell<bool>,
     /// The next `identity.publish` fails before it reaches the store.
     refuse_publish: Cell<bool>,
+    /// Changes every claim view `identity.offers` answers (a store that swaps a field).
+    tamper_claim: Cell<Option<fn(&mut Value)>>,
 }
 
 impl TestExecutor {
@@ -113,6 +115,7 @@ impl TestExecutor {
             publishes: Cell::new(0),
             lose_publish_answer: Cell::new(false),
             refuse_publish: Cell::new(false),
+            tamper_claim: Cell::new(None),
         }
     }
 
@@ -317,6 +320,16 @@ impl ExecutorRpc for TestExecutor {
                     .await;
                 if code != 200 {
                     return Err(Self::refused(code, &body));
+                }
+                let mut body = body;
+                if let (Some(tamper), Some(listings)) =
+                    (self.tamper_claim.get(), body.as_array_mut())
+                {
+                    for listing in listings {
+                        if listing["state"]["state"] == "claimed" {
+                            tamper(&mut listing["state"]["claim"]);
+                        }
+                    }
                 }
                 Ok(body)
             }
@@ -809,6 +822,58 @@ async fn revoke_ends_the_second_executors_key() {
     .unwrap();
     let refused = claim(&b, &again.link(), None).await.unwrap_err();
     assert_eq!(refused.code, 409, "{refused:?}");
+}
+
+/// A claim view the store changed after the device signed it: the holder refuses it in
+/// `wait_for_claim`, so the master signs nothing and the log stays at the incept.
+async fn a_swapped_claim_view_is_refused(entropy: u8, tamper: fn(&mut Value)) {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, entropy).await;
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Node,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    claim(&b, &flow.link(), None).await.unwrap();
+    let publishes = a.rpc().publishes.get();
+    a.rpc().tamper_claim.set(Some(tamper));
+
+    let refused = flow.wait_for_claim().await;
+    assert!(
+        matches!(refused, Err(ClientError::Link(link::LinkError::CoSig))),
+        "{refused:?}"
+    );
+    assert_eq!(a.rpc().publishes.get(), publishes);
+    let log = a.log(&did, 0, true).await.unwrap();
+    assert_eq!(log.events.len(), 1);
+}
+
+#[tokio::test]
+async fn a_claim_view_with_a_swapped_enc_key_is_never_signed() {
+    a_swapped_claim_view_is_refused(8, |claim| {
+        let other = SigningKey::from_bytes(&[9; 32])
+            .verifying_key()
+            .to_montgomery();
+        claim["encKey"] = json!(ad4m_identity_core::encode_x25519_multikey(other.as_bytes()));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_claim_view_with_a_swapped_can_keep_master_is_never_signed() {
+    a_swapped_claim_view_is_refused(9, |claim| {
+        claim["canKeepMaster"] = json!(true);
+    })
+    .await;
 }
 
 #[tokio::test]

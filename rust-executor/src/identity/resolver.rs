@@ -27,7 +27,7 @@ use ad4m_identity_core::{
 use serde_json::Value;
 
 use super::backend::{IdentityBackend, IdentityError};
-use super::cache::{fold_log, scid_from, CacheError, Ingested, KelCache, MAX_PAGES};
+use super::cache::{fold_log, rival_holds, scid_from, CacheError, Ingested, KelCache, MAX_PAGES};
 use super::src_fetch::{refuse_private_host, SrcFetch};
 use super::types::{
     convert, DidDocumentMetadata, DidResolutionMetadata, DidResolutionResult, ForkRecord,
@@ -875,7 +875,12 @@ impl Resolver {
             }
             keys.insert(key.to_string(), scid.clone());
         }
-        meta.key_valid = Some(chain.state().key_valid_at(&key_id, trusted));
+        // A bot key past its scope's `expires` is no longer valid, as `key_speaks_for` reads it.
+        meta.key_valid = Some(chain.state().key_valid_at_time(
+            &key_id,
+            trusted,
+            super::service::now(),
+        ));
         meta.key_id = Some(key_id);
         self.answer(&chain, None, None, meta).await
     }
@@ -1020,7 +1025,13 @@ impl Resolver {
                         Ok((merged, loaded))
                     }
                     Ok(ImportOutcome::Fork(fork)) => {
-                        loaded.conflict = Some(fork);
+                        match self.verified_conflict(scid, fork, &events).await {
+                            Ok(fork) => loaded.conflict = Some(fork),
+                            Err(why) => loaded.skipped.push(SkippedSource {
+                                src: label,
+                                reason: why,
+                            }),
+                        }
                         Ok((held, loaded))
                     }
                     Ok(ImportOutcome::Gap { have, first }) => {
@@ -1050,6 +1061,52 @@ impl Resolver {
                 loaded,
             )),
         }
+    }
+
+    /// A hash-only conflict between the events a foreign `src` served (`served`) and the log the
+    /// cache holds: `coasys:fork` only when the rival event holds on the prefix below it
+    /// ([`rival_holds`], the core's own rules and proofs), since `import` checks no proof of an
+    /// event at a held seq. Else why it does not, for `coasys:skipped`: a host with no key
+    /// cannot make an answer report a fork.
+    async fn verified_conflict(
+        &self,
+        scid: &str,
+        fork: ForkEvidence,
+        served: &[Event],
+    ) -> Result<ForkEvidence, String> {
+        let rival = served
+            .iter()
+            .find(|e| {
+                e.seq == fork.seq
+                    && ad4m_identity_core::event_hash(e).is_ok_and(|h| h == fork.theirs)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "no event it served at seq {} hashes to {}",
+                    fork.seq, fork.theirs
+                )
+            })?;
+        // The prefix: the cache's events, then what the src served past them (a later page
+        // can conflict with the src's own earlier one).
+        let mut prefix = self
+            .cache
+            .stored_events(scid, 0)
+            .await
+            .map_err(|e| format!("the key-log cache: {e}"))?;
+        let top = prefix.last().map(|e| e.seq);
+        prefix.extend(
+            served
+                .iter()
+                .filter(|e| top.is_none_or(|top| e.seq > top))
+                .cloned(),
+        );
+        rival_holds(scid, &prefix, rival).map_err(|e| {
+            format!(
+                "its event at seq {} conflicts with the log and does not hold: {e}",
+                fork.seq
+            )
+        })?;
+        Ok(fork)
     }
 
     /// Reads `scid`'s log from the foreign host `base` over the did:scid host profile
@@ -1101,7 +1158,16 @@ impl Resolver {
                             first,
                         }))
                     }
-                    ImportOutcome::Fork(fork) => return Err(ForeignMiss::Conflict(fork)),
+                    ImportOutcome::Fork(fork) => {
+                        let mut served_so_far = served.clone();
+                        served_so_far.extend(events.iter().cloned());
+                        return Err(
+                            match self.verified_conflict(scid, fork, &served_so_far).await {
+                                Ok(fork) => ForeignMiss::Conflict(fork),
+                                Err(why) => ForeignMiss::Failed(why),
+                            },
+                        );
+                    }
                 },
             };
             served.extend(events);
@@ -1852,6 +1918,26 @@ mod tests {
         assert!(methods(&result).is_empty());
     }
 
+    /// A bot key past its scope's `expires` resolves to its person with `coasys:keyValid:
+    /// false`, as `key_speaks_for` reads it; one still in its scope is valid.
+    #[tokio::test]
+    async fn an_expired_bot_key_resolves_as_not_valid() {
+        let mut log = TestLog::new(86);
+        let expired = add_bot_until(&mut log, 87, 1_000);
+        let live = add_bot(&mut log, 88);
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let (resolver, _) = resolver(in_memory(vec![store.key.multikey()]), store, None);
+        for (bot, id, valid) in [(&expired, "d2", false), (&live, "d3", true)] {
+            let result = resolver
+                .resolve(&format!("did:key:{}", bot.key()), false)
+                .await;
+            let meta = &result.did_resolution_metadata;
+            assert_eq!(meta.error, None, "{result:?}");
+            assert_eq!(meta.key_id.as_deref(), Some(id));
+            assert_eq!(meta.key_valid, Some(valid), "{id}");
+        }
+    }
+
     #[tokio::test]
     async fn an_unknown_device_key_is_not_found() {
         let log = TestLog::new(1);
@@ -2012,6 +2098,12 @@ mod tests {
 
     /// Adds a bot key (`read`, never expiring) to `log` at the next seq; its secret.
     fn add_bot(log: &mut TestLog, seed: u8) -> ed25519_dalek::SigningKey {
+        add_bot_until(log, seed, 4_000_000_000)
+    }
+
+    /// Adds a bot key (`read`, expiring at `expires`, unix seconds) to `log` at the next seq;
+    /// its secret.
+    fn add_bot_until(log: &mut TestLog, seed: u8, expires: u64) -> ed25519_dalek::SigningKey {
         use ad4m_identity_core::build::{add_unsigned, cosign};
         use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
         let bot = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
@@ -2022,7 +2114,7 @@ mod tests {
             enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
             life: KeyLife::Bot(BotScope {
                 can: vec!["read".into()],
-                expires: 4_000_000_000,
+                expires,
             }),
         };
         let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
@@ -2390,6 +2482,46 @@ mod tests {
                 .hash,
             held.chain().head().hash
         );
+    }
+
+    /// A foreign `src` that serves another body at a held seq that no key signed: a hash-only
+    /// conflict, not a fork. The answer is the cache's log with no `coasys:fork`; the `src` is
+    /// in `coasys:skipped` with why.
+    #[tokio::test]
+    async fn a_src_with_an_unsigned_conflicting_event_reports_no_fork() {
+        let mut held = TestLog::new(84);
+        held.revoke_d1();
+        let mut page =
+            serde_json::to_value(FakeStore::new(held.events.clone()).page(0).unwrap()).unwrap();
+        let mut forged = held.events[1].clone();
+        forged.proof.clear();
+        if let ad4m_identity_core::Op::Revoke { revoke } = &mut forged.op {
+            revoke.push("d9".into());
+        }
+        page["events"][1] = serde_json::to_value(&forged).unwrap();
+        let body = serde_json::to_vec(&page).unwrap();
+        let host = TestHost::start(move |_| response("200 OK", &[], &body)).await;
+        let resolver = local_resolver(trusting(), Arc::new(FakeStore::new(held.events.clone())));
+        let did = did_of(&held.scid());
+        resolver.resolve(&did, false).await;
+
+        let src = format!("log.example:{}", host.port);
+        let result = resolver.resolve(&format!("{did}?src={src}"), true).await;
+        let meta = &result.did_resolution_metadata;
+        assert_eq!(meta.error, None, "{result:?}");
+        assert_eq!(meta.fork, None, "an unsigned body is no fork: {result:?}");
+        assert!(
+            meta.skipped
+                .iter()
+                .any(|s| s.src == src && s.reason.contains("does not hold")),
+            "{:?}",
+            meta.skipped
+        );
+        assert!(
+            methods(&result).is_empty(),
+            "the cache's log, with the revoke"
+        );
+        assert!(resolver.cache.forks(&held.scid()).await.unwrap().is_empty());
     }
 
     /// One resolution reads at most `MAX_SRC_LOG_BYTES` from a foreign host, whatever the page

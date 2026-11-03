@@ -104,16 +104,19 @@ pub(super) fn db<T>(
     Ad4mDb::with_global_instance(f).map_err(|e| WsRpcError::internal(e.to_string()))
 }
 
-/// The identity a local agent (`did:key`) speaks for, or `None` (also when the database is not
-/// open yet, as in unit tests that never open it).
-pub fn identity_of_agent(agent_did: &str) -> Option<String> {
+/// The identity a local agent (`did:key`) speaks for, or `None` (also before the database and
+/// the identity module start, as in unit tests that never open them): see
+/// [`IdentityService::identity_of`].
+pub async fn identity_of_agent(agent_did: &str) -> Option<String> {
+    super::service().ok()?.identity_of(agent_did).await
+}
+
+/// The SCID `identity_agents` binds `agent_did` to (`None` also without an open database).
+fn bound_identity(agent_did: &str) -> Option<String> {
     let instance = Ad4mDb::global_instance();
     let guard = instance.lock().ok()?;
     let db = guard.as_ref()?;
-    db.agent_identity(agent_did)
-        .ok()
-        .flatten()
-        .map(|scid| did_of(&scid))
+    db.agent_identity(agent_did).ok().flatten()
 }
 
 fn first_fork(forks: &[ad4m_identity_core::ForkEvidence]) -> Option<ForkRecord> {
@@ -122,6 +125,22 @@ fn first_fork(forks: &[ad4m_identity_core::ForkEvidence]) -> Option<ForkRecord> 
         ours: f.ours.clone(),
         theirs: f.theirs.clone(),
     })
+}
+
+impl IdentityService {
+    /// The `did:scid` the local agent `agent_did` speaks for: bound to it in `identity_agents`
+    /// and its device key listed, valid and without the bot mark at the log's trusted seq
+    /// (`resolver::key_speaks_for`, no store read). After a revocation of the key reaches the
+    /// trusted seq the agent speaks for no one, so `agent.get` and `agent.status` answer
+    /// `identity: null`; the binding itself stays, and `identity.status` shows it with `revoked`.
+    pub async fn identity_of(&self, agent_did: &str) -> Option<String> {
+        let scid = bound_identity(agent_did)?;
+        let key = agent_did.strip_prefix("did:key:")?;
+        let did = did_of(&scid);
+        super::resolver::key_speaks_for(&self.cache, &did, key, now())
+            .await
+            .then_some(did)
+    }
 }
 
 fn mirror_head(head: &ad4m_ldk::identity::SignedHead) -> Result<SignedHead, WsRpcError> {
@@ -328,10 +347,11 @@ impl IdentityService {
             // The main agent's status gains its identity (a managed agent's status event names
             // the main agent's, so only the main agent's changes here).
             if agent.is_main_agent() {
-                let status = crate::agent::AgentService::with_global_instance(|a| a.dump());
+                let mut status = crate::agent::AgentService::with_global_instance(|a| a.dump());
+                status.identity = self.identity_of(&agent_did).await;
                 crate::pubsub::get_global_pubsub()
                     .await
-                    .publish_event(crate::events::Event::agent_status(&status.with_identity()));
+                    .publish_event(crate::events::Event::agent_status(&status));
             }
             if !bound_before {
                 if let Err(e) =
@@ -860,6 +880,9 @@ mod tests {
             req: Option<&ad4m_ldk::identity::SignedRequest>,
         ) -> Result<(), IdentityError> {
             self.inner.put_agent(record, req).await
+        }
+        async fn agent_version(&self, did: &str) -> Result<Option<u64>, IdentityError> {
+            self.inner.agent_version(did).await
         }
         async fn open_offer(
             &self,

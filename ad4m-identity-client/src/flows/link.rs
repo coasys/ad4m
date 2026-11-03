@@ -6,7 +6,8 @@
 //!    secret `s` in its fragment only.
 //! 2. The surface hands the link over (QR code, paste, `ad4m-executor claim <link>`).
 //! 3. [`LinkFlow::wait_for_claim`]: master-signed list requests (`identity.offers`) until the
-//!    offer is claimed; the claim's device key gives the match code both sides show.
+//!    offer is claimed; the device's co-signature must cover the claim the store answered
+//!    (`link::verify_claim_view`); the claim's device key gives the match code both sides show.
 //! 4. [`LinkFlow::confirm`] after the person sees the same code: the `add` that spends the
 //!    claim, signed by the current master key (`identity.publish`).
 
@@ -200,7 +201,8 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
     }
 
     /// Waits until the offer is claimed; fails when it ends unclaimed (expired, cancelled,
-    /// superseded) or expires.
+    /// superseded) or expires. A claim whose co-signature does not cover the view the store
+    /// answered (another `encKey` or `canKeepMaster`) is `ClientError::Link(LinkError::CoSig)`.
     pub async fn wait_for_claim(&self) -> Result<Claimed, ClientError> {
         let chain = chain_of(self.executor, &self.did).await?;
         // The store's wait answers at a change or at its timeout, so the first look takes the
@@ -217,6 +219,10 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
                 Some(OfferState::Claimed { claim }) => {
                     let view: ClaimView = serde_json::from_value(json!(claim))
                         .map_err(|e| ClientError::Protocol(e.to_string()))?;
+                    // The match code covers the device key only, and `fold` never reads the
+                    // co-signature: check that the device signed this very view (its `encKey`
+                    // and `canKeepMaster` too) before the master can sign it into the log.
+                    link::verify_claim_view(&self.offer, &view)?;
                     return Ok(Claimed {
                         match_code: link::match_code(
                             &self.offer.scid,

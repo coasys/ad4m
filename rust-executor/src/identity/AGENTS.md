@@ -34,6 +34,19 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   `identity-fork` once per fork, to the sessions of the identity's local agents. A store that
   answers no log records a fork only when the cache holds a head that store signed; a log only
   a foreign `src` served is no evidence against the store.
+- **A different event counts only when it is valid.** `import` compares hashes at a held seq
+  and checks no proof there, so before a fork is recorded (or a `src` conflict reported as
+  `coasys:fork`) the competing event goes through `cache::rival_holds`: the core's `fold` of the
+  held prefix below it and the event, every rule and proof. One that does not hold records
+  nothing and alerts nobody: `ingest` refuses it as `CacheError::Fold`, and a foreign `src`
+  serving it is skipped (`coasys:skipped`, "does not hold"). Without this a store or host with
+  no key could raise a persistent fork alert per body it makes up.
+- **A signed head proves authenticity, not freshness.** `verify_head` checks the store's
+  signature and never reads `time` (the head's append time, not the read's): a store, or
+  anyone replaying its answer, can serve an older signed head, and no signed statement proves
+  a read is current. The cache never moves back (a lower head is a fork), and
+  `ADMIT_FRESHNESS` bounds how long a positive verdict goes without a re-read; neither proves
+  the store showed its latest head.
 - **A fork has one way out: `identity.resetLog { did }`** (`Guard::Operator`). It drops this
   executor's copy of that log (its `coasys:kel` events, its `identity_heads` row, its
   `chain_forks` rows, the log in memory, the resolver's confirmed keys and failed fetches of
@@ -104,7 +117,10 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   answers, and the failed attempt counts as the window's read, so an unreachable store is tried
   once per window per log, not on every read.
 - An agent keeps the first identity it joined (`identity_agents`); `agent.status` and
-  `agent.get` carry it as `identity`, `did` stays the device `did:key` (and
+  `agent.get` carry it as `identity` only while the agent speaks for it
+  (`IdentityService::identity_of`: `key_speaks_for` at the trusted seq, no store read), so after
+  a revocation of its key reaches the trusted seq they answer `identity: null` while
+  `identity.status` still shows the binding with `revoked`. `did` stays the device `did:key` (and
   `agent.status().didDocument` the device's did:key document; `identity.resolve` serves the
   person's).
 - **An agent that speaks for a person publishes the person's profile** under the `did:scid`
@@ -114,7 +130,10 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   person while `identity_agents` binds it and its device key is listed, valid and without the
   bot mark at the trusted seq. The record: the agent's profile with `did` the `did:scid`, as an
   expression authored by the `did:scid` and signed by the device key (`proof.key` the bare
-  `did:key`), `anchor` the trusted seq, `version` the time in ms; the signed request: the same
+  `did:key`), `anchor` the trusted seq, `version` `person::next_version`: the time in ms, or
+  one past the version the store holds (`IdentityBackend::agent_version`, the agent language's
+  `expressionGet` of the `did:scid`, `proof.record.version`) when that is not below it, so a
+  device whose clock runs ahead never blocks the others; the signed request: the same
   key at the accepted head, for the store that signed that head. A failure is logged, never
   fails the did:key publish, and the next profile publish tries again.
 
@@ -137,7 +156,8 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   Metadata: `coasys:source` (the host that answered, or `cache`), `coasys:headTrusted` (the
   answered log's head is the one `KelCache::trusted` gives: the accepted head, verifying under
   the current `identity.storeKeys`), `coasys:fork` (the first recorded fork, else a conflict
-  between this answer's `src` and the cache), `coasys:skipped` (sources not used, with why).
+  between this answer's `src` and the cache whose competing event holds), `coasys:skipped`
+  (sources not used, with why).
 - **Sources.** The cache answers unless `fresh`, or it lacks the log or the asked
   `versionId`. Then: the URL's `src`, then the configured store. A `src` naming the configured
   store (same host, port, path; scheme ignored) is the configured store. The configured store
@@ -151,7 +171,9 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   cache. The configured store is read on in any case (into the cache), so a `src` serving a
   prefix cannot hide an event the store holds (a revocation): the answer is the `src`'s events
   on the cache's log, `coasys:source` the `src`. When the two differ at a seq both hold, the
-  cache's log answers with the conflict as `coasys:fork`, and no fork is recorded. The cache
+  cache's log answers with the conflict as `coasys:fork` when the `src`'s event holds on the
+  prefix (`Resolver::verified_conflict`, `rival_holds`), and no fork is recorded; when it does
+  not, the `src` is skipped with why and no `coasys:fork` is set. The cache
   only extends; a fork with the configured store is recorded and the held log answers. A
   failed foreign fetch is remembered per (host, SCID) for 5 minutes (`MISS_TTL`), `fresh` or
   not.
@@ -159,8 +181,9 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   `identityKeyOwner`, `GET /v1/keys/{multikey}`) is a hint: the named log (cache, then store;
   re-read once from the store when the cached log does not list the key up to its trusted seq)
   must list the key as a device key added at or below the trusted seq. Answer: the person's
-  document at the head with `coasys:keyId` and `coasys:keyValid` (`key_valid_at` the trusted
-  seq; a revoked key resolves, `false`). Unknown key: `notFound`. A log that does not list it:
+  document at the head with `coasys:keyId` and `coasys:keyValid` (`key_valid_at_time` at the
+  trusted seq by the clock now, as `key_speaks_for`; a revoked key, or a bot key past its scope's
+  `expires`, resolves `false`). Unknown key: `notFound`. A log that does not list it:
   `notFound` with `coasys:keyIndexMismatch: true` and a warning in the log. A log that lists it
   only past its trusted seq (or has no store-signed head, e.g. only a foreign `src` served it):
   `notFound`, no mismatch flag. A confirmed key → SCID sits in a bounded in-memory map.

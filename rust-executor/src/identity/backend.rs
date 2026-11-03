@@ -101,6 +101,10 @@ pub trait IdentityBackend: Send + Sync {
         record: &AgentRecord,
         req: Option<&SignedRequest>,
     ) -> Result<(), IdentityError>;
+    /// The `version` of the agent record the store holds for `did`, as the agent language
+    /// answers the record (`expressionGet`, `proof.record.version`); `None` without one. A put
+    /// must carry a greater version, so a device whose clock lags another's reads it first.
+    async fn agent_version(&self, did: &str) -> Result<Option<u64>, IdentityError>;
     async fn open_offer(&self, offer: &SignedOffer) -> Result<OfferOpened, IdentityError>;
     async fn list_offers(
         &self,
@@ -174,6 +178,16 @@ pub(crate) fn read_answer<T: DeserializeOwned>(text: &str) -> Result<T, Identity
         .map_err(|e| IdentityError::Invalid(format!("the agent language answered {e}")))
 }
 
+/// The `version` of the agent record a profile came in (`proof.record.version`, which the agent
+/// language adds to a `did:scid` profile); `None` without one.
+pub(crate) fn record_version(profile: &Value) -> Option<u64> {
+    profile
+        .get("proof")?
+        .get("record")?
+        .get("version")?
+        .as_u64()
+}
+
 /// [`IdentityBackend`] on the agent language.
 pub struct AgentLanguageBackend;
 
@@ -181,6 +195,16 @@ impl AgentLanguageBackend {
     async fn call<T: DeserializeOwned>(
         &self,
         cap: Capability,
+        args: &[Value],
+    ) -> Result<T, IdentityError> {
+        self.call_export(cap, cap.export_name(), args).await
+    }
+
+    /// `export` on the agent language that serves `cap`.
+    async fn call_export<T: DeserializeOwned>(
+        &self,
+        cap: Capability,
+        export: &str,
         args: &[Value],
     ) -> Result<T, IdentityError> {
         let controller = LanguageController::global_instance();
@@ -194,11 +218,11 @@ impl AgentLanguageBackend {
                 cap.wire_name()
             )));
         }
-        let script = call_script(cap.export_name(), args);
+        let script = call_script(export, args);
         let run = controller.execute_on_language(language.address(), &script);
         let text = tokio::time::timeout(CALL_TIMEOUT, run)
             .await
-            .map_err(|_| IdentityError::Unavailable(format!("{} timed out", cap.wire_name())))?
+            .map_err(|_| IdentityError::Unavailable(format!("{export} timed out")))?
             .map_err(|e| IdentityError::Unavailable(e.to_string()))?;
         read_answer(&text)
     }
@@ -240,6 +264,14 @@ impl IdentityBackend for AgentLanguageBackend {
         let req = req.map(json).transpose()?.unwrap_or(Value::Null);
         self.call(Capability::IdentityPutAgent, &[json(record)?, req])
             .await
+    }
+
+    async fn agent_version(&self, did: &str) -> Result<Option<u64>, IdentityError> {
+        // The language that takes the record answers it: the profile with `proof.record`.
+        let profile: Option<Value> = self
+            .call_export(Capability::IdentityPutAgent, "expressionGet", &[did.into()])
+            .await?;
+        Ok(profile.as_ref().and_then(record_version))
     }
 
     async fn open_offer(&self, offer: &SignedOffer) -> Result<OfferOpened, IdentityError> {

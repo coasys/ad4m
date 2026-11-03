@@ -84,7 +84,7 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
                 perspective: Some(DomainPerspective { links: vec![] }),
             },
         };
-        return Ok(serde_json::to_value(with_identity(agent))?);
+        return Ok(serde_json::to_value(with_identity(agent).await)?);
     }
 
     // Fallback to main agent for admin/legacy mode.
@@ -103,12 +103,13 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
         Ok::<Agent, WsRpcError>(agent)
     })?;
 
-    Ok(serde_json::to_value(with_identity(agent))?)
+    Ok(serde_json::to_value(with_identity(agent).await)?)
 }
 
-/// `agent.get`'s answer: the profile, and the `did:scid` its device key speaks for.
-fn with_identity(agent: Agent) -> crate::identity::types::AgentWithIdentity {
-    let identity = crate::identity::service::identity_of_agent(&agent.did);
+/// `agent.get`'s answer: the profile, and the `did:scid` its device key speaks for (`null` once
+/// a revocation of the key reaches the log's trusted seq).
+async fn with_identity(agent: Agent) -> crate::identity::types::AgentWithIdentity {
+    let identity = crate::identity::service::identity_of_agent(&agent.did).await;
     crate::identity::types::AgentWithIdentity { agent, identity }
 }
 
@@ -748,13 +749,14 @@ async fn get_agent_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
                 is_unlocked: true,
                 identity: None,
             }
-            .with_identity(),
+            .with_identity()
+            .await,
         )?);
     }
 
     // Fallback to main agent status
     let status = AgentService::with_global_instance(|agent_service| agent_service.dump());
-    Ok(serde_json::to_value(status.with_identity())?)
+    Ok(serde_json::to_value(status.with_identity().await)?)
 }
 
 /// agent.isLocked — check if agent is locked

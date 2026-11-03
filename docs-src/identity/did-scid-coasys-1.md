@@ -237,7 +237,9 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
    valid logs where one is a prefix of the other, it keeps the longer. Two valid logs that
    differ at one seq are a fork: the resolver keeps the log it held first, whichever is longer,
    and reports the fork in the DID resolution metadata (`coasys:fork`: the seq and the two
-   event hashes).
+   event hashes). Both must be valid: the competing event must replay on the prefix below it,
+   proofs included. A different event there that does not is no fork (anyone can write one
+   without a key); the source gave no valid log and is skipped.
 4. **The DID document.** The resolver derives the DID document (section 9) from the state
    after the head. With `versionId=<seq>`, it derives it from the state after that seq.
    DID Core defines `versionId` only as an identifier of a version of the DID document and
@@ -256,8 +258,9 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
    time, so the resolver does not support `versionTime` and refuses it with `invalidDidUrl`;
    `created` and `updated` are absent for the same reason. A host's `appendedAt` is the host's
    claim, not part of the verifiable history.
-6. **What a host can do.** A host can withhold events or serve an older head. It cannot forge
-   one: every event carries proofs by keys the state before it names, and event #0 hashes to
+6. **What a host can do.** A host can withhold events or serve an older head, signed or not (a
+   signed head proves the host held it, not that it is the latest, section 13). It cannot forge
+   an event: every event carries proofs by keys the state before it names, and event #0 hashes to
    the SCID in the DID. The resolver must not trust a host for anything except the bytes it
    returns, and checks every byte itself.
 
@@ -485,7 +488,11 @@ GET /v1/logs/<scid>?from=<n>
     past the head gives an empty `events`.
   - `head`: the host's head `{scid, seq, hash, …}`. A host may sign it (the Coasys identity
     store signs it under `coasys:head` with `time`, `store` and `sig`); a resolver that does
-    not trust the host's key reads it only as a hint of how far to page.
+    not trust the host's key reads it only as a hint of how far to page. A signed head proves
+    authenticity, not freshness: it says the host held this head, never that the host holds no
+    later one now. Its `time` is when the head was appended, not when it was read, so a host
+    (or anyone replaying its answer) can serve an older signed head, and no signed statement
+    proves a read is current.
   - `appendedAt`: one unix time per event, when the host stored it. It is the host's claim
     and no part of the verifiable history.
 

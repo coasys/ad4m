@@ -153,6 +153,18 @@ pub fn fold_log(scid: &str, events: &[Event]) -> Result<(KelChain, Vec<Event>), 
     Ok((chain, sorted))
 }
 
+/// Checks that `rival`, an event at a seq `held` holds with another hash, is a valid event of
+/// `scid`'s log: the module's `import` compares hashes only and checks no proof of an event at a
+/// held seq, so a hash-only conflict is no evidence until the rival steps through the core's own
+/// rules on the held prefix below it (`fold` of `held[..rival.seq]` and the rival: seq, prev,
+/// chain id, every rule of `KelPolicy`, the proofs). Without it anybody could raise forks with
+/// no key. `Err` says why the rival does not hold.
+pub fn rival_holds(scid: &str, held: &[Event], rival: &Event) -> Result<(), CacheError> {
+    let mut prefix: Vec<Event> = held.iter().filter(|e| e.seq < rival.seq).cloned().collect();
+    prefix.push(rival.clone());
+    fold_log(scid, &prefix).map(|_| ())
+}
+
 impl KelCache {
     /// The cache in the database file at `path` (the executor's `ad4m_db.sqlite`), trusting
     /// heads signed by `store_keys` (multikeys).
@@ -385,11 +397,24 @@ impl KelCache {
                 first,
             }),
             ImportOutcome::Fork(fork) => {
-                let theirs = events
+                // A fork counts only when the competing event is one the log's own rules admit
+                // on the held prefix; an unsigned or otherwise invalid body is refused as an
+                // event that does not fold, records nothing and alerts nobody.
+                let rival = events
                     .iter()
-                    .find(|e| e.seq == fork.seq)
-                    .and_then(|e| e.to_canonical_json().ok())
-                    .unwrap_or_default();
+                    .find(|e| {
+                        e.seq == fork.seq
+                            && ad4m_identity_core::event_hash(e).is_ok_and(|h| h == fork.theirs)
+                    })
+                    .ok_or_else(|| {
+                        CacheError::Fold(ChainError::Malformed(format!(
+                            "no event at seq {} hashes to {}",
+                            fork.seq, fork.theirs
+                        )))
+                    })?;
+                let held = self.stored_events(scid, 0).await?;
+                rival_holds(scid, &held, rival)?;
+                let theirs = rival.to_canonical_json().unwrap_or_default();
                 self.record_fork(&fork, &theirs).await?;
                 Err(CacheError::Fork(fork))
             }
@@ -823,11 +848,29 @@ pub(crate) mod tests {
             if self.put_down.load(Ordering::SeqCst) {
                 return Err(IdentityError::Unavailable("down".into()));
             }
+            // As the store: only a greater version replaces the record.
+            if self
+                .agent_version(&record.did)
+                .await?
+                .is_some_and(|stored| record.version <= stored)
+            {
+                return Err(IdentityError::Invalid("version".into()));
+            }
             self.puts
                 .lock()
                 .unwrap()
                 .push((record.clone(), req.cloned()));
             Ok(())
+        }
+        async fn agent_version(&self, did: &str) -> Result<Option<u64>, IdentityError> {
+            Ok(self
+                .puts
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(r, _)| r.did == did)
+                .map(|(r, _)| r.version))
         }
         async fn open_offer(&self, _: &SignedOffer) -> Result<OfferOpened, IdentityError> {
             unimplemented_call("open_offer")
@@ -941,7 +984,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_different_event_at_a_held_seq_raises_one_fork() {
+    async fn an_unsigned_event_at_a_held_seq_raises_no_fork() {
         let mut log = TestLog::new(1);
         log.revoke_d1();
         let store = FakeStore::new(log.events.clone());
@@ -949,13 +992,55 @@ pub(crate) mod tests {
         let forks = counting_cache(&mut cache);
         cache.refresh(&store, &log.scid()).await.unwrap();
 
-        // Another event at the held seq 1. `import` compares the hash of an event at a held
-        // seq before any rule, so a changed body is enough to show the fork.
-        let mut other = log.events[1].clone();
-        other.proof.clear();
-        if let ad4m_identity_core::Op::Revoke { revoke } = &mut other.op {
-            revoke.push("d1".into());
+        // Another body at the held seq 1 that no key signed: `import` sees a hash-only
+        // conflict, but the rival does not step through the log's rules, so it is refused as
+        // an event that does not fold. A store with no key raises no fork, however many bodies.
+        for extra in ["d1", "d2"] {
+            let mut other = log.events[1].clone();
+            other.proof.clear();
+            if let ad4m_identity_core::Op::Revoke { revoke } = &mut other.op {
+                revoke.push(extra.into());
+            }
+            assert!(matches!(
+                cache.ingest(&log.scid(), &[other]).await,
+                Err(CacheError::Fold(_))
+            ));
         }
+        assert_eq!(forks.load(Ordering::SeqCst), 0);
+        assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
+        assert_eq!(
+            cache.chain(&log.scid()).await.unwrap().unwrap().head(),
+            log.chain().head()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_signed_competing_event_at_a_held_seq_raises_one_fork() {
+        let mut log = TestLog::new(1);
+        let at_incept = log.chain();
+        log.revoke_d1();
+        let store = FakeStore::new(log.events.clone());
+        let mut cache = in_memory(vec![store.key.multikey()]);
+        let forks = counting_cache(&mut cache);
+        cache.refresh(&store, &log.scid()).await.unwrap();
+
+        // The master signs another event at seq 1: an `add` instead of the revoke. It holds on
+        // the incept, so the conflict is a fork.
+        let other_device = SigningKey::from_bytes(&[42; 32]);
+        let mut other = ad4m_identity_core::build::add_unsigned(
+            &at_incept,
+            DeviceKey {
+                id: at_incept.state().next_device_id(),
+                sign: other_device.key(),
+                enc: ad4m_identity_core::encode_x25519_multikey(&[42; 32]),
+                life: KeyLife::Standing,
+            },
+            "offer",
+            "coSig",
+        )
+        .unwrap();
+        cosign(&mut other, "m0", &log.master).unwrap();
+        rival_holds(&log.scid(), &log.events, &other).unwrap();
         let theirs_hash = ad4m_identity_core::event_hash(&other).unwrap();
         for _ in 0..2 {
             match cache.ingest(&log.scid(), &[other.clone()]).await {
@@ -967,6 +1052,7 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(forks.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.forks(&log.scid()).await.unwrap().len(), 1);
         assert_eq!(
             cache.chain(&log.scid()).await.unwrap().unwrap().head(),
             log.chain().head()
