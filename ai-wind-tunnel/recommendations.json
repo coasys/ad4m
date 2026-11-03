@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "1970-01-01T00:00:00.000Z",
+  "rules": {
+    "llm": {
+      "floor": [
+        {
+          "metric": "decodeTps",
+          "atLeast": 15
+        },
+        {
+          "metric": "ttftMs",
+          "atMost": 2000
+        }
+      ],
+      "order": [
+        {
+          "metric": "params",
+          "dir": "desc"
+        },
+        {
+          "metric": "decodeTps",
+          "dir": "desc"
+        }
+      ],
+      "report": [
+        "ttftMs",
+        "decodeTps",
+        "prefillTps",
+        "latencyMs",
+        "throughputTpsC4",
+        "firstRequestMs",
+        "peakRssBytes",
+        "peakGpuBytes",
+        "executorOverheadMs"
+      ]
+    },
+    "completion": {
+      "floor": [
+        {
+          "metric": "latencyMs",
+          "atMost": 3000
+        }
+      ],
+      "order": [
+        {
+          "metric": "params",
+          "dir": "desc"
+        },
+        {
+          "metric": "latencyMs",
+          "dir": "asc"
+        }
+      ],
+      "report": [
+        "latencyMs",
+        "firstRequestMs",
+        "executorOverheadMs"
+      ]
+    },
+    "embeddings": {
+      "floor": [
+        {
+          "metric": "textsPerSec",
+          "atLeast": 10
+        },
+        {
+          "metric": "mrr",
+          "atLeast": 1
+        }
+      ],
+      "order": [
+        {
+          "metric": "textsPerSec",
+          "dir": "desc"
+        }
+      ],
+      "report": [
+        "textsPerSec",
+        "batchLatencyMs",
+        "singleLatencyMs",
+        "dimension",
+        "mrr",
+        "peakRssBytes",
+        "executorOverheadMs"
+      ]
+    },
+    "stt": {
+      "floor": [
+        {
+          "metric": "rtf",
+          "atMost": 0.5
+        }
+      ],
+      "order": [
+        {
+          "metric": "wer",
+          "dir": "asc",
+          "round": 0.02
+        },
+        {
+          "metric": "rtf",
+          "dir": "asc"
+        }
+      ],
+      "report": [
+        "wer",
+        "rtf",
+        "latencyMs",
+        "streamLatencyMs",
+        "firstRequestMs",
+        "peakRssBytes"
+      ]
+    },
+    "tts": {
+      "floor": [
+        {
+          "metric": "rtf",
+          "atMost": 1
+        }
+      ],
+      "order": [
+        {
+          "metric": "roundTripWer",
+          "dir": "asc",
+          "round": 0.02
+        },
+        {
+          "metric": "rtf",
+          "dir": "asc"
+        }
+      ],
+      "report": [
+        "rtf",
+        "ttfbMs",
+        "latencyMs",
+        "roundTripWer",
+        "firstRequestMs",
+        "peakRssBytes"
+      ]
+    }
+  },
+  "classes": {}
+}
