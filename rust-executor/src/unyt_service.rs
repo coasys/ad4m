@@ -129,7 +129,8 @@ pub struct PaymentResult {
 
 /// Ensure the alliance DNA is installed. Safe to call multiple times —
 /// only the first call actually installs; subsequent calls are no-ops.
-/// Blocks until holochain service is available.
+/// Fails with [`HolochainNotRunning`] when no conductor runs or starts: a caller that
+/// must wait for the conductor (the install at start-up) waits before it calls this.
 /// Returns an error if no membrane proof has been stored yet.
 pub async fn ensure_installed() -> Result<(), AnyError> {
     // Acquire the lock for the entire install sequence to prevent races.
@@ -145,10 +146,7 @@ pub async fn ensure_installed() -> Result<(), AnyError> {
         ));
     }
 
-    // Wait for holochain service to become available (no timeout — agent unlock may take a while)
-    while maybe_get_holochain_service().await.is_none() {
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    }
+    running_holochain_service().await?;
 
     let result = install_with_retries(&mut installed).await;
     set_install_error(result.as_ref().err().map(|e| e.to_string()));
@@ -171,6 +169,13 @@ async fn install_with_retries(installed: &mut bool) -> Result<(), AnyError> {
     // but DNA installation with network join can take longer.
     let mut last_err = None;
     for attempt in 1..=5 {
+        // A conductor that stopped since the last attempt will not come back for a retry.
+        if !maybe_get_holochain_service()
+            .await
+            .is_some_and(|service| !service.is_stopped())
+        {
+            return Err(HolochainNotRunning.into());
+        }
         match install_alliance_dna(&data_path).await {
             Ok(()) => {
                 *installed = true;
@@ -183,12 +188,19 @@ async fn install_with_retries(installed: &mut bool) -> Result<(), AnyError> {
                 return Ok(());
             }
             Err(e) => {
+                let retry = if attempt < 5 {
+                    ". Retrying in 5s..."
+                } else {
+                    ""
+                };
                 warn!(
-                    "Unyt DNA install attempt {}/5 failed: {}. Retrying in 5s...",
-                    attempt, e
+                    "Unyt DNA install attempt {}/5 failed: {}{}",
+                    attempt, e, retry
                 );
                 last_err = Some(e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                if attempt < 5 {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
             }
         }
     }
@@ -826,11 +838,40 @@ async fn capture_dna_hash() {
 // Zome call helpers
 // ---------------------------------------------------------------------------
 
+/// A Unyt call found no running Holochain conductor. The WS handlers answer it with 503.
+#[derive(Debug)]
+pub struct HolochainNotRunning;
+
+impl std::fmt::Display for HolochainNotRunning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Holochain is not running")
+    }
+}
+
+impl std::error::Error for HolochainNotRunning {}
+
+/// The running Holochain service, or [`HolochainNotRunning`] at once when no conductor
+/// runs or starts, or the one there has stopped.
+async fn running_holochain_service() -> Result<HolochainServiceInterface, AnyError> {
+    crate::holochain_service::holochain_service_once_started()
+        .await
+        .filter(|service| !service.is_stopped())
+        .ok_or_else(|| HolochainNotRunning.into())
+}
+
 /// Call a zome function on the alliance DNA and return decoded JSON.
 /// Automatically ensures the DNA is installed first.
+///
+/// A request does not wait for a conductor that does not run (Holochain disabled, agent
+/// locked, conductor down or shut down): it fails at once with [`HolochainNotRunning`]. It
+/// waits only for a conductor start in progress (`holochain_service_once_started`). Only
+/// the background install at start-up waits for the conductor without a limit.
 async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue, AnyError> {
+    // Before the install lock: an install in progress must not hold up a call that
+    // can already see the conductor is gone.
+    running_holochain_service().await?;
     ensure_installed().await?;
-    let hc = get_holochain_service().await;
+    let hc = running_holochain_service().await?;
 
     let response = call_alliance_zome(&hc, fn_name, payload).await?;
 
@@ -1594,6 +1635,120 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
     use tokio::sync::{mpsc, Mutex};
+
+    /// A wallet read must answer at once when the Holochain conductor does not run
+    /// (Holochain disabled, agent still locked, conductor down), even with a membrane
+    /// proof stored. Only the background install at start-up waits for the conductor.
+    #[tokio::test]
+    async fn wallet_read_without_conductor_fails_at_once() {
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        set_membrane_proof("cHJvb2Y=").unwrap();
+        // An earlier test may have left a conductor running: set it aside, put it back after.
+        let running = crate::holochain_service::interface::take_holochain_service().await;
+
+        let ledger = tokio::time::timeout(Duration::from_secs(2), get_ledger())
+            .await
+            .expect("get_ledger must not wait for a conductor that does not run");
+        let history = tokio::time::timeout(Duration::from_secs(2), get_history(None, 50))
+            .await
+            .expect("get_history must not wait for a conductor that does not run");
+
+        for err in [ledger.unwrap_err(), history.unwrap_err()] {
+            assert!(
+                err.to_string().contains("Holochain is not running"),
+                "unexpected error: {err}"
+            );
+        }
+        if let Some(service) = running {
+            crate::holochain_service::interface::set_holochain_service(service).await;
+        }
+    }
+
+    /// A conductor that has shut down keeps its handle in the global until an `init`
+    /// replaces it. A wallet read must see it stopped and answer at once, not retry the
+    /// install against its closed channel.
+    #[tokio::test]
+    async fn wallet_read_with_a_stopped_conductor_fails_at_once() {
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        // The install reads the data path: give it one, so only the conductor can stop it.
+        {
+            let mut config = crate::config::GLOBAL_AD4M_CONFIG.lock().unwrap();
+            if config.is_none() {
+                *config = Some(crate::config::Ad4mConfig {
+                    app_data_path: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+                    ..Default::default()
+                });
+            }
+        }
+        set_membrane_proof("cHJvb2Y=").unwrap();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        drop(receiver);
+        let (_signal_tx, signal_rx) = mpsc::unbounded_channel();
+        let stopped = HolochainServiceInterface {
+            sender,
+            stream_receiver: Arc::new(Mutex::new(signal_rx)),
+        };
+        let running = crate::holochain_service::interface::take_holochain_service().await;
+        crate::holochain_service::interface::set_holochain_service(stopped).await;
+        let was_installed = *INSTALL_ONCE.lock().await;
+
+        // Before the install (the install's own check) and after it (`call_zome`'s check).
+        let mut ledgers = Vec::new();
+        for installed in [false, true] {
+            *INSTALL_ONCE.lock().await = installed;
+            ledgers.push(tokio::time::timeout(Duration::from_secs(2), get_ledger()).await);
+        }
+
+        *INSTALL_ONCE.lock().await = was_installed;
+        crate::holochain_service::interface::take_holochain_service().await;
+        if let Some(service) = running {
+            crate::holochain_service::interface::set_holochain_service(service).await;
+        }
+        for (installed, ledger) in [false, true].into_iter().zip(ledgers) {
+            let err = ledger
+                .expect("get_ledger must not retry against a stopped conductor")
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("Holochain is not running"),
+                "installed = {installed}: unexpected error: {err}"
+            );
+        }
+    }
+
+    /// The install a request starts must not wait for a conductor that is gone (stopped by
+    /// the shutdown op, never started): it fails, and leaves the DNA marked not installed so
+    /// a later call installs it.
+    #[tokio::test]
+    async fn an_install_without_conductor_fails_at_once_and_stays_pending() {
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        set_membrane_proof("cHJvb2Y=").unwrap();
+        let running = crate::holochain_service::interface::take_holochain_service().await;
+        let was_installed = std::mem::replace(&mut *INSTALL_ONCE.lock().await, false);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), ensure_installed())
+            .await
+            .expect("ensure_installed must not wait for a conductor that is gone");
+        let still_pending = !*INSTALL_ONCE.lock().await;
+
+        *INSTALL_ONCE.lock().await = was_installed;
+        if let Some(service) = running {
+            crate::holochain_service::interface::set_holochain_service(service).await;
+        }
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Holochain is not running"),
+            "the install must say why it failed"
+        );
+        assert!(still_pending);
+    }
 
     /// Two Unyt writes started together must reach the alliance cell one after the other,
     /// even though the dispatch loop runs zome calls concurrently since #1133: overlapping

@@ -109,6 +109,17 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   commit at exactly cursor + 1 the cursor moves past it, so catch-up does
   not fetch our own links back; otherwise another agent's diff is in
   between and the cursor stays.
+- **The executor owns the outbox; the language keeps none.** `commit`
+  (index.ts) awaits the POST and throws on any failure (server down,
+  refused, key ring not ready). The executor then keeps the diff in its
+  pending-diffs table (`Ad4mDb::add_pending_diff`), and `pending_diffs_loop`
+  retries it with backoff, oldest first, batching bursts, across executor
+  restarts (rust-executor/src/perspectives/perspective_instance.rs; test
+  `a_restart_sends_the_diffs_the_language_did_not_accept`). Do not add a
+  queue in the language: a `commit` that returns before the server accepted
+  the diff makes the executor drop its copy (53ff23f11 lost links that way
+  through the old in-memory `enqueueCommitBatched` queue), and a durable
+  one would send each diff twice.
 - **A 401 replaces the session.** `commit`, `bootstrap` and `catchUp` run
   their request through `withToken` (src/sync.ts): on a 401 it drops the
   cached token (`invalidateToken` → `auth.invalidateSession()`),
@@ -153,15 +164,6 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 
 ## Known limitations / follow-ups
 
-- **Durable outbox is limited to in-memory retry.** `enqueueCommitBatched`
-  (src/sync.ts) coalesces contiguous commits into segments and retries
-  each segment up to 3 times with exponential backoff. If all attempts
-  fail, the failed segments re-enqueue for the next flush cycle and the
-  language emits `LinkLanguageInstalledButNotSynced`. The language's store
-  only gets links the server accepted, so queued links stay out of it until
-  the server recovers, and a process restart loses the
-  queue — a durable pending-commits queue (persisted in the KV store,
-  retried by `sync()`) would close this gap.
 - **E2E encryption activates automatically — no plaintext mode.** The admin's
   language instance generates the initial room key during `init()` when no E2E
   exists yet. Subsequent rotations require explicit admin action.
