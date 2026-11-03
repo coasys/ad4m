@@ -997,6 +997,70 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
         .is_none());
 }
 
+#[test]
+fn a_did_scid_record_is_ignored_when_the_store_serves_another_identitys_log() {
+    // A hostile store answers Alice's SCID with Mallory's genuine log and an agent row for
+    // Alice signed by Mallory's d1 at Mallory's head. Every check but the DID binding passes:
+    // the log replays, the key is a non-bot device key valid at the anchor, the anchor is at the
+    // head, the profile is authored by Alice and `proof.key` is the signer. The reader must not
+    // take Mallory's keys as Alice's.
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (_host, store) = Host::on(&server.url);
+    let alice = person(&mut apps, &store, "alice swap");
+    let alice_did = alice["did"].as_str().unwrap().to_string();
+    let mallory = person(&mut apps, &store, "mallory swap");
+    let mallory_did = mallory["did"].as_str().unwrap().to_string();
+    let mallory_head = block_on(store.head(&mallory_did)).unwrap().unwrap().seq;
+    let profile = scid_profile(&mut apps, "mallory swap", "d1", &alice_did);
+    let hostile = apps.run(
+        "record",
+        json!({ "name": "mallory swap", "signer": "d1", "profile": profile, "version": 1,
+                "did": alice_did, "anchor": mallory_head }),
+    );
+    assert_eq!(
+        hostile["signedBy"],
+        format!(
+            "did:key:{}",
+            mallory["incept"]["add"][0]["sign"].as_str().unwrap()
+        )
+    );
+    let scid = |did: &str| did.rsplit(':').next().unwrap().to_string();
+    {
+        let db = rusqlite::Connection::open(server.db()).unwrap();
+        db.execute(
+            "INSERT INTO agents (did, record, version, stored_at) VALUES (?1, ?2, 1, 0)
+             ON CONFLICT(did) DO UPDATE SET record = excluded.record, version = 1",
+            rusqlite::params![alice_did, hostile.to_string()],
+        )
+        .unwrap();
+        // The store now serves Mallory's events under Alice's SCID (Alice's own head row stays).
+        db.execute(
+            "DELETE FROM chain_entries WHERE chain = ?1",
+            rusqlite::params![scid(&alice_did)],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE chain_entries SET chain = ?1 WHERE chain = ?2",
+            rusqlite::params![scid(&alice_did), scid(&mallory_did)],
+        )
+        .unwrap();
+    }
+    // The served log replays, and it is Mallory's: no log of Alice, no profile.
+    let served = block_on(store.log(&alice_did, 0)).unwrap().unwrap();
+    assert_eq!(served.events[0]["scid"], json!(scid(&mallory_did)));
+    assert!(block_on(agents::read_log(&store, &alice_did))
+        .unwrap()
+        .is_none());
+    assert!(block_on(agents::get(&store, &alice_did, now_s()))
+        .unwrap()
+        .is_none());
+    // Mallory's own record on her own log still answers.
+    assert!(block_on(agents::read_log(&store, &mallory_did))
+        .unwrap()
+        .is_none_or(|chain| chain.state().did == mallory_did));
+}
+
 /// A `did:scid` person's profile as its agent record stores it: the Agent as an AD4M
 /// expression authored by `did`, `proof.key` the `did:key` of `signer` (the record's
 /// `signedBy`). The language does not check the expression's own signature (the executor

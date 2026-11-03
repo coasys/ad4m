@@ -287,7 +287,10 @@ async fn verified<H: Http>(
 }
 
 /// The whole log of `did` from the store, replayed (every event's signatures checked).
-/// `None` when the store holds none or the events do not replay.
+/// `None` when the store holds none, the events do not replay, or they are another
+/// identity's log: event #0 derives the SCID (spec section 8, step 3), and a store's answer
+/// is not trusted for which log it is, so a store that serves one identity's log under
+/// another's SCID gets no reader to take its keys as that identity's.
 pub async fn read_log<H: Http>(store: &Store<H>, did: &str) -> LanguageResult<Option<KelChain>> {
     let mut events: Vec<Value> = Vec::new();
     loop {
@@ -301,7 +304,9 @@ pub async fn read_log<H: Http>(store: &Store<H>, did: &str) -> LanguageResult<Op
             break;
         }
     }
-    Ok(fold_json(&events).ok())
+    Ok(fold_json(&events)
+        .ok()
+        .filter(|chain| chain.state().did == did))
 }
 
 /// `version` (unix milliseconds) as an ISO 8601 timestamp, `YYYY-MM-DDTHH:MM:SS.mmmZ`.
