@@ -7,6 +7,19 @@ import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./typ
 import { getRelationsMetadata } from "./decorators";
 
 /**
+ * The `totalCount` of a model query sent with `count: true`. The executor
+ * answers such a query with a count, so an answer without one is an error,
+ * not zero matches.
+ */
+export function requireTotalCount(answer: { totalCount?: number } | null | undefined): number {
+  const totalCount = answer?.totalCount;
+  if (typeof totalCount !== "number") {
+    throw new Error("model query asked for a count (count: true) but the answer has no totalCount");
+  }
+  return totalCount;
+}
+
+/**
  * Resolves the predicate for a parent query.
  *
  * Uses TS discriminated union narrowing:

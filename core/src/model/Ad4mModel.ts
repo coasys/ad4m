@@ -7,7 +7,7 @@ import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue, compileWhereClause } from "./query-utils";
-import { requireSingleParent, resolveParentPredicate } from "./query-common";
+import { requireSingleParent, requireTotalCount, resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
@@ -19,7 +19,7 @@ import {
 } from "./hydration";
 import type {
   Scope, TraverseScope, IncludeMap, Query,
-  GetOptions, AllInstancesResult, QueryResults, ResultsWithTotalCount,
+  GetOptions, AllInstancesResult, Page, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf, LinksMap,
@@ -1375,7 +1375,7 @@ export class Ad4mModel {
     classes: (typeof Ad4mModel)[],
     query: Query = {},
     options?: CallOptions,
-  ): Promise<QueryResults<Ad4mModel>> {
+  ): Promise<Page<Ad4mModel>> {
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
     const result = await perspective.modelQuery(classNames, queryJson, options);
     const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
@@ -1454,7 +1454,7 @@ export class Ad4mModel {
     query: Query = {},
     classNameOverride?: string | null,
     options?: CallOptions,
-  ): Promise<QueryResults<T>> {
+  ): Promise<Page<T>> {
     // Delegate query input building to the shared prepareModelQueryParams
     // helper.  The executor resolves the shape from SHACL server-side.
     const { className, queryJson } = this.prepareModelQueryParams(
@@ -1569,8 +1569,8 @@ export class Ad4mModel {
     query?: Q,
     options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const { results, totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), count: true }, undefined, options);
-    return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount: totalCount ?? 0 };
+    const answer = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), count: true }, undefined, options);
+    return { results: answer.results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount: requireTotalCount(answer) };
   }
 
   /**
@@ -1599,8 +1599,8 @@ export class Ad4mModel {
     options?: CallOptions,
   ): Promise<PaginationResult<T & IncludeExtras<T, IncludeOf<Q>>>> {
     const paginationQuery = { ...((query ?? {}) as Query), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
-    return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount: totalCount ?? 0, pageSize, pageNumber };
+    const answer = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
+    return { results: answer.results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount: requireTotalCount(answer), pageSize, pageNumber };
   }
 
   /**
@@ -1635,8 +1635,7 @@ export class Ad4mModel {
     query?: TypedQuery<T>,
     options?: CallOptions,
   ): Promise<number> {
-    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0, count: true }, undefined, options);
-    return totalCount ?? 0;
+    return requireTotalCount(await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0, count: true }, undefined, options));
   }
 
   /** The `executeAction` write that sets property `key` to `value`; none for an empty value. */
@@ -2018,6 +2017,8 @@ export class Ad4mModel {
 
       if (value !== undefined && value !== null) {
         if (value?.action) {
+          const envelopePredicate = this.getRelationOptions(key)?.predicate;
+          if (envelopePredicate && value.action !== "remover") this._relationsWritten.add(envelopePredicate);
           switch (value.action) {
             case "setter":
               writes.push(...this.planRelation(key, 'setter', value.value));
@@ -2067,6 +2068,7 @@ export class Ad4mModel {
           // both paths at once.
           const relationMeta = this.getRelationOptions(key);
           if (relationMeta) {
+            this._relationsWritten.add(relationMeta.predicate);
             writes.push(...this.planRelation(key, 'setter', [value]));
             continue;
           }
