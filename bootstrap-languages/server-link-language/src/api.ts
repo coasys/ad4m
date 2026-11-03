@@ -194,7 +194,9 @@ export async function deleteRoomKey(config: RoomConfig, token: string, version: 
  */
 export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<KeysResponse> {
     const res = await request<Partial<KeysResponse> | undefined>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
-    return { keys: res?.keys ?? [] };
+    // A body without a list is a broken answer, not "no keys": throwing keeps a loaded ring (`afterFailedKeyRead`).
+    if (!Array.isArray(res?.keys)) throw new Error("server-link-language: /keys answered without a keys list");
+    return { keys: res.keys };
 }
 
 // ---------------------------------------------------------------------------

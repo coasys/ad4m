@@ -226,13 +226,17 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         if (!link.data || typeof link.data !== "object") {
           return reply.code(400).send({ error: "each link must have a data object" });
         }
-        if (!isEncryptedLinkData(link.data)) {
+        // Only ciphertext and nonce: a plaintext key beside them would be stored and served in the clear.
+        if (!isEncryptedLinkData(link.data) || Object.keys(link.data).length !== 2) {
           return reply.code(400).send({
-            error: "this room requires end-to-end encryption; plaintext links are not accepted",
+            error: "this room requires end-to-end encryption; link data must be exactly {ciphertext, nonce}",
           });
         }
         if (!link.link_hash || typeof link.link_hash !== "string") {
           return reply.code(400).send({ error: "encrypted links must include a link_hash" });
+        }
+        if (link.key_version !== undefined && !(Number.isSafeInteger(link.key_version) && link.key_version > 0)) {
+          return reply.code(400).send({ error: "key_version must be a positive integer" });
         }
       }
 

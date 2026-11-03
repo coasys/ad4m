@@ -365,7 +365,10 @@ export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKeyOrRing:
     const plaintext = gcm(roomKey, nonce).decrypt(ciphertext);
     const parsed = JSON.parse(bytesToUtf8(plaintext));
 
-    if (!parsed || typeof parsed !== "object" || !parsed.author || !parsed.data || typeof parsed.data !== "object") {
+    if (
+        !parsed || typeof parsed !== "object" || !parsed.author || typeof parsed.timestamp !== "string" ||
+        !parsed.proof || typeof parsed.proof !== "object" || !parsed.data || typeof parsed.data !== "object"
+    ) {
         throw new Error("decryptLinkFromWire: the decrypted payload is not {author, timestamp, proof, data}");
     }
     return {

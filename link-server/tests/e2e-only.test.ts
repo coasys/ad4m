@@ -109,6 +109,21 @@ test("a commit mixing an encrypted and a plaintext link is refused whole", async
   });
 });
 
+test("an encrypted link carrying a plaintext key beside its ciphertext, or a bad key_version, is refused", async () => {
+  await withServer(async (server) => {
+    const { roomId, member, adminToken, memberToken } = await roomWithMember(server);
+    const { roomKey } = await clientSideRotate(server.url, roomId, adminToken);
+    const link = await createSignedLink(member, { source: "test://ok", predicate: "p", target: "t" }, undefined, roomKey);
+    const mixed = { ...link, data: { ...link.data, source: "test://leaked" } };
+    for (const bad of [mixed, { ...link, key_version: 0 }, { ...link, key_version: "never" }]) {
+      const res = await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [bad], removals: [] }, memberToken);
+      assert.equal(res.status, 400);
+    }
+    const render = await getJson<{ links: unknown[] }>(`${server.url}/rooms/${roomId}/render`, memberToken);
+    assert.deepEqual(render.body.links, [], "none of them was stored");
+  });
+});
+
 test("GET /keys answers a member without a key with 200 and an empty list", async () => {
   await withServer(async (server) => {
     const { roomId, adminToken, memberToken } = await roomWithMember(server);

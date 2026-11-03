@@ -228,6 +228,16 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         assert.throws(() => decryptLinkFromWire(wire, roomKey), /not \{author, timestamp, proof, data\}/);
     });
 
+    it("throws when the payload has author and data but no timestamp or proof", () => {
+        const roomKey = generateRoomKey();
+        const nonce = randomBytes(12);
+        const payload = new TextEncoder().encode(
+            JSON.stringify({ author: "did:key:z6MkA", data: { source: "s", predicate: "p", target: "t" } }),
+        );
+        const wire = { data: { ciphertext: bytesToHex(gcm(roomKey, nonce).encrypt(payload)), nonce: bytesToHex(nonce) } };
+        assert.throws(() => decryptLinkFromWire(wire as any, roomKey), /not \{author, timestamp, proof, data\}/);
+    });
+
     it("attaches key_version when provided", () => {
         const roomKey = generateRoomKey();
         const link = makeLink();

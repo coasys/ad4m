@@ -30,6 +30,14 @@ describe("api: fetchRoomKeys", () => {
         assert.deepEqual(await api.fetchRoomKeys(config, "token"), { keys: [entry] });
     });
 
+    it("throws on a 2xx answer without a keys list, so a loaded key ring is kept", async () => {
+        for (const body of ["", "{}", JSON.stringify({ keys: "x" })]) {
+            answering({ status: 200, headers: {}, body });
+            await assert.rejects(() => api.fetchRoomKeys(config, "token"), /without a keys list/);
+            resetAdapters();
+        }
+    });
+
     it("throws on any error status, a 404 included: it is never read as holding no key", async () => {
         for (const status of [404, 500]) {
             answering({ status, headers: {}, body: "{\"error\":\"x\"}" });
