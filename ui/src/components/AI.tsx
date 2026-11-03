@@ -63,7 +63,14 @@ const AI = () => {
 
   async function removeEndpoint(endpoint: AiEndpoint) {
     try {
-      await client!.ai.removeEndpoint(endpoint.id);
+      if (endpoint.managed) {
+        // This executor runs it: removing it stops local AI and removes its models. The
+        // downloaded files stay for the next install (other agents may use them).
+        if (!confirm("Stop local AI and remove its models from this agent?")) return;
+        await client!.ai.localRemove(false);
+      } else {
+        await client!.ai.removeEndpoint(endpoint.id);
+      }
     } catch (e) {
       alert(`${e}`);
     }
@@ -152,6 +159,7 @@ const AI = () => {
                     <j-flex key={endpoint.id} a="center" j="between" gap="300">
                       <j-text nomargin color="ui-0">
                         {endpoint.name}: {kindLabel(endpoint.kind)} at {endpoint.baseUrl} (
+                        {endpoint.managed ? "local AI, " : ""}
                         {endpoint.health.state.toLowerCase()})
                       </j-text>
                       <j-button variant="subtle" size="sm" onClick={() => removeEndpoint(endpoint)}>
