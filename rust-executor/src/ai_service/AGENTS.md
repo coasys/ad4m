@@ -53,6 +53,38 @@ A model's status (`ModelView::status`, `ai.modelStatus`) is computed from its en
 last health check (`Endpoint::model_status`): `READY` when the endpoint lists it,
 `MISSING` when it answers without it, `ENDPOINT_DOWN`, or `UNKNOWN` before a check.
 
+## `local/` (one-click local AI)
+
+The executor still runs no model in-process: `local/` installs and supervises model
+*servers* as child processes and registers them as **managed** endpoints
+(`Endpoint::managed`, column `ai_endpoints.managed`).
+
+| File | Does |
+|---|---|
+| `data.rs` | embeds `local/manifest.json` (runtime builds and model files: URL, size, sha256, memory) and `ai-wind-tunnel/{recommendations,hardware-classes}.json` (schema v1); `classify` (passes `ai-wind-tunnel/hardware-class-fixtures.json`, as the wind tunnel's TS classifier does) and the `smaller` chain |
+| `hardware.rs` | `ai.localHardware`: sysinfo (RAM, CPU, disk), std CPU features, NVML and the Vulkan loader opened with `libloading` when present (no `wgpu`), amdgpu sysfs, macOS sysctl. GPU probes run once per process. `memory_budget` = min(GPU − 1 GiB, RAM − 4 GiB) |
+| `plan.rs` | pure `plan()`: per service the recommendation of the class or the nearest smaller measured one (no evidence = unmeasured), memory sum vs budget with step-down, build per provider (recommended, else CUDA13 > CUDA12 > Metal > Vulkan > CPU), disk check |
+| `install.rs` | the store (`downloads/`, `runtime/<id>/<version>-<build>/`, `models/`), `download` (`.part` + `Range` resume, sha256 and size before rename), `unpack` (tar.gz, zip; no path escapes), macOS quarantine strip |
+| `supervisor.rs` | `Supervised` child: loopback port (`choose_port`, never the `detect.rs` ports), readiness (llama `/health`, whisper TCP), `RestartBudget` (3, reset after 5 healthy min), SIGTERM then SIGKILL, Linux `PR_SET_PDEATHSIG` from one long-lived spawner thread, `reap_stale` by pid + exe path |
+| `mod.rs` | `install` / `start` / `stop` / `remove` / `status`, `register` (endpoints `This device (llama.cpp)` / `This device (whisper.cpp)`, models named by manifest id, defaults), `managed_health` (what `check_health` uses for a managed endpoint: whisper-server lists no models), `autostart` (`local_ai_autostart`), `stop_on_exit` (the shutdown handler) |
+
+- Storage: the store is per user, shared by agents (`local_ai_dir` / `AD4M_LOCAL_AI_DIR`,
+  else `dirs::data_local_dir()/ad4m/local-ai`); per-executor state (`selection.json`,
+  `pids.json`, `llama-models.ini`, `<provider>.log`) is `<app_data_path>/local-ai/`. Tests set
+  the directories explicitly; never let one write to `~/.local/share/ad4m`.
+- llama-server runs in router mode: `--models-preset` names the chat and embedding models
+  (`embeddings = true` on the latter, `load-on-startup`), the key (`LLAMA_API_KEY`, in the environment so `ps` does not show it) is new per start,
+  `--offline`. whisper-server: `--request-path /v1/audio --inference-path /transcriptions`,
+  no key (loopback only).
+- `ai.updateEndpoint` / `ai.removeEndpoint` refuse a managed endpoint (`refuse_managed`);
+  `ai.detectEndpoints` skips the managed ports.
+- RPCs (`api/ai_ws.rs`): `ai.localHardware` / `localPlan` / `localStatus` are
+  `Executor(AI_READ)` reads; `ai.localInstall` (long) / `localStart` (long) / `localStop` /
+  `localRemove` are `Guard::Operator`. Progress: the `ai-local-progress` event (operator).
+- Model names live in `manifest.json` and the recommendations, as data (the rule below).
+  Updating a pin: new URL, `sizeBytes` and `sha256` (GitHub `digest`, HF `lfs.oid`), and an
+  HF URL with a commit, never `main` (a unit test checks).
+
 ## Transcription
 
 `transcription.rs` holds the endpoint path and what streams and `/v1` share:
@@ -89,8 +121,9 @@ edges; item 7 moves harness + interpretation + flows + auto_processor into `agen
 
 - Never call a model without a billing decision: use the existing `bill_*_if_authed` /
   `CreditGate` path.
-- Model names are data: the onboarding recommendations live in one place
-  (`core/src/ai/recommendedModels.ts`); don't scatter new ones in Rust.
+- Model names are data: the onboarding recommendations for model servers live in
+  `core/src/ai/recommendedModels.ts`, the local AI models in `local/manifest.json` and
+  `ai-wind-tunnel/recommendations.json`; don't scatter new ones in Rust code.
 - Streaming responses the executor answers itself (Anthropic, the text tool fallback) go
   through `prompt_messages_stream`. `/v1` forwards a model on an
   OpenAI-shaped endpoint itself (`api/openai_compat/passthrough.rs`).

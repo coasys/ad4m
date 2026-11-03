@@ -17,6 +17,44 @@ AD4M gives applications language models, embeddings, speech-to-text and text-to-
 
 A fresh executor has no models. Features that need one answer that no model is configured until one is added.
 
+## Local AI on this device
+
+The quickest setup needs no model server: the executor installs and runs one itself. The launcher's onboarding offers it first ("Set up local AI"), and WE's AI settings use the same calls.
+
+1. **Detect.** `ai.localHardware` reads the OS, CPU, RAM, GPUs (NVIDIA through NVML, every other GPU through the Vulkan loader, AMD memory from sysfs, Apple Silicon's unified memory) and the backends a runtime can use: CUDA 12/13, Metal, Vulkan, CPU. It gives the device a hardware class (`apple-silicon-16gb`, `nvidia-12gb`, `igpu-32gb`, `cpu-8gb`, ...).
+2. **Plan.** `ai.localPlan` picks, per service, the model the AI wind tunnel measured for that class (or the nearest smaller measured class), and the runtime build for the best backend. The models run at once, so their memory adds up: it fits when the sum is at most min(GPU memory − 1 GB, RAM − 4 GB); when it does not, the largest model steps down. The plan says what it downloads, how much, and why it fits or not.
+3. **Install.** `ai.localInstall` downloads the pinned [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` and [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `whisper-server` builds from their GitHub releases and the models from Hugging Face (pinned commits). Every file is checked against its sha256 before it is used; an interrupted download resumes. Progress arrives as `ai-local-progress` events.
+4. **Run.** The executor starts both servers as its own child processes on free `127.0.0.1` ports (never 9931 or 8080, the upstream defaults), llama-server with a random API key, and restarts one that crashes (3 times, given back after 5 healthy minutes). They stop with the executor and start with it again (`local_ai_autostart`).
+5. **Register.** They appear as two endpoints, `This device (llama.cpp)` (chat and embeddings, llama-server in router mode) and `This device (whisper.cpp)` (transcription), marked `managed`, with their models as the defaults. A managed endpoint is not edited or removed with `ai.updateEndpoint` / `ai.removeEndpoint`: use `ai.localStop` / `ai.localRemove`. Its health is the supervisor's check, not a model listing.
+
+```typescript
+const plan = await ad4m.ai.localPlan();
+console.log(plan.hardwareClass, plan.models.map((m) => m.modelId), plan.downloadBytes, plan.fits);
+
+if (plan.fits) {
+  const status = await ad4m.ai.localInstall({}, (p) =>
+    console.log(p.phase, p.item, p.doneBytes, '/', p.totalBytes));
+  console.log(status.runtimes.map((r) => `${r.provider}: ${r.phase} on ${r.port}`));
+}
+
+await ad4m.ai.localStop();         // the endpoints stay, down
+await ad4m.ai.localStart();
+await ad4m.ai.localRemove(false);  // true also deletes the downloaded files
+```
+
+| Method | Who | What |
+|---|---|---|
+| `ai.localHardware` | the main agent's sessions (AI READ) | this device |
+| `ai.localPlan` | the main agent's sessions (AI READ) | what an install would do, and whether it fits |
+| `ai.localStatus` | the main agent's sessions (AI READ) | what is installed, and each runtime's phase, port, restarts |
+| `ai.localInstall` | the operator | download, start, register (long) |
+| `ai.localStart`, `ai.localStop` | the operator | the runtimes |
+| `ai.localRemove` | the operator | stop and unregister; `deleteFiles` also deletes the files |
+
+**Storage.** Runtimes and models go to one per-user directory that every agent and app of the user shares, not into each agent's data: `~/.local/share/ad4m/local-ai` on Linux, `~/Library/Application Support/ad4m/local-ai` on macOS, `%LOCALAPPDATA%\ad4m\local-ai` on Windows (`local_ai_dir` / `--local-ai-dir` / `AD4M_LOCAL_AI_DIR` moves it). Each executor keeps only its own state (the chosen models, ports, pids and the runtimes' logs) in `<app data>/local-ai/`.
+
+**Known gaps.** whisper.cpp publishes no macOS binary and no GPU build for Linux: transcription is not offered on macOS yet, and runs on the CPU on Linux. llama.cpp runs on the GPU (Metal, CUDA, Vulkan). There is no local text-to-speech yet. whisper-server takes no API key: it listens on loopback only.
+
 ## Setting up model servers
 
 The launcher's onboarding (and Settings, AI) looks for model servers on this machine and offers the recommended models: a 4-8B instruct model that calls tools (`qwen3:8b`), an embedding model (`nomic-embed-text`) and, on a transcription server, `Systran/faster-whisper-small`. The SDK exports the list as `AI_RECOMMENDED_MODELS`.
