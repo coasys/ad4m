@@ -129,7 +129,8 @@ pub struct PaymentResult {
 
 /// Ensure the alliance DNA is installed. Safe to call multiple times —
 /// only the first call actually installs; subsequent calls are no-ops.
-/// Blocks until holochain service is available.
+/// Fails with [`HolochainNotRunning`] when no conductor runs or starts: a caller that
+/// must wait for the conductor (the install at start-up) waits before it calls this.
 /// Returns an error if no membrane proof has been stored yet.
 pub async fn ensure_installed() -> Result<(), AnyError> {
     // Acquire the lock for the entire install sequence to prevent races.
@@ -145,10 +146,7 @@ pub async fn ensure_installed() -> Result<(), AnyError> {
         ));
     }
 
-    // Wait for holochain service to become available (no timeout — agent unlock may take a while)
-    while maybe_get_holochain_service().await.is_none() {
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    }
+    running_holochain_service().await?;
 
     let result = install_with_retries(&mut installed).await;
     set_install_error(result.as_ref().err().map(|e| e.to_string()));
@@ -850,11 +848,10 @@ async fn running_holochain_service() -> Result<HolochainServiceInterface, AnyErr
 /// Automatically ensures the DNA is installed first.
 ///
 /// A request does not wait for a conductor that does not run (Holochain disabled, agent
-/// locked, conductor down): it fails at once with [`HolochainNotRunning`]. It waits only
-/// for a conductor start in progress (`holochain_service_once_started`). The unbounded
-/// wait in `ensure_installed` is for the background install at start-up.
+/// locked, conductor down or shut down): it fails at once with [`HolochainNotRunning`]. It
+/// waits only for a conductor start in progress (`holochain_service_once_started`). Only
+/// the background install at start-up waits for the conductor without a limit.
 async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue, AnyError> {
-    running_holochain_service().await?;
     ensure_installed().await?;
     let hc = running_holochain_service().await?;
 
@@ -1649,6 +1646,37 @@ mod tests {
         if let Some(service) = running {
             crate::holochain_service::interface::set_holochain_service(service).await;
         }
+    }
+
+    /// The install a request starts must not wait for a conductor that is gone (stopped by
+    /// the shutdown op, never started): it fails, and leaves the DNA marked not installed so
+    /// a later call installs it.
+    #[tokio::test]
+    async fn an_install_without_conductor_fails_at_once_and_stays_pending() {
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        set_membrane_proof("cHJvb2Y=").unwrap();
+        let running = crate::holochain_service::interface::take_holochain_service().await;
+        let was_installed = std::mem::replace(&mut *INSTALL_ONCE.lock().await, false);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), ensure_installed())
+            .await
+            .expect("ensure_installed must not wait for a conductor that is gone");
+        let still_pending = !*INSTALL_ONCE.lock().await;
+
+        *INSTALL_ONCE.lock().await = was_installed;
+        if let Some(service) = running {
+            crate::holochain_service::interface::set_holochain_service(service).await;
+        }
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Holochain is not running"),
+            "the install must say why it failed"
+        );
+        assert!(still_pending);
     }
 
     /// Two Unyt writes started together must reach the alliance cell one after the other,
