@@ -1,6 +1,7 @@
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy";
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective";
+import { PerspectiveClient } from "../perspectives/PerspectiveClient";
 
 const signal = new PerspectiveExpression("did:test:alice", "2026-01-01T00:00:00Z", new Perspective(), { key: "key", signature: "sig" });
 
@@ -14,6 +15,7 @@ jest.mock('../apiClient', () => {
       delete: jest.fn(),
       on: jest.fn().mockReturnValue(() => {}),
       watchApplied: jest.fn().mockResolvedValue(undefined),
+      onReconnect: jest.fn().mockReturnValue(() => {}),
     }))
   };
 });
@@ -63,6 +65,7 @@ describe("NeighbourhoodProxy", () => {
         return () => {};
       }),
       watchApplied: jest.fn().mockResolvedValue(undefined),
+      onReconnect: jest.fn().mockReturnValue(() => {}),
     }));
 
     const neighbourhoodClient = new NeighbourhoodClient("http://localhost:0", "test-token");
@@ -121,6 +124,120 @@ describe("NeighbourhoodProxy", () => {
     it("refuses when the executor reports no DID", async () => {
       const { proxy } = proxyAnswering(null);
       await expect(proxy.createSession("room")).rejects.toThrow("no agent DID");
+    });
+  });
+
+  // WE asks `getNeighbourhoodProxy()` for a new proxy on every call join.
+  describe("createSession through a new proxy per join", () => {
+    const NAT = { reachability: "nat", isPublic: false, bindAddress: "0.0.0.0:1", advertisedAddress: null, detail: "nat" };
+    const PUBLIC = { ...NAT, reachability: "public", isPublic: true, detail: "public" };
+
+    /** An executor socket: `agent.status` and `sfu.status` answer after `rttMs`, or when the test says so. */
+    function executor(rttMs = 0) {
+      const started: string[] = [];
+      const pending: Record<string, Array<{ resolve: (v: unknown) => void; reject: (e: unknown) => void }>> = {};
+      const answers: Record<string, () => unknown> = {
+        "agent.status": () => ({ did: "did:key:me", isInitialized: true, isUnlocked: true }),
+        "sfu.status": () => NAT,
+      };
+      let deferred = false;
+      const reconnects = new Set<() => void>();
+      const api = {
+        call: jest.fn((method: string) => {
+          started.push(method);
+          if (!deferred) {
+            const reply = new Promise((resolve) => (rttMs ? setTimeout(resolve, rttMs) : resolve(undefined)));
+            return reply.then(() => answers[method]?.());
+          }
+          return new Promise((resolve, reject) => (pending[method] ??= []).push({ resolve, reject }));
+        }),
+        on: jest.fn().mockReturnValue(() => {}),
+        onReconnect: jest.fn((callback: () => void) => {
+          reconnects.add(callback);
+          return () => reconnects.delete(callback);
+        }),
+      };
+      const perspectives = new PerspectiveClient("http://localhost:0", undefined, api as never);
+      perspectives.setNeighbourhoodClient(new NeighbourhoodClient("http://localhost:0", undefined, api as never));
+      const join = (room: string) =>
+        perspectives.getNeighbourhoodProxy("uuid").createSession(room, { neighbourhoodUrl: "neighbourhood://n" });
+      const count = (method: string) => started.filter((m) => m === method).length;
+      return {
+        answers, started, pending, join, count,
+        defer: () => { deferred = true; },
+        reconnect: () => reconnects.forEach((callback) => callback()),
+      };
+    }
+
+    it("reads the caller's DID and the SFU status once for two joins", async () => {
+      const ex = executor();
+      await ex.join("room-1");
+      await ex.join("room-2");
+      expect(ex.count("agent.status")).toBe(1);
+      expect(ex.count("sfu.status")).toBe(1);
+    });
+
+    it("sends agent.status and sfu.status together", async () => {
+      const ex = executor();
+      ex.defer();
+      const joined = ex.join("room");
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      expect(ex.started).toEqual(expect.arrayContaining(["agent.status", "sfu.status"]));
+      ex.pending["agent.status"][0].resolve({ did: "did:key:me" });
+      ex.pending["sfu.status"][0].resolve(NAT);
+      await expect(joined).resolves.toBeDefined();
+    });
+
+    it("reads the SFU status and DID again after the client reconnects (an executor restart)", async () => {
+      const ex = executor();
+      await ex.join("room-1");
+      ex.answers["sfu.status"] = () => PUBLIC;
+      ex.reconnect();
+      await ex.join("room-2");
+      expect(ex.count("sfu.status")).toBe(2);
+      expect(ex.count("agent.status")).toBe(2);
+    });
+
+    it("asks for the SFU status again while the SFU is not available", async () => {
+      const ex = executor();
+      ex.answers["sfu.status"] = () => { throw new Error("SFU service not yet available"); };
+      await ex.join("room-1");
+      ex.answers["sfu.status"] = () => PUBLIC;
+      await ex.join("room-2");
+      await ex.join("room-3");
+      expect(ex.count("sfu.status")).toBe(2);
+      expect(ex.count("agent.status")).toBe(1);
+    });
+
+    it("asks for the DID again while the executor reports none", async () => {
+      const ex = executor();
+      ex.answers["agent.status"] = () => ({ did: null, isInitialized: false, isUnlocked: false });
+      await expect(ex.join("room-1")).rejects.toThrow("no agent DID");
+      ex.answers["agent.status"] = () => ({ did: "did:key:me" });
+      await expect(ex.join("room-2")).resolves.toBeDefined();
+      expect(ex.count("agent.status")).toBe(2);
+    });
+
+    // Staging-like wall time: SDK_RTT_MS=336 npx jest NeighbourhoodProxy -t "wall time"
+    const rtt = Number(process.env.SDK_RTT_MS || 0);
+    (rtt ? it : it.skip)("wall time per join at a fixed round trip", async () => {
+      const runs = Number(process.env.SDK_RTT_RUNS || 3);
+      const median = (ms: number[]) => [...ms].sort((a, b) => a - b)[Math.floor(ms.length / 2)].toFixed(0);
+      const first: number[] = [];
+      const second: number[] = [];
+      for (let i = 0; i < runs; i++) {
+        const ex = executor(rtt);
+        let start = performance.now();
+        await ex.join("room-1");
+        first.push(performance.now() - start);
+        start = performance.now();
+        await ex.join("room-2");
+        second.push(performance.now() - start);
+      }
+      console.log(
+        `RTT ${rtt} ms, ${runs} runs: first join median ${median(first)} ms [${first.map((m) => m.toFixed(0))}], ` +
+          `next join median ${median(second)} ms [${second.map((m) => m.toFixed(0))}]`,
+      );
     });
   });
 });

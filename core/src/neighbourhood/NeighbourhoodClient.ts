@@ -23,6 +23,9 @@ export class NeighbourhoodClient {
     #apiClient: ApiClient
     #signalHandlers: Map<string, TelepresenceSignalCallback[]> = new Map()
     #signalUnsubscribers: Map<string, () => void> = new Map()
+    #callerDidCache: string | null = null
+    #sfuStatusCache: SfuStatus | null = null
+    #clearOnReconnect: (() => void) | null = null
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
@@ -347,6 +350,32 @@ export class NeighbourhoodClient {
      */
     async sfuServesAllMembers(perspectiveId: string): Promise<boolean> {
         return this.#apiClient.call("sfu.servesAllMembers", { uuid: perspectiveId })
+    }
+
+    /**
+     * What a call session needs from this executor: the caller's DID and
+     * the SFU status. Both are read together, and each is kept once the
+     * executor gives it, until this client's socket reconnects.
+     *
+     * The DID is the token's: a user token names one user, and a new
+     * token needs a new client. The SFU status is fixed for an executor
+     * process (the service is set once at startup, and its reachability
+     * with it). A restart drops the socket, so a reconnect clears both.
+     * A missing DID or an SFU that does not answer yet is not kept.
+     */
+    async sessionContext(): Promise<{ did: string | null; sfuStatus: SfuStatus | null }> {
+        this.#clearOnReconnect ??= this.#apiClient.onReconnect(() => {
+            this.#callerDidCache = null
+            this.#sfuStatusCache = null
+        })
+        const [did, sfuStatus] = await Promise.all([
+            this.#callerDidCache ?? this.callerDid(),
+            // Non-fatal: a session works without the SFU status.
+            this.#sfuStatusCache ?? this.sfuStatus().catch((): null => null),
+        ])
+        this.#callerDidCache = did || null
+        this.#sfuStatusCache = sfuStatus ?? null
+        return { did: this.#callerDidCache, sfuStatus: this.#sfuStatusCache }
     }
 
     // ── SFU diagnostic / test-harness endpoints ────────────────────────
