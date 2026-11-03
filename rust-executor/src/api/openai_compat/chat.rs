@@ -15,6 +15,9 @@
 //! any tool calls are recovered from the text afterwards.  Assistant
 //! `tool_calls` and `role:"tool"` results are folded back into prompt text
 //! because the local chat template has no tool role.
+//!
+//! A model whose provider carries tools as data skips all of that and goes
+//! through [`super::native_tools`] instead.
 
 use std::convert::Infallible;
 use std::time::SystemTime;
@@ -29,6 +32,7 @@ use uuid::Uuid;
 
 use super::errors::{OpenAIError, OpenAIJson, OpenAIResult};
 use super::model_selector::resolve_model;
+use super::native_tools;
 use super::tool_grammar::{self, ExtractedToolCall, ToolChoice};
 use super::types::{
     ChatChoice, ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
@@ -36,19 +40,20 @@ use super::types::{
     CompletionRequest, CompletionResponse, FunctionCall, FunctionCallDelta, Role, ToolCall,
     ToolCallDelta, ToolDef, Usage,
 };
-use crate::agent::capabilities::{check_capability, AI_PROMPT_CAPABILITY};
+use crate::agent::capabilities::AI_PROMPT_CAPABILITY;
+use crate::agent::session::Session;
 use crate::ai_service::AIService;
-use crate::api::auth::AuthContext;
 use crate::billing::check_compute_credits;
-use crate::types::ModelType;
+use crate::types::{ModelType, RequestContext};
 
 /// `POST /v1/chat/completions` — handles both streaming (`stream: true`)
 /// and non-streaming responses.
 pub async fn chat_completions(
-    auth: AuthContext,
+    auth: RequestContext,
     OpenAIJson(req): OpenAIJson<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, OpenAIError> {
-    check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
+    auth.require(&AI_PROMPT_CAPABILITY)
+        .map_err(OpenAIError::forbidden)?;
 
     // Resolve the OpenAI `model` string to an AD4M model_id.
     let model_id = resolve_model(&req.model, ModelType::Llm).await?;
@@ -60,6 +65,20 @@ pub async fn chat_completions(
     // Tools are "active" (rendered + potentially constrained + parsed out)
     // unless the caller explicitly disabled them with tool_choice: "none".
     let tools_active = has_tools && choice != ToolChoice::None;
+
+    // A provider that carries tools as data gets them that way, and answers
+    // with structured calls instead of text to parse them out of.
+    if tools_active && AIService::model_supports_native_tools(&model_id) {
+        return native_tools::chat_with_native_tools(
+            auth,
+            req.model.clone(),
+            model_id,
+            &req.messages,
+            &tools,
+            req.stream,
+        )
+        .await;
+    }
 
     // Assemble (role, content) pairs.  Fold assistant tool calls and
     // `role:"tool"` results into text, and prepend the tools system prompt.
@@ -109,10 +128,11 @@ pub async fn chat_completions(
 /// single user message with no system prompt.  Tools are not supported on
 /// the legacy endpoint.
 pub async fn completions(
-    auth: AuthContext,
+    auth: RequestContext,
     OpenAIJson(req): OpenAIJson<CompletionRequest>,
 ) -> OpenAIResult<Json<CompletionResponse>> {
-    check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
+    auth.require(&AI_PROMPT_CAPABILITY)
+        .map_err(OpenAIError::forbidden)?;
 
     let model_id = resolve_model(&req.model, ModelType::Llm).await?;
     let prompt = req
@@ -121,8 +141,8 @@ pub async fn completions(
         .map_err(OpenAIError::invalid_request)?;
     let messages = vec![("user".to_string(), prompt)];
 
-    if let Some(email) = user_email(&auth) {
-        check_compute_credits(&email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -130,7 +150,12 @@ pub async fn completions(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
-        .prompt_messages(model_id, messages, Some(auth.auth_token.clone()), None)
+        .prompt_messages(
+            model_id,
+            messages,
+            auth.user_did().map(str::to_string),
+            None,
+        )
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
@@ -156,7 +181,7 @@ pub async fn completions(
 }
 
 async fn chat_oneshot(
-    auth: AuthContext,
+    auth: RequestContext,
     requested_model: String,
     model_id: String,
     messages: Vec<(String, String)>,
@@ -166,8 +191,8 @@ async fn chat_oneshot(
     // NOTE: WS-RPC `ai.prompt` on dev does not bill today (only pre-checks).
     // /v1 billing is correct for the public API surface; the WS-RPC gap
     // should be aligned in a separate PR against dev.
-    if let Some(email) = user_email(&auth) {
-        check_compute_credits(&email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -178,7 +203,7 @@ async fn chat_oneshot(
         .prompt_messages(
             model_id,
             messages,
-            Some(auth.auth_token.clone()),
+            auth.user_did().map(str::to_string),
             constraint,
         )
         .await
@@ -232,15 +257,15 @@ async fn chat_oneshot(
 }
 
 async fn chat_stream(
-    auth: AuthContext,
+    auth: RequestContext,
     requested_model: String,
     model_id: String,
     messages: Vec<(String, String)>,
     constraint: Option<ArcParser<()>>,
     tools_active: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
-    if let Some(email) = user_email(&auth) {
-        check_compute_credits(&email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -251,7 +276,7 @@ async fn chat_stream(
         .prompt_messages_stream(
             model_id,
             messages,
-            Some(auth.auth_token.clone()),
+            auth.user_did().map(str::to_string),
             constraint,
         )
         .await
@@ -288,7 +313,7 @@ async fn chat_stream(
         Event::default().data(serde_json::to_string(&role_chunk).unwrap())
     ));
 
-    tokio::spawn({
+    spawn_until_over(&auth.session, {
         let event_tx = event_tx.clone();
         let stream_model = stream_model.clone();
         let id = id.clone();
@@ -416,6 +441,21 @@ async fn chat_stream(
     Ok(Sse::new(stream).into_response())
 }
 
+/// Spawns `forward`, the task that feeds an SSE stream, and drops it once `session` is over
+/// (revoked or expired): the stream then ends, as the session's sockets close.
+pub(super) fn spawn_until_over(
+    session: &Session,
+    forward: impl std::future::Future<Output = ()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    let over = session.over();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = over => {}
+            _ = forward => {}
+        }
+    })
+}
+
 /// Emit the final SSE chunk carrying an empty delta and `finish_reason`.
 fn emit_final(
     event_tx: &tokio::sync::mpsc::UnboundedSender<Result<Event, Infallible>>,
@@ -460,7 +500,7 @@ fn to_openai_tool_calls(extracted: Vec<ExtractedToolCall>) -> Vec<ToolCall> {
 /// calls and `role:"tool"` results are rendered into text using the Qwen
 /// `<tool_call>` / `<tool_response>` convention, since the local chat
 /// template has no tool role.
-fn flatten_message(m: &ChatMessage) -> (String, String) {
+pub(super) fn flatten_message(m: &ChatMessage) -> (String, String) {
     let base_text = m
         .content
         .as_ref()
@@ -470,11 +510,16 @@ fn flatten_message(m: &ChatMessage) -> (String, String) {
     match m.role {
         // Tool result → a `<tool_response>` block in a user turn. Shared
         // renderer with harness_bridge so a fix in one place propagates.
-        // Legacy: `ChatMessage` doesn't carry `tool_call_id` on `Role::Tool`
-        // today; passing `None` matches the pre-refactor bare-tag output.
+        //
+        // The id is carried through when the caller sent one, so a turn that
+        // dispatched several tools at once can be matched back to which call
+        // each result answers. Without it the model sees an unordered pile of
+        // `<tool_response>` blocks and has to guess — which it does badly, and
+        // silently. Absent id still renders the bare tag, for callers that
+        // send none and for the hand-written messages in tests.
         Role::Tool => (
             "user".to_string(),
-            tool_grammar::render_tool_response_block(&base_text, None),
+            tool_grammar::render_tool_response_block(&base_text, m.tool_call_id.as_deref()),
         ),
         // Assistant turn that called tools → re-render the calls so the model
         // sees its own prior invocations.
@@ -508,15 +553,11 @@ fn role_to_str(role: &Role) -> &'static str {
     }
 }
 
-fn epoch_seconds() -> i64 {
+pub(super) fn epoch_seconds() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-fn user_email(auth: &AuthContext) -> Option<String> {
-    crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
 }
 
 // Re-export a Stream alias for documentation purposes.

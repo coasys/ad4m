@@ -5,15 +5,14 @@ use std::str::FromStr;
 use ts_rs::TS;
 use url::Url;
 
-use super::domain::{
-    LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput,
-};
-use crate::agent::signatures::verify;
+use super::domain::{LinkExpressionInput, LinkInput, LinkStatus, PerspectiveInput};
+use crate::agent::signatures::verify_or_false;
+use crate::secret::Secret;
 use regex::Regex;
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct Expression<T: Serialize> {
+pub struct Expression<T> {
     pub author: String,
     pub timestamp: String,
     pub data: T,
@@ -27,8 +26,8 @@ pub struct ExpressionProof {
     pub signature: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub struct VerifiedExpression<T: Serialize> {
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+pub struct VerifiedExpression<T> {
     pub author: String,
     pub timestamp: String,
     pub data: T,
@@ -46,7 +45,7 @@ pub struct DecoratedExpressionProof {
 
 impl<T: Serialize> From<Expression<T>> for VerifiedExpression<T> {
     fn from(expr: Expression<T>) -> Self {
-        let valid = verify(&expr).unwrap_or(false);
+        let valid = verify_or_false(&expr, "VerifiedExpression::from");
         let invalid = !valid;
         VerifiedExpression {
             author: expr.author,
@@ -190,6 +189,23 @@ impl LinkExpression {
             status: input.status,
         }
     }
+
+    /// Derive the signature verdict for this link — the same recipe as
+    /// [`DecoratedLinkExpression::compute_proof_valid`], for the plain form
+    /// whose proof carries no verdict field at all. Code that hands links
+    /// across a trust boundary carries `LinkExpression` precisely so a
+    /// verdict cannot travel with them; the receiving side calls this instead
+    /// of believing anyone. Normalizing `data` first is not optional: the
+    /// signature was produced over the normalized link.
+    pub fn compute_proof_valid(&self) -> bool {
+        let link_expr = Expression::<Link> {
+            author: self.author.clone(),
+            timestamp: self.timestamp.clone(),
+            data: self.data.normalize(),
+            proof: self.proof.clone(),
+        };
+        verify_or_false(&link_expr, "LinkExpression::compute_proof_valid")
+    }
 }
 
 impl From<LinkExpression> for Expression<Link> {
@@ -228,7 +244,18 @@ pub struct DecoratedLinkExpression {
 }
 
 impl DecoratedLinkExpression {
-    pub fn verify_signature(&mut self) {
+    /// Derive the signature verdict for this link, without touching
+    /// `self.proof.valid`.
+    ///
+    /// `proof.valid` is a *read view* over the signature, not a stored fact, so
+    /// every place that needs the verdict recomputes it from here rather than
+    /// trusting a value someone handed along. Normalizing `data` first is not
+    /// optional: the signature was produced over the normalized link, so
+    /// verifying the raw form reports a valid link as invalid.
+    ///
+    /// A verification error counts as "not verified" — see
+    /// [`verify_or_false`](crate::agent::signatures::verify_or_false).
+    pub fn compute_proof_valid(&self) -> bool {
         let link_expr = Expression::<Link> {
             author: self.author.clone(),
             timestamp: self.timestamp.clone(),
@@ -238,7 +265,11 @@ impl DecoratedLinkExpression {
                 signature: self.proof.signature.clone(),
             },
         };
-        let valid = verify(&link_expr).unwrap_or(false);
+        verify_or_false(&link_expr, "DecoratedLinkExpression::compute_proof_valid")
+    }
+
+    pub fn verify_signature(&mut self) {
+        let valid = self.compute_proof_valid();
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);
     }
@@ -292,14 +323,14 @@ impl From<PerspectiveInput> for Perspective {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct NeighbourhoodExpression {
     pub author: String,
     pub data: Neighbourhood,
@@ -309,13 +340,13 @@ pub struct NeighbourhoodExpression {
 
 pub type Address = String;
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct LanguageRef {
-    pub name: String,
     pub address: Address,
+    pub name: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct ExpressionRef {
     pub language: LanguageRef,
     pub expression: Address,
@@ -394,7 +425,7 @@ impl Display for ExpressionRef {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct PerspectiveDiff {
     pub additions: Vec<LinkExpression>,
     pub removals: Vec<LinkExpression>,
@@ -430,8 +461,9 @@ impl PerspectiveDiff {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "camelCase")]
+/// A notification as the executor stores and fires it. Not serialisable: its webhook
+/// credential goes only to the webhook. Results and events carry [`NotificationView`].
+#[derive(Debug, Clone)]
 pub struct Notification {
     pub id: String,
     pub granted: bool,
@@ -442,18 +474,146 @@ pub struct Notification {
     pub trigger: String,
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
-    pub webhook_auth: String,
-    pub user_email: Option<String>, // NULL for main agent, Some(email) for managed users
+    pub webhook_auth: Secret,
+    /// The owner's DID: a managed user's, or the main agent's.
+    pub owner_did: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+impl Notification {
+    /// The notification as its owner and the operator see it.
+    pub fn view(&self) -> NotificationView {
+        NotificationView {
+            id: self.id.clone(),
+            granted: self.granted,
+            description: self.description.clone(),
+            app_name: self.app_name.clone(),
+            app_url: self.app_url.clone(),
+            app_icon_path: self.app_icon_path.clone(),
+            trigger: self.trigger.clone(),
+            perspective_ids: self.perspective_ids.clone(),
+            webhook_url: self.webhook_url.clone(),
+            has_webhook_auth: !self.webhook_auth.is_empty(),
+            owner_did: self.owner_did.clone(),
+        }
+    }
+
+    /// The webhook credential after an update that moves the notification to `webhook_url`
+    /// and sends `sent`: a sent value (`""` clears it) replaces the stored one; without one
+    /// the stored credential stays, unless it is set and the URL changes.
+    pub fn webhook_auth_after_update(
+        &self,
+        webhook_url: &str,
+        sent: Option<Secret>,
+    ) -> Result<Secret, WebhookAuthNotResent> {
+        match sent {
+            Some(sent) => Ok(sent),
+            None if self.webhook_auth.is_empty()
+                || same_endpoint(&self.webhook_url, webhook_url) =>
+            {
+                Ok(self.webhook_auth.clone())
+            }
+            None => Err(WebhookAuthNotResent),
+        }
+    }
+
+    /// Every field, the credential included, for equality and ordering: the fire path
+    /// keys its trigger matches by notification, and an edited credential is another
+    /// notification there, as it was before the credential became a [`Secret`]. The
+    /// value is read in place and leaves nothing.
+    #[allow(clippy::type_complexity)]
+    fn ordering_key(
+        &self,
+    ) -> (
+        (&str, bool, &str, &str),
+        (&str, &str, &str),
+        (&[String], &str),
+        (&str, &str),
+    ) {
+        (
+            (&self.id, self.granted, &self.description, &self.app_name),
+            (&self.app_url, &self.app_icon_path, &self.trigger),
+            (&self.perspective_ids, &self.webhook_url),
+            (self.webhook_auth.expose(), &self.owner_did),
+        )
+    }
+}
+
+impl PartialEq for Notification {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for Notification {}
+
+impl PartialOrd for Notification {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Notification {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.ordering_key().cmp(&other.ordering_key())
+    }
+}
+
+/// `runtime.updateNotification` was asked to keep a stored webhook credential while moving
+/// the notification to another webhook URL. The credential goes only to the webhook it was
+/// set for, so the caller sends it again (or an empty one) with the new URL. A caller's
+/// mistake: a bad request.
+#[derive(Debug)]
+pub struct WebhookAuthNotResent;
+
+impl std::fmt::Display for WebhookAuthNotResent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "The notification has a stored webhook credential and the webhook URL changed: \
+             send webhookAuth again (an empty string for none) to move the notification to \
+             another webhook",
+        )
+    }
+}
+
+impl std::error::Error for WebhookAuthNotResent {}
+
+/// Whether `sent` names the same endpoint as `stored`: equal as parsed URLs, or as strings
+/// when either does not parse.
+pub(crate) fn same_endpoint(stored: &str, sent: &str) -> bool {
+    match (Url::parse(stored), Url::parse(sent)) {
+        (Ok(stored), Ok(sent)) => stored == sent,
+        _ => stored == sent,
+    }
+}
+
+/// A notification as RPC results and events show it: whether a webhook credential is
+/// set, never the credential.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "Notification")]
+pub struct NotificationView {
+    pub id: String,
+    pub granted: bool,
+    pub description: String,
+    pub app_name: String,
+    pub app_url: String,
+    pub app_icon_path: String,
+    pub trigger: String,
+    pub perspective_ids: Vec<String>,
+    pub webhook_url: String,
+    pub has_webhook_auth: bool,
+    /// The owner's DID: a managed user's, or the main agent's.
+    pub owner_did: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AIPromptExamples {
     pub input: String,
     pub output: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AITask {
     pub name: String,
@@ -466,40 +626,29 @@ pub struct AITask {
     pub updated_at: String,
 }
 
-impl Notification {
-    pub fn from_input_and_id(
-        id: String,
-        input: NotificationInput,
-        user_email: Option<String>,
-    ) -> Self {
-        Notification {
-            id,
-            granted: false,
-            description: input.description,
-            app_name: input.app_name,
-            app_url: input.app_url,
-            app_icon_path: input.app_icon_path,
-            trigger: input.trigger,
-            perspective_ids: input.perspective_ids,
-            webhook_url: input.webhook_url,
-            webhook_auth: input.webhook_auth,
-            user_email,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TriggeredNotification {
-    pub notification: Notification,
+    pub notification: NotificationView,
     pub perspective_id: String,
     pub trigger_match: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+/// The `notification-triggered` event: the triggered notification plus the
+/// perspective it fired in.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationTriggeredEvent {
+    pub perspective_uuid: String,
+    pub notification: TriggeredNotification,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ModelApiType {
     OpenAi,
+    Anthropic,
+    Ollama,
 }
 
 impl FromStr for ModelApiType {
@@ -512,6 +661,12 @@ impl FromStr for ModelApiType {
             "openAi" => Ok(ModelApiType::OpenAi),
             "OpenAi" => Ok(ModelApiType::OpenAi),
             "OPEN_AI" => Ok(ModelApiType::OpenAi),
+            "anthropic" => Ok(ModelApiType::Anthropic),
+            "Anthropic" => Ok(ModelApiType::Anthropic),
+            "ANTHROPIC" => Ok(ModelApiType::Anthropic),
+            "ollama" => Ok(ModelApiType::Ollama),
+            "Ollama" => Ok(ModelApiType::Ollama),
+            "OLLAMA" => Ok(ModelApiType::Ollama),
             _ => Err(format!("Unknown ModelApiType: {}", s)),
         }
     }
@@ -522,20 +677,60 @@ impl ToString for ModelApiType {
     fn to_string(&self) -> String {
         match self {
             ModelApiType::OpenAi => "OPEN_AI".to_string(),
+            ModelApiType::Anthropic => "ANTHROPIC".to_string(),
+            ModelApiType::Ollama => "OLLAMA".to_string(),
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+/// A remote model's endpoint as the executor stores and uses it. Not serialisable: the
+/// provider key leaves the executor only towards the provider. Clients see
+/// [`ModelApiView`].
+#[derive(Debug, Clone)]
 pub struct ModelApi {
     pub base_url: Url,
-    pub api_key: String,
+    /// Empty for an endpoint that takes no key.
+    pub api_key: Secret,
     pub model: String,
     pub api_type: ModelApiType,
+    /// See [`ModelApiView::max_num_ctx`].
+    pub max_num_ctx: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+/// A remote model's endpoint as RPC results show it: whether a provider key is set,
+/// never the key.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "ModelApi")]
+pub struct ModelApiView {
+    pub base_url: Url,
+    pub has_api_key: bool,
+    pub model: String,
+    pub api_type: ModelApiType,
+    /// Ceiling for the context window requested from the provider, in tokens.
+    ///
+    /// Only the Ollama provider reads this today: `num_ctx` sizes the KV
+    /// cache at model load, so the right ceiling depends on how much VRAM
+    /// the operator of that Ollama host can spend — a per-model decision,
+    /// not a compile-time one. Unset falls back to the provider's built-in
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_num_ctx: Option<u32>,
+}
+
+impl From<&ModelApi> for ModelApiView {
+    fn from(api: &ModelApi) -> Self {
+        ModelApiView {
+            base_url: api.base_url.clone(),
+            has_api_key: !api.api_key.is_empty(),
+            model: api.model.clone(),
+            api_type: api.api_type.clone(),
+            max_num_ctx: api.max_num_ctx,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModel {
     pub file_name: String,
@@ -544,7 +739,7 @@ pub struct LocalModel {
     pub revision: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenizerSource {
     pub repo: String,
@@ -575,12 +770,41 @@ impl Display for ModelType {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+/// A model as the executor stores and uses it. Not serialisable, because its
+/// [`ModelApi`] holds the provider key: every RPC result and event carries
+/// [`ModelView`] instead.
+#[derive(Debug, Clone)]
 pub struct Model {
     pub id: String,
     pub name: String,
     pub api: Option<ModelApi>,
+    pub local: Option<LocalModel>,
+    pub model_type: ModelType,
+}
+
+impl Model {
+    /// The model as a client sees it, for every caller: the operator set the key and has
+    /// no need to read it back, and anyone else holding it could spend on it.
+    pub fn view(&self) -> ModelView {
+        ModelView {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            api: self.api.as_ref().map(ModelApiView::from),
+            local: self.local.clone(),
+            model_type: self.model_type.clone(),
+        }
+    }
+}
+
+/// A model as RPC results show it. Its provider key never leaves the executor:
+/// `api.hasApiKey` says whether one is set.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "Model")]
+pub struct ModelView {
+    pub id: String,
+    pub name: String,
+    pub api: Option<ModelApiView>,
     pub local: Option<LocalModel>,
     #[serde(rename = "modelType")]
     pub model_type: ModelType,
@@ -588,7 +812,7 @@ pub struct Model {
 
 // Internal User struct - NOT exposed via REST API
 // Contains sensitive data like password_hash that should never be returned to clients
-#[derive(Default, Deserialize, Serialize, Clone)]
+#[derive(Default, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct User {
     pub username: String,
@@ -612,10 +836,50 @@ impl std::fmt::Debug for User {
 
 // Public UserInfo struct - safe to return from public APIs
 // Does NOT contain password_hash
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
     pub username: String,
     pub did: String,
     pub last_seen: Option<i64>,
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    fn notification(webhook_auth: &str) -> Notification {
+        Notification {
+            id: "n".into(),
+            granted: true,
+            description: String::new(),
+            app_name: String::new(),
+            app_url: String::new(),
+            app_icon_path: String::new(),
+            trigger: String::new(),
+            perspective_ids: vec![],
+            webhook_url: "https://hook.test".into(),
+            webhook_auth: webhook_auth.into(),
+            owner_did: "did:x".into(),
+        }
+    }
+
+    // The fire path keys trigger matches by notification, so equality and order still
+    // include the credential, as the derived impls did.
+    #[test]
+    fn equality_and_order_include_the_credential() {
+        assert_eq!(notification("a"), notification("a"));
+        assert_ne!(notification("a"), notification("b"));
+        assert!(notification("a") < notification("b"));
+    }
+
+    #[test]
+    fn the_view_and_debug_never_carry_the_credential() {
+        let n = notification("wh-cred");
+        let json = serde_json::to_string(&n.view()).unwrap();
+        assert!(!json.contains("wh-cred"), "{json}");
+        assert!(json.contains(r#""hasWebhookAuth":true"#), "{json}");
+        assert!(!format!("{n:?}").contains("wh-cred"));
+        assert!(!notification("").view().has_webhook_auth);
+    }
 }

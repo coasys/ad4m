@@ -1,0 +1,75 @@
+Cryptographic Autonomy License version 1.0
+
+This Cryptographic Autonomy License (the "License") applies to any
+Work whose owner has marked it with any of the following notices:
+
+  "Licensed under the Cryptographic Autonomy License version 1.0"
+  "SPDX-License-Identifier: CAL-1.0"
+
+or similar language indicating that the terms of this License apply.
+
+1. Purpose
+
+This License gives You unlimited permission to use and modify the
+software to which it applies (the "Work"), either as-is or in modified
+form, for Your private purposes, while protecting the rights of the
+Work's community to transparently assess whether Your modifications
+constitute a change to the Work's fundamental function, and to access
+their own user data.
+
+2. Acceptance
+
+In order to use or modify the Work under this License, You must agree
+to the terms of this License. If You do not agree, You are not
+authorized to use or modify the Work.
+
+3. Grant of Non-exclusive License
+
+The Owner of the Work hereby grants You a worldwide, royalty-free,
+non-exclusive, perpetual license to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Work, and to permit
+persons to whom the Work is furnished to do so, subject to the
+following conditions:
+
+a) The above copyright notice and this License shall be included in
+   all copies or substantial portions of the Work.
+
+b) Any modified version of the Work must carry prominent notices
+   stating that You changed the Work.
+
+c) If the Work normally reads commands interactively when run, You
+   must cause it, when started running for such interactive use in the
+   most ordinary way, to print or display an appropriate copyright
+   notice and a notice that there is no warranty (or else, saying that
+   You provide a warranty) and that users may redistribute the Work
+   under these conditions, and telling the user how to view a copy of
+   this License.
+
+d) You may not impose any further restrictions on the exercise of the
+   rights granted or affirmed under this License.
+
+4. Protection of User Data Rights
+
+a) This Work may be used as part of a Larger Work. If the Work is
+   used as part of a Larger Work, the Larger Work may impose
+   additional terms on the use of the Work as part of the Larger
+   Work, provided such terms do not conflict with the terms of this
+   License.
+
+b) If You operate a service that uses the Work, You must provide
+   users of that service access to a copy of the Source Code of the
+   Work, as well as any modifications You have made to the Work.
+
+c) If You operate a service that uses the Work and that service
+   stores user data, You must provide users with the ability to
+   export their data in a commonly used format.
+
+5. Disclaimer of Warranty
+
+THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE WORK
+OR THE USE OR OTHER DEALINGS IN THE WORK.

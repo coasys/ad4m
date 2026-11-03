@@ -1,12 +1,13 @@
 use super::{
-    apply_with_overlay, build_interpretation_input, class_label,
+    apply_with_overlay, build_interpretation_input, build_speaker_name_map, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
-    identity_property, normalize_identity, parse_interpretation_response,
+    identity_property, normalize_identity, parse_interpretation_output,
     plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
-    ExistingInstances, ExistingLinks, InterpretationOp, InterpretationRunCursor, ProposedInstance,
-    TranscriptTurn,
+    ExistingInstances, ExistingLinks, InterpretationOp, InterpretationOutput,
+    InterpretationRunCursor, TranscriptTurn,
 };
 use crate::agent::AgentContext;
+use crate::ai_service::harness::flow_propose::{FlowProposalBuffer, FlowTransitionProposeProvider};
 use crate::ai_service::harness::propose::{
     class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider,
 };
@@ -25,8 +26,8 @@ use std::sync::Arc;
 /// again a few times before giving up on the whole call.
 pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
 
-/// run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
-/// response as an interpretation JSON payload. Returns the first successful parse;
+/// Run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
+/// response as an [`InterpretationOutput`] (instances plus flow proposals). Returns the first successful parse;
 /// the last parse error propagates if every attempt fails. `prompt_fn` is an
 /// async closure so callers can inject anything (real `AIService`, a canned
 /// script, a mock) without a live LLM.
@@ -36,7 +37,7 @@ pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
 /// fail deterministically in [`build_interpretation_input`], not here.
 pub async fn retry_interpretation_parse<F, Fut>(
     mut prompt_fn: F,
-) -> anyhow::Result<Vec<ProposedInstance>>
+) -> anyhow::Result<InterpretationOutput>
 where
     F: FnMut(u8) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<String>>,
@@ -51,8 +52,8 @@ where
                 continue;
             }
         };
-        match parse_interpretation_response(&raw) {
-            Ok(instances) => return Ok(instances),
+        match parse_interpretation_output(&raw) {
+            Ok(output) => return Ok(output),
             Err(e) => {
                 log::warn!(
                     "interpretation: parse attempt {attempt} failed: {e:#}; will retry (max {INTERPRETATION_MAX_ATTEMPTS})"
@@ -510,6 +511,7 @@ pub async fn run_interpretation_observed(
         None,
         false,
         emit_ctx,
+        None,
     )
     .await
     .map(|out| out.bases)
@@ -545,6 +547,7 @@ pub async fn run_interpretation_with_strategy(
         None,
         false,
         None,
+        None,
     )
     .await
     .map(|out| out.bases)
@@ -578,6 +581,9 @@ pub struct InterpretationDebug {
 pub struct InterpretationOutcome {
     pub bases: Vec<String>,
     pub debug: Option<InterpretationDebug>,
+    /// URIs of the `FlowTransitionProposal`s the deterministic flow pass
+    /// minted after this pass's writes were committed.
+    pub flow_proposals: Vec<String>,
 }
 
 pub async fn run_interpretation_with_strategy_and_model(
@@ -592,6 +598,7 @@ pub async fn run_interpretation_with_strategy_and_model(
     cursor: Option<&InterpretationRunCursor>,
     emit_debug_events: bool,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
@@ -655,10 +662,19 @@ pub async fn run_interpretation_with_strategy_and_model(
         };
         let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
             perspective,
+            context,
             &flow_subjects,
+            flow_filter,
         )
         .await;
-        let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
+        let speaker_names = build_speaker_name_map(transcript);
+        let prompt = build_interpretation_input(
+            shapes,
+            transcript,
+            &existing_ctx,
+            &active_flows,
+            &speaker_names,
+        );
 
         let service = crate::ai_service::AIService::global_instance()
             .await
@@ -679,7 +695,10 @@ pub async fn run_interpretation_with_strategy_and_model(
         // succeeds is by construction the final (parse-successful) attempt.
         let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
-        let instances = retry_interpretation_parse(|_attempt| {
+        let InterpretationOutput {
+            instances,
+            flow_proposals: llm_proposals,
+        } = retry_interpretation_parse(|_attempt| {
             let service = service.clone();
             let task_id = task.task_id.clone();
             let prompt = prompt.clone();
@@ -785,7 +804,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         } else {
             None
         };
-        let bases = apply_with_overlay(
+        let (bases, flow_proposals) = apply_ops_and_run_flow_passes(
             perspective,
             shapes,
             ops,
@@ -795,21 +814,27 @@ pub async fn run_interpretation_with_strategy_and_model(
             context,
             cursor,
             debug.as_ref(),
+            &llm_proposals,
+            &flow_subjects,
+            flow_filter,
         )
         .await?;
 
-        // The affected instance base URIs (created, updated, or given new
-        // relations). Links are owned by `create_subject` / `update_subject`.
-        Ok(InterpretationOutcome { bases, debug })
+        Ok(InterpretationOutcome {
+            bases,
+            debug,
+            flow_proposals,
+        })
     }
     .await;
     match outcome_result {
         Ok(outcome) => {
             log::info!(
-                "✅ 🧠 interpretation done model={} latency={}ms bases_written={}",
+                "✅ 🧠 interpretation done model={} latency={}ms bases_written={} flow_proposals={}",
                 model_override.unwrap_or("<default>"),
                 interpretation_started.elapsed().as_millis(),
-                outcome.bases.len()
+                outcome.bases.len(),
+                outcome.flow_proposals.len()
             );
             Ok(outcome)
         }
@@ -823,6 +848,156 @@ pub async fn run_interpretation_with_strategy_and_model(
             Err(e)
         }
     }
+}
+
+/// Shared tail of both interpretation paths (single-shot strategy and the
+/// tool-calling harness): capture the created bases from the planned ops
+/// **before** they move into the apply, apply with overlay, run the spawn pass
+/// on the created items, then the flow proposal pass on the relevant subjects.
+///
+/// Extracted so the capture-before-move ordering — the one place the flow
+/// wiring reasons about a value taken before a move — is a single testable
+/// unit instead of a convention duplicated at two call sites. Returns
+/// `(bases, flow_proposals)`.
+///
+/// Spawn runs before the proposal pass: a freshly created item whose class is
+/// in some flow's `inputTypes` gets its `FlowInstance` minted now, so the
+/// flow's first-state `requires` are evaluated against this run's own evidence
+/// in the same pass rather than the next one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_ops_and_run_flow_passes(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    ops: Vec<InterpretationOp>,
+    task: &crate::types::AITask,
+    run_id: String,
+    ran_at: String,
+    context: &AgentContext,
+    cursor: Option<&InterpretationRunCursor>,
+    debug: Option<&crate::perspectives::interpretation::InterpretationDebug>,
+    llm_proposals: &[crate::perspectives::interpretation::LlmFlowProposal],
+    flow_subjects: &[String],
+    flow_filter: Option<&[String]>,
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    // Captured before `ops` moves into the apply: the spawn pass below is
+    // scoped to *created* instances (design §10 v1), and the returned
+    // `bases` mix created and updated indistinguishably.
+    let created = crate::perspectives::flow_spawn::created_bases_of(&ops);
+    let bases = apply_with_overlay(
+        perspective,
+        shapes,
+        ops,
+        task,
+        run_id,
+        ran_at,
+        context,
+        cursor,
+        debug,
+    )
+    .await?;
+
+    let spawned = crate::perspectives::flow_spawn::run_flow_spawn_pass(
+        perspective,
+        &created,
+        context,
+        flow_filter,
+    )
+    .await;
+    if !spawned.is_empty() {
+        log::info!(
+            "🌱 interpretation: spawned {} flow instance(s) on new items",
+            spawned.len()
+        );
+    }
+
+    // The affected instance base URIs (created, updated, or given new
+    // relations). Links are owned by `create_subject` / `update_subject`.
+    let flow_proposals = run_flow_post_pass(
+        perspective,
+        &bases,
+        flow_subjects,
+        context,
+        llm_proposals,
+        &task.task_id,
+        flow_filter,
+    )
+    .await;
+    Ok((bases, flow_proposals))
+}
+
+/// Shared flow post-processing for both interpretation paths (single-shot
+/// strategy and harness): the LLM's writes are on the graph now, so
+/// re-evaluate the guards of every flow anchored on `subjects` — the union
+/// of what this pass wrote (`bases`) and what the LLM was shown
+/// (`flow_subjects`, i.e. cursor sources / scope anchor). The LLM's own
+/// proposals only contribute a rationale; the semantic check reuses the
+/// extraction task so both share one worker and billing scope.
+///
+/// The subject set is bounded to: everything the pass wrote plus everything
+/// the LLM was shown flow context for, deduplicated. Never empty-by-accident
+/// on a pass that did work, never a sweep.
+async fn run_flow_post_pass(
+    perspective: &mut PerspectiveInstance,
+    bases: &[String],
+    flow_subjects: &[String],
+    context: &AgentContext,
+    llm_proposals: &[crate::perspectives::interpretation::LlmFlowProposal],
+    task_id: &str,
+    flow_filter: Option<&[String]>,
+) -> Vec<String> {
+    let mut subjects: Vec<String> = bases.to_vec();
+    for s in flow_subjects {
+        if !subjects.contains(s) {
+            subjects.push(s.clone());
+        }
+    }
+    let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
+        task_id: task_id.to_string(),
+    };
+    let minted = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+        perspective,
+        &subjects,
+        context,
+        llm_proposals,
+        Some(&semantic_check),
+        flow_filter,
+    )
+    .await;
+
+    // Sweep straight after minting: with the default `{ n: 1 }` rule a freshly
+    // satisfied transition has already settled by the time the mint returns,
+    // and this is what records it — the cache write and the fired marks.
+    // Higher thresholds leave the proposal live for other agents' votes.
+    // The sweep takes the flow lock; the mint above does not, so a vote is
+    // never held up behind the semantic check's LLM call.
+    let lock = perspective.flow_pass_lock.clone();
+    let _passes = lock.lock().await;
+    let recorded = crate::perspectives::flow_instance::pass::run_flow_consensus_pass(
+        perspective,
+        None,
+        context,
+        flow_filter,
+        None,
+    )
+    .await;
+    for outcome in &recorded {
+        log::info!(
+            "🔥 flow settled: {} {} → {} (by {:?})",
+            outcome.instance_uri,
+            outcome.from_state,
+            outcome.to_state,
+            outcome.voters
+        );
+    }
+    crate::perspectives::flow_instance::pass::run_flow_pass_for_co_owners(
+        perspective,
+        context,
+        flow_filter,
+        None,
+    )
+    .await;
+
+    minted
 }
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to
@@ -865,11 +1040,12 @@ pub async fn run_interpretation_with_harness_and_model(
     scope: Option<&Scope>,
     cursor: Option<&InterpretationRunCursor>,
     max_tool_calls: u32,
-    auth_token: Option<String>,
+    caller: Option<Arc<crate::agent::session::Session>>,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     dedup_on_drain: bool,
     credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
-) -> anyhow::Result<Vec<String>> {
+    flow_filter: Option<&[String]>,
+) -> anyhow::Result<InterpretationOutcome> {
     // Same task-row selection as the single-shot path so the model + system
     // prompt + few-shots + billing meta come from the same row the operator
     // configured — the harness pass is just a different loop, not a
@@ -896,10 +1072,21 @@ pub async fn run_interpretation_with_harness_and_model(
     } else {
         Vec::new()
     };
-    let active_flows =
-        crate::perspectives::flow_context::gather_active_flow_contexts(perspective, &flow_subjects)
-            .await;
-    let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
+    let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
+        perspective,
+        context,
+        &flow_subjects,
+        flow_filter,
+    )
+    .await;
+    let speaker_names = build_speaker_name_map(transcript);
+    let prompt = build_interpretation_input(
+        shapes,
+        transcript,
+        &existing_ctx,
+        &active_flows,
+        &speaker_names,
+    );
 
     // Build per-class propose shapes from the perspective's SHACL classes,
     // filtered to the class-name set the caller passed as `shapes`. Any
@@ -917,15 +1104,9 @@ pub async fn run_interpretation_with_harness_and_model(
         .map(class_propose_shape_from_shacl)
         .collect();
 
-    // The AD4M MCP handler is the read-tool surface. Constructed here with a
-    // pass-scoped McpContext — admin-credential from env (matches the /v1
-    // openai-compat path) + a fresh per-pass auth-token slot. Every existing
-    // MCP tool (`query_*`, `get_*`, subject/perspective tools) becomes
-    // visible to the LLM through `Ad4mToolProvider`.
-    let mcp_context = crate::mcp::server::McpContext {
-        admin_credential: std::env::var("AD4M_ADMIN_CREDENTIAL").ok(),
-        auth_token: Arc::new(tokio::sync::RwLock::new(auth_token.clone())),
-    };
+    // The AD4M MCP handler is the read-tool surface (see `pass_mcp_context`).
+    let has_caller = caller.is_some();
+    let mcp_context = pass_mcp_context(perspective, context, caller).await;
     let mcp_handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::new(mcp_context));
     let ad4m_provider = Arc::new(crate::mcp::tools::provider_impl::Ad4mToolProvider::new(
         mcp_handler,
@@ -958,28 +1139,34 @@ pub async fn run_interpretation_with_harness_and_model(
     // overlay) and never touched `extintention_propose_create`. Filtering
     // down to the ~2 classes × ~3 read verbs the pass actually needs
     // forces the LLM through the propose-write wrappers below.
-    let allowed_class_prefixes: Vec<String> = propose_shapes
+    let offered_classes: Vec<_> = all_shacl_classes
         .iter()
-        .map(|s| format!("{}_", s.class_name.to_lowercase()))
+        .filter(|c| requested_class_names.contains_key(&c.name))
+        .cloned()
         .collect();
-    let ad4m_filtered: Arc<dyn ToolProvider> =
-        Arc::new(FilteredProvider::new(ad4m_bound, move |t: &ToolSchema| {
-            if !is_read_only(t) {
-                return false;
-            }
-            allowed_class_prefixes.iter().any(|p| t.name.starts_with(p))
-        }));
+    let ad4m_filtered: Arc<dyn ToolProvider> = Arc::new(FilteredProvider::new(
+        ad4m_bound,
+        offered_class_tools(&offered_classes),
+    ));
 
     // Wrap in ProposeWritesProvider so the LLM also sees the two synthetic
     // per-class writers whose side-effect is "queue an InterpretationOp",
     // not "mutate the graph." The buffer is drained after the loop.
     let buffer = ProposalBuffer::new();
     let classes_offered = propose_shapes.len();
-    let provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
+    let write_provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
         ad4m_filtered,
         propose_shapes,
         buffer.clone(),
         base_prefix.to_string(),
+    ));
+    // One `{Flow}_propose_transition` tool per active flow; calls are
+    // validated against the flow's reachable states and buffered.
+    let flow_buffer = FlowProposalBuffer::new();
+    let provider: Arc<dyn ToolProvider> = Arc::new(FlowTransitionProposeProvider::new(
+        write_provider,
+        active_flows,
+        flow_buffer.clone(),
     ));
 
     // OpenAI-compat bridge: real CompletionSource that talks to AIService
@@ -988,10 +1175,16 @@ pub async fn run_interpretation_with_harness_and_model(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
+    // A pass with a caller bills the agent it acts as (by DID); the caller's session named that
+    // agent. An executor-owned pass (no caller) bills no one.
+    let bill_to = context
+        .managed_did()
+        .map(str::to_string)
+        .filter(|_| has_caller);
     let bridge = Arc::new(
         crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
             Arc::new(service),
-            auth_token,
+            bill_to,
         ),
     );
 
@@ -1044,7 +1237,9 @@ pub async fn run_interpretation_with_harness_and_model(
     // `InterpretationDebug` payload dev #903 wires into the classic path;
     // a follow-up commit on this branch can carry a per-round transcript
     // once the shape is agreed.
-    let bases = apply_with_overlay(
+    // Same tail as the single-shot path — one shared unit, so the
+    // capture-before-move ordering can't drift between the two.
+    let (bases, flow_proposals) = apply_ops_and_run_flow_passes(
         perspective,
         shapes,
         ops,
@@ -1054,18 +1249,535 @@ pub async fn run_interpretation_with_harness_and_model(
         context,
         cursor,
         None,
+        &flow_buffer.drain(),
+        &flow_subjects,
+        flow_filter,
     )
     .await?;
 
     log::warn!("harness: apply_with_overlay produced {} bases", bases.len());
+    if !flow_proposals.is_empty() {
+        log::info!(
+            "harness: flow pass minted {} proposal(s): {flow_proposals:?}",
+            flow_proposals.len()
+        );
+    }
 
-    Ok(bases)
+    Ok(InterpretationOutcome {
+        bases,
+        // No single prompt/response to snapshot on the multi-turn harness
+        // loop; per-tool-call events carry the debug surface instead.
+        debug: None,
+        flow_proposals,
+    })
+}
+
+/// Which AD4M tools a pass sees: the read tools generated for `offered` classes, by exact
+/// name. Not a name prefix: offered classes come from graph state neighbourhood peers write,
+/// and a class named `List` would otherwise admit the static `list_perspectives`.
+fn offered_class_tools(
+    offered: &[crate::mcp::shacl::ShaclClass],
+) -> impl Fn(&ToolSchema) -> bool + Send + Sync + 'static {
+    let names = crate::mcp::tools::Ad4mMcpHandler::class_tool_names(offered);
+    move |t: &ToolSchema| is_read_only(t) && names.contains(&t.name)
+}
+
+/// The MCP context of an interpretation pass on `perspective`. The pass runs in-process but
+/// has no request headers, so its reach is `Network`: a tokenless fallback inside it is
+/// anonymous. Its dynamic tool list names the classes of `perspective` only.
+///
+/// - A pass with a caller acts as the caller's session: the one its RPC request arrived on,
+///   so the pass's tools reach what the caller reaches, and stop once that session's grant
+///   ends.
+/// - A pass without one (the auto-processor's) acts as the perspective's owner, limited to
+///   querying `perspective` ([`pass_owner_session`]), never as the operator: the transcript it
+///   reads may come from
+///   neighbourhood peers and can steer the model, and the operator reaches every user's
+///   perspectives.
+pub(crate) async fn pass_mcp_context(
+    perspective: &PerspectiveInstance,
+    context: &AgentContext,
+    caller: Option<Arc<crate::agent::session::Session>>,
+) -> crate::mcp::server::McpContext {
+    let session = match caller {
+        Some(session) => session,
+        None => Arc::new(pass_owner_session(perspective, context).await),
+    };
+    crate::mcp::server::McpContext::new(
+        // The pass holds its session; no token arrives that a credential would decide.
+        None,
+        // A pass has no request headers, so nothing shows it local: any tokenless
+        // fallback inside a pass is anonymous, never the operator.
+        crate::agent::capabilities::ListenerReach::Network,
+        // The harness reaches tools through `list_tool_schemas` /
+        // `call_tool_by_name`, which always include the dynamic per-class
+        // tools regardless of this flag (it only gates the MCP transport).
+        // Set explicitly so the intent is visible at the construction site.
+        true,
+    )
+    .scoped_to(&perspective.uuid)
+    .with_session(session)
+}
+
+/// The session a pass without a caller acts as, from the owners of `perspective`. Always an
+/// in-process session ([`Session::in_process`]): one of the executor's agents, never the
+/// operator.
+///
+/// - a managed user who owns it (the pass's own user, if it is one of them) acts as that
+///   user's agent;
+/// - otherwise (unowned, owned by the main agent, or by a DID that is no managed user) the
+///   main agent. The perspective guard lets the main agent reach its own and unowned
+///   perspectives only, so the pass reaches no user's perspective.
+///
+/// Either way the session may only query this perspective, so even a tool outside the pass's
+/// offered ones ([`offered_class_tools`]) would reach nothing else of the agent's. The pass
+/// writes through its proposal buffer.
+///
+/// [`Session::in_process`]: crate::agent::session::Session::in_process
+async fn pass_owner_session(
+    perspective: &PerspectiveInstance,
+    context: &AgentContext,
+) -> crate::agent::session::Session {
+    use crate::agent::session::Session;
+    let handle = perspective.persisted.lock().await.clone();
+    let main_did = crate::agent::AgentService::global_instance()
+        .lock()
+        .ok()
+        .and_then(|agent| agent.as_ref().and_then(|a| a.did.clone()));
+    let main_owns = handle.is_unowned()
+        || main_did
+            .as_deref()
+            .is_some_and(|did| handle.is_owned_by(did));
+    // Owners are agent DIDs (D16); the managed ones are those a user account holds.
+    let managed = crate::agent::AgentService::managed_agent_dids().unwrap_or_default();
+    let users: Vec<String> = handle
+        .get_owners()
+        .into_iter()
+        .filter(|did| managed.contains(did))
+        .collect();
+    let own_user = users
+        .iter()
+        .find(|did| context.managed_did() == Some(did.as_str()));
+    let owner = own_user.or_else(|| users.first().filter(|_| !main_owns));
+    let caps = vec![crate::agent::capabilities::perspective_query_capability(
+        vec![handle.uuid],
+    )];
+    match owner {
+        Some(did) => Session::in_process(AgentContext::managed(did.clone()), caps).with_did(did),
+        None => Session::in_process(AgentContext::main_agent(), caps),
+    }
+}
+
+/// Whom the tools of a pass without a caller token act as, and what they reach.
+#[cfg(test)]
+mod pass_session_tests {
+    use super::*;
+    use crate::agent::session::Principal;
+    use crate::mcp::tools::provider_impl::Ad4mToolProvider;
+    use crate::mcp::tools::Ad4mMcpHandler;
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::perspectives::{register_perspective, unregister_perspective};
+    use serde_json::{json, Value};
+
+    const NOTE_SDNA: &str = r#"{
+      "target_class": "pass://Note",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"pass://Note"}
+      ],
+      "properties": [
+        {"path":"pass://note_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"pass://note_title","target":"value"}]}
+      ]
+    }"#;
+
+    const DIARY_SDNA: &str = r#"{
+      "target_class": "pass://Diary",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"pass://Diary"}
+      ],
+      "properties": [
+        {"path":"pass://diary_entry","name":"entry","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"pass://diary_entry","target":"value"}]}
+      ]
+    }"#;
+
+    const LEDGER_SDNA: &str = r#"{
+      "target_class": "pass://Ledger",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"pass://Ledger"}
+      ],
+      "properties": [
+        {"path":"pass://ledger_sum","name":"sum","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"pass://ledger_sum","target":"value"}]}
+      ]
+    }"#;
+
+    /// What user B wrote in B's perspective: no tool of another pass may return it.
+    const B_SECRET: &str = "pass-test-b-secret-entry";
+
+    /// A registered perspective with one class, owned by `owner` (`None`: unowned).
+    /// Unregistered when dropped.
+    struct Fixture {
+        perspective: PerspectiveInstance,
+        uuid: String,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            unregister_perspective(&self.uuid);
+        }
+    }
+
+    async fn fixture(class: &str, sdna: &str, owner: Option<&str>) -> Fixture {
+        let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[(class, sdna)]).await;
+        let uuid = {
+            let mut handle = perspective.persisted.lock().await;
+            handle.owners = owner.map(|did| vec![did.to_string()]);
+            handle.uuid.clone()
+        };
+        register_perspective(uuid.clone(), perspective.clone());
+        Fixture { perspective, uuid }
+    }
+
+    /// A managed user: a row in the users table, which makes the owner DID a managed agent.
+    fn managed_user(email: &str, did: &str) {
+        let known = crate::db::Ad4mDb::with_global_instance(|db| db.get_username_by_did(did))
+            .ok()
+            .flatten();
+        if known.is_none() {
+            crate::db::Ad4mDb::with_global_instance(|db| db.add_user(email, did, "pw"))
+                .expect("a managed user");
+        }
+    }
+
+    const A_EMAIL: &str = "pass.owner.a@example.org";
+    const A_DID: &str = "did:key:pass-owner-a";
+    const B_EMAIL: &str = "pass.owner.b@example.org";
+    const B_DID: &str = "did:key:pass-owner-b";
+
+    /// User B's perspective with a Diary entry in it, written as the operator.
+    async fn b_perspective() -> Fixture {
+        managed_user(B_EMAIL, B_DID);
+        let b = fixture("Diary", DIARY_SDNA, Some(B_DID)).await;
+        let operator = crate::mcp::tools::test_support::handler_as(
+            crate::mcp::tools::test_support::operator(),
+        );
+        let created = operator
+            .call_tool_by_name(
+                "instance_create",
+                json!({
+                    "perspective_id": b.uuid,
+                    "class_name": "Diary",
+                    "properties": { "entry": B_SECRET },
+                }),
+            )
+            .await
+            .expect("the operator writes B's diary");
+        assert!(!created.contains("error"), "{created}");
+        // The operator reads it: the secret is there for a tool to leak.
+        let read = operator
+            .call_tool_by_name(
+                "instance_query",
+                json!({ "perspective_id": b.uuid, "class_name": "Diary" }),
+            )
+            .await
+            .unwrap();
+        assert!(read.contains(B_SECRET), "{read}");
+        b
+    }
+
+    /// The handler of a pass without a caller token on `pass`, run by `context`.
+    async fn pass_handler(pass: &Fixture, context: &AgentContext) -> Arc<Ad4mMcpHandler> {
+        let mcp = pass_mcp_context(&pass.perspective, context, None).await;
+        Arc::new(Ad4mMcpHandler::new(mcp))
+    }
+
+    /// A value for a schema property the test does not care about, of the declared type,
+    /// that the tool parses before it reaches its guard.
+    fn filler(name: &str, schema: &Value) -> Value {
+        if name == "commands" {
+            return json!(
+                r#"[{"action":"addLink","source":"this","predicate":"pass://p","target":"pass://t"}]"#
+            );
+        }
+        match schema["type"].as_str() {
+            Some("integer") | Some("number") => json!(1),
+            Some("boolean") => json!(false),
+            Some("array") => json!([]),
+            Some("object") => json!({}),
+            _ => json!("Diary"),
+        }
+    }
+
+    /// Calls every tool of `handler` that names a perspective with `target` as that
+    /// perspective (the other required arguments filled in), and returns each answer.
+    async fn every_perspective_tool_on(
+        handler: &Ad4mMcpHandler,
+        target: &str,
+    ) -> Vec<(String, String)> {
+        let mut answers = Vec::new();
+        for tool in handler.list_tool_schemas().await {
+            let properties = tool.parameters["properties"].clone();
+            let Some(properties) = properties.as_object() else {
+                continue;
+            };
+            let key = ["perspective_id", "perspective_uuid", "uuid"]
+                .into_iter()
+                .find(|k| properties.contains_key(*k));
+            let Some(key) = key else { continue };
+            let mut args = serde_json::Map::new();
+            for required in tool.parameters["required"].as_array().into_iter().flatten() {
+                let name = required.as_str().unwrap_or_default();
+                args.insert(name.to_string(), filler(name, &properties[name]));
+            }
+            args.insert(key.to_string(), json!(target));
+            let answer = match handler
+                .call_tool_by_name(&tool.name, Value::Object(args))
+                .await
+            {
+                Ok(answer) => answer,
+                Err(e) => e.to_string(),
+            };
+            answers.push((tool.name, answer));
+        }
+        answers
+    }
+
+    /// No answer carries B's data, and every one refuses B: as missing, by status, or as a
+    /// tool the in-process bridge does not dispatch.
+    fn assert_b_unreachable(answers: &[(String, String)], b: &str) {
+        assert!(answers.len() > 10, "the tools that name a perspective ran");
+        let not_refused: Vec<_> = answers
+            .iter()
+            .filter(|(_, answer)| {
+                answer.contains(B_SECRET)
+                    || !((answer.contains(&format!("Perspective {b} not found"))
+                        && answer.contains("\"status\":404"))
+                        || answer.contains("\"status\":403")
+                        || answer.contains("\"status\":401")
+                        || answer.starts_with("Unknown tool:"))
+            })
+            .collect();
+        assert!(not_refused.is_empty(), "reached B: {not_refused:#?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tokenless_pass_acts_as_the_user_who_owns_the_perspective() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let session = pass_handler(&a, &AgentContext::managed(A_DID.into()))
+            .await
+            .session()
+            .await
+            .unwrap();
+        assert!(!session.is_operator());
+        assert_eq!(session.managed_did(), Some(A_DID));
+        // Run by the main agent's loop, it is still the owner.
+        let session = pass_handler(&a, &AgentContext::main_agent())
+            .await
+            .session()
+            .await
+            .unwrap();
+        assert_eq!(session.managed_did(), Some(A_DID));
+    }
+
+    /// A pass has no request headers, so its reach is `Network`: any tokenless fallback
+    /// inside a pass is anonymous, never the operator, even without an admin credential.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tokenless_fallback_inside_a_pass_is_anonymous() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let handler = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
+        let tokenless = handler.tokenless_session().unwrap();
+        assert!(!tokenless.is_operator());
+        assert!(!tokenless.is_authenticated());
+        // The pass's own session is unchanged: the owner's.
+        let session = handler.session().await.unwrap();
+        assert_eq!(session.managed_did(), Some(A_DID));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_on_user_as_perspective_cannot_read_user_bs() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let b = b_perspective().await;
+        let handler = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
+
+        // The pass reads its own perspective.
+        let described = handler
+            .call_tool_by_name("describe_perspective", json!({ "perspective_id": a.uuid }))
+            .await
+            .unwrap();
+        assert!(described.contains("Note"), "{described}");
+
+        // Every perspective tool, called with B's uuid, refuses.
+        assert_b_unreachable(&every_perspective_tool_on(&handler, &b.uuid).await, &b.uuid);
+
+        // Through the pass's provider, a model that sends B's uuid reads A's perspective.
+        let bound = BoundArgsProvider::new(
+            Arc::new(Ad4mToolProvider::new(handler)),
+            std::collections::BTreeMap::from([(
+                "perspective_id".to_string(),
+                Value::String(a.uuid.clone()),
+            )]),
+        );
+        for (tool, args) in [
+            (
+                "instance_query",
+                json!({ "perspective_id": b.uuid, "class_name": "Diary" }),
+            ),
+            ("describe_perspective", json!({ "perspective_id": b.uuid })),
+            ("query_links", json!({ "perspective_id": b.uuid })),
+        ] {
+            let answer = bound
+                .call(tool, args)
+                .await
+                .unwrap_or_else(|e| e.to_string());
+            assert!(!answer.contains(B_SECRET), "{tool} read B: {answer}");
+            assert!(!answer.contains(&b.uuid), "{tool} named B: {answer}");
+        }
+    }
+
+    /// A class with no properties, named `name`.
+    fn bare_class(name: &str) -> crate::mcp::shacl::ShaclClass {
+        crate::mcp::shacl::ShaclClass {
+            name: name.to_string(),
+            name_lower: name.to_lowercase(),
+            properties: vec![],
+            shape_uri: None,
+            all_predicates: vec![],
+        }
+    }
+
+    /// A read tool named `name`, as the filter sees it.
+    fn read_tool(name: &str) -> crate::ai_service::harness::provider::ToolSchema {
+        crate::ai_service::harness::provider::ToolSchema {
+            name: name.to_string(),
+            description: String::new(),
+            parameters: json!({}),
+            side_effect: crate::ai_service::harness::provider::SideEffect::Read,
+        }
+    }
+
+    // Offered classes come from SHACL in the perspective, shared graph state that
+    // neighbourhood peers write: a class named after a static tool's first word (`List`,
+    // `Query`, `Get`, `Instance`, ...) must not admit that static tool.
+    #[test]
+    fn an_offered_class_admits_its_own_tools_and_no_static_tool() {
+        let statics = Ad4mMcpHandler::static_tool_names();
+        assert!(statics.iter().any(|n| n == "list_perspectives"));
+        let mut words: Vec<&str> = statics.iter().filter_map(|n| n.split('_').next()).collect();
+        words.extend(["List", "Query", "Get"]);
+        for word in words {
+            let mut chars = word.chars();
+            let class_name: String = chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default();
+            let admits = offered_class_tools(&[bare_class(&class_name)]);
+            for name in &statics {
+                assert!(
+                    !admits(&read_tool(name)),
+                    "a class named `{class_name}` admits the static tool `{name}`"
+                );
+            }
+        }
+
+        let admits = offered_class_tools(&[bare_class("List")]);
+        for own in ["list_query", "list_list", "list_get"] {
+            assert!(admits(&read_tool(own)), "`{own}` is the class's own tool");
+        }
+        assert!(!admits(&read_tool("note_query")), "another class's tool");
+    }
+
+    // The pass reaches its own perspective, not the rest of its user's, even through a static
+    // tool: the perspective's config and SHACL are shared graph state that neighbourhood peers
+    // write.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tokenless_pass_lists_no_other_perspective_of_its_user() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let other = fixture("Diary", DIARY_SDNA, Some(A_DID)).await;
+        let handler = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
+        let listed = handler
+            .call_tool_by_name("list_perspectives", json!({}))
+            .await
+            .unwrap_or_else(|e| e.to_string());
+        assert!(!listed.contains(&other.uuid), "{listed}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_on_an_unowned_perspective_cannot_reach_a_users_perspective() {
+        let unowned = fixture("Note", NOTE_SDNA, None).await;
+        let b = b_perspective().await;
+        let handler = pass_handler(&unowned, &AgentContext::main_agent()).await;
+        let session = handler.session().await.unwrap();
+        assert!(!session.is_operator());
+        assert_eq!(
+            session.principal,
+            Principal::Agent(AgentContext::main_agent())
+        );
+        assert!(
+            session.grant().is_none(),
+            "an in-process session has no grant"
+        );
+
+        let described = handler
+            .call_tool_by_name(
+                "describe_perspective",
+                json!({ "perspective_id": unowned.uuid }),
+            )
+            .await
+            .unwrap();
+        assert!(described.contains("Note"), "{described}");
+
+        assert_b_unreachable(&every_perspective_tool_on(&handler, &b.uuid).await, &b.uuid);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_tool_list_of_a_pass_names_the_classes_of_its_perspective_only() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        // A's other perspective: A may read it, the pass on A still does not list it.
+        let a_other = fixture("Ledger", LEDGER_SDNA, Some(A_DID)).await;
+        let b = b_perspective().await;
+
+        let names = |tools: Vec<crate::ai_service::harness::provider::ToolSchema>| {
+            tools.into_iter().map(|t| t.name).collect::<Vec<_>>()
+        };
+        let tokenless = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
+        // A pass run by the operator reaches every perspective; its list is scoped too.
+        let operator = Arc::new(crate::agent::session::Session::for_test(
+            Principal::Operator,
+        ));
+        let operator_pass = Ad4mMcpHandler::new(
+            pass_mcp_context(&a.perspective, &AgentContext::main_agent(), Some(operator)).await,
+        );
+        assert!(operator_pass.session().await.unwrap().is_operator());
+
+        for listed in [
+            names(tokenless.list_tool_schemas().await),
+            names(operator_pass.list_tool_schemas().await),
+        ] {
+            assert!(listed.iter().any(|n| n.starts_with("note_")), "{listed:?}");
+            assert!(
+                !listed.iter().any(|n| n.starts_with("diary_")),
+                "{listed:?}"
+            );
+            assert!(
+                !listed.iter().any(|n| n.starts_with("ledger_")),
+                "{listed:?}"
+            );
+        }
+        drop((a_other, b));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::Ad4mDb;
+    use crate::perspectives::flow_context::{load_flow_instances, FlowInstanceRecord};
     use crate::perspectives::interpretation::*;
     use crate::perspectives::interpretation_test_support::*;
     use crate::types::{AITask, Link};
@@ -1646,5 +2358,183 @@ mod tests {
         let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &ExistingLinks::new());
         assert_eq!(deduped.len(), 1);
         assert!(matches!(&deduped[0], InterpretationOp::Update { .. }));
+    }
+
+    // ---- apply_ops_and_run_flow_passes — the shared interpretation tail ----
+    //
+    // The central wiring claim of the spawn slice: an interpretation pass
+    // whose ops CREATE an instance of a class some flow lists in `inputTypes`
+    // ends with a `FlowInstance` on that item — and the created-bases capture
+    // happens before the ops move into the apply. Both interpretation paths
+    // (single-shot + harness) share this tail, so this covers the call
+    // Marvin flagged as untested without needing an LLM in the loop.
+
+    fn tail_task() -> AITask {
+        AITask {
+            model_id: "gemma3:12b".to_string(),
+            system_prompt: "You extract typed instances.".to_string(),
+            prompt_examples: Vec::new(),
+            ..Default::default()
+        }
+    }
+
+    fn tail_create_task_op(base: &str) -> InterpretationOp {
+        InterpretationOp::Create {
+            base: base.to_string(),
+            class: "Task".to_string(),
+            values: serde_json::Map::from_iter([(
+                "title".to_string(),
+                serde_json::json!("write the spawn wiring test"),
+            )]),
+        }
+    }
+
+    async fn run_tail(
+        p: &mut PerspectiveInstance,
+        shapes: &[ModelShape],
+        ctx: &AgentContext,
+        ops: Vec<InterpretationOp>,
+        flow_filter: Option<&[String]>,
+    ) -> (Vec<String>, Vec<String>) {
+        apply_ops_and_run_flow_passes(
+            p,
+            shapes,
+            ops,
+            &tail_task(),
+            uuid::Uuid::new_v4().to_string(),
+            "1700000000000".to_string(),
+            ctx,
+            None,
+            None,
+            &[],
+            &[],
+            flow_filter,
+        )
+        .await
+        .expect("apply_ops_and_run_flow_passes failed")
+    }
+
+    async fn live_on(p: &PerspectiveInstance, base: &str) -> Vec<FlowInstanceRecord> {
+        load_flow_instances(p, std::slice::from_ref(&base.to_string()))
+            .await
+            .expect("load_flow_instances failed")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interpretation_tail_spawns_flow_instance_on_created_item() {
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
+
+        let base = "soa://tail/task/created";
+        let (bases, _proposals) = run_tail(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            vec![tail_create_task_op(base)],
+            None,
+        )
+        .await;
+
+        assert!(
+            bases.iter().any(|b| b == base),
+            "the Create op must land as a written base, got {bases:?}"
+        );
+        let live = live_on(&perspective, base).await;
+        assert_eq!(
+            live.len(),
+            1,
+            "exactly one FlowInstance must spawn on the created Task"
+        );
+        assert_eq!(live[0].flow_uri, "delivery://DeliveryFlow");
+        let did = crate::agent::did_for_context(&ctx).expect("did");
+        assert_eq!(
+            crate::perspectives::flow_instance::replica_state::FlowReplicaState::current_state(
+                &perspective.uuid,
+                &did,
+                &live[0].instance_uri,
+            )
+            .expect("recorded state")
+            .as_deref(),
+            Some("identified"),
+            "fresh instance starts in the flow's first state by value"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interpretation_tail_honours_empty_flow_selection() {
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
+
+        // `Some(&[])` is the auto-processor's "no flows selected" — the pass
+        // must be flow-blind even though the catalogue has a matching flow.
+        let base = "soa://tail/task/filtered";
+        let (bases, proposals) = run_tail(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            vec![tail_create_task_op(base)],
+            Some(&[]),
+        )
+        .await;
+
+        assert!(bases.iter().any(|b| b == base), "the write itself proceeds");
+        assert!(proposals.is_empty(), "flow-blind pass mints no proposals");
+        let live = live_on(&perspective, base).await;
+        assert!(
+            live.is_empty(),
+            "deselected flows must not spawn, got {live:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interpretation_tail_does_not_spawn_on_updates() {
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
+
+        // Seed the Task first (a "pre-existing" item), then run the tail with
+        // only an Update op on it. Spawn is scoped to created instances
+        // (design §10 v1) — the capture from the op list must exclude it.
+        let base = "soa://tail/task/updated";
+        seed_instance(&mut perspective, &ctx, &shapes[0], base, "already here").await;
+
+        let (_bases, _proposals) = run_tail(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            vec![InterpretationOp::Update {
+                base: base.to_string(),
+                class: "Task".to_string(),
+                values: serde_json::Map::from_iter([(
+                    "title".to_string(),
+                    serde_json::json!("edited title"),
+                )]),
+            }],
+            None,
+        )
+        .await;
+
+        let live = live_on(&perspective, base).await;
+        assert!(
+            live.is_empty(),
+            "an updated (not created) item must not spawn, got {live:?}"
+        );
     }
 }

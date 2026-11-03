@@ -1268,6 +1268,13 @@ describe("Lightweight fingerprint optimization", () => {
 
 
 
+/** Turn a LiveQuery's update listener into `push(result)`: each push sends the
+ *  next revision of `subscriptionId` with the whole result. */
+function updatesFor(subscriptionId: string, listener: (update: any) => void) {
+  let revision = 0;
+  return (result: any) => listener({ subscriptionId, revision: ++revision, result });
+}
+
 // ── Subscribe callback timing ──────────────────────────────────────────
 describe("ModelQueryBuilder subscribe callback timing", () => {
   it("subscribe should not invoke callback synchronously before Promise resolves", async () => {
@@ -1280,13 +1287,14 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        updateCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        updateCallback = updatesFor(mockSubscriptionId, cb);
         return () => {}; // unsubscribe function
       }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
 
@@ -1333,162 +1341,213 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
 });
 
 describe("ModelQueryBuilder paginateSubscribe", () => {
-  it("paginateSubscribe should use a single query with count: true", async () => {
-    const mockSubscriptionId = "paginate-sub-123";
-
+  // The subscription is the paged query itself (PERF-11). Since #1237 the
+  // executor re-runs a paged subscription when a record outside the page
+  // starts or stops matching (the `joins` / `scan` trigger rules), and the
+  // result carries `totalCount`, so such a write changes the result and is
+  // pushed. Each page is built from the pushed rows: no second query.
+  function buildMocks(initial: any = { instances: [], totalCount: 0 }) {
+    let listener: ((update: any) => void) | null = null;
+    let revision = 0;
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
-        subscriptionId: mockSubscriptionId,
-        result: { instances: [], totalCount: 0 },
+        subscriptionId: "paginate-sub",
+        revision: 0,
+        result: initial,
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
-        return () => {};
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        listener = cb;
+        return () => { if (listener === cb) listener = null; };
       }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
-
     const mockPerspective = {
       uuid: "test-uuid",
       client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson);
-      }),
-      modelQuery: jest.fn().mockResolvedValue({ instances: [{ id: "item1", type: "test://paginate" }], totalCount: 42 }),
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) =>
+        mockClient.modelSubscribe("test-uuid", className, queryJson)
+      ),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [{ id: "from-query" }], totalCount: 99 }),
     } as any;
+    /** Push the next revision; `update` is `{ result }` or a model delta. */
+    const push = (update: any) => listener?.({ subscriptionId: "paginate-sub", revision: ++revision, ...update });
+    return { mockClient, mockPerspective, push };
+  }
 
+  function testModel(name: string) {
     const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "PaginateTest" })
-    class PaginateTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://paginate" })
-      type: string = "test://paginate";
+    @Model({ name })
+    class M extends Ad4mModel {
+      @Flag({ through: "test://type", value: `test://${name}` })
+      type: string = `test://${name}`;
       @Property({ through: "test://name" })
       name: string = "";
     }
+    return M;
+  }
 
-    const builder = PaginateTest.query(mockPerspective);
-    const result = await builder.paginateSubscribe(10, 1, () => {});
+  const ids = (page: any) => page.results.map((r: any) => r.id);
+  const settle = () => new Promise(r => setTimeout(r, 10));
 
-    // Should return paginated result structure
-    expect(result).toHaveProperty("results");
-    expect(result).toHaveProperty("totalCount");
-    expect(result).toHaveProperty("pageSize", 10);
-    expect(result).toHaveProperty("pageNumber", 1);
+  it("subscribes to the page itself and returns the initial page from the subscription", async () => {
+    const { mockPerspective } = buildMocks({ instances: [{ id: "p2a" }, { id: "p2b" }], totalCount: 12 });
+    const builder = testModel("PaginateInitial").query(mockPerspective);
 
-    // modelQuery should be called exactly once (not twice — no separate count query)
-    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+    const result = await builder.paginateSubscribe(10, 2, () => {});
 
-    // The query should have count: true
-    const callArgs = mockPerspective.modelQuery.mock.calls[0];
-    const queryJson = JSON.parse(callArgs[1]);
-    expect(queryJson.count).toBe(true);
+    expect(ids(result)).toEqual(["p2a", "p2b"]);
+    expect(result.totalCount).toBe(12);
+    expect(result.pageSize).toBe(10);
+    expect(result.pageNumber).toBe(2);
+
+    const queryJson = JSON.parse(mockPerspective.modelSubscribe.mock.calls[0][1]);
     expect(queryJson.limit).toBe(10);
-    expect(queryJson.offset).toBe(0);
+    expect(queryJson.offset).toBe(10);
+    expect(queryJson.count).toBe(true);
+    // The subscription's first result is the page: no separate read.
+    expect(mockPerspective.modelQuery).not.toHaveBeenCalled();
+    builder.dispose();
   });
 
-  it("paginateSubscribe should re-fetch on real subscription updates", async () => {
-    const mockSubscriptionId = "paginate-update-sub";
-    let capturedCallback: ((result: any) => void) | null = null;
+  it("delivers each page from the pushed rows without a second query", async () => {
+    const { mockPerspective, push } = buildMocks();
+    const pages: any[] = [];
+    const builder = testModel("PaginatePush").query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, p => pages.push(p));
 
-    const mockClient = {
-      modelSubscribe: jest.fn().mockResolvedValue({
-        subscriptionId: mockSubscriptionId,
-        result: { instances: [], totalCount: 0 },
-      }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
-        return () => {};
-      }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-    };
+    push({ result: { instances: [{ id: "a" }, { id: "b" }], totalCount: 5 } });
+    await settle();
 
-    let modelQueryCallCount = 0;
-    const mockPerspective = {
-      uuid: "test-uuid",
-      client: mockClient,
-      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
-        return mockClient.modelSubscribe("test-uuid", className, queryJson);
-      }),
-      modelQuery: jest.fn().mockImplementation(async () => {
-        modelQueryCallCount++;
-        return { instances: [{ id: "new-item", type: "test://update" }], totalCount: 1 };
-      }),
-    } as any;
+    expect(mockPerspective.modelQuery).not.toHaveBeenCalled();
+    expect(pages).toHaveLength(1);
+    expect(ids(pages[0])).toEqual(["a", "b"]);
+    expect(pages[0].totalCount).toBe(5);
+    expect(pages[0].pageSize).toBe(10);
+    expect(pages[0].pageNumber).toBe(1);
+    builder.dispose();
+  });
 
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
+  it("delivers a change outside the page through totalCount", async () => {
+    // A create past the page leaves the rows as they were and moves the
+    // count; the executor pushes that as a delta with no upserts.
+    const { mockPerspective, push } = buildMocks({ instances: [{ id: "a" }], totalCount: 1 });
+    const pages: any[] = [];
+    const builder = testModel("PaginateOutside").query(mockPerspective);
+    await builder.paginateSubscribe(1, 1, p => pages.push(p));
 
-    @Model({ name: "UpdateTest" })
-    class UpdateTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://update" })
-      type: string = "test://update";
-      @Property({ through: "test://name" })
-      name: string = "";
+    push({ ids: ["a"], upsert: [], totalCount: 2 });
+    await settle();
+
+    expect(pages).toHaveLength(1);
+    expect(ids(pages[0])).toEqual(["a"]);
+    expect(pages[0].totalCount).toBe(2);
+    expect(mockPerspective.modelQuery).not.toHaveBeenCalled();
+    builder.dispose();
+  });
+
+  it("skips a pushed page equal to the last one, as subscribe() does", async () => {
+    // A resync or a reconnect re-open replaces the result wholesale, and
+    // LiveQuery calls back even when nothing changed.
+    const { mockPerspective, push } = buildMocks({ instances: [{ id: "a" }], totalCount: 1 });
+    const pages: any[] = [];
+    const builder = testModel("PaginateUnchanged").query(mockPerspective);
+    await builder.paginateSubscribe(1, 1, p => pages.push(p));
+
+    push({ result: { instances: [{ id: "a" }], totalCount: 1 } });
+    await settle();
+    expect(pages).toHaveLength(0);
+
+    push({ result: { instances: [{ id: "a" }], totalCount: 2 } });
+    push({ result: { instances: [{ id: "a" }], totalCount: 2 } });
+    await settle();
+    expect(pages.map(p => p.totalCount)).toEqual([2]);
+    builder.dispose();
+  });
+
+  it("ends on the latest state after back-to-back changes (#1051)", async () => {
+    // #1051: two saves in quick succession used to leave the callback on the
+    // first save, because each push started a re-read and a re-read could
+    // finish out of order. The pushes now carry the rows, in revision order,
+    // so the last callback is the last push.
+    const { mockPerspective, push } = buildMocks();
+    const pages: any[] = [];
+    const builder = testModel("PaginateLatest").query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, p => pages.push(p));
+
+    push({ ids: ["m1"], upsert: [{ id: "m1" }], totalCount: 1 });
+    push({ ids: ["m1", "m2"], upsert: [{ id: "m2" }], totalCount: 2 });
+    await settle();
+
+    expect(pages.map(ids)).toEqual([["m1"], ["m1", "m2"]]);
+    expect(pages[pages.length - 1].totalCount).toBe(2);
+    expect(mockPerspective.modelQuery).not.toHaveBeenCalled();
+    builder.dispose();
+  });
+
+  it("delivers nothing after dispose", async () => {
+    const { mockClient, mockPerspective, push } = buildMocks();
+    const callback = jest.fn();
+    const builder = testModel("PaginateDispose").query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, callback);
+
+    builder.dispose();
+    push({ result: { instances: [{ id: "late" }], totalCount: 1 } });
+    await settle();
+
+    expect(callback).not.toHaveBeenCalled();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "paginate-sub");
+  });
+
+  it("logs a callback that throws and keeps delivering", async () => {
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { mockPerspective, push } = buildMocks();
+      const pages: any[] = [];
+      const builder = testModel("PaginateThrow").query(mockPerspective);
+      await builder.paginateSubscribe(10, 1, p => {
+        pages.push(p);
+        if (pages.length === 1) throw new Error("consumer failed");
+      });
+
+      push({ result: { instances: [{ id: "a" }], totalCount: 1 } });
+      push({ result: { instances: [{ id: "a" }, { id: "b" }], totalCount: 2 } });
+      await settle();
+
+      expect(pages.map(ids)).toEqual([["a"], ["a", "b"]]);
+      expect(errorSpy.mock.calls.some(args => args[0] === "Paginate subscription error:")).toBe(true);
+      builder.dispose();
+    } finally {
+      errorSpy.mockRestore();
     }
-
-    const userCallback = jest.fn();
-    const builder = UpdateTest.query(mockPerspective);
-    await builder.paginateSubscribe(10, 1, userCallback);
-
-    const initialCallCount = modelQueryCallCount;
-
-    // Simulate a subscription update
-    capturedCallback!({ instances: [{ id: "new-item" }], totalCount: 1 });
-
-    // Wait for async processing
-    await new Promise(r => setTimeout(r, 100));
-
-    // modelQuery should have been called again for the re-fetch
-    expect(modelQueryCallCount).toBeGreaterThan(initialCallCount);
-    // User callback should have been invoked with paginated results
-    expect(userCallback).toHaveBeenCalled();
-    const callArg = userCallback.mock.calls[0][0];
-    expect(callArg).toHaveProperty("totalCount");
-    expect(callArg).toHaveProperty("pageSize", 10);
-    expect(callArg).toHaveProperty("pageNumber", 1);
   });
 });
 
 // ============================================================================
-// Subscription keepalive recovery tests
+// Subscriptions after a reconnect (the executor ends a socket's subscriptions
+// when it closes; there is no keepalive)
 // ============================================================================
 
-describe("ModelQueryBuilder keepalive recovery", () => {
-  beforeEach(() => jest.useFakeTimers());
-  afterEach(() => jest.useRealTimers());
-
-  /**
-   * Helper: build a mock perspective whose keepAliveQuery rejects after
-   * `failAfter` successful calls, simulating a server-side subscription
-   * eviction (returns "Subscription not found").  On resubscribe (a second
-   * modelSubscribe call) it returns a *new* subscription ID.
-   */
-  function buildMocks(failAfter = 0) {
-    let keepaliveCallCount = 0;
-    let modelSubscribeCallCount = 0;
-
+describe("ModelQueryBuilder reconnect", () => {
+  function buildMocks() {
+    let subscribeCount = 0;
+    const reconnectListeners = new Set<() => void>();
     const mockClient = {
       modelSubscribe: jest.fn().mockImplementation(async () => {
-        modelSubscribeCallCount++;
+        subscribeCount++;
         return {
-          subscriptionId: `sub-${modelSubscribeCallCount}`,
-          result: { instances: [], totalCount: 0 },
+          subscriptionId: `sub-${subscribeCount}`,
+          revision: 0,
+          result: { instances: [], totalCount: subscribeCount },
         };
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
-        return () => {};
-      }),
-      keepAliveQuery: jest.fn().mockImplementation(async () => {
-        keepaliveCallCount++;
-        if (keepaliveCallCount > failAfter) {
-          throw new Error("RPC error 500: Subscription not found");
-        }
-        return true;
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn((cb: () => void) => {
+        reconnectListeners.add(cb);
+        return () => reconnectListeners.delete(cb);
       }),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
-
     const mockPerspective = {
       uuid: "test-uuid",
       client: mockClient,
@@ -1499,125 +1558,63 @@ describe("ModelQueryBuilder keepalive recovery", () => {
       modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
       getLinks: jest.fn().mockResolvedValue([]),
     } as any;
-
-    return { mockClient, mockPerspective, getKeepaliveCount: () => keepaliveCallCount, getSubscribeCount: () => modelSubscribeCallCount };
+    const reconnect = async () => {
+      reconnectListeners.forEach(cb => cb());
+      await new Promise(r => setTimeout(r, 0));
+    };
+    return { mockClient, mockPerspective, reconnect, subscribeCount: () => subscribeCount };
   }
 
-  it("subscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
-    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(/* failAfter */ 1);
-
+  function testModel(name: string) {
     const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "KeepaliveRecoveryTest" })
-    class KeepaliveRecoveryTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://ka" })
-      type: string = "test://ka";
+    @Model({ name })
+    class M extends Ad4mModel {
+      @Flag({ through: "test://type", value: `test://${name}` })
+      type: string = `test://${name}`;
       @Property({ through: "test://name" })
       name: string = "";
     }
+    return M;
+  }
 
-    const builder = KeepaliveRecoveryTest.query(mockPerspective);
+  it("subscribe re-opens after a reconnect", async () => {
+    const { mockClient, mockPerspective, reconnect, subscribeCount } = buildMocks();
+    const builder = testModel("ReconnectSubscribe").query(mockPerspective);
     await builder.subscribe(() => {});
+    await reconnect();
+    expect(subscribeCount()).toBe(2);
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-2");
+  });
 
-    // Initial subscription
-    expect(getSubscribeCount()).toBe(1);
-
-    // First keepalive at 30s — succeeds (failAfter=1)
-    await jest.advanceTimersByTimeAsync(30_000);
-    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(1);
-
-    // Second keepalive at 60s — fails → should trigger resubscribe
-    await jest.advanceTimersByTimeAsync(30_000);
-    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(2);
-
-    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
-    await jest.advanceTimersByTimeAsync(2500);
-
-    // A second modelSubscribe call means recovery happened
-    expect(getSubscribeCount()).toBe(2);
-
-    // Clean up
+  it("countSubscribe delivers the count from the re-opened subscription", async () => {
+    const { mockPerspective, reconnect } = buildMocks();
+    const counts: number[] = [];
+    const builder = testModel("ReconnectCount").query(mockPerspective);
+    expect(await builder.countSubscribe(c => counts.push(c))).toBe(1);
+    await reconnect();
+    expect(counts).toEqual([2]);
     builder.dispose();
   });
 
-  it("countSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
-    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0); // fail immediately
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "CountKeepaliveTest" })
-    class CountKeepaliveTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://cka" })
-      type: string = "test://cka";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const builder = CountKeepaliveTest.query(mockPerspective);
-    await builder.countSubscribe(() => {});
-
-    expect(getSubscribeCount()).toBe(1);
-
-    // First keepalive at 30s — fails immediately → should trigger resubscribe
-    await jest.advanceTimersByTimeAsync(30_000);
-    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
-    await jest.advanceTimersByTimeAsync(2500);
-
-    expect(getSubscribeCount()).toBe(2);
-
+  it("paginateSubscribe re-reads the page after a reconnect", async () => {
+    const { mockPerspective, reconnect, subscribeCount } = buildMocks();
+    const pages: any[] = [];
+    const builder = testModel("ReconnectPaginate").query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, p => pages.push(p));
+    await reconnect();
+    expect(subscribeCount()).toBe(2);
+    expect(pages).toHaveLength(1);
     builder.dispose();
   });
 
-  it("paginateSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
-    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0);
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "PaginateKeepaliveTest" })
-    class PaginateKeepaliveTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://pka" })
-      type: string = "test://pka";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const builder = PaginateKeepaliveTest.query(mockPerspective);
-    await builder.paginateSubscribe(10, 1, () => {});
-
-    expect(getSubscribeCount()).toBe(1);
-
-    await jest.advanceTimersByTimeAsync(30_000);
-    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
-    await jest.advanceTimersByTimeAsync(2500);
-
-    expect(getSubscribeCount()).toBe(2);
-
-    builder.dispose();
-  });
-
-  it("subscribe: stops retrying after dispose()", async () => {
-    const { mockClient, mockPerspective } = buildMocks(Infinity); // keepalive always succeeds
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "DisposeTest" })
-    class DisposeTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://disp" })
-      type: string = "test://disp";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const builder = DisposeTest.query(mockPerspective);
+  it("a disposed subscription does not re-open", async () => {
+    const { mockPerspective, reconnect, subscribeCount } = buildMocks();
+    const builder = testModel("ReconnectDisposed").query(mockPerspective);
     await builder.subscribe(() => {});
-
     builder.dispose();
-
-    // Advance well past multiple keepalive intervals
-    await jest.advanceTimersByTimeAsync(120_000);
-
-    // No keepalive calls should have happened after dispose
-    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(0);
+    await reconnect();
+    expect(subscribeCount()).toBe(1);
   });
 });
 
@@ -2348,6 +2345,121 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(qi.projections?.$commentCount?.targetClassName).toBeUndefined();
   });
 
+  // --- $-keys inside a nested include ---
+  //
+  // The executor reads a sub-query as it reads a top-level query, so a nested
+  // projection belongs in the sub-query's own `projections`. Left in `include`
+  // it named no relation and was skipped: no error, and no field.
+
+  @Model({ name: "Thread" })
+  class Thread extends Ad4mModel {
+    @HasMany({ through: "thread://post", target: () => Post })
+    posts: Post[] = [];
+  }
+
+  @Model({ name: "Board" })
+  class Board extends Ad4mModel {
+    @HasMany({ through: "board://post", target: () => Post })
+    posts: Post[] = [];
+
+    @HasMany({ through: "board://thread", target: () => Thread })
+    threads: Thread[] = [];
+
+    @HasMany({ through: "board://item", polymorphic: true })
+    items: string[] = [];
+
+    // Polymorphic, but with a declared target: members may still be of other classes.
+    @HasMany({ through: "board://pinned", target: () => Post, polymorphic: true })
+    pinned: Post[] = [];
+  }
+
+  it("moves a $-key inside a nested include into that sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { posts: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Read against the relation's target, so it is tagged as a top-level one would be.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("keeps the nested relations beside the projections it moves", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        posts: { include: { signals: true, $signalCount: { from: "signals", count: true } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.include).toEqual({ signals: true });
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+  });
+
+  it("moves a $-key two include levels down into the innermost sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        threads: { include: { posts: { include: { $signalCount: { from: "signals", count: true } } } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.threads.include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Tagged against Post, the class two relations down.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("leaves a projection untagged under a polymorphic relation that declares a target", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { pinned: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const pinned = JSON.parse(queryJson).include.pinned;
+
+    expect(pinned.polymorphic).toBe(true);
+    expect(pinned.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // Tagging from the declared target (Post → Signal) would name one class for
+    // members of several; the executor reads each member's own class instead.
+    expect(pinned.projections.$signalCount.targetClassName).toBeUndefined();
+  });
+
+  it("moves it under a polymorphic relation too, untagged, for the executor to read per class", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { items: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const items = JSON.parse(queryJson).include.items;
+
+    expect(items.polymorphic).toBe(true);
+    expect(items.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // The members are of several classes, so there is no one target to name.
+    expect(items.projections.$signalCount.targetClassName).toBeUndefined();
+  });
+
+  it("leaves the projections in the caller's query where the caller wrote them", async () => {
+    const query = {
+      include: {
+        $postCount: { from: "posts", count: true },
+        posts: { include: { $signalCount: { from: "signals", count: true } } },
+      },
+    } as const;
+    const before = JSON.stringify(query);
+
+    await Board.findAll(mockPerspective, query);
+
+    expect(JSON.stringify(query)).toBe(before);
+  });
+
   // --- result passthrough ---
 
   it("returns $-keyed projection values attached by Rust on instances", async () => {
@@ -2514,20 +2626,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     target?: string;
   }
 
-  // A coverage fixture for a branch that already exists in `save()`, not a
-  // modelling pattern being endorsed. No required property, no flag and no
-  // initial value means `buildSHACL` emits the node shape and its property
-  // shapes as normal but with an *empty* constructor-action list, which the
-  // Rust side rejects as "No SHACL constructor found" — so `save()` skips
-  // `createSubject` and calls `innerUpdate(true)` instead. The base expression
-  // exists either way: the `Ad4mModel` constructor mints one, and
-  // `createSubject` writes onto a base rather than creating it.
-  //
-  // Worth naming the real caveat, which is about conformance rather than
-  // writes: a class with no required property and no flag states no criteria,
-  // so nothing structurally distinguishes an instance of it from any other
-  // base expression. That makes it an overlay rather than a class, and it is a
-  // question about SDNA modelling generally rather than about this file.
+  // No required property, no flag and no initial value: an empty constructor.
   @Model({ name: "TestNoConstructor" })
   class TestNoConstructor extends Ad4mModel {
     @HasOne({ through: "we://placed_node" })
@@ -2610,7 +2709,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       expect(writtenTargets(scalar)).toEqual(writtenTargets(array));
     });
 
-    it("still writes the relation when there is no SHACL constructor", async () => {
+    it("writes the relation when the constructor is empty", async () => {
       const perspective = makePerspective();
 
       await TestNoConstructor.create(
@@ -2619,8 +2718,96 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
         { batchId: "batch-1" }
       );
 
-      expect(perspective.createSubject).not.toHaveBeenCalled();
       expect(writtenTargets(perspective)).toContain("we://block/a");
+    });
+  });
+
+  // The failure this closes: every `save()` of a new instance logged one
+  // Rust-side "declares no setter" warning per ORM-internal field, per flag,
+  // and per empty HasMany relation — none of which are real model data, so
+  // none of them should ever have been offered to `createSubject` at all.
+  describe("initialValues sent to createSubject", () => {
+    @Model({ name: "TestNoisyPost" })
+    class TestNoisyPost extends Ad4mModel {
+      @Flag({ through: "test://post_type", value: "test://post" })
+      type: string = "test://post";
+
+      @Property({ through: "test://title", required: true })
+      title: string = "";
+
+      @HasMany({ through: "test://has_tag" })
+      tags: string[] = [];
+
+      @HasOne({ through: "test://in_channel" })
+      channel: string = "";
+    }
+
+    it("offers only settable scalar properties: no bookkeeping, flags or relations", async () => {
+      const perspective = makePerspective();
+
+      await TestNoisyPost.create(perspective, { title: "hello", channel: "test://channel/1" }, { batchId: "batch-1" });
+
+      expect(perspective.createSubject.mock.calls[0][2]).toEqual({ title: "hello" });
+      // The @HasOne value is still written, as a relation.
+      expect(writtenTargets(perspective)).toContain("test://channel/1");
+    });
+  });
+
+  // `readOnly` keeps `through` as the predicate the relation reads. Writing it
+  // from save() would be the setter the shape refuses to offer, and on a create
+  // the `= []` initialiser turns that write into a clear.
+  describe("readOnly relations without a getter", () => {
+    @Model({ name: "TestReadOnlyRelations" })
+    class TestReadOnlyRelations extends Ad4mModel {
+      @Property({ through: "test://title", required: true })
+      title: string = "";
+
+      @HasMany({ through: "test://voted_by", readOnly: true })
+      votedBy: string[] = [];
+
+      @HasOne({ through: "test://resolved_by", readOnly: true })
+      resolvedBy?: string;
+
+      // The control: an ordinary relation on the same model is still written.
+      @HasMany({ through: "test://has_tag" })
+      tags: string[] = [];
+    }
+
+    /** Predicates written by `executeAction`, across every call. */
+    const writtenPredicates = (perspective: any): string[] =>
+      perspective.executeAction.mock.calls.flatMap((call: any[]) =>
+        (call[0] ?? []).map((action: any) => action.predicate)
+      );
+
+    it("are not written by create(), not even as the empty initialiser", async () => {
+      const perspective = makePerspective();
+
+      await TestReadOnlyRelations.create(
+        perspective,
+        { title: "t", tags: ["test://tag/1"] },
+        { batchId: "batch-1" }
+      );
+
+      expect(writtenPredicates(perspective)).toContain("test://has_tag");
+      expect(writtenPredicates(perspective)).not.toContain("test://voted_by");
+      expect(writtenPredicates(perspective)).not.toContain("test://resolved_by");
+    });
+
+    it("are not written by save() even when the caller sets them", async () => {
+      const perspective = makePerspective();
+      const instance = new TestReadOnlyRelations(perspective);
+      instance.title = "t";
+      instance.tags = ["test://tag/1"];
+      instance.votedBy = ["did:key:a"];
+      instance.resolvedBy = "did:key:b";
+
+      await instance.save("batch-1");
+
+      expect(writtenPredicates(perspective)).toContain("test://has_tag");
+      expect(writtenPredicates(perspective)).not.toContain("test://voted_by");
+      expect(writtenPredicates(perspective)).not.toContain("test://resolved_by");
+      expect(writtenTargets(perspective)).not.toContain("did:key:a");
+      expect(writtenTargets(perspective)).not.toContain("did:key:b");
     });
   });
 
@@ -3028,5 +3215,440 @@ describe("Polymorphic relations", () => {
     });
 
     expect(JSON.parse(queryJson).include.sections.include.children.polymorphic).toBe(false);
+  });
+});
+
+describe("Ordered relations", () => {
+  @Model({ name: "OrderedColumn" })
+  class OrderedColumn extends Ad4mModel {
+    @HasMany({ through: "kanban://has_task", ordering: { strategy: "linkedList" } })
+    tasks: string[] = [];
+
+    @HasMany({ through: "kanban://archived" })
+    archived: string[] = [];
+  }
+
+  const mockPerspective = { uuid: "test" } as any;
+
+  it("declares its ordering in SHACL", () => {
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const tasks = shape.properties.find((p: any) => p.name === "tasks");
+    expect(tasks.ordering).toBe("linkedList");
+  });
+
+  it("declares the predicate the ordering entries are stored under", () => {
+    // Entries live on the parent under one shared predicate. The instance query
+    // builds its predicate filter from the shape's declared paths, so without
+    // this the read that needs the ordering links filters them out.
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const orderProp = shape.properties.find(
+      (p: any) => p.path === "ad4m://collection_order"
+    );
+    expect(orderProp).toBeDefined();
+  });
+
+  it("omits that predicate when nothing on the class is ordered", () => {
+    @Model({ name: "UnorderedOnly" })
+    class UnorderedOnly extends Ad4mModel {
+      @HasMany({ through: "kanban://archived" })
+      archived: string[] = [];
+    }
+    const { shape } = (UnorderedOnly as any).generateSHACL();
+    expect(
+      shape.properties.find((p: any) => p.path === "ad4m://collection_order")
+    ).toBeUndefined();
+  });
+
+  it("treats a reorder as a change", () => {
+    // The whole point: for an ordered relation the sequence *is* the state, so
+    // sorting before comparing would make save() a no-op for the one edit this
+    // feature exists to support.
+    const column = new OrderedColumn(mockPerspective, "kanban://col/1") as any;
+    column.tasks = ["a", "b", "c"];
+    column.takeSnapshot();
+
+    column.tasks = ["c", "a", "b"];
+    expect(column.changedFields()).toContain("tasks");
+  });
+
+  it("still treats a reorder of an unordered relation as no change", () => {
+    // An unordered relation is a set — the executor returns it by link
+    // timestamp, so assigning the same members in another order changed nothing.
+    const column = new OrderedColumn(mockPerspective, "kanban://col/1") as any;
+    column.archived = ["a", "b", "c"];
+    column.takeSnapshot();
+
+    column.archived = ["c", "a", "b"];
+    expect(column.changedFields()).not.toContain("archived");
+  });
+
+  it("round-trips ordering through SHACL links", () => {
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const links = shape.toLinks().map((l: any) => ({
+      source: l.source,
+      predicate: l.predicate,
+      target: l.target,
+    }));
+    const reconstructed = SHACLShape.fromLinks(links as any, shape.nodeShapeUri);
+    const tasks = reconstructed.properties.find((p: any) => p.name === "tasks");
+    expect(tasks!.ordering).toBe("linkedList");
+  });
+});
+
+/**
+ * A traversal names its predicate the same two ways every other scope does.
+ *
+ * The feature shipped with only the raw spelling, so every caller reading a
+ * thread wrote `'test://has_comment'` by hand — the literal `resolveParentPredicate`
+ * exists to keep out of call sites, reintroduced by the newest scope.
+ */
+describe("Ad4mModel.prepareModelQueryParams() — traverse scope", () => {
+  @Model({ name: "TraverseComment" })
+  class TraverseComment extends Ad4mModel {
+    @Property({ through: "test://body" })
+    body: string = "";
+  }
+
+  @Model({ name: "TraversePost" })
+  class TraversePost extends Ad4mModel {
+    @HasMany(() => TraverseComment, { through: "test://has_comment" })
+    comments: TraverseComment[] = [];
+
+    @HasOne(() => TraverseComment, { through: "test://pinned_comment" })
+    pinned: TraverseComment | null = null;
+  }
+
+  const parentOf = (query: any) =>
+    JSON.parse((TraverseComment as any).prepareModelQueryParams(query).queryJson).parent;
+
+  it("keeps the raw spelling exactly as written", () => {
+    expect(
+      parentOf({ parent: { ids: ["we://a", "we://b"], predicate: "test://has_comment" } }),
+    ).toEqual({ ids: ["we://a", "we://b"], predicate: "test://has_comment" });
+  });
+
+  it("resolves the predicate from the model that declares the relation", () => {
+    expect(parentOf({ parent: { ids: "we://a", model: TraversePost } })).toEqual({
+      ids: "we://a",
+      predicate: "test://has_comment",
+    });
+  });
+
+  it("takes `field` when one parent has two relations to the same child", () => {
+    // Without it the scan finds `comments` first and a request for the pinned
+    // comment's subtree would quietly read the wrong edge.
+    expect(
+      parentOf({ parent: { ids: "we://a", model: TraversePost, field: "pinned" } }),
+    ).toEqual({ ids: "we://a", predicate: "test://pinned_comment" });
+  });
+
+  it("sends the traversal's own options and nothing else", () => {
+    // `model` is a constructor; spreading the scope would put a class into a
+    // query variable. What travels is the resolved predicate and the options.
+    expect(
+      parentOf({
+        parent: {
+          ids: ["we://a"],
+          model: TraversePost,
+          field: "comments",
+          transitive: true,
+          direction: "in",
+          limitPerAnchor: 5,
+        },
+      }),
+    ).toEqual({
+      ids: ["we://a"],
+      predicate: "test://has_comment",
+      transitive: true,
+      direction: "in",
+      limitPerAnchor: 5,
+    });
+  });
+
+  it("omits the options the caller did not set rather than sending defaults", () => {
+    // An absent `transitive` is not `false` on the wire: the executor's serde
+    // defaults own that, and sending our own would be a second opinion.
+    const parent = parentOf({ parent: { ids: "we://a", model: TraversePost, levels: [10, 5] } });
+    expect(parent).toEqual({ ids: "we://a", predicate: "test://has_comment", levels: [10, 5] });
+    expect(parent).not.toHaveProperty("transitive");
+    expect(parent).not.toHaveProperty("limitPerAnchor");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// linkStatus — read from links of one status only (#1116)
+// ──────────────────────────────────────────────────────────
+
+describe("linkStatus — wire format", () => {
+  @Model({ name: "LinkStatusWireCard" })
+  class LinkStatusWireCard extends Ad4mModel {
+    @Flag({ through: "lsw://type", value: "lsw://card" })
+    type: string = "";
+
+    @Property({ through: "lsw://title" })
+    title: string = "";
+  }
+
+  it("is omitted unless the caller sets it, so both statuses are read", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({});
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("drops `linkStatus: null`, which reads both statuses like unset", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: null,
+    });
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("travels as `linkStatus` when set, from the query and the builder", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: "shared",
+    });
+    expect(JSON.parse(queryJson).linkStatus).toBe("shared");
+
+    const builder = LinkStatusWireCard.query({} as any).linkStatus("local");
+    expect((builder as any).queryParams.linkStatus).toBe("local");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// includeUnverified — opt-in to links whose signature did not verify (#1113)
+// ──────────────────────────────────────────────────────────
+
+describe("includeUnverified — wire format", () => {
+  @Model({ name: "UnverifiedWireRecipe" })
+  class UnverifiedWireRecipe extends Ad4mModel {
+    @Flag({ through: "uv://type", value: "uv://recipe" })
+    type: string = "";
+
+    @Property({ through: "uv://name" })
+    name: string = "";
+  }
+
+  it("is omitted unless the caller sets it, so the executor's default applies", () => {
+    const { queryJson } = (UnverifiedWireRecipe as any).prepareModelQueryParams({});
+    expect(JSON.parse(queryJson)).not.toHaveProperty("includeUnverified");
+  });
+
+  it("travels as `includeUnverified` when set, from the query and the builder", () => {
+    const { queryJson } = (UnverifiedWireRecipe as any).prepareModelQueryParams({
+      includeUnverified: true,
+    });
+    expect(JSON.parse(queryJson).includeUnverified).toBe(true);
+
+    const builder = UnverifiedWireRecipe.query({} as any).includeUnverified();
+    expect((builder as any).queryParams.includeUnverified).toBe(true);
+  });
+});
+
+// ── One subscription per builder ──────────────────────────────────────
+describe("ModelQueryBuilder subscription ownership", () => {
+  function makePerspective() {
+    let n = 0;
+    const mockClient = {
+      modelSubscribe: jest.fn().mockImplementation(async () => ({
+        subscriptionId: `sub-${++n}`,
+        revision: 0,
+        result: { instances: [], totalCount: 0 },
+      })),
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(
+        async (className: string, queryJson: string) =>
+          mockClient.modelSubscribe("test-uuid", className, queryJson)
+      ),
+      getLinks: jest.fn().mockResolvedValue([]),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+    } as any;
+    return { mockPerspective, mockClient };
+  }
+
+  const { Ad4mModel, Model, Property, Flag } = require("./index");
+
+  @Model({ name: "OwnershipTest" })
+  class OwnershipTest extends Ad4mModel {
+    @Flag({ through: "test://type", value: "test://ownership" })
+    type: string = "test://ownership";
+    @Property({ through: "test://name" })
+    name: string = "";
+  }
+
+  it("a failed open does not end a later call's subscription", async () => {
+    const { mockPerspective, mockClient } = makePerspective();
+    let rejectFirst!: (e: Error) => void;
+    mockClient.modelSubscribe
+      .mockImplementationOnce(() => new Promise((_, reject) => { rejectFirst = reject; }))
+      .mockImplementationOnce(async () => ({ subscriptionId: "sub-b", revision: 0, result: { instances: [], totalCount: 0 } }));
+    const builder = OwnershipTest.query(mockPerspective);
+
+    const first = builder.subscribe(() => {});
+    await Promise.resolve();
+    await builder.subscribe(() => {});
+    rejectFirst(new Error("refused"));
+    await expect(first).rejects.toThrow("refused");
+
+    expect(mockClient.disposeQuerySubscription).not.toHaveBeenCalledWith("test-uuid", "sub-b");
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-b");
+  });
+
+  it("paginateSubscribe() disposed while opening leaves the builder usable", async () => {
+    const { mockPerspective, mockClient } = makePerspective();
+    let resolveOpen!: (v: any) => void;
+    mockClient.modelSubscribe.mockImplementationOnce(() => new Promise(resolve => { resolveOpen = resolve; }));
+    const callback = jest.fn();
+    const builder = OwnershipTest.query(mockPerspective);
+
+    const page = builder.paginateSubscribe(10, 1, callback);
+    await Promise.resolve();
+    builder.dispose();
+    resolveOpen({ subscriptionId: "sub-p", revision: 0, result: { instances: [], totalCount: 0 } });
+    await page;
+
+    expect(() => builder.dispose()).not.toThrow();
+    await expect(builder.subscribe(() => {})).resolves.toBeDefined();
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it("overlapping subscribe() calls leave exactly one live subscription", async () => {
+    const { mockPerspective, mockClient } = makePerspective();
+    const builder = OwnershipTest.query(mockPerspective);
+
+    await Promise.all([builder.subscribe(() => {}), builder.subscribe(() => {})]);
+
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+    // The second call ended the first subscription.
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-1");
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-2");
+  });
+
+  it("dispose() ends the subscription once, however often it is called", async () => {
+    const { mockPerspective, mockClient } = makePerspective();
+    const builder = OwnershipTest.query(mockPerspective);
+
+    builder.dispose();
+    await builder.subscribe(() => {});
+    builder.dispose();
+    builder.dispose();
+
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-1");
+  });
+});
+
+describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)", () => {
+  @Model({ name: "UnionTaskU" })
+  class UnionTaskU extends Ad4mModel {
+    @Flag({ through: "u://kind", value: "u://task" })
+    kind: string = "";
+    @Property({ through: "u://status" })
+    status: string = "";
+  }
+
+  @Model({ name: "UnionNoteU" })
+  class UnionNoteU extends Ad4mModel {
+    @Flag({ through: "u://kind", value: "u://note" })
+    kind: string = "";
+    @Property({ through: "u://body" })
+    body: string = "";
+  }
+
+  const rows = {
+    instances: [
+      { id: "u://t1", status: "open", __subjectClass: "UnionTaskU", __subjectClasses: ["UnionTaskU"] },
+      { id: "u://n1", body: "hi", __subjectClass: "UnionNoteU", __subjectClasses: ["UnionNoteU"] },
+      { id: "u://x", __subjectClass: "Other", __subjectClasses: ["Other"] },
+    ],
+    totalCount: 7,
+  };
+
+  it("sends every class name and builds each row as its own class", async () => {
+    const perspective = { modelQuery: jest.fn().mockResolvedValue(rows), uuid: "p" } as any;
+    const results = await Ad4mModel.findAllOf(perspective, [UnionTaskU, UnionNoteU], {
+      where: { status: "open" },
+      order: { status: "DESC" },
+      limit: 2,
+      preferClasses: ["UnionNoteU"],
+    });
+
+    const [classNames, queryJson] = perspective.modelQuery.mock.calls[0];
+    expect(classNames).toEqual(["UnionTaskU", "UnionNoteU"]);
+    const sent = JSON.parse(queryJson);
+    expect(sent.where).toEqual({ status: "open" });
+    expect(sent.order).toEqual([["status", "DESC"]]);
+    expect(sent.limit).toBe(2);
+    expect(sent.preferClasses).toEqual(["UnionNoteU"]);
+
+    expect(results[0]).toBeInstanceOf(UnionTaskU);
+    expect((results[0] as UnionTaskU).status).toBe("open");
+    expect(results[1]).toBeInstanceOf(UnionNoteU);
+    // A class the caller did not list stays plain JSON.
+    expect(results[2]).not.toBeInstanceOf(Ad4mModel);
+  });
+
+  it("queryOf().count() reads the union's totalCount", async () => {
+    const perspective = { modelQuery: jest.fn().mockResolvedValue(rows), uuid: "p" } as any;
+    const count = await Ad4mModel.queryOf(perspective, [UnionTaskU, UnionNoteU]).count();
+    expect(count).toBe(7);
+    expect(JSON.parse(perspective.modelQuery.mock.calls[0][1]).limit).toBe(0);
+  });
+
+  it("refuses a projection key the classes tag with different target classes", () => {
+    @Model({ name: "UnionCardU" })
+    class UnionCardU extends Ad4mModel {
+      @Property({ through: "u://title" })
+      title: string = "";
+    }
+    @Model({ name: "UnionWaypointU" })
+    class UnionWaypointU extends Ad4mModel {
+      @Property({ through: "u://x" })
+      x: string = "";
+    }
+    @Model({ name: "UnionPlacementU" })
+    class UnionPlacementU extends Ad4mModel {
+      @HasMany(() => UnionCardU, { through: "u://items" })
+      items: string[] = [];
+    }
+    @Model({ name: "UnionRouteU" })
+    class UnionRouteU extends Ad4mModel {
+      @HasMany(() => UnionWaypointU, { through: "u://items" })
+      items: string[] = [];
+    }
+    const include = { $items: { from: "items", where: { title: "a" } } } as any;
+    expect(() =>
+      Ad4mModel.prepareUnionQueryParams([UnionPlacementU, UnionRouteU], { include }),
+    ).toThrow(/different target classes/);
+    // Same target on both: accepted.
+    expect(() =>
+      Ad4mModel.prepareUnionQueryParams([UnionPlacementU, UnionPlacementU], { include }),
+    ).not.toThrow();
+  });
+
+  it("keeps a raw parent predicate and refuses a scope the classes resolve differently", () => {
+    const { queryJson } = Ad4mModel.prepareUnionQueryParams([UnionTaskU, UnionNoteU], {
+      parent: { id: "u://canvas", predicate: "u://item" },
+    });
+    expect(JSON.parse(queryJson).parent).toEqual({ id: "u://canvas", predicate: "u://item" });
+
+    @Model({ name: "UnionBoardU" })
+    class UnionBoardU extends Ad4mModel {
+      @HasMany(() => UnionTaskU, { through: "u://tasks" })
+      tasks: string[] = [];
+      @HasMany(() => UnionNoteU, { through: "u://notes" })
+      notes: string[] = [];
+    }
+    expect(() =>
+      Ad4mModel.prepareUnionQueryParams([UnionTaskU, UnionNoteU], {
+        parent: { id: "u://board", model: UnionBoardU },
+      }),
+    ).toThrow(/different predicates/);
   });
 });

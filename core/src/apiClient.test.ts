@@ -1,0 +1,1244 @@
+import { ApiClient, LONG_TIMEOUT_MS, RpcError } from "./apiClient"
+import { AIClient } from "./ai/AIClient"
+import { AgentClient } from "./agent/AgentClient"
+import { LanguageClient } from "./language/LanguageClient"
+import { NeighbourhoodClient } from "./neighbourhood/NeighbourhoodClient"
+import { PerspectiveClient } from "./perspectives/PerspectiveClient"
+import { PerspectiveHandle } from "./perspectives/PerspectiveHandle"
+import { PerspectiveProxy } from "./perspectives/PerspectiveProxy"
+import { RuntimeClient } from "./runtime/RuntimeClient"
+
+type AnyMsg = Record<string, any>
+
+/** A socket the tests drive by hand: open(), drop(), reply(). */
+class TestSocket {
+    static instances: TestSocket[] = []
+    /** Open on the next microtask, like a reachable server. */
+    static autoOpen = false
+    /** Fire onclose some time after close(), like browsers and `ws`. */
+    static asyncClose = false
+    /** close() never fires onclose: a dead TCP connection, whose close frame
+     *  no peer answers, can stay CLOSING for minutes. */
+    static closeHangs = false
+    /** Answer `ping` with `pong`, as the executor does while calls run. */
+    static answersPings = true
+
+    readyState = 0
+    sent: AnyMsg[] = []
+    onopen: (() => void) | null = null
+    onmessage: ((ev: { data: string }) => void) | null = null
+    onerror: ((ev: unknown) => void) | null = null
+    onclose: ((ev: { code: number; reason: string }) => void) | null = null
+
+    constructor(public url: string) {
+        TestSocket.instances.push(this)
+        if (TestSocket.autoOpen) queueMicrotask(() => this.open())
+    }
+    send(data: string) {
+        const msg = JSON.parse(data)
+        this.sent.push(msg)
+        if (msg.type === 'ping' && TestSocket.answersPings) {
+            queueMicrotask(() => { if (this.readyState === 1) this.reply({ type: 'pong' }) })
+        }
+    }
+    close() {
+        if (TestSocket.closeHangs) {
+            this.readyState = 2
+        } else if (TestSocket.asyncClose) {
+            this.readyState = 2
+            setTimeout(() => this.drop(), 5)
+        } else {
+            this.drop()
+        }
+    }
+    open() { this.readyState = 1; this.onopen?.() }
+    /** Close from the server side; 1006 is an abnormal close with no close frame. */
+    drop(code = 1006, reason = '') { this.readyState = 3; this.onclose?.({ code, reason }) }
+    reply(msg: AnyMsg) { this.onmessage?.({ data: JSON.stringify(msg) }) }
+}
+
+const url = 'http://localhost:1234'
+const socket = (i: number) => TestSocket.instances[i]
+const flush = () => new Promise((r) => setTimeout(r, 0))
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+/** Starts a connection the way an event subscriber does. */
+const open = () => { client.on('agent-updated', () => {}) }
+
+let client: ApiClient
+beforeEach(() => {
+    TestSocket.instances = []
+    TestSocket.autoOpen = true
+    TestSocket.asyncClose = false
+    TestSocket.closeHangs = false
+    TestSocket.answersPings = true
+    client = new ApiClient(url, undefined, TestSocket as unknown as new (url: string) => WebSocket)
+})
+afterEach(() => client.closeAll())
+
+/** Transport tests send arbitrary method names, outside the typed table. */
+type UntypedCall = (type: string, params?: unknown, options?: object) => Promise<unknown>
+
+/** A call whose rejection counts as handled until the test awaits it. */
+function call<T = unknown>(type: string, params?: Record<string, unknown>, options?: object): Promise<T> {
+    const promise = (client.call as UntypedCall)(type, params ?? {}, options) as Promise<T>
+    promise.catch(() => {})
+    return promise
+}
+
+/** Reads how `promise` settled so far: 'pending', 'resolved' or the rejection. */
+function outcomeOf(promise: Promise<unknown>): () => unknown {
+    let outcome: unknown = 'pending'
+    promise.then(() => { outcome = 'resolved' }, (e) => { outcome = e })
+    return () => outcome
+}
+
+describe('ApiClient calls', () => {
+    it('sends the call and resolves with the reply', async () => {
+        const promise = call('agent.get', { foo: 'bar' })
+        await flush()
+        const req = socket(0).sent[0]
+        expect(req).toMatchObject({ type: 'agent.get', params: { foo: 'bar' } })
+        socket(0).reply({ id: req.id, result: { did: 'd' } })
+        await expect(promise).resolves.toEqual({ did: 'd' })
+    })
+
+    it('rejects with AbortError before opening a socket if the signal is already aborted', async () => {
+        const controller = new AbortController()
+        controller.abort()
+        await expect(call('agent.get', {}, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+        expect(TestSocket.instances).toHaveLength(0)
+    })
+
+    it('sends request.cancel and rejects with AbortError when the signal fires in flight', async () => {
+        const controller = new AbortController()
+        const promise = call('perspective.querySparql', { uuid: 'u' }, { signal: controller.signal })
+        await flush()
+        const req = socket(0).sent[0]
+
+        controller.abort()
+        expect(socket(0).sent[1]).toMatchObject({ type: 'request.cancel', params: { targetId: req.id } })
+        await expect(promise).rejects.toMatchObject({ name: 'AbortError' })
+    })
+
+    it('drops a late reply to an aborted call and the cancel ack', async () => {
+        const events: unknown[] = []
+        client.on('agent-updated', (e) => { events.push(e) })
+        const controller = new AbortController()
+        const promise = call('perspective.querySparql', { uuid: 'u' }, { signal: controller.signal })
+        await flush()
+        controller.abort()
+        await expect(promise).rejects.toMatchObject({ name: 'AbortError' })
+
+        socket(0).reply({ id: socket(0).sent[0].id, result: '[]' })
+        socket(0).reply({ id: socket(0).sent[1].id, result: { cancelled: true } })
+        expect(events).toEqual([])
+    })
+
+    it('rejects with an RpcError carrying the code and message of an error reply', async () => {
+        const promise = call('perspective.get', { uuid: 'u' })
+        await flush()
+        socket(0).reply({ id: socket(0).sent[0].id, error: { code: 404, message: 'perspective not found' } })
+        const error = await promise.catch((e) => e)
+        expect(error).toBeInstanceOf(RpcError)
+        expect(error).toMatchObject({ status: 404, body: 'perspective not found' })
+    })
+
+    it('rejects with status 500 when an error reply has no code', async () => {
+        const promise = call('agent.get')
+        await flush()
+        socket(0).reply({ id: socket(0).sent[0].id, error: { message: 'boom' } })
+        await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 500, body: 'boom' })
+    })
+
+    it('sends no request.cancel when the signal fires after the call settled', async () => {
+        const controller = new AbortController()
+        const promise = call('agent.get', {}, { signal: controller.signal })
+        await flush()
+        socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
+        await promise
+
+        controller.abort()
+        expect(socket(0).sent).toHaveLength(1)
+    })
+})
+
+describe('ApiClient connect-phase failures', () => {
+    beforeEach(() => { TestSocket.autoOpen = false })
+
+    it('rejects with 503 before its timeout when every socket closes before the call goes out', async () => {
+        jest.useFakeTimers()
+        try {
+            const timeoutMs = 10_000
+            const outcome = outcomeOf(call('agent.get', {}, { timeoutMs }))
+            let dropped = 0
+            for (let elapsed = 0; elapsed < timeoutMs - 100 && outcome() === 'pending'; elapsed += 100) {
+                while (dropped < TestSocket.instances.length) socket(dropped++).drop()
+                await jest.advanceTimersByTimeAsync(100)
+            }
+            expect(outcome()).toMatchObject({ name: 'RpcError', status: 503 })
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it('sends a call made while the first connect is refused once a later socket opens', async () => {
+        // An executor that logs "API server starting" before it binds refuses the first connect.
+        jest.useFakeTimers()
+        try {
+            const promise = call<string>('agent.generate', { passphrase: 'p' }, { timeoutMs: 10_000 })
+            socket(0).drop()
+            await jest.advanceTimersByTimeAsync(500)
+            socket(1).open()
+            expect(socket(1).sent[0]).toMatchObject({ type: 'agent.generate' })
+            socket(1).reply({ id: socket(1).sent[0].id, result: 'ok' })
+            await expect(promise).resolves.toBe('ok')
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it("a replaced socket's late onclose does not fail the call on its successor", async () => {
+        TestSocket.asyncClose = true
+        open()
+        socket(0).open()
+        client.closeAll() // socket 0's onclose arrives 5 ms later
+        const promise = call<string>('x')
+        await sleep(10)
+        socket(1).open()
+        socket(1).reply({ id: socket(1).sent[0].id, result: 'ok' })
+        await expect(promise).resolves.toBe('ok')
+    })
+
+    it('leaves no timers after closeAll', async () => {
+        jest.useFakeTimers()
+        try {
+            const promise = call('agent.status')
+            socket(0).open()
+            socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
+            await promise
+            client.closeAll()
+            expect(jest.getTimerCount()).toBe(0)
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it('rejects with 408 when the socket never opens within the timeout', async () => {
+        const started = Date.now()
+        await expect(call('agent.get', {}, { timeoutMs: 50 })).rejects.toMatchObject({ name: 'RpcError', status: 408 })
+        expect(Date.now() - started).toBeLessThan(1_000)
+    })
+
+    it('closes a socket stuck connecting when a call times out, so the next call dials again', async () => {
+        await expect(call('agent.get', {}, { timeoutMs: 20 })).rejects.toMatchObject({ status: 408 })
+        expect(socket(0).readyState).toBe(3)
+
+        const next = call<number>('agent.get')
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        socket(1).reply({ id: socket(1).sent[0].id, result: 1 })
+        await expect(next).resolves.toBe(1)
+    })
+
+    it('keeps a socket stuck connecting while another call still waits on it', async () => {
+        const first = call('agent.get', {}, { timeoutMs: 20 })
+        const second = call<number>('agent.get', {}, { timeoutMs: 1_000 })
+        await expect(first).rejects.toMatchObject({ status: 408 })
+        expect(socket(0).readyState).toBe(0)
+        socket(0).open()
+        socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
+        await expect(second).resolves.toBe(1)
+    })
+
+    it('redials for subscribers when a stuck connect is dropped', async () => {
+        open()
+        await expect(call('agent.get', {}, { timeoutMs: 20 })).rejects.toMatchObject({ status: 408 })
+        expect(socket(0).readyState).toBe(3)
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        const promise = call('agent.get')
+        socket(1).reply({ id: socket(1).sent.at(-1)!.id, result: 1 })
+        await expect(promise).resolves.toBe(1)
+    })
+
+    it('rejects callers waiting to connect when the client is closed', async () => {
+        const promise = call('agent.get', {}, { timeoutMs: 1_000 })
+        client.closeAll()
+        await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+    })
+
+    it('keeps the socket for a call still connecting when the last subscriber leaves', async () => {
+        TestSocket.asyncClose = true
+        const unsubscribe = client.on('agent-updated', () => {})
+        const promise = call<number>('agent.get', {}, { timeoutMs: 1_000 })
+        unsubscribe()
+        socket(0).open()
+        socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
+        await expect(promise).resolves.toBe(1)
+    })
+})
+
+describe('ApiClient retries idempotent reads once after a reconnect', () => {
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => jest.useRealTimers())
+
+    /** Drop socket `i` and let the reconnect timer open the next one. */
+    function reconnect(i: number) {
+        socket(i).drop()
+        jest.advanceTimersByTime(500)
+        socket(i + 1).open()
+    }
+
+    it('resends a read that was in flight and resolves it', async () => {
+        const read = call('perspective.all')
+        socket(0).open()
+        reconnect(0)
+
+        const resent = socket(1).sent[0]
+        expect(resent).toEqual(socket(0).sent[0])
+        socket(1).reply({ id: resent.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+    })
+
+    it('rejects a write that was in flight with 503', async () => {
+        const write = call('perspective.addLink', { uuid: 'u' })
+        socket(0).open()
+        socket(0).drop()
+        await expect(write).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
+    it('rejects a read that drops again after its retry', async () => {
+        const read = call('agent.get')
+        socket(0).open()
+        reconnect(0)
+        socket(1).drop()
+        await expect(read).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+    })
+})
+
+describe('ApiClient notices a socket that went silent', () => {
+    // A network switch leaves the old socket OPEN: no FIN or RST ever arrives,
+    // so no close event comes, and nothing the client sends gets an answer.
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        TestSocket.closeHangs = true
+        TestSocket.answersPings = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => jest.useRealTimers())
+
+    it('drops a socket whose ping goes unanswered and redials; a pending write fails, a pending read is resent', async () => {
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u' }, { timeoutMs: 120_000 }))
+        const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
+        expect(socket(0).sent.map(m => m.type)).toEqual(['events.watch', 'perspective.addLink', 'perspective.all'])
+
+        // Silent from here on: no pong, no reply, no close event.
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
+        expect(socket(0).readyState).toBe(2)
+        expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+
+        await jest.advanceTimersByTimeAsync(500)
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        const sent = socket(1).sent.map(m => m.type)
+        expect(sent).toContain('events.watch')
+        expect(sent).toContain('perspective.all')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+
+        const next = call<number>('agent.status')
+        socket(1).reply({ id: socket(1).sent.at(-1)!.id, result: 1 })
+        await expect(next).resolves.toBe(1)
+
+        // The dead socket's close event, if it ever comes, leaves its successor alone.
+        socket(0).drop()
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(socket(1).readyState).toBe(1)
+    })
+
+    it('keeps a socket while a large write it sent may still be crossing a slow link', async () => {
+        // The executor reads a ping only after the frame sent before it, so a
+        // 600 kB write on a slow link holds the pong back for as long as the
+        // write takes. That silence is not a dead socket.
+        open()
+        socket(0).open()
+        const write = call<string>('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 })
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ id: socket(0).sent.find(m => m.type === 'perspective.addLink')!.id, result: 'done' })
+        await expect(write).resolves.toBe('done')
+        // Once heard from, the socket is held to the usual deadline again.
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('counts a write in the UTF-8 bytes it is sent as, not in characters', async () => {
+        // 300 000 two-byte characters go out as 600 kB.
+        open()
+        socket(0).open()
+        void call('perspective.addLink', { uuid: 'u', blob: 'é'.repeat(300_000) }, { timeoutMs: 120_000 }).catch(() => {})
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('keeps the time a large write needs when other messages come in while it is still going out', async () => {
+        // Hearing from the executor says nothing about how far the upload got:
+        // a 600 kB write takes 37.5 s at 16 kB/s, whatever arrives meanwhile.
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 }))
+        await jest.advanceTimersByTimeAsync(1_000)
+        socket(0).reply({ type: 'agent-updated' })
+        await jest.advanceTimersByTimeAsync(14_000)
+        socket(0).reply({ type: 'agent-updated' })
+        await jest.advanceTimersByTimeAsync(15_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(write()).toBe('pending')
+        // The ping could reach the executor at 37.5 s; its pong gets 5 s more to come back.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(0).readyState).toBe(1)
+        // Still unanswered at the next tick: dropped.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(0).readyState).toBe(2)
+        expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+    })
+
+    it('gives a ping that waited behind a large write time for its pong to come back', async () => {
+        // The write could have crossed at about 39.94 s, just before the 40 s tick.
+        // The ping after it is read then, and its pong comes back 100 ms later.
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(638_900) }, { timeoutMs: 120_000 }))
+        await jest.advanceTimersByTimeAsync(40_040)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ type: 'pong' })
+        await jest.advanceTimersByTimeAsync(15_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(write()).toBe('pending')
+    })
+
+    it('does not give a silent socket more time for what it sent after its unanswered ping', async () => {
+        // Those frames queue behind the ping, so they cannot delay its pong.
+        open()
+        socket(0).open()
+        for (let t = 0; t < 20_000; t += 2_000) {
+            call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(20_000) }, { timeoutMs: 120_000 })
+            await jest.advanceTimersByTimeAsync(2_000)
+        }
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('judges a new socket by its own pings, not by its predecessor\'s', async () => {
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+        await jest.advanceTimersByTimeAsync(500)
+        socket(1).open()
+        // Its first tick pings; nothing has gone unanswered on it yet.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(1).sent.some(m => m.type === 'ping')).toBe(true)
+        expect(socket(1).readyState).toBe(1)
+    })
+
+    it('pings a quiet socket before it counts as silent, even when the timer fires late', async () => {
+        // A socket with no traffic hears nothing until its first ping is answered.
+        // Silence is counted from that ping, not from the last message.
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(9_990)
+        // The interval fires 40 ms late.
+        const now = performance.now.bind(performance)
+        const late = jest.spyOn(performance, 'now').mockImplementation(() => now() + 50)
+        try {
+            await jest.advanceTimersByTimeAsync(10)
+            expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
+            expect(socket(0).readyState).toBe(1)
+            // Unanswered for a whole interval after that ping: dropped.
+            await jest.advanceTimersByTimeAsync(10_000)
+            expect(socket(0).readyState).toBe(2)
+        } finally {
+            late.mockRestore()
+        }
+    })
+
+    it('ignores events that reach a socket after it was dropped', async () => {
+        const seen = jest.fn()
+        client.on('agent-updated', seen)
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+        socket(0).reply({ type: 'agent-updated' })
+        expect(seen).not.toHaveBeenCalled()
+    })
+
+    it('keeps a socket that answers its pings or sends anything else', async () => {
+        open()
+        socket(0).open()
+        // Replies by hand: a pong after some pings, an event after the others.
+        for (let i = 0; i < 6; i++) {
+            await jest.advanceTimersByTimeAsync(10_000)
+            if (i % 2 === 0) socket(0).reply({ type: 'pong' })
+            else socket(0).reply({ type: 'agent-updated' })
+        }
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('leaves no timers after closeAll on an open socket', async () => {
+        const promise = call('agent.status')
+        socket(0).open()
+        socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
+        await promise
+        client.closeAll()
+        expect(jest.getTimerCount()).toBe(0)
+    })
+})
+
+describe('ApiClient.onReconnect', () => {
+    beforeEach(() => { TestSocket.autoOpen = false })
+
+    /** Drop the open socket, if any, and open socket `i`. */
+    function connect(i: number) {
+        if (socket(i - 1)?.readyState === 1) socket(i - 1).drop()
+        open()
+        socket(i).open()
+    }
+
+    it('fires on a reconnect but not on the first connect', () => {
+        const reconnected = jest.fn()
+        client.onReconnect(reconnected)
+        connect(0)
+        expect(reconnected).not.toHaveBeenCalled()
+        connect(1)
+        expect(reconnected).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not fire once unsubscribed', () => {
+        const reconnected = jest.fn()
+        const unsubscribe = client.onReconnect(reconnected)
+        connect(0)
+        unsubscribe()
+        connect(1)
+        expect(reconnected).not.toHaveBeenCalled()
+    })
+
+    it('does not fire on the first connect of a client reused after closeAll', () => {
+        const reconnected = jest.fn()
+        connect(0)
+        client.closeAll()
+        client.onReconnect(reconnected)
+        connect(1)
+        expect(reconnected).not.toHaveBeenCalled()
+    })
+})
+
+/** An event target that counts the listeners on it, as `window` or `document`. */
+class CountingTarget extends EventTarget {
+    listeners = new Map<string, number>()
+    visibilityState = 'hidden'
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject | null, options?: AddEventListenerOptions | boolean) {
+        this.listeners.set(type, (this.listeners.get(type) ?? 0) + 1)
+        super.addEventListener(type, listener, options)
+    }
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null, options?: EventListenerOptions | boolean) {
+        this.listeners.set(type, (this.listeners.get(type) ?? 0) - 1)
+        super.removeEventListener(type, listener, options)
+    }
+    /** Listeners added and not removed, of every type. */
+    get live() { return [...this.listeners.values()].reduce((a, b) => a + b, 0) }
+}
+
+describe('ApiClient.reconnectNow', () => {
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => jest.useRealTimers())
+
+    /** Open socket 0, then drop `drops` sockets in a row, so the client waits out a grown backoff. */
+    function backOff(drops: number) {
+        open()
+        socket(0).open()
+        socket(0).drop()
+        for (let i = 1; i < drops; i++) {
+            jest.advanceTimersByTime(30_000)
+            socket(i).drop()
+        }
+    }
+
+    it('dials at once instead of waiting out the backoff, and fires onReconnect', () => {
+        const reconnected = jest.fn()
+        client.onReconnect(reconnected)
+        backOff(5) // now waiting 8 s
+        const before = TestSocket.instances.length
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(before + 1)
+        socket(before).open()
+        expect(reconnected).toHaveBeenCalledTimes(1)
+        // The wait it cut short does not dial again later: one loop, no second timer.
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(before + 1)
+        // The backoff starts over: the next drop is retried after 500 ms.
+        socket(before).drop()
+        jest.advanceTimersByTime(499)
+        expect(TestSocket.instances).toHaveLength(before + 1)
+        jest.advanceTimersByTime(1)
+        expect(TestSocket.instances).toHaveLength(before + 2)
+    })
+
+    it('keeps backing off from the start when the dial it made fails too', () => {
+        backOff(5)
+        const before = TestSocket.instances.length
+        client.reconnectNow()
+        socket(before).drop()
+        jest.advanceTimersByTime(500)
+        expect(TestSocket.instances).toHaveLength(before + 2)
+    })
+
+    it('cuts short the wait after a socket dropped for going silent', async () => {
+        TestSocket.closeHangs = true
+        TestSocket.answersPings = false
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2) // dropped as silent, waiting 500 ms
+        expect(TestSocket.instances).toHaveLength(1)
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(2)
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(TestSocket.instances).toHaveLength(2)
+    })
+
+    it('does nothing while a socket is open', () => {
+        open()
+        socket(0).open()
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('does nothing while a dial is in flight', () => {
+        open()
+        expect(socket(0).readyState).toBe(0)
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(1)
+
+        // Nor once the backoff timer has fired and its dial is still connecting.
+        socket(0).open()
+        socket(0).drop()
+        jest.advanceTimersByTime(500)
+        expect(TestSocket.instances).toHaveLength(2)
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(2)
+    })
+
+    it('does nothing while a call dials during the backoff', () => {
+        backOff(3) // waiting 2 s
+        call('agent.status').catch(() => {})
+        const dialling = TestSocket.instances.length
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(dialling)
+    })
+
+    it('ends the wait when a call dials during the backoff, so that socket retries from 500 ms', () => {
+        backOff(5) // waiting 8 s
+        call('agent.status').catch(() => {})
+        const dialled = TestSocket.instances.length - 1
+        socket(dialled).open()
+        socket(dialled).drop()
+        jest.advanceTimersByTime(500)
+        expect(TestSocket.instances).toHaveLength(dialled + 2)
+    })
+
+    it('does nothing once the executor refused the token', () => {
+        open()
+        socket(0).open()
+        socket(0).drop(1008, 'token expired')
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
+    it('does nothing after closeAll', () => {
+        backOff(3)
+        const before = TestSocket.instances.length
+        client.closeAll()
+        client.reconnectNow()
+        expect(TestSocket.instances).toHaveLength(before)
+    })
+
+    it('dials through Ad4mClient.reconnectNow', () => {
+        const { Ad4mClient } = require('./Ad4mClient')
+        const facade = new Ad4mClient(url, undefined, {
+            webSocketImpl: TestSocket as unknown as new (url: string) => WebSocket,
+        })
+        try {
+            facade.on('agent-updated', () => {})
+            const first = TestSocket.instances.length - 1
+            socket(first).open()
+            socket(first).drop()
+            facade.reconnectNow()
+            expect(TestSocket.instances).toHaveLength(first + 2)
+        } finally {
+            facade.close()
+        }
+    })
+
+    describe('in a browser', () => {
+        const g = globalThis as Record<string, unknown>
+        let win: CountingTarget
+        let doc: CountingTarget
+        beforeEach(() => {
+            win = new CountingTarget()
+            doc = new CountingTarget()
+            g.window = win
+            g.document = doc
+        })
+        afterEach(() => {
+            client.closeAll()
+            delete g.window
+            delete g.document
+        })
+
+        it('reconnects on `online` and on the page becoming visible, only while waiting to reconnect', () => {
+            open()
+            win.dispatchEvent(new Event('online')) // dialling
+            doc.visibilityState = 'visible'
+            doc.dispatchEvent(new Event('visibilitychange'))
+            expect(TestSocket.instances).toHaveLength(1)
+            socket(0).open()
+            win.dispatchEvent(new Event('online')) // connected
+            doc.dispatchEvent(new Event('visibilitychange'))
+            expect(TestSocket.instances).toHaveLength(1)
+
+            socket(0).drop()
+            jest.advanceTimersByTime(500)
+            socket(1).drop() // waiting 1 s now
+            win.dispatchEvent(new Event('online'))
+            expect(TestSocket.instances).toHaveLength(3)
+
+            socket(2).drop()
+            doc.visibilityState = 'hidden'
+            doc.dispatchEvent(new Event('visibilitychange'))
+            expect(TestSocket.instances).toHaveLength(3)
+            doc.visibilityState = 'visible'
+            doc.dispatchEvent(new Event('visibilitychange'))
+            expect(TestSocket.instances).toHaveLength(4)
+        })
+
+        it('listens only while waiting to reconnect', () => {
+            open()
+            socket(0).open()
+            expect(win.live + doc.live).toBe(0)
+            socket(0).drop()
+            expect(win.listeners.get('online')).toBe(1)
+            expect(doc.listeners.get('visibilitychange')).toBe(1)
+            jest.advanceTimersByTime(500) // the wait is over: dialling
+            expect(win.live + doc.live).toBe(0)
+            socket(1).drop()
+            expect(win.live + doc.live).toBe(2)
+            client.reconnectNow()
+            expect(win.live + doc.live).toBe(0)
+            // Many waits leave one listener each, never more.
+            for (let i = 2; i < 8; i++) {
+                socket(i).drop()
+                expect(win.live + doc.live).toBe(2)
+                jest.advanceTimersByTime(30_000)
+            }
+        })
+
+        it('removes its listeners on closeAll', () => {
+            backOff(3)
+            expect(win.live + doc.live).toBe(2)
+            client.closeAll()
+            expect(win.live + doc.live).toBe(0)
+            expect(jest.getTimerCount()).toBe(0)
+        })
+
+        it('removes its listeners when the executor refuses the token', () => {
+            backOff(2)
+            expect(win.live + doc.live).toBe(2)
+            jest.advanceTimersByTime(30_000)
+            socket(2).drop(1008, 'token expired')
+            expect(win.live + doc.live).toBe(0)
+        })
+
+        it('stops listening when the last subscriber leaves during the wait', () => {
+            const unsubscribe = client.on('perspective-added', () => {})
+            socket(0).open()
+            socket(0).drop()
+            expect(win.live + doc.live).toBe(2)
+            unsubscribe()
+            expect(win.live + doc.live).toBe(0)
+            win.dispatchEvent(new Event('online'))
+            jest.advanceTimersByTime(30_000)
+            expect(TestSocket.instances).toHaveLength(1)
+        })
+    })
+
+    it('registers nothing without window, and still reconnects on its backoff', () => {
+        const g = globalThis as Record<string, unknown>
+        expect(typeof g.window).toBe('undefined')
+        // A document without a window (a non-browser host with a DOM shim) is left alone too.
+        const doc = new CountingTarget()
+        g.document = doc
+        try {
+            backOff(2) // waiting 1 s
+            expect(doc.live).toBe(0)
+            const before = TestSocket.instances.length
+            jest.advanceTimersByTime(1_000)
+            expect(TestSocket.instances).toHaveLength(before + 1)
+            client.reconnectNow() // dialling: nothing to do
+            expect(TestSocket.instances).toHaveLength(before + 1)
+        } finally {
+            delete g.document
+        }
+    })
+})
+
+describe('ApiClient when the executor refuses the token', () => {
+    const REASON = 'Unauthorized access: the token expired or was revoked'
+    let authFailed: jest.Mock
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        jest.useFakeTimers()
+        authFailed = jest.fn()
+        client.onAuthFailed(authFailed)
+    })
+    afterEach(() => jest.useRealTimers())
+
+    it('rejects sent calls with 401 on close code 1008, and does not reconnect', async () => {
+        open()
+        socket(0).open()
+        const write = call('perspective.addLink', { uuid: 'u' })
+        const read = call('perspective.all')
+        socket(0).drop(1008, REASON)
+        await expect(write).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        // A read is retried after an ordinary close; a refused token gets no retry.
+        await expect(read).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        expect(authFailed).toHaveBeenCalledTimes(1)
+        expect(authFailed).toHaveBeenCalledWith(REASON)
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
+    it('rejects a call still waiting to go out with 401 when the socket closes 1008 before it opens', async () => {
+        const queued = call('agent.get')
+        socket(0).drop(1008, REASON)
+        await expect(queued).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        expect(authFailed).toHaveBeenCalledTimes(1)
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
+    it('rejects a waiting watchApplied() with 401 when the socket closes 1008 before it opens', async () => {
+        open()
+        const applied = client.watchApplied()
+        socket(0).drop(1008, REASON)
+        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+    })
+
+    it('rejects a waiting watchApplied() with the reason when the socket closes 1013 before it opens', async () => {
+        const LOCKED = 'Executor is locked: ask the operator to unlock it, then reconnect'
+        open()
+        const applied = client.watchApplied()
+        socket(0).drop(1013, LOCKED)
+        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 503, body: LOCKED })
+        expect(authFailed).not.toHaveBeenCalled()
+    })
+
+    it('fails every later call with 401 without opening a socket', async () => {
+        open()
+        socket(0).drop(1008, REASON)
+        open()
+        await expect(call('agent.get')).rejects.toMatchObject({ status: 401, body: REASON })
+        await expect(client.watchApplied()).rejects.toMatchObject({ status: 401 })
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
+    it('rejects watchApplied() with 401 when the executor refuses events.watch on an open socket', async () => {
+        open()
+        jest.runAllTicks() // fake timers hold the queued watch flush
+        socket(0).open()
+        const watch = socket(0).sent.find((m) => m.type === 'events.watch')!
+        const applied = client.watchApplied()
+        socket(0).reply({ id: watch.id, error: { code: 401, message: REASON } })
+        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        expect(authFailed).toHaveBeenCalledTimes(1)
+    })
+
+    it('fails every pending call on a 401 reply and stops once the executor closes the socket', async () => {
+        open()
+        socket(0).open()
+        const first = call('agent.get')
+        const second = call('perspective.addLink', { uuid: 'u' })
+        socket(0).reply({ id: socket(0).sent.find((m) => m.type === 'agent.get')!.id, error: { code: 401, message: REASON } })
+        await expect(first).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        await expect(second).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        expect(socket(0).readyState).toBe(3)
+        socket(0).drop(1008, REASON)
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(authFailed).toHaveBeenCalledTimes(1)
+    })
+
+    it('still reconnects after an ordinary close, with 503 for an unsent write', async () => {
+        open()
+        socket(0).open()
+        const write = call('perspective.addLink', { uuid: 'u' })
+        socket(0).drop()
+        await expect(write).rejects.toMatchObject({ status: 503 })
+        jest.advanceTimersByTime(500)
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(authFailed).not.toHaveBeenCalled()
+    })
+
+    // A locked wallet is a state of the executor: the token may be good. 1013 is not an auth failure.
+    it('treats close code 1013 (executor locked) as an ordinary close that carries its reason', async () => {
+        const LOCKED = 'Executor is locked: ask the operator to unlock it, then reconnect'
+        open()
+        socket(0).open()
+        const write = call('perspective.addLink', { uuid: 'u' })
+        socket(0).drop(1013, LOCKED)
+        await expect(write).rejects.toMatchObject({ name: 'RpcError', status: 503, body: LOCKED })
+        expect(authFailed).not.toHaveBeenCalled()
+        jest.advanceTimersByTime(500)
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(socket(1).url).toBe(socket(0).url)
+    })
+
+    it('leaves a new client, with a new token, free to connect', async () => {
+        open()
+        socket(0).drop(1008, REASON)
+        const fresh = new ApiClient(url, 'new-token', TestSocket as unknown as new (url: string) => WebSocket)
+        const reply = (fresh.call as UntypedCall)('agent.get', {})
+        socket(1).open()
+        expect(socket(1).url).toContain('token=new-token')
+        socket(1).reply({ id: socket(1).sent.find((m) => m.type === 'agent.get')!.id, result: { did: 'd' } })
+        await expect(reply).resolves.toEqual({ did: 'd' })
+        fresh.closeAll()
+    })
+})
+
+describe('long calls', () => {
+    beforeEach(() => jest.useFakeTimers())
+    afterEach(() => jest.useRealTimers())
+
+    const calls: [string, (o?: object) => Promise<unknown>][] = [
+        ['ai.prompt', (o) => new AIClient(url, undefined, client).prompt('t', 'p', o)],
+        ['ai.embed', (o) => new AIClient(url, undefined, client).embed('m', 'x', o)],
+        ['ai.addModel', (o) => new AIClient(url, undefined, client).addModel({ name: 'm', modelType: 'LLM' } as any, o)],
+        ['agent.generate', (o) => new AgentClient(url, undefined, client).generate('pw', o)],
+        ['agent.unlock', (o) => new AgentClient(url, undefined, client).unlock('pw', true, o)],
+        ['language.publish', (o) => new LanguageClient(url, undefined, client).publish('/p', { name: 'l' } as any, o)],
+        ['language.applyTemplate', (o) => new LanguageClient(url, undefined, client).applyTemplateAndPublish('h', '{}', o)],
+        ['neighbourhood.publish', (o) => new NeighbourhoodClient(url, undefined, client).publishFromPerspective('u', 'l', { links: [] } as any, o)],
+        ['neighbourhood.join', (o) => new NeighbourhoodClient(url, undefined, client).joinFromUrl('n://x', o)],
+        ['runtime.restartHolochain', (o) => new RuntimeClient(url, undefined, client).restartHolochain(o)],
+        ['perspective.runInterpretation', (o) => new PerspectiveClient(url, undefined, client).runInterpretation('u', [], 'b', undefined, undefined, undefined, undefined, o)],
+        ['perspective.runInterpretationWithHarness', (o) => new PerspectiveClient(url, undefined, client).runInterpretationWithHarness('u', [], 'b', 1, undefined, undefined, undefined, undefined, undefined, o)],
+    ]
+    const proxy = () => new PerspectiveProxy(
+        new PerspectiveHandle('u', 'p'),
+        new PerspectiveClient(url, undefined, client),
+    )
+    const proxyCalls: typeof calls = [
+        ['perspective.runInterpretation', (o) => proxy().runInterpretation([], 'b', undefined, o)],
+        ['perspective.runInterpretationWithHarness', (o) => proxy().runInterpretationWithHarness([], 'b', 1, undefined, undefined, undefined, undefined, o)],
+    ]
+    const lastSent = () => TestSocket.instances[TestSocket.instances.length - 1].sent.at(-1)!
+
+    describe.each([['client', calls], ['PerspectiveProxy', proxyCalls]])('%s', (_via, table) => {
+        it.each(table)('%s waits LONG_TIMEOUT_MS by default', async (type, run) => {
+            const outcome = outcomeOf(run())
+            await jest.advanceTimersByTimeAsync(1)
+            expect(lastSent().type).toBe(type)
+
+            await jest.advanceTimersByTimeAsync(31_000)
+            expect(outcome()).toBe('pending')
+            await jest.advanceTimersByTimeAsync(LONG_TIMEOUT_MS)
+            expect(outcome()).toMatchObject({ name: 'RpcError', status: 408 })
+        })
+
+        it.each(table)('%s takes timeoutMs', async (_type, run) => {
+            const timedOut = outcomeOf(run({ timeoutMs: 100 }))
+            await jest.advanceTimersByTimeAsync(100)
+            expect(timedOut()).toMatchObject({ status: 408 })
+        })
+    })
+})
+
+/** A `link-added` event exactly as the executor sends it. */
+function linkAdded(perspectiveUuid: string, target = 'literal://x') {
+    return {
+        type: 'link-added',
+        perspectiveUuid,
+        link: {
+            author: 'did:test:alice',
+            timestamp: '2026-01-01T00:00:00Z',
+            data: { source: 'ad4m://self', predicate: 'ad4m://has', target },
+            proof: { key: 'key', signature: 'sig', valid: true, invalid: false },
+            status: 'SHARED',
+        },
+    }
+}
+
+/** An `agent-updated` event exactly as the executor sends it. */
+const agentUpdated = { type: 'agent-updated', agent: { did: 'did:test:alice', directMessageLanguage: null, perspective: null } }
+
+describe('ApiClient.on', () => {
+    it('delivers an event, as sent, to the handlers of its type only', async () => {
+        const added: unknown[] = []
+        const updated: unknown[] = []
+        client.on('link-added', (e) => { added.push(e) })
+        client.on('agent-updated', (e) => { updated.push(e) })
+        await flush()
+
+        socket(0).reply(linkAdded('p1'))
+
+        expect(added).toEqual([linkAdded('p1')])
+        expect(updated).toEqual([])
+    })
+
+    it('delivers a scoped event only to handlers of its perspective or of every perspective', async () => {
+        const p1: string[] = []
+        const p2: string[] = []
+        const all: string[] = []
+        client.on('link-added', (e) => { p1.push(e.link.data.target) }, { perspective: 'p1' })
+        client.on('link-added', (e) => { p2.push(e.link.data.target) }, { perspective: 'p2' })
+        client.on('link-added', (e) => { all.push(e.link.data.target) })
+        await flush()
+
+        socket(0).reply(linkAdded('p1', 'literal://a'))
+        socket(0).reply(linkAdded('p2', 'literal://b'))
+
+        expect(p1).toEqual(['literal://a'])
+        expect(p2).toEqual(['literal://b'])
+        expect(all).toEqual(['literal://a', 'literal://b'])
+    })
+
+    it('stops delivery once unsubscribed and keeps the other handlers', async () => {
+        const first = jest.fn()
+        const second = jest.fn()
+        const off = client.on('link-added', first)
+        client.on('link-added', second)
+        await flush()
+
+        off()
+        socket(0).reply(linkAdded('p1'))
+
+        expect(first).not.toHaveBeenCalled()
+        expect(second).toHaveBeenCalledTimes(1)
+    })
+
+    it('skips a handler removed during dispatch and delivers to one added during dispatch from the next event', async () => {
+        const received: string[] = []
+        let offSecond = () => {}
+        client.on('link-added', () => {
+            received.push('first')
+            offSecond()
+            client.on('link-added', () => { received.push('added') })
+        })
+        offSecond = client.on('link-added', () => { received.push('second') })
+        await flush()
+
+        socket(0).reply(linkAdded('p1'))
+        expect(received).toEqual(['first'])
+
+        socket(0).reply(linkAdded('p1'))
+        expect(received).toEqual(['first', 'first', 'added'])
+    })
+
+    it('removes a type from watchedEvents() with its last unsubscribe', () => {
+        const offAll = client.on('link-added', () => {})
+        const offP1 = client.on('link-added', () => {}, { perspective: 'p1' })
+        const offP2 = client.on('link-added', () => {}, { perspective: 'p2' })
+        client.on('agent-updated', () => {})
+        expect(client.watchedEvents()).toEqual({ 'agent-updated': null, 'link-added': null })
+
+        offAll()
+        expect(client.watchedEvents()).toEqual({ 'agent-updated': null, 'link-added': ['p1', 'p2'] })
+        offP1()
+        expect(client.watchedEvents()).toEqual({ 'agent-updated': null, 'link-added': ['p2'] })
+        offP2()
+        expect(client.watchedEvents()).toEqual({ 'agent-updated': null })
+    })
+
+    it('sends the executor the watched events on open', async () => {
+        TestSocket.autoOpen = false
+        client.on('link-added', () => {}, { perspective: 'p1' })
+        client.on('agent-updated', () => {})
+        await flush()
+        socket(0).open()
+
+        expect(socket(0).sent).toEqual([
+            expect.objectContaining({ type: 'events.watch', params: { 'agent-updated': null, 'link-added': ['p1'] } }),
+        ])
+    })
+
+    it('clears the watch when the last handler goes while a call keeps the socket open', async () => {
+        TestSocket.autoOpen = false
+        const off = client.on('link-added', () => {})
+        await flush()
+        socket(0).open()
+        const pending = call('agent.get', {})
+        off()
+        await flush()
+
+        const watches = socket(0).sent.filter(m => m.type === 'events.watch').map(m => m.params)
+        expect(watches).toEqual([{ 'link-added': null }, {}])
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ id: socket(0).sent.find(m => m.type === 'agent.get')!.id, result: null })
+        await pending
+    })
+
+    it('ignores a second registration of the same handler for the same type and perspective', async () => {
+        const handler = jest.fn()
+        const off = client.on('link-added', handler, { perspective: 'p1' })
+        const offAgain = client.on('link-added', handler, { perspective: 'p1' })
+        await flush()
+
+        socket(0).reply(linkAdded('p1'))
+        expect(handler).toHaveBeenCalledTimes(1)
+
+        // Both returned functions release the one registration.
+        offAgain()
+        expect(client.watchedEvents()).toEqual({})
+        off()
+        socket(0).reply(linkAdded('p1'))
+        expect(handler).toHaveBeenCalledTimes(1)
+    })
+
+    it('treats one handler under two perspectives as two registrations', async () => {
+        const handler = jest.fn()
+        client.on('link-added', handler, { perspective: 'p1' })
+        const offP2 = client.on('link-added', handler, { perspective: 'p2' })
+        await flush()
+
+        offP2()
+        socket(0).reply(linkAdded('p1'))
+        socket(0).reply(linkAdded('p2'))
+        expect(handler).toHaveBeenCalledTimes(1)
+        expect(client.watchedEvents()).toEqual({ 'link-added': ['p1'] })
+    })
+
+    it('keeps delivering an event to later handlers when one handler throws', async () => {
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
+        const received: string[] = []
+        client.on('agent-updated', () => { received.push('first') })
+        client.on('agent-updated', () => { throw new Error('boom') })
+        client.on('agent-updated', () => { received.push('third') })
+        await flush()
+
+        socket(0).reply(agentUpdated)
+
+        expect(received).toEqual(['first', 'third'])
+        expect(errorSpy).toHaveBeenCalledWith("Error in 'agent-updated' handler:", expect.objectContaining({ message: 'boom' }))
+        errorSpy.mockRestore()
+    })
+
+    it('logs a rejection from an async handler instead of leaving it unhandled', async () => {
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
+        const unhandled = jest.fn()
+        process.on('unhandledRejection', unhandled)
+        const received: string[] = []
+        client.on('agent-updated', async () => { throw new Error('async boom') })
+        client.on('agent-updated', () => { received.push('second') })
+        await flush()
+
+        socket(0).reply(agentUpdated)
+        await flush()
+
+        expect(received).toEqual(['second'])
+        expect(errorSpy).toHaveBeenCalledWith("Error in 'agent-updated' handler:", expect.objectContaining({ message: 'async boom' }))
+        expect(unhandled).not.toHaveBeenCalled()
+        process.off('unhandledRejection', unhandled)
+        errorSpy.mockRestore()
+    })
+
+    it('opens no socket until the first handler, and closes it after the last unsubscribe', () => {
+        expect(TestSocket.instances).toHaveLength(0)
+        const off = client.on('agent-updated', () => {})
+        expect(TestSocket.instances).toHaveLength(1)
+
+        off()
+        expect(socket(0).readyState).toBe(3)
+    })
+})
+
+describe('PerspectiveProxy.on', () => {
+    const proxyFor = (uuid: string) => new PerspectiveProxy(
+        new PerspectiveHandle(uuid, uuid),
+        new PerspectiveClient(url, undefined, client),
+    )
+
+    it("delivers only the proxy's perspective's events", async () => {
+        const received: string[] = []
+        proxyFor('p1').on('link-added', ({ link }) => { received.push(link.data.target) })
+        await flush()
+
+        socket(0).reply(linkAdded('p2', 'literal://other'))
+        socket(0).reply(linkAdded('p1', 'literal://mine'))
+
+        expect(received).toEqual(['literal://mine'])
+        expect(client.watchedEvents()).toEqual({ 'link-added': ['p1'] })
+    })
+
+    it('releases every handler it registered on dispose() and leaves other proxies\' handlers', async () => {
+        const mine = jest.fn()
+        const other = jest.fn()
+        const proxy = proxyFor('p1')
+        const sibling = proxyFor('p1')
+        proxy.on('link-added', mine)
+        proxy.on('link-removed', mine)
+        proxy.on('sync-state-change', mine)
+        sibling.on('link-added', other)
+        await flush()
+
+        proxy.dispose()
+        expect(client.watchedEvents()).toEqual({ 'link-added': ['p1'] })
+
+        socket(0).reply(linkAdded('p1'))
+        expect(mine).not.toHaveBeenCalled()
+        expect(other).toHaveBeenCalledTimes(1)
+    })
+
+    it("a proxy's dispose() leaves another proxy's registration of the same function", async () => {
+        const shared = jest.fn()
+        const proxy = proxyFor('p1')
+        const sibling = proxyFor('p1')
+        proxy.on('link-added', shared)
+        sibling.on('link-added', shared)
+        await flush()
+
+        proxy.dispose()
+        socket(0).reply(linkAdded('p1'))
+        expect(shared).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not release a handler twice when its function runs before dispose()', async () => {
+        const proxy = proxyFor('p1')
+        const handler = jest.fn()
+        const off = proxy.on('link-added', handler)
+        off()
+        // The client now holds a new registration of the same handler; dispose() must not drop it.
+        client.on('link-added', handler, { perspective: 'p1' })
+        proxy.dispose()
+        await flush()
+
+        // off() left no handler, so the client closed its socket; the new registration opened another.
+        TestSocket.instances.at(-1)!.reply(linkAdded('p1'))
+        expect(handler).toHaveBeenCalledTimes(1)
+    })
+})

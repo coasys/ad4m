@@ -2,9 +2,13 @@ import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
 
 export class ModelApi {
     baseUrl: string;
-    apiKey: string;
+    /** Whether the model has a provider key. The executor never returns the key itself. */
+    hasApiKey: boolean;
     model: string;
     apiType: String;
+    /** Optional ceiling for the provider's context window (tokens).
+     *  Read by the Ollama provider to bound num_ctx / KV-cache VRAM. */
+    maxNumCtx?: number;
 }
 
 export class TokenizerSource {
@@ -32,9 +36,14 @@ export class Model {
 
 export class ModelApiInput {
     baseUrl: string;
-    apiKey: string;
+    /** The provider key. Empty or left out on `addModel`: no key. Left out on
+     *  `updateModel`: the stored key stays, and the update is refused if `baseUrl`
+     *  changes too. Empty on `updateModel`: the stored key is removed. */
+    apiKey?: string;
     model: string;
     apiType: string;
+    /** Optional ceiling for the provider's context window (tokens). */
+    maxNumCtx?: number;
 }
 
 export class TokenizerSourceInput {

@@ -35,7 +35,7 @@ export function Connect() {
         setURLError("Invalid URL (e.g. http://localhost:12000)");
       } else {
         try {
-          const client = await buildAd4mClient(url!, false);
+          const client = await buildAd4mClient(url!);
 
           const id = setTimeout(() => {
             resolve(true);

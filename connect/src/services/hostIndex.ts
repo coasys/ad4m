@@ -45,6 +45,6 @@ export async function fetchUserInfo(ad4mClient: Ad4mClient): Promise<UserInfo> {
 export async function requestPayment(
   ad4mClient: Ad4mClient,
   amountHOT: number
-): Promise<{ success: boolean; message: string }> {
+): Promise<{ success: boolean; amountHOT: string }> {
   return ad4mClient.agent.requestPayment(amountHOT.toString());
 }

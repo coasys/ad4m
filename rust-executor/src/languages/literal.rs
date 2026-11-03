@@ -1,17 +1,28 @@
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde_json::Value as JsonValue;
 
 use super::error::LanguageError;
 
+/// Percent-encoding set matching JS `encodeRFC3986URIComponent`, which the
+/// SDK's `Literal.toUrl()` uses: everything but `A-Z a-z 0-9 - _ . ~` is
+/// escaped. The store renders `literal:string:` / `literal:json:` targets with
+/// the same set.
+pub(crate) const RFC3986_COMPONENT_ENCODE: AsciiSet = NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
 /// Encode a JSON value into a literal URL expression part.
 ///
-/// Mirrors the TypeScript `Literal.from(value).toUrl()` behavior.
+/// Mirrors the TypeScript `Literal.from(value).toUrl()` behavior, including
+/// its percent-encoding set.
 /// For primitive types, uses the corresponding prefix (`string:`, `number:`, `boolean:`).
 /// For objects/arrays, uses `json:` prefix with percent-encoded JSON serialization.
 pub fn literal_encode(value: &JsonValue) -> String {
     match value {
         JsonValue::String(s) => {
-            let encoded = utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
+            let encoded = utf8_percent_encode(s, &RFC3986_COMPONENT_ENCODE).to_string();
             format!("string:{}", encoded)
         }
         JsonValue::Number(n) => {
@@ -23,7 +34,7 @@ pub fn literal_encode(value: &JsonValue) -> String {
         _ => {
             // For objects, arrays, null — use json: prefix
             let json_str = serde_json::to_string(value).unwrap_or_default();
-            let encoded = utf8_percent_encode(&json_str, NON_ALPHANUMERIC).to_string();
+            let encoded = utf8_percent_encode(&json_str, &RFC3986_COMPONENT_ENCODE).to_string();
             format!("json:{}", encoded)
         }
     }
@@ -130,5 +141,19 @@ mod tests {
         let decoded = literal_decode(&encoded).unwrap();
         // Objects are returned as-is (not wrapped)
         assert_eq!(decoded, value);
+    }
+
+    /// Same bytes as the SDK's `Literal.from(v).toUrl()`
+    /// (`encodeRFC3986URIComponent`): `-_.~` stay bare.
+    #[test]
+    fn test_encode_matches_the_sdk_encoding() {
+        assert_eq!(
+            literal_encode(&JsonValue::String("board://status a-b_c.d~e".into())),
+            "string:board%3A%2F%2Fstatus%20a-b_c.d~e"
+        );
+        assert_eq!(
+            literal_encode(&serde_json::json!({ "a": "x-y" })),
+            "json:%7B%22a%22%3A%22x-y%22%7D"
+        );
     }
 }

@@ -1,7 +1,7 @@
 //! Internal API endpoints — authenticated via INTERNAL_API_TOKEN.
 //!
 //! These endpoints serve platform → executor communication only.
-//! They do not use the normal user auth (AuthContext / capabilities).
+//! They do not use the normal session auth (RequestContext / capabilities).
 
 use axum::{http::HeaderMap, response::Json};
 use serde_json::json;
@@ -19,9 +19,12 @@ fn verify_internal_token(headers: &HeaderMap) -> Result<(), ApiError> {
         .unwrap_or("");
 
     let config = crate::config::get_global_config();
-    let expected = config.internal_api_token.as_deref().unwrap_or("");
+    let matches = config
+        .internal_api_token
+        .as_ref()
+        .is_some_and(|expected| !expected.is_empty() && expected.expose_for_compare(token));
 
-    if token.is_empty() || expected.is_empty() || token != expected {
+    if token.is_empty() || !matches {
         return Err(ApiError::Unauthorized(
             "Invalid internal API token".to_string(),
         ));

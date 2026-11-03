@@ -1,8 +1,7 @@
-import { ApiClient } from "../apiClient"
+import {ApiClient, CallOptions } from '../apiClient'
 import { LanguageHandle } from "./LanguageHandle"
 import { LanguageMeta, LanguageMetaInput } from "./LanguageMeta"
 import { LanguageRef } from "./LanguageRef"
-import type { ApplyTemplateRequest, PublishLanguageRequest, WriteSettingsRequest } from "../generated/api"
 
 export class LanguageClient {
     #apiClient: ApiClient
@@ -12,38 +11,38 @@ export class LanguageClient {
     }
 
     async byAddress(address: string): Promise<LanguageHandle> {
-        return this.#apiClient.call<LanguageHandle>('language.get', { address })
+        return this.#apiClient.call('language.get', { address })
     }
 
     async byFilter(filter: string): Promise<LanguageHandle[]> {
-        return this.#apiClient.call<LanguageHandle[]>('language.all', { filter })
+        return this.#apiClient.call('language.all', { filter })
     }
 
     async all(): Promise<LanguageHandle[]> {
-        return this.#apiClient.call<LanguageHandle[]>('language.all')
+        return this.#apiClient.call('language.all', {})
     }
 
     async writeSettings(languageAddress: string, settings: string): Promise<Boolean> {
-        return this.#apiClient.call<Boolean>('language.writeSettings', { address: languageAddress, settings })
+        return this.#apiClient.call('language.writeSettings', { address: languageAddress, settings })
     }
 
-    async applyTemplateAndPublish(sourceLanguageHash: string, templateData: string): Promise<LanguageRef> {
-        return this.#apiClient.call<LanguageRef>('language.applyTemplate', { sourceLanguageHash, templateData })
+    async applyTemplateAndPublish(sourceLanguageHash: string, templateData: string, options?: CallOptions): Promise<LanguageRef> {
+        return this.#apiClient.call('language.applyTemplate', { sourceLanguageHash, templateData }, options)
     }
 
-    async publish(languagePath: string, languageMeta: LanguageMetaInput): Promise<LanguageMeta> {
-        return this.#apiClient.call<LanguageMeta>('language.publish', { languagePath, languageMeta })
+    async publish(languagePath: string, languageMeta: LanguageMetaInput, options?: CallOptions): Promise<LanguageMeta> {
+        return this.#apiClient.call('language.publish', { languagePath, languageMeta }, options)
     }
 
     async meta(address: string): Promise<LanguageMeta> {
-        return this.#apiClient.call<LanguageMeta>('language.meta', { address })
+        return this.#apiClient.call('language.meta', { address })
     }
 
     async source(address: string): Promise<string> {
-        return this.#apiClient.call<string>('language.source', { address })
+        return this.#apiClient.call('language.source', { address })
     }
 
     async remove(address: string): Promise<Boolean> {
-        return this.#apiClient.call<Boolean>('language.remove', { address })
+        return this.#apiClient.call('language.remove', { address })
     }
 }

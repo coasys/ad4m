@@ -2,11 +2,12 @@ import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import { CallOptions } from "../apiClient";
 import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue, compileWhereClause } from "./query-utils";
-import { resolveParentPredicate } from "./query-common";
+import { requireSingleParent, resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
@@ -17,12 +18,13 @@ import {
   normalizeValue,
 } from "./hydration";
 import type {
-  Scope, IncludeMap, Query,
+  Scope, TraverseScope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
-  TypedQuery, IncludeExtras, IncludeOf,
+  TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
+import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./types";
 
 
 
@@ -136,6 +138,105 @@ function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): 
     }
     if (TargetClass) applyPolymorphicIncludeDefaults(nested, TargetClass);
   }
+}
+
+/**
+ * Split an include map into its relations and its `$`-prefixed projections.
+ *
+ * The two travel in different fields: a relation is hydrated, a projection is
+ * computed over one. Both halves are new objects, so the caller's query is left
+ * as it was written and can be sent again.
+ */
+function splitIncludeProjections(include: IncludeMap): {
+  includes: IncludeMap;
+  projections: Record<string, IncludeProjection>;
+} {
+  const includes: IncludeMap = {};
+  const projections: Record<string, IncludeProjection> = {};
+  for (const [key, val] of Object.entries(include)) {
+    if (key.startsWith('$')) {
+      projections[key] = { ...(val as IncludeProjection) };
+    } else {
+      includes[key] = val;
+    }
+  }
+  return { includes, projections };
+}
+
+/**
+ * Tag each projection with its target class name, so the executor can resolve
+ * the target shape through its in-memory cache when applying a projection's
+ * where-clause. `ctor` is the class the projections are read against; without
+ * one (the members of a polymorphic relation) nothing is tagged, and the
+ * executor resolves each projection against each member's own class.
+ */
+function tagProjectionTargets(projections: Record<string, IncludeProjection>, ctor: Function | undefined): void {
+  if (!ctor) return;
+  const allRelMeta = getRelationsMetadata(ctor);
+  for (const proj of Object.values(projections)) {
+    const relMeta = allRelMeta[proj.from];
+    if (!proj.targetClassName && relMeta?.target) {
+      try {
+        const TargetClass = relMeta.target();
+        const targetMeta = (TargetClass as any).getModelMetadata?.();
+        if (targetMeta?.className) {
+          proj.targetClassName = targetMeta.className;
+        }
+      } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
+    }
+  }
+}
+
+/**
+ * Move the `$`-prefixed keys of every nested include into that sub-query's own
+ * `projections`, at every depth.
+ *
+ * The executor reads a sub-query exactly as it reads a top-level query, so a
+ * projection on related records belongs in the sub-query's `projections` field,
+ * as it does at the top. Left inside `include` it named a relation that does not
+ * exist and was skipped: the query succeeded and the field was simply absent, so
+ * `include: { posts: { include: { $likeCount: … } } }` came back without counts
+ * and said nothing.
+ *
+ * Copies every sub-query it changes rather than editing it, so a query object
+ * the caller keeps (a subscription re-preparing its query, say) still says what
+ * it said.
+ */
+function liftNestedProjections(includes: IncludeMap, ctor: Function | undefined): IncludeMap {
+  const relMeta = ctor ? getRelationsMetadata(ctor) : {};
+  const out: IncludeMap = {};
+  for (const [relName, val] of Object.entries(includes)) {
+    if (typeof val !== 'object' || val === null || relName.startsWith('$')) {
+      out[relName] = val;
+      continue;
+    }
+    const subQuery: any = { ...val };
+    // The class the nested keys are read against. A polymorphic relation's
+    // members are of several classes, so there is none to name: its nested
+    // projections go untagged and the executor resolves them per member class.
+    let TargetClass: Function | undefined;
+    if (!subQuery.polymorphic) {
+      try {
+        TargetClass = relMeta[relName]?.target?.();
+      } catch (e) {
+        console.debug(`prepareModelQueryParams: target class unavailable for include '${relName}':`, e);
+      }
+    }
+    if (subQuery.include && typeof subQuery.include === 'object') {
+      const { includes: nestedIncludes, projections } = splitIncludeProjections(subQuery.include);
+      if (Object.keys(nestedIncludes).length > 0) {
+        subQuery.include = liftNestedProjections(nestedIncludes, TargetClass);
+      } else {
+        delete subQuery.include;
+      }
+      if (Object.keys(projections).length > 0) {
+        tagProjectionTargets(projections, TargetClass);
+        subQuery.projections = { ...(subQuery.projections ?? {}), ...projections };
+      }
+    }
+    out[relName] = subQuery;
+  }
+  return out;
 }
 
 function jsonToModelInstance<T extends Ad4mModel>(
@@ -272,6 +373,37 @@ function jsonToModelInstance<T extends Ad4mModel>(
   return instance;
 }
 
+
+/**
+ * Put `childId` under `parent`. A containment scope `{ id }` writes through the
+ * built-in `Container` (#1446): the executor runs the adder of the parent's own
+ * `children` relation when its class has one (a block's `we://child`), else
+ * writes `ad4m://has_child`. The other forms write their one predicate.
+ */
+async function linkToParent(
+  perspective: PerspectiveProxy,
+  parent: Exclude<Scope, TraverseScope>,
+  childCtor: Function,
+  childId: string,
+  batchId?: string,
+): Promise<void> {
+  if (isContainedScope(parent)) {
+    await perspective.updateSubject(
+      "ad4m://Container",
+      parent.id,
+      { children: { action: "adder", value: [childId] } },
+      batchId,
+    );
+    return;
+  }
+  const link = new Link({
+    source: parent.id,
+    predicate: resolveParentPredicate(parent, childCtor),
+    target: childId,
+  });
+  await perspective.add(link, 'shared', batchId);
+}
+
 /**
  * Base class for defining data models in AD4M.
  * 
@@ -388,9 +520,18 @@ export class Ad4mModel {
   private _baseExpression: string;
   private _perspective: PerspectiveProxy;
   private _snapshot: Record<string, any> | null = null;
+  /** True when the constructor minted the id: no record can hold links yet. */
+  private _idMinted: boolean = false;
+  /** Predicates this instance has already written relation links under (`add*`/`set*`), so they may hold links. */
+  private _relationsWritten = new Set<string>();
   author: string;
   createdAt: any;
   updatedAt: any;
+  /**
+   * Per-link rows for the entries asked for with `Query.links`, keyed as they
+   * were asked. Absent when the query did not ask for any.
+   */
+  declare __links?: LinksMap;
 
   /**
    * Backwards compatibility alias for createdAt.
@@ -531,12 +672,14 @@ export class Ad4mModel {
         predicate: options.predicate || "",
         ...(options.local !== undefined && { local: options.local }),
         ...(options.getter !== undefined && { getter: options.getter }),
+        ...(options.readOnly && { readOnly: true }),
         direction: (options.kind === 'belongsToMany' || options.kind === 'belongsToOne') ? 'reverse' : 'forward',
         ...(options.kind !== undefined && { kind: options.kind }),
         ...(options.maxCount !== undefined && { maxCount: options.maxCount }),
         ...(options.target !== undefined && { target: options.target }),
         ...(options.filter !== undefined && { filter: options.filter }),
         ...(options.where !== undefined && { where: options.where }),
+        ...(options.ordering !== undefined && { ordering: options.ordering }),
       };
     }
     
@@ -621,6 +764,7 @@ export class Ad4mModel {
     // IRIs, so relation links like `<post> --has_comment--> <comment-id>`
     // round-trip correctly through the SPARQL store.
     this._baseExpression = baseExpression ? baseExpression : `ad4m://obj/${makeRandomId(24)}`;
+    this._idMinted = !baseExpression;
     this._perspective = perspective;
   }
 
@@ -846,10 +990,22 @@ export class Ad4mModel {
       const original = this._snapshot[field];
 
       if (Array.isArray(current) || Array.isArray(original)) {
-        // Order-insensitive comparison (sorted) so reordering alone
-        // doesn't mark a relation as dirty.
-        const a = Array.isArray(current) ? [...current].sort() : [];
-        const b = Array.isArray(original) ? [...original].sort() : [];
+        // For an ordered relation the sequence *is* the state, so a reorder is
+        // the whole change and must mark the field dirty — sorting first would
+        // make `save()` a no-op for the one edit the ordering feature exists to
+        // support.
+        //
+        // Everything else compares order-insensitively, because an unordered
+        // relation is a set: the executor returns its members by link timestamp,
+        // and a caller who assigned the same members in another order has not
+        // changed anything.
+        const ordered = !!(metadata.relations as any)[field]?.ordering;
+        const a = Array.isArray(current) ? [...current] : [];
+        const b = Array.isArray(original) ? [...original] : [];
+        if (!ordered) {
+          a.sort();
+          b.sort();
+        }
         if (a.length !== b.length || a.some((v: any, i: number) => v !== b[i])) {
           changed.push(field);
         }
@@ -954,12 +1110,23 @@ export class Ad4mModel {
    * Shape resolution happens server-side from the perspective's SHACL triples.
    * @internal
    */
+  /**
+   * The name the executor knows this class by: its class name, or a
+   * built-in abstract class's URI (`ad4m://TextContent`, #1446). The URI is
+   * the class's own static only: a subclass is a class of its own.
+   * @internal
+   */
+  static queriedAs(): string {
+    const builtinUri = Object.prototype.hasOwnProperty.call(this, 'builtinUri') ? (this as any).builtinUri : undefined;
+    return builtinUri || this.getModelMetadata().className;
+  }
+
   static prepareModelQueryParams(
     query: Query = {},
     classNameOverride?: string | null,
   ): { className: string; queryJson: string; metadata: ModelMetadata } {
     const metadata = this.getModelMetadata();
-    const className = classNameOverride || metadata.className;
+    const className = classNameOverride || this.queriedAs();
 
     // Expand includeAll: true to a full IncludeMap covering every forward relation.
     if (query.includeAll) {
@@ -974,23 +1141,51 @@ export class Ad4mModel {
     }
 
     const queryInput: any = {};
-    if (query.parent) {
+    if (query.parent && isContainedScope(query.parent)) {
+      // Containment: the executor resolves the predicates from the installed
+      // classes, so only the id travels.
+      queryInput.parent = { id: query.parent.id };
+    } else if (query.parent && isContainmentTraversal(query.parent)) {
+      // A traversal over containment: no predicate travels either.
+      const t = query.parent;
+      const traverse: Record<string, unknown> = { ids: t.ids };
+      if (t.transitive !== undefined) traverse.transitive = t.transitive;
+      if (t.direction !== undefined) traverse.direction = t.direction;
+      if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
+      if (t.levels !== undefined) traverse.levels = t.levels;
+      if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
+      queryInput.parent = traverse;
+    } else if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
-      queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+      // A traversal keeps its own shape on the wire: the executor reads `ids`,
+      // and flattening it to one `id` here is how a request for a whole level
+      // would quietly become a request for one parent's children.
+      //
+      // Its fields are named rather than spread, because `model` — the class
+      // itself — is how the scope may name its predicate, and that is a
+      // constructor, not something to put in a query variable. The predicate is
+      // resolved above; what travels is the result.
+      if (isTraverseScope(query.parent)) {
+        const t = query.parent;
+        const traverse: Record<string, unknown> = {
+          ids: t.ids,
+          predicate: parentPredicate,
+        };
+        if (t.transitive !== undefined) traverse.transitive = t.transitive;
+        if (t.direction !== undefined) traverse.direction = t.direction;
+        if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
+        if (t.levels !== undefined) traverse.levels = t.levels;
+        if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
+        queryInput.parent = traverse;
+      } else {
+        queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+      }
     }
     if (query.properties) queryInput.properties = query.properties;
     if (query.include) {
-      // Split include keys: $-prefixed / IncludeProjection values → queryInput.projections
-      // All other keys (boolean | RelationSubQuery) → queryInput.include
-      const normalIncludes: IncludeMap = {};
-      const projections: Record<string, IncludeProjection> = {};
-      for (const [key, val] of Object.entries(query.include)) {
-        if (key.startsWith('$')) {
-          projections[key] = val as IncludeProjection;
-        } else {
-          normalIncludes[key] = val;
-        }
-      }
+      // $-prefixed keys → queryInput.projections; all other keys (boolean |
+      // RelationSubQuery) → queryInput.include.
+      const { includes: normalIncludes, projections } = splitIncludeProjections(query.include);
       // A relation declared `polymorphic` reads that way by default, so the
       // caller writes `include: { children: true }` and still gets each child
       // hydrated as the class it actually is. Declaring it on the model rather
@@ -1000,25 +1195,10 @@ export class Ad4mModel {
       // every depth, since a nested include is a fact about the data too.
       if (Object.keys(normalIncludes).length > 0) {
         applyPolymorphicIncludeDefaults(normalIncludes, this as any);
-        queryInput.include = normalIncludes;
+        queryInput.include = liftNestedProjections(normalIncludes, this as any);
       }
       if (Object.keys(projections).length > 0) {
-        // Tag each projection with its target class name so the executor can
-        // resolve the target shape through its in-memory cache when applying
-        // projection where-clause filters.
-        const allRelMeta = getRelationsMetadata(this as any);
-        for (const [, proj] of Object.entries(projections)) {
-          const relMeta = allRelMeta[proj.from];
-          if (!proj.targetClassName && relMeta?.target) {
-            try {
-              const TargetClass = relMeta.target();
-              const targetMeta = (TargetClass as any).getModelMetadata?.();
-              if (targetMeta?.className) {
-                proj.targetClassName = targetMeta.className;
-              }
-            } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
-          }
-        }
+        tagProjectionTargets(projections, this as any);
         queryInput.projections = projections;
       }
     }
@@ -1029,7 +1209,10 @@ export class Ad4mModel {
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
+    if (query.links) queryInput.links = query.links;
     queryInput.deepQuery = query.deepQuery ?? true;
+    if (query.linkStatus != null) queryInput.linkStatus = query.linkStatus;
+    if (query.includeUnverified !== undefined) queryInput.includeUnverified = query.includeUnverified;
 
     // Conformance getters, where filters, and target shapes for includes
     // are all resolved by the executor from the perspective's SHACL triples
@@ -1060,6 +1243,192 @@ export class Ad4mModel {
     return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
   }
 
+  /**
+   * Snapshot freshly built instances for dirty tracking, with the relations
+   * `include` loaded (its `$`-prefixed projection keys are not relations).
+   * Used by every query path, and by ModelQueryBuilder for pushed results.
+   * @internal
+   */
+  static takeSnapshots(instances: Ad4mModel[], include?: IncludeMap): void {
+    const relations = include
+      ? Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')))
+      : undefined;
+    const snapshot = relations && Object.keys(relations).length > 0 ? relations : undefined;
+    for (const inst of instances) inst.takeSnapshot?.(snapshot);
+  }
+
+
+  // ── One query over several classes (#1238) ────────────────────────────────
+
+  /**
+   * Build the wire parameters for one query over several classes.
+   *
+   * Each class normalises the query as it would for itself — its polymorphic
+   * include defaults, its `$` projections, its parent predicate — and the
+   * results are merged: includes and projections by key (the first class that
+   * declares a key decides its form; a projection two classes tag with
+   * different target classes is refused), the parent scope only when every
+   * class that can resolve it resolves it to the same predicate.
+   * @internal
+   */
+  static prepareUnionQueryParams(
+    classes: (typeof Ad4mModel)[],
+    query: Query = {},
+  ): { classNames: string[]; queryJson: string } {
+    if (!classes.length) throw new Error('A query over several classes needs at least one class');
+    const { parent, preferClasses, ...rest } = query;
+    const inputs = classes.map((c) => JSON.parse(c.prepareModelQueryParams(rest).queryJson));
+    // A projection is tagged with its relation's target class, at every depth,
+    // and the executor hydrates a list projection (and resolves its `where`)
+    // as that class. Two classes that tag the same key differently cannot share
+    // one form of it, so the key is refused rather than read as the first's.
+    const tags = new Map<string, string>();
+    const collectTags = (node: any, path: string) => {
+      if (!node || typeof node !== 'object') return;
+      for (const [k, v] of Object.entries(node)) {
+        if (k === 'targetClassName' && typeof v === 'string') {
+          const seen = tags.get(path);
+          if (seen !== undefined && seen !== v) {
+            throw new Error(
+              `projection '${path}': the classes resolve it to different target classes ` +
+              `(${seen}, ${v}); query those classes separately`,
+            );
+          }
+          tags.set(path, v);
+        } else {
+          collectTags(v, path ? `${path}.${k}` : k);
+        }
+      }
+    };
+    for (const input of inputs) {
+      collectTags(input.include, 'include');
+      collectTags(input.projections, 'projections');
+    }
+    const merged: any = { ...inputs[0] };
+    if (preferClasses) merged.preferClasses = preferClasses;
+    for (const key of ['include', 'projections'] as const) {
+      const combined = Object.assign({}, ...inputs.map((i) => i[key] ?? {}).reverse());
+      if (Object.keys(combined).length) merged[key] = combined;
+      else delete merged[key];
+    }
+    if (parent) {
+      // A model-form scope names its predicate through the relation that
+      // targets the queried class, so each class may resolve it differently
+      // or not at all. One query has one scope.
+      const scopes: string[] = [];
+      let firstError: unknown;
+      for (const c of classes) {
+        try {
+          scopes.push(JSON.stringify(JSON.parse(c.prepareModelQueryParams({ parent }).queryJson).parent));
+        } catch (e) {
+          firstError ??= e;
+        }
+      }
+      if (!scopes.length) throw firstError;
+      if (new Set(scopes).size > 1) {
+        throw new Error(
+          'parent(): the classes resolve the parent scope to different predicates; ' +
+          'pass the predicate itself (or a `field`) so they share one scope',
+        );
+      }
+      merged.parent = JSON.parse(scopes[0]);
+    }
+    return {
+      classNames: classes.map((c) => c.queriedAs()),
+      queryJson: JSON.stringify(merged),
+    };
+  }
+
+  /**
+   * Build each row of a union result as the class the executor hydrated it as
+   * (`__subjectClass`). A row of a class not in `classes` stays plain JSON.
+   * @internal
+   */
+  static parseUnionResult(
+    classes: (typeof Ad4mModel)[],
+    perspective: PerspectiveProxy,
+    raw: any,
+    include?: IncludeMap,
+    properties?: string[],
+  ): Ad4mModel[] {
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const arr = data.instances || data;
+    if (!Array.isArray(arr)) return [];
+    const byName = new Map(classes.map((c) => [c.getModelMetadata().className, c]));
+    return arr.map((json: any) => {
+      const cls = byName.get(json?.[SUBJECT_CLASS_KEY]);
+      return cls ? jsonToModelInstance(cls as any, perspective, json, include, properties) : json;
+    });
+  }
+
+  /** @internal */
+  static async executeUnionQuery(
+    perspective: PerspectiveProxy,
+    classes: (typeof Ad4mModel)[],
+    query: Query = {},
+    options?: CallOptions,
+  ): Promise<ResultsWithTotalCount<Ad4mModel>> {
+    const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
+    const result = await perspective.modelQuery(classNames, queryJson, options);
+    const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
+    Ad4mModel.takeSnapshots(results, query.include);
+    return { results, totalCount: result.totalCount };
+  }
+
+  /**
+   * One query over several model classes (#1238).
+   *
+   * `where`, `order`, `limit` and `offset` apply once, over the union. Each
+   * result is an instance of the class the executor hydrated it as: the first
+   * `preferClasses` entry it conforms to, otherwise the most specific of
+   * `classes` it conforms to. A record that is several of them is returned
+   * once; `__subjectClasses` on it names every class it conforms to.
+   *
+   * - `where` on a property a class does not declare excludes that class's rows.
+   * - `order` on such a property sorts those rows last, in both directions,
+   *   then by id.
+   *
+   * @example
+   * ```typescript
+   * const items = await Ad4mModel.findAllOf(perspective, [Placement, EdgeRoute], {
+   *   parent: { id: canvas.id, predicate: "canvas://item" },
+   *   order: { zIndex: "ASC" },
+   *   limit: 50,
+   * });
+   * for (const item of items) {
+   *   if (item instanceof Placement) { ... }
+   * }
+   * ```
+   */
+  static async findAllOf<C extends (typeof Ad4mModel)[]>(
+    perspective: PerspectiveProxy,
+    classes: [...C],
+    query?: Query,
+    options?: CallOptions,
+  ): Promise<InstanceType<C[number]>[]> {
+    const { results } = await Ad4mModel.executeUnionQuery(perspective, classes, query ?? {}, options);
+    return results as InstanceType<C[number]>[];
+  }
+
+  /**
+   * A {@link ModelQueryBuilder} over several model classes: the builder form of
+   * {@link findAllOf}. `subscribe()` registers one subscription, which re-runs
+   * when any of the classes changes.
+   *
+   * @example
+   * ```typescript
+   * const builder = Ad4mModel.queryOf(perspective, [Placement, EdgeRoute])
+   *   .parent(canvas.id, "canvas://item");
+   * await builder.subscribe((items) => render(items));
+   * ```
+   */
+  static queryOf<C extends (typeof Ad4mModel)[]>(
+    perspective: PerspectiveProxy,
+    classes: [...C],
+    query?: Query,
+  ): ModelQueryBuilder<InstanceType<C[number]>> {
+    return new ModelQueryBuilder<InstanceType<C[number]>>(perspective, Ad4mModel, query, classes);
+  }
 
   // instancesFromQueryResult — removed (superseded by Rust executeModelQuery pipeline)
 
@@ -1076,6 +1445,7 @@ export class Ad4mModel {
     perspective: PerspectiveProxy,
     query: Query = {},
     classNameOverride?: string | null,
+    options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T>> {
     // Delegate query input building to the shared prepareModelQueryParams
     // helper.  The executor resolves the shape from SHACL server-side.
@@ -1083,7 +1453,7 @@ export class Ad4mModel {
       query, classNameOverride,
     );
 
-    const result = await perspective.modelQuery(className, queryJson);
+    const result = await perspective.modelQuery(className, queryJson, options);
 
     // Convert JSON instances to model class instances, recursively constructing
     // class instances for any included relations resolved by Rust.
@@ -1091,15 +1461,7 @@ export class Ad4mModel {
       return jsonToModelInstance(this, perspective, json, query.include, query.properties);
     });
 
-    // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
-    const snapshotRelations = query.include
-      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    for (const inst of instances) {
-      (inst as Ad4mModel).takeSnapshot(
-        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
-      );
-    }
+    Ad4mModel.takeSnapshots(instances, query.include);
 
     return {
       results: instances,
@@ -1134,13 +1496,14 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: Q,
+    options?: CallOptions,
   ): Promise<(T & IncludeExtras<T, IncludeOf<Q>>)[]> {
     const q = (query ?? {}) as Query;
     if (q.properties && q.properties.length === 0) {
       throw new Error("properties[] must not be empty — omit the field to return all properties, or specify at least one field name");
     }
 
-    const { results } = await this.executeModelQuery(perspective, q);
+    const { results } = await this.executeModelQuery(perspective, q, undefined, options);
     return results as (T & IncludeExtras<T, IncludeOf<Q>>)[];
   }
 
@@ -1168,9 +1531,10 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: Q,
+    options?: CallOptions,
   ): Promise<(T & IncludeExtras<T, IncludeOf<Q>>) | null> {
     const limitedQuery = { ...((query ?? {}) as Query), limit: 1 } as Q;
-    const results = await this.findAll<T, Q>(perspective, limitedQuery);
+    const results = await this.findAll<T, Q>(perspective, limitedQuery, options);
     return results[0] ?? null;
   }
 
@@ -1195,8 +1559,9 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: Q,
+    options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const out = await this.executeModelQuery(perspective, (query ?? {}) as Query);
+    const out = await this.executeModelQuery(perspective, (query ?? {}) as Query, undefined, options);
     return out as ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>;
   }
 
@@ -1223,9 +1588,10 @@ export class Ad4mModel {
     pageSize: number,
     pageNumber: number,
     query?: Q,
+    options?: CallOptions,
   ): Promise<PaginationResult<T & IncludeExtras<T, IncludeOf<Q>>>> {
     const paginationQuery = { ...((query ?? {}) as Query), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery);
+    const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
     return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount, pageSize, pageNumber };
   }
 
@@ -1259,8 +1625,9 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: TypedQuery<T>,
+    options?: CallOptions,
   ): Promise<number> {
-    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0 });
+    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0 }, undefined, options);
     return totalCount;
   }
 
@@ -1302,10 +1669,31 @@ export class Ad4mModel {
     return String(value);
   }
 
+  /** A relation write on a row read through an abstract class (#1435). The
+   *  relation's predicate is the abstract class's, which no record's class
+   *  reads: the executor runs the adder, remover or setter of each of the
+   *  record's classes for the relation answering to `key`. */
+  private async relationThroughAbstract(
+    abstractName: string,
+    key: string,
+    action: 'adder' | 'remover' | 'setter',
+    value: any,
+    batchId?: string
+  ) {
+    const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
+    await this._perspective.updateSubject(abstractName, this._baseExpression, { [key]: { action, value: ids } }, batchId);
+  }
+
   private async setRelationValues(key: string, value: any, batchId?: string) {
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
+      return;
+    }
+    this._relationsWritten.add(metadata.predicate);
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'setter', value, batchId);
       return;
     }
 
@@ -1332,6 +1720,12 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    this._relationsWritten.add(metadata.predicate);
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'adder', value, batchId);
+      return;
+    }
 
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generateRelationAction(key, 'adder');
@@ -1353,6 +1747,11 @@ export class Ad4mModel {
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
+      return;
+    }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'remover', value, batchId);
       return;
     }
 
@@ -1401,7 +1800,12 @@ export class Ad4mModel {
   async save(batchId?: string) {
     // Existing instance → update path (has been fetched / hydrated before)
     if (this._snapshot) {
-      await this.innerUpdate(true, batchId);
+      const abstractName = this.abstractName();
+      if (abstractName) {
+        await this.perspective.updateSubject(abstractName, this._baseExpression, this.changedValuesForDispatch(), batchId);
+      } else {
+        await this.innerUpdate(true, batchId);
+      }
       if (batchId) {
         // Batch hasn't been committed yet — getData() would fetch stale data
         // and overwrite in-memory values. Just refresh the snapshot so further
@@ -1413,57 +1817,61 @@ export class Ad4mModel {
       return;
     }
 
-    // New instance → create path
+    // New instance → create path. The executor refuses an abstract class
+    // too; refusing here keeps the error ahead of the batch.
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      throw new Error(
+        `'${abstractName}' is an abstract class and cannot be created. Create an instance of ` +
+        `a class that has its properties; querying '${abstractName}' reads it.`
+      );
+    }
     let batchCreatedHere = false;
     if(!batchId) {
       batchId = await this.perspective.createBatch()
       batchCreatedHere = true;
     }
-    
 
-    // Check if the model has any constructor actions (required properties,
-    // flags, or properties with initial values).  Models whose properties are
-    // all optional, have no @Flag, and have no initial values produce an empty
-    // SHACL constructor, so calling createSubject would fail on the Rust side
-    // ("No SHACL constructor found").  In that case we skip createSubject
-    // entirely and let innerUpdate write the links directly.
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    const hasConstructor = Object.values(metadata.properties).some(
-      (p) => p.required || p.flag || p.initial !== undefined
-    );
 
     // Track properties resolved through expression_create — a signed literal
     // envelope or a custom (non-"literal") resolveLanguage. These may fail
     // inside a batch context, so defer them to setProperty after createSubject.
     const deferredExpressionProps: string[] = [];
 
-    if (hasConstructor) {
-      const initialValues = {};
-      for (const [key, value] of Object.entries(this)) {
-        if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
-          const propMeta = metadata.properties[key];
-          if (propMeta && effectiveLiteralStorage(propMeta).kind !== "deterministic") {
-            deferredExpressionProps.push(key);
-            continue;
-          }
-          initialValues[key] = value;
+    const initialValues = {};
+    for (const [key, value] of Object.entries(this)) {
+      if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
+        const propMeta = metadata.properties[key];
+        // Only offer keys with a declared, settable model property. This
+        // excludes ORM bookkeeping fields (_baseExpression, _perspective —
+        // enumerable instance fields, not model properties), relations
+        // (@HasOne also registers a property, but innerUpdate writes it as a
+        // relation), and read-only properties/flags (readOnly: true). None of
+        // these have an `ad4m://setter` on the Rust side, which otherwise logs
+        // a "declares no setter" warning per key on every save().
+        if (!propMeta || propMeta.readOnly || metadata.relations[key]) {
+          continue;
         }
+        if (effectiveLiteralStorage(propMeta).kind !== "deterministic") {
+          deferredExpressionProps.push(key);
+          continue;
+        }
+        initialValues[key] = value;
       }
-
-      const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
-
-      await this.perspective.createSubject(
-        className,
-        this._baseExpression,
-        initialValues,
-        batchId
-      );
     }
 
-    // Set properties and relations via innerUpdate.
-    // When createSubject was skipped (no constructor actions), we must enable
-    // property writing so that scalar values are persisted as links.
-    await this.innerUpdate(!hasConstructor, batchId)
+    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
+
+    await this.perspective.createSubject(
+      className,
+      this._baseExpression,
+      initialValues,
+      batchId
+    );
+
+    // Relations via innerUpdate; createSubject wrote the scalar properties.
+    await this.innerUpdate(false, batchId)
 
     for (const key of deferredExpressionProps) {
       const value = (this as any)[key];
@@ -1484,6 +1892,38 @@ export class Ad4mModel {
       // links (e.g. two competing "title" values).
       this.takeSnapshot();
     }
+  }
+
+  /** The name the executor knows the class by when it is abstract (#1435):
+   *  a built-in's URI (#1446). Through an abstract class, the executor
+   *  writes to the record's own classes. */
+  private abstractName(): string | undefined {
+    const ctor = this.constructor as typeof Ad4mModel & { isAbstract?: boolean };
+    return ctor.isAbstract ? ctor.queriedAs() : undefined;
+  }
+
+  private changedValues(): Record<string, any> {
+    return Object.fromEntries(this.changedFields().map((key) => [key, (this as any)[key]]));
+  }
+
+  /** `changedValues()` with each relation's members as IDs, as the relation
+   *  helpers send them: a member may be a model instance. An action envelope
+   *  (`{ action: "adder", value }`) keeps its action, as `innerUpdate()` runs
+   *  it; an action it does not know is a setter there, so it is one here. */
+  private changedValuesForDispatch(): Record<string, any> {
+    const relations = (this.constructor as typeof Ad4mModel).getModelMetadata().relations;
+    const ids = (value: any) =>
+      Array.isArray(value) ? value.map((v) => this.resolveRelationId(v)) : this.resolveRelationId(value);
+    return Object.fromEntries(
+      Object.entries(this.changedValues()).map(([key, value]) => {
+        if (!relations[key] || value == null) return [key, value];
+        if (value.action) {
+          const action = ["adder", "remover", "setter"].includes(value.action) ? value.action : "setter";
+          return [key, { action, value: ids(value.value) }];
+        }
+        return [key, ids(value)];
+      })
+    );
   }
 
   private cleanCopy() {
@@ -1528,13 +1968,14 @@ export class Ad4mModel {
       // Skip unchanged fields when a snapshot is available
       if (dirty && !dirty.has(key)) continue;
 
-      // Skip read-only computed relations — explicit getters never write links.
+      // Skip read-only relations — explicit getters never write links, and
+      // neither does a relation declared `readOnly`.
       // For target+filter relations, skip only when another relation on this
       // model claims the same predicate (i.e., this is a filtered *view* of a
       // base relation and writing would collide).
       const relMeta = metadata.relations[key];
       if (relMeta) {
-        if (relMeta.getter) continue;
+        if (relMeta.getter || relMeta.readOnly) continue;
         if (relMeta.target && relMeta.filter !== false) {
           // Check for predicate collision with a sibling relation
           const hasCollision = Object.entries(metadata.relations).some(
@@ -1563,7 +2004,10 @@ export class Ad4mModel {
               break;
           }
         } else if (Array.isArray(value)) {
-          // Handle all arrays as relations, including empty ones (which clears the relation)
+          // Handle all arrays as relations, including empty ones (which clears the relation).
+          // A record being created under an id minted here has no links to
+          // clear, so an empty relation there costs a round trip and writes nothing.
+          if (value.length === 0 && !this._snapshot && this._idMinted && !this._relationsWritten.has(this.getRelationOptions(key)?.predicate ?? key)) continue;
           await this.setRelationValues(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
           // A scalar handed to a relation field is a single-member relation.
@@ -1745,7 +2189,9 @@ export class Ad4mModel {
    */
   async delete(batchId?: string) {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    const hasDestructor = Object.values(metadata.properties).some(
+    // Through an abstract class (#1435), `removeSubject` runs the destructors
+    // of the record's own classes.
+    const hasDestructor = !!this.abstractName() || Object.values(metadata.properties).some(
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
@@ -1849,13 +2295,7 @@ export class Ad4mModel {
     if (options?.parent && !options?.batchId) {
       const batchId = await perspective.createBatch();
       await instance.save(batchId);
-      const predicate = resolveParentPredicate(options.parent, this);
-      const link = new Link({
-        source: options.parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', batchId);
+      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, batchId);
       await perspective.commitBatch(batchId);
       // Hydrate the instance now that the batch has been committed (mirrors the
       // behaviour of save() when it manages its own batch).
@@ -1867,13 +2307,7 @@ export class Ad4mModel {
 
     // Create parent → child link if a parent scope was provided
     if (options?.parent) {
-      const predicate = resolveParentPredicate(options.parent, this);
-      const link = new Link({
-        source: options.parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', options?.batchId);
+      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, options?.batchId);
     }
 
     return instance;

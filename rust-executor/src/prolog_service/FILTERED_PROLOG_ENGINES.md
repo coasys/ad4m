@@ -176,7 +176,6 @@ let sdna_facts = {
 ### Service Level API
 ```rust
 // Automatic optimization - no code changes required
-let result = prolog_service.run_query_subscription(perspective_id, query).await?;
 let result = prolog_service.run_query_smart(perspective_id, query).await?;
 ```
 

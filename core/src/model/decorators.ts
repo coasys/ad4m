@@ -36,6 +36,8 @@ export interface RelationMetadataEntry {
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      */
     getter?: string;
+    /** No writer for this relation; see `RelationOptions.readOnly`. */
+    readOnly?: boolean;
     /**
      * Whether to auto-generate a conformance filter when `target` is set.
      * Defaults to `true` — set to `false` to opt out of DB-level type filtering
@@ -72,6 +74,8 @@ export interface RelationMetadataEntry {
      * memoized registry copy.
      */
     interpretationHint?: string;
+    /** Names for abstract classes — see `RelationOptions.alias`. */
+    alias?: Record<string, string>;
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -214,6 +218,8 @@ export function setRelationRegistryEntry(
 export interface Ad4mModelLike {
     new (...args: any[]): any;
     className?: string;
+    /** Set by `@Model({ abstract: true })`. */
+    isAbstract?: boolean;
     generateSDNA?: () => any;
     generateSHACL?: () => any;
 }
@@ -399,6 +405,14 @@ export interface PropertyOptions {
      * (e.g. `"xsd://string"`) and enables the hydration decode gate.
      */
     datatype?: string;
+
+    /**
+     * The name this property answers to through an abstract class, keyed by
+     * its name: `alias: { TextContent: "text" }` reads (and writes) `body` as
+     * `text` through `TextContent`. Registering fails if the class already
+     * uses that name.
+     */
+    alias?: Record<string, string>;
 }
 
 
@@ -572,12 +586,65 @@ export interface ModelConfig {
     name: string;
 
     /**
+     * An abstract class names properties a record has, not what it is.
+     * Querying it reads every installed class that has all of its names (or
+     * aliases for them), matched by name, never by `through`; rows keep
+     * their `__subjectClass`. It cannot be created. `save()` and `delete()`
+     * on a row read through it run the setters and destructors of the
+     * record's own classes; values are not converted between them.
+     */
+    abstract?: boolean;
+
+    /**
+     * Abstract classes this class is meant to be read through: checked at
+     * declaration (every name of each must be a name or alias here). The
+     * executor matches by structure, listed or not.
+     */
+    implements?: Ad4mModelLike[];
+
+    /**
      * Natural-language hint that steers the generic LLM extractor when
      * turning a transcript into instances of this class.  Emitted as an
      * `ad4m://interpretation_hint` link on the SHACL shape node and surfaced
      * on `ModelShape.interpretation_hint` by the Rust model query.
      */
     interpretationHint?: string;
+}
+
+/**
+ * `@Model({ implements })`: every property and relation name of
+ * `abstractClass` must be a name or an alias (for it) on `target`.
+ */
+function checkImplements(name: string, target: any, abstractClass: any) {
+    const abstractName: string | undefined = abstractClass?.className ?? abstractClass?.prototype?.className;
+    if (!abstractName || !abstractClass.isAbstract) {
+        throw new Error(
+            `${name} implements ${abstractName ?? abstractClass?.name ?? String(abstractClass)}, ` +
+            `which is not an abstract class: declare it with @Model({ abstract: true })`
+        );
+    }
+    const names = (ctor: any) => {
+        const relations = getRelationsMetadata(ctor);
+        const properties = Object.keys(getPropertiesMetadata(ctor)).filter(p => !relations[p]);
+        return { properties, relations: Object.keys(relations) };
+    };
+    const answersTo = (entries: Record<string, { alias?: Record<string, string> }>, keys: string[]) =>
+        new Set(keys.map(k => entries[k]?.alias?.[abstractName] ?? k));
+
+    const wanted = names(abstractClass);
+    const own = names(target);
+    const ownProperties = answersTo(getPropertiesMetadata(target), own.properties);
+    const ownRelations = answersTo(getRelationsMetadata(target), own.relations);
+    for (const p of wanted.properties) {
+        if (!ownProperties.has(p)) {
+            throw new Error(`${name} implements ${abstractName} but has no property or alias named \`${p}\``);
+        }
+    }
+    for (const r of wanted.relations) {
+        if (!ownRelations.has(r)) {
+            throw new Error(`${name} implements ${abstractName} but has no relation or alias named \`${r}\``);
+        }
+    }
 }
 
 /**
@@ -595,6 +662,9 @@ export interface ModelConfig {
  * - Generates the necessary SDNA code for the model's properties and relations
  * - Enables the use of other model decorators (@Property, @HasMany, etc.)
  * - Provides static query methods through the Ad4mModel base class
+ *
+ * Schema generation calls the class constructor once, without a perspective, to read
+ * field defaults, so keep constructors free of side effects.
  * 
  * @example
  * ```typescript
@@ -637,6 +707,10 @@ export function Model(opts: ModelConfig) {
     return function (target: any) {
         target.prototype.className = opts.name;
         target.className = opts.name;
+        target.isAbstract = !!opts.abstract;
+        for (const abstractClass of opts.implements ?? []) {
+            checkImplements(opts.name, target, abstractClass);
+        }
 
         target.generateSDNA = function() {
             return buildSDNA(
@@ -656,6 +730,7 @@ export function Model(opts: ModelConfig) {
                 buildConformanceFilter,
                 seed,
                 opts.interpretationHint,
+                !!opts.abstract,
             ));
         }
 
@@ -817,7 +892,7 @@ export interface RelationOptions {
     /**
      * The predicate URI used to link the two models.
      * Defaults to `'ad4m://has_child'` when omitted.
-     * Cannot be combined with `getter`.
+     * Cannot be combined with `getter`, except on a `readOnly` relation.
      */
     through?: string;
     /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string relations.
@@ -830,7 +905,9 @@ export interface RelationOptions {
      *
      * Mutually exclusive with `through` — a getter replaces link-based resolution,
      * so there is no predicate to add to or remove from. When `getter` is provided
-     * the relation is read-only (no adder/remover actions are generated).
+     * the relation is read-only (no adder/remover actions are generated). The
+     * exception is `readOnly: true`, where `through` names the predicate the
+     * getter reads and becomes the shape's path.
      *
      * **Combines with `target`**, which names the class the traversal's values
      * hydrate into — without it `include` has no shape to resolve and the relation
@@ -851,6 +928,14 @@ export interface RelationOptions {
      * ```
      */
     getter?: string;
+    /**
+     * A relation read through `through` that this model must not write: no
+     * `add*`/`remove*`/`set*` methods and no adder or remover actions. Pair
+     * it with `getter` when the stored links need filtering on the way out
+     * (only those signed by their target, say) but the predicate should
+     * still be the shape's path, so a subscription re-runs when one lands.
+     */
+    readOnly?: boolean;
     /** Whether the link is stored locally (not shared on the network) */
     local?: boolean;
     /**
@@ -888,6 +973,9 @@ export interface RelationOptions {
      * `HasMany<string>` that stores plain strings). The executor uses
      * this to decode `literal:<type>:<value>` wire form on hydration.
      * Omit for URI relations that point at other model instances.
+     *
+     * Mutually exclusive with `target`: a relation holds either literals or
+     * model instances. Combines with `through` or `getter`.
      *
      * @example
      * ```typescript
@@ -968,7 +1056,7 @@ export interface RelationOptions {
      *
      * Ordering is declared in the type system, rather than passed per query, so
      * that *every* writer gets it once it is wired: the ORM, MCP agents, raw
-     * GraphQL callers, another app sharing the neighbourhood. Implemented
+     * WS-RPC callers, another app sharing the neighbourhood. Implemented
      * client-side it would order only what this client wrote.
      *
      * @example
@@ -1000,6 +1088,13 @@ export interface RelationOptions {
      * ```
      */
     interpretationHint?: string;
+
+    /**
+     * The name this relation answers to when its class is read through an
+     * abstract class, keyed by the abstract class's name. See
+     * `PropertyOptions.alias`.
+     */
+    alias?: Record<string, string>;
 }
 
 /**
@@ -1043,13 +1138,33 @@ function resolveRelationArgs(
         );
     }
 
-    // getter is mutually exclusive with through
+    // `datatype` makes the relation's values encoded literals; `target` makes
+    // them model instances. `buildSHACL` would emit `sh:nodeKind sh:Literal`
+    // and `sh:class` on the same property shape, so the executor would decode
+    // the values as literals while `include` tried to hydrate them as
+    // instances. Checked before the getter path returns, so a getter
+    // relation is held to the same rule.
+    if (opts.datatype && opts.target) {
+        throw new Error(
+            'Relation decorator: `datatype` and `target` are mutually exclusive. ' +
+            '`datatype` declares a relation of literal values; `target` declares a ' +
+            'relation to model instances. Drop `datatype` to link instances, or drop ' +
+            '`target` to store literals.'
+        );
+    }
+
+    // getter is mutually exclusive with a WRITABLE through: the relation would
+    // write raw links and read back whatever the getter lets through. With
+    // `readOnly` there is nothing to write, and `through` only names the
+    // predicate the getter reads — the shape's path, which is what makes a
+    // subscription re-run when one of those links lands.
     if (opts.getter) {
-        if (opts.through) {
+        if (opts.through && !opts.readOnly) {
             throw new Error(
                 'Relation decorator: `getter` and `through` are mutually exclusive. ' +
-                'Use `getter` alone for custom read-only relations, or `through` ' +
-                '(with optional `target`) for standard link-based relations.'
+                'Use `getter` alone for custom read-only relations, `through` ' +
+                '(with optional `target`) for standard link-based relations, or ' +
+                'both with `readOnly: true` to read that predicate through the getter.'
             );
         }
         // `target` and `where` are NOT mutually exclusive with `getter`.
@@ -1149,12 +1264,14 @@ export function HasMany(
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.alias && { alias: opts.alias }),
+            ...(opts.readOnly && { readOnly: true }),
         };
 
         const relKey = key as string;
         // Only add mutation methods when a predicate is available
-        // (getter-only relations are read-only)
-        if (opts.through) {
+        // (getter-only relations are read-only) and writing is allowed
+        if (opts.through && !opts.readOnly) {
             (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
                 return (this as any).addRelationValue(relKey, arg, batchId);
             };
@@ -1200,6 +1317,15 @@ export function HasOne(
     second?: Omit<RelationOptions, 'target'>,
 ): PropertyDecorator {
     const opts = resolveRelationArgs(first, second);
+    // `readOnly` lets `through` and `getter` stand together on `@HasMany`.
+    // `@HasOne` reads through its predicate as a property and carries no
+    // getter, so the pair would read the predicate unfiltered.
+    if (opts.through && opts.getter) {
+        throw new Error(
+            '@HasOne: `through` with `getter` is not supported, even with `readOnly`. ' +
+            'Use `@HasMany` for a read-only relation read through a getter.'
+        );
+    }
     return function <T>(target: T, key: keyof T) {
         const ctor = (target as any).constructor;
         if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
@@ -1217,10 +1343,18 @@ export function HasOne(
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.alias && { alias: opts.alias }),
+            ...(opts.readOnly && { readOnly: true }),
         };
 
         const relKey = key as string;
-        if (opts.through) {
+        if (opts.through && opts.readOnly) {
+            applyPropertyMetadata({
+                through: opts.through,
+                readOnly: true,
+                local: opts.local,
+            })(target, key);
+        } else if (opts.through) {
             // Register as a writable property
             applyPropertyMetadata({
                 through: opts.through,
@@ -1300,6 +1434,7 @@ export function BelongsToOne(
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.alias && { alias: opts.alias }),
         };
 
         if (opts.through) {
@@ -1363,6 +1498,7 @@ export function BelongsToMany(
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.alias && { alias: opts.alias }),
         };
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*

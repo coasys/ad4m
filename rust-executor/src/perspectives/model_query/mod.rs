@@ -75,40 +75,77 @@
 //! | [`sparql_builder`] | Generating SPARQL query strings (conformance, where-clauses, pagination) |
 //! | [`hydration`] | Converting raw SPARQL result rows into hydrated JSON instances |
 //! | [`filtering`] | Post-hydration where-clause matching and multi-key sorting |
+//! | [`link_author`] | `where` `author`: nested per link (`{ p: { eq, author } }`), bare per instance, side by side both |
 //! | [`getters`] | Evaluating `ASK`/`SELECT` getter expressions in batched queries |
 //! | [`relations`] | Resolving reverse relations and recursive `include` eager-loading |
 //! | [`projection`] | Computing projection aggregations (counts and filtered lists) |
+//! | [`links`] | Per-link rows on request (`links` → `__links`), including undeclared predicates |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
+//! | [`union`] | One query over several classes: per-class rows, one classification, one sort and page over the union |
+//! | [`abstract_classes`] | Abstract classes: the concrete classes one reads, and the views it reads them through |
+//! | [`builtin_classes`] | Built-in abstract classes (`ad4m://TextContent`, `ad4m://Container`), addressed by URI and never stored |
+//! | [`containment`] | Containment through `Container`: the edge set, and the patterns and rows that read it |
 
+pub(crate) mod abstract_classes;
+pub(crate) mod builtin_classes;
+#[cfg(test)]
+mod collection_provenance_tests;
+pub(crate) mod containment;
 mod eval_transform;
 mod filtering;
 mod getters;
 mod hydration;
 #[cfg(test)]
 mod integration_tests;
+mod link_author;
+#[cfg(test)]
+mod link_author_tests;
+#[cfg(test)]
+mod link_status_relation_tests;
+#[cfg(test)]
+mod link_status_tests;
+mod links;
+#[cfg(test)]
+mod page_before_resolve_tests;
 mod projection;
+#[cfg(test)]
+mod proof_valid_tests;
 mod query;
 mod relations;
 #[cfg(test)]
+mod resolve_selection_tests;
+#[cfg(test)]
 mod round_trip_tests;
+#[cfg(test)]
+mod selection_guard_tests;
 pub(crate) mod shape;
 mod sparql_builder;
 #[cfg(test)]
 mod test_helpers;
 pub(crate) mod types;
+mod union;
 pub(crate) mod utils;
 
+/// The per-value condition evaluator, shared with the flow engine so a
+/// `fromRole` rule's `author` condition means the same thing whether it is
+/// applied to a grant row here or to a revocation tombstone there.
+pub(crate) use filtering::matches_condition;
+pub(crate) use getters::conformance_predicates;
 pub use getters::evaluate_getters_batch;
+pub(crate) use links::{links_rows, links_trigger_predicates};
 pub use query::execute_model_query;
 pub use relations::resolve_reverse_relations;
-pub(crate) use shape::load_shape_from_store;
+pub(crate) use shape::{load_shape_from_store, MissingShape};
 pub use types::{
-    IncludeValue, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ProjectionInput,
-    Scope, ShapeResolver, WhereCondition, WhereOps,
+    constrain_ids, take_produced_by_flow, IncludeValue, ModelQueryInput, ModelQueryResult,
+    ModelShape, OrderDirection, ProducedByFlowFilter, ProjectionInput, Scope, ShapeResolver,
+    WhereCondition, WhereOps,
 };
 /// Re-export the shared IRI-safety predicate so write-side callers
 /// (e.g. `perspective_instance::resolve_property_value`,
 /// `mcp::tools::create_property_expression`) can gate raw-`NamedNode`
 /// storage on the same rule the SPARQL query builder uses.  See
 /// [`utils::is_safe_iri_target`] for the full contract.
+pub(crate) use union::refuse_union_reads;
+pub use union::{execute_union_query, execute_union_query_with_views, QueryClasses};
 pub use utils::is_safe_iri_target;

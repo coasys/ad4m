@@ -31,6 +31,33 @@ pub struct ProposedInstance {
     pub props: HashMap<String, serde_json::Value>,
 }
 
+/// A flow transition the LLM proposes, either in the `flow_proposals` field
+/// of its JSON output (strategy path) or through a `{Flow}_propose_transition`
+/// tool call (harness path). The engine honours it only when the target
+/// state's `requires` guard holds on the graph; then `reason` becomes the
+/// on-graph proposal's `rationale`. A proposal without satisfied evidence is
+/// dropped.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct LlmFlowProposal {
+    /// FlowInstance URI, verbatim from `active_flows[i].instance`.
+    pub instance: String,
+    /// One of that instance's `nextStates[j].name`.
+    #[serde(rename = "toState")]
+    pub to_state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Everything one interpretation call returns: the extracted instances plus
+/// any flow proposals. A bare JSON array, the output shape without flows,
+/// still parses as instances only.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct InterpretationOutput {
+    pub instances: Vec<ProposedInstance>,
+    #[serde(default)]
+    pub flow_proposals: Vec<LlmFlowProposal>,
+}
+
 /// The existing instances in scope for an interpretation pass, keyed by base
 /// URI (`id`). A single base can conform to multiple subject classes, so each
 /// key maps to a `Vec` of entries. This is the **single source of truth** the

@@ -45,6 +45,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::model_query::utils::looks_like_absolute_iri;
+use super::shacl_parser::ABSTRACT_PREDICATE;
 use super::sparql_store::SparqlStore;
 
 /// Every subject class registered in this perspective.
@@ -71,7 +72,34 @@ pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error
     Ok(names)
 }
 
-fn local_name(uri: &str) -> String {
+/// Every registered class that is not abstract (#1435): the classes a record
+/// can be classified as. An abstract class names what a record has, not what
+/// it is, so it is never one of a record's classes.
+pub fn concrete_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error> {
+    let query = format!(
+        r#"
+        SELECT ?targetClass WHERE {{
+            ?targetClass <rdf://type> <ad4m://SubjectClass> .
+            FILTER NOT EXISTS {{
+                ?targetClass <ad4m://shape> ?shape .
+                ?shape <{ABSTRACT_PREDICATE}> ?marker .
+            }}
+        }}
+    "#
+    );
+    let rows: Vec<Value> = serde_json::from_str(&store.query(&query)?)?;
+    let mut names: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r["targetClass"].as_str())
+        .map(local_name)
+        .filter(|n| !n.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+pub(crate) fn local_name(uri: &str) -> String {
     if let Some(p) = uri.rfind('#') {
         return uri[p + 1..].to_string();
     }
@@ -162,6 +190,27 @@ pub fn subject_classes_of(
     resolver: &dyn ShapeResolver,
     uris: &[String],
 ) -> Result<HashMap<String, Vec<String>>, Error> {
+    subject_classes_of_with_pending(store, resolver, uris, &[])
+}
+
+/// [`subject_classes_of`], counting links that are staged but not yet committed.
+///
+/// `pending` is `(source, predicate, target)` for links an open batch holds. The
+/// store cannot see them until the batch commits, and a subject is *created*
+/// inside a batch: the constructor actions that write its class flags and the
+/// setters that populate its relations are all staged together. Classifying such
+/// a URI against the store alone answers "no class", which for the ordering
+/// lookup means a collection created and ordered in one batch silently gets no
+/// ordering entries.
+///
+/// Membership is set containment, so a staged triple counts exactly as a
+/// committed one does — this widens what is known, never what conforms.
+pub fn subject_classes_of_with_pending(
+    store: &SparqlStore,
+    resolver: &dyn ShapeResolver,
+    uris: &[String],
+    pending: &[(String, String, String)],
+) -> Result<HashMap<String, Vec<String>>, Error> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     if uris.is_empty() {
         return Ok(out);
@@ -184,7 +233,7 @@ pub fn subject_classes_of(
 
     // Load every class's shape once. Shapes are cached per perspective, so this
     // is a map lookup after the first call.
-    let class_names = all_subject_class_names(store)?;
+    let class_names = concrete_subject_class_names(store)?;
     let mut shapes: Vec<(String, Vec<(String, Option<String>)>)> = Vec::new();
     for name in class_names {
         match resolver.get_shape(&name) {
@@ -223,6 +272,16 @@ pub fn subject_classes_of(
     // What each URI actually carries, in the two shapes membership asks about.
     let mut pairs: HashMap<String, HashSet<(String, String)>> = HashMap::new();
     let mut present: HashMap<String, HashSet<String>> = HashMap::new();
+
+    // Staged links first. Both maps are sets, so a triple the store also
+    // returns simply lands in the same slot.
+    for (s, p, o) in pending {
+        pairs
+            .entry(s.clone())
+            .or_default()
+            .insert((p.clone(), o.clone()));
+        present.entry(s.clone()).or_default().insert(p.clone());
+    }
 
     if !flag_preds.is_empty() {
         let rows = fetch(store, &values_clause, &flag_preds, true)?;

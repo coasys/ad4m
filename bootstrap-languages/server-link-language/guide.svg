@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 420" width="940" height="420">
+  <defs>
+    <linearGradient id="grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#10B981"/>
+    </linearGradient>
+    <clipPath id="frame">
+      <rect width="940" height="420" rx="16"/>
+    </clipPath>
+  </defs>
+
+  <!-- Canvas -->
+  <g clip-path="url(#frame)">
+    <rect width="940" height="420" fill="white"/>
+    <rect width="940" height="5" fill="url(#grad)"/>
+  </g>
+  <rect width="940" height="420" rx="16" fill="none" stroke="#E2E8F0" stroke-width="1"/>
+
+  <!-- Title -->
+  <text x="470" y="40" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700" fill="#1E293B">Server Link Language</text>
+  <text x="470" y="62" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="#64748B">Setup &amp; Join Guide</text>
+
+  <!-- ═══ LEFT CARD: SET UP ═══ -->
+  <rect x="40" y="88" width="350" height="310" rx="16" fill="#EEF2FF" stroke="#C7D2FE" stroke-width="1.5"/>
+
+  <!-- Badge -->
+  <rect x="157" y="74" width="86" height="28" rx="14" fill="#6366F1"/>
+  <text x="200" y="93" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" fill="white">SET UP</text>
+
+  <!-- Step 1 -->
+  <circle cx="80" cy="148" r="16" fill="#6366F1"/>
+  <text x="80" y="153" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" fill="white">1</text>
+  <text x="108" y="144" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="600" fill="#1E293B">Deploy Server</text>
+  <text x="108" y="162" font-family="Courier New, Courier, monospace" font-size="11" fill="#64748B">npx @coasys/link-server</text>
+
+  <!-- Connector 1 → 2 -->
+  <line x1="80" y1="164" x2="80" y2="212" stroke="#C7D2FE" stroke-width="2" stroke-dasharray="4 4"/>
+
+  <!-- Step 2 -->
+  <circle cx="80" cy="228" r="16" fill="#6366F1"/>
+  <text x="80" y="233" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" fill="white">2</text>
+  <text x="108" y="224" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="600" fill="#1E293B">Publish Template</text>
+  <text x="108" y="242" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#64748B">Once — shared across the network</text>
+
+  <!-- Connector 2 → 3 -->
+  <line x1="80" y1="244" x2="80" y2="292" stroke="#C7D2FE" stroke-width="2" stroke-dasharray="4 4"/>
+
+  <!-- Step 3 -->
+  <circle cx="80" cy="308" r="16" fill="#6366F1"/>
+  <text x="80" y="313" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" fill="white">3</text>
+  <text x="108" y="304" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="600" fill="#1E293B">Create Neighbourhood</text>
+  <text x="108" y="322" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#64748B">Server URL + room name</text>
+
+  <!-- ═══ ARROW BRIDGE ═══ -->
+  <line x1="390" y1="240" x2="548" y2="240" stroke="#94A3B8" stroke-width="1.5"/>
+  <polygon points="550,240 542,234 542,246" fill="#94A3B8"/>
+
+  <!-- URL badge -->
+  <rect x="410" y="226" width="120" height="28" rx="14" fill="white" stroke="#CBD5E1" stroke-width="1"/>
+  <text x="470" y="244" text-anchor="middle" font-family="Courier New, Courier, monospace" font-size="10" fill="#64748B">neighbourhood://</text>
+
+  <text x="470" y="268" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="10" fill="#94A3B8">share</text>
+
+  <!-- ═══ RIGHT CARD: JOIN ═══ -->
+  <rect x="550" y="88" width="350" height="310" rx="16" fill="#ECFDF5" stroke="#A7F3D0" stroke-width="1.5"/>
+
+  <!-- Badge -->
+  <rect x="689" y="74" width="62" height="28" rx="14" fill="#10B981"/>
+  <text x="720" y="93" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" fill="white">JOIN</text>
+
+  <!-- Step 1 -->
+  <circle cx="590" cy="176" r="16" fill="#10B981"/>
+  <text x="590" y="181" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" fill="white">1</text>
+  <text x="618" y="172" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="600" fill="#1E293B">Paste the URL</text>
+  <text x="618" y="190" font-family="Courier New, Courier, monospace" font-size="11" fill="#64748B">ad4m neighbourhoods join</text>
+
+  <!-- Separator -->
+  <line x1="580" y1="214" x2="870" y2="214" stroke="#A7F3D0" stroke-width="1"/>
+
+  <!-- Auto section -->
+  <text x="590" y="244" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#64748B">The rest happens automatically:</text>
+
+  <text x="600" y="274" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="600" fill="#10B981">✓</text>
+  <text x="618" y="274" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#334155">Authenticates your identity</text>
+
+  <text x="600" y="300" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="600" fill="#10B981">✓</text>
+  <text x="618" y="300" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#334155">Downloads existing links</text>
+
+  <text x="600" y="326" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="600" fill="#10B981">✓</text>
+  <text x="618" y="326" font-family="Arial, Helvetica, sans-serif" font-size="13" fill="#334155">Opens live connection</text>
+
+</svg>

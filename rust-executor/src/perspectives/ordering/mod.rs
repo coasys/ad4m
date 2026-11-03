@@ -14,7 +14,7 @@
 //! # Shape of the solution
 //!
 //! Ordering is declared in the type system (SHACL) and lives entirely in the
-//! executor, so every writer gets it — the ORM, MCP agents, raw GraphQL callers,
+//! executor, so every writer gets it — the ORM, MCP agents, raw WS-RPC callers,
 //! another app sharing the neighbourhood. A client-side implementation would
 //! order only what that client wrote.
 //!

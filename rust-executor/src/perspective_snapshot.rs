@@ -1,52 +1,81 @@
 //! Per-perspective snapshots of the OxiGraph/RocksDB perspective stores.
 //!
-//! Each perspective gets its own tar.gz archive. A JSON manifest tracks
-//! which perspectives exist and their sizes. Both get uploaded to the
-//! remote snapshot backend via HMAC-presigned URLs.
+//! Periodically archives each perspective's store as its own tar.gz, lists the
+//! archives in a JSON manifest (`snapshots/{did}/manifest.json` on the backend),
+//! and uploads both via HMAC-presigned URLs. An open store is archived from a
+//! RocksDB checkpoint, never from its live directory.
 //!
-//! In multi-tenant mode, startup downloads the manifest first, then
-//! fetches individual perspective archives on demand. Falls back to
-//! the legacy monolithic `perspectives.tar.gz` format if no manifest
-//! exists.
+//! On start-up an executor that opens its perspectives eagerly downloads every
+//! archive before they open ([`restore_perspectives`]). One that defers them
+//! (shared DB backend) downloads the manifest only ([`restore_perspectives_lazy`]);
+//! each archive downloads when its perspective hydrates
+//! ([`restore_perspective_archive`]). Both fall back to the monolithic
+//! `perspectives.tar.gz` of earlier executors when no manifest exists.
 //!
-//! The presign endpoint lives at `{backend_base}/internal/snapshots/presign`.
-//! Backend base URL derives from `wallet_backend_url` or `db_backend_url`
-//! config — the same endpoint serves both hosted and self-hosted deployments.
+//! The presign endpoint lives at `{platform_base}/internal/snapshots/presign`.
+//! Platform base URL derives from `wallet_backend_url` config.
 
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-// std::io::Read brought in by GzDecoder via tar::Archive internally.
 use std::path::{Path, PathBuf};
 use tar::{Archive, Builder};
 
 use crate::config::Ad4mConfig;
+use crate::perspectives::sparql_store::SparqlStore;
+use std::sync::Mutex;
 
-// ── Manifest ──────────────────────────────────────────────────────────────────
+// ── Manifest ────────────────────────────────────────────────────────────────────
 
-/// Manifest for per-perspective snapshots.
-///
-/// Stored as `snapshots/{did}/manifest.json` on the remote backend.
-/// Each entry describes one perspective's archive.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+/// The perspective archives one agent's snapshot holds, stored as
+/// `snapshots/{did}/manifest.json` on the backend.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct SnapshotManifest {
-    /// ISO-8601 timestamp of when the manifest was created.
+    /// When the manifest was written (RFC 3339).
     pub created_at: String,
-    /// List of perspective entries.
     pub perspectives: Vec<ManifestEntry>,
 }
 
-/// One entry in the snapshot manifest.
+/// One perspective's archive in a [`SnapshotManifest`].
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct ManifestEntry {
-    /// Perspective UUID.
     pub uuid: String,
     /// Size of the tar.gz archive in bytes.
     pub size_bytes: u64,
-    /// ISO-8601 timestamp of last modification.
+    /// When the archive was uploaded (RFC 3339).
     pub last_modified: String,
+}
+
+impl SnapshotManifest {
+    fn entry(&self, uuid: &str) -> Option<&ManifestEntry> {
+        self.perspectives.iter().find(|e| e.uuid == uuid)
+    }
+}
+
+/// The manifest the remote snapshot holds, as this executor last read or wrote it.
+/// `None` until the start-up restore read it: a backup then cannot tell which
+/// archives a deferred perspective has, so it refuses rather than drop them.
+static CURRENT_MANIFEST: Mutex<Option<SnapshotManifest>> = Mutex::new(None);
+
+fn current_manifest() -> Option<SnapshotManifest> {
+    CURRENT_MANIFEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+fn set_current_manifest(manifest: Option<SnapshotManifest>) {
+    *CURRENT_MANIFEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = manifest;
+}
+
+/// Whether this executor backs its perspectives up to (and restores them from) the
+/// snapshot backend: in shared wallet mode.
+pub fn snapshots_enabled(config: &Ad4mConfig) -> bool {
+    config.wallet_backend.as_deref() == Some("shared")
 }
 
 // ── Path helpers ───────────────────────────────────────────────────────────────
@@ -60,11 +89,11 @@ pub fn perspectives_dir(config: &Ad4mConfig) -> Result<PathBuf, AnyError> {
     Ok(PathBuf::from(data_path).join("perspectives"))
 }
 
-/// Derive the remote backend base URL from `wallet_backend_url`.
+/// Derive the platform Worker base URL from `wallet_backend_url`.
 ///
 /// `wallet_backend_url` looks like `http://host:port/internal/wallet`.
 /// Strips the path from `/internal/` onward to get `http://host:port`.
-fn backend_base_url(config: &Ad4mConfig) -> Result<String, AnyError> {
+fn platform_base_url(config: &Ad4mConfig) -> Result<String, AnyError> {
     let url = config
         .wallet_backend_url
         .as_ref()
@@ -79,14 +108,16 @@ fn backend_base_url(config: &Ad4mConfig) -> Result<String, AnyError> {
 }
 
 fn presign_url(config: &Ad4mConfig) -> Result<String, AnyError> {
-    let base = backend_base_url(config)?;
+    let base = platform_base_url(config)?;
     Ok(format!("{}/internal/snapshots/presign", base))
 }
 
 fn internal_token(config: &Ad4mConfig) -> Result<String, AnyError> {
+    // The Worker's bearer token, sent with the snapshot requests.
     config
         .internal_api_token
-        .clone()
+        .as_ref()
+        .map(|token| token.expose().to_string())
         .ok_or_else(|| anyhow!("INTERNAL_API_TOKEN required for snapshots"))
 }
 
@@ -148,13 +179,8 @@ pub fn restore_snapshot(data_path: &Path, snapshot: &[u8]) -> Result<(), AnyErro
     Ok(())
 }
 
-// ── Per-perspective archive ────────────────────────────────────────────────────
-
-/// Create a tar.gz archive of a single perspective's directory.
-///
-/// Archives `{perspectives_path}/{uuid}/` into a tar.gz.
-/// The archive root uses `perspectives/{uuid}/` as prefix so
-/// `restore_snapshot()` extracts it to the correct location.
+/// Create a tar.gz archive of one perspective: `{perspectives_path}/{uuid}/`, under the
+/// prefix `perspectives/{uuid}/`, the layout [`restore_perspective_snapshot`] restores.
 pub fn create_perspective_snapshot(
     perspectives_path: &Path,
     uuid: &str,
@@ -171,9 +197,8 @@ pub fn create_perspective_snapshot(
     {
         let encoder = GzEncoder::new(&mut compressed, Compression::fast());
         let mut archive = Builder::new(encoder);
-        let prefix = format!("perspectives/{}", uuid);
         archive
-            .append_dir_all(&prefix, &persp_subdir)
+            .append_dir_all(format!("perspectives/{}", uuid), &persp_subdir)
             .map_err(|e| anyhow!("Failed to build perspective archive: {}", e))?;
         let encoder = archive
             .into_inner()
@@ -191,9 +216,48 @@ pub fn create_perspective_snapshot(
     Ok(compressed)
 }
 
+/// Restore one perspective's archive to `{perspectives_path}/{uuid}/`, replacing what
+/// is there. It extracts next to `perspectives_path` first, so a failed extraction
+/// leaves the old directory, and files of an older store never mix with the new one.
+/// Only the archive's `perspectives/{uuid}/` tree is kept.
+pub fn restore_perspective_snapshot(
+    perspectives_path: &Path,
+    uuid: &str,
+    snapshot: &[u8],
+) -> Result<(), AnyError> {
+    let parent = perspectives_path.parent().unwrap_or(perspectives_path);
+    let staging = parent.join(format!(".restore-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        restore_snapshot(&staging, snapshot)?;
+        let extracted = staging.join("perspectives").join(uuid);
+        if !extracted.is_dir() {
+            return Err(anyhow!(
+                "Archive for {} holds no perspectives/{}/",
+                uuid,
+                uuid
+            ));
+        }
+        std::fs::create_dir_all(perspectives_path)
+            .map_err(|e| anyhow!("Failed to create {:?}: {}", perspectives_path, e))?;
+        let target = perspectives_path.join(uuid);
+        if target.exists() {
+            std::fs::remove_dir_all(&target)
+                .map_err(|e| anyhow!("Failed to replace {:?}: {}", target, e))?;
+        }
+        std::fs::rename(&extracted, &target)
+            .map_err(|e| anyhow!("Failed to move {:?} to {:?}: {}", extracted, target, e))
+    })();
+    if staging.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&staging) {
+            log::warn!("Failed to remove restore staging {:?}: {}", staging, e);
+        }
+    }
+    result
+}
+
 // ── HTTP operations ────────────────────────────────────────────────────────────
 
-/// Presigned-URL response from the snapshot backend.
+/// Presigned-URL response from the platform Worker.
 #[derive(serde::Deserialize, Debug)]
 struct PresignResponse {
     url: String,
@@ -203,16 +267,21 @@ struct PresignResponse {
     key: String,
 }
 
-/// Request a presigned URL from the snapshot backend.
-///
-/// `object_type`: `"snapshot"` (legacy monolithic), `"manifest"`, or `"perspective"`.
-/// `perspective_uuid`: required when `object_type` is `"perspective"`.
+/// What a presigned URL reaches in an agent's snapshot.
+#[derive(Clone, Copy, Debug)]
+enum SnapshotObject<'a> {
+    /// The monolithic `perspectives.tar.gz` of earlier executors (no `objectType`).
+    Legacy,
+    Manifest,
+    Perspective(&'a str),
+}
+
+/// Request a presigned URL from the platform Worker.
 fn presign(
     config: &Ad4mConfig,
     operation: &str,
     did: &str,
-    object_type: &str,
-    perspective_uuid: Option<&str>,
+    object: SnapshotObject,
 ) -> Result<PresignResponse, AnyError> {
     let url = presign_url(config)?;
     let token = internal_token(config)?;
@@ -225,10 +294,14 @@ fn presign(
     let mut body = serde_json::json!({
         "operation": operation,
         "did": did,
-        "objectType": object_type,
     });
-    if let Some(uuid) = perspective_uuid {
-        body["perspectiveUuid"] = serde_json::Value::String(uuid.to_string());
+    match object {
+        SnapshotObject::Legacy => {}
+        SnapshotObject::Manifest => body["objectType"] = "manifest".into(),
+        SnapshotObject::Perspective(uuid) => {
+            body["objectType"] = "perspective".into();
+            body["perspectiveUuid"] = uuid.into();
+        }
     }
 
     let resp = client
@@ -246,8 +319,8 @@ fn presign(
         .map_err(|e| anyhow!("Presign response parse: {}", e))
 }
 
-/// Upload a snapshot via a presigned PUT URL.
-fn upload(url: &str, data: Vec<u8>) -> Result<(), AnyError> {
+/// Upload a snapshot object via a presigned PUT URL.
+fn upload(url: &str, content_type: &str, data: Vec<u8>) -> Result<(), AnyError> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -255,7 +328,7 @@ fn upload(url: &str, data: Vec<u8>) -> Result<(), AnyError> {
 
     let resp = client
         .put(url)
-        .header("Content-Type", "application/gzip")
+        .header("Content-Type", content_type)
         .body(data)
         .send()
         .map_err(|e| anyhow!("Snapshot upload failed: {}", e))?;
@@ -294,129 +367,49 @@ fn download(url: &str) -> Result<Vec<u8>, AnyError> {
     Ok(bytes.to_vec())
 }
 
-/// Upload JSON content via a presigned PUT URL.
-fn upload_json(url: &str, data: Vec<u8>) -> Result<(), AnyError> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| anyhow!("HTTP client build: {}", e))?;
-
-    let resp = client
-        .put(url)
-        .header("Content-Type", "application/json")
-        .body(data)
-        .send()
-        .map_err(|e| anyhow!("Manifest upload failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!("Manifest upload returned {}", resp.status()));
-    }
-
-    Ok(())
-}
-
-// ── Manifest cache (for lazy loading) ─────────────────────────────────────────
-
-use std::sync::Mutex as StdMutex;
-
-lazy_static::lazy_static! {
-    /// Cached manifest from `restore_perspectives_lazy()`. Used by
-    /// `restore_perspective_archive()` to download individual archives
-    /// on demand during lazy hydration.
-    static ref CACHED_MANIFEST: StdMutex<Option<SnapshotManifest>> = StdMutex::new(None);
-}
-
 // ── Public API ─────────────────────────────────────────────────────────────────
 
-/// Lazy restore: download the manifest only, without fetching individual
-/// perspective archives. Archives get downloaded on demand when each
-/// perspective hydrates via `restore_perspective_archive()`.
-///
-/// Returns `Ok(true)` if a manifest was found (even with zero entries),
-/// `Ok(false)` if no manifest exists (first run).
-pub fn restore_perspectives_lazy(config: &Ad4mConfig) -> Result<bool, AnyError> {
-    let did = crate::agent::did();
-
-    let manifest_presign = presign(config, "get", &did, "manifest", None)?;
-    let manifest_data = download(&manifest_presign.url)?;
-
-    if manifest_data.is_empty() {
-        log::info!(
-            "No manifest found for DID {} — starting fresh (lazy mode)",
-            did
-        );
-        return Ok(false);
+/// Checkpoint each store into `staging/perspectives/{uuid}/sparql_store`, the
+/// layout `create_snapshot` archives and `restore_snapshot` restores. Returns
+/// the `staging/perspectives` directory.
+pub fn checkpoint_stores(
+    stores: &[(String, std::sync::Arc<SparqlStore>)],
+    staging: &Path,
+) -> Result<PathBuf, AnyError> {
+    let persp_dir = staging.join("perspectives");
+    std::fs::create_dir_all(&persp_dir)
+        .map_err(|e| anyhow!("Failed to create {:?}: {}", persp_dir, e))?;
+    for (uuid, store) in stores {
+        let uuid_dir = persp_dir.join(uuid);
+        std::fs::create_dir_all(&uuid_dir)
+            .map_err(|e| anyhow!("Failed to create {:?}: {}", uuid_dir, e))?;
+        store.backup(&uuid_dir.join("sparql_store"))?;
     }
-
-    let manifest: SnapshotManifest = serde_json::from_slice(&manifest_data)
-        .map_err(|e| anyhow!("Failed to parse snapshot manifest: {}", e))?;
-
-    log::info!(
-        "📋 Manifest loaded with {} perspectives for DID {} (lazy — archives deferred)",
-        manifest.perspectives.len(),
-        did
-    );
-
-    // Cache for later per-perspective downloads.
-    *CACHED_MANIFEST.lock().unwrap() = Some(manifest);
-
-    Ok(true)
+    Ok(persp_dir)
 }
 
-/// Download and extract a single perspective's archive from the remote
-/// snapshot backend. Used during lazy hydration when a deferred
-/// perspective gets accessed for the first time.
-///
-/// Returns `Ok(true)` if the archive was downloaded and extracted,
-/// `Ok(false)` if the perspective has no remote archive (new perspective).
-pub fn restore_perspective_archive(config: &Ad4mConfig, uuid: &str) -> Result<bool, AnyError> {
-    // Check manifest cache — if the perspective has no entry, skip download.
-    {
-        let manifest = CACHED_MANIFEST.lock().unwrap();
-        if let Some(ref m) = *manifest {
-            if !m.perspectives.iter().any(|e| e.uuid == uuid) {
-                log::info!(
-                    "Perspective {} has no manifest entry — skipping archive download",
-                    uuid
-                );
-                return Ok(false);
-            }
-        }
-    }
-
-    let did = crate::agent::did();
-    let data_path = config
-        .app_data_path
-        .as_ref()
-        .ok_or_else(|| anyhow!("app_data_path not configured"))?;
-
-    let persp_presign = presign(config, "get", &did, "perspective", Some(uuid))?;
-    let archive_data = download(&persp_presign.url)?;
-
-    if archive_data.is_empty() {
-        log::info!(
-            "No remote archive for perspective {} — hydrating with fresh store",
-            uuid
-        );
-        return Ok(false);
-    }
-
-    restore_snapshot(Path::new(data_path), &archive_data)?;
-    log::info!(
-        "📥 Restored perspective archive {} ({} bytes) for hydration",
-        uuid,
-        archive_data.len()
-    );
-
-    Ok(true)
+/// The stored perspectives not registered yet (`registered` lists the uuids that are).
+fn missing_stores(
+    stored: &[crate::types::PerspectiveHandle],
+    registered: &[String],
+) -> Vec<String> {
+    stored
+        .iter()
+        .filter(|h| !registered.contains(&h.uuid))
+        .map(|h| h.uuid.clone())
+        .collect()
 }
 
-/// Backup all perspective data to the remote snapshot backend.
+/// Backup all perspective data to the platform backend.
 ///
-/// Creates per-perspective tar.gz archives and a manifest.json:
-/// 1. Flush all SPARQL stores.
-/// 2. For each perspective UUID directory, create + upload an individual archive.
-/// 3. Build and upload the manifest listing all perspectives.
+/// 1. Checkpoint every open SPARQL store into a staging directory next to
+///    `perspectives/` (same filesystem, so the checkpoints hard-link), archive each
+///    checkpoint and upload it.
+/// 2. A deferred perspective keeps the archive the manifest lists for it: nothing
+///    changed it since. One the manifest does not list (restored from a legacy
+///    snapshot) is archived from its closed store directory, with its hydration held
+///    off meanwhile.
+/// 3. Upload the manifest of every archive, then remove the staging directory.
 pub fn backup_perspectives(config: &Ad4mConfig) -> Result<(), AnyError> {
     let did = crate::agent::did();
     let persp_dir = perspectives_dir(config)?;
@@ -426,152 +419,221 @@ pub fn backup_perspectives(config: &Ad4mConfig) -> Result<(), AnyError> {
         return Ok(());
     }
 
-    // Flush all open SPARQL stores before snapshotting.
-    flush_all_stores();
-
-    // Enumerate perspective UUID directories and upload each individually.
-    let mut entries = Vec::new();
-    let dir_iter = std::fs::read_dir(&persp_dir)
-        .map_err(|e| anyhow!("Failed to read perspectives directory: {}", e))?;
-
-    for dir_entry in dir_iter {
-        let dir_entry = dir_entry.map_err(|e| anyhow!("Failed to read dir entry: {}", e))?;
-        let path = dir_entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let uuid = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow!("Invalid perspective directory name"))?
-            .to_string();
-
-        let data = create_perspective_snapshot(&persp_dir, &uuid)?;
-        let size_bytes = data.len() as u64;
-
-        let presign_resp = presign(config, "put", &did, "perspective", Some(&uuid))?;
-        upload(&presign_resp.url, data)?;
-        log::info!(
-            "Uploaded perspective snapshot for {}: {} bytes",
-            uuid,
-            size_bytes
-        );
-
-        entries.push(ManifestEntry {
-            uuid,
-            size_bytes,
-            last_modified: chrono::Utc::now().to_rfc3339(),
-        });
+    let registered = crate::perspectives::all_perspectives();
+    // Start-up opens each stored perspective in its own task. An archive taken
+    // before all are open would replace the last full snapshot with a partial
+    // one, so refuse until every stored perspective is registered.
+    let stored = crate::db::Ad4mDb::with_global_instance(|db| db.get_all_perspectives())
+        .map_err(|e| anyhow!("Failed to list perspectives: {}", e))?;
+    let uuids: Vec<String> = registered.iter().map(|p| p.uuid.clone()).collect();
+    let loading = missing_stores(&stored, &uuids);
+    if !loading.is_empty() {
+        return Err(anyhow!(
+            "Skipping snapshot: {} perspective(s) still loading: {}",
+            loading.len(),
+            loading.join(", ")
+        ));
     }
+    // A unique name, so a shutdown backup and a periodic one cannot collide.
+    let staging = persp_dir
+        .parent()
+        .unwrap_or(&persp_dir)
+        .join(format!(".snapshot-{}", uuid::Uuid::new_v4()));
+    let manifest = archive_perspectives(&registered, &persp_dir, &staging, &mut |uuid, data| {
+        let presign_resp = presign(config, "put", &did, SnapshotObject::Perspective(uuid))?;
+        upload(&presign_resp.url, "application/gzip", data)
+    });
+    if staging.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&staging) {
+            log::warn!("Failed to remove snapshot staging {:?}: {}", staging, e);
+        }
+    }
+    let manifest = manifest?;
 
-    // Upload the manifest.
-    let manifest = SnapshotManifest {
-        created_at: chrono::Utc::now().to_rfc3339(),
-        perspectives: entries,
-    };
     let manifest_json = serde_json::to_vec_pretty(&manifest)
         .map_err(|e| anyhow!("Failed to serialize manifest: {}", e))?;
-
-    let presign_resp = presign(config, "put", &did, "manifest", None)?;
-    upload_json(&presign_resp.url, manifest_json)?;
+    let presign_resp = presign(config, "put", &did, SnapshotObject::Manifest)?;
+    upload(&presign_resp.url, "application/json", manifest_json)?;
 
     log::info!(
-        "Snapshot manifest uploaded for DID {} ({} perspectives)",
+        "Snapshot uploaded for DID {} ({} perspectives)",
         did,
         manifest.perspectives.len()
     );
+    set_current_manifest(Some(manifest));
     Ok(())
 }
 
-/// Restore perspective data from the remote snapshot backend, if available.
+/// Archive every perspective in `registered` and pass each archive to `put`; return
+/// the manifest of the archives. See [`backup_perspectives`].
+fn archive_perspectives(
+    registered: &[crate::perspectives::perspective_instance::PerspectiveInstance],
+    persp_dir: &Path,
+    staging: &Path,
+    put: &mut dyn FnMut(&str, Vec<u8>) -> Result<(), AnyError>,
+) -> Result<SnapshotManifest, AnyError> {
+    let known = current_manifest();
+    let mut entries = Vec::new();
+    let mut archive_and_put = |dir: &Path, uuid: &str| -> Result<ManifestEntry, AnyError> {
+        let data = create_perspective_snapshot(dir, uuid)?;
+        let size_bytes = data.len() as u64;
+        put(uuid, data)?;
+        Ok(ManifestEntry {
+            uuid: uuid.to_string(),
+            size_bytes,
+            last_modified: chrono::Utc::now().to_rfc3339(),
+        })
+    };
+
+    for p in registered {
+        let deferred = p.while_deferred(|| -> Result<Option<ManifestEntry>, AnyError> {
+            let known = known.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "Skipping snapshot: perspective {} is deferred and the remote manifest was never read",
+                    p.uuid
+                )
+            })?;
+            if let Some(entry) = known.entry(&p.uuid) {
+                return Ok(Some(entry.clone()));
+            }
+            if persp_dir.join(&p.uuid).join("sparql_store").exists() {
+                return archive_and_put(persp_dir, &p.uuid).map(Some);
+            }
+            // Never stored anything: no archive to keep.
+            Ok(None)
+        });
+        match deferred {
+            Some(entry) => entries.extend(entry?),
+            None => {
+                let checkpoints = checkpoint_stores(&[(p.uuid.clone(), p.store())], staging)?;
+                entries.push(archive_and_put(&checkpoints, &p.uuid)?);
+            }
+        }
+    }
+
+    Ok(SnapshotManifest {
+        created_at: chrono::Utc::now().to_rfc3339(),
+        perspectives: entries,
+    })
+}
+
+/// Restore every perspective archive from the platform backend, if available.
 ///
-/// Tries the manifest-based per-perspective format first. Falls back to
-/// the legacy monolithic `perspectives.tar.gz` if no manifest exists.
-/// Returns `Ok(true)` if data was restored, `Ok(false)` if no snapshot existed.
+/// Called before perspective initialisation when perspectives open eagerly.
+/// Reads the manifest and restores each archive it lists; without a manifest,
+/// restores the legacy monolithic snapshot.
+/// Returns Ok(true) if data was restored, Ok(false) if no snapshot existed.
 pub fn restore_perspectives(config: &Ad4mConfig) -> Result<bool, AnyError> {
     let did = crate::agent::did();
+    let persp_dir = perspectives_dir(config)?;
+
+    let Some(manifest) = fetch_manifest(config, &did)? else {
+        return restore_legacy(config, &did);
+    };
+    for entry in &manifest.perspectives {
+        if !fetch_perspective(config, &did, &persp_dir, &entry.uuid)? {
+            log::warn!(
+                "Perspective archive for {} not found — skipping",
+                entry.uuid
+            );
+        }
+    }
+    set_current_manifest(Some(manifest));
+    Ok(true)
+}
+
+/// Restore for an executor that defers its perspectives: read the manifest only;
+/// each perspective's archive downloads when it hydrates
+/// ([`restore_perspective_archive`]). Without a manifest, restores the legacy
+/// monolithic snapshot in full, so its perspectives hydrate from their local stores.
+/// Returns Ok(true) if a snapshot existed, Ok(false) if not.
+pub fn restore_perspectives_lazy(config: &Ad4mConfig) -> Result<bool, AnyError> {
+    let did = crate::agent::did();
+
+    let Some(manifest) = fetch_manifest(config, &did)? else {
+        return restore_legacy(config, &did);
+    };
+    log::info!(
+        "📋 Manifest lists {} perspectives for DID {} (archives download on first access)",
+        manifest.perspectives.len(),
+        did
+    );
+    set_current_manifest(Some(manifest));
+    Ok(true)
+}
+
+/// Download and restore perspective `uuid`'s archive, for its hydration.
+/// Returns Ok(false) when the snapshot holds no archive for it (a perspective
+/// created since, or one restored from a legacy snapshot).
+pub fn restore_perspective_archive(config: &Ad4mConfig, uuid: &str) -> Result<bool, AnyError> {
+    if let Some(manifest) = current_manifest() {
+        if manifest.entry(uuid).is_none() {
+            return Ok(false);
+        }
+    }
+    let did = crate::agent::did();
+    fetch_perspective(config, &did, &perspectives_dir(config)?, uuid)
+}
+
+/// The remote manifest, or `None` when the snapshot has none.
+fn fetch_manifest(config: &Ad4mConfig, did: &str) -> Result<Option<SnapshotManifest>, AnyError> {
+    let presign_resp = presign(config, "get", did, SnapshotObject::Manifest)?;
+    let data = download(&presign_resp.url)?;
+    if data.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_slice(&data)
+        .map(Some)
+        .map_err(|e| anyhow!("Failed to parse snapshot manifest: {}", e))
+}
+
+/// Download and restore one perspective's archive; Ok(false) if it has none.
+fn fetch_perspective(
+    config: &Ad4mConfig,
+    did: &str,
+    persp_dir: &Path,
+    uuid: &str,
+) -> Result<bool, AnyError> {
+    let presign_resp = presign(config, "get", did, SnapshotObject::Perspective(uuid))?;
+    let data = download(&presign_resp.url)?;
+    if data.is_empty() {
+        return Ok(false);
+    }
+    restore_perspective_snapshot(persp_dir, uuid, &data)?;
+    log::info!("📥 Restored perspective {} ({} bytes)", uuid, data.len());
+    Ok(true)
+}
+
+/// Restore the monolithic snapshot of earlier executors, if there is one. Either
+/// way the snapshot now has no per-perspective archives: the next backup writes
+/// them and the manifest.
+fn restore_legacy(config: &Ad4mConfig, did: &str) -> Result<bool, AnyError> {
     let data_path = config
         .app_data_path
         .as_ref()
         .ok_or_else(|| anyhow!("app_data_path not configured"))?;
-
-    // Try manifest-based restore first.
-    let manifest_presign = presign(config, "get", &did, "manifest", None)?;
-    let manifest_data = download(&manifest_presign.url)?;
-
-    if !manifest_data.is_empty() {
-        let manifest: SnapshotManifest = serde_json::from_slice(&manifest_data)
-            .map_err(|e| anyhow!("Failed to parse snapshot manifest: {}", e))?;
-
+    let presign_resp = presign(config, "get", did, SnapshotObject::Legacy)?;
+    let data = download(&presign_resp.url)?;
+    let restored = if data.is_empty() {
+        log::info!("No remote snapshot for DID {} — starting fresh", did);
+        false
+    } else {
         log::info!(
-            "Found manifest with {} perspectives for DID {}",
-            manifest.perspectives.len(),
+            "Downloaded {} byte legacy snapshot for DID {} — restoring",
+            data.len(),
             did
         );
-
-        if manifest.perspectives.is_empty() {
-            return Ok(true);
-        }
-
-        for entry in &manifest.perspectives {
-            let persp_presign = presign(config, "get", &did, "perspective", Some(&entry.uuid))?;
-            let archive_data = download(&persp_presign.url)?;
-
-            if archive_data.is_empty() {
-                log::warn!(
-                    "Perspective archive for {} not found — skipping",
-                    entry.uuid
-                );
-                continue;
-            }
-
-            restore_snapshot(Path::new(data_path), &archive_data)?;
-            log::info!(
-                "Restored perspective {} ({} bytes)",
-                entry.uuid,
-                archive_data.len()
-            );
-        }
-
-        return Ok(true);
-    }
-
-    // Fall back to legacy monolithic snapshot.
-    log::info!("No manifest found — trying legacy monolithic snapshot");
-    let legacy_presign = presign(config, "get", &did, "snapshot", None)?;
-    let legacy_data = download(&legacy_presign.url)?;
-
-    if legacy_data.is_empty() {
-        log::info!("No remote snapshot for DID {} — starting fresh", did);
-        return Ok(false);
-    }
-
-    log::info!(
-        "Downloaded {} byte legacy snapshot for DID {} — restoring",
-        legacy_data.len(),
-        did
-    );
-    restore_snapshot(Path::new(data_path), &legacy_data)?;
-    Ok(true)
+        restore_snapshot(Path::new(data_path), &data)?;
+        true
+    };
+    set_current_manifest(Some(SnapshotManifest {
+        created_at: chrono::Utc::now().to_rfc3339(),
+        perspectives: Vec::new(),
+    }));
+    Ok(restored)
 }
 
-/// Flush all registered perspective SPARQL stores.
-///
-/// Iterates the global PERSPECTIVES map and calls `flush()` on each store.
-fn flush_all_stores() {
-    let perspectives = crate::perspectives::all_perspectives();
-    for instance in &perspectives {
-        // Skip unhydrated (deferred) perspectives — they have no persistent store.
-        if !instance.is_hydrated() {
-            continue;
-        }
-        if let Err(e) = instance.store().flush() {
-            log::warn!("Failed to flush SPARQL store for {}: {}", instance.uuid, e);
-        }
-    }
-}
-
-/// Spawn a background task that periodically backs up perspectives to the remote snapshot backend.
+/// Spawn a background task that periodically backs up perspectives to the platform backend.
 ///
 /// Runs every `snapshot_interval_secs` (default 300 = 5 minutes).
 /// Logs errors but does not propagate — backup failure must not crash the executor.
@@ -645,6 +707,271 @@ mod tests {
         assert_eq!(fs::read(&restored_wal).unwrap(), b"write-ahead-log");
     }
 
+    /// Checkpointed stores round-trip through the archive: each restored store
+    /// opens with its links.
+    #[test]
+    fn checkpointed_stores_restore_with_their_links() {
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+        use std::sync::Arc;
+
+        let signer = TestSigner::generate();
+        let link = |i: usize| {
+            let signed = signer.sign(
+                Link {
+                    source: format!("ad4m://s/{i}"),
+                    predicate: Some("ad4m://p".to_string()),
+                    target: format!("ad4m://t/{i}"),
+                }
+                .normalize(),
+            );
+            LinkExpression {
+                author: signed.author,
+                timestamp: signed.timestamp,
+                data: signed.data,
+                proof: signed.proof,
+                status: Some(LinkStatus::Shared),
+            }
+        };
+
+        let live = TempDir::new().unwrap();
+        let mut stores = Vec::new();
+        for (uuid, count) in [("uuid-a", 3), ("uuid-b", 5)] {
+            let dir = live.path().join("perspectives").join(uuid);
+            let store = Arc::new(SparqlStore::new(Some(dir.to_str().unwrap())).unwrap());
+            for i in 0..count {
+                store.add_link(&link(i)).unwrap();
+            }
+            stores.push((uuid.to_string(), store));
+        }
+
+        let staging = live.path().join(".snapshot-test");
+        let persp_dir = checkpoint_stores(&stores, &staging).unwrap();
+        let data = create_snapshot(&persp_dir).unwrap();
+
+        let restored = TempDir::new().unwrap();
+        restore_snapshot(restored.path(), &data).unwrap();
+        for (uuid, count) in [("uuid-a", 3), ("uuid-b", 5)] {
+            let dir = restored.path().join("perspectives").join(uuid);
+            let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
+            assert_eq!(store.get_all_links().unwrap().len(), count, "{uuid}");
+        }
+    }
+
+    /// A stored perspective not registered yet blocks the backup.
+    #[test]
+    fn a_stored_perspective_not_registered_is_missing() {
+        use crate::types::PerspectiveHandle;
+
+        let handle = |uuid: &str| PerspectiveHandle {
+            uuid: uuid.to_string(),
+            ..Default::default()
+        };
+        let registered = vec!["uuid-a".to_string()];
+
+        assert!(missing_stores(&[handle("uuid-a")], &registered).is_empty());
+        assert_eq!(
+            missing_stores(&[handle("uuid-a"), handle("uuid-b")], &registered),
+            vec!["uuid-b".to_string()]
+        );
+    }
+
+    fn signed_link(
+        signer: &crate::agent::signatures::TestSigner,
+        i: usize,
+    ) -> crate::types::LinkExpression {
+        use crate::types::{Link, LinkExpression, LinkStatus};
+        let signed = signer.sign(
+            Link {
+                source: format!("ad4m://s/{i}"),
+                predicate: Some("ad4m://p".to_string()),
+                target: format!("ad4m://t/{i}"),
+            }
+            .normalize(),
+        );
+        LinkExpression {
+            author: signed.author,
+            timestamp: signed.timestamp,
+            data: signed.data,
+            proof: signed.proof,
+            status: Some(LinkStatus::Shared),
+        }
+    }
+
+    fn store_at(dir: &Path, links: usize) -> SparqlStore {
+        let signer = crate::agent::signatures::TestSigner::generate();
+        let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
+        for i in 0..links {
+            store.add_link(&signed_link(&signer, i)).unwrap();
+        }
+        store
+    }
+
+    fn perspective(uuid: &str) -> crate::perspectives::perspective_instance::PerspectiveInstance {
+        crate::perspectives::perspective_instance::PerspectiveInstance::new_deferred(
+            crate::types::PerspectiveHandle {
+                uuid: uuid.to_string(),
+                ..Default::default()
+            },
+        )
+    }
+
+    fn entry(uuid: &str) -> ManifestEntry {
+        ManifestEntry {
+            uuid: uuid.to_string(),
+            size_bytes: 42,
+            last_modified: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// Sets the current manifest for one test and clears it after.
+    struct KnownManifest;
+    impl KnownManifest {
+        fn set(manifest: Option<SnapshotManifest>) -> Self {
+            set_current_manifest(manifest);
+            KnownManifest
+        }
+    }
+    impl Drop for KnownManifest {
+        fn drop(&mut self) {
+            set_current_manifest(None);
+        }
+    }
+
+    #[test]
+    fn manifest_round_trips_through_json() {
+        let manifest = SnapshotManifest {
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            perspectives: vec![entry("uuid-a"), entry("uuid-b")],
+        };
+        let json = serde_json::to_vec(&manifest).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<SnapshotManifest>(&json).unwrap(),
+            manifest
+        );
+    }
+
+    /// A restored archive replaces the perspective's directory: no file of the store it
+    /// replaces stays, and other perspectives are untouched.
+    #[test]
+    fn a_perspective_archive_replaces_its_directory() {
+        let src = TempDir::new().unwrap();
+        let src_persp = src.path().join("perspectives");
+        fs::create_dir_all(src_persp.join("uuid-a/sparql_store")).unwrap();
+        fs::write(src_persp.join("uuid-a/sparql_store/CURRENT"), b"new").unwrap();
+        let archive = create_perspective_snapshot(&src_persp, "uuid-a").unwrap();
+
+        let dst = TempDir::new().unwrap();
+        let dst_persp = dst.path().join("perspectives");
+        fs::create_dir_all(dst_persp.join("uuid-a/sparql_store")).unwrap();
+        fs::write(dst_persp.join("uuid-a/sparql_store/OLD-000001.sst"), b"old").unwrap();
+        fs::create_dir_all(dst_persp.join("uuid-b")).unwrap();
+        fs::write(dst_persp.join("uuid-b/keep"), b"b").unwrap();
+
+        restore_perspective_snapshot(&dst_persp, "uuid-a", &archive).unwrap();
+        assert_eq!(
+            fs::read(dst_persp.join("uuid-a/sparql_store/CURRENT")).unwrap(),
+            b"new"
+        );
+        assert!(!dst_persp
+            .join("uuid-a/sparql_store/OLD-000001.sst")
+            .exists());
+        assert_eq!(fs::read(dst_persp.join("uuid-b/keep")).unwrap(), b"b");
+        let leftovers: Vec<_> = fs::read_dir(dst.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy().starts_with(".restore-"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging removed: {leftovers:?}");
+    }
+
+    /// An archive for another perspective does not restore over this one.
+    #[test]
+    fn an_archive_for_another_perspective_is_refused() {
+        let src = TempDir::new().unwrap();
+        let src_persp = src.path().join("perspectives");
+        fs::create_dir_all(src_persp.join("uuid-b")).unwrap();
+        let archive = create_perspective_snapshot(&src_persp, "uuid-b").unwrap();
+
+        let dst = TempDir::new().unwrap();
+        let dst_persp = dst.path().join("perspectives");
+        assert!(restore_perspective_snapshot(&dst_persp, "uuid-a", &archive).is_err());
+        assert!(!dst_persp.join("uuid-a").exists());
+    }
+
+    /// A backup archives each open store from a checkpoint, keeps a deferred
+    /// perspective's listed archive without re-uploading it, archives a deferred
+    /// perspective the manifest does not list from its closed store, and lists nothing
+    /// for a deferred perspective with no store.
+    #[test]
+    fn a_backup_archives_open_stores_and_keeps_deferred_archives() {
+        let data = TempDir::new().unwrap();
+        let persp_dir = data.path().join("perspectives");
+
+        let open = perspective("uuid-open");
+        open.swap_store(store_at(&persp_dir.join("uuid-open"), 3));
+        let listed = perspective("uuid-listed");
+        let legacy = perspective("uuid-legacy");
+        drop(store_at(&persp_dir.join("uuid-legacy"), 2));
+        let empty = perspective("uuid-empty");
+
+        let _known = KnownManifest::set(Some(SnapshotManifest {
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            perspectives: vec![entry("uuid-listed")],
+        }));
+        let mut uploaded = std::collections::BTreeMap::new();
+        let manifest = archive_perspectives(
+            &[open, listed, legacy, empty],
+            &persp_dir,
+            &data.path().join(".snapshot-test"),
+            &mut |uuid, data| {
+                uploaded.insert(uuid.to_string(), data);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let uuids: Vec<_> = manifest
+            .perspectives
+            .iter()
+            .map(|e| e.uuid.as_str())
+            .collect();
+        assert_eq!(uuids, vec!["uuid-open", "uuid-listed", "uuid-legacy"]);
+        assert_eq!(
+            manifest.perspectives[1],
+            entry("uuid-listed"),
+            "kept as listed"
+        );
+        assert_eq!(
+            uploaded.keys().collect::<Vec<_>>(),
+            vec!["uuid-legacy", "uuid-open"]
+        );
+
+        for (uuid, links) in [("uuid-open", 3), ("uuid-legacy", 2)] {
+            let restored = TempDir::new().unwrap();
+            let restored_persp = restored.path().join("perspectives");
+            restore_perspective_snapshot(&restored_persp, uuid, &uploaded[uuid]).unwrap();
+            let store =
+                SparqlStore::new(Some(restored_persp.join(uuid).to_str().unwrap())).unwrap();
+            assert_eq!(store.get_all_links().unwrap().len(), links, "{uuid}");
+        }
+    }
+
+    /// Without the remote manifest a backup cannot tell what a deferred perspective's
+    /// archive is, so it refuses instead of writing a manifest without it.
+    #[test]
+    fn a_backup_refuses_a_deferred_perspective_without_the_manifest() {
+        let data = TempDir::new().unwrap();
+        let _known = KnownManifest::set(None);
+        let result = archive_perspectives(
+            &[perspective("uuid-deferred")],
+            &data.path().join("perspectives"),
+            &data.path().join(".snapshot-test"),
+            &mut |_, _| panic!("nothing to upload"),
+        );
+        assert!(result.is_err());
+    }
+
     #[test]
     fn test_create_snapshot_missing_dir() {
         let tmp = TempDir::new().unwrap();
@@ -664,12 +991,12 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_base_url_derivation() {
+    fn test_platform_base_url_derivation() {
         let mut config = Ad4mConfig::default();
         config.wallet_backend_url =
             Some("http://host.docker.internal:8787/internal/wallet".to_string());
 
-        let base = backend_base_url(&config).unwrap();
+        let base = platform_base_url(&config).unwrap();
         assert_eq!(base, "http://host.docker.internal:8787");
 
         let url = presign_url(&config).unwrap();
@@ -680,305 +1007,21 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_base_url_no_internal_path() {
+    fn test_platform_base_url_no_internal_path() {
         let mut config = Ad4mConfig::default();
         config.wallet_backend_url = Some("http://localhost:8787".to_string());
 
-        let base = backend_base_url(&config).unwrap();
+        let base = platform_base_url(&config).unwrap();
         assert_eq!(base, "http://localhost:8787");
     }
 
     #[test]
-    fn test_backend_base_url_missing() {
+    fn test_platform_base_url_missing() {
         let mut config = Ad4mConfig::default();
         config.wallet_backend_url = None;
         config.db_backend_url = None;
 
-        let result = backend_base_url(&config);
+        let result = platform_base_url(&config);
         assert!(result.is_err());
-    }
-
-    // ── Per-perspective snapshot tests ─────────────────────────────────
-
-    #[test]
-    fn test_create_perspective_snapshot() {
-        let src_dir = TempDir::new().unwrap();
-        let persp_dir = src_dir.path().join("perspectives");
-        let uuid = "test-uuid-1234";
-        let store_dir = persp_dir.join(uuid).join("sparql_store");
-        fs::create_dir_all(&store_dir).unwrap();
-        fs::write(store_dir.join("data.db"), b"perspective-data").unwrap();
-        fs::write(store_dir.join("wal.log"), b"perspective-wal").unwrap();
-
-        let data = create_perspective_snapshot(&persp_dir, uuid).unwrap();
-        assert!(!data.is_empty());
-
-        // Restore and verify
-        let dst_dir = TempDir::new().unwrap();
-        restore_snapshot(dst_dir.path(), &data).unwrap();
-
-        let restored_data = dst_dir
-            .path()
-            .join("perspectives")
-            .join(uuid)
-            .join("sparql_store/data.db");
-        assert!(restored_data.exists());
-        assert_eq!(fs::read(&restored_data).unwrap(), b"perspective-data");
-
-        let restored_wal = dst_dir
-            .path()
-            .join("perspectives")
-            .join(uuid)
-            .join("sparql_store/wal.log");
-        assert!(restored_wal.exists());
-        assert_eq!(fs::read(&restored_wal).unwrap(), b"perspective-wal");
-    }
-
-    #[test]
-    fn test_create_perspective_snapshot_missing_uuid() {
-        let tmp = TempDir::new().unwrap();
-        let persp_dir = tmp.path().join("perspectives");
-        fs::create_dir_all(&persp_dir).unwrap();
-
-        let result = create_perspective_snapshot(&persp_dir, "nonexistent-uuid");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_manifest_serialization_roundtrip() {
-        let manifest = SnapshotManifest {
-            created_at: "2026-09-01T00:00:00Z".to_string(),
-            perspectives: vec![
-                ManifestEntry {
-                    uuid: "uuid-1".to_string(),
-                    size_bytes: 1024,
-                    last_modified: "2026-09-01T00:00:00Z".to_string(),
-                },
-                ManifestEntry {
-                    uuid: "uuid-2".to_string(),
-                    size_bytes: 2048,
-                    last_modified: "2026-09-01T01:00:00Z".to_string(),
-                },
-            ],
-        };
-
-        let json = serde_json::to_vec_pretty(&manifest).unwrap();
-        let deserialized: SnapshotManifest = serde_json::from_slice(&json).unwrap();
-
-        assert_eq!(deserialized.created_at, manifest.created_at);
-        assert_eq!(deserialized.perspectives.len(), 2);
-        assert_eq!(deserialized.perspectives[0], manifest.perspectives[0]);
-        assert_eq!(deserialized.perspectives[1], manifest.perspectives[1]);
-    }
-
-    // =========================================================================
-    // 14.9, 14.11, 14.12: Lazy perspective loading — flush/backup/manifest
-    // =========================================================================
-
-    /// 14.9 (snapshot-side) flush_all_stores skips unhydrated perspectives.
-    ///
-    /// Tests that the internal flush_all_stores() function gracefully
-    /// handles a mix of hydrated and unhydrated perspectives by calling
-    /// the same skip logic used in the production code path.
-    #[test]
-    fn test_flush_all_stores_skips_unhydrated() {
-        crate::test_utils::setup_wallet();
-        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
-        crate::agent::AgentService::init_global_test_instance();
-
-        let uuid_h = uuid::Uuid::new_v4().to_string();
-        let uuid_d = uuid::Uuid::new_v4().to_string();
-
-        // Register a hydrated perspective
-        let handle_h = crate::types::PerspectiveHandle {
-            uuid: uuid_h.clone(),
-            name: Some("Hydrated".to_string()),
-            shared_url: None,
-            neighbourhood: None,
-            state: crate::types::PerspectiveState::Private,
-            owners: None,
-        };
-        let p_h =
-            crate::perspectives::perspective_instance::PerspectiveInstance::new(handle_h, None);
-        crate::perspectives::register_perspective(uuid_h.clone(), p_h);
-
-        // Register a deferred (unhydrated) perspective
-        let handle_d = crate::types::PerspectiveHandle {
-            uuid: uuid_d.clone(),
-            name: Some("Deferred".to_string()),
-            shared_url: None,
-            neighbourhood: None,
-            state: crate::types::PerspectiveState::Private,
-            owners: None,
-        };
-        let p_d =
-            crate::perspectives::perspective_instance::PerspectiveInstance::new_deferred(handle_d);
-        assert!(!p_d.is_hydrated());
-        crate::perspectives::register_perspective(uuid_d.clone(), p_d);
-
-        // flush_all_stores must not panic (skips the unhydrated one)
-        flush_all_stores();
-
-        // Deferred perspective must still report unhydrated
-        let p = crate::perspectives::get_perspective(&uuid_d).unwrap();
-        assert!(
-            !p.is_hydrated(),
-            "flush_all_stores must not trigger hydration"
-        );
-    }
-
-    /// 14.11 Backup skips unhydrated perspectives.
-    ///
-    /// backup_perspectives() calls flush_all_stores() which skips unhydrated.
-    /// Additionally, backup only archives perspective directories that exist
-    /// on disk — deferred perspectives have no directory yet, so they produce
-    /// no archive. The manifest carries forward their entry from the cached
-    /// manifest (the remote archive remains untouched).
-    ///
-    /// This test verifies that flush_all_stores (called within backup) does
-    /// not trigger hydration of deferred perspectives.
-    #[test]
-    fn test_backup_flush_does_not_hydrate_deferred() {
-        // Same setup as 14.9 — the assertion is that flush inside
-        // backup_perspectives does not force hydration.
-        crate::test_utils::setup_wallet();
-        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
-        crate::agent::AgentService::init_global_test_instance();
-
-        let uuid = uuid::Uuid::new_v4().to_string();
-        let handle = crate::types::PerspectiveHandle {
-            uuid: uuid.clone(),
-            name: Some("Deferred backup".to_string()),
-            shared_url: None,
-            neighbourhood: None,
-            state: crate::types::PerspectiveState::Private,
-            owners: None,
-        };
-        let p =
-            crate::perspectives::perspective_instance::PerspectiveInstance::new_deferred(handle);
-        assert!(!p.is_hydrated());
-        crate::perspectives::register_perspective(uuid.clone(), p);
-
-        // flush_all_stores (the first step of backup_perspectives) must skip
-        flush_all_stores();
-
-        let after = crate::perspectives::get_perspective(&uuid).unwrap();
-        assert!(
-            !after.is_hydrated(),
-            "flush during backup must not hydrate deferred perspectives"
-        );
-    }
-
-    /// 14.12 Cached manifest stores lazy-mode data for per-perspective downloads.
-    ///
-    /// The CACHED_MANIFEST global stores the manifest after
-    /// restore_perspectives_lazy() downloads it. This test verifies the
-    /// caching and lookup logic without requiring network access.
-    #[test]
-    fn test_cached_manifest_stores_and_retrieves() {
-        // Set a manifest with two perspectives
-        let manifest = SnapshotManifest {
-            created_at: "2026-09-01T00:00:00Z".to_string(),
-            perspectives: vec![
-                ManifestEntry {
-                    uuid: "uuid-known".to_string(),
-                    size_bytes: 1024,
-                    last_modified: "2026-09-01T00:00:00Z".to_string(),
-                },
-                ManifestEntry {
-                    uuid: "uuid-also-known".to_string(),
-                    size_bytes: 2048,
-                    last_modified: "2026-09-01T01:00:00Z".to_string(),
-                },
-            ],
-        };
-
-        // Simulate what restore_perspectives_lazy does: cache the manifest
-        *CACHED_MANIFEST.lock().unwrap() = Some(manifest);
-
-        // Verify: known UUID present in manifest
-        {
-            let cached = CACHED_MANIFEST.lock().unwrap();
-            let m = cached.as_ref().expect("manifest must be cached");
-            assert_eq!(m.perspectives.len(), 2);
-            assert!(
-                m.perspectives.iter().any(|e| e.uuid == "uuid-known"),
-                "known UUID must appear in cached manifest"
-            );
-        }
-
-        // Verify: unknown UUID not in manifest (restore_perspective_archive
-        // would skip download in this case)
-        {
-            let cached = CACHED_MANIFEST.lock().unwrap();
-            let m = cached.as_ref().unwrap();
-            assert!(
-                !m.perspectives.iter().any(|e| e.uuid == "uuid-unknown"),
-                "unknown UUID must not appear in cached manifest"
-            );
-        }
-
-        // Clean up
-        *CACHED_MANIFEST.lock().unwrap() = None;
-    }
-
-    /// 14.12b Empty manifest returns Ok(true) in lazy mode.
-    ///
-    /// A manifest with zero entries means "no perspectives to download"
-    /// but the manifest itself was found. restore_perspectives_lazy stores
-    /// it (with zero entries) and returns Ok(true).
-    #[test]
-    fn test_cached_manifest_empty_entries_still_cached() {
-        let manifest = SnapshotManifest {
-            created_at: "2026-09-01T00:00:00Z".to_string(),
-            perspectives: vec![],
-        };
-
-        *CACHED_MANIFEST.lock().unwrap() = Some(manifest);
-
-        let cached = CACHED_MANIFEST.lock().unwrap();
-        let m = cached.as_ref().expect("empty manifest must be cached");
-        assert!(
-            m.perspectives.is_empty(),
-            "empty manifest must have zero entries"
-        );
-
-        // Clean up
-        drop(cached);
-        *CACHED_MANIFEST.lock().unwrap() = None;
-    }
-
-    #[test]
-    fn test_create_multiple_perspective_snapshots() {
-        let src_dir = TempDir::new().unwrap();
-        let persp_dir = src_dir.path().join("perspectives");
-
-        // Create two perspectives
-        for uuid in &["uuid-aaa", "uuid-bbb"] {
-            let store_dir = persp_dir.join(uuid).join("sparql_store");
-            fs::create_dir_all(&store_dir).unwrap();
-            fs::write(store_dir.join("data.db"), format!("data-{}", uuid)).unwrap();
-        }
-
-        // Archive each separately
-        let archive_a = create_perspective_snapshot(&persp_dir, "uuid-aaa").unwrap();
-        let archive_b = create_perspective_snapshot(&persp_dir, "uuid-bbb").unwrap();
-
-        // Restore both to a fresh directory
-        let dst_dir = TempDir::new().unwrap();
-        restore_snapshot(dst_dir.path(), &archive_a).unwrap();
-        restore_snapshot(dst_dir.path(), &archive_b).unwrap();
-
-        // Verify both perspectives exist
-        let data_a = dst_dir
-            .path()
-            .join("perspectives/uuid-aaa/sparql_store/data.db");
-        let data_b = dst_dir
-            .path()
-            .join("perspectives/uuid-bbb/sparql_store/data.db");
-        assert!(data_a.exists());
-        assert!(data_b.exists());
-        assert_eq!(fs::read_to_string(&data_a).unwrap(), "data-uuid-aaa");
-        assert_eq!(fs::read_to_string(&data_b).unwrap(), "data-uuid-bbb");
     }
 }

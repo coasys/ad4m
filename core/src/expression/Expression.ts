@@ -21,8 +21,15 @@ export class ExpressionProofInput {
     invalid?: boolean;
 }
 
-//Note having any as return type here fixes compilation errors but we lose the ExpressionClass type in resulting .d.ts files
-export function ExpressionGeneric<DataType>(DataTypeClass: ClassType<DataType>): any {
+/** The fields every expression carries, with `DataType` as its data. */
+export type ExpressionShape<DataType, Proof = ExpressionProof> = {
+    author: string
+    timestamp: string
+    data: DataType
+    proof: Proof
+}
+
+export function ExpressionGeneric<DataType>(DataTypeClass: ClassType<DataType>): abstract new (author?: string, timestamp?: string, data?: DataType, proof?: ExpressionProof) => ExpressionShape<DataType> {
     abstract class ExpressionClass {
         author: string;
         timestamp: string;
@@ -39,7 +46,7 @@ export function ExpressionGeneric<DataType>(DataTypeClass: ClassType<DataType>):
     return ExpressionClass;
 }
 
-export function ExpressionGenericInput<DataType>(DataTypeClass: ClassType<DataType>): any {
+export function ExpressionGenericInput<DataType>(DataTypeClass: ClassType<DataType>): abstract new () => ExpressionShape<DataType, ExpressionProofInput> {
     abstract class ExpressionClass {
         author: string;
         timestamp: string;
@@ -50,6 +57,8 @@ export function ExpressionGenericInput<DataType>(DataTypeClass: ClassType<DataTy
 }
 export class Expression extends ExpressionGeneric(Object) {};
 export class ExpressionRendered extends ExpressionGeneric(String) {
+    /** The expression's data as a JSON string, as the executor renders it. */
+    declare data: string
     language: LanguageRef
     icon: Icon
 };
