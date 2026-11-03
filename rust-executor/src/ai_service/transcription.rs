@@ -73,7 +73,8 @@ impl SpeechGate {
         }
     }
 
-    /// Whether `samples` is speech, by dev's thresholds.
+    /// Whether `samples` is speech, by dev's thresholds (the stream logs the ratio itself).
+    #[cfg(test)]
     pub(crate) fn passes(&mut self, samples: &[f32]) -> bool {
         self.speech_ratio(samples) >= VAD_MIN_SPEECH_RATIO
     }
