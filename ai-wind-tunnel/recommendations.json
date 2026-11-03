@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "1970-01-01T00:00:00.000Z",
+  "generatedAt": "2026-11-03T02:09:43.806Z",
   "rules": {
     "llm": {
       "floor": [
@@ -94,7 +94,7 @@
       ],
       "order": [
         {
-          "metric": "wer",
+          "metric": "werMean",
           "dir": "asc",
           "round": 0.02
         },
@@ -104,7 +104,7 @@
         }
       ],
       "report": [
-        "wer",
+        "werMean",
         "rtf",
         "latencyMs",
         "streamLatencyMs",
@@ -140,5 +140,134 @@
       ]
     }
   },
-  "classes": {}
+  "classes": {
+    "amd-igpu-uma-128": {
+      "llm": {
+        "provider": "llama-server",
+        "modelId": "qwen3.5-4b-q4_k_m",
+        "runtimeBuild": "linux-x64-vulkan",
+        "backend": "vulkan",
+        "serverFlags": [
+          "-c",
+          "8192",
+          "-ngl",
+          "999",
+          "--reasoning",
+          "off"
+        ],
+        "metrics": {
+          "ttftMs": 157.5,
+          "decodeTps": 63.249,
+          "prefillTps": 1591,
+          "latencyMs": 179.7,
+          "throughputTpsC4": 131.3,
+          "firstRequestMs": 170,
+          "peakRssBytes": 3018297344,
+          "peakGpuBytes": 7819993088,
+          "executorOverheadMs": 21.5
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd.json"
+        ],
+        "candidates": 10,
+        "overFloor": 10
+      },
+      "completion": {
+        "provider": "llama-server",
+        "modelId": "qwen3.5-0.8b-q8_0",
+        "runtimeBuild": "linux-x64-rocm",
+        "backend": "rocm",
+        "serverFlags": [
+          "-c",
+          "8192",
+          "-ngl",
+          "999",
+          "--reasoning",
+          "off"
+        ],
+        "metrics": {
+          "latencyMs": 126.5,
+          "firstRequestMs": 223,
+          "executorOverheadMs": -3.2
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd.json"
+        ],
+        "candidates": 3,
+        "overFloor": 3
+      },
+      "embeddings": {
+        "provider": "llama-server",
+        "modelId": "nomic-embed-text-v1.5-q8_0",
+        "runtimeBuild": "linux-x64-rocm",
+        "backend": "rocm",
+        "serverFlags": [
+          "-c",
+          "8192",
+          "-ngl",
+          "999",
+          "--embeddings"
+        ],
+        "metrics": {
+          "textsPerSec": 560.3,
+          "batchLatencyMs": 57.114,
+          "singleLatencyMs": 6.107,
+          "dimension": 768,
+          "mrr": 1,
+          "peakRssBytes": 580091904,
+          "executorOverheadMs": 2.6
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd.json"
+        ],
+        "candidates": 3,
+        "overFloor": 3
+      },
+      "stt": {
+        "provider": "whisper-server",
+        "modelId": "whisper-small-q5_1",
+        "runtimeBuild": "linux-x64-cpu",
+        "backend": "cpu",
+        "serverFlags": [
+          "--request-path",
+          "/v1/audio",
+          "--inference-path",
+          "/transcriptions",
+          "-t",
+          "8"
+        ],
+        "metrics": {
+          "werMean": 0.054,
+          "rtf": 0.219,
+          "latencyMs": 1002.5,
+          "streamLatencyMs": 991,
+          "firstRequestMs": 953,
+          "peakRssBytes": 434806784
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd.json"
+        ],
+        "candidates": 3,
+        "overFloor": 3
+      },
+      "tts": {
+        "provider": "speaches",
+        "remoteModel": "speaches-ai/Kokoro-82M-v1.0-ONNX-int8",
+        "backend": "cpu",
+        "metrics": {
+          "rtf": 0.742,
+          "ttfbMs": 2852.7,
+          "latencyMs": 2852.9,
+          "roundTripWer": 0,
+          "firstRequestMs": 4275,
+          "peakRssBytes": 2194477056
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd.json"
+        ],
+        "candidates": 1,
+        "overFloor": 1
+      }
+    }
+  }
 }
