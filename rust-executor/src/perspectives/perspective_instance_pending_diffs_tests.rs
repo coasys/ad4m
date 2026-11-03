@@ -109,7 +109,7 @@ fn enqueue(perspective: &PerspectiveInstance, diff: &PerspectiveDiff) {
 /// Store `target`'s link as Shared, as a write through `commit` leaves it.
 fn store_shared(perspective: &PerspectiveInstance, target: &str) {
     perspective
-        .sparql_store
+        .store()
         .add_link(&LinkExpression {
             status: Some(LinkStatus::Shared),
             ..link("did:key:alice", target)
