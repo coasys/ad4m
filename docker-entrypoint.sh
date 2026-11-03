@@ -434,6 +434,9 @@ CADDYEOF
     echo "WE frontend + API proxy serving at http://0.0.0.0:${we_port}/"
 }
 
+# ── Local AI shipped in the image (INCLUDE_MODELS=true) ──────────────────────
+seed_local_ai /opt/ad4m/local-ai-state /opt/ad4m/local-ai /data/local-ai
+
 # ── Start executor in background, auto-generate agent, then wait ────────────
 ad4m-executor run \
     --app-data-path /data \

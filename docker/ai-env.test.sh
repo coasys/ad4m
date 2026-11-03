@@ -1,4 +1,6 @@
 #!/bin/bash
+# Each case sets its variables in a subshell of its own, on purpose.
+# shellcheck disable=SC2030,SC2031
 # Tests of docker/ai-env.sh (AI endpoints from the environment): bash docker/ai-env.test.sh
 # `ws_rpc` here is a fake executor that keeps endpoints, models and defaults in files and
 # records every call, so each case reads what the entrypoint would have asked for.
@@ -131,6 +133,46 @@ run_setup
 check "a transcription key goes with its endpoint" \
     '[{"name":"transcription","kind":"OPEN_AI_AUDIO","baseUrl":"https://api.openai.com","apiKey":"sk-openai"}]' \
     "$(endpoints)"
+
+# ── Local AI the image ships (INCLUDE_MODELS=true) ──────────────────────────
+seed_dir=$(mktemp -d)
+mkdir -p "${seed_dir}/image-state" "${seed_dir}/store"
+echo '{"runtimes":[],"models":[]}' > "${seed_dir}/image-state/selection.json"
+seeded=$(
+    unset AD4M_LOCAL_AI_DIR
+    # shellcheck source=/dev/null
+    . "${script}"
+    seed_local_ai "${seed_dir}/image-state" "${seed_dir}/store" "${seed_dir}/data/local-ai" >/dev/null
+    echo "${AD4M_LOCAL_AI_DIR}"
+)
+check "the image's store is the executor's local AI store" "${seed_dir}/store" "${seeded}"
+check "the image's selection is the executor's" \
+    '{"runtimes":[],"models":[]}' "$(cat "${seed_dir}/data/local-ai/selection.json")"
+echo '{"runtimes":[{"x":1}],"models":[]}' > "${seed_dir}/data/local-ai/selection.json"
+(
+    # shellcheck source=/dev/null
+    . "${script}"
+    seed_local_ai "${seed_dir}/image-state" "${seed_dir}/store" "${seed_dir}/data/local-ai" >/dev/null
+)
+check "a selection the executor has already is kept" \
+    '{"runtimes":[{"x":1}],"models":[]}' "$(cat "${seed_dir}/data/local-ai/selection.json")"
+other=$(
+    export AD4M_LOCAL_AI_DIR=/elsewhere
+    # shellcheck source=/dev/null
+    . "${script}"
+    seed_local_ai "${seed_dir}/image-state" "${seed_dir}/store" "${seed_dir}/data2" >/dev/null
+    echo "${AD4M_LOCAL_AI_DIR}"
+)
+check "an operator's AD4M_LOCAL_AI_DIR wins" "/elsewhere" "${other}"
+empty=$(
+    unset AD4M_LOCAL_AI_DIR
+    # shellcheck source=/dev/null
+    . "${script}"
+    seed_local_ai "${seed_dir}/none" "${seed_dir}/store" "${seed_dir}/data3"
+    echo "dir=${AD4M_LOCAL_AI_DIR:-}"
+)
+check "an image without local AI changes nothing" "dir=" "${empty}"
+check "  and makes no state" "no" "$([ -e "${seed_dir}/data3" ] && echo yes || echo no)"
 
 # ── Nothing set: nothing is asked ───────────────────────────────────────────
 unset_ai_env

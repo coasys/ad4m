@@ -110,3 +110,20 @@ setup_ai_models() {
     fi
     return 0
 }
+
+# Local AI the image ships (INCLUDE_MODELS=true): the store $2 and the selection the
+# image build kept in $1. Points the executor at the store (unless AD4M_LOCAL_AI_DIR
+# names another) and gives the executor's state $3 the selection once, so local AI
+# starts with the executor (local_ai_autostart) with no download. A selection the
+# executor has already (a later ai.localInstall) is kept.
+seed_local_ai() {
+    local image_state="$1" image_store="$2" state="$3"
+    [ -f "${image_state}/selection.json" ] || return 0
+    export AD4M_LOCAL_AI_DIR="${AD4M_LOCAL_AI_DIR:-${image_store}}"
+    if [ ! -f "${state}/selection.json" ]; then
+        mkdir -p "${state}"
+        cp "${image_state}/selection.json" "${state}/selection.json"
+        echo "Local AI from the image: its runtimes and models start with the executor."
+    fi
+    return 0
+}
