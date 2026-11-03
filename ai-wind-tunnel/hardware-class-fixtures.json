@@ -1,86 +1,96 @@
 {
   "schemaVersion": 1,
-  "description": "Fingerprints and the class hardware-classes.json gives each. The executor's Rust classifier and the wind tunnel's TypeScript one both pass every case.",
-  "cases": [
+  "description": "Classifier inputs and the class each must get from hardware-classes.json. Every classifier (TS in tests/js, Rust in the executor) runs these. Memory in bytes.",
+  "fixtures": [
     {
-      "name": "MacBook Air M2 8 GB",
-      "fingerprint": { "os": "macos", "arch": "aarch64", "ramBytes": 8589934592, "gpu": { "vendor": "apple", "type": "unified", "vramBytes": null } },
-      "expected": "apple-silicon-8gb"
+      "name": "AMD Strix Halo, 128 GB unified, ROCm and Vulkan",
+      "input": { "os": "linux", "arch": "x64", "memoryBytes": 130996502528, "backends": ["cpu", "rocm", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 536870912, "unified": true }] },
+      "expected": "amd-igpu-uma-128"
     },
     {
-      "name": "MacBook Pro M3 18 GB",
-      "fingerprint": { "os": "macos", "arch": "aarch64", "ramBytes": 19327352832, "gpu": { "vendor": "apple", "type": "unified", "vramBytes": null } },
-      "expected": "apple-silicon-16gb"
+      "name": "AMD Strix Halo, 64 GB unified, Vulkan only",
+      "input": { "os": "linux", "arch": "x64", "memoryBytes": 66571993088, "backends": ["cpu", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 4294967296, "unified": true }] },
+      "expected": "amd-igpu-uma-64"
     },
     {
-      "name": "Mac mini M4 Pro 24 GB",
-      "fingerprint": { "os": "macos", "arch": "aarch64", "ramBytes": 25769803776, "gpu": { "vendor": "apple", "type": "unified", "vramBytes": null } },
-      "expected": "apple-silicon-24gb"
+      "name": "Ryzen 780M laptop, 32 GB",
+      "input": { "os": "linux", "arch": "x64", "memoryBytes": 32768000000, "backends": ["cpu", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 2147483648, "unified": true }] },
+      "expected": "amd-igpu-uma-32"
     },
     {
-      "name": "Mac Studio M2 Max 64 GB",
-      "fingerprint": { "os": "macos", "arch": "aarch64", "ramBytes": 68719476736, "gpu": { "vendor": "apple", "type": "unified", "vramBytes": null } },
-      "expected": "apple-silicon-48gb"
+      "name": "AMD iGPU on 8 GB falls to cpu",
+      "input": { "os": "linux", "arch": "x64", "memoryBytes": 8000000000, "backends": ["cpu", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 536870912, "unified": true }] },
+      "expected": "cpu-8gb"
     },
     {
-      "name": "Intel MacBook Pro 16 GB",
-      "fingerprint": { "os": "macos", "arch": "x86_64", "ramBytes": 17179869184, "gpu": { "vendor": "intel", "type": "integrated", "vramBytes": 1610612736 } },
-      "expected": "igpu-16gb"
-    },
-    {
-      "name": "Linux desktop, RTX 3060 12 GB, 32 GB RAM",
-      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 33554432000, "gpu": { "vendor": "nvidia", "type": "discrete", "vramBytes": 12884901888 } },
-      "expected": "nvidia-12gb"
-    },
-    {
-      "name": "Linux server, RTX 2060 6 GB, 16 GB RAM",
-      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 16486170624, "gpu": { "vendor": "nvidia", "type": "discrete", "vramBytes": 6442450944 } },
-      "expected": "nvidia-6gb"
-    },
-    {
-      "name": "Windows, RTX 4090 24 GB",
-      "fingerprint": { "os": "windows", "arch": "x86_64", "ramBytes": 68719476736, "gpu": { "vendor": "nvidia", "type": "discrete", "vramBytes": 25757220864 } },
-      "expected": "nvidia-24gb"
-    },
-    {
-      "name": "Windows laptop, GTX 1650 4 GB, 16 GB RAM",
-      "fingerprint": { "os": "windows", "arch": "x86_64", "ramBytes": 17095983104, "gpu": { "vendor": "nvidia", "type": "discrete", "vramBytes": 4294967296 } },
-      "expected": "cpu-16gb"
-    },
-    {
-      "name": "Linux, Radeon RX 7900 XTX 24 GB",
-      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 67108864000, "gpu": { "vendor": "amd", "type": "discrete", "vramBytes": 25753026560 } },
-      "expected": "dgpu-24gb"
-    },
-    {
-      "name": "Linux, Intel Arc A770 16 GB",
-      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 33554432000, "gpu": { "vendor": "intel", "type": "discrete", "vramBytes": 17179869184 } },
-      "expected": "dgpu-12gb"
-    },
-    {
-      "name": "Linux, AMD Strix Halo (Radeon 8060S), 128 GB unified",
-      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 131891142656, "gpu": { "vendor": "amd", "type": "integrated", "vramBytes": 536870912 } },
-      "expected": "igpu-32gb"
-    },
-    {
-      "name": "Windows laptop, Intel Iris Xe, 16 GB",
-      "fingerprint": { "os": "windows", "arch": "x86_64", "ramBytes": 16834306048, "gpu": { "vendor": "intel", "type": "integrated", "vramBytes": 134217728 } },
-      "expected": "igpu-16gb"
-    },
-    {
-      "name": "Linux, no GPU, 64 GB",
-      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 67108864000, "gpu": null },
+      "name": "AMD iGPU without a GPU backend falls to cpu",
+      "input": { "os": "linux", "arch": "x64", "memoryBytes": 33554432000, "backends": ["cpu"], "gpus": [{ "vendor": "amd", "vramBytes": 536870912, "unified": true }] },
       "expected": "cpu-32gb"
     },
     {
-      "name": "Linux arm64 board, 8 GB",
-      "fingerprint": { "os": "linux", "arch": "aarch64", "ramBytes": 8253046784, "gpu": null },
+      "name": "RX 7900 XTX, ROCm",
+      "input": { "os": "linux", "arch": "x64", "memoryBytes": 68719476736, "backends": ["cpu", "rocm", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 25753026560, "unified": false }] },
+      "expected": "amd-dgpu-24gb"
+    },
+    {
+      "name": "RTX 3060 12 GB, CUDA",
+      "input": { "os": "linux", "arch": "x64", "memoryBytes": 33554432000, "backends": ["cpu", "cuda", "vulkan"], "gpus": [{ "vendor": "nvidia", "vramBytes": 12884901888, "unified": false }] },
+      "expected": "nvidia-12gb"
+    },
+    {
+      "name": "RTX 2060 6 GB is below the smallest nvidia class",
+      "input": { "os": "linux", "arch": "x64", "memoryBytes": 16777216000, "backends": ["cpu", "cuda"], "gpus": [{ "vendor": "nvidia", "vramBytes": 6442450944, "unified": false }] },
+      "expected": "cpu-16gb"
+    },
+    {
+      "name": "RTX 4090 on Windows",
+      "input": { "os": "windows", "arch": "x64", "memoryBytes": 68719476736, "backends": ["cpu", "cuda", "vulkan"], "gpus": [{ "vendor": "nvidia", "vramBytes": 25769803776, "unified": false }] },
+      "expected": "nvidia-24gb"
+    },
+    {
+      "name": "RTX 4060 Ti 16 GB, driver missing: no backend",
+      "input": { "os": "linux", "arch": "x64", "memoryBytes": 34359738368, "backends": ["cpu"], "gpus": [{ "vendor": "nvidia", "vramBytes": 17179869184, "unified": false }] },
+      "expected": "cpu-32gb"
+    },
+    {
+      "name": "Laptop with an NVIDIA dGPU and an AMD iGPU picks the NVIDIA class",
+      "input": { "os": "linux", "arch": "x64", "memoryBytes": 34359738368, "backends": ["cpu", "cuda", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 536870912, "unified": true }, { "vendor": "nvidia", "vramBytes": 8589934592, "unified": false }] },
+      "expected": "nvidia-8gb"
+    },
+    {
+      "name": "MacBook Pro M3 Max 64 GB",
+      "input": { "os": "macos", "arch": "arm64", "memoryBytes": 68719476736, "backends": ["cpu", "metal"], "gpus": [{ "vendor": "apple", "vramBytes": 0, "unified": true }] },
+      "expected": "apple-silicon-64"
+    },
+    {
+      "name": "MacBook Air M2 16 GB",
+      "input": { "os": "macos", "arch": "arm64", "memoryBytes": 17179869184, "backends": ["cpu", "metal"], "gpus": [{ "vendor": "apple", "vramBytes": 0, "unified": true }] },
+      "expected": "apple-silicon-16"
+    },
+    {
+      "name": "Mac mini M1 8 GB",
+      "input": { "os": "macos", "arch": "arm64", "memoryBytes": 8589934592, "backends": ["cpu", "metal"], "gpus": [{ "vendor": "apple", "vramBytes": 0, "unified": true }] },
+      "expected": "apple-silicon-8"
+    },
+    {
+      "name": "Intel Mac 32 GB is a cpu class",
+      "input": { "os": "macos", "arch": "x64", "memoryBytes": 34359738368, "backends": ["cpu"], "gpus": [] },
+      "expected": "cpu-32gb"
+    },
+    {
+      "name": "Headless server, 16 GB, no GPU",
+      "input": { "os": "linux", "arch": "x64", "memoryBytes": 16492674416, "backends": ["cpu"], "gpus": [] },
+      "expected": "cpu-16gb"
+    },
+    {
+      "name": "Raspberry Pi 5, 8 GB",
+      "input": { "os": "linux", "arch": "arm64", "memoryBytes": 8443211776, "backends": ["cpu"], "gpus": [] },
       "expected": "cpu-8gb"
     },
     {
-      "name": "Old laptop, 4 GB",
-      "fingerprint": { "os": "windows", "arch": "x86_64", "ramBytes": 4294967296, "gpu": null },
-      "expected": "cpu-8gb"
+      "name": "Workstation, 128 GB, no GPU",
+      "input": { "os": "windows", "arch": "x64", "memoryBytes": 137438953472, "backends": ["cpu"], "gpus": [] },
+      "expected": "cpu-128gb"
     }
   ]
 }

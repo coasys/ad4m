@@ -1,26 +1,272 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-03T00:00:00Z",
-  "description": "Seed written by the local AI setup branch (ai/local-setup); the wind tunnel's measured file replaces it. One class, cpu-8gb, the smallest tier: every class without measurements falls back to it along hardware-classes.json's `smaller` chain, and the plan's memory rule still checks it fits. The metrics come from one smoke test of these models on an igpu-32gb device (see the evidence), not from an 8 GB CPU machine.",
+  "generatedAt": "2026-11-03T02:09:43.806Z",
+  "rules": {
+    "llm": {
+      "floor": [
+        {
+          "metric": "decodeTps",
+          "atLeast": 15
+        },
+        {
+          "metric": "ttftMs",
+          "atMost": 2000
+        }
+      ],
+      "order": [
+        {
+          "metric": "params",
+          "dir": "desc"
+        },
+        {
+          "metric": "decodeTps",
+          "dir": "desc"
+        }
+      ],
+      "report": [
+        "ttftMs",
+        "decodeTps",
+        "prefillTps",
+        "latencyMs",
+        "throughputTpsC4",
+        "firstRequestMs",
+        "peakRssBytes",
+        "peakGpuBytes",
+        "executorOverheadMs"
+      ]
+    },
+    "completion": {
+      "floor": [
+        {
+          "metric": "latencyMs",
+          "atMost": 3000
+        }
+      ],
+      "order": [
+        {
+          "metric": "params",
+          "dir": "desc"
+        },
+        {
+          "metric": "latencyMs",
+          "dir": "asc"
+        }
+      ],
+      "report": [
+        "latencyMs",
+        "firstRequestMs",
+        "executorOverheadMs"
+      ]
+    },
+    "embeddings": {
+      "floor": [
+        {
+          "metric": "textsPerSec",
+          "atLeast": 10
+        },
+        {
+          "metric": "mrr",
+          "atLeast": 1
+        }
+      ],
+      "order": [
+        {
+          "metric": "textsPerSec",
+          "dir": "desc"
+        }
+      ],
+      "report": [
+        "textsPerSec",
+        "batchLatencyMs",
+        "singleLatencyMs",
+        "dimension",
+        "mrr",
+        "peakRssBytes",
+        "executorOverheadMs"
+      ]
+    },
+    "stt": {
+      "floor": [
+        {
+          "metric": "rtf",
+          "atMost": 0.5
+        }
+      ],
+      "order": [
+        {
+          "metric": "werMean",
+          "dir": "asc",
+          "round": 0.02
+        },
+        {
+          "metric": "rtf",
+          "dir": "asc"
+        }
+      ],
+      "report": [
+        "werMean",
+        "rtf",
+        "latencyMs",
+        "streamLatencyMs",
+        "firstRequestMs",
+        "peakRssBytes"
+      ]
+    },
+    "tts": {
+      "floor": [
+        {
+          "metric": "rtf",
+          "atMost": 1
+        }
+      ],
+      "order": [
+        {
+          "metric": "roundTripWer",
+          "dir": "asc",
+          "round": 0.02
+        },
+        {
+          "metric": "rtf",
+          "dir": "asc"
+        }
+      ],
+      "report": [
+        "rtf",
+        "ttfbMs",
+        "latencyMs",
+        "roundTripWer",
+        "firstRequestMs",
+        "peakRssBytes"
+      ]
+    }
+  },
   "classes": {
-    "cpu-8gb": {
+    "amd-igpu-uma-128": {
       "llm": {
         "provider": "llama-server",
-        "modelId": "qwen3.5-2b-q4_k_m",
-        "metrics": { "measuredOn": "igpu-32gb", "backend": "vulkan", "generatedTokensPerSecond": 131.3, "promptTokensPerSecond": 82.6 },
-        "evidence": ["ai-wind-tunnel/evidence/2026-11-03-local-setup-smoke.json"]
+        "modelId": "qwen3.5-4b-q4_k_m",
+        "runtimeBuild": "linux-x64-vulkan",
+        "backend": "vulkan",
+        "serverFlags": [
+          "-c",
+          "8192",
+          "-ngl",
+          "999",
+          "--reasoning",
+          "off"
+        ],
+        "metrics": {
+          "ttftMs": 157.5,
+          "decodeTps": 63.249,
+          "prefillTps": 1591,
+          "latencyMs": 179.7,
+          "throughputTpsC4": 131.3,
+          "firstRequestMs": 170,
+          "peakRssBytes": 3018297344,
+          "peakGpuBytes": 7819993088,
+          "executorOverheadMs": 21.5
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd.json"
+        ],
+        "candidates": 10,
+        "overFloor": 10
+      },
+      "completion": {
+        "provider": "llama-server",
+        "modelId": "qwen3.5-0.8b-q8_0",
+        "runtimeBuild": "linux-x64-rocm",
+        "backend": "rocm",
+        "serverFlags": [
+          "-c",
+          "8192",
+          "-ngl",
+          "999",
+          "--reasoning",
+          "off"
+        ],
+        "metrics": {
+          "latencyMs": 126.5,
+          "firstRequestMs": 223,
+          "executorOverheadMs": -3.2
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd.json"
+        ],
+        "candidates": 3,
+        "overFloor": 3
       },
       "embeddings": {
         "provider": "llama-server",
         "modelId": "nomic-embed-text-v1.5-q8_0",
-        "metrics": { "measuredOn": "igpu-32gb", "backend": "vulkan", "dimensions": 768, "msForTwoInputs": 10 },
-        "evidence": ["ai-wind-tunnel/evidence/2026-11-03-local-setup-smoke.json"]
+        "runtimeBuild": "linux-x64-rocm",
+        "backend": "rocm",
+        "serverFlags": [
+          "-c",
+          "8192",
+          "-ngl",
+          "999",
+          "--embeddings"
+        ],
+        "metrics": {
+          "textsPerSec": 560.3,
+          "batchLatencyMs": 57.114,
+          "singleLatencyMs": 6.107,
+          "dimension": 768,
+          "mrr": 1,
+          "peakRssBytes": 580091904,
+          "executorOverheadMs": 2.6
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd.json"
+        ],
+        "candidates": 3,
+        "overFloor": 3
       },
       "stt": {
         "provider": "whisper-server",
-        "modelId": "whisper-base-q5_1",
-        "metrics": { "measuredOn": "igpu-32gb", "backend": "cpu", "realTimeFactor": 0.03 },
-        "evidence": ["ai-wind-tunnel/evidence/2026-11-03-local-setup-smoke.json"]
+        "modelId": "whisper-small-q5_1",
+        "runtimeBuild": "linux-x64-cpu",
+        "backend": "cpu",
+        "serverFlags": [
+          "--request-path",
+          "/v1/audio",
+          "--inference-path",
+          "/transcriptions",
+          "-t",
+          "8"
+        ],
+        "metrics": {
+          "werMean": 0.054,
+          "rtf": 0.219,
+          "latencyMs": 1002.5,
+          "streamLatencyMs": 991,
+          "firstRequestMs": 953,
+          "peakRssBytes": 434806784
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd.json"
+        ],
+        "candidates": 3,
+        "overFloor": 3
+      },
+      "tts": {
+        "provider": "speaches",
+        "remoteModel": "speaches-ai/Kokoro-82M-v1.0-ONNX-int8",
+        "backend": "cpu",
+        "metrics": {
+          "rtf": 0.742,
+          "ttfbMs": 2852.7,
+          "latencyMs": 2852.9,
+          "roundTripWer": 0,
+          "firstRequestMs": 4275,
+          "peakRssBytes": 2194477056
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/amd-igpu-uma-128/2026-11-03-d9d043fd.json"
+        ],
+        "candidates": 1,
+        "overFloor": 1
       }
     }
   }
