@@ -26,7 +26,9 @@ Tool-calling loop used by `perspectives/interpretation` and `perspectives/agent_
 
 - `provider.rs`: `ToolProvider`, `ToolSchema`, `CreditGate` traits. The clean seam;
   implemented by `mcp/tools/provider_impl.rs`.
-- `mod.rs`: `run_with_tools` loop, `HarnessConfig`, step events.
+- `mod.rs`: `run_with_tools` loop, `HarnessConfig`, and `ToolObserver`, told about each tool call
+  as it is made: interpretation's emit context (the `ToolCall`/`ToolResult` debug events) and an
+  agent reply's `StepWriter` (`perspectives/agent_reply_steps.rs`) implement it.
 - `propose.rs`, `flow_propose.rs`: propose-write / propose-flow-transition tools and
   buffers consumed by `interpretation/run.rs`.
 

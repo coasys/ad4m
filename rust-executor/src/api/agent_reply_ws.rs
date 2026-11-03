@@ -59,7 +59,7 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     let work_in = body.work_in;
     let context = body.context;
     let model = body.model;
-    let run: Runner = Box::new(move |messages: Vec<AgentMessage>| {
+    let run: Runner = Box::new(move |messages: Vec<AgentMessage>, steps| {
         Box::pin(async move {
             let request = AgentSessionRequest {
                 perspective_uuid: &work_in,
@@ -69,7 +69,7 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
                 model: model.as_deref(),
                 max_tool_calls,
             };
-            run_agent_session(request, &run_context, session, credit_gate).await
+            run_agent_session(request, &run_context, session, credit_gate, Some(steps)).await
         })
     });
 

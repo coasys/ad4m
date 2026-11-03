@@ -183,6 +183,7 @@ async fn a_session_offers_reads_and_only_the_writes_it_was_given() {
         model.clone(),
         "m",
         None,
+        None,
     )
     .await
     .unwrap();
@@ -226,6 +227,7 @@ async fn a_session_offers_reads_and_only_the_writes_it_was_given() {
         model.clone(),
         "m",
         None,
+        None,
     )
     .await
     .unwrap();
@@ -248,6 +250,7 @@ async fn a_write_it_was_not_given_is_refused_even_when_the_model_names_it() {
         tools,
         model.clone(),
         "m",
+        None,
         None,
     )
     .await
@@ -276,6 +279,7 @@ async fn a_write_it_was_given_lands_in_its_own_perspective_only() {
         tools,
         model.clone(),
         "m",
+        None,
         None,
     )
     .await
@@ -360,6 +364,7 @@ async fn a_session_in_one_perspective_cannot_publish_another() {
         model.clone(),
         "m",
         None,
+        None,
     )
     .await;
     assert!(
@@ -383,6 +388,7 @@ async fn a_session_in_one_perspective_cannot_publish_another() {
         tools,
         model.clone(),
         "m",
+        None,
         None,
     )
     .await
@@ -414,6 +420,7 @@ async fn a_session_stopped_by_credits_says_so_rather_than_answering_empty() {
         model,
         "m",
         Some(Arc::new(Broke)),
+        None,
     )
     .await;
     assert!(

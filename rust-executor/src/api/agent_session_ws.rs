@@ -47,7 +47,13 @@ async fn run_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     };
     let outcome = tokio::time::timeout(
         Duration::from_secs(RUN_AGENT_TIMEOUT_SECS),
-        run_agent_session(request, &agent_context, ctx.session.clone(), credit_gate),
+        run_agent_session(
+            request,
+            &agent_context,
+            ctx.session.clone(),
+            credit_gate,
+            None,
+        ),
     )
     .await
     .map_err(|_| WsRpcError {
