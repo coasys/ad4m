@@ -955,3 +955,87 @@ async fn a_users_transcription_is_billed_to_the_user_by_its_words() {
     assert_eq!(calls[0].operation, concat!("ai_", "transcription"));
     assert_eq!(calls[0].amount, 1.5, "3 words at 0.5");
 }
+
+/// llama-server does not enforce `tool_choice: "required"` or a named function: the
+/// request goes up without `tools`, constrained by a schema of the call, and the JSON it
+/// answers comes back as a tool call, as JSON or as SSE. Also for a llama-server model
+/// without `nativeTools`.
+#[tokio::test]
+async fn a_forced_call_on_llama_server_is_made_by_a_schema_and_answered_as_a_tool_call() {
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    let upstream = endpoint("llama", EndpointKind::LlamaServer, &server.url(), "");
+    save(&upstream);
+    model_with_tools("local-chat", ModelType::Llm, &upstream, "qwen", Some(true));
+    model("plain-chat", ModelType::Llm, &upstream, "qwen-plain");
+    Ad4mDb::with_global_instance(|db| {
+        db.set_host_rates(&[("local-chat".into(), 0.5), ("plain-chat".into(), 0.5)])
+    })
+    .unwrap();
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(Matcher::PartialJson(json!({
+            "stream": false,
+            "response_format": { "type": "json_schema", "json_schema": { "schema": {
+                "properties": { "name": { "const": "add_note" } } } } },
+        })))
+        .with_body(
+            json!({
+                "id": "chatcmpl-9", "object": "chat.completion", "created": 1, "model": "qwen",
+                "choices": [{ "index": 0, "finish_reason": "stop", "message": { "role": "assistant",
+                    "content": "{\"name\": \"add_note\", \"arguments\": {\"text\": \"tea\"}}" } }],
+                "usage": { "prompt_tokens": 30, "completion_tokens": 9, "total_tokens": 39 },
+            })
+            .to_string(),
+        )
+        .expect(3)
+        .create_async()
+        .await;
+    let tools = json!([
+        { "type": "function", "function": { "name": "get_weather", "parameters": { "type": "object", "properties": { "city": { "type": "string" } } } } },
+        { "type": "function", "function": { "name": "add_note", "parameters": { "type": "object", "properties": { "text": { "type": "string" } } } } }
+    ]);
+    let named = json!({ "type": "function", "function": { "name": "add_note" } });
+
+    for model_name in ["local-chat", "plain-chat"] {
+        let response = chat(
+            user(),
+            json!({ "model": model_name, "messages": hello(), "tools": tools, "tool_choice": named }),
+        )
+        .await;
+        assert_eq!(response.status(), 200, "{model_name}");
+        let answer = body_json(response).await;
+        assert_eq!(answer["model"], model_name);
+        let choice = &answer["choices"][0];
+        assert_eq!(choice["finish_reason"], "tool_calls");
+        assert_eq!(
+            choice["message"]["tool_calls"][0]["function"]["name"],
+            "add_note"
+        );
+        assert_eq!(
+            choice["message"]["tool_calls"][0]["function"]["arguments"],
+            "{\"text\":\"tea\"}"
+        );
+    }
+
+    let response = chat(
+        user(),
+        json!({ "model": "local-chat", "messages": hello(), "tools": tools, "tool_choice": named, "stream": true }),
+    )
+    .await;
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let sse = body_text(response).await;
+    assert!(sse.contains("\"tool_calls\":[{"), "{sse}");
+    assert!(sse.contains("\"finish_reason\":\"tool_calls\""), "{sse}");
+    assert!(sse.ends_with("data: [DONE]\n\n"), "{sse}");
+    mock.assert_async().await;
+    assert_eq!(test_seam::calls().len(), 3);
+
+    let unknown = json!({ "type": "function", "function": { "name": "nope" } });
+    let response = chat(
+        user(),
+        json!({ "model": "local-chat", "messages": hello(), "tools": tools, "tool_choice": unknown }),
+    )
+    .await;
+    assert_eq!(response.status(), 400);
+}

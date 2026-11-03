@@ -9,6 +9,11 @@
 //! event it adds is not passed on to a client that did not ask for it. Where the upstream
 //! reports no usage, the request and the generated text are estimated.
 //!
+//! One exception: a chat for llama-server that forces a tool call (`tool_choice:
+//! "required"` or a named function) goes up as a schema of the call instead of `tools`,
+//! and comes back as the call ([`super::forced_call`]): llama-server enforces the schema,
+//! not the choice.
+//!
 //! When `/v1` forwards and when the executor answers itself: [`Upstream::for_chat`] and
 //! [`Upstream::of`]. Failures map per §5.4 ([`OpenAIError::from_upstream`]); one that says
 //! the endpoint is down or refuses the key re-checks its health, and a 404 marks the model
@@ -104,12 +109,17 @@ impl Upstream {
     /// The upstream of a `/v1/chat/completions` `body` for `resolved`, by the rule of
     /// [`Self::of`] plus one: a request with active tools (`tools` given, `tool_choice` not
     /// `"none"`) is forwarded only to a model that takes tools as definitions
-    /// (`Model::uses_native_tools`). For any other, the executor renders the tools into
-    /// the prompt and reads the calls back out of the text.
+    /// (`Model::uses_native_tools`), or to llama-server when it forces a call
+    /// ([`super::forced_call`]: a grammar makes the call there). For any other, the executor
+    /// renders the tools into the prompt and reads the calls back out of the text.
     pub fn for_chat(resolved: &Resolved, body: &Value) -> Option<Upstream> {
         let upstream = Self::of(resolved)?;
         let takes_tools = || resolved.model.uses_native_tools(&resolved.endpoint);
-        (!tools_active(body) || takes_tools()).then_some(upstream)
+        let forced_here = || {
+            resolved.endpoint.kind == EndpointKind::LlamaServer
+                && !matches!(super::forced_call::forced_call(body), Ok(None))
+        };
+        (!tools_active(body) || takes_tools() || forced_here()).then_some(upstream)
     }
 }
 
@@ -326,7 +336,15 @@ pub async fn forward_completion(
         .pointer("/stream_options/include_usage")
         .and_then(Value::as_bool)
         == Some(true);
-    if stream {
+    let forced =
+        if route == Route::ChatCompletions && upstream.endpoint.kind == EndpointKind::LlamaServer {
+            super::forced_call::forced_call(&body)?
+        } else {
+            None
+        };
+    if let Some(forced) = &forced {
+        forced.rewrite(&mut body);
+    } else if stream {
         match body
             .get_mut("stream_options")
             .and_then(Value::as_object_mut)
@@ -350,6 +368,18 @@ pub async fn forward_completion(
         started: std::time::Instant::now(),
     };
 
+    if let Some(forced) = forced {
+        let answer = send(&upstream, route, &body, false).await?;
+        return forced_answer_back(
+            upstream,
+            answer,
+            client_model,
+            bill,
+            &forced,
+            stream.then_some(client_wants_usage),
+        )
+        .await;
+    }
     let answer = send(&upstream, route, &body, stream).await?;
     if stream {
         Ok(stream_back(
@@ -398,6 +428,42 @@ async fn answer_back(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(json.to_string()))
+        .map_err(|e| OpenAIError::internal(format!("Response build error: {e}")))
+}
+
+/// The answer to a request [`super::forced_call`] rewrote: the server's JSON as the
+/// client's tool calls, billed, as JSON or, when `stream` says whether the client wants
+/// the usage, as the SSE of a stream.
+async fn forced_answer_back(
+    upstream: Upstream,
+    answer: Answer,
+    client_model: Value,
+    bill: Bill,
+    forced: &super::forced_call::ForcedCall,
+    stream: Option<bool>,
+) -> Result<Response, OpenAIError> {
+    let bytes = read_body(&upstream, answer).await?;
+    let mut json: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        upstream_failure(
+            &upstream.endpoint,
+            &upstream.remote_model,
+            anyhow::anyhow!("the endpoint answered a body that is not JSON"),
+        )
+    })?;
+    bill.settle(json.get("usage"), &generated_text(&json));
+    forced.answer(&mut json);
+    json["model"] = client_model;
+    let (content_type, body) = match stream {
+        Some(include_usage) => (
+            "text/event-stream",
+            super::forced_call::as_sse(&json, include_usage),
+        ),
+        None => ("application/json", json.to_string()),
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body))
         .map_err(|e| OpenAIError::internal(format!("Response build error: {e}")))
 }
 

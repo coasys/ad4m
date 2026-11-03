@@ -20,7 +20,9 @@
 //! `tool_choice: "required"`, a named function and `parallel_tool_calls: false` are not
 //! enforced on this path, nor on the injected one. A model on an OpenAI-shaped endpoint
 //! that takes tools natively gets the request as written through the `/v1` passthrough,
-//! fields included; wiring them through here means a provider-level request field.
+//! fields included; on llama-server, which does not enforce the first two, a forced call is
+//! made by a schema there ([`super::forced_call`]). Wiring them through here means a
+//! provider-level request field.
 
 use std::convert::Infallible;
 
