@@ -36,9 +36,9 @@ export class Agent {
   /** Address of the Language by which the Agent will receive DMs */
   directMessageLanguage?: string;
 
-  /** The `did:scid` this agent speaks for (`agent.me()`), or `null`; absent on agents read
-   * from the agent language. `did` stays the device `did:key`. */
-  identity?: string | null;
+  /** The `did:scid` this agent speaks for (`agent.me()`); absent when it speaks for no one,
+   * and on agents read from the agent language. `did` stays the device `did:key`. */
+  identity?: string;
 
   constructor(did: string, perspective?: Perspective) {
     this.did = did;
@@ -53,7 +53,7 @@ export class Agent {
   static fromWire(wire: WireAgent | AgentWithIdentity): Agent {
     const agent = new Agent(wire.did, Perspective.fromWire(wire.perspective));
     agent.directMessageLanguage = wire.directMessageLanguage;
-    if ("identity" in wire) {
+    if ("identity" in wire && wire.identity) {
       agent.identity = wire.identity;
     }
     return agent;
