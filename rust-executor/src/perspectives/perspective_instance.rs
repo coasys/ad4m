@@ -698,13 +698,14 @@ pub struct PerspectiveInstance {
     force_shape_sync_wait: Arc<AtomicBool>,
 }
 
-/// The local Shared links the remote render lacks, without the links of parked diffs.
-/// Links compare by author, timestamp, source, predicate and target; one set of those
-/// identities for remote and parked keeps the pass linear.
+/// The local Shared links the remote render lacks, without the links of the diffs the
+/// queue still holds (queued or parked). Links compare by author, timestamp, source,
+/// predicate and target; one set of those identities for remote and unsent keeps the
+/// pass linear.
 fn links_missing_remotely(
     local_links: &[(LinkExpression, LinkStatus)],
     remote_links: &[LinkExpression],
-    parked: &[LinkExpression],
+    unsent: &[LinkExpression],
 ) -> Vec<LinkExpression> {
     fn identity(l: &LinkExpression) -> (&str, &str, &str, Option<&str>, &str) {
         (
@@ -715,7 +716,7 @@ fn links_missing_remotely(
             &l.data.target,
         )
     }
-    let known: HashSet<_> = remote_links.iter().chain(parked).map(identity).collect();
+    let known: HashSet<_> = remote_links.iter().chain(unsent).map(identity).collect();
     local_links
         .iter()
         .map(|(link, _)| link)
@@ -1636,19 +1637,19 @@ impl PerspectiveInstance {
                 },
             };
 
-            // A parked diff's links stay Shared in the store, but the queue took them out
-            // for good: sending them here would put them behind their successors.
-            let parked = match Ad4mDb::with_global_instance(|db| db.get_parked_additions(&uuid)) {
-                Ok(parked) => parked,
+            // A queued or parked diff's links stay Shared in the store, but the queue owns
+            // them: a queued one would be sent twice, a parked one after its successors.
+            let unsent = match Ad4mDb::with_global_instance(|db| db.get_unsent_additions(&uuid)) {
+                Ok(unsent) => unsent,
                 Err(e) => {
                     log::warn!(
-                        "ensure_public_links_are_shared: could not read parked diffs for perspective {}: {} — skipping this sync attempt",
+                        "ensure_public_links_are_shared: could not read queued and parked diffs for perspective {}: {} — skipping this sync attempt",
                         uuid, e
                     );
                     return false;
                 }
             };
-            let links_to_commit = links_missing_remotely(&local_links, &remote_links, &parked);
+            let links_to_commit = links_missing_remotely(&local_links, &remote_links, &unsent);
 
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();

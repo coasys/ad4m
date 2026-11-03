@@ -2130,20 +2130,22 @@ impl Ad4mDb {
         Ok(())
     }
 
-    /// The additions of the perspective's parked diffs (`is_pending = 0`). Their links
-    /// stay in the store as Shared, but must not reach the link language again.
+    /// The additions of every diff of the perspective still in `perspective_diff`: queued
+    /// (`is_pending = 1`, the commit loop sends them) or parked (`is_pending = 0`, never
+    /// sent again). A sent diff's row is deleted. Their links stay in the store as
+    /// Shared, but the fallback sync must not send them: the queue owns them.
     ///
     /// An imported row is stored without a shape check. A row whose additions do not
     /// read as links is skipped with a warning naming its id: failing the whole read
     /// would stop the fallback sync on every attempt.
-    pub fn get_parked_additions(
+    pub fn get_unsent_additions(
         &self,
         perspective_uuid: &str,
     ) -> Ad4mDbResult<Vec<LinkExpression>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, additions FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2 ORDER BY id",
+            "SELECT id, additions FROM perspective_diff WHERE perspective = ?1 ORDER BY id",
         )?;
-        let rows = stmt.query_map(params![perspective_uuid, false], |row| {
+        let rows = stmt.query_map(params![perspective_uuid], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)))
         })?;
         let mut additions = Vec::new();
@@ -2158,7 +2160,7 @@ impl Ad4mDb {
                 Ok(elements) => elements,
                 Err(e) => {
                     log::warn!(
-                        "perspective {}: skipping parked diff {}, its additions are not a list: {}",
+                        "perspective {}: skipping diff {}, its additions are not a list: {}",
                         perspective_uuid,
                         id,
                         e
@@ -2170,7 +2172,7 @@ impl Ad4mDb {
                 match serde_json::from_value::<LinkExpression>(element) {
                     Ok(link) => additions.push(link),
                     Err(e) => log::warn!(
-                        "perspective {}: skipping an addition of parked diff {} that does not read as a link: {}",
+                        "perspective {}: skipping an addition of diff {} that does not read as a link: {}",
                         perspective_uuid,
                         id,
                         e
@@ -5103,7 +5105,7 @@ mod tests {
         let (_, ids) = db.get_pending_diffs(&p_uuid, None).unwrap();
         db.park_pending_diffs(&p_uuid, ids).unwrap();
 
-        assert_eq!(db.get_parked_additions(&p_uuid).unwrap(), vec![parked]);
+        assert_eq!(db.get_unsent_additions(&p_uuid).unwrap(), vec![parked]);
     }
 
     #[test]
@@ -5123,7 +5125,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.get_parked_additions(&p_uuid).unwrap(), vec![good]);
+        assert_eq!(db.get_unsent_additions(&p_uuid).unwrap(), vec![good]);
     }
 
     /// The notifications table of executors that named the owner by email.

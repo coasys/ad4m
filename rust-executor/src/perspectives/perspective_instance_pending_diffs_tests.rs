@@ -337,6 +337,24 @@ async fn a_refused_diff_does_not_block_the_diffs_behind_it() {
     assert_eq!(parked_targets(&perspective), vec![REFUSED]);
 }
 
+/// A queued diff's links are Shared in the store before the commit loop sends
+/// them. The fallback sync leaves them to the queue: sending them too would
+/// commit the same links twice.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_leaves_a_queued_diff_to_the_queue() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("queued"));
+    store_shared(&perspective, "queued");
+    store_shared(&perspective, "missing");
+    *perspective.link_language.write().await = Some(rendering_language(&fake, vec![]));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.committed(), vec!["+missing"]);
+    assert_eq!(pending(&perspective), 1);
+}
+
 /// The fallback sync sends the Shared links the remote lacks, but never the
 /// links of a parked diff: they stay Shared in the store, and sending them
 /// would put them behind the diffs that went through after them. The parked
