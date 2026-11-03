@@ -25,7 +25,8 @@ pub use codec::{
 };
 pub use jcs::{canonical_json, CanonError, MAX_SAFE_INTEGER};
 pub use proof::{
-    signing_input, verify_proof, verify_proof_json, Proof, ProofError, CRYPTOSUITE, PROOF_TYPE,
+    signing_input, signing_input_json, verify_proof, verify_proof_json, Proof, ProofError,
+    CRYPTOSUITE, PROOF_TYPE,
 };
 
 /// The id of one chain, given by the chain type: the KEL uses the SCID.
@@ -43,10 +44,9 @@ pub trait Entry: Serialize + DeserializeOwned + Clone {
 }
 
 /// `multihash_b58(sha256(JCS(entry without "proof")))`. Fails when the entry has no
-/// canonical form (a float, an integer outside ±(2^53 − 1), or not an object).
+/// canonical form (a float, finite or not, an integer outside ±(2^53 − 1), or not an object).
 pub fn entry_hash<E: Entry>(entry: &E) -> Result<Hash, CanonError> {
-    let value = serde_json::to_value(entry).map_err(|e| CanonError::Serde(e.to_string()))?;
-    entry_hash_json(&value)
+    entry_hash_json(&jcs::to_value(entry)?)
 }
 
 /// [`entry_hash`] over an entry given as JSON (any object: the module reads no field).
@@ -59,11 +59,21 @@ pub fn entry_hash_json(entry: &Value) -> Result<Hash, CanonError> {
 
 /// The JCS text of a whole entry, proofs included: the form on the wire and on disk.
 pub fn entry_json<E: Entry>(entry: &E) -> Result<String, CanonError> {
-    let value = serde_json::to_value(entry).map_err(|e| CanonError::Serde(e.to_string()))?;
+    let value = jcs::to_value(entry)?;
     if !value.is_object() {
         return Err(CanonError::NotObject);
     }
     canonical_json(&value)
+}
+
+/// Parses an entry received as text (from a peer, a file or a store). The text must be the
+/// entry's JCS text, [`entry_json`], byte for byte, else it is refused (`NotCanonical`, or
+/// the parse or float error that comes first). That refuses a duplicate member name
+/// (I-JSON, RFC 7493), a member the entry type drops on parsing (`"key": null` for a
+/// skipped `None`) and other spellings of a number (`1e2`, `-0`, `100.0`), so one accepted
+/// text has one hash on every target.
+pub fn entry_from_json<E: Entry>(text: &str) -> Result<E, CanonError> {
+    jcs::from_canonical_text(text)
 }
 
 /// The rules of one chain type. The module calls it after the order and link checks pass.
@@ -248,7 +258,7 @@ impl<P: ChainPolicy> Chain<P> {
 /// The entry's hash, after checking that its JSON is an object whose `seq` and `prev`
 /// members agree with the `Entry` accessors and whose `prev` is a sha2-256 multihash.
 fn checked_hash<E: Entry, X>(entry: &E) -> Result<Hash, ChainError<X>> {
-    let value = serde_json::to_value(entry).map_err(|e| ChainError::Malformed(e.to_string()))?;
+    let value = jcs::to_value(entry)?;
     let map = value
         .as_object()
         .ok_or_else(|| ChainError::Malformed("an entry must be a JSON object".into()))?;
@@ -307,6 +317,31 @@ fn step<P: ChainPolicy>(
     }
     policy.apply(state, entry).map_err(ChainError::Policy)?;
     Ok(hash)
+}
+
+/// [`step`] on the first of `copies` (one entry, several proof sets) that passes; the first
+/// copy's error when none does.
+fn step_any<P: ChainPolicy>(
+    policy: &P,
+    id: &ChainId,
+    head: &Head,
+    state: &mut P::State,
+    copies: &[&P::Entry],
+) -> Result<Hash, ChainError<P::Error>> {
+    let mut first_error = None;
+    for entry in copies {
+        let mut attempt = state.clone();
+        match step(policy, id, head, &mut attempt, entry) {
+            Ok(hash) => {
+                *state = attempt;
+                return Ok(hash);
+            }
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    Err(first_error.unwrap_or(ChainError::Empty))
 }
 
 /// Replays `entries` in the order given: `genesis` on the first, then the checks of `append` on
@@ -393,7 +428,9 @@ pub enum ImportOutcome {
 /// Checks, in order: every entry has a canonical form and names this chain; an entry at a
 /// seq we hold has the hash we hold (else `Fork`); the new entries start at head + 1 (else
 /// `Gap`); then each new entry passes the order, link and policy checks of `append`. Two
-/// different entries at one new seq within the batch are `Malformed`.
+/// different entries at one new seq within the batch are `Malformed`. Copies of one entry
+/// (same hash, other proofs) are all tried, in batch order: the first that passes appends,
+/// and the batch fails only when none does.
 ///
 /// `Fork` is hash-only evidence: the competing entry has a canonical form and names this
 /// chain, but its proofs are not verified and the policy is not applied to it. Verify it
@@ -418,7 +455,9 @@ pub fn import<P: ChainPolicy>(
     items.sort_by_key(|(seq, _, _)| *seq);
 
     let head = chain.head();
-    let mut new: Vec<(u64, Hash, &P::Entry)> = Vec::new();
+    // Copies of one entry share a hash (it leaves out `proof`), so each new seq keeps every
+    // copy: the first one the checks accept is the one appended.
+    let mut new: Vec<(u64, Hash, Vec<&P::Entry>)> = Vec::new();
     for (seq, hash, entry) in items {
         if seq <= head.seq {
             let ours = &chain.hashes[seq as usize];
@@ -432,15 +471,16 @@ pub fn import<P: ChainPolicy>(
             }
             continue;
         }
-        match new.last() {
-            Some((last_seq, last_hash, _)) if *last_seq == seq => {
+        match new.last_mut() {
+            Some((last_seq, last_hash, copies)) if *last_seq == seq => {
                 if *last_hash != hash {
                     return Err(ChainError::Malformed(format!(
                         "two different entries at seq {seq} in one batch"
                     )));
                 }
+                copies.push(entry);
             }
-            _ => new.push((seq, hash, entry)),
+            _ => new.push((seq, hash, vec![entry])),
         }
     }
 
@@ -457,8 +497,8 @@ pub fn import<P: ChainPolicy>(
     let mut state = chain.state.clone();
     let mut at = head;
     let mut added = Vec::with_capacity(new.len());
-    for (_, _, entry) in &new {
-        let hash = step(policy, &chain.id, &at, &mut state, entry)?;
+    for (_, _, copies) in &new {
+        let hash = step_any(policy, &chain.id, &at, &mut state, copies)?;
         at = Head {
             seq: at.seq + 1,
             hash: hash.clone(),

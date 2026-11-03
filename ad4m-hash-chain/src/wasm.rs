@@ -29,16 +29,18 @@ pub fn entry_hash_js(entry: JsValue) -> Result<String, JsValue> {
     entry_hash_json(&value).map_err(|e| malformed(&e.to_string()))
 }
 
-/// `compare` on hashes from seq `from` on. `from` must be a safe non-negative integer, and
-/// so must the seq of every hash listed (`from + length - 1`): every seq the answer names is
-/// one of those or one past the shorter list, so it reaches JavaScript exactly.
+/// `compare` on hashes from seq `from` on. `ours` and `theirs` must be arrays of strings.
+/// `from` must be a safe non-negative integer, and so must the seq of every hash listed
+/// (`from + length - 1`): every seq the answer names is one of those or one past the shorter
+/// list, so it reaches JavaScript exactly.
 #[wasm_bindgen(js_name = compare)]
 pub fn compare_js(
-    ours: Vec<String>,
-    theirs: Vec<String>,
+    #[wasm_bindgen(unchecked_param_type = "string[]")] ours: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string[]")] theirs: JsValue,
     from: f64,
     chain: String,
 ) -> Result<JsValue, JsValue> {
+    let (ours, theirs) = (hashes_of(&ours, "ours")?, hashes_of(&theirs, "theirs")?);
     if !(from >= 0.0 && from.fract() == 0.0 && from <= crate::MAX_SAFE_INTEGER as f64) {
         return Err(malformed("from must be a safe non-negative integer"));
     }
@@ -52,4 +54,19 @@ pub fn compare_js(
     let result: Compare = compare(&ours, &theirs, from, &chain)
         .ok_or_else(|| malformed("a seq of the answer does not fit in a u64"))?;
     to_js(&result)
+}
+
+/// The strings of a JavaScript array; `malformed` for anything else, so a caller gets the
+/// crate's `ChainErrorCode` and not wasm-bindgen's conversion error.
+fn hashes_of(list: &JsValue, name: &str) -> Result<Vec<String>, JsValue> {
+    if !js_sys::Array::is_array(list) {
+        return Err(malformed(&format!("{name} must be an array of strings")));
+    }
+    js_sys::Array::from(list)
+        .iter()
+        .map(|item| {
+            item.as_string()
+                .ok_or_else(|| malformed(&format!("{name} must be an array of strings")))
+        })
+        .collect()
 }

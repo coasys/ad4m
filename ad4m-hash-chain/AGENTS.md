@@ -9,15 +9,16 @@ identity core, not here).
 
 | File | What |
 |---|---|
-| `src/lib.rs` | `Entry`, `entry_hash`, `entry_hash_json`, `ChainPolicy`, `Chain<P>`, `fold`, `import`, `compare`, `ForkEvidence`, `ChainError`, `ImportOutcome` |
-| `src/jcs.rs` | RFC 8785 canonical JSON; refuses floats and integers outside ±(2^53 − 1) |
+| `src/lib.rs` | `Entry`, `entry_hash`, `entry_hash_json`, `entry_json`, `entry_from_json`, `ChainPolicy`, `Chain<P>`, `fold`, `import`, `compare`, `ForkEvidence`, `ChainError`, `ImportOutcome` |
+| `src/jcs.rs` | RFC 8785 canonical JSON; refuses floats (finite or not) and integers outside ±(2^53 − 1); the canonical-text check behind `entry_from_json` |
 | `src/codec.rs` | SHA-256 multihash (`0x12 0x20`, base58btc, no multibase prefix, `Qm…`), Ed25519 multikey (`z6Mk…`), proof value |
-| `src/proof.rs` | `Proof`, `signing_input`, `verify_proof`, `verify_proof_json` (`eddsa-jcs-2022` with `domain`) |
+| `src/proof.rs` | `Proof`, `signing_input`, `signing_input_json`, `verify_proof`, `verify_proof_json` (`eddsa-jcs-2022` with `domain`, Ed25519 `verify_strict`) |
 | `src/store.rs` | feature `store`: `ChainStore`, `StoredEntry`, `StoreError`, `MemoryChainStore` |
 | `src/store/sqlite.rs` | feature `sqlite`: `SqliteChainStore` (tables `chain_heads`, `chain_entries`, `chain_forks`), `append_in(&Transaction, …)` |
 | `src/wasm.rs` | feature `wasm`: wasm-bindgen `entryHash`, `compare` |
 | `vectors/*.json` | shared vectors; every build target must give the same answers |
-| `tests/common/mod.rs` | the test chain type (`test:chain`) and the vector builder/checker |
+| `tests/common/mod.rs` | the test chain type (`test:chain`) and the vector builder/checker; the builder computes signing inputs from the spec text, the checker runs the crate's own functions |
+| `tests/rfc8785/` | RFC 8785 test data (source and the float cases left out: its README) |
 
 ## Rules
 
@@ -31,9 +32,22 @@ identity core, not here).
   question, never the module's.
 - No function panics on outside data and there are no convenience twins: `entry_hash`
   and `signing_input` return `Result<_, CanonError>` (an entry with a float, an unsafe
-  integer or no object form has no canonical form). A `*_json` variant exists only where
-  the crate itself needs it (the wasm export and the store hash JSON; `verify_proof`
-  builds on `verify_proof_json`).
+  integer or no object form has no canonical form). A typed entry is checked for floats
+  before it becomes JSON, so NaN and ±∞ are refused, not hashed as `null`. A `*_json`
+  variant exists only where the crate itself needs it (the wasm export and the store hash
+  JSON; `verify_proof` builds on `verify_proof_json`; the vectors check
+  `signing_input_json`).
+- **The hash covers the parsed entry, so a received text must be its canonical form.**
+  Text from outside (a peer, a file, a store row) goes through `entry_from_json`, which
+  refuses any text that is not byte for byte the JCS text of the entry it parses into:
+  that refuses a duplicate member name (I-JSON, RFC 7493), a member the type drops
+  (`"key": null` for a skipped `None`), and `1e2`, `-0` or `100.0`. A JavaScript object
+  (the wasm exports) has no text: what `JSON.stringify` gives is what is hashed.
+- `import` keeps every copy of a new entry that shares a hash (the hash leaves out
+  `proof`) and appends the first copy that passes; it fails only when none does.
+- The SQLite store answers as the memory store does (`range` past `i64::MAX` is empty)
+  and reads a negative stored integer as an error. Its expect check is a compare-and-set
+  in the head-row write itself.
 - `Chain::append` and `import` change nothing when a check fails. Order of checks:
   canonical form, `seq`, `prev`, chain id, then the policy. `append` copies the state for
   that; `fold` fails as a whole, so it applies every entry to one state in place and never
@@ -63,8 +77,10 @@ The vectors on wasm need a `wasm-bindgen-test-runner` of the same version as the
 ```bash
 cargo install wasm-bindgen-cli --version <locked version> --locked --root target/wasm-tools
 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$PWD/target/wasm-tools/bin/wasm-bindgen-test-runner \
-  cargo test -p ad4m-hash-chain --target wasm32-unknown-unknown --features wasm --test vectors --test wasm_exports
+  cargo test -p ad4m-hash-chain --target wasm32-unknown-unknown --features wasm
 ```
+
+CI runs the same in the `rust-tests` job (step `identity crates wasm tests`).
 
 `tests/vectors_fresh.rs` fails when the committed vectors differ from what the generator
 builds from its fixed seeds. After an intended change, regenerate and review the diff:

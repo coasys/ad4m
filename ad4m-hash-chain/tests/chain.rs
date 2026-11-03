@@ -243,6 +243,28 @@ fn entry_with_float_or_unsafe_integer_is_malformed() {
         x: 0.5,
     };
     assert!(matches!(entry_hash(&float), Err(CanonError::Float(_))));
+    // A non-finite float would turn into `null` on the way to JSON: refused before that.
+    for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let loose = Loose {
+            seq: 0,
+            prev: None,
+            x,
+        };
+        assert!(matches!(entry_hash(&loose), Err(CanonError::Float(_))));
+        assert!(matches!(
+            ad4m_hash_chain::entry_json(&loose),
+            Err(CanonError::Float(_))
+        ));
+        let proof = ad4m_hash_chain::Proof::unsigned("test:c#k", "assertionMethod", DOMAIN);
+        assert!(matches!(
+            ad4m_hash_chain::signing_input(&loose, &proof),
+            Err(CanonError::Float(_))
+        ));
+        assert!(matches!(
+            ad4m_hash_chain::verify_proof(&loose, &proof, &multikey(&signing_key(1)), DOMAIN),
+            Err(ProofError::Encoding)
+        ));
+    }
     let mut big = make_chain("c", 1, 1)[0].clone();
     big.seq = 1 << 53;
     assert!(matches!(entry_hash(&big), Err(CanonError::Integer(_))));
@@ -259,6 +281,148 @@ fn entry_with_float_or_unsafe_integer_is_malformed() {
         Chain::genesis(&TestPolicy, &big).unwrap_err(),
         ChainError::Malformed(_)
     ));
+}
+
+/// An entry type whose accessors need not agree with its JSON.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Liar {
+    #[serde(flatten)]
+    json: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip)]
+    seq: u64,
+    #[serde(skip)]
+    prev: Option<String>,
+}
+
+impl ad4m_hash_chain::Entry for Liar {
+    fn seq(&self) -> u64 {
+        self.seq
+    }
+    fn prev(&self) -> Option<&String> {
+        self.prev.as_ref()
+    }
+    fn proofs(&self) -> &[ad4m_hash_chain::Proof] {
+        &[]
+    }
+}
+
+/// Accepts every entry; chain id "c".
+struct AnyPolicy;
+
+impl ad4m_hash_chain::ChainPolicy for AnyPolicy {
+    type Entry = Liar;
+    type State = ();
+    type Error = TestError;
+    const TYPE: &'static str = "test:any";
+    const DOMAIN: &'static str = "test:any";
+    fn genesis(&self, _: &Liar) -> Result<(String, ()), TestError> {
+        Ok(("c".into(), ()))
+    }
+    fn chain_of(&self, _: &Liar) -> String {
+        "c".into()
+    }
+    fn apply(&self, _: &mut (), _: &Liar) -> Result<(), TestError> {
+        Ok(())
+    }
+}
+
+fn liar(json: serde_json::Value, seq: u64, prev: Option<&str>) -> Liar {
+    Liar {
+        json: json.as_object().unwrap().clone(),
+        seq,
+        prev: prev.map(str::to_string),
+    }
+}
+
+fn malformed_reason(e: ChainError<TestError>) -> String {
+    match e {
+        ChainError::Malformed(reason) => reason,
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_entry_whose_json_disagrees_with_its_accessors_is_malformed() {
+    let honest = liar(json!({"seq": 0, "prev": null}), 0, None);
+    let chain = Chain::genesis(&AnyPolicy, &honest).unwrap();
+    let h0 = chain.head().hash;
+
+    // The `seq` member against Entry::seq: another number, or none.
+    for json in [json!({"seq": 1, "prev": null}), json!({"prev": null})] {
+        let reason =
+            malformed_reason(Chain::genesis(&AnyPolicy, &liar(json, 0, None)).unwrap_err());
+        assert!(reason.contains("`seq`"), "{reason}");
+    }
+    // The `prev` member against Entry::prev: null against a hash, a hash against none,
+    // another hash, or no member.
+    let cases = [
+        (json!({"seq": 0, "prev": null}), Some(h0.as_str())),
+        (json!({"seq": 0, "prev": h0}), None),
+        (json!({"seq": 0}), None),
+    ];
+    for (json, prev) in cases {
+        let reason =
+            malformed_reason(Chain::genesis(&AnyPolicy, &liar(json, 0, prev)).unwrap_err());
+        assert!(reason.contains("`prev`"), "{reason}");
+    }
+    let other = entry_hash_json(&json!({"x": 1})).unwrap();
+    let mut next = chain.clone();
+    let reason = malformed_reason(
+        next.append(
+            &AnyPolicy,
+            &liar(json!({"seq": 1, "prev": other}), 1, Some(h0.as_str())),
+        )
+        .unwrap_err(),
+    );
+    assert!(reason.contains("`prev`"), "{reason}");
+    // `proof` must be an array when present.
+    for proof in [json!({}), json!("p"), json!(null)] {
+        let entry = liar(json!({"seq": 0, "prev": null, "proof": proof}), 0, None);
+        let reason = malformed_reason(Chain::genesis(&AnyPolicy, &entry).unwrap_err());
+        assert!(reason.contains("`proof`"), "{reason}");
+    }
+    // The honest entry with an empty proof array is fine.
+    let with_proofs = liar(json!({"seq": 0, "prev": null, "proof": []}), 0, None);
+    assert_eq!(
+        Chain::genesis(&AnyPolicy, &with_proofs)
+            .unwrap()
+            .head()
+            .hash,
+        h0
+    );
+}
+
+/// The test chain type, except that `genesis` answers a chain id other than `chain_of`.
+struct SplitIdPolicy;
+
+impl ad4m_hash_chain::ChainPolicy for SplitIdPolicy {
+    type Entry = TestEntry;
+    type State = TestState;
+    type Error = TestError;
+    const TYPE: &'static str = "test:split";
+    const DOMAIN: &'static str = DOMAIN;
+    fn genesis(&self, entry: &TestEntry) -> Result<(String, TestState), TestError> {
+        let (id, state) = TestPolicy.genesis(entry)?;
+        Ok((format!("{id}-genesis"), state))
+    }
+    fn chain_of(&self, entry: &TestEntry) -> String {
+        TestPolicy.chain_of(entry)
+    }
+    fn apply(&self, state: &mut TestState, entry: &TestEntry) -> Result<(), TestError> {
+        TestPolicy.apply(state, entry)
+    }
+}
+
+#[test]
+fn genesis_refuses_an_entry_that_names_another_chain_than_the_policy_gives() {
+    let e0 = make_chain("c", 1, 1)[0].clone();
+    assert_eq!(
+        Chain::genesis(&SplitIdPolicy, &e0).unwrap_err(),
+        ChainError::WrongChain {
+            want: "c-genesis".into(),
+            got: "c".into()
+        }
+    );
 }
 
 // ------------------------------------------------------------------ tampering
@@ -382,6 +546,29 @@ fn proof_refuses_unknown_members() {
     let mut v = serde_json::to_value(&entries[0].proof[0]).unwrap();
     v["created"] = json!("2026-10-24T00:00:00Z");
     assert!(serde_json::from_value::<ad4m_hash_chain::Proof>(v).is_err());
+}
+
+#[test]
+fn a_small_order_key_and_r_pass_verify_but_not_verify_strict() {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let entry = make_chain("c", 1, 2)[1].clone();
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut signature = [0u8; 64];
+    signature[..32].copy_from_slice(&identity);
+    let mut proof = entry.proof[0].clone();
+    proof.proof_value = ad4m_hash_chain::encode_proof_value(&signature);
+    let input = ad4m_hash_chain::signing_input(&entry, &proof).unwrap();
+    // The plain check accepts it, so the fixture tells the two apart.
+    VerifyingKey::from_bytes(&identity)
+        .unwrap()
+        .verify(&input, &Signature::from_bytes(&signature))
+        .unwrap();
+    let key = ad4m_hash_chain::encode_ed25519_multikey(&identity);
+    assert_eq!(
+        verify_proof(&entry, &proof, &key, DOMAIN),
+        Err(ProofError::Signature)
+    );
 }
 
 // ---------------------------------------------------------------------- forks
@@ -615,6 +802,56 @@ fn import_changes_nothing_when_a_later_entry_fails() {
         import(&mut chain, &TestPolicy, &holed).unwrap_err(),
         ChainError::Seq { want: 3, got: 4 }
     );
+    assert_eq!(snapshot(&chain), before);
+}
+
+#[test]
+fn import_keeps_the_copy_of_an_entry_whose_proof_holds() {
+    let full = make_chain("c", 1, 5);
+    let mut stripped = full[3].clone();
+    stripped.proof.clear();
+    let mut forged = full[3].clone();
+    forged.proof = next_entry(&full[2], "x", &signing_key(9), None).proof;
+    assert_eq!(
+        entry_hash(&stripped).unwrap(),
+        entry_hash(&full[3]).unwrap()
+    );
+
+    // Copies at head + 1 that fail come first in the batch; the valid one still appends.
+    for batch in [
+        vec![stripped.clone(), full[3].clone(), full[4].clone()],
+        vec![
+            full[4].clone(),
+            forged.clone(),
+            stripped.clone(),
+            full[3].clone(),
+        ],
+        vec![full[3].clone(), stripped.clone(), full[4].clone()],
+    ] {
+        let mut chain = fold(&TestPolicy, &full[..3]).unwrap();
+        assert_eq!(
+            import(&mut chain, &TestPolicy, &batch).unwrap(),
+            ImportOutcome::Appended {
+                head: chain.head(),
+                count: 2
+            }
+        );
+        assert_eq!(
+            snapshot(&chain),
+            snapshot(&fold(&TestPolicy, &full).unwrap())
+        );
+    }
+
+    // No copy holds: the first copy's error, and nothing changes.
+    let mut chain = fold(&TestPolicy, &full[..3]).unwrap();
+    let before = snapshot(&chain);
+    let err = import(
+        &mut chain,
+        &TestPolicy,
+        &[stripped, forged, full[4].clone()],
+    )
+    .unwrap_err();
+    assert_eq!(policy_err(&err), Some(&TestError::MissingProof));
     assert_eq!(snapshot(&chain), before);
 }
 
