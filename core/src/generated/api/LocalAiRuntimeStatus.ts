@@ -7,4 +7,14 @@ export type LocalAiRuntimeStatus = { provider: LocalAiProvider, runtimeId: strin
 /**
  * `null`: not started by this executor since it started.
  */
-phase: LocalAiPhase | null, port: number | null, pid: number | null, restarts: number, detail: string | null, endpointId: string | null, };
+phase: LocalAiPhase | null, port: number | null, pid: number | null, restarts: number, detail: string | null, endpointId: string | null, 
+/**
+ * After a start on a GPU build: whether the chat model's process holds GPU memory (a
+ * GPU build that finds no device runs on the CPU without saying so). `null`: not
+ * checked (a CPU build, not Linux, or an NVIDIA GPU, whose memory DRM does not show).
+ */
+onGpu: boolean | null, 
+/**
+ * The GPU memory the runtime's processes held at the check.
+ */
+gpuBytes: number | null, };

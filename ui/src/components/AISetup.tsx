@@ -302,6 +302,8 @@ export default function AISetup(props: {
                       <j-text key={r.provider} nomargin size="400">
                         {r.provider}: {r.phase ?? "not started"}
                         {r.port ? ` on port ${r.port}` : ""}
+                        {r.onGpu === true ? `, on the GPU (${gb(r.gpuBytes ?? 0)})` : ""}
+                        {r.onGpu === false ? ", on the CPU: the GPU build found no device" : ""}
                         {r.detail ? ` (${r.detail})` : ""}
                       </j-text>
                     ))}

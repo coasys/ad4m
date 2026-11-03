@@ -33,7 +33,7 @@ use ts_rs::TS;
 use url::Url;
 
 use self::data::{Provider, Service};
-use self::hardware::LocalHardware;
+use self::hardware::{Backend, LocalHardware};
 use self::install::Store;
 use self::plan::LocalPlan;
 use self::supervisor::{
@@ -146,6 +146,13 @@ pub struct RuntimeStatus {
     pub restarts: u32,
     pub detail: Option<String>,
     pub endpoint_id: Option<String>,
+    /// After a start on a GPU build: whether the chat model's process holds GPU memory (a
+    /// GPU build that finds no device runs on the CPU without saying so). `null`: not
+    /// checked (a CPU build, not Linux, or an NVIDIA GPU, whose memory DRM does not show).
+    pub on_gpu: Option<bool>,
+    /// The GPU memory the runtime's processes held at the check.
+    #[ts(type = "number | null")]
+    pub gpu_bytes: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
@@ -194,6 +201,9 @@ struct SelectedRuntime {
     binary: PathBuf,
     lib_dirs: Vec<PathBuf>,
     services: Vec<Service>,
+    /// What the build runs on; the GPU check after a start reads it.
+    #[serde(default)]
+    backend: Option<Backend>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -203,6 +213,9 @@ struct SelectedModel {
     model_id: String,
     provider: Provider,
     path: PathBuf,
+    /// The server flags the plan gave the model (the measurement's, else the defaults).
+    #[serde(default)]
+    server_flags: Vec<String>,
 }
 
 impl Selection {
@@ -252,7 +265,13 @@ lazy_static! {
         tokio::sync::Mutex::new(BTreeMap::new());
     static ref MANAGED_PORTS: std::sync::RwLock<BTreeMap<u16, ManagedPort>> =
         std::sync::RwLock::new(BTreeMap::new());
+    /// Per runtime, the GPU check of its last start: on the GPU, and the bytes it held.
+    static ref GPU_CHECKS: std::sync::Mutex<BTreeMap<Provider, GpuCheck>> =
+        std::sync::Mutex::new(BTreeMap::new());
 }
+
+/// A GPU check's outcome: on the GPU, and the GPU memory held. `None`s: not checked (yet).
+type GpuCheck = (Option<bool>, Option<u64>);
 
 static INSTALLING: AtomicBool = AtomicBool::new(false);
 
@@ -300,6 +319,16 @@ fn autostart_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// The GPU check of `provider`'s last start: (on the GPU, bytes held), `None`s when none ran.
+fn gpu_check(provider: Provider) -> GpuCheck {
+    GPU_CHECKS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&provider)
+        .copied()
+        .unwrap_or((None, None))
+}
+
 /// `ai.localStatus`.
 pub async fn status() -> LocalStatus {
     let paths = LocalPaths::from_config();
@@ -335,6 +364,8 @@ pub async fn status() -> LocalStatus {
                             pid: process.as_ref().and_then(|p| p.pid),
                             restarts: process.as_ref().map(|p| p.restarts).unwrap_or(0),
                             detail: process.and_then(|p| p.detail),
+                            on_gpu: gpu_check(r.provider).0,
+                            gpu_bytes: gpu_check(r.provider).1,
                             endpoint_id: live.and_then(|l| l.endpoint_id.clone()).or_else(|| {
                                 managed
                                     .iter()
@@ -476,7 +507,7 @@ async fn install_at(paths: &LocalPaths, params: &InstallParams) -> Result<()> {
     for runtime in &plan.runtimes {
         let build = &data.manifest.runtimes[&runtime.runtime_id].builds[&runtime.build];
         let reporter = Reporter::new(runtime.runtime_id.clone(), runtime.size_bytes, done, total);
-        let dir = store
+        let installed = store
             .fetch_build(
                 &client,
                 &runtime.runtime_id,
@@ -488,7 +519,7 @@ async fn install_at(paths: &LocalPaths, params: &InstallParams) -> Result<()> {
             .await?;
         reporter.flush().await;
         done += runtime.size_bytes;
-        let binary = dir.join(&build.binary);
+        let binary = installed.dir.join(&build.binary);
         if !binary.exists() {
             bail!(
                 "{} has no {} after unpacking",
@@ -501,9 +532,10 @@ async fn install_at(paths: &LocalPaths, params: &InstallParams) -> Result<()> {
             runtime_id: runtime.runtime_id.clone(),
             version: runtime.version.clone(),
             build: runtime.build.clone(),
-            lib_dirs: build.extras.iter().map(|e| dir.join(&e.lib_dir)).collect(),
+            lib_dirs: installed.lib_dirs,
             binary,
             services: runtime.services.clone(),
+            backend: Some(runtime.backend),
         });
     }
     for model in &plan.models {
@@ -519,6 +551,7 @@ async fn install_at(paths: &LocalPaths, params: &InstallParams) -> Result<()> {
             model_id: model.model_id.clone(),
             provider: model.provider,
             path,
+            server_flags: model.server_flags.clone(),
         });
     }
     selection.save(paths)?;
@@ -601,7 +634,33 @@ fn random_key() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The preset file of llama-server's router: one section per model, loaded at startup.
+/// A server's flags as preset keys: `-c 8192` is `c = 8192`, a flag without a value
+/// (`--embeddings`) is `embeddings = true`. Keys are the long or short flag names, which
+/// presets take as they are.
+fn preset_keys(flags: &[String]) -> Vec<(String, String)> {
+    let mut keys = Vec::new();
+    let mut i = 0;
+    while i < flags.len() {
+        let key = flags[i].trim_start_matches('-').to_string();
+        let value = flags
+            .get(i + 1)
+            .filter(|next| !next.starts_with('-') || next.parse::<f64>().is_ok());
+        match value {
+            Some(value) => {
+                keys.push((key, value.clone()));
+                i += 2;
+            }
+            None => {
+                keys.push((key, "true".to_string()));
+                i += 1;
+            }
+        }
+    }
+    keys
+}
+
+/// The preset file of llama-server's router: one section per model, loaded at startup,
+/// with the model's server flags (`-c 8192 -ngl 999 --reasoning off`, `--embeddings`).
 fn llama_presets(models: &[&SelectedModel]) -> String {
     let mut ini = String::from("version = 1\n\n[*]\nfit = on\n");
     for model in models {
@@ -610,13 +669,22 @@ fn llama_presets(models: &[&SelectedModel]) -> String {
             model.model_id,
             model.path.display()
         ));
-        match model.service {
-            Service::Embeddings => ini.push_str("embeddings = true\n"),
-            // Qwen3.5 thinks before it answers, without end on a bad day: a prompt
-            // without max_tokens (`ai.prompt`) then waits minutes. 1024 tokens of thought
-            // keep the reasoning and bound the wait.
-            Service::Llm => ini.push_str("reasoning-budget = 1024\n"),
-            Service::Stt | Service::Tts => {}
+        let flags = if model.server_flags.is_empty() {
+            plan::default_flags(model.service)
+        } else {
+            model.server_flags.clone()
+        };
+        let mut keys = preset_keys(&flags);
+        // An embedding model is served as one, whatever its flags say.
+        if model.service == Service::Embeddings
+            && !keys
+                .iter()
+                .any(|(k, _)| k == "embeddings" || k == "embedding")
+        {
+            keys.push(("embeddings".into(), "true".into()));
+        }
+        for (key, value) in keys {
+            ini.push_str(&format!("{key} = {value}\n"));
         }
     }
     ini
@@ -658,23 +726,36 @@ fn child_spec(
             let model = models
                 .first()
                 .ok_or_else(|| anyhow!("whisper-server has no model selected"))?;
-            (
-                vec![
-                    "--host".into(),
-                    "127.0.0.1".into(),
-                    "--port".into(),
-                    port.to_string(),
-                    "--model".into(),
-                    model.path.to_string_lossy().into_owned(),
-                    "--request-path".into(),
-                    "/v1/audio".into(),
-                    "--inference-path".into(),
-                    "/transcriptions".into(),
-                    "--threads".into(),
-                    threads,
-                ],
-                Readiness::Tcp,
-            )
+            let mut args: Vec<String> = vec![
+                "--host".into(),
+                "127.0.0.1".into(),
+                "--port".into(),
+                port.to_string(),
+                "--model".into(),
+                model.path.to_string_lossy().into_owned(),
+            ];
+            // The measured flags, without any that would move it off loopback or its port.
+            let mut flags = if model.server_flags.is_empty() {
+                plan::default_flags(Service::Stt)
+            } else {
+                model.server_flags.clone()
+            };
+            let mut i = 0;
+            while i < flags.len() {
+                if matches!(flags[i].as_str(), "--host" | "--port" | "-m" | "--model") {
+                    flags.drain(i..(i + 2).min(flags.len()));
+                } else {
+                    i += 1;
+                }
+            }
+            if !flags.iter().any(|f| f == "--inference-path") {
+                flags.extend(plan::default_flags(Service::Stt));
+            }
+            if !flags.iter().any(|f| f == "-t" || f == "--threads") {
+                flags.extend(["--threads".to_string(), threads]);
+            }
+            args.extend(flags);
+            (args, Readiness::Tcp)
         }
     };
     let mut env = Vec::new();
@@ -817,6 +898,15 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
             running.endpoint_id = Some(endpoint_id.clone());
             spawn_health_follower(endpoint_id, running.supervised.watch());
         }
+        GPU_CHECKS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(runtime.provider, (None, None));
+        if let Some(model_bytes) = gpu_check_for(&runtime, &selection).await {
+            if let Some(running) = RUNNING.lock().await.get(&runtime.provider) {
+                spawn_gpu_check(runtime.provider, running.supervised.watch(), model_bytes);
+            }
+        }
     }
     selection.save(paths)?;
     write_pids(paths).await;
@@ -847,6 +937,178 @@ fn spawn_health_follower(
             }
         }
     });
+}
+
+/// The memory one DRM client of an fdinfo holds, with the client's id: the
+/// `drm-memory-*` / `drm-resident-*` lines of vram, gtt, system and local memory (amdgpu,
+/// i915, xe). `None` for a file that is no DRM client.
+fn drm_client_bytes(fdinfo: &str) -> Option<(String, u64)> {
+    let id = fdinfo.lines().find_map(|l| {
+        l.strip_prefix("drm-client-id:")
+            .map(|v| v.trim().to_string())
+    })?;
+    let mut bytes = 0u64;
+    for line in fdinfo.lines() {
+        let Some(rest) = line
+            .strip_prefix("drm-memory-")
+            .or_else(|| line.strip_prefix("drm-resident-"))
+        else {
+            continue;
+        };
+        let Some((region, value)) = rest.split_once(':') else {
+            continue;
+        };
+        if !matches!(region, "vram" | "gtt" | "system" | "local") {
+            continue;
+        }
+        let mut parts = value.split_whitespace();
+        let Some(number) = parts.next().and_then(|n| n.parse::<u64>().ok()) else {
+            continue;
+        };
+        bytes += number
+            * match parts.next() {
+                Some("MiB") => 1024 * 1024,
+                Some("KiB") | Some("kB") => 1024,
+                _ => 1,
+            };
+    }
+    Some((id, bytes))
+}
+
+/// `root` and every process under it (llama-server's router runs a process per model).
+fn process_tree(root: u32) -> Vec<u32> {
+    let mut parents: Vec<(u32, u32)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            // `/proc/<pid>/stat`: pid (comm) state ppid ...; comm may hold spaces.
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            let ppid = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                .and_then(|p| p.parse::<u32>().ok());
+            if let Some(ppid) = ppid {
+                parents.push((pid, ppid));
+            }
+        }
+    }
+    let mut tree = vec![root];
+    let mut at = 0;
+    while at < tree.len() {
+        let parent = tree[at];
+        tree.extend(
+            parents
+                .iter()
+                .filter(|(_, p)| *p == parent)
+                .map(|(c, _)| *c),
+        );
+        at += 1;
+    }
+    tree
+}
+
+/// The GPU memory `pids` hold through DRM (Linux), each client once.
+fn drm_bytes(pids: &[u32]) -> u64 {
+    let mut clients: BTreeMap<String, u64> = BTreeMap::new();
+    for pid in pids {
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fdinfo")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Ok(info) = std::fs::read_to_string(fd.path()) else {
+                continue;
+            };
+            if let Some((id, bytes)) = drm_client_bytes(&info) {
+                let held = clients.entry(format!("{pid}:{id}")).or_default();
+                *held = (*held).max(bytes);
+            }
+        }
+    }
+    clients.values().sum()
+}
+
+/// After a start on a GPU build: wait (up to 2 minutes, while the models load) for the
+/// runtime's processes to hold at least half the chat model's size in GPU memory, as the
+/// wind tunnel checks. A GPU build that finds no device runs on the CPU and says nothing.
+/// Linux with an AMD or Intel GPU only: NVIDIA's memory does not show in DRM fdinfo.
+fn spawn_gpu_check(
+    provider: Provider,
+    status: tokio::sync::watch::Receiver<ProcessStatus>,
+    model_bytes: u64,
+) {
+    tokio::spawn(async move {
+        let started = Instant::now();
+        let mut held = 0;
+        while started.elapsed() < Duration::from_secs(120) {
+            let pid = {
+                let current = status.borrow();
+                (current.phase == Phase::Running)
+                    .then_some(current.pid)
+                    .flatten()
+            };
+            if let Some(pid) = pid {
+                held = tokio::task::spawn_blocking(move || drm_bytes(&process_tree(pid)))
+                    .await
+                    .unwrap_or(0);
+                if held * 2 >= model_bytes {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let on_gpu = held * 2 >= model_bytes;
+        if on_gpu {
+            log::info!(
+                "Local AI: {} holds {:.2} GB of GPU memory for a {:.2} GB model",
+                provider.as_str(),
+                held as f64 / 1e9,
+                model_bytes as f64 / 1e9
+            );
+        } else {
+            log::warn!(
+                "Local AI: {} holds {:.2} GB of GPU memory for a {:.2} GB model: the GPU build runs on the CPU",
+                provider.as_str(),
+                held as f64 / 1e9,
+                model_bytes as f64 / 1e9
+            );
+        }
+        GPU_CHECKS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(provider, (Some(on_gpu), Some(held)));
+    });
+}
+
+/// Whether a start of `runtime` gets the GPU check, and against how many bytes: a GPU
+/// build, Linux, an AMD or Intel GPU; the chat model's file size (else the largest model's).
+async fn gpu_check_for(runtime: &SelectedRuntime, selection: &Selection) -> Option<u64> {
+    let backend = runtime.backend?;
+    if backend == Backend::Cpu
+        || !cfg!(target_os = "linux")
+        || runtime.provider != Provider::LlamaServer
+    {
+        return None;
+    }
+    let hardware = hardware().await.ok()?;
+    let vendor = hardware.primary_gpu()?.vendor;
+    if !matches!(
+        vendor,
+        hardware::GpuVendor::Amd | hardware::GpuVendor::Intel
+    ) {
+        return None;
+    }
+    let models = selection.models_of(runtime.provider);
+    let size = |m: &&SelectedModel| m.path.metadata().map(|md| md.len()).unwrap_or(0);
+    models
+        .iter()
+        .find(|m| m.service == Service::Llm)
+        .map(size)
+        .or_else(|| models.iter().map(size).max())
+        .filter(|bytes| *bytes > 0)
 }
 
 /// Register `runtime` as a managed endpoint with its models; make each the default of its
@@ -1156,9 +1418,12 @@ mod tests {
             model_id: id.into(),
             provider,
             path: PathBuf::from(format!("/store/models/{id}.gguf")),
+            server_flags: vec![],
         }
     }
 
+    /// Without measured flags: chat without thinking (Qwen3.5 otherwise thinks until the
+    /// context is full), the embedding model as one.
     #[test]
     fn the_router_presets_load_each_model_at_start_and_mark_the_embedding_one() {
         let chat = selected(Service::Llm, "qwen3.5-2b-q4_k_m", Provider::LlamaServer);
@@ -1169,13 +1434,58 @@ mod tests {
         );
         let ini = llama_presets(&[&chat, &embed]);
         assert!(ini.starts_with("version = 1\n"));
-        assert!(ini.contains("[qwen3.5-2b-q4_k_m]\nmodel = /store/models/qwen3.5-2b-q4_k_m.gguf\nload-on-startup = true\n"));
-        assert!(ini.contains("[nomic-embed-text-v1.5-q8_0]\nmodel = /store/models/nomic-embed-text-v1.5-q8_0.gguf\nload-on-startup = true\nembeddings = true\n"));
+        assert!(ini.contains("[qwen3.5-2b-q4_k_m]\nmodel = /store/models/qwen3.5-2b-q4_k_m.gguf\nload-on-startup = true\nreasoning = off\n"), "{ini}");
+        assert!(ini.contains("[nomic-embed-text-v1.5-q8_0]\nmodel = /store/models/nomic-embed-text-v1.5-q8_0.gguf\nload-on-startup = true\nembeddings = true\n"), "{ini}");
         assert_eq!(ini.matches("embeddings = true").count(), 1);
-        assert!(ini.contains(
-            "[qwen3.5-2b-q4_k_m]\nmodel = /store/models/qwen3.5-2b-q4_k_m.gguf\nload-on-startup = true\nreasoning-budget = 1024\n"
-        ));
-        assert_eq!(ini.matches("reasoning-budget").count(), 1);
+        assert_eq!(ini.matches("reasoning = off").count(), 1);
+    }
+
+    /// The wind tunnel's measured flags become the model's preset keys.
+    #[test]
+    fn measured_server_flags_become_preset_keys() {
+        let flags = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(
+            preset_keys(&flags("-c 8192 -ngl 999 --reasoning off")),
+            vec![
+                ("c".to_string(), "8192".to_string()),
+                ("ngl".to_string(), "999".to_string()),
+                ("reasoning".to_string(), "off".to_string())
+            ]
+        );
+        assert_eq!(
+            preset_keys(&flags("-c 8192 --embeddings --temp -1")),
+            vec![
+                ("c".to_string(), "8192".to_string()),
+                ("embeddings".to_string(), "true".to_string()),
+                ("temp".to_string(), "-1".to_string())
+            ]
+        );
+        let mut chat = selected(Service::Llm, "qwen3.5-4b-q4_k_m", Provider::LlamaServer);
+        chat.server_flags = flags("-c 8192 -ngl 999 --reasoning off");
+        let mut embed = selected(Service::Embeddings, "nomic", Provider::LlamaServer);
+        embed.server_flags = flags("-c 8192 -ngl 999");
+        let ini = llama_presets(&[&chat, &embed]);
+        assert!(
+            ini.contains("load-on-startup = true\nc = 8192\nngl = 999\nreasoning = off\n"),
+            "{ini}"
+        );
+        // The embedding model is one even when its flags forget to say so.
+        assert!(ini.ends_with("ngl = 999\nembeddings = true\n"), "{ini}");
+    }
+
+    /// amdgpu's fdinfo of a DRM client: the memory it holds, by region.
+    #[test]
+    fn a_drm_clients_memory_is_read_from_its_fdinfo() {
+        let fdinfo = "pos:\t0\nflags:\t02100002\ndrm-driver:\tamdgpu\ndrm-client-id:\t42\n\
+                      drm-memory-vram:\t1024 KiB\ndrm-memory-gtt:\t2 MiB\ndrm-memory-cpu:\t0 KiB\n\
+                      drm-engine-gfx:\t12345 ns\n";
+        assert_eq!(
+            drm_client_bytes(fdinfo),
+            Some(("42".to_string(), 1024 * 1024 + 2 * 1024 * 1024))
+        );
+        assert_eq!(drm_client_bytes("pos:\t0\nflags:\t0\n"), None);
+        // This process is in its own tree.
+        assert!(process_tree(std::process::id()).contains(&std::process::id()));
     }
 
     #[test]
@@ -1198,10 +1508,11 @@ mod tests {
             provider: Provider::LlamaServer,
             runtime_id: "llama.cpp".into(),
             version: "b1".into(),
-            build: "linux-x86_64-cuda13".into(),
+            build: "linux-x64-cuda".into(),
             binary: dir.path().join("rt/llama-server"),
             lib_dirs: vec![dir.path().join("rt/cudart")],
             services: vec![Service::Llm],
+            backend: Some(Backend::Cuda),
         };
         let spec = child_spec(&paths, &llama, &selection, 40001, "k3y").unwrap();
         let args = spec.args.join(" ");
@@ -1235,18 +1546,47 @@ mod tests {
             provider: Provider::WhisperServer,
             runtime_id: "whisper.cpp".into(),
             version: "b2".into(),
-            build: "linux-x86_64-cpu".into(),
+            build: "linux-x64-cpu".into(),
             binary: dir.path().join("rt/whisper-server"),
             lib_dirs: vec![],
             services: vec![Service::Stt],
+            backend: Some(Backend::Cpu),
         };
         let spec = child_spec(&paths, &whisper, &selection, 40002, "").unwrap();
         let args = spec.args.join(" ");
         assert!(args.contains("--host 127.0.0.1 --port 40002"));
         assert!(args.contains("--request-path /v1/audio --inference-path /transcriptions"));
         assert!(args.contains("whisper-base-q5_1"));
+        assert!(args.contains("--threads"));
         assert_eq!(spec.readiness, Readiness::Tcp);
         assert!(spec.env.is_empty());
+
+        // The measured flags, with its thread count; never a host or port of its own.
+        let mut measured = selection.clone();
+        measured.models[1].server_flags = [
+            "--request-path",
+            "/v1/audio",
+            "--inference-path",
+            "/transcriptions",
+            "-t",
+            "8",
+            "--host",
+            "0.0.0.0",
+        ]
+        .map(String::from)
+        .to_vec();
+        let args = child_spec(&paths, &whisper, &measured, 40002, "")
+            .unwrap()
+            .args
+            .join(" ");
+        assert!(
+            args.ends_with("--request-path /v1/audio --inference-path /transcriptions -t 8"),
+            "{args}"
+        );
+        assert!(
+            !args.contains("0.0.0.0") && !args.contains("--threads"),
+            "{args}"
+        );
     }
 
     /// The exit path of the CLI and the launcher, which cannot await: every managed child

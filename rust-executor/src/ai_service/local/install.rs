@@ -58,6 +58,26 @@ impl std::fmt::Display for ChecksumMismatch {
 
 impl std::error::Error for ChecksumMismatch {}
 
+/// An unpacked runtime build: its directory and the library directories of its extras,
+/// which the supervisor puts on the library path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstalledBuild {
+    pub dir: PathBuf,
+    pub lib_dirs: Vec<PathBuf>,
+}
+
+/// Beside the marker: each extra's library dir, relative, one per line.
+const LIB_DIRS: &str = ".ad4m-lib-dirs";
+
+/// The library dirs a build recorded at its unpack; the manifest's names for one unpacked
+/// before the record existed.
+fn read_lib_dirs(dir: &Path, build: &Build) -> Vec<PathBuf> {
+    match std::fs::read_to_string(dir.join(LIB_DIRS)) {
+        Ok(text) if !build.extras.is_empty() => text.lines().map(|r| dir.join(r)).collect(),
+        _ => build.extras.iter().map(|e| dir.join(&e.lib_dir)).collect(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     pub root: PathBuf,
@@ -177,7 +197,7 @@ impl Store {
         key: &str,
         build: &Build,
         progress: &(dyn Fn(u64) + Send + Sync),
-    ) -> Result<PathBuf> {
+    ) -> Result<InstalledBuild> {
         let dir = self.runtime_dir(runtime_id, version, key);
         let archives: Vec<(&Url, &str, u64)> =
             std::iter::once((&build.url, build.sha256.as_str(), build.size_bytes))
@@ -190,7 +210,8 @@ impl Store {
                 .collect();
         if self.build_installed(runtime_id, version, key, build) {
             progress(archives.iter().map(|a| a.2).sum());
-            return Ok(dir);
+            let lib_dirs = read_lib_dirs(&dir, build);
+            return Ok(InstalledBuild { dir, lib_dirs });
         }
         let mut done = 0u64;
         let mut files = Vec::new();
@@ -212,14 +233,30 @@ impl Store {
         let staging = dir.with_extension("partial");
         let target = dir.clone();
         let shas: Vec<String> = archives.iter().map(|a| a.1.to_string()).collect();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        let named: Vec<String> = build.extras.iter().map(|e| e.lib_dir.clone()).collect();
+        let relative = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             if staging.exists() {
                 std::fs::remove_dir_all(&staging)?;
             }
             std::fs::create_dir_all(&staging)?;
-            for file in &files {
-                unpack(file, &staging).with_context(|| format!("Unpacking {}", file.display()))?;
+            let mut relative = Vec::new();
+            for (i, file) in files.iter().enumerate() {
+                let top = unpack(file, &staging)
+                    .with_context(|| format!("Unpacking {}", file.display()))?;
+                // An extra's libraries: the dir the manifest names, else the archive's one
+                // top-level dir (cudart unpacks into `cudart-llama-...-x64/`), else its root.
+                if i > 0 {
+                    let named = &named[i - 1];
+                    relative.push(if !named.is_empty() {
+                        named.clone()
+                    } else if top.len() == 1 {
+                        top.into_iter().next().unwrap_or_default()
+                    } else {
+                        String::new()
+                    });
+                }
             }
+            std::fs::write(staging.join(LIB_DIRS), relative.join("\n"))?;
             std::fs::write(staging.join(INSTALLED_MARKER), shas.join("\n"))?;
             if target.exists() {
                 std::fs::remove_dir_all(&target)?;
@@ -229,10 +266,11 @@ impl Store {
             for file in &files {
                 let _ = std::fs::remove_file(file);
             }
-            Ok(())
+            Ok(relative)
         })
         .await??;
-        Ok(dir)
+        let lib_dirs = relative.iter().map(|r| dir.join(r)).collect();
+        Ok(InstalledBuild { dir, lib_dirs })
     }
 }
 
@@ -385,7 +423,14 @@ pub async fn download(
 }
 
 /// Unpack a `.tar.gz` or `.zip` into `into`, refusing entries that would land outside it.
-pub fn unpack(archive: &Path, into: &Path) -> Result<()> {
+/// Answers the archive's top-level names.
+pub fn unpack(archive: &Path, into: &Path) -> Result<std::collections::BTreeSet<String>> {
+    let mut top = std::collections::BTreeSet::new();
+    let mut note_top = |path: &Path| {
+        if let Some(std::path::Component::Normal(first)) = path.components().next() {
+            top.insert(first.to_string_lossy().into_owned());
+        }
+    };
     let name = archive.to_string_lossy().to_lowercase();
     if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         let file = std::fs::File::open(archive)?;
@@ -394,12 +439,13 @@ pub fn unpack(archive: &Path, into: &Path) -> Result<()> {
         tar.set_overwrite(true);
         for entry in tar.entries()? {
             let mut entry = entry?;
+            note_top(&entry.path()?);
             // `unpack_in` refuses paths that leave `into`.
             if !entry.unpack_in(into)? {
                 bail!("{} holds a path outside the archive", archive.display());
             }
         }
-        Ok(())
+        Ok(top)
     } else if name.ends_with(".zip") {
         let file = std::fs::File::open(archive)?;
         let mut zip = zip::ZipArchive::new(file)?;
@@ -409,6 +455,7 @@ pub fn unpack(archive: &Path, into: &Path) -> Result<()> {
                 .enclosed_name()
                 .ok_or_else(|| anyhow!("{} holds a path outside the archive", archive.display()))?
                 .to_path_buf();
+            note_top(&relative);
             let path = into.join(relative);
             if entry.is_dir() {
                 std::fs::create_dir_all(&path)?;
@@ -425,7 +472,7 @@ pub fn unpack(archive: &Path, into: &Path) -> Result<()> {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
             }
         }
-        Ok(())
+        Ok(top)
     } else {
         bail!("{} is neither .tar.gz nor .zip", archive.display())
     }
@@ -678,14 +725,14 @@ mod tests {
             .await;
         let build: Build = serde_json::from_value(serde_json::json!({
             "url": url(&server, "/main.tar.gz"), "sha256": sha(&main), "sizeBytes": main.len(), "binary": "rt/server",
-            "extras": [{ "url": url(&server, "/extra.tar.gz"), "sha256": sha(&extra), "sizeBytes": extra.len(), "libDir": "libs" }]
+            "extras": [{ "url": url(&server, "/extra.tar.gz"), "sha256": sha(&extra), "sizeBytes": extra.len() }]
         }))
         .unwrap();
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
         assert!(!store.build_installed("rt", "v1", "linux-x86_64-cpu", &build));
         let total = AtomicU64::new(0);
-        let at = store
+        let installed = store
             .fetch_build(
                 &http_client().unwrap(),
                 "rt",
@@ -700,8 +747,11 @@ mod tests {
             total.load(Ordering::SeqCst),
             (main.len() + extra.len()) as u64
         );
+        let at = installed.dir.clone();
         assert!(at.join("rt/server").exists());
         assert!(at.join("libs/libx.so").exists());
+        // No `libDir` in the manifest: the extra's one top-level dir holds its libraries.
+        assert_eq!(installed.lib_dirs, vec![at.join("libs")]);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -716,6 +766,20 @@ mod tests {
         }
         assert!(store.build_installed("rt", "v1", "linux-x86_64-cpu", &build));
         assert!(!store.downloads_dir().join("main.tar.gz").exists());
+        // Installed already: no download, the same library dirs.
+        drop(server);
+        let again = store
+            .fetch_build(
+                &http_client().unwrap(),
+                "rt",
+                "v1",
+                "linux-x86_64-cpu",
+                &build,
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(again, installed);
     }
 
     #[test]
