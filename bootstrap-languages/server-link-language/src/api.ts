@@ -79,7 +79,9 @@ export async function requestChallenge(config: RoomConfig, did: string): Promise
 }
 
 /**
- * Step 2: POST {did, challenge, signature} -> {token}
+ * Step 2: POST {did, challenge, signature, e2e: true} -> {token}. When this
+ * call creates the room, `e2e` makes it refuse plaintext from creation, before
+ * the admin's first key exists. A link server that predates the flag ignores it.
  */
 export async function verifyChallenge(
     config: RoomConfig,
@@ -91,7 +93,7 @@ export async function verifyChallenge(
         roomUrl(config, "/auth"),
         "POST",
         jsonHeaders(),
-        JSON.stringify({ did, challenge, signature }),
+        JSON.stringify({ did, challenge, signature, e2e: true }),
     );
     return res.token;
 }
@@ -186,24 +188,17 @@ export async function deleteRoomKey(config: RoomConfig, token: string, version: 
 }
 
 /**
- * Fetches the room's E2E keys for this agent.
- *
- * Returns null when the room has no E2E at all (server responds 404).
- * Returns `{ keys: [], e2e_enabled: true }` when the room HAS E2E but
- * this agent has no keys yet (freshly added member awaiting grant).
+ * Fetches the room key versions sealed to this agent. No keys means the agent
+ * waits for one: a 404 is what a room an older build created, or an older
+ * link server, answers when there is none for this agent. It never means
+ * "plaintext room" to this build.
  */
-export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<KeysResponse | null> {
+export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<KeysResponse> {
     try {
-        const res = await request<Partial<KeysResponse>>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
-        if (!res) return null;
-        return {
-            keys: res.keys ?? [],
-            e2e_enabled: res.e2e_enabled ?? (!!res.keys && res.keys.length > 0),
-        };
+        const res = await request<Partial<KeysResponse> | undefined>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
+        return { keys: res?.keys ?? [] };
     } catch (err) {
-        if (err instanceof ApiError && (err.status === 404 || err.status === 204)) {
-            return null; // Room has no E2E — 404
-        }
+        if (err instanceof ApiError && err.status === 404) return { keys: [] };
         throw err;
     }
 }

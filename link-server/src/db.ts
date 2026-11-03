@@ -182,7 +182,7 @@ export class LinkServerDB {
          FROM rooms r ORDER BY r.created_at DESC`
       ),
       createRoom: this.raw.prepare(
-        "INSERT INTO rooms (id, admin_did, created_at, e2e_enabled, revision) VALUES (?, ?, ?, 0, ?)"
+        "INSERT INTO rooms (id, admin_did, created_at, e2e_enabled, revision) VALUES (?, ?, ?, ?, ?)"
       ),
       setE2e: this.raw.prepare("UPDATE rooms SET e2e_enabled = ? WHERE id = ?"),
       updateRevision: this.raw.prepare("UPDATE rooms SET revision = ? WHERE id = ?"),
@@ -296,10 +296,15 @@ export class LinkServerDB {
     return this.stmts.listRooms.all() as Array<RoomRow & { member_count: number }>;
   }
 
-  createRoom(roomId: string, adminDid: string): RoomRow {
+  /**
+   * `e2e`: the room refuses plaintext links from creation (the current language build asks for this).
+   * Without it the room is a legacy one: plaintext until its admin's first key rotation.
+   */
+  createRoom(roomId: string, adminDid: string, e2e = false): RoomRow {
     const createdAt = new Date().toISOString();
-    this.stmts.createRoom.run(roomId, adminDid, createdAt, EMPTY_REVISION);
-    return { id: roomId, admin_did: adminDid, created_at: createdAt, e2e_enabled: 0, revision: EMPTY_REVISION };
+    const e2eEnabled = e2e ? 1 : 0;
+    this.stmts.createRoom.run(roomId, adminDid, createdAt, e2eEnabled, EMPTY_REVISION);
+    return { id: roomId, admin_did: adminDid, created_at: createdAt, e2e_enabled: e2eEnabled, revision: EMPTY_REVISION };
   }
 
   /** Returns the revision for a room. Always present — set at creation and updated on every commit. */

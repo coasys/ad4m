@@ -89,14 +89,12 @@ describe("template uniqueness", () => {
 });
 
 describe("adminRotates", () => {
-    it("rotates when the admin holds no room key it can open", () => {
-        assert.strictEqual(adminRotates("none", false), true);
+    it("rotates when the admin holds no room key it can open, as in the room it just created", () => {
         assert.strictEqual(adminRotates("pending", false), true);
     });
 
     it("rotates at most once a run: if its own new box did not open, another version would not either", () => {
         assert.strictEqual(adminRotates("pending", true), false);
-        assert.strictEqual(adminRotates("none", true), false);
     });
 
     it("does not rotate while it holds a key, or when the key ring errored", () => {
@@ -113,8 +111,8 @@ describe("afterFailedKeyRead", () => {
         assert.strictEqual(after.ring, ring);
     });
 
-    it("is an error when no ring was loaded: commits refuse plaintext", () => {
-        for (const status of ["none", "pending", "error"] as const) {
+    it("is an error when no ring was loaded: commits wait", () => {
+        for (const status of ["pending", "error"] as const) {
             assert.deepStrictEqual(afterFailedKeyRead(status, null), { status: "error", ring: null });
         }
         assert.deepStrictEqual(afterFailedKeyRead("ready", new Map()), { status: "error", ring: null });

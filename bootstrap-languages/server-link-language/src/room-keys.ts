@@ -17,21 +17,22 @@ function message(err: unknown): string {
 }
 
 /**
- * - "none": the room has no room key yet (or no E2E): plaintext commits are fine.
+ * There is no plaintext mode: only "ready" commits.
+ * - "pending": this agent holds no room key it opens (the admin has not
+ *   rotated one in yet, or no member holding one has granted it).
  * - "ready": the key ring is loaded.
- * - "pending": the room has keys, but none sealed to this agent opens yet.
  * - "error": the key ring could not be read or opened.
  */
-export type KeyRingStatus = "none" | "pending" | "ready" | "error";
+export type KeyRingStatus = "pending" | "ready" | "error";
 
 /**
- * An admin holding no room key it can open ("none": the room has none yet;
- * "pending": none sealed to it opens) mints one, once a run. A box it just
+ * An admin holding no room key it can open ("pending": the room has none
+ * yet, or none sealed to it opens) mints one, once a run. A box it just
  * sealed to its own DID that does not open means its executor cannot open
  * any, so another version would only pile up unopened keys.
  */
 export function adminRotates(status: KeyRingStatus, rotatedThisRun: boolean): boolean {
-    return !rotatedThisRun && (status === "none" || status === "pending");
+    return !rotatedThisRun && status === "pending";
 }
 
 /**

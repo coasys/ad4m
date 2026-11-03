@@ -129,9 +129,10 @@ describe("auth: authenticate", () => {
                 }
                 assert.deepEqual(
                     Object.keys(parsed).sort(),
-                    ["challenge", "did", "signature"],
-                    "step 2 carries the signed challenge and nothing else: members' keys come from their DIDs",
+                    ["challenge", "did", "e2e", "signature"],
+                    "step 2 carries the signed challenge and the E2E flag, no key: members' keys come from their DIDs",
                 );
+                assert.equal(parsed.e2e, true, "the room this call creates refuses plaintext from the start");
                 assert.equal(parsed.challenge, CHALLENGE);
                 assert.ok(typeof parsed.signature === "string" && parsed.signature.length > 0);
                 return {

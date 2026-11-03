@@ -185,9 +185,6 @@ export interface KeysResponseEntry {
 
 export interface KeysResponse {
     keys: KeysResponseEntry[];
-    /** True when the room has E2E enabled (even if this agent has no keys
-     *  yet). Absent on 404 responses (room has no E2E at all). */
-    e2e_enabled?: boolean;
 }
 
 export interface MemberMissingKeys {

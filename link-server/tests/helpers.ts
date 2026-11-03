@@ -120,11 +120,16 @@ export async function getJson<T = unknown>(url: string, token?: string): Promise
   return { status: res.status, body: (text ? JSON.parse(text) : undefined) as T };
 }
 
-/** Full DID challenge-response flow. Returns the issued JWT. Room is auto-created if this is the first agent. */
+/**
+ * Full DID challenge-response flow. Returns the issued JWT. Room is auto-created if this is the first agent:
+ * a plaintext-capable room as older language builds create it, or, with `{ e2e: true }`, an E2E room as the
+ * current build creates it.
+ */
 export async function authenticateAgent(
   serverUrl: string,
   roomId: string,
-  agent: TestAgent
+  agent: TestAgent,
+  opts: { e2e?: boolean } = {}
 ): Promise<string> {
   const step1 = await postJson<{ challenge?: string; error?: string }>(
     `${serverUrl}/rooms/${roomId}/auth`,
@@ -136,7 +141,7 @@ export async function authenticateAgent(
   const signature = await signChallenge(agent, step1.body.challenge);
   const step2 = await postJson<{ token?: string; error?: string }>(
     `${serverUrl}/rooms/${roomId}/auth`,
-    { did: agent.did, challenge: step1.body.challenge, signature }
+    { did: agent.did, challenge: step1.body.challenge, signature, ...(opts.e2e ? { e2e: true } : {}) }
   );
   if (step2.status !== 200 || !step2.body.token) {
     throw new Error(`auth verify failed: ${step2.status} ${JSON.stringify(step2.body)}`);

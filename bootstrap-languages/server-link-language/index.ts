@@ -62,19 +62,18 @@ let localAgents: string[] = [];
 let wsClient: WsClient | null = null;
 
 /** The room's versioned key ring (version → decrypted AES-256-GCM key).
- * Null for a plaintext room OR while E2E setup is still in flight. */
+ * Null while this agent holds no room key it can open. */
 let keyRing: KeyRing | null = null;
 /**
- * - "none": room has no E2E — plaintext commits are fine.
+ * Every room is end-to-end encrypted: commits wait for "ready".
+ * - "pending": this agent holds no key it can open: the admin has not
+ *   rotated one in yet, no member holding one has been online since it
+ *   joined, or none of its boxes opens (an older format). An admin in this
+ *   state rotates; a member waits for a grant.
  * - "ready": key ring acquired and decrypted — encrypted commits ready.
- * - "pending": room HAS E2E but this agent holds no key it can open: no
- *   member holding one has been online since it joined, or none of its
- *   boxes opens (an older format). An admin in this state rotates.
- *   commit() refuses to send plaintext.
- * - "error": E2E keys almost certainly exist but we could not get/open
- *   them. commit() refuses to send plaintext.
+ * - "error": we could not get/open the keys.
  */
-let keyRingStatus: KeyRingStatus = "none";
+let keyRingStatus: KeyRingStatus = "pending";
 /** True when this agent has been identified as the room admin. */
 let isRoomAdmin = false;
 /** Set once this run has minted a room key version (see `rotateIfAdminWithoutKey`). */
@@ -110,23 +109,13 @@ async function setupKeyRing(): Promise<void> {
         const token = await auth.getValidToken();
         const keysRes = await api.fetchRoomKeys(config, token);
         if (gen !== lifecycleGen) return;
-        if (!keysRes) {
-            keyRingStatus = "none";
-            keyRing = null;
-            return;
-        }
-        if (keysRes.keys.length === 0 && keysRes.e2e_enabled) {
+        if (keysRes.keys.length === 0) {
             keyRingStatus = "pending";
             keyRing = null;
             console.log(
-                "[server-link-language] room has E2E enabled but this agent has no keys yet — " +
-                "commits blocked until a member holding the room key grants it",
+                "[server-link-language] this agent holds no room key yet — commits wait until the admin " +
+                "rotates one in or a member holding one grants it",
             );
-            return;
-        }
-        if (keysRes.keys.length === 0) {
-            keyRingStatus = "none";
-            keyRing = null;
             return;
         }
         const { ring, spoiled } = buildKeyRing(keysRes.keys, getAgent());
@@ -162,7 +151,7 @@ async function setupKeyRing(): Promise<void> {
             keyRingStatus === "ready"
                 ? "[server-link-language] key ring refresh failed — keeping the key ring already loaded:"
                 : "[server-link-language] failed to acquire/decrypt E2E key ring — " +
-                  "refusing to commit plaintext until this resolves:",
+                  "commits wait until this resolves:",
             err,
         );
         return;
@@ -175,9 +164,25 @@ async function setupKeyRing(): Promise<void> {
     }
 }
 
-/** The admin mints a room key when it holds none it can open (`adminRotates`). */
+/** Whether this agent is the room's admin, as the server's ACL says now. */
+async function readIsRoomAdmin(): Promise<boolean> {
+    try {
+        const aclInfo = await api.fetchAclInfo(getConfig(), await auth.getValidToken());
+        return aclInfo.admin === myDid;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * The admin mints a room key when it holds none it can open (`adminRotates`).
+ * With no plaintext mode, an admin that missed its admin status at startup
+ * (the ACL read failed) would never commit: re-read it while a key is missing.
+ */
 async function rotateIfAdminWithoutKey(): Promise<void> {
-    if (!isRoomAdmin || !adminRotates(keyRingStatus, rotatedThisRun)) return;
+    if (!adminRotates(keyRingStatus, rotatedThisRun)) return;
+    if (!isRoomAdmin) isRoomAdmin = await readIsRoomAdmin();
+    if (!isRoomAdmin) return;
     console.log(`[server-link-language] admin holds no room key (${keyRingStatus}) — generating a new one`);
     await performRotation();
 }
@@ -360,16 +365,13 @@ const language = defineLanguage({
             await auth.authenticate();
 
             // Determine admin status — only the admin rotates the room key.
-            try {
-                const aclInfo = await api.fetchAclInfo(config, await auth.getValidToken());
-                isRoomAdmin = aclInfo.admin === myDid;
-            } catch {
-                isRoomAdmin = false;
-            }
+            isRoomAdmin = await readIsRoomAdmin();
 
             await setupKeyRingCoalesced();
-            // E2E is mandatory: an admin that holds no room key it can open
-            // rotates, sealing a new version to every ACL member.
+            // The admin that just created the room (E2E from creation, no key
+            // yet) mints key version 1 here, before its first commit; any admin
+            // holding no key it can open rotates, sealing a new version to
+            // every ACL member.
             await rotateIfAdminWithoutKey();
 
             // The room's current links, emitted to the executor; those no
@@ -417,7 +419,7 @@ const language = defineLanguage({
         configured = false;
         localAgents = [];
         keyRing = null;
-        keyRingStatus = "none";
+        keyRingStatus = "pending";
         isRoomAdmin = false;
         rotatedThisRun = false;
         keyRingInflight = null;
@@ -446,22 +448,19 @@ const language = defineLanguage({
             }
             if (keyRingStatus === "error") {
                 throw new Error(
-                    "server-link-language: refusing to commit — this room's E2E key ring could not be " +
-                    "acquired/decrypted, and sending plaintext to a possibly-encrypted room would be unsafe. " +
-                    "Retry once connectivity/auth recovers.",
+                    "server-link-language: cannot commit yet — this room's E2E key ring could not be " +
+                    "acquired/decrypted. Retry once connectivity/auth recovers.",
                 );
             }
-            // E2E is mandatory: an admin that still holds no room key rotates
-            // before it commits; a failed rotation throws, and the executor
-            // keeps the diff for retry. Non-admin "none" means the room has
-            // no E2E yet — plaintext is correct for the first commit that
-            // triggers the admin flow.
+            // An admin that still holds no room key rotates before it
+            // commits; a failed rotation throws, and the executor keeps the
+            // diff for retry. There is no plaintext mode: a member without a
+            // key waits for a grant.
             await rotateIfAdminWithoutKey();
-            if (keyRingStatus === "pending") {
+            if (keyRingStatus !== "ready") {
                 throw new Error(
-                    "server-link-language: refusing to commit — this room has E2E encryption enabled " +
-                    "but this agent holds no room key it can open. A member holding one grants it " +
-                    "when it is next online.",
+                    "server-link-language: cannot commit yet — this agent holds no room key it can open. " +
+                    "The admin rotates one in, or a member holding one grants it when it is next online.",
                 );
             }
 

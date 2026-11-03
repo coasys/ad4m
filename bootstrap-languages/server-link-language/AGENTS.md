@@ -129,8 +129,9 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 - **Local store is always plaintext.** E2E encryption operates only at the
   wire boundary (`encryptLinkForWire`/`decryptLinkFromWire` in
   `src/encryption.ts`, called from `src/sync.ts`'s `toWireLink`/
-  `fromWireLink`). `render()`/`queryLinks()` must never need to know
-  whether the room is E2E — if you're touching decryption logic outside
+  `openWireLink`). Every room is E2E: `toWireLink` throws without a key
+  ring and `openWireLink` skips a plaintext link. `render()`/`queryLinks()`
+  never deal with ciphertext — if you're touching decryption logic outside
   `sync.ts`'s wire-translation functions, you're probably in the wrong
   place.
 - **Module state resets are almost free.** Per the AD4M language-interface
@@ -162,9 +163,15 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   the server recovers, and a process restart loses the
   queue — a durable pending-commits queue (persisted in the KV store,
   retried by `sync()`) would close this gap.
-- **E2E encryption activates automatically — no plaintext mode.** The admin's
-  language instance generates the initial room key during `init()` when no E2E
-  exists yet. Subsequent rotations require explicit admin action.
+- **Rooms are E2E from creation — no plaintext mode.** The sign-in that
+  creates the room sends `e2e: true` (`api.verifyChallenge`), so the link
+  server refuses plaintext before any key exists; the admin's `init()` (or,
+  failing that, its first commit) mints key version 1. Key status is
+  `pending | ready | error` (src/room-keys.ts); only `ready` commits. A `/keys`
+  404 (a legacy room, an older server) reads as no key, never as "no E2E".
+  An admin whose ACL read failed at startup re-reads its admin status while it
+  holds no key (`rotateIfAdminWithoutKey`). Subsequent rotations require
+  explicit admin action.
   `performRotation()` (admin only) generates a fresh room key client-side,
   seals it to the DID of every ACL member, including members that never
   connected, and POSTs only sealed boxes — the server never sees plaintext.
