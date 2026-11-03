@@ -393,6 +393,37 @@ async fn remove_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
 
 // ── Prompt & Embed ──
 
+/// The answer to a failed prompt or embed. A managed user does not read endpoints
+/// (`ai.endpoints` refuses them, and their model statuses carry no detail), so the URLs of
+/// the endpoints leave the message they get: a provider's "could not reach" error names
+/// the URL it called.
+fn upstream_failure(e: &anyhow::Error, ctx: &RequestContext) -> WsRpcError {
+    let message = e.to_string();
+    if ctx.user_did().is_none() {
+        return WsRpcError::internal(message);
+    }
+    let endpoints = Ad4mDb::with_global_instance(|db| db.get_endpoints()).unwrap_or_default();
+    WsRpcError::internal(without_endpoint_urls(&message, &endpoints))
+}
+
+/// `message` with each endpoint's base URL, and then its origin (a provider calls paths
+/// under it), replaced by a neutral phrase.
+fn without_endpoint_urls(message: &str, endpoints: &[crate::types::Endpoint]) -> String {
+    const REPLACEMENT: &str = "<the model's endpoint>";
+    let mut message = message.to_string();
+    for endpoint in endpoints {
+        let base = endpoint.base_url.as_str().trim_end_matches('/').to_string();
+        let origin = endpoint.base_url.origin();
+        let origin = origin.is_tuple().then(|| origin.ascii_serialization());
+        for needle in std::iter::once(base).chain(origin) {
+            if !needle.is_empty() {
+                message = message.replace(&needle, REPLACEMENT);
+            }
+        }
+    }
+    message
+}
+
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_compute_credits_ws(ctx.user_did())?;
 
@@ -408,7 +439,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     let result = service
         .prompt(task_id, body.prompt, ctx.user_did().map(str::to_string))
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| upstream_failure(&e, &ctx))?;
 
     Ok(Value::String(result.text))
 }
@@ -426,7 +457,7 @@ async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     let embedding = service
         .embed(body.model_id, body.text, ctx.user_did().map(str::to_string))
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| upstream_failure(&e, &ctx))?;
 
     let json_string = serde_json::to_string(&embedding.embeddings)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;

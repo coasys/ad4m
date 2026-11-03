@@ -49,6 +49,11 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
 - `config.rs`: the config file's `ai_endpoints` / `ai_models` / `ai_defaults`, applied
   before the service loads; idempotent by name, keys only from env vars.
 
+`add_model` and `update_model` refuse (`InvalidModel`, a 400) a model whose endpoint has no
+route for its type, before anything is written: transcription and speech need an
+OpenAI-shaped server (not Ollama or Anthropic), embeddings a kind with an embeddings
+client. So a refused model never gives its endpoint the capability.
+
 A model's status (`ModelView::status`, `ai.modelStatus`) is computed from its endpoint's
 last health check (`Endpoint::model_status`): `READY` when the endpoint lists it,
 `MISSING` when it answers without it, `ENDPOINT_DOWN`, or `UNKNOWN` before a check.
@@ -67,7 +72,10 @@ last health check (`Endpoint::model_status`): `READY` when the endpoint lists it
   `/v1/audio/transcriptions`); `publish_text` sends `transcription-text` to the owner's
   DID only. `transcription_is_billed_in_one_place` pins the first.
 - The idle reaper (`start_stream_reaper`) holds the stream map weakly: dropping a clone of
-  the service (every `global_instance()` call makes one) does not stop it.
+  the service (every `global_instance()` call makes one) does not stop it. A stream is idle
+  30 s after its last feed or answer, and never while an utterance is upstream
+  (`TranscriptionSession::in_flight`, counted by an `InFlight` guard that a dropped feed
+  releases too).
 - `transcription_e2e.rs`: real server, skipped unless `TRANSCRIPTION_E2E_BASE_URL` and
   `TRANSCRIPTION_E2E_MODEL` are set.
 
