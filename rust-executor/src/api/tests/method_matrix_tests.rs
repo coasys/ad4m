@@ -542,6 +542,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "perspective.agentReplyCancel",
         || json!({ "container": "ad4m://chat" }),
     ),
+    (
+        "perspective.agentSessionDelete",
+        || json!({ "session": "ad4m://agent_session/s" }),
+    ),
     ("perspective.addAutoProcessor", || {
         json!({
             "processorId": "p",

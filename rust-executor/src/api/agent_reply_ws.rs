@@ -18,6 +18,9 @@ use crate::perspectives::agent_reply::{cancel_reply, start_reply, ReplyError, Ru
 use crate::perspectives::agent_session::{
     check_settings, run_agent_session, AgentMessage, AgentSessionRequest,
 };
+use crate::perspectives::agent_sessions::{
+    create_session, delete_session, session_settings, NewSession, SessionSettings,
+};
 use crate::types::*;
 
 use super::guards::Guard;
@@ -32,21 +35,22 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     let perspective = guarded_perspective(&params).await?;
     check_credits(ctx.user_did())?;
 
-    let write_tools = body.write_tools.unwrap_or_default();
+    // A session's settings fill in what the call leaves out.
+    let saved = session_settings(&perspective, body.container.trim())
+        .await
+        .map_err(|e| WsRpcError::internal(format!("{e:#}")))?
+        .unwrap_or_default();
+    let work_in = body.work_in.or(saved.work_in).ok_or_else(|| {
+        WsRpcError::bad_request(
+            "`workIn` is missing: name the perspective the agent works in, or reply in a session \
+             that has one",
+        )
+    })?;
+    let write_tools = body.write_tools.unwrap_or(saved.write_tools);
+    let model = body.model.or(saved.model);
     let max_tool_calls = body.max_tool_calls.unwrap_or(DEFAULT_MAX_TOOL_CALLS);
     check_settings(&write_tools, max_tool_calls).map_err(WsRpcError::bad_request)?;
-    let work_cap = if write_tools.is_empty() {
-        perspective_query_capability
-    } else {
-        perspective_update_capability
-    };
-    Guard::perspective(work_cap)
-        .admit(
-            "perspective.agentReply",
-            &json!({ "uuid": body.work_in }),
-            &ctx,
-        )
-        .await?;
+    admit_work_in(&ctx, &work_in, &write_tools).await?;
 
     let agent_context = ctx.acts_as();
     let caller_did = crate::agent::did_for_context(&agent_context)
@@ -56,9 +60,7 @@ async fn agent_reply(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         WsHarnessCreditGate::new(ctx.user_did().map(str::to_string)),
     ));
     let run_context = agent_context.clone();
-    let work_in = body.work_in;
     let context = body.context;
-    let model = body.model;
     let run: Runner = Box::new(move |messages: Vec<AgentMessage>, steps| {
         Box::pin(async move {
             let request = AgentSessionRequest {
@@ -102,11 +104,81 @@ async fn agent_reply_cancel(params: Value, ctx: Arc<RequestContext>) -> Result<V
     Ok(json!(cancelled))
 }
 
+/// The caller may let an agent work in `work_in`: query it, and update it when the agent may
+/// write. The perspective guard, run on that perspective.
+async fn admit_work_in(
+    ctx: &RequestContext,
+    work_in: &str,
+    write_tools: &[String],
+) -> Result<(), WsRpcError> {
+    let cap = if write_tools.is_empty() {
+        perspective_query_capability
+    } else {
+        perspective_update_capability
+    };
+    Guard::perspective(cap)
+        .admit("perspective.agentReply", &json!({ "uuid": work_in }), ctx)
+        .await
+}
+
+async fn agent_session_create(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let body: AgentSessionCreateRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let perspective = guarded_perspective(&params).await?;
+    let write_tools = body.write_tools.unwrap_or_default();
+    check_settings(&write_tools, DEFAULT_MAX_TOOL_CALLS).map_err(WsRpcError::bad_request)?;
+    if let Some(work_in) = &body.work_in {
+        admit_work_in(&ctx, work_in, &write_tools).await?;
+    }
+    let session_id = create_session(
+        perspective,
+        NewSession {
+            title: body.title.unwrap_or_default(),
+            about: body.about,
+            settings: SessionSettings {
+                work_in: body.work_in,
+                write_tools,
+                model: body.model,
+            },
+        },
+        &ctx.acts_as(),
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(format!("{e:#}")))?;
+    Ok(serde_json::to_value(AgentSessionCreated { session_id })?)
+}
+
+async fn agent_session_delete(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let body: AgentSessionDeleteRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let perspective = guarded_perspective(&params).await?;
+    let deleted = delete_session(perspective, body.session.trim(), &ctx.acts_as())
+        .await
+        .map_err(|e| WsRpcError::internal(format!("{e:#}")))?;
+    Ok(json!(deleted))
+}
+
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<AgentReplyRequest, AgentReplyStarted>("perspective.agentReply", agent_reply)
         .guard(Guard::perspective(perspective_update_capability));
     map.method::<AgentReplyCancelRequest, bool>("perspective.agentReplyCancel", agent_reply_cancel)
         .guard(Guard::perspective(perspective_update_capability));
+    map.method::<AgentSessionCreateRequest, AgentSessionCreated>(
+        "perspective.agentSessionCreate",
+        agent_session_create,
+    )
+    .guard(Guard::perspective(perspective_update_capability));
+    map.method::<AgentSessionDeleteRequest, bool>(
+        "perspective.agentSessionDelete",
+        agent_session_delete,
+    )
+    .guard(Guard::perspective(perspective_update_capability));
 }
 
 // ── Contracts ──
@@ -121,15 +193,17 @@ pub struct AgentReplyRequest {
     /// the messages. The person's message must be written there before the call.
     pub container: String,
     /// The perspective the agent works in: what its tools read and, with `writeTools`, change.
-    pub work_in: String,
+    /// Absent: the session's (`container` is an `AgentSession` created with one).
+    #[ts(optional)]
+    pub work_in: Option<String>,
     /// What the person is looking at, as a hint for the model (`{ "recordId": "…" }`).
     #[ts(optional, type = "Record<string, unknown>")]
     pub context: Option<Value>,
-    /// Tools that write which the model may call, as for `perspective.runAgent`. None means an
-    /// agent that only reads.
+    /// Tools that write which the model may call, as for `perspective.runAgent`. Absent: the
+    /// session's, or none, an agent that only reads.
     #[ts(optional)]
     pub write_tools: Option<Vec<String>>,
-    /// A model id; the node's default language model when absent.
+    /// A model id. Absent: the session's, else the node's default language model.
     #[ts(optional)]
     pub model: Option<String>,
     /// How many tool calls the model may make before it must answer. Default 20.
@@ -153,4 +227,44 @@ pub struct AgentReplyCancelRequest {
     pub uuid: String,
     /// The node that holds the conversation whose running reply is stopped.
     pub container: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentSessionCreateRequest {
+    /// The perspective that keeps the session: its replies are written there.
+    pub uuid: String,
+    #[ts(optional)]
+    pub title: Option<String>,
+    /// The record the session is about (an id), so a client lists the sessions about it.
+    #[ts(optional)]
+    pub about: Option<String>,
+    /// The perspective its replies' agent works in, unless a reply names another. Kept on this
+    /// node only.
+    #[ts(optional)]
+    pub work_in: Option<String>,
+    /// The tools its replies' agent may write with. Kept on this node only.
+    #[ts(optional)]
+    pub write_tools: Option<Vec<String>>,
+    /// The model its replies use. Kept on this node only.
+    #[ts(optional)]
+    pub model: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentSessionCreated {
+    /// The session: an `AgentSession`, and the `container` to reply in.
+    pub session_id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentSessionDeleteRequest {
+    pub uuid: String,
+    /// The session to delete, with its replies and their steps.
+    pub session: String,
 }

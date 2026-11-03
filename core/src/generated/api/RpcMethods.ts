@@ -13,6 +13,9 @@ import type { AgentReplyCancelRequest } from "./AgentReplyCancelRequest";
 import type { AgentReplyRequest } from "./AgentReplyRequest";
 import type { AgentReplyStarted } from "./AgentReplyStarted";
 import type { AgentRevokeTokenParams } from "./AgentRevokeTokenParams";
+import type { AgentSessionCreateRequest } from "./AgentSessionCreateRequest";
+import type { AgentSessionCreated } from "./AgentSessionCreated";
+import type { AgentSessionDeleteRequest } from "./AgentSessionDeleteRequest";
 import type { AgentSignature } from "./AgentSignature";
 import type { AgentStatus } from "./AgentStatus";
 import type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
@@ -268,6 +271,8 @@ export interface RpcMethods {
   "perspective.addSdna": { params: PerspectiveAddSdnaParams; result: PerspectiveAddSdnaResult };
   "perspective.agentReply": { params: AgentReplyRequest; result: AgentReplyStarted };
   "perspective.agentReplyCancel": { params: AgentReplyCancelRequest; result: boolean };
+  "perspective.agentSessionCreate": { params: AgentSessionCreateRequest; result: AgentSessionCreated };
+  "perspective.agentSessionDelete": { params: AgentSessionDeleteRequest; result: boolean };
   "perspective.all": { params: Record<string, never>; result: Array<PerspectiveHandle> };
   "perspective.commitBatch": { params: PerspectiveCommitBatchParams; result: PerspectiveLinkDiff };
   "perspective.create": { params: CreatePerspectiveRequest; result: PerspectiveHandle };

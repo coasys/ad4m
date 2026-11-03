@@ -558,3 +558,143 @@ fn a_step_fails_on_the_loops_error_or_the_tools_error_and_caps_the_message() {
     let (_, long) = outcome_of(&format!("error: {}", "x".repeat(1000)));
     assert!(long.unwrap().chars().count() <= 301);
 }
+
+// ── Sessions ────────────────────────────────────────────────────────────────
+
+use super::agent_sessions::{
+    create_session, delete_session, session_settings, NewSession, SessionSettings,
+};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_keeps_its_settings_on_this_node_only() {
+    let f = fixture().await;
+    let settings = SessionSettings {
+        work_in: Some("work-perspective".into()),
+        write_tools: vec!["template_update".into()],
+        model: Some("local-model".into()),
+    };
+    let id = create_session(
+        f.perspective.clone(),
+        NewSession {
+            title: "Chat 1".into(),
+            about: Some("app://template/1".into()),
+            settings: settings.clone(),
+        },
+        &f.ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        session_settings(&f.perspective, &id).await.unwrap(),
+        Some(settings)
+    );
+    assert_eq!(
+        session_settings(&f.perspective, "app://not-a-session")
+            .await
+            .unwrap(),
+        None
+    );
+
+    let links = f
+        .perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(id.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for link in &links {
+        let predicate = link.data.predicate.clone().unwrap_or_default();
+        let local = matches!(link.status, Some(LinkStatus::Local));
+        let node_local = ["work_in", "write_tools", "model"]
+            .iter()
+            .any(|p| predicate == format!("ad4m://agent_session/{p}"));
+        assert_eq!(local, node_local, "{predicate} is local: {local}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_session_removes_it_its_replies_and_their_steps() {
+    let mut f = fixture().await;
+    let id = create_session(f.perspective.clone(), NewSession::default(), &f.ctx)
+        .await
+        .unwrap();
+    // The person's message, then a reply with a step, in the session.
+    f.perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some("Message".into()),
+                query: None,
+            },
+            "app://m/1".into(),
+            Some(json!({ "text": "hello" })),
+            None,
+            &f.ctx,
+        )
+        .await
+        .unwrap();
+    f.perspective
+        .add_link(
+            Link {
+                source: id.clone(),
+                predicate: Some(HAS_CHILD.into()),
+                target: "app://m/1".into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &f.ctx,
+        )
+        .await
+        .unwrap();
+    let run: Runner = Box::new(|_messages, steps: Arc<dyn ToolObserver>| {
+        Box::pin(async move {
+            steps
+                .tool_called("template_read", &json!({ "base_uri": "app://t/1" }))
+                .await;
+            steps
+                .tool_returned("template_read", &json!({ "base_uri": "app://t/1" }), "{}")
+                .await;
+            Ok(AgentReply { text: "hi".into() })
+        })
+    });
+    let reply = start_reply(f.perspective.clone(), &id, &f.did, f.ctx.clone(), run)
+        .await
+        .unwrap();
+    until_status(&f, &reply, ReplyStatus::Done).await;
+    let step = steps_of(&f, &reply).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert!(delete_session(f.perspective.clone(), &id, &f.ctx)
+        .await
+        .unwrap());
+    for node in [&id, &reply, &step] {
+        let left = f
+            .perspective
+            .get_links(&crate::types::LinkQuery {
+                source: Some(node.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(left.is_empty(), "{node} still has {left:?}");
+    }
+    // The app's message is the app's to delete.
+    let message = f
+        .perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some("app://m/1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(!message.is_empty());
+
+    assert!(!delete_session(f.perspective.clone(), &id, &f.ctx)
+        .await
+        .unwrap());
+    assert!(!delete_session(f.perspective.clone(), "app://m/1", &f.ctx)
+        .await
+        .unwrap());
+}

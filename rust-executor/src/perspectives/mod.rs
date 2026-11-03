@@ -5,6 +5,7 @@ mod agent_reply_tests;
 pub(crate) mod agent_session;
 #[cfg(test)]
 mod agent_session_tests;
+pub(crate) mod agent_sessions;
 pub mod auto_processor;
 pub(crate) mod content_address;
 pub(crate) mod flow_classes;
