@@ -106,6 +106,31 @@ fn enqueue(perspective: &PerspectiveInstance, diff: &PerspectiveDiff) {
     Ad4mDb::with_global_instance(|db| db.add_pending_diff(&perspective.uuid, diff)).unwrap();
 }
 
+/// Store `target`'s link as Shared, as a write through `commit` leaves it.
+fn store_shared(perspective: &PerspectiveInstance, target: &str) {
+    perspective
+        .sparql_store
+        .add_link(&LinkExpression {
+            status: Some(LinkStatus::Shared),
+            ..link("did:key:alice", target)
+        })
+        .unwrap();
+}
+
+/// `fake`'s commit, with a render that answers `remote`.
+fn rendering_language(fake: &Arc<FakeLanguage>, remote: Vec<LinkExpression>) -> Language {
+    let fake = fake.clone();
+    Language::with_test_commit(
+        "fake-link-language".to_string(),
+        Arc::new(move |diff| fake.commit(diff)),
+    )
+    .with_test_render(Arc::new(move || {
+        Ok(Some(Perspective {
+            links: remote.clone(),
+        }))
+    }))
+}
+
 /// Diffs still waiting to be committed.
 fn pending(perspective: &PerspectiveInstance) -> usize {
     Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&perspective.uuid, None))
@@ -312,34 +337,191 @@ async fn a_refused_diff_does_not_block_the_diffs_behind_it() {
     assert_eq!(parked_targets(&perspective), vec![REFUSED]);
 }
 
+/// A queued diff's links are Shared in the store before the commit loop sends
+/// them. The fallback sync leaves them to the queue: sending them too would
+/// commit the same links twice.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_leaves_a_queued_diff_to_the_queue() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("queued"));
+    store_shared(&perspective, "queued");
+    store_shared(&perspective, "missing");
+    *perspective.link_language.write().await = Some(rendering_language(&fake, vec![]));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.committed(), vec!["+missing"]);
+    assert_eq!(pending(&perspective), 1);
+}
+
 /// The fallback sync sends the Shared links the remote lacks, but never the
 /// links of a parked diff: they stay Shared in the store, and sending them
-/// would put them behind the diffs that went through after them.
+/// would put them behind the diffs that went through after them. The parked
+/// diff failed only transiently, so the language would take it again.
 #[tokio::test(start_paused = true)]
 async fn the_fallback_sync_does_not_send_a_parked_diff_again() {
     let fake = Arc::new(FakeLanguage::default());
+    fake.fail_next.store(2, Ordering::SeqCst);
     let perspective = neighbourhood_perspective(&fake).await;
-    enqueue(&perspective, &add(REFUSED));
-    enqueue(&perspective, &add("after"));
+    enqueue(&perspective, &add("a"));
+    enqueue(&perspective, &add("b"));
     let task = start_loop(&perspective);
-    run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    run_until(Duration::from_secs(60), || pending(&perspective) == 0)
+        .await
+        .expect("the queue drains");
     task.abort();
+    assert_eq!(parked_targets(&perspective), vec!["a"]);
 
-    let parked =
-        Ad4mDb::with_global_instance(|db| db.get_parked_additions(&perspective.uuid)).unwrap();
-    assert_eq!(parked, vec![link("did:key:alice", REFUSED)]);
+    for target in ["a", "b", "missing"] {
+        store_shared(&perspective, target);
+    }
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, vec![link("did:key:alice", "b")]));
 
-    let local = [
-        (link("did:key:alice", REFUSED), LinkStatus::Shared),
-        (link("did:key:alice", "after"), LinkStatus::Shared),
-        (link("did:key:alice", "missing"), LinkStatus::Shared),
-    ];
-    let remote = [link("did:key:alice", "after")];
-    let to_send: Vec<String> = links_missing_remotely(&local, &remote, &parked)
-        .into_iter()
-        .map(|l| l.data.target)
-        .collect();
-    assert_eq!(to_send, vec!["missing"]);
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(fake.committed(), vec!["+b", "+missing"]);
+}
+
+/// A fallback sync that starts while the commit loop is parking a diff waits
+/// for the park: it must not read the parked rows before the park lands and
+/// then send the parked link after the diffs that went through behind it.
+///
+/// The test seam's commit is synchronous, so the rest of the batch blocks a
+/// worker thread on a std channel once the language has taken it; the
+/// multi-thread runtime keeps the others free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_fallback_sync_waits_for_a_park_in_flight() {
+    let fake = Arc::new(FakeLanguage::default());
+    // The batch and the oldest diff alone fail; the rest goes through.
+    fake.fail_next.store(2, Ordering::SeqCst);
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("a"));
+    enqueue(&perspective, &add("b"));
+    for target in ["a", "b"] {
+        store_shared(&perspective, target);
+    }
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let entered_tx = std::sync::Mutex::new(entered_tx);
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let rest_sent = AtomicBool::new(false);
+    let in_language = fake.clone();
+    *perspective.link_language.write().await = Some(
+        Language::with_test_commit(
+            "fake-link-language".to_string(),
+            Arc::new(move |diff| {
+                let result = in_language.commit(diff);
+                // Hold the commit loop between the language taking the rest
+                // of the batch and the park.
+                if result.is_ok() && !rest_sent.swap(true, Ordering::SeqCst) {
+                    entered_tx.lock().unwrap().send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(30))
+                        .map_err(|_| anyhow!("never released"))?;
+                }
+                result
+            }),
+        )
+        .with_test_render(Arc::new(|| {
+            Ok(Some(Perspective {
+                links: vec![link("did:key:alice", "b")],
+            }))
+        })),
+    );
+
+    let commit_loop = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.commit_pending_diffs().await })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the rest of the batch reaches the language");
+
+    let fallback = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.ensure_public_links_are_shared().await })
+    };
+    // Time for a fallback that does not wait for the park to run to its end.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    release_tx.send(()).unwrap();
+    commit_loop.await.unwrap().unwrap();
+    assert!(fallback.await.unwrap());
+
+    assert_eq!(parked_targets(&perspective), vec!["a"]);
+    assert_eq!(fake.committed(), vec!["+b"]);
+}
+
+/// A fallback sync that starts while a pending batch is on its way to the
+/// language waits for it, and then sees its links in the render: the same
+/// links are not sent twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_fallback_sync_waits_for_a_pending_batch_in_flight() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("a"));
+    store_shared(&perspective, "a");
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let entered_tx = std::sync::Mutex::new(entered_tx);
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let first = AtomicBool::new(true);
+    let in_language = fake.clone();
+    let rendered = fake.clone();
+    *perspective.link_language.write().await = Some(
+        Language::with_test_commit(
+            "fake-link-language".to_string(),
+            Arc::new(move |diff| {
+                // Hold the commit loop's first send before the language takes it.
+                if first.swap(false, Ordering::SeqCst) {
+                    entered_tx.lock().unwrap().send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(30))
+                        .map_err(|_| anyhow!("never released"))?;
+                }
+                in_language.commit(diff)
+            }),
+        )
+        // The remote holds what the language accepted so far.
+        .with_test_render(Arc::new(move || {
+            Ok(Some(Perspective {
+                links: rendered
+                    .committed()
+                    .iter()
+                    .filter_map(|c| c.strip_prefix('+'))
+                    .map(|target| link("did:key:alice", target))
+                    .collect(),
+            }))
+        })),
+    );
+
+    let commit_loop = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.commit_pending_diffs().await })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the pending batch is on its way to the language");
+
+    let fallback = {
+        let p = perspective.clone();
+        tokio::spawn(async move { p.ensure_public_links_are_shared().await })
+    };
+    // Time for a fallback that does not wait for the batch to send its links.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    release_tx.send(()).unwrap();
+    commit_loop.await.unwrap().unwrap();
+    assert!(fallback.await.unwrap());
+
+    assert_eq!(fake.committed(), vec!["+a"]);
 }
 
 /// Two healthy diffs; the batch and the oldest alone fail on a transient
