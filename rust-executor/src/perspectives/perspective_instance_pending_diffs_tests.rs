@@ -7,7 +7,7 @@
 //! Accepted links are recorded in order as `+target` / `-target`.
 
 use super::*;
-use crate::db::Ad4mDb;
+use crate::db::{link_identity, Ad4mDb};
 use crate::types::{DecoratedNeighbourhoodExpression, ExpressionProof, Link, PerspectiveState};
 use std::sync::atomic::AtomicUsize;
 
@@ -24,6 +24,10 @@ struct FakeLanguage {
     committed: std::sync::Mutex<Vec<String>>,
     /// Links per accepted commit, in order.
     batches: std::sync::Mutex<Vec<usize>>,
+    /// The links a peer holds after applying every accepted diff the way a
+    /// receiver does (`persist_link_diff`): removals, then additions, a removal
+    /// matching the exact link expression.
+    held: std::sync::Mutex<Vec<LinkExpression>>,
 }
 
 impl FakeLanguage {
@@ -47,6 +51,18 @@ impl FakeLanguage {
         let mut committed = self.committed.lock().unwrap();
         committed.extend(diff.additions.iter().map(|l| format!("+{}", l.data.target)));
         committed.extend(diff.removals.iter().map(|l| format!("-{}", l.data.target)));
+        let mut held = self.held.lock().unwrap();
+        for removal in &diff.removals {
+            held.retain(|l| link_identity(l) != link_identity(removal));
+        }
+        for addition in diff.additions {
+            if !held
+                .iter()
+                .any(|l| link_identity(l) == link_identity(&addition))
+            {
+                held.push(addition);
+            }
+        }
         Ok(None)
     }
 
@@ -56,6 +72,19 @@ impl FakeLanguage {
 
     fn attempts(&self) -> usize {
         self.attempts.load(Ordering::SeqCst)
+    }
+
+    /// Targets of the links a peer holds, sorted.
+    fn held_targets(&self) -> Vec<String> {
+        let mut targets: Vec<String> = self
+            .held
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l.data.target.clone())
+            .collect();
+        targets.sort();
+        targets
     }
 }
 
@@ -77,6 +106,13 @@ fn add(target: &str) -> PerspectiveDiff {
     PerspectiveDiff {
         additions: vec![link("did:key:alice", target)],
         removals: vec![],
+    }
+}
+
+fn remove(target: &str) -> PerspectiveDiff {
+    PerspectiveDiff {
+        additions: vec![],
+        removals: vec![link("did:key:alice", target)],
     }
 }
 
@@ -335,6 +371,102 @@ async fn a_refused_diff_does_not_block_the_diffs_behind_it() {
     assert_eq!(fake.committed(), vec!["+before", "+after", "+later"]);
     assert_eq!(pending(&perspective), 0);
     assert_eq!(parked_targets(&perspective), vec![REFUSED]);
+}
+
+/// Queue `diffs` as one burst, run the commit loop until the queue drains, and
+/// return what a peer holds afterwards.
+async fn commit_burst(diffs: &[PerspectiveDiff], peer_holds: &[&str]) -> Arc<FakeLanguage> {
+    let fake = Arc::new(FakeLanguage::default());
+    fake.held
+        .lock()
+        .unwrap()
+        .extend(peer_holds.iter().map(|t| link("did:key:alice", t)));
+    let perspective = neighbourhood_perspective(&fake).await;
+    for diff in diffs {
+        enqueue(&perspective, diff);
+    }
+    let task = start_loop(&perspective);
+    let drained = run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    task.abort();
+    assert!(
+        drained.is_some(),
+        "{} diffs still pending",
+        pending(&perspective)
+    );
+    fake
+}
+
+/// A link added and then removed in one burst must not reach peers: the batch
+/// is one diff, and a receiver applies its removals before its additions.
+#[tokio::test(start_paused = true)]
+async fn a_link_added_then_removed_in_one_burst_does_not_reach_peers() {
+    let fake = commit_burst(&[add("x"), add("other"), remove("x")], &[]).await;
+
+    assert_eq!(
+        fake.batches.lock().unwrap().len(),
+        1,
+        "one commit per batch"
+    );
+    assert!(
+        !fake.committed().contains(&"+x".to_string()),
+        "the batch adds x: {:?}",
+        fake.committed()
+    );
+    assert_eq!(fake.held_targets(), vec!["other"]);
+}
+
+/// A peer that held x before the burst drops it too: the removal is kept.
+#[tokio::test(start_paused = true)]
+async fn a_link_added_then_removed_is_removed_from_a_peer_that_held_it() {
+    let fake = commit_burst(&[add("x"), remove("x")], &["x"]).await;
+
+    assert_eq!(fake.held_targets(), Vec::<String>::new());
+}
+
+/// A link removed and then added again in one burst stays with peers, whether
+/// they held it before or not.
+#[tokio::test(start_paused = true)]
+async fn a_link_removed_then_added_in_one_burst_stays_with_peers() {
+    for peer_holds in [&[][..], &["x"][..]] {
+        let fake = commit_burst(&[remove("x"), add("other"), add("x")], peer_holds).await;
+
+        assert_eq!(
+            fake.held_targets(),
+            vec!["other", "x"],
+            "peer held {:?} before",
+            peer_holds
+        );
+    }
+}
+
+/// The oldest diff adds x and is refused; a later diff removes x. The batch's
+/// merge cancels x, so the rest is merged from its own rows: it still removes x,
+/// and adds the links after it.
+#[tokio::test(start_paused = true)]
+async fn a_parked_diff_does_not_change_what_the_rest_of_its_batch_sends() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(
+        &perspective,
+        &PerspectiveDiff {
+            additions: vec![link("did:key:alice", REFUSED), link("did:key:alice", "x")],
+            removals: vec![],
+        },
+    );
+    enqueue(&perspective, &remove("x"));
+    enqueue(&perspective, &add("after"));
+    let task = start_loop(&perspective);
+
+    let drained = run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    task.abort();
+
+    assert!(
+        drained.is_some(),
+        "{} diffs still pending",
+        pending(&perspective)
+    );
+    assert_eq!(fake.committed(), vec!["+after", "-x"]);
+    assert_eq!(parked_targets(&perspective), vec![REFUSED, "x"]);
 }
 
 /// A queued diff's links are Shared in the store before the commit loop sends
@@ -629,7 +761,7 @@ async fn a_slow_commit_does_not_block_set_immediate_commits() {
 
 /// A link language whose first commit blocks until `release` and then fails
 /// (a link server that times out), and which records every later commit as
-/// `+target` / `-target`.
+/// `-target` / `+target`, each diff's removals first, as a receiver applies them.
 fn slow_then_failing_language(
     release: std::sync::mpsc::Receiver<()>,
 ) -> (
@@ -655,8 +787,8 @@ fn slow_then_failing_language(
                 return Err(anyhow!("link server timed out"));
             }
             let mut seen = seen_in_language.lock().unwrap();
-            seen.extend(diff.additions.iter().map(|l| format!("+{}", l.data.target)));
             seen.extend(diff.removals.iter().map(|l| format!("-{}", l.data.target)));
+            seen.extend(diff.additions.iter().map(|l| format!("+{}", l.data.target)));
             Ok(None)
         }),
     );
@@ -733,8 +865,9 @@ async fn a_slow_failed_commit_stays_ahead_of_later_diffs() {
 }
 
 /// End to end through the pending loop: a link added by a slow immediate
-/// commit that fails, then removed while that call is in flight, reaches the
-/// language as +x before -x. In the other order peers keep x.
+/// commit that fails, then removed while that call is in flight, ends removed
+/// for a receiver: the last thing it applies to x is -x. A removal sent before
+/// the addition, or both in one diff (removals applied first), leave peers x.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_removal_does_not_overtake_a_slow_failed_addition() {
     let perspective = slow_commit_perspective();
@@ -771,5 +904,14 @@ async fn a_removal_does_not_overtake_a_slow_failed_addition() {
         .expect("the queue drains");
     task.abort();
 
-    assert_eq!(*seen.lock().unwrap(), vec!["+x", "-x"]);
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        seen.iter()
+            .rev()
+            .find(|op| op.ends_with('x'))
+            .map(String::as_str),
+        Some("-x"),
+        "applied in order: {:?}",
+        *seen
+    );
 }
