@@ -112,11 +112,14 @@ impl ApiError {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": error }))
     }
 
-    /// `500`: the store failed (its database); nothing was committed.
+    /// `500 {error: "internal"}`: the store failed (its database); nothing was committed. The
+    /// detail goes to the store's log (stderr), never into the body: it can name tables,
+    /// paths and stored data.
     pub fn internal(detail: impl Into<String>) -> Self {
+        eprintln!("identity-store: internal error: {}", detail.into());
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            json!({ "error": "internal", "detail": detail.into() }),
+            json!({ "error": "internal" }),
         )
     }
 }
@@ -143,5 +146,19 @@ impl IntoResponse for ApiError {
             }
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_database_failure_answers_a_generic_body() {
+        let error = ApiError::from(rusqlite::Error::InvalidColumnName(
+            "secret_column in /var/lib/store.sqlite".into(),
+        ));
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.body, json!({ "error": "internal" }));
     }
 }

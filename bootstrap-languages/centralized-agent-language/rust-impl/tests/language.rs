@@ -19,7 +19,9 @@ use ad4m_ldk::identity::{
 };
 use ad4m_ldk::prelude::{Expression, ExpressionProof, LanguageError, LanguageResult};
 use centralized_agent_language::agents::{self, AgentKey};
-use centralized_agent_language::store::{encode_request, Http, HttpReply, Store, REQUEST_HEADER};
+use centralized_agent_language::store::{
+    encode_request, Http, HttpReply, Store, MAX_REPLY_BYTES, REQUEST_HEADER,
+};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use futures::executor::block_on;
 use serde_json::{json, Value};
@@ -1014,66 +1016,96 @@ fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_ar
 
 #[test]
 fn a_did_scid_record_is_ignored_when_the_store_serves_another_identitys_log() {
-    // A hostile store answers Alice's SCID with Mallory's genuine log and an agent row for
-    // Alice signed by Mallory's d1 at Mallory's head. Every check but the DID binding passes:
-    // the log replays, the key is a non-bot device key valid at the anchor, the anchor is at the
+    // A hostile store answers Alice's SCID with Mallory's genuine log, a head it signs with a
+    // key the reader trusts for that log under Alice's SCID, and an agent row for Alice signed
+    // by Mallory's d1 at Mallory's head. Every check but the DID binding passes: the head is
+    // signed by a configured store key, names Alice's SCID and is where the replay ends; the
+    // log replays, the key is a non-bot device key valid at the anchor, the anchor is at the
     // head, the profile is authored by Alice and `proof.key` is the signer. The reader must not
     // take Mallory's keys as Alice's.
     let server = StoreProcess::start();
     let mut apps = Apps::start();
-    let (_host, store) = Host::on(&server.url);
+    let (host, store) = Host::of(&server);
+    let hostile = SigningKey::from_bytes(&sha256(b"hostile store"));
+    let hostile_key = encode_ed25519_multikey(hostile.verifying_key().as_bytes()).to_string();
+    host.keys.borrow_mut().push(hostile_key.clone());
     let alice = person(&mut apps, &store, "alice swap");
     let alice_did = alice["did"].as_str().unwrap().to_string();
     let mallory = person(&mut apps, &store, "mallory swap");
     let mallory_did = mallory["did"].as_str().unwrap().to_string();
-    let mallory_head = block_on(store.head(&mallory_did)).unwrap().unwrap().seq;
+    let carol = person(&mut apps, &store, "carol swap");
+    let carol_did = carol["did"].as_str().unwrap().to_string();
+    let mallory_head = block_on(store.head(&mallory_did)).unwrap().unwrap();
     let profile = scid_profile(&mut apps, "mallory swap", "d1", &alice_did);
-    let hostile = apps.run(
+    let record = apps.run(
         "record",
         json!({ "name": "mallory swap", "signer": "d1", "profile": profile, "version": 1,
-                "did": alice_did, "anchor": mallory_head }),
+                "did": alice_did, "anchor": mallory_head.seq }),
     );
     assert_eq!(
-        hostile["signedBy"],
+        record["signedBy"],
         format!(
             "did:key:{}",
             mallory["incept"]["add"][0]["sign"].as_str().unwrap()
         )
     );
     let scid = |did: &str| did.rsplit(':').next().unwrap().to_string();
+    let alice_scid = scid(&alice_did);
+    let hostile_did = format!("did:key:{hostile_key}");
+    let statement = ad4m_identity_core::HeadStatement {
+        scid: &alice_scid,
+        seq: mallory_head.seq,
+        hash: &mallory_head.hash,
+        time: mallory_head.time,
+        store: &hostile_did,
+    };
+    let sig = hostile.sign(&statement.signing_bytes().unwrap()).to_bytes();
+    let head = json!({
+        "scid": alice_scid, "seq": mallory_head.seq, "hash": mallory_head.hash,
+        "time": mallory_head.time, "store": hostile_did,
+        "sig": ad4m_hash_chain::encode_proof_value(&sig),
+    });
     {
         let db = rusqlite::Connection::open(server.db()).unwrap();
         db.execute(
             "INSERT INTO agents (did, record, version, stored_at) VALUES (?1, ?2, 1, 0)
              ON CONFLICT(did) DO UPDATE SET record = excluded.record, version = 1",
-            rusqlite::params![alice_did, hostile.to_string()],
+            rusqlite::params![alice_did, record.to_string()],
         )
         .unwrap();
-        // The store now serves Mallory's events under Alice's SCID (Alice's own head row stays).
+        // The store now serves Mallory's events under Alice's SCID, with the hostile head.
         db.execute(
             "DELETE FROM chain_entries WHERE chain = ?1",
-            rusqlite::params![scid(&alice_did)],
+            rusqlite::params![alice_scid],
         )
         .unwrap();
         db.execute(
             "UPDATE chain_entries SET chain = ?1 WHERE chain = ?2",
-            rusqlite::params![scid(&alice_did), scid(&mallory_did)],
+            rusqlite::params![alice_scid, scid(&mallory_did)],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE heads SET signed_head = ?1 WHERE scid = ?2",
+            rusqlite::params![head.to_string(), alice_scid],
         )
         .unwrap();
     }
-    // The served log replays, and it is Mallory's: no log of Alice, no profile.
+    // The served log replays to the head the trusted key signed for Alice's SCID, and it is
+    // Mallory's: no log of Alice, no profile.
     let served = block_on(store.log(&alice_did, 0)).unwrap().unwrap();
     assert_eq!(served.events[0]["scid"], json!(scid(&mallory_did)));
+    assert_eq!(served.head.store, hostile_did);
     assert!(block_on(agents::read_log(&store, &alice_did))
         .unwrap()
         .is_none());
     assert!(block_on(agents::get(&store, &alice_did, now_s()))
         .unwrap()
         .is_none());
-    // Mallory's own record on her own log still answers.
-    assert!(block_on(agents::read_log(&store, &mallory_did))
+    // An untouched identity on the same store and settings still reads.
+    let chain = block_on(agents::read_log(&store, &carol_did))
         .unwrap()
-        .is_none_or(|chain| chain.state().did == mallory_did));
+        .expect("carol's log reads");
+    assert_eq!(chain.state().did, carol_did);
 }
 
 /// A `did:scid` person's profile as its agent record stores it: the Agent as an AD4M
@@ -1488,6 +1520,94 @@ fn a_log_page_over_the_stores_limits_is_refused() {
             did.rsplit(':').next().unwrap()
         )
     );
+}
+
+#[test]
+fn expression_create_retries_once_above_the_stores_version_and_never_past_u64_max() {
+    let agent = TestAgentKey::new("agent ivy");
+    let did = agent.did().unwrap();
+    let content =
+        json!({ "did": did, "perspective": { "links": [] }, "directMessageLanguage": null });
+    let puts = |host: &Host| -> Vec<Value> {
+        host.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.method == "PUT")
+            .map(|c| serde_json::from_str::<Value>(&c.body).unwrap()["version"].clone())
+            .collect()
+    };
+    let conflict = |version: Value| HttpReply {
+        status: 409,
+        body: json!({ "error": "version", "version": version }).to_string(),
+    };
+
+    // A newer stored version: one retry just above it.
+    let (host, store) = Host::on("https://newer.example");
+    host.serve("https://newer.example", conflict(json!(41)));
+    assert!(block_on(agents::create(&store, &agent, content.clone())).is_err());
+    let sent = puts(&host);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1], json!(42));
+
+    // A stored version at u64::MAX has nothing above it: no retry.
+    let (host, store) = Host::on("https://max.example");
+    host.serve("https://max.example", conflict(json!(u64::MAX)));
+    assert!(block_on(agents::create(&store, &agent, content)).is_err());
+    assert_eq!(puts(&host).len(), 1);
+}
+
+#[test]
+fn a_reply_over_the_byte_cap_is_refused_on_every_route() {
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (host, store) = Host::of(&server);
+    let p = person(&mut apps, &store, "nell large");
+    let did = p["did"].as_str().unwrap().to_string();
+    let head = block_on(store.head(&did)).unwrap().unwrap();
+    let pad = "x".repeat(MAX_REPLY_BYTES);
+    let too_large = IdentityErrorCode::Invalid {
+        reason: "too-large".into(),
+    };
+    // A store answering `status` with a body one byte over the cap, padded from `body`.
+    let mut n = 0;
+    let mut answering = |status: u16, body: Value| {
+        n += 1;
+        let base = format!("https://big{n}.example");
+        let mut text = body.to_string();
+        text.insert_str(1, &format!("\"pad\":\"{pad}\","));
+        text.truncate(MAX_REPLY_BYTES + 1);
+        host.serve(&base, HttpReply { status, body: text });
+        *host.url.borrow_mut() = base;
+    };
+
+    answering(200, serde_json::to_value(&head).unwrap());
+    assert_eq!(refusal(block_on(store.head(&did))), too_large);
+    answering(200, json!({ "bits": 8, "previousBits": 8, "changedAt": 0 }));
+    assert_eq!(refusal(block_on(store.pow_params())), too_large);
+    answering(200, json!({ "scid": "x" }));
+    assert_eq!(refusal(block_on(store.key_owner("z6Mk", 0))), too_large);
+    answering(404, json!({ "error": "not-found" }));
+    assert_eq!(refusal(block_on(store.head(&did))), too_large);
+    answering(409, json!({ "head": head }));
+    let request = append_req(vec![p["incept"].clone()]);
+    assert_eq!(refusal(block_on(store.append(&did, &request))), too_large);
+    answering(200, json!({ "error": "x" }));
+    assert_eq!(refusal(block_on(store.log(&did, 0))), too_large);
+
+    // A reply at the cap is read.
+    let mut text = serde_json::to_string(&head).unwrap();
+    let room = MAX_REPLY_BYTES - text.len() - "\"pad\":\"\",".len();
+    text.insert_str(1, &format!("\"pad\":\"{}\",", "x".repeat(room)));
+    assert_eq!(text.len(), MAX_REPLY_BYTES);
+    host.serve(
+        "https://atcap.example",
+        HttpReply {
+            status: 200,
+            body: text,
+        },
+    );
+    *host.url.borrow_mut() = "https://atcap.example".into();
+    assert_eq!(block_on(store.head(&did)).unwrap().unwrap(), head);
 }
 
 /// A `did:scid` person with a linked phone and a record by d1 the store took: answers the did,

@@ -3238,7 +3238,8 @@ mod agent_language_profile_tests {
             (JsonValue::Bool(false), JsonValue::Bool(true))
         );
 
-        // A store record's multibase `coasys:link` signature is not an AD4M expression proof.
+        // A store record's multibase `coasys:agent-record` signature is not an AD4M
+        // expression proof.
         let mut record_sig = expression;
         record_sig["proof"]["signature"] = JsonValue::from("z3Jx6Yb4rD9aQnL2");
         assert_eq!(

@@ -38,8 +38,8 @@ fn chain_error(e: &ChainError<FoldError>) -> ApiError {
 /// `docs-src/identity/did-scid-coasys-1.md`). There is no brake yet: no
 /// bucket per address, no store-wide ceiling and no required proof of work. A proof that is
 /// sent must still meet `POW_BITS`, so the request format and the client's work stay those
-/// of the format. The brake adds the buckets and makes the proof required here, before any
-/// replay.
+/// of the format. The brake adds the buckets and makes the proof required here; it runs once
+/// event #0 has replayed and before the rest of the append replays.
 pub fn admit_new_log(
     scid: &str,
     proof: Option<&ad4m_ldk::identity::Pow>,

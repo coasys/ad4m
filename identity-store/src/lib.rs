@@ -140,7 +140,8 @@ impl Store {
     }
 
     /// How many reads wait on `topic` now.
-    pub fn waiting(&self, topic: &Topic) -> usize {
+    #[cfg(test)]
+    fn waiting(&self, topic: &Topic) -> usize {
         self.waits
             .lock()
             .ok()

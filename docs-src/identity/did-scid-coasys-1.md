@@ -380,15 +380,15 @@ clocks.
 
 - A signature by a device key `k` of identity X, anchored at seq `s`, holds only when X's log
   lists `k` and `key_valid_at(k, s)` (section 6). A key revoked at *N* signs nothing valid
-  anchored at or after *N*; content anchored below *N* that was admitted before the revocation
-  stays valid.
+  anchored at or after *N*; content anchored below *N* stays valid.
 - An anchor past the head of the log the verifier holds is refused.
 - The signer picks the anchor, so the anchor alone cannot stop a holder of a revoked key from
-  backdating new content to a seq below *N*. The host that admits signed content (for an agent
-  record, the store that takes the `PUT`) orders arrivals: when the content arrives it also
-  checks `k` listed and valid at the head of the log it holds, and refuses the content
-  otherwise, whatever anchor it names. A revoked key so cannot backdate new content past that
-  host. Readers check at the anchor and rely on that host's admission for arrival order.
+  backdating new content to a seq below *N*. A host that admits signed content can order
+  arrivals, as host policy (section 14): when the content arrives it also checks `k` listed
+  and valid at the head of the log it holds, and refuses the content otherwise, whatever
+  anchor it names. The Coasys identity store does so for agent records. A revoked key so
+  cannot backdate new content past such a host; readers check at the anchor and may rely on
+  its admission for arrival order. Admission never changes whether a signature holds.
 - A reader that first sees a signature after the key's revocation, anchored before it, and
   did not get it through such a host, may flag it. That is the reader's policy; the signature
   holds.
@@ -527,6 +527,8 @@ Coasys identity store adds these checks:
 - **One key per identity.** A host may require that a signing key appears in at most one log
   it holds (rule K8 already holds within one log). Revoked keys count: a log that ever listed
   the key keeps it, so a revoked key can never enter another log on that host.
+- **Signers valid at the head.** The store takes an agent record only when its signing key is
+  valid at the head of the log it holds when the record arrives (section 10, anchors).
 - **Expiry window.** The store refuses a bot scope's `expires` in the past or more than 400
   days ahead.
 - **Forks freeze.** An append whose event sits at a seq the store holds, differs from the

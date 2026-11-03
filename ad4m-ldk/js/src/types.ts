@@ -147,7 +147,7 @@ export interface LogPage {
     pauses: PauseRecord[];
 }
 
-/** A proof of work on a new log with no note (section 9 of `docs-src/identity/did-scid-coasys-1.md`). */
+/** A proof of work on a new log with no note (section 14, host admission policy, of `docs-src/identity/did-scid-coasys-1.md`). */
 export interface Pow {
     /** base58btc, 16 bytes. */
     nonce: string;

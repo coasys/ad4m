@@ -25,6 +25,10 @@ use serde_json::Value;
 /// The production store, used when the settings name none.
 pub const DEFAULT_STORE_URL: &str = "https://store.coasys.org";
 pub const REQUEST_HEADER: &str = "X-Coasys-Request";
+/// The largest reply body the language takes from the store, on every route and status: a log
+/// page ([`MAX_LOG_PAGE_BYTES`]) is the largest answer a store gives. The host's `httpFetch`
+/// has read the body by then; the cap bounds what the language parses and keeps.
+pub const MAX_REPLY_BYTES: usize = MAX_LOG_PAGE_BYTES;
 
 /// What the host's `httpFetch` answers.
 #[derive(Debug, Clone)]
@@ -75,11 +79,6 @@ pub fn store_settings_from(settings: &str) -> StoreSettings {
         })
         .unwrap_or_default();
     StoreSettings { url, keys }
-}
-
-/// The store URL from the language settings JSON (`{"storeUrl": …}`), or the default.
-pub fn store_url_from(settings: &str) -> String {
-    store_settings_from(settings).url
 }
 
 /// True when the language may call a store at `url`: `https`, or plain `http` to a loopback
@@ -266,8 +265,9 @@ impl<H: Http> Store<H> {
     }
 
     /// Sends one request to the configured store and answers the raw reply. Only a network
-    /// failure fails here, and a store URL the language does not call ([`transport_allowed`]),
-    /// which is `invalid` (`store-url`).
+    /// failure fails here, a store URL the language does not call ([`transport_allowed`]),
+    /// which is `invalid` (`store-url`), and a reply body over [`MAX_REPLY_BYTES`] whatever
+    /// its status, which is `invalid` (`too-large`).
     pub async fn send(
         &self,
         method: &str,
@@ -301,10 +301,15 @@ impl<H: Http> Store<H> {
             headers.insert(REQUEST_HEADER.into(), encode_request(req)?.into());
         }
         let headers = Value::Object(headers).to_string();
-        self.http
+        let reply = self
+            .http
             .fetch(&url, method, &headers, &body)
             .await
-            .map_err(|_| unavailable())
+            .map_err(|_| unavailable())?;
+        if reply.body.len() > MAX_REPLY_BYTES {
+            return Err(invalid("too-large"));
+        }
+        Ok(reply)
     }
 
     /// Sends and answers the parsed body of a 2xx reply; any other status is its refusal.
@@ -354,7 +359,7 @@ impl<H: Http> Store<H> {
     }
 
     /// One page of `did`'s log from `from`, from the configured store. A reply larger than
-    /// [`MAX_LOG_PAGE_BYTES`] or a page of more than [`LOG_PAGE_EVENTS`] events is refused as
+    /// [`MAX_REPLY_BYTES`] or a page of more than [`LOG_PAGE_EVENTS`] events is refused as
     /// `invalid` (`too-large`).
     pub async fn log(&self, did: &str, from: u64) -> LanguageResult<Option<LogPage>> {
         Ok(self.log_sized(did, from).await?.map(|(page, _)| page))
@@ -378,9 +383,6 @@ impl<H: Http> Store<H> {
         }
         if !(200..300).contains(&reply.status) {
             return Err(refusal_of(reply.status, &reply.body).into());
-        }
-        if reply.body.len() > MAX_LOG_PAGE_BYTES {
-            return Err(invalid("too-large"));
         }
         let page: LogPage = serde_json::from_str(&reply.body).map_err(|_| unavailable())?;
         if page.events.len() > LOG_PAGE_EVENTS as usize {
@@ -597,9 +599,10 @@ mod tests {
 
     #[test]
     fn the_store_url_comes_from_the_settings() {
-        assert_eq!(store_url_from(r#"{"storeUrl":"http://x"}"#), "http://x");
-        assert_eq!(store_url_from(""), DEFAULT_STORE_URL);
-        assert_eq!(store_url_from(r#"{"storeUrl":""}"#), DEFAULT_STORE_URL);
+        let url = |settings: &str| store_settings_from(settings).url;
+        assert_eq!(url(r#"{"storeUrl":"http://x"}"#), "http://x");
+        assert_eq!(url(""), DEFAULT_STORE_URL);
+        assert_eq!(url(r#"{"storeUrl":""}"#), DEFAULT_STORE_URL);
         assert_eq!(
             store_settings_from(r#"{"storeUrl":"https://s","storeKeys":["z6MkA",3,"z6MkB"]}"#),
             StoreSettings {

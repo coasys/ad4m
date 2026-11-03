@@ -408,7 +408,11 @@ store (`identity-store`); a later Holochain or Holograph agent language serves t
 Each call is its own capability (`identity-log`, `identity-head`, …), detected from its flat
 export. **The executor calls them only on the language at `system_addresses.agent_language`**
 (`LanguageController::language_for_capability` refuses any other language with
-`NotAgentLanguage`), so a third-party language that exports them is never asked.
+`NotAgentLanguage`), so a third-party language that exports them is never asked. The executor
+side of this section (this routing, `IdentityBackend` and the `identity.storeUrl` and
+`identity.storeKeys` config keys) is the executor's planned behaviour: the guard exists, and
+the executor's identity change routes every identity call through it; until then no executor
+path makes these calls.
 
 | Export | Parameters | Returns | Store route |
 |---|---|---|---|
@@ -428,8 +432,9 @@ export. **The executor calls them only on the language at `system_addresses.agen
 Every call goes to the language's own store. A did:scid `src` hint (a DID URL's `?src=`,
 another host of the log) is not part of this interface: the executor fetches such a host
 itself, over the did:scid host profile (`GET {base}/v1/logs/{scid}?from=`), with a transport
-that refuses non-public addresses when it connects. A log page over 256 events or over the
-size of 257 store bodies (64 KiB each) is refused as `invalid` (`too-large`).
+that refuses non-public addresses when it connects. A log page over 256 events, and any reply
+over the size of 257 store bodies (64 KiB each; a full log page), whatever the route and
+status, is refused as `invalid` (`too-large`).
 
 `did` is the full `did:scid:coasys:1:<scid>`. The wire types live in `ad4m-ldk`
 (`js/src/types.ts`, `rust/src/identity.rs`); JSON field names are camelCase.

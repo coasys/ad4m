@@ -28,6 +28,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `tests/common/agent.rs` | a test person: fixed keys, a log built with the core's builders, offers, claims, signed requests, records |
 | `tests/common/mod.rs` | `TestStore`: a real store on a temp file with an injected clock, called through the router |
 | `tests/logs.rs`, `tests/offers.rs` | the store's acceptance tests: logs, heads, the key index, signed requests, limits and agent records; offers, claims, the state poll and the claim check |
+| `tests/serve.rs` | the `serve` process stops cleanly on SIGTERM and SIGINT |
 | `examples/test_agent.rs` | the test person over JSON lines, for the agent language suites |
 | `Dockerfile` | the container image (build from the repo root) |
 
@@ -157,7 +158,8 @@ tests name them by these names.
   that is sent must meet `POW_BITS` (`403 pow` otherwise); no address or global buckets, no
   `/metrics`. A vouching token answers `503 vouch-unavailable` and commits nothing. No pairing
   routes, no vouching notes. The brake (per-address buckets, a store-wide ceiling, a required
-  proof of work) belongs in `log::admit_new_log`, before any replay.
+  proof of work) belongs in `log::admit_new_log`, which runs once event #0 has replayed and
+  before the rest of the append replays.
 - The store reads the clock only through `Store::now` (tests inject it). A `wait` read
   watches one `Topic`: the identity's offers (`GET /offers/{scid}`, the state poll) or one
   key (`GET /keys/{k}`); a committed write wakes only the topics it concerns

@@ -52,8 +52,8 @@ unix milliseconds: the store refuses one more than 5 minutes past its clock, so 
 push the version out of the owner's reach.
 
 Every call goes to that store. A did:scid `src` hint names another host of a log; the executor
-fetches it itself, never through the language. A log page over 256 events or 257 × 64 KiB is
-`invalid` (`too-large`).
+fetches it itself, never through the language. A reply over 257 × 64 KiB (a full log page),
+on any route and with any status, and a log page over 256 events are `invalid` (`too-large`).
 
 The language is `rust-impl/` (the Rust ALDK port), which `pnpm build` bundles into
 `build/bundle.js`. The older TypeScript `index.ts` is not built and does not serve the

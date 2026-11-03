@@ -171,12 +171,13 @@ pub async fn create<H: Http>(
             return Ok(did);
         }
         // The store holds a newer version (another clock): publish just above it, once.
-        let stored = (reply.status == 409)
+        let next = (reply.status == 409)
             .then(|| serde_json::from_str::<Value>(&reply.body).ok())
             .flatten()
-            .and_then(|b| b.get("version").and_then(Value::as_u64));
-        match stored {
-            Some(stored) if attempt == 0 => version = stored + 1,
+            .and_then(|b| b.get("version").and_then(Value::as_u64))
+            .and_then(|stored| stored.checked_add(1));
+        match next {
+            Some(next) if attempt == 0 => version = next,
             _ => return Err(crate::store::refusal_of(reply.status, &reply.body).into()),
         }
     }
