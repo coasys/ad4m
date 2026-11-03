@@ -127,6 +127,7 @@ fn apply_endpoint(
         max_num_ctx: setting.max_num_ctx,
         request_timeout_secs: setting.request_timeout_secs,
         max_concurrent: setting.max_concurrent,
+        managed: false,
         health: existing
             .as_ref()
             .map(|e| e.health.clone())

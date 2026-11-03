@@ -97,6 +97,7 @@ impl Ad4mDb {
             max_num_ctx: api.max_num_ctx,
             request_timeout_secs: None,
             max_concurrent: None,
+            managed: false,
             health: EndpointHealth::default(),
         };
         self.insert_endpoint(&endpoint)?;
@@ -210,6 +211,7 @@ impl Ad4mDb {
             max_num_ctx: optional_u32("max_num_ctx"),
             request_timeout_secs: optional_u32("request_timeout_secs"),
             max_concurrent: optional_u32("max_concurrent"),
+            managed: false,
             health: EndpointHealth::default(),
         };
         self.insert_endpoint(&endpoint)

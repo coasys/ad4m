@@ -36,7 +36,11 @@ pub(super) fn create_table(conn: &Connection) -> Result<(), rusqlite::Error> {
         )",
     )?;
     // Added after the table first shipped; appended so `ENDPOINT_COLUMNS` reads both shapes.
-    for column in ["request_timeout_secs INTEGER", "max_concurrent INTEGER"] {
+    for column in [
+        "request_timeout_secs INTEGER",
+        "max_concurrent INTEGER",
+        "managed INTEGER NOT NULL DEFAULT 0",
+    ] {
         match conn.execute(&format!("ALTER TABLE ai_endpoints ADD COLUMN {column}"), []) {
             Err(e) if !e.to_string().contains("duplicate column name") => return Err(e),
             _ => {}
@@ -45,7 +49,7 @@ pub(super) fn create_table(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-const ENDPOINT_COLUMNS: &str = "id, name, kind, base_url, api_key, capabilities, max_num_ctx, health, request_timeout_secs, max_concurrent";
+const ENDPOINT_COLUMNS: &str = "id, name, kind, base_url, api_key, capabilities, max_num_ctx, health, request_timeout_secs, max_concurrent, managed";
 
 fn json_err(column: usize, error: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(error))
@@ -69,6 +73,7 @@ fn endpoint_from_row(row: &rusqlite::Row) -> rusqlite::Result<Endpoint> {
         max_num_ctx: row.get(6)?,
         request_timeout_secs: row.get(8)?,
         max_concurrent: row.get(9)?,
+        managed: row.get(10)?,
         health: match health {
             Some(health) => serde_json::from_str(&health).map_err(|e| json_err(7, e))?,
             None => EndpointHealth::default(),
@@ -152,7 +157,7 @@ impl Ad4mDb {
     pub fn insert_endpoint(&self, endpoint: &Endpoint) -> Ad4mDbResult<()> {
         self.refuse_invalid(endpoint)?;
         self.conn.execute(
-            &format!("INSERT INTO ai_endpoints ({ENDPOINT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
+            &format!("INSERT INTO ai_endpoints ({ENDPOINT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
             params![
                 endpoint.id,
                 endpoint.name,
@@ -165,6 +170,7 @@ impl Ad4mDb {
                 serde_json::to_string(&endpoint.health)?,
                 endpoint.request_timeout_secs,
                 endpoint.max_concurrent,
+                endpoint.managed,
             ],
         )?;
         Ok(())
@@ -177,7 +183,7 @@ impl Ad4mDb {
         self.conn.execute(
             "UPDATE ai_endpoints SET name = ?2, kind = ?3, base_url = ?4, api_key = ?5,
                 capabilities = ?6, max_num_ctx = ?7, health = ?8, request_timeout_secs = ?9,
-                max_concurrent = ?10
+                max_concurrent = ?10, managed = ?11
              WHERE id = ?1",
             params![
                 endpoint.id,
@@ -190,6 +196,7 @@ impl Ad4mDb {
                 serde_json::to_string(&endpoint.health)?,
                 endpoint.request_timeout_secs,
                 endpoint.max_concurrent,
+                endpoint.managed,
             ],
         )?;
         self.endpoint_model_ids(&endpoint.id)
@@ -290,6 +297,7 @@ mod tests {
             max_num_ctx: Some(8192),
             request_timeout_secs: Some(90),
             max_concurrent: Some(2),
+            managed: false,
             health: EndpointHealth::default(),
         }
     }

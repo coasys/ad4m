@@ -255,6 +255,7 @@ mod tests {
             max_num_ctx: None,
             request_timeout_secs: None,
             max_concurrent: None,
+            managed: false,
             health: EndpointHealth::default(),
         }
     }

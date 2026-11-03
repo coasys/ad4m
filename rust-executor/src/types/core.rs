@@ -869,6 +869,8 @@ pub struct Endpoint {
     pub request_timeout_secs: Option<u32>,
     /// See [`EndpointView::max_concurrent`].
     pub max_concurrent: Option<u32>,
+    /// See [`EndpointView::managed`].
+    pub managed: bool,
     pub health: EndpointHealth,
 }
 
@@ -909,6 +911,7 @@ impl Endpoint {
             max_num_ctx: self.max_num_ctx,
             request_timeout_secs: self.request_timeout_secs,
             max_concurrent: self.max_concurrent,
+            managed: self.managed,
             health: self.health.clone(),
         }
     }
@@ -928,6 +931,7 @@ impl Endpoint {
             max_num_ctx: None,
             request_timeout_secs: None,
             max_concurrent: None,
+            managed: false,
             health: EndpointHealth::default(),
         }
     }
@@ -953,6 +957,11 @@ pub struct EndpointView {
     /// At most this many requests to this endpoint at once; the rest queue. Unset: no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<u32>,
+    /// The executor's own local AI runs this server (`ai.localInstall`): its URL, key and
+    /// models follow the supervisor, `ai.updateEndpoint` and `ai.removeEndpoint` refuse it,
+    /// and its health is the supervisor's liveness check. `ai.localRemove` removes it.
+    #[serde(default)]
+    pub managed: bool,
     pub health: EndpointHealth,
 }
 

@@ -116,6 +116,20 @@ fn refuse_cleartext_key(endpoint: &Endpoint) -> Result<()> {
     Ok(())
 }
 
+/// Refuses an operator's write to an endpoint the local AI supervisor runs: its URL and key
+/// change at every start, so an edit would not hold. `ai.localStop` / `ai.localRemove` do
+/// what an operator wants there.
+fn refuse_managed(endpoint: &Endpoint) -> Result<()> {
+    if endpoint.managed {
+        return Err(InvalidEndpoint(format!(
+            "Endpoint {:?} is this executor's local AI: use ai.localStop or ai.localRemove",
+            endpoint.name
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// Publish an endpoint's health to the sessions that may administer the executor: those
 /// acting as the main agent (the operator and grants on it), never a managed user
 /// (`ai.endpoints` is operator-only). Before the main agent has a DID, the operator's only.
@@ -160,7 +174,10 @@ pub(crate) async fn publish_model_status(
 pub async fn check_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
     // Add and update refuse such an endpoint, but a migrated or imported one can hold a
     // key for a plain-HTTP remote host: probing it would send the key in the clear.
-    let health = if refuse_cleartext_key(endpoint).is_err() {
+    let health = if endpoint.managed {
+        // whisper-server lists no models: the supervisor's liveness check is the health.
+        crate::ai_service::local::managed_health(endpoint).await
+    } else if refuse_cleartext_key(endpoint).is_err() {
         EndpointHealth {
             state: EndpointState::Unreachable,
             checked_at: Some(chrono::Utc::now().timestamp_millis()),
@@ -244,6 +261,7 @@ impl AIService {
             max_num_ctx: input.max_num_ctx,
             request_timeout_secs: input.request_timeout_secs,
             max_concurrent: input.max_concurrent,
+            managed: false,
             health: EndpointHealth::default(),
         };
         refuse_cleartext_key(&endpoint)?;
@@ -255,7 +273,7 @@ impl AIService {
     /// Replace endpoint `id`'s settings, probed once first. Without a key the stored one
     /// stays, for the same base URL only. The models it serves follow it.
     pub async fn update_endpoint(&self, id: &str, input: EndpointInput) -> Result<EndpointView> {
-        stored_endpoint(id)?;
+        refuse_managed(&stored_endpoint(id)?)?;
         let api_key = match input.api_key {
             Some(key) => key,
             None => Ad4mDb::with_global_instance(|db| db.kept_endpoint_key(id, &input.base_url))?,
@@ -270,6 +288,7 @@ impl AIService {
             max_num_ctx: input.max_num_ctx,
             request_timeout_secs: input.request_timeout_secs,
             max_concurrent: input.max_concurrent,
+            managed: false,
             health: EndpointHealth::default(),
         };
         refuse_cleartext_key(&endpoint)?;
@@ -287,7 +306,7 @@ impl AIService {
     /// Remove endpoint `id`. Refused while models run on it, unless `cascade` removes them
     /// first.
     pub async fn remove_endpoint(&self, id: &str, cascade: bool) -> Result<()> {
-        stored_endpoint(id)?;
+        refuse_managed(&stored_endpoint(id)?)?;
         if cascade {
             for model_id in Ad4mDb::with_global_instance(|db| db.endpoint_model_ids(id))? {
                 self.remove_model(model_id).await?;
