@@ -50,7 +50,10 @@ pub enum FormatError {
     EmptyAdd,
     #[error("a revoke must name at least one key")]
     EmptyRevoke,
-    #[error("the event is {0} bytes of canonical JSON, above the limit of 65536")]
+    #[error(
+        "the event is {0} bytes of canonical JSON, above the limit of {limit}",
+        limit = crate::EVENT_MAX_BYTES
+    )]
     TooLarge(usize),
 }
 
