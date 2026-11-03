@@ -699,24 +699,27 @@ pub struct PerspectiveInstance {
 }
 
 /// The local Shared links the remote render lacks, without the links of parked diffs.
-/// Links compare by author, timestamp, source, predicate and target.
+/// Links compare by author, timestamp, source, predicate and target; one set of those
+/// identities for remote and parked keeps the pass linear.
 fn links_missing_remotely(
     local_links: &[(LinkExpression, LinkStatus)],
     remote_links: &[LinkExpression],
     parked: &[LinkExpression],
 ) -> Vec<LinkExpression> {
-    let same = |a: &LinkExpression, b: &LinkExpression| {
-        a.author == b.author
-            && a.timestamp == b.timestamp
-            && a.data.source == b.data.source
-            && a.data.target == b.data.target
-            && a.data.predicate == b.data.predicate
-    };
+    fn identity(l: &LinkExpression) -> (&str, &str, &str, Option<&str>, &str) {
+        (
+            &l.author,
+            &l.timestamp,
+            &l.data.source,
+            l.data.predicate.as_deref(),
+            &l.data.target,
+        )
+    }
+    let known: HashSet<_> = remote_links.iter().chain(parked).map(identity).collect();
     local_links
         .iter()
         .map(|(link, _)| link)
-        .filter(|link| !remote_links.iter().any(|r| same(r, link)))
-        .filter(|link| !parked.iter().any(|p| same(p, link)))
+        .filter(|link| !known.contains(&identity(link)))
         .cloned()
         .collect()
 }
