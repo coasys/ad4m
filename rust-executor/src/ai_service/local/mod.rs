@@ -425,12 +425,18 @@ impl Drop for InstallGuard {
 /// `ai.localInstall`: download what the plan names (resuming, verified), keep the
 /// selection, then start and register, unless `start` is false.
 pub async fn install(params: InstallParams) -> Result<LocalStatus> {
+    let paths = LocalPaths::from_config();
+    run_install(install_at(&paths, &params)).await
+}
+
+/// One install at a time: runs `work` under the install flag, publishes how it ended and
+/// answers the status after it.
+async fn run_install(work: impl std::future::Future<Output = Result<()>>) -> Result<LocalStatus> {
     if INSTALLING.swap(true, Ordering::SeqCst) {
         return Err(LocalAiRefused("A local AI install is running already".into()).into());
     }
     let guard = InstallGuard;
-    let paths = LocalPaths::from_config();
-    let outcome = install_at(&paths, &params).await;
+    let outcome = work.await;
     // Done before the answer: the status it carries says no install runs.
     drop(guard);
     match &outcome {
@@ -1630,6 +1636,46 @@ mod tests {
         assert_eq!(polite.wait().unwrap().signal(), Some(libc::SIGTERM));
         assert_eq!(stubborn.wait().unwrap().signal(), Some(libc::SIGKILL));
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// `ai.localInstall`'s answer is the status after the install: it says no install runs
+    /// (the launcher shows "installing" until it does). While one runs, another is refused;
+    /// a failed one clears the flag too.
+    #[tokio::test]
+    async fn a_finished_install_answers_that_no_install_runs() {
+        use crate::config::{Ad4mConfig, GLOBAL_AD4M_CONFIG};
+        crate::test_utils::ensure_test_db();
+        let store = tempfile::tempdir().unwrap();
+        let saved_config = GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        crate::config::set_global_config(Ad4mConfig {
+            local_ai_dir: Some(store.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+
+        let finished = run_install(async {
+            assert!(
+                INSTALLING.load(Ordering::SeqCst),
+                "the flag is up meanwhile"
+            );
+            let second = run_install(async { Ok(()) }).await;
+            assert!(
+                second.is_err_and(|e| e.downcast_ref::<LocalAiRefused>().is_some()),
+                "a second install is refused"
+            );
+            Ok(())
+        })
+        .await;
+        let failed = run_install(async { Err(anyhow!("the download broke off")) }).await;
+        let flag_after_failure = INSTALLING.load(Ordering::SeqCst);
+        *GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = saved_config;
+
+        let finished = finished.unwrap();
+        assert!(!finished.installing, "{finished:?}");
+        assert!(failed.unwrap_err().to_string().contains("broke off"));
+        assert!(!flag_after_failure);
     }
 
     #[test]
