@@ -105,6 +105,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const transport = new MockTransport();
         setup(transport);
         const link = makeLink();
+        store.setSequence(4);
 
         const result = syncModule.applyInboundWireDiff({ additions: [link], removals: [] }, 5, "rev-5");
 
@@ -114,6 +115,20 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.equal(emittedDiffs.length, 1);
         assert.deepEqual(emittedDiffs[0], { additions: [link], removals: [] });
         assert.deepEqual(result, { additions: [link], removals: [] });
+    });
+
+    it("a push ahead of the next sequence is applied but leaves the cursor, so the tail fetches the diffs in between", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        store.setSequence(4);
+        store.setRevision("rev-4");
+        const link = makeLink();
+
+        syncModule.applyInboundWireDiff({ additions: [link], removals: [] }, 7, "rev-7");
+
+        assert.deepEqual(store.allLinks().links, [link]);
+        assert.equal(store.getSequence(), 4, "diffs 5 and 6 are still to come");
+        assert.equal(store.getRevision(), "rev-4");
     });
 
     it("applies removals and still emits", () => {
@@ -152,6 +167,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const link = makeLink({ source: "encrypted-no-ring" });
         const wireLink = encryptLinkForWire(link, rk, 1);
 
+        store.setSequence(4);
         syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
 
         assert.equal(store.allLinks().links.length, 0, "undecryptable link must not appear in store");
@@ -169,6 +185,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const link = makeLink({ source: "wrong-version" });
         const wireLink = encryptLinkForWire(link, rk2, 2); // encrypted with version 2, ring only has 1
 
+        store.setSequence(4);
         syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
         assert.equal(store.allLinks().links.length, 0, "undecryptable link must not appear in store");
         assert.equal(store.getSequence(), 5, "sequence must advance — the link is held, not lost");
@@ -188,6 +205,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const plaintextLink = makeLink({ source: "visible" });
         const encryptedLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 2); // version 2, ring only has 1
 
+        store.setSequence(4);
         syncModule.applyInboundWireDiff(
             { additions: [plaintextLink, encryptedLink], removals: [] }, 5, "rev-5",
         );

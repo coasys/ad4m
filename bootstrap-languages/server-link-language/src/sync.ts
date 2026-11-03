@@ -235,8 +235,12 @@ function openOrHoldDiff(wire: WirePerspectiveDiff): PerspectiveDiff {
 export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: number, revision: string): PerspectiveDiff {
     if (store.getRenderProgress()) return { additions: [], removals: [] };
     const emitted = applyAndEmit(openOrHoldDiff(wireDiff));
-    if (revision) store.setRevision(revision);
-    if (Number.isFinite(sequence)) store.setSequence(sequence);
+    // Only the next diff moves the cursor: a push further ahead leaves the
+    // diffs in between to the tail, which re-applies this one too.
+    if (sequence === store.getSequence() + 1) {
+        if (revision) store.setRevision(revision);
+        store.setSequence(sequence);
+    }
     return emitted;
 }
 
