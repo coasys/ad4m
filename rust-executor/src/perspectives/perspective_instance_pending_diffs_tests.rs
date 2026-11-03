@@ -451,30 +451,78 @@ async fn a_removal_of_another_expression_of_the_triple_keeps_the_addition() {
     }
 }
 
-/// `add_link_expression` keeps an empty predicate as `Some("")`; the removal
-/// of that link, read back from the store, has `None`. They are one link, so
-/// the burst does not add it.
+/// A client adds a Shared link with an empty predicate through
+/// `add_link_expression`, which queues it as `Some("")`, then removes it
+/// through `remove_link` with the link as read back from the store, which
+/// queues the store's `None`. Both writes wait in one pending batch. They are
+/// one link, so the batch does not add it and a peer ends without it.
 #[tokio::test(start_paused = true)]
 async fn a_link_added_with_an_empty_predicate_and_removed_does_not_reach_peers() {
+    // `add_link_expression` and `remove_link` read the global agent service.
+    crate::agent::AgentService::init_global_test_instance();
+    let fake = Arc::new(FakeLanguage::default());
+    let mut perspective = neighbourhood_perspective(&fake).await;
+    // No immediate commits: every write is queued, and the loop is not
+    // running yet, so both land in one batch.
+    perspective.set_immediate_commits(0).await;
+
     let mut added = link("did:key:alice", "x");
     added.data.predicate = Some(String::new());
-    let mut removed = added.clone();
-    removed.data.predicate = None;
-    let fake = commit_burst(
-        &[
-            PerspectiveDiff {
-                additions: vec![added],
-                removals: vec![],
-            },
-            PerspectiveDiff {
-                additions: vec![],
-                removals: vec![removed],
-            },
-        ],
-        &[],
-    )
-    .await;
+    perspective
+        .add_link_expression(added, LinkStatus::Shared, None)
+        .await
+        .unwrap();
+    run_until(Duration::from_secs(5), || pending(&perspective) == 1)
+        .await
+        .expect("the addition is queued");
 
+    let read_back: Vec<LinkExpression> = perspective
+        .sparql_store
+        .get_links_by_source("ad4m://self")
+        .unwrap()
+        .into_iter()
+        .map(LinkExpression::from)
+        .filter(|l| l.data.target == "x")
+        .collect();
+    assert_eq!(read_back.len(), 1, "the store holds x: {:?}", read_back);
+    let read_back = read_back.into_iter().next().unwrap();
+    perspective.remove_link(read_back, None).await.unwrap();
+    run_until(Duration::from_secs(5), || pending(&perspective) == 2)
+        .await
+        .expect("the removal is queued");
+
+    // The two queued rows spell the predicate differently: the addition as
+    // the client sent it, the removal as the store reads it back.
+    let export = Ad4mDb::with_global_instance(|db| db.export_all_to_json()).unwrap();
+    let rows: Vec<_> = export["perspective_diffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["perspective"] == perspective.uuid.as_str() && d["is_pending"] == true)
+        .collect();
+    let predicates = |key: &str| -> Vec<serde_json::Value> {
+        rows.iter()
+            .flat_map(|d| d[key].as_array().unwrap().clone())
+            .map(|l| l["data"]["predicate"].clone())
+            .collect()
+    };
+    assert_eq!(predicates("additions"), vec![serde_json::json!("")]);
+    assert_eq!(predicates("removals"), vec![serde_json::Value::Null]);
+
+    let task = start_loop(&perspective);
+    let drained = run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    task.abort();
+
+    assert!(
+        drained.is_some(),
+        "{} diffs still pending",
+        pending(&perspective)
+    );
+    assert_eq!(
+        fake.batches.lock().unwrap().len(),
+        1,
+        "one commit per batch"
+    );
     assert!(
         !fake.committed().contains(&"+x".to_string()),
         "the batch adds x: {:?}",
