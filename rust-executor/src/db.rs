@@ -5197,6 +5197,50 @@ mod tests {
         );
     }
 
+    /// `get_pending_diffs_among` reads only the queued rows among the ids it is
+    /// given: a row parked since (`is_pending = 0`) is never sent again, even
+    /// when its id is asked for.
+    #[test]
+    fn get_pending_diffs_among_skips_parked_rows() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+        let a = construct_dummy_link_expression(LinkStatus::Shared);
+        let parked_addition = construct_dummy_link_expression(LinkStatus::Shared);
+        let parked_removal = construct_dummy_link_expression(LinkStatus::Shared);
+        let c = construct_dummy_link_expression(LinkStatus::Shared);
+        for row in [
+            PerspectiveDiff {
+                additions: vec![a.clone()],
+                removals: vec![],
+            },
+            PerspectiveDiff {
+                additions: vec![parked_addition.clone()],
+                removals: vec![parked_removal.clone()],
+            },
+            PerspectiveDiff {
+                additions: vec![c.clone()],
+                removals: vec![],
+            },
+        ] {
+            db.add_pending_diff(&p_uuid, &row).unwrap();
+        }
+        let (_, ids) = db.get_pending_diffs(&p_uuid, None).unwrap();
+        assert_eq!(ids.len(), 3);
+
+        db.park_pending_diffs(&p_uuid, vec![ids[1]]).unwrap();
+
+        let among = db.get_pending_diffs_among(&p_uuid, &ids).unwrap();
+        assert!(!among.additions.contains(&parked_addition));
+        assert!(!among.removals.contains(&parked_removal));
+        assert_eq!(
+            among,
+            PerspectiveDiff {
+                additions: vec![a, c],
+                removals: vec![],
+            }
+        );
+    }
+
     /// A repeated operation on one expression (a failed batch stored as one row
     /// with `remove_link` called twice, or duplicates across rows) is sent once:
     /// only the last operation on each expression stays.
