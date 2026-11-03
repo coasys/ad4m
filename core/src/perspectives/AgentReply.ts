@@ -81,3 +81,39 @@ export class AgentReplyRecord extends Ad4mModel {
   @HasMany(() => AgentStepRecord, { through: "ad4m://agent_step" })
   steps: AgentStepRecord[] = [];
 }
+
+/**
+ * A conversation the executor owns, for a client with no conversation of its own to point
+ * `perspective.agentReply` at. Mirrors `hardwired_sdna/agent_session.json`.
+ *
+ * A session is the `container` its replies are written under: write the person's messages as
+ * its children (`ad4m://has_child`), then reply in it without sending the settings again. List a
+ * perspective's sessions about a record with `AgentSessionRecord.findAll(p, { where: { about } })`.
+ * Create and delete them with `perspective.agentSessionCreate` / `agentSessionDelete`: the
+ * executor writes these, an app does not.
+ *
+ * `workIn`, `writeTools` and `model` are kept on the node that created the session only (local
+ * links): `workIn` is a perspective uuid, which means nothing to another node.
+ */
+@Model({ name: "AgentSession" })
+export class AgentSessionRecord extends Ad4mModel {
+  /** First-declared, for the namespace (`ad4m://`). */
+  @Property({ through: "ad4m://agent_session/title", required: true })
+  title: string = "";
+
+  /** The record the session is about, by id. */
+  @Property({ through: "ad4m://agent_session/about" })
+  about: string = "";
+
+  /** The perspective its replies' agent works in. Local to the node. */
+  @Property({ through: "ad4m://agent_session/work_in", local: true })
+  workIn: string = "";
+
+  /** The tools its replies' agent may write with, as a JSON array. Local to the node. */
+  @Property({ through: "ad4m://agent_session/write_tools", local: true })
+  writeTools: string = "";
+
+  /** The model its replies use. Local to the node. */
+  @Property({ through: "ad4m://agent_session/model", local: true })
+  model: string = "";
+}

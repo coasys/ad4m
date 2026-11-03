@@ -23,6 +23,7 @@ import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { AgentReplyStarted } from "../generated/api/AgentReplyStarted";
+import type { AgentSessionCreated } from "../generated/api/AgentSessionCreated";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
 import { SHACLShape } from "../shacl/SHACLShape";
@@ -483,9 +484,21 @@ export class PerspectiveProxy {
      */
     async agentReply(
         container: string,
-        settings: Parameters<PerspectiveClient['agentReply']>[2],
+        settings: Parameters<PerspectiveClient['agentReply']>[2] = {},
     ): Promise<AgentReplyStarted> {
         return await this.#client.agentReply(this.#handle.uuid, container, settings)
+    }
+
+    /** Create a session to reply in (its id is the `container`). See {@link PerspectiveClient.agentSessionCreate}. */
+    async agentSessionCreate(
+        session?: Parameters<PerspectiveClient['agentSessionCreate']>[1],
+    ): Promise<AgentSessionCreated> {
+        return await this.#client.agentSessionCreate(this.#handle.uuid, session)
+    }
+
+    /** Delete a session with its replies and their steps. `false` when it is no session. */
+    async agentSessionDelete(session: string): Promise<boolean> {
+        return await this.#client.agentSessionDelete(this.#handle.uuid, session)
     }
 
     /** Stop the reply running in `container`. `false` when none was running. */
