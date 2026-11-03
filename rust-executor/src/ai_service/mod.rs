@@ -178,11 +178,19 @@ impl ChatModel {
         })
     }
 
-    /// One completion of `turns`, with `tools` as definitions, in a slot of the endpoint's
+    /// One completion of `turns`, with `tools` as definitions and the reply constrained to
+    /// `json_schema` when given ([`ChatRequest::json_schema`]), in a slot of the endpoint's
     /// concurrency cap when it has one.
-    async fn chat(&self, turns: Vec<ChatTurn>, tools: Vec<ToolSpec>) -> Result<ChatReply> {
+    async fn chat(
+        &self,
+        turns: Vec<ChatTurn>,
+        tools: Vec<ToolSpec>,
+        json_schema: Option<serde_json::Value>,
+    ) -> Result<ChatReply> {
         let _slot = endpoints::request_slot(&self.endpoint).await;
-        let request = ChatRequest::new(self.remote_model.clone(), turns).with_tools(tools);
+        let request = ChatRequest::new(self.remote_model.clone(), turns)
+            .with_tools(tools)
+            .with_json_schema(json_schema);
         let reply = self.client.chat(request).await;
         self.after(reply)
     }
@@ -632,11 +640,16 @@ impl AIService {
     /// Run a chat-style prompt on `model_id` with a stateless message list and return the
     /// full response text and token counts. Backs the `/v1/chat/completions` paths the
     /// executor answers itself (Anthropic, the text tool fallback) and the harness.
+    ///
+    /// `json_schema` constrains the reply's text to JSON matching it, where the model's
+    /// server can decode against a schema ([`ChatRequest::json_schema`]); the caller
+    /// validates what comes back.
     pub async fn prompt_messages(
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
         bill_to: Option<String>,
+        json_schema: Option<serde_json::Value>,
     ) -> Result<PromptResult> {
         let resolved = Self::replace_model_variables(&model_id)?;
         let chat = self.chat_model(&resolved).await?;
@@ -648,7 +661,7 @@ impl AIService {
             resolved,
             truncate_for_log(&final_prompt)
         );
-        let text = chat.chat(turns, Vec::new()).await?.text;
+        let text = chat.chat(turns, Vec::new(), json_schema).await?.text;
         let completion_tokens = estimate_token_count(&text);
         log::debug!(
             "🤖 prompt_messages output model={} text={:?}",
@@ -721,7 +734,7 @@ impl AIService {
             }))
             .sum();
 
-        let reply = chat.chat(turns, tools).await?;
+        let reply = chat.chat(turns, tools, None).await?;
         let completion_tokens = estimate_reply_tokens(&reply);
 
         log::debug!(
@@ -816,7 +829,7 @@ impl AIService {
         let text_result: Result<String> = async {
             let chat = self.chat_model(&model_id).await?;
             Ok(chat
-                .chat(turns_for_task(&task, prompt), Vec::new())
+                .chat(turns_for_task(&task, prompt), Vec::new(), None)
                 .await?
                 .text)
         }
@@ -1081,6 +1094,7 @@ impl AIService {
             agent_did: agent_did.clone(),
             user_did,
             listeners: text_broadcast_tx.clone(),
+            gate: transcription::SpeechGate::new(),
         };
         tokio::spawn(worker.run(queue));
 
@@ -1598,7 +1612,7 @@ mod tests {
                 remote_model: "m".into(),
                 endpoint: Arc::new(endpoint),
             };
-            let calls = (0..4).map(|_| chat.chat(vec![ChatTurn::user("hi")], vec![]));
+            let calls = (0..4).map(|_| chat.chat(vec![ChatTurn::user("hi")], vec![], None));
             for reply in futures::future::join_all(calls).await {
                 assert_eq!(reply.unwrap().text, "ok");
             }
@@ -1826,8 +1840,15 @@ mod remote_stream_tests {
     use crate::pubsub::get_global_pubsub;
 
     /// An upstream that takes a millisecond per sample, answers `<samples> samples`, and
-    /// fails an utterance of 13 samples.
+    /// fails an utterance of [`FAILS`] samples.
     struct Upstream;
+
+    const FAILS: usize = 72_000;
+
+    /// The first `samples` of the speech recording: speech, so the gate lets it through.
+    fn utterance(samples: usize) -> Vec<f32> {
+        transcription::speech_fixture()[..samples].to_vec()
+    }
 
     #[async_trait::async_trait]
     impl RemoteTranscribe for Upstream {
@@ -1841,7 +1862,7 @@ mod remote_stream_tests {
             assert!(fields.is_empty());
             let samples = (audio.bytes.len() - 44) / 2;
             sleep(Duration::from_millis(samples as u64)).await;
-            if samples == 13 {
+            if samples == FAILS {
                 return Err(providers::http::UpstreamStatus {
                     url: "http://upstream/v1/audio/transcriptions".into(),
                     status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1885,13 +1906,13 @@ mod remote_stream_tests {
 
         // The first utterance takes longer upstream than the second.
         let (slow, fast) = tokio::join!(
-            service.feed_transcription_stream(&id, vec![0.1; 300], &operator),
-            service.feed_transcription_stream(&id, vec![0.1; 10], &operator),
+            service.feed_transcription_stream(&id, utterance(78_000), &operator),
+            service.feed_transcription_stream(&id, utterance(64_000), &operator),
         );
         slow.unwrap();
         fast.unwrap();
-        assert_eq!(text.recv().await.unwrap(), "300 samples");
-        assert_eq!(text.recv().await.unwrap(), "10 samples");
+        assert_eq!(text.recv().await.unwrap(), "78000 samples");
+        assert_eq!(text.recv().await.unwrap(), "64000 samples");
     }
 
     /// Moves the last activity of stream `id` back past the reaper's timeout.
@@ -1915,7 +1936,7 @@ mod remote_stream_tests {
         let operator = RequestContext::operator_for_test();
 
         let reaper = async {
-            // The utterance is upstream (500 ms), and was fed longer ago than the timeout.
+            // The utterance is upstream (64 s), and was fed longer ago than the timeout.
             sleep(Duration::from_millis(100)).await;
             backdate(&service, &id).await;
             AIService::close_idle_streams(&service.transcription_streams).await;
@@ -1925,7 +1946,7 @@ mod remote_stream_tests {
             );
         };
         let (fed, ()) = tokio::join!(
-            service.feed_transcription_stream(&id, vec![0.1; 500], &operator),
+            service.feed_transcription_stream(&id, utterance(64_000), &operator),
             reaper
         );
         fed.unwrap();
@@ -1936,7 +1957,7 @@ mod remote_stream_tests {
             "a stream answered a moment ago is not idle"
         );
         service
-            .feed_transcription_stream(&id, vec![0.1; 5], &operator)
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
             .await
             .expect("the stream still takes utterances");
 
@@ -1956,7 +1977,7 @@ mod remote_stream_tests {
         // The caller gives up while the utterance is upstream.
         let gave_up = tokio::time::timeout(
             Duration::from_millis(100),
-            service.feed_transcription_stream(&id, vec![0.1; 500], &operator),
+            service.feed_transcription_stream(&id, utterance(64_000), &operator),
         )
         .await;
         assert!(gave_up.is_err());
@@ -1974,7 +1995,7 @@ mod remote_stream_tests {
         let mut events = get_global_pubsub().await.subscribe_events();
 
         service
-            .feed_transcription_stream(&id, vec![0.1; 5], &operator)
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
             .await
             .unwrap();
 
@@ -1989,7 +2010,7 @@ mod remote_stream_tests {
             Audience::Dids(vec!["did:key:owner".to_string()])
         );
         assert_eq!(event.payload["streamId"], id.as_str());
-        assert_eq!(event.payload["text"], "5 samples");
+        assert_eq!(event.payload["text"], "64000 samples");
     }
 
     // Not paused: the re-check is a real request to a dead port.
@@ -2012,7 +2033,7 @@ mod remote_stream_tests {
 
         let operator = RequestContext::operator_for_test();
         assert!(service
-            .feed_transcription_stream(&id, vec![0.1; 5], &operator)
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
             .await
             .is_err());
         assert!(
@@ -2032,7 +2053,7 @@ mod remote_stream_tests {
             .unwrap();
 
         let error = service
-            .feed_transcription_stream(&id, vec![0.1; 13], &operator)
+            .feed_transcription_stream(&id, utterance(FAILS), &operator)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("failed (500"), "{error}");
@@ -2044,10 +2065,10 @@ mod remote_stream_tests {
 
         // The stream carries on.
         service
-            .feed_transcription_stream(&id, vec![0.1; 4], &operator)
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
             .await
             .unwrap();
-        assert_eq!(text.recv().await.unwrap(), "4 samples");
+        assert_eq!(text.recv().await.unwrap(), "64000 samples");
     }
 
     #[tokio::test(start_paused = true)]
@@ -2060,7 +2081,7 @@ mod remote_stream_tests {
         let operator = RequestContext::operator_for_test();
 
         service
-            .feed_transcription_stream(&id, vec![0.1; 7], &operator)
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
             .await
             .unwrap();
 
@@ -2079,6 +2100,256 @@ mod remote_stream_tests {
             .feed_transcription_stream(&id, vec![0.1; 7], &operator)
             .await
             .is_err());
+    }
+}
+
+/// A stream on a real HTTP upstream (mockito): the speech gate before the request, and the
+/// text of a streaming upstream published piece by piece.
+#[cfg(test)]
+mod remote_stream_http_tests {
+    use super::providers::audio::OpenAiTranscribe;
+    use super::transcription::speech_fixture as speech;
+    use super::*;
+    use crate::billing::test_seam;
+    use mockito::Matcher;
+
+    /// Deterministic white noise at `level`: keyboard and fan noise, not a voice.
+    fn noise(samples: usize, level: f32) -> Vec<f32> {
+        let mut state = 0x2545_f491_u32;
+        (0..samples)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state as f32 / u32::MAX as f32 * 2.0 - 1.0) * level
+            })
+            .collect()
+    }
+
+    async fn open(
+        service: &AIService,
+        server: &mockito::ServerGuard,
+        payer: Option<&str>,
+    ) -> String {
+        let _ = Ad4mDb::init_global_instance(":memory:");
+        service
+            .open_remote_stream(
+                "m".into(),
+                "remote-model".into(),
+                "e".into(),
+                Arc::new(OpenAiTranscribe::new(
+                    "",
+                    url::Url::parse(&server.url()).unwrap(),
+                )),
+                payer.map(str::to_string),
+                "did:key:owner".into(),
+            )
+            .await
+    }
+
+    fn asks_to_stream(request: &mockito::Request) -> bool {
+        request
+            .utf8_lossy_body()
+            .map(|body| body.contains("name=\"stream\"\r\n\r\ntrue"))
+            .unwrap_or(false)
+    }
+
+    fn texts(rx: &mut tokio::sync::broadcast::Receiver<String>) -> Vec<String> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    // dev scored every fed utterance with Silero (a window is speech above 0.6) and dropped
+    // one with under a third of its 32 ms windows speech: silence, noise and a click never
+    // reach the upstream, where a model without VAD makes up text for them.
+    #[tokio::test]
+    async fn silence_and_noise_are_not_sent_upstream() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"text":"Thank you."}"#)
+            .expect(0)
+            .create_async()
+            .await;
+        let service = AIService::empty();
+        let id = open(&service, &server, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+
+        for utterance in [
+            vec![0.0; 32_000],
+            noise(32_000, 0.3),
+            noise(32_000, 0.02),
+            vec![0.1; 300],
+        ] {
+            service
+                .feed_transcription_stream(&id, utterance, &operator)
+                .await
+                .expect("a dropped utterance is not an error");
+        }
+        mock.assert_async().await;
+        assert!(texts(&mut text).is_empty());
+    }
+
+    #[tokio::test]
+    async fn speech_is_sent_upstream() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"text":"If you can read this, transcription is working."}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let service = AIService::empty();
+        let id = open(&service, &server, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+
+        service
+            .feed_transcription_stream(&id, speech(), &operator)
+            .await
+            .unwrap();
+        mock.assert_async().await;
+        assert_eq!(
+            texts(&mut text),
+            vec!["If you can read this, transcription is working."]
+        );
+    }
+
+    // dev published each segment as Whisper decoded it. An upstream that streams
+    // (`stream=true`: speaches, OpenAI's gpt-4o-transcribe, vLLM) does the same here: each
+    // delta is one `transcription-text`, and the words are billed once, from the whole text.
+    #[tokio::test]
+    async fn a_streaming_upstream_publishes_each_piece_as_it_is_decoded() {
+        for (shape, sse) in [
+            (
+                "speaches / OpenAI",
+                concat!(
+                    "data: {\"type\":\"transcript.text.delta\",\"delta\":\"If you can read this,\"}\n\n",
+                    "data: {\"type\":\"transcript.text.delta\",\"delta\":\" transcription is working.\"}\n\n",
+                    "data: {\"type\":\"transcript.text.done\",\"text\":\"If you can read this, transcription is working.\"}\n\n",
+                    "data: [DONE]\n\n",
+                ),
+            ),
+            (
+                "vLLM",
+                concat!(
+                    "data: {\"object\":\"transcription.chunk\",\"choices\":[{\"delta\":{\"content\":\"If you can read this,\"}}]}\n\n",
+                    "data: {\"object\":\"transcription.chunk\",\"choices\":[{\"delta\":{\"content\":\" transcription is working.\"}}]}\n\n",
+                    "data: [DONE]\n\n",
+                ),
+            ),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/v1/audio/transcriptions")
+                .match_body(Matcher::Regex("name=\"stream\"\r\n\r\ntrue".into()))
+                .with_header("content-type", "text/event-stream")
+                .with_body(sse)
+                .expect(1)
+                .create_async()
+                .await;
+            let service = AIService::empty();
+            let id = open(&service, &server, Some("did:key:payer")).await;
+            Ad4mDb::with_global_instance(|db| db.set_host_rates(&[("m".to_string(), 0.5)]))
+                .unwrap();
+            test_seam::reset();
+            test_seam::force_result(test_seam::ForcedResult::Success);
+            let operator = RequestContext::operator_for_test();
+            let mut text = service
+                .subscribe_transcription_text(&id, &operator)
+                .await
+                .unwrap();
+
+            service
+                .feed_transcription_stream(&id, speech(), &operator)
+                .await
+                .unwrap();
+            mock.assert_async().await;
+            assert_eq!(
+                texts(&mut text),
+                vec!["If you can read this,", " transcription is working."],
+                "{shape}"
+            );
+            let calls = test_seam::calls();
+            assert_eq!(calls.len(), 1, "{shape}: {calls:?}");
+            assert_eq!(calls[0].amount, 4.0, "{shape}: 8 words at 0.5");
+        }
+    }
+
+    // A server that takes `stream` and answers JSON anyway (nemo-speech's transcription
+    // route, OpenAI's whisper-1) is answered per utterance, as before.
+    #[tokio::test]
+    async fn a_server_that_does_not_stream_is_answered_per_utterance() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"text":"If you can read this, transcription is working."}"#)
+            .expect(2)
+            .create_async()
+            .await;
+        let service = AIService::empty();
+        let id = open(&service, &server, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            service
+                .feed_transcription_stream(&id, speech(), &operator)
+                .await
+                .unwrap();
+        }
+        mock.assert_async().await;
+        assert_eq!(texts(&mut text).len(), 2);
+    }
+
+    // A server that refuses the field is asked again without it, and the stream does not
+    // ask it again.
+    #[tokio::test]
+    async fn a_server_that_refuses_stream_is_asked_without_it_from_then_on() {
+        let mut server = mockito::Server::new_async().await;
+        let refused = server
+            .mock("POST", "/v1/audio/transcriptions")
+            .match_request(asks_to_stream)
+            .with_status(422)
+            .with_body(r#"{"detail":"stream: extra fields not permitted"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let plain = server
+            .mock("POST", "/v1/audio/transcriptions")
+            .match_request(|request| !asks_to_stream(request))
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"text":"If you can read this, transcription is working."}"#)
+            .expect(2)
+            .create_async()
+            .await;
+        let service = AIService::empty();
+        let id = open(&service, &server, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            service
+                .feed_transcription_stream(&id, speech(), &operator)
+                .await
+                .unwrap();
+        }
+        refused.assert_async().await;
+        plain.assert_async().await;
+        assert_eq!(texts(&mut text).len(), 2);
     }
 }
 

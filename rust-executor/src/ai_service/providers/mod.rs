@@ -198,6 +198,13 @@ pub struct ChatRequest {
     /// OpenAI's `response_format` (`json_object`, `json_schema`), as the caller wrote it.
     /// Same rule as `tool_choice`.
     pub response_format: Option<serde_json::Value>,
+    /// A decoding constraint: the reply's text must be JSON matching this schema. Each
+    /// provider sends it the way its server takes one (OpenAI-shaped: `response_format`
+    /// `json_schema`, which llama-server, vLLM and OpenAI apply while decoding; Ollama's
+    /// native API: `format`). A provider without such a field (Anthropic) sends the
+    /// request without it, so the caller validates the reply whatever answered.
+    /// Ignored when `response_format` is set: the caller's own format wins.
+    pub json_schema: Option<serde_json::Value>,
 }
 
 impl ChatRequest {
@@ -208,6 +215,7 @@ impl ChatRequest {
             tools: Vec::new(),
             tool_choice: None,
             response_format: None,
+            json_schema: None,
         }
     }
 
@@ -224,6 +232,12 @@ impl ChatRequest {
 
     pub fn with_tools(mut self, tools: Vec<ToolSpec>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    /// Constrain the reply to JSON matching `schema` (see [`ChatRequest::json_schema`]).
+    pub fn with_json_schema(mut self, schema: Option<serde_json::Value>) -> Self {
+        self.json_schema = schema;
         self
     }
 }

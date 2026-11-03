@@ -314,7 +314,7 @@ async fn ollama_gets_tools_through_its_openai_compatible_api() {
     let mock = server
         .mock("POST", "/v1/chat/completions")
         .match_body(Matcher::PartialJson(
-            json!({ "model": "qwen3:8b", "tools": tools, "tool_choice": "required" }),
+            json!({ "model": "qwen3:8b", "tools": tools, "tool_choice": "auto" }),
         ))
         .with_body(json!({ "model": "qwen3:8b", "choices": [] }).to_string())
         .expect(1)
@@ -323,7 +323,7 @@ async fn ollama_gets_tools_through_its_openai_compatible_api() {
 
     let response = chat(
         user(),
-        json!({ "model": "qwen", "messages": hello(), "tools": tools, "tool_choice": "required" }),
+        json!({ "model": "qwen", "messages": hello(), "tools": tools, "tool_choice": "auto" }),
     )
     .await;
     assert_eq!(response.status(), 200);
@@ -953,4 +953,639 @@ async fn a_users_transcription_is_billed_to_the_user_by_its_words() {
     assert_eq!(calls[0].agent_did, USER);
     assert_eq!(calls[0].operation, concat!("ai_", "transcription"));
     assert_eq!(calls[0].amount, 1.5, "3 words at 0.5");
+}
+
+// ── tool_choice on the text path: a decoding constraint, checked ─────────────────────────
+
+/// A chat model on a mock llama-server endpoint, without native tools (the text path),
+/// loaded into a fresh AIService.
+async fn text_tools_model(server: &mockito::ServerGuard) {
+    fresh();
+    let upstream = endpoint("llama", EndpointKind::LlamaServer, &server.url(), "");
+    save(&upstream);
+    let id = model("chat", ModelType::Llm, &upstream, "qwen3.5-0.8b");
+    load(&[id]).await;
+}
+
+/// The models `ids` loaded into the AIService.
+async fn load(ids: &[String]) {
+    crate::ai_service::AIService::init_global_instance()
+        .await
+        .unwrap();
+    let service = crate::ai_service::AIService::global_instance()
+        .await
+        .unwrap();
+    for id in ids {
+        service.reload_model(id.clone()).await.unwrap();
+    }
+}
+
+fn lookup_tool() -> Value {
+    json!([{ "type": "function", "function": {
+        "name": "lookup",
+        "parameters": {
+            "type": "object",
+            "properties": { "q": { "type": "string", "minLength": 1 } },
+            "required": ["q"],
+        },
+    } }])
+}
+
+/// A completion whose text is `content`.
+fn completion(content: &str) -> String {
+    json!({ "choices": [{ "message": { "role": "assistant", "content": content } }] }).to_string()
+}
+
+/// The bodies of the requests an upstream received, in order.
+type Received = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+
+/// An upstream that answers its n-th chat request with `replies[n]` (the last one after
+/// that), and keeps what it received.
+async fn replying(server: &mut mockito::ServerGuard, replies: Vec<String>) -> Received {
+    let received: Received = Default::default();
+    let keep = received.clone();
+    server
+        .mock("POST", "/v1/chat/completions")
+        .with_body_from_request(move |request| {
+            let body = serde_json::from_slice(request.body().unwrap()).unwrap();
+            let mut bodies = keep.lock().unwrap();
+            bodies.push(body);
+            replies[(bodies.len() - 1).min(replies.len() - 1)]
+                .clone()
+                .into_bytes()
+        })
+        .create_async()
+        .await;
+    received
+}
+
+fn bodies(received: &Received) -> Vec<Value> {
+    received.lock().unwrap().clone()
+}
+
+/// What a request with `tool_choice: "required"` and one tool sends as its constraint.
+fn lookup_constraint(max_calls: usize) -> Value {
+    json!({ "response_format": { "type": "json_schema", "json_schema": { "name": "reply", "schema": {
+        "type": "object",
+        "properties": { "tool_calls": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "enum": ["lookup"] },
+                    "arguments": {
+                        "type": "object",
+                        "properties": { "q": { "type": "string" } },
+                        "required": ["q"],
+                    },
+                },
+                "required": ["name", "arguments"],
+            },
+            "minItems": 1,
+            "maxItems": max_calls,
+        } },
+        "required": ["tool_calls"],
+    } } } })
+}
+
+#[tokio::test]
+async fn a_required_tool_choice_sends_the_calls_schema_and_answers_with_the_call() {
+    let mut server = mockito::Server::new_async().await;
+    text_tools_model(&server).await;
+    let received = replying(
+        &mut server,
+        vec![completion(
+            r#"{"tool_calls":[{"name":"lookup","arguments":{"q":"ad4m"}}]}"#,
+        )],
+    )
+    .await;
+
+    let response = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "tools": lookup_tool(),
+                "tool_choice": "required" }),
+    )
+    .await;
+
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let sent = bodies(&received);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["model"], "qwen3.5-0.8b");
+    assert_eq!(
+        sent[0]["response_format"],
+        lookup_constraint(8)["response_format"]
+    );
+    // The tools reach the model as text too, in the system prompt; not as definitions.
+    assert!(sent[0].get("tools").is_none(), "{}", sent[0]);
+    let system = sent[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("<tools>") && system.contains("lookup"),
+        "{system}"
+    );
+
+    let choice = &body["choices"][0];
+    assert_eq!(choice["finish_reason"], "tool_calls");
+    assert_eq!(choice["message"]["content"], Value::Null);
+    let call = &choice["message"]["tool_calls"][0];
+    assert_eq!(call["function"]["name"], "lookup");
+    assert_eq!(call["function"]["arguments"], r#"{"q":"ad4m"}"#);
+    assert_eq!(body["model"], "chat");
+}
+
+#[tokio::test]
+async fn a_named_function_without_parallel_calls_allows_one_call() {
+    let mut server = mockito::Server::new_async().await;
+    text_tools_model(&server).await;
+    let received = replying(
+        &mut server,
+        vec![completion(
+            r#"{"tool_calls":[{"name":"lookup","arguments":{"q":"one"}}]}"#,
+        )],
+    )
+    .await;
+
+    let response = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "tools": lookup_tool(),
+                "tool_choice": { "type": "function", "function": { "name": "lookup" } } }),
+    )
+    .await;
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        bodies(&received)[0]["response_format"],
+        lookup_constraint(1)["response_format"]
+    );
+    let body = body_json(response).await;
+    assert_eq!(
+        body["choices"][0]["message"]["tool_calls"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_reply_that_breaks_the_constraint_is_asked_for_again() {
+    let mut server = mockito::Server::new_async().await;
+    text_tools_model(&server).await;
+    // A server that does not constrain: prose first, then a call.
+    let received = replying(
+        &mut server,
+        vec![
+            completion("I would look that up."),
+            completion(r#"<tool_call>{"name":"lookup","arguments":{"q":"x"}}</tool_call>"#),
+        ],
+    )
+    .await;
+
+    let response = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "tools": lookup_tool(),
+                "tool_choice": "required" }),
+    )
+    .await;
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(bodies(&received).len(), 2);
+    let body = body_json(response).await;
+    assert_eq!(
+        body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+        r#"{"q":"x"}"#
+    );
+}
+
+#[tokio::test]
+async fn a_model_that_never_makes_the_required_call_is_a_clear_error() {
+    let mut server = mockito::Server::new_async().await;
+    text_tools_model(&server).await;
+    // Arguments that miss the required `q`, every time.
+    let received = replying(
+        &mut server,
+        vec![completion(
+            r#"{"tool_calls":[{"name":"lookup","arguments":{}}]}"#,
+        )],
+    )
+    .await;
+
+    let response = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "tools": lookup_tool(),
+                "tool_choice": "required", "stream": true }),
+    )
+    .await;
+
+    assert_eq!(response.status(), 502);
+    assert_eq!(bodies(&received).len(), 2);
+    let body = body_json(response).await;
+    assert_eq!(body["error"]["code"], "tool_call_not_made");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("arguments.q is missing"), "{message}");
+}
+
+#[tokio::test]
+async fn a_streamed_required_call_comes_as_a_tool_call_delta() {
+    let mut server = mockito::Server::new_async().await;
+    text_tools_model(&server).await;
+    let received = replying(
+        &mut server,
+        vec![completion(
+            r#"{"tool_calls":[{"name":"lookup","arguments":{"q":"a"}},{"name":"lookup","arguments":{"q":"b"}}]}"#,
+        )],
+    )
+    .await;
+
+    let response = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "tools": lookup_tool(),
+                "tool_choice": "required", "stream": true }),
+    )
+    .await;
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        bodies(&received)[0]["response_format"],
+        lookup_constraint(8)["response_format"]
+    );
+    let events = events(&body_text(response).await);
+    assert_eq!(events.last().unwrap(), "[DONE]");
+    let chunks: Vec<Value> = events[..events.len() - 1]
+        .iter()
+        .map(|e| serde_json::from_str(e).unwrap())
+        .collect();
+    assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+    let calls: Vec<&Value> = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["tool_calls"].get(0))
+        .collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1]["index"], 1);
+    assert_eq!(calls[1]["function"]["arguments"], r#"{"q":"b"}"#);
+    assert_eq!(
+        chunks.last().unwrap()["choices"][0]["finish_reason"],
+        "tool_calls"
+    );
+}
+
+#[tokio::test]
+async fn auto_sends_no_constraint_and_without_parallel_calls_keeps_the_first() {
+    let mut server = mockito::Server::new_async().await;
+    text_tools_model(&server).await;
+    let received = replying(
+        &mut server,
+        vec![completion(
+            "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"a\"}}</tool_call>\n\
+             <tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"b\"}}</tool_call>",
+        )],
+    )
+    .await;
+
+    let one = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "tools": lookup_tool(),
+                "parallel_tool_calls": false }),
+    )
+    .await;
+    let calls = body_json(one).await["choices"][0]["message"]["tool_calls"].clone();
+    assert_eq!(calls.as_array().unwrap().len(), 1);
+    assert_eq!(calls[0]["function"]["arguments"], r#"{"q":"a"}"#);
+
+    let both = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "tools": lookup_tool() }),
+    )
+    .await;
+    let calls = body_json(both).await["choices"][0]["message"]["tool_calls"].clone();
+    assert_eq!(calls.as_array().unwrap().len(), 2);
+
+    let sent = bodies(&received);
+    assert_eq!(sent.len(), 2);
+    assert!(
+        sent.iter()
+            .all(|body| body.get("response_format").is_none()),
+        "{sent:?}"
+    );
+}
+
+/// llama-server enforces neither `tool_choice: "required"` nor a named function (it refuses
+/// the named form as the wrong type): a forced call is made under the schema also for a
+/// model with `nativeTools`, as JSON or SSE, and billed. Adapted from #1627.
+#[tokio::test]
+async fn a_forced_call_on_llama_server_is_made_by_a_schema_also_with_native_tools() {
+    let mut server = mockito::Server::new_async().await;
+    fresh();
+    let upstream = endpoint("llama", EndpointKind::LlamaServer, &server.url(), "");
+    save(&upstream);
+    let native = model_with_tools("local-chat", ModelType::Llm, &upstream, "qwen", Some(true));
+    let plain = model("plain-chat", ModelType::Llm, &upstream, "qwen-plain");
+    // One table: setting the host rates replaces them all.
+    Ad4mDb::with_global_instance(|db| {
+        db.set_host_rates(&[("local-chat".into(), 0.5), ("plain-chat".into(), 0.5)])
+    })
+    .unwrap();
+    load(&[native, plain]).await;
+    let received = replying(
+        &mut server,
+        vec![completion(
+            r#"{"name": "add_note", "arguments": {"text": "tea"}}"#,
+        )],
+    )
+    .await;
+    let tools = json!([
+        { "type": "function", "function": { "name": "get_weather", "parameters": { "type": "object", "properties": { "city": { "type": "string" } } } } },
+        { "type": "function", "function": { "name": "add_note", "parameters": { "type": "object", "properties": { "text": { "type": "string" } } } } }
+    ]);
+    let named = json!({ "type": "function", "function": { "name": "add_note" } });
+
+    for model_name in ["local-chat", "plain-chat"] {
+        let response = chat(
+            user(),
+            json!({ "model": model_name, "messages": hello(), "tools": tools, "tool_choice": named }),
+        )
+        .await;
+        assert_eq!(response.status(), 200, "{model_name}");
+        let answer = body_json(response).await;
+        assert_eq!(answer["model"], model_name);
+        let choice = &answer["choices"][0];
+        assert_eq!(choice["finish_reason"], "tool_calls");
+        let call = &choice["message"]["tool_calls"][0]["function"];
+        assert_eq!(call["name"], "add_note");
+        assert_eq!(call["arguments"], r#"{"text":"tea"}"#);
+    }
+
+    let response = chat(
+        user(),
+        json!({ "model": "local-chat", "messages": hello(), "tools": tools, "tool_choice": named, "stream": true }),
+    )
+    .await;
+    let sse = body_text(response).await;
+    assert!(sse.contains("\"name\":\"add_note\""), "{sse}");
+    assert!(sse.contains("\"finish_reason\":\"tool_calls\""), "{sse}");
+    assert!(sse.ends_with("data: [DONE]\n\n"), "{sse}");
+
+    let sent = bodies(&received);
+    assert_eq!(sent.len(), 3);
+    for body in &sent {
+        assert!(body.get("tools").is_none(), "{body}");
+        assert!(body.get("tool_choice").is_none(), "{body}");
+        let schema = &body["response_format"]["json_schema"]["schema"];
+        let names = &schema["properties"]["tool_calls"]["items"]["properties"]["name"];
+        assert_eq!(names["enum"], json!(["add_note"]), "{body}");
+    }
+    assert_eq!(test_seam::calls().len(), 3, "{:?}", test_seam::calls());
+
+    let unknown = json!({ "type": "function", "function": { "name": "nope" } });
+    let response = chat(
+        user(),
+        json!({ "model": "local-chat", "messages": hello(), "tools": tools, "tool_choice": unknown }),
+    )
+    .await;
+    assert_eq!(response.status(), 400);
+}
+
+/// vLLM holds a model to `tool_choice` by structured outputs, and OpenAI does too: a forced
+/// call goes to them as the client wrote it.
+#[tokio::test]
+async fn a_forced_call_goes_as_written_to_a_server_that_enforces_it() {
+    for kind in [EndpointKind::Vllm, EndpointKind::OpenAi] {
+        fresh();
+        let mut server = mockito::Server::new_async().await;
+        let upstream = endpoint("enforcing", kind, &server.url(), "");
+        save(&upstream);
+        model_with_tools("chat", ModelType::Llm, &upstream, "m", Some(true));
+        let tools = json!([{ "type": "function", "function": { "name": "f", "parameters": {} } }]);
+        let mock = server
+            .mock("POST", "/v1/chat/completions")
+            .match_body(Matcher::PartialJson(
+                json!({ "model": "m", "tools": tools, "tool_choice": "required" }),
+            ))
+            .with_body(json!({ "model": "m", "choices": [] }).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let response = chat(
+            user(),
+            json!({ "model": "chat", "messages": hello(), "tools": tools, "tool_choice": "required" }),
+        )
+        .await;
+        assert_eq!(response.status(), 200, "{kind:?}");
+        mock.assert_async().await;
+    }
+}
+
+/// Ollama's OpenAI API ignores `tool_choice`: a forced call goes to its native API under
+/// the schema, as `format`.
+#[tokio::test]
+async fn a_forced_call_on_ollama_is_made_by_a_format_schema() {
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    let ollama = endpoint("ollama", EndpointKind::Ollama, &server.url(), "");
+    save(&ollama);
+    let id = model("qwen", ModelType::Llm, &ollama, "qwen3:8b");
+    load(&[id]).await;
+    server
+        .mock("POST", "/api/show")
+        .with_body(json!({ "model_info": { "qwen3.context_length": 8192 } }).to_string())
+        .create_async()
+        .await;
+    let api_chat = server
+        .mock("POST", "/api/chat")
+        .match_body(Matcher::PartialJson(json!({
+            "model": "qwen3:8b",
+            "format": { "required": ["tool_calls"] },
+        })))
+        .with_body(
+            json!({
+                "message": { "role": "assistant",
+                    "content": "{\"tool_calls\":[{\"name\":\"f\",\"arguments\":{}}]}" },
+                "done": true,
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let forwarded = server
+        .mock("POST", "/v1/chat/completions")
+        .expect(0)
+        .create_async()
+        .await;
+
+    let tools = json!([{ "type": "function", "function": { "name": "f", "parameters": {} } }]);
+    let response = chat(
+        user(),
+        json!({ "model": "qwen", "messages": hello(), "tools": tools, "tool_choice": "required" }),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert_eq!(
+        body["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+        "f"
+    );
+    api_chat.assert_async().await;
+    forwarded.assert_async().await;
+}
+
+/// llama-server still offers the tools when a request says `tool_choice: "none"`, and
+/// their call markup comes back as text: the request goes up without them.
+#[tokio::test]
+async fn none_reaches_llama_server_without_the_tools() {
+    fresh();
+    let mut server = mockito::Server::new_async().await;
+    let upstream = endpoint("llama", EndpointKind::LlamaServer, &server.url(), "");
+    save(&upstream);
+    model_with_tools("chat", ModelType::Llm, &upstream, "m", Some(true));
+    let received = replying(&mut server, vec![completion("plain text")]).await;
+    let tools = json!([{ "type": "function", "function": { "name": "f", "parameters": {} } }]);
+
+    let response = chat(
+        user(),
+        json!({ "model": "chat", "messages": hello(), "tools": tools, "tool_choice": "none",
+                "temperature": 0.2 }),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let sent = bodies(&received);
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].get("tools").is_none(), "{}", sent[0]);
+    assert!(sent[0].get("tool_choice").is_none(), "{}", sent[0]);
+    assert_eq!(sent[0]["temperature"], 0.2);
+}
+
+/// A model the executor answers itself (not forwarded), loaded into a fresh AIService.
+async fn answered_here(kind: EndpointKind, url: &str, key: &str, native_tools: Option<bool>) {
+    fresh();
+    let upstream = endpoint("here", kind, url, key);
+    save(&upstream);
+    let id = model_with_tools("chat", ModelType::Llm, &upstream, "m", native_tools);
+    crate::ai_service::AIService::init_global_instance()
+        .await
+        .unwrap();
+    crate::ai_service::AIService::global_instance()
+        .await
+        .unwrap()
+        .reload_model(id)
+        .await
+        .unwrap();
+}
+
+fn a_tool() -> Value {
+    json!([{ "type": "function", "function": {
+        "name": "get_time", "parameters": { "type": "object", "properties": {} } } }])
+}
+
+/// What a client gets from each path the executor answers itself when the upstream
+/// answers `status`: Anthropic chat (plain and with tools, which go as native tools),
+/// Anthropic `/v1/completions`, and the text-tools path of a llama-server model.
+async fn failures_answered_here(
+    status: usize,
+    body: &str,
+) -> Vec<(String, axum::response::Response)> {
+    let mut out = Vec::new();
+    for (case, kind, path, native, request) in [
+        (
+            "anthropic chat",
+            EndpointKind::Anthropic,
+            "/v1/messages",
+            None,
+            json!({ "model": "chat", "messages": hello() }),
+        ),
+        (
+            "anthropic tools",
+            EndpointKind::Anthropic,
+            "/v1/messages",
+            None,
+            json!({ "model": "chat", "messages": hello(), "tools": a_tool() }),
+        ),
+        (
+            "anthropic completion",
+            EndpointKind::Anthropic,
+            "/v1/messages",
+            None,
+            json!({ "model": "chat", "prompt": "hi" }),
+        ),
+        (
+            "llama-server text tools",
+            EndpointKind::LlamaServer,
+            "/v1/chat/completions",
+            Some(false),
+            json!({ "model": "chat", "messages": hello(), "tools": a_tool() }),
+        ),
+    ] {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", path)
+            .with_status(status)
+            .with_header("retry-after", "7")
+            .with_body(body)
+            .expect(1)
+            .create_async()
+            .await;
+        answered_here(kind, &server.url(), "sk-secret-key", native).await;
+        let response = if request.get("prompt").is_some() {
+            chat::completions(user(), OpenAIJson(request))
+                .await
+                .into_response()
+        } else {
+            chat(user(), request).await
+        };
+        mock.assert_async().await;
+        assert!(
+            test_seam::calls().is_empty(),
+            "{case}: a failure bills nothing"
+        );
+        out.push((case.to_string(), response));
+    }
+    out
+}
+
+#[tokio::test]
+async fn the_executors_own_text_paths_keep_the_upstream_status() {
+    for (case, response) in
+        failures_answered_here(404, r#"{"error":{"message":"no such model"}}"#).await
+    {
+        assert_eq!(response.status(), 404, "{case}");
+        let error = body_json(response).await;
+        assert_eq!(error["error"]["code"], "model_not_found", "{case}");
+        assert_eq!(error["error"]["message"], "no such model", "{case}");
+    }
+    for (case, response) in failures_answered_here(429, "slow down").await {
+        assert_eq!(response.status(), 429, "{case}");
+        assert_eq!(response.headers()["retry-after"], "7", "{case}");
+    }
+    for (case, response) in failures_answered_here(401, "bad key sk-secret-key").await {
+        assert_eq!(response.status(), 502, "{case}");
+        let text = body_text(response).await;
+        assert!(text.contains("upstream_auth"), "{case}: {text}");
+        assert!(!text.contains("sk-secret-key"), "{case}: {text}");
+    }
+    for (case, response) in failures_answered_here(500, "boom").await {
+        assert_eq!(response.status(), 502, "{case}");
+        assert_eq!(
+            body_json(response).await["error"]["type"],
+            "upstream_error",
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_anthropic_endpoint_that_refuses_connections_is_a_503() {
+    answered_here(
+        EndpointKind::Anthropic,
+        "http://127.0.0.1:1",
+        "sk-ant",
+        None,
+    )
+    .await;
+    let response = chat(user(), json!({ "model": "chat", "messages": hello() })).await;
+    assert_eq!(response.status(), 503);
+    assert_eq!(
+        body_json(response).await["error"]["type"],
+        "upstream_unavailable"
+    );
 }

@@ -89,7 +89,7 @@ impl CompletionSource for OpenAiCompatBridge {
         // wrapped array shapes).
         let result = self
             .service
-            .prompt_messages(model_id.to_string(), flat, self.bill_to.clone())
+            .prompt_messages(model_id.to_string(), flat, self.bill_to.clone(), None)
             .await?;
 
         // The model's text is either a plain answer or a tool-call block

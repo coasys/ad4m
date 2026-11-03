@@ -1,10 +1,14 @@
 //! Transcription on an endpoint, and what streams and `/v1/audio/transcriptions` share:
 //! billing and the `transcription-text` event.
 //!
-//! A stream has no executor-side voice-activity gate: the client cuts
-//! utterances (WE's worklet) and the upstream filters silence. Each utterance fed is encoded
-//! as a 16 kHz mono PCM16 WAV and sent as one `/v1/audio/transcriptions` call, one at a time,
-//! so text comes out in the order the audio went in.
+//! The client cuts utterances (WE's worklet, by energy); the executor scores each one with
+//! Silero VAD ([`SpeechGate`], dev's gate and thresholds) and drops one that is not speech
+//! (a cough, a keyboard, a fan) before any request: a model without VAD of its own makes
+//! text up for it. Each utterance that passes is encoded as a 16 kHz mono PCM16 WAV and
+//! sent as one `/v1/audio/transcriptions` call, one at a time, so text comes out in the
+//! order the audio went in. An upstream that streams its transcript publishes each piece as
+//! it decodes it, as dev published each Whisper segment
+//! ([`RemoteTranscribe::transcribe_pieces`]); one that does not, the whole utterance.
 
 use anyhow::anyhow;
 use std::sync::Arc;
@@ -20,6 +24,60 @@ use crate::types::{ModelType, TranscriptionTextFilter};
 
 /// What every feed carries: 16 kHz mono `f32`.
 pub(crate) const SAMPLE_RATE: u32 = 16_000;
+
+/// Silero's window at [`SAMPLE_RATE`]: 512 samples, 32 ms.
+pub(crate) const VAD_WINDOW: usize = 512;
+/// A window is speech above this probability (dev: the Kalosm rechunker's start threshold).
+pub(crate) const VAD_SPEECH_PROBABILITY: f32 = 0.6;
+/// An utterance is speech when at least this share of its windows is (dev: rejects
+/// transients).
+pub(crate) const VAD_MIN_SPEECH_RATIO: f32 = 0.33;
+
+/// The server-side speech gate of a stream: Silero VAD over each fed utterance, its state
+/// carried from one utterance to the next as dev's was. `None` when the model did not load
+/// (ONNX Runtime missing where it is loaded at run time, macOS): every utterance passes,
+/// with a warning at open, rather than the stream refusing all audio.
+pub(crate) struct SpeechGate {
+    vad: Option<voice_activity_detector::VoiceActivityDetector>,
+}
+
+impl SpeechGate {
+    pub(crate) fn new() -> Self {
+        let vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(SAMPLE_RATE as i64)
+            .chunk_size(VAD_WINDOW)
+            .build()
+            .map_err(|e| log::warn!("Silero VAD did not load ({e:?}): this stream sends all audio"))
+            .ok();
+        SpeechGate { vad }
+    }
+
+    /// The share of `samples`' whole windows that are speech; 0 for fewer than one window,
+    /// 1 without a model.
+    pub(crate) fn speech_ratio(&mut self, samples: &[f32]) -> f32 {
+        let Some(vad) = self.vad.as_mut() else {
+            return 1.0;
+        };
+        let mut total = 0usize;
+        let mut speech = 0usize;
+        for window in samples.chunks_exact(VAD_WINDOW) {
+            total += 1;
+            if vad.predict(window.iter().copied()) > VAD_SPEECH_PROBABILITY {
+                speech += 1;
+            }
+        }
+        if total == 0 {
+            0.0
+        } else {
+            speech as f32 / total as f32
+        }
+    }
+
+    /// Whether `samples` is speech, by dev's thresholds.
+    pub(crate) fn passes(&mut self, samples: &[f32]) -> bool {
+        self.speech_ratio(samples) >= VAD_MIN_SPEECH_RATIO
+    }
+}
 
 /// The client of the endpoint that serves transcription model `model_id`, the id the
 /// endpoint knows the model by, and the endpoint's id.
@@ -125,12 +183,13 @@ pub(super) struct RemoteStream {
     pub agent_did: Option<String>,
     pub user_did: String,
     pub listeners: broadcast::Sender<String>,
+    pub gate: SpeechGate,
 }
 
 impl RemoteStream {
     /// Transcribe each utterance in turn until the stream closes (its sender is dropped);
     /// the ones already fed are still answered.
-    pub(super) async fn run(self, mut utterances: mpsc::UnboundedReceiver<Utterance>) {
+    pub(super) async fn run(mut self, mut utterances: mpsc::UnboundedReceiver<Utterance>) {
         while let Some(utterance) = utterances.recv().await {
             let outcome = self.transcribe(utterance.samples).await;
             let _ = utterance.done.send(outcome);
@@ -138,26 +197,48 @@ impl RemoteStream {
         log::info!("Transcription stream {} closed", self.stream_id);
     }
 
-    /// One upstream call. A failure is logged, acted on for the endpoint
-    /// (`endpoints::after_failed_request`) and returned to the feed; no text is published
-    /// or billed.
-    async fn transcribe(&self, samples: Vec<f32>) -> Result<()> {
+    /// One upstream call, for an utterance the gate takes as speech. Each piece of text a
+    /// streaming upstream decodes is published as it arrives; the words are billed once,
+    /// from the whole transcript. A failure is logged, acted on for the endpoint
+    /// (`endpoints::after_failed_request`) and returned to the feed; nothing more is
+    /// published, and only what was published is billed.
+    async fn transcribe(&mut self, samples: Vec<f32>) -> Result<()> {
         if samples.is_empty() {
             return Ok(());
         }
         let audio_ms = samples.len() as u64 * 1000 / SAMPLE_RATE as u64;
+        let speech_ratio = self.gate.speech_ratio(&samples);
+        if speech_ratio < VAD_MIN_SPEECH_RATIO {
+            log::debug!(
+                "transcription stream={} audio_ms={audio_ms} dropped by the speech gate (speech_ratio={speech_ratio:.2})",
+                self.stream_id
+            );
+            return Ok(());
+        }
         let audio = AudioFile {
             bytes: wav_pcm16(&samples),
             file_name: "utterance.wav".into(),
             mime: "audio/wav".into(),
         };
         let started = Instant::now();
-        let reply = match self
+        let (pieces_tx, mut pieces) = mpsc::unbounded_channel::<String>();
+        let call = self
             .client
-            .transcribe(&self.remote_model, audio, vec![])
-            .await
-        {
-            Ok(reply) => reply,
+            .transcribe_pieces(&self.remote_model, audio, &pieces_tx);
+        tokio::pin!(call);
+        let mut published = String::new();
+        let outcome = loop {
+            tokio::select! {
+                biased;
+                Some(piece) = pieces.recv() => self.publish_piece(&piece, &mut published).await,
+                outcome = &mut call => break outcome,
+            }
+        };
+        while let Ok(piece) = pieces.try_recv() {
+            self.publish_piece(&piece, &mut published).await;
+        }
+        let text = match outcome {
+            Ok(text) => text,
             Err(e) => {
                 log::warn!(
                     "transcription stream={} model={} audio_ms={audio_ms} failed: {e:#}",
@@ -165,34 +246,78 @@ impl RemoteStream {
                     self.remote_model
                 );
                 super::endpoints::after_failed_request(&self.endpoint_id, &self.remote_model, &e);
+                let words = published.split_whitespace().count();
+                if words > 0 {
+                    bill_transcription(self.agent_did.as_deref(), &self.model_id, words);
+                }
                 return Err(anyhow!(TranscribeFailure::of(&e).to_string()));
             }
         };
-        let words = reply.text.split_whitespace().count();
+        let words = text.split_whitespace().count();
         log::info!(
-            "transcription stream={} model={} audio_ms={audio_ms} latency_ms={} words={words}",
+            "transcription stream={} model={} audio_ms={audio_ms} latency_ms={} words={words} streamed={}",
             self.stream_id,
             self.remote_model,
-            started.elapsed().as_millis()
+            started.elapsed().as_millis(),
+            !published.is_empty()
         );
         if words == 0 {
             return Ok(());
         }
         bill_transcription(self.agent_did.as_deref(), &self.model_id, words);
-        publish_text(
-            &self.stream_id,
-            &self.user_did,
-            &reply.text,
-            &self.listeners,
-        )
-        .await;
+        if published.is_empty() {
+            publish_text(&self.stream_id, &self.user_did, &text, &self.listeners).await;
+        }
         Ok(())
     }
+
+    /// Publish one streamed piece (as the upstream sent it, its spacing kept), skipping
+    /// empty ones.
+    async fn publish_piece(&self, piece: &str, published: &mut String) {
+        if piece.trim().is_empty() {
+            return;
+        }
+        published.push_str(piece);
+        publish_text(&self.stream_id, &self.user_did, piece, &self.listeners).await;
+    }
+}
+
+/// "If you can read this, transcription is working": `tests/transcription_test.wav`, 16 kHz
+/// mono PCM16, 4.9 s, as samples.
+#[cfg(test)]
+pub(crate) fn speech_fixture() -> Vec<f32> {
+    let wav = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/transcription_test.wav"
+    ))
+    .expect("the test recording is in the repo");
+    assert_eq!(&wav[36..40], b"data", "a plain 44-byte header");
+    wav[44..]
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / i16::MAX as f32)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The gate's model loads from the weights compiled in, and scores the recording as
+    // speech and silence as not.
+    #[test]
+    fn the_speech_gate_takes_speech_and_drops_silence_and_short_clicks() {
+        let mut gate = SpeechGate::new();
+        let speech = speech_fixture();
+        let ratio = gate.speech_ratio(&speech);
+        assert!(ratio >= VAD_MIN_SPEECH_RATIO, "speech scored {ratio}");
+        assert!(gate.passes(&speech));
+        assert!(!gate.passes(&vec![0.0; 16_000]));
+        assert_eq!(
+            gate.speech_ratio(&[0.5; VAD_WINDOW - 1]),
+            0.0,
+            "under one window"
+        );
+    }
 
     #[test]
     fn a_wav_is_16_khz_mono_pcm16_and_clips() {

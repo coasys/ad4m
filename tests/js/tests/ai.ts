@@ -1,6 +1,7 @@
 import { TestContext } from './test-context'
 import { pollUntil } from '../utils/utils'
 import { expect } from "chai";
+import fs from 'fs';
 import type { AiEndpoint } from '@coasys/ad4m';
 import {
     FakeUpstream,
@@ -10,6 +11,15 @@ import {
     fakeVector,
     startFakeUpstream,
 } from '../helpers/ai-upstream';
+
+// "If you can read this, transcription is working" (tests/transcription_test.wav, 16 kHz
+// mono PCM16, a 44-byte header) as the samples a client feeds.
+function speechRecording(): Float32Array {
+    const wav = fs.readFileSync('../transcription_test.wav')
+    const samples = new Float32Array((wav.length - 44) / 2)
+    for (let i = 0; i < samples.length; i++) samples[i] = wav.readInt16LE(44 + 2 * i) / 32767
+    return samples
+}
 
 // The AI contract against a fake OpenAI-shaped upstream (helpers/ai-upstream.ts): the
 // executor's real wire to a model server, no model weights. Real models run nightly in the
@@ -201,8 +211,9 @@ export default function aiTests(testContext: TestContext) {
                 const texts: string[] = []
                 const streamId = await ad4mClient.ai.openTranscriptionStream(id, (text) => texts.push(text))
 
-                // One utterance: 1600 samples (0.1 s at 16 kHz), sent on as a 16-bit WAV.
-                await ad4mClient.ai.feedTranscriptionStream(streamId, new Float32Array(1600).fill(0.1))
+                // One utterance of speech (the executor's VAD gate drops one that is not),
+                // sent on as a 16-bit WAV.
+                await ad4mClient.ai.feedTranscriptionStream(streamId, speechRecording())
                 await pollUntil(() => texts.length > 0, { timeoutMs: 10000, intervalMs: 200, label: "transcript" })
                 expect(texts).to.have.length(1)
                 expect(texts[0]).to.match(/^fake transcript of \d+ bytes$/)

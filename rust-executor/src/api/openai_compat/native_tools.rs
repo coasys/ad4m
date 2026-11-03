@@ -17,10 +17,11 @@
 //! full and framed as SSE afterwards — which is also what the injected path
 //! does whenever tools are active, so a client sees no difference in shape.
 //!
-//! `tool_choice: "required"`, a named function and `parallel_tool_calls: false` are not
-//! enforced on this path, nor on the injected one. A model on an OpenAI-shaped endpoint
-//! that takes tools natively gets the request as written through the `/v1` passthrough,
-//! fields included; wiring them through here means a provider-level request field.
+//! A forced call (`tool_choice: "required"` or a named function) reaches this path only for
+//! Anthropic, where it is not enforced yet (the Anthropic client does not translate
+//! `tool_choice`). OpenAI and vLLM get it as written through the `/v1` passthrough and
+//! enforce it; every other endpoint makes it on the injected path under a schema the server
+//! decodes against (`chat::constrained_tool_calls`, `passthrough::enforces_tool_choice`).
 
 use std::convert::Infallible;
 
@@ -31,6 +32,7 @@ use uuid::Uuid;
 use super::chat::epoch_seconds;
 use super::errors::OpenAIError;
 use super::harness_bridge::structured_turns;
+use super::model_selector::Resolved;
 use super::types::{
     ChatChoice, ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionResponse,
     ChatMessage, ChatMessageContent, ChatResponseMessage, FunctionCall, FunctionCallDelta, Role,
@@ -45,7 +47,7 @@ use crate::types::RequestContext;
 pub async fn chat_with_native_tools(
     auth: RequestContext,
     requested_model: String,
-    model_id: String,
+    resolved: &Resolved,
     messages: &[ChatMessage],
     tools: &[ToolDef],
     stream: bool,
@@ -69,9 +71,14 @@ pub async fn chat_with_native_tools(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     // Billing happens inside prompt_with_tools, on success only.
     let reply = service
-        .prompt_with_tools(model_id, turns, specs, auth.user_did().map(str::to_string))
+        .prompt_with_tools(
+            resolved.model.id.clone(),
+            turns,
+            specs,
+            auth.user_did().map(str::to_string),
+        )
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(|e| resolved.failure(e))?;
 
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = epoch_seconds();
