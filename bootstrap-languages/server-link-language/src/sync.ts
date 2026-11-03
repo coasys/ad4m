@@ -281,9 +281,11 @@ export function retryHeld(): PerspectiveDiff {
 // ---------------------------------------------------------------------------
 
 /**
- * Direct single-shot commit. Callers that need error propagation (test
- * harnesses, non-batching write paths) can await this. Used by
- * `enqueueCommitBatched` below to send the accumulated batch.
+ * The language's perspective-commit: one POST per diff the executor commits.
+ * A failed POST rejects, and the executor keeps the diff in its pending-diffs
+ * queue (its database: retried with backoff, oldest first, across restarts),
+ * so the language keeps no outbox of its own. The executor batches bursts
+ * before they get here.
  *
  * The store changes only after the server accepted the diff, so a failed
  * POST leaves no local-only links. Nothing is emitted back: the executor
@@ -307,132 +309,12 @@ export async function commit(diff: PerspectiveDiff): Promise<void> {
     emitSyncStateSafe("Synced");
 }
 
-// ---------------------------------------------------------------------------
-// Batched commit — coalesce contiguous synchronous commits into as few POSTs
-// as possible WITHOUT reordering user-visible operations.
-//
-// Motivation: `alice.perspective.addLink()` × 1500 in a tight loop produced
-// 1500 sequential POSTs to /rooms/<room>/commit, each blocking the next
-// `addLink`. The stress-test integration ran ~200s and timed out.
-//
-// Design:
-//   - Every `enqueueCommitBatched(diff)` appends the diff to a queue and
-//     schedules a microtask flush if not already scheduled. Returns after
-//     enqueuing — the actual POST(s) happen later.
-//   - The flush walks the queue in order and greedily merges adjacent diffs
-//     into "segments" where each segment can be sent as one POST without
-//     losing caller-visible ordering. A merge is UNSAFE iff any link
-//     identity appears in one merged side's additions and the other's
-//     removals — in that case we start a new segment and send a separate
-//     POST so the server applies them in caller order.
-//     (The server applies additions before removals within a single POST:
-//     link-server/src/db.ts::applyDiffAndAppend. So merging `remove(X);
-//     add(X)` into `additions:[X], removals:[X]` would silently swap the
-//     order → X gone when the caller expected X to remain.)
-//   - Common bulk-add case (1500 unique addLinks) → 1 segment → 1 POST.
-//   - Per-segment bounded retries with exponential backoff (replaces the
-//     old `commitWithRetry`). If a segment still fails after
-//     `MAX_COMMIT_ATTEMPTS`, the failed segment and all remaining
-//     downstream segments get re-enqueued into `_pendingQueue` so the
-//     next flush cycle picks them up automatically. The existing
-//     coalescing handles dedup if diffs overlap, and the microtask
-//     scheduling triggers the retry naturally. We emit
-//     `LinkLanguageInstalledButNotSynced` so the executor knows the
-//     language lags until the re-queued segments land.
-// ---------------------------------------------------------------------------
-
-const MAX_COMMIT_ATTEMPTS = 3;
-const RETRY_BASE_DELAY_MS = 200;
-
-const MAX_RETRY_DELAY_MS = 5 * 60 * 1000;
-let _pendingQueue: PerspectiveDiff[] = [];
-let _flushScheduled = false;
-let _inflight: Promise<void> = Promise.resolve();
-let _retryTimer: ReturnType<typeof setTimeout> | null = null;
-let _retryDelay = 2_500;
-
-/** Enqueue a diff to be flushed on the next microtask. */
-export function enqueueCommitBatched(diff: PerspectiveDiff): void {
-    _pendingQueue.push(diff);
-    if (!_flushScheduled) {
-        _flushScheduled = true;
-        // Serialize flushes: each waits for the previous to finish before
-        // starting, so we never have two overlapping POSTs stepping on
-        // sequence order. The terminal `.catch` is load-bearing: `_inflight`
-        // is a single reusable chain, and if a flush rejects (e.g. deps()
-        // throws because the module was torn down mid-microtask), every
-        // subsequent `.then(flushBatch)` would be skipped, silently killing
-        // all future commits. The catch swallows the rejection so the chain
-        // stays live.
-        _inflight = _inflight
-            .then(() => flushBatch())
-            .catch((err) => {
-                console.error(
-                    "[server-link-language] batch flush crashed; keeping the flush chain live for subsequent enqueues:",
-                    err,
-                );
-            });
-    }
-}
-
-async function flushBatch(): Promise<void> {
-    // Snapshot + reset FIRST so any commits arriving during the POST land in
-    // the next batch, not this one.
-    const queue = _pendingQueue;
-    _pendingQueue = [];
-    _flushScheduled = false;
-    if (queue.length === 0) return;
-
-    const segments = coalesceDiffs(queue);
-    for (let i = 0; i < segments.length; i++) {
-        const segment = segments[i];
-        if (segment.additions.length === 0 && segment.removals.length === 0) continue;
-        const ok = await commitSegmentWithRetries(segment);
-        if (!ok) {
-            // Re-enqueue the failed segment + all remaining downstream
-            // segments. They land at the front of the pending queue so
-            // the next flush cycle retries them in original order.
-            const requeue = segments.slice(i);
-            const requeueSummary = requeue.map((s, idx) =>
-                `  segment ${i + 1 + idx}: ${s.additions.length} adds, ${s.removals.length} removes`)
-                .join("\n");
-            console.warn(
-                `[server-link-language] segment ${i + 1}/${segments.length} failed after ` +
-                `${MAX_COMMIT_ATTEMPTS} attempts; re-enqueueing ${requeue.length} segment(s) ` +
-                `for next flush cycle:\n${requeueSummary}`,
-            );
-            _pendingQueue.unshift(...requeue);
-            if (!_retryTimer) {
-                _retryDelay = Math.min(_retryDelay * 2, MAX_RETRY_DELAY_MS);
-                _retryTimer = setTimeout(() => {
-                    _retryTimer = null;
-                    if (_pendingQueue.length > 0 && !_flushScheduled) {
-                        _flushScheduled = true;
-                        _inflight = _inflight
-                            .then(() => flushBatch())
-                            .catch((err) => {
-                                console.error(
-                                    "[server-link-language] retry flush crashed; keeping the flush chain live:",
-                                    err,
-                                );
-                            });
-                    }
-                }, _retryDelay);
-            }
-            emitSyncStateSafe("LinkLanguageInstalledButNotSynced");
-            return;
-        }
-    }
-    _retryDelay = 2_500;
-}
-
 /**
  * `deps()` can throw once the language has been torn down (resetAdapters
  * clears the module state), and a throwing `emitSyncState` (e.g. because
- * getRuntime() no longer exists) would reject the entire flushBatch —
- * poisoning `_inflight` if that rejection escapes the chain's terminal
- * catch. Route every sync-state emission through this so an emit failure
- * during teardown stays local instead of taking the flush chain with it.
+ * getRuntime() no longer exists) would turn a finished commit or sync into a
+ * failure. Route every sync-state emission through this so an emit failure
+ * during teardown stays local.
  */
 function emitSyncStateSafe(state: string): void {
     try {
@@ -440,147 +322,6 @@ function emitSyncStateSafe(state: string): void {
     } catch (err) {
         console.error("[server-link-language] emitSyncState failed (likely post-teardown):", err);
     }
-}
-
-async function commitSegmentWithRetries(segment: PerspectiveDiff): Promise<boolean> {
-    let delay = RETRY_BASE_DELAY_MS;
-    for (let attempt = 1; attempt <= MAX_COMMIT_ATTEMPTS; attempt++) {
-        try {
-            await commit(segment);
-            return true;
-        } catch (err) {
-            const isLast = attempt === MAX_COMMIT_ATTEMPTS;
-            console.error(
-                `[server-link-language] batched commit attempt ${attempt}/${MAX_COMMIT_ATTEMPTS} ` +
-                `failed (${segment.additions.length} adds, ${segment.removals.length} removes)` +
-                (isLast ? " — giving up." : `; retrying in ${delay}ms.`),
-                err,
-            );
-            if (isLast) return false;
-            await new Promise<void>((resolve) => setTimeout(resolve, delay));
-            delay *= 2;
-        }
-    }
-    return false;
-}
-
-/**
- * Coalesce a queue of diffs into the minimum number of segments that
- * preserve observable server-side ordering. See the block comment above
- * for the merge-safety rule.
- *
- * Identity: canonical fields (`author`, `timestamp`, `source`, `predicate`,
- * `target`) serialised via JSON.stringify. Matches the server's own
- * linkHash inputs — see `linkIdentity` below for why signature is
- * deliberately excluded.
- */
-export function coalesceDiffs(queue: PerspectiveDiff[]): PerspectiveDiff[] {
-    const segments: PerspectiveDiff[] = [];
-    for (const next of queue) {
-        const current = segments[segments.length - 1];
-        if (!current) {
-            segments.push({ additions: [...next.additions], removals: [...next.removals] });
-            continue;
-        }
-        const currentAddIds = new Set(current.additions.map(linkIdentity));
-        const currentRemIds = new Set(current.removals.map(linkIdentity));
-        const conflict =
-            next.additions.some((l) => currentRemIds.has(linkIdentity(l))) ||
-            next.removals.some((l) => currentAddIds.has(linkIdentity(l)));
-        if (conflict) {
-            segments.push({ additions: [...next.additions], removals: [...next.removals] });
-        } else {
-            current.additions.push(...next.additions);
-            current.removals.push(...next.removals);
-        }
-    }
-    return segments;
-}
-
-function linkIdentity(link: LinkExpression): string {
-    // Must match the SAME canonical field set (and key order) as the
-    // server's canonicalLinkPayload (link-server/src/types.ts) so that two
-    // links the server considers identical also collapse here. We
-    // deliberately do NOT include proof.signature: two links with
-    // identical canonical fields but different signatures (e.g. re-signed
-    // after a key rotation) are the SAME link from the server's
-    // perspective, and treating them as different identities would let a
-    // remove(oldSig) + add(newSig) sequence merge into one segment →
-    // additions:[X], removals:[X] → server applies add-then-remove → X
-    // gone, contrary to the caller's intent.
-    return JSON.stringify({
-        source: link.data?.source ?? "",
-        predicate: link.data?.predicate ?? null,
-        target: link.data?.target ?? "",
-        author: link.author,
-        timestamp: link.timestamp,
-    });
-}
-
-/** Test/teardown hook: await any in-flight flush + drain everything still
- * queued so a subsequent teardown or read sees a settled server state. Not
- * called on the hot path.
- *
- * Loops rather than making one pass: a diff enqueued during the final
- * await (by a concurrent caller or by teardown code that itself commits)
- * would otherwise stay unflushed. The bound is a runaway-loop guard, not
- * an expected iteration count — a settled system exits after 1 or 2 laps.
- * Enqueues are routed through the normal `enqueueCommitBatched` path so
- * they land in `_inflight` — direct `flushBatch()` calls would break the
- * serialisation invariant that other flushes rely on.
- */
-export async function drainCommitBatch(): Promise<void> {
-    // Cap at 10 laps (not 100) — each lap can trigger up to 3 retry POSTs
-    // per segment. 10 laps × 3 attempts = 30 POSTs max, which keeps the
-    // teardown/outage burst bounded while still giving a genuine queue a
-    // reasonable chance to flush.
-    const MAX_LAPS = 10;
-    for (let lap = 0; lap < MAX_LAPS; lap++) {
-        await _inflight;
-        if (_pendingQueue.length === 0) return;
-        if (!_flushScheduled) {
-            _flushScheduled = true;
-            _inflight = _inflight
-                .then(() => flushBatch())
-                .catch((err) => {
-                    console.error(
-                        "[server-link-language] batch flush crashed during drain:",
-                        err,
-                    );
-                });
-        }
-    }
-    if (_pendingQueue.length > 0) {
-        console.warn(
-            `[server-link-language] drainCommitBatch: bailed after ${MAX_LAPS} laps with ` +
-            `${_pendingQueue.length} segment(s) still pending — they will flush on the next ` +
-            `enqueueCommitBatched call.`,
-        );
-    }
-}
-
-/** Test-only: clear all batch state without draining. Used by unit tests
- * that spin up fresh mock adapters between cases and don't want stale
- * queued diffs from the previous case flushing against them. */
-export function _resetBatchStateForTests(): void {
-    _pendingQueue = [];
-    _flushScheduled = false;
-    _inflight = Promise.resolve();
-    if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
-    _retryDelay = 2_500;
-    _renderNeeded = false;
-    _renderDueAt = 0;
-    _renderRetryDelay = RENDER_RETRY_BASE_MS;
-    _renderInflight = null;
-    _renderRetry = null;
-}
-
-/** Test-only: await the current in-flight flush without the drain loop.
- * Unlike drainCommitBatch (which re-schedules until the queue empties),
- * this resolves after exactly one flush cycle — useful when testing
- * failure paths where the queue never empties. */
-export async function _awaitInflightForTests(): Promise<void> {
-    await _inflight;
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +342,15 @@ let _renderRetryDelay = RENDER_RETRY_BASE_MS;
 let _renderInflight: Promise<void> | null = null;
 /** The retry in flight (its render, then a catch-up), for the test hook. */
 let _renderRetry: Promise<void> | null = null;
+
+/** Test-only: clear the render state, so one test's failed render does not leak into the next. */
+export function _resetRenderStateForTests(): void {
+    _renderNeeded = false;
+    _renderDueAt = 0;
+    _renderRetryDelay = RENDER_RETRY_BASE_MS;
+    _renderInflight = null;
+    _renderRetry = null;
+}
 
 /**
  * Marks the room's snapshot as not loaded in this run: catch-up runs the

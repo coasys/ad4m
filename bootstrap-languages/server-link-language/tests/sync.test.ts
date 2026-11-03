@@ -79,9 +79,7 @@ let keyRing: KeyRing | null;
 
 function setup(transport: MockTransport): void {
     resetAdapters();
-    // Wipe any leftover batch state so a previous test's queued diff can't
-    // flush against this test's transport.
-    syncModule._resetBatchStateForTests();
+    syncModule._resetRenderStateForTests();
     initAdapters({ storage: new MockStorage(), transport, config });
     store.initStore(simpleHash);
 
@@ -516,11 +514,14 @@ class MockLinkServer {
     sequence = 0;
     /** Answers the next N POSTs with a 500 instead of accepting them. */
     failNext = 0;
+    /** Every POST /commit, accepted or not. */
+    posts = 0;
 
     constructor(transport: MockTransport) {
         transport.route(
             (url, method) => method === "POST" && url.endsWith("/commit"),
             (_url, _method, body) => {
+                this.posts++;
                 if (this.failNext > 0) {
                     this.failNext--;
                     return { status: 500, headers: {}, body: "{\"error\":\"down\"}" };
@@ -573,6 +574,38 @@ describe("sync: commit keeps the store in step with the server", () => {
 
         assert.equal(store.allLinks().links.length, 3);
         assert.equal(server.links.size, 3);
+    });
+
+    it("a refused commit leaves nothing behind for a restart: the executor's retry is its only send", async () => {
+        // The executor keeps a diff the language refused in its own
+        // pending-diffs table and retries it after a restart; the language
+        // keeps no outbox, so a restarted instance sends nothing by itself.
+        const transport = new MockTransport();
+        const storage = new MockStorage();
+        const server = new MockLinkServer(transport);
+        const start = () => {
+            resetAdapters();
+            initAdapters({ storage, transport, config });
+            store.initStore(simpleHash);
+            syncModule.initSync({
+                config,
+                getToken: async () => "test-token",
+                emitDiff: (diff) => emittedDiffs.push(diff),
+                getKeyRing: () => null,
+            });
+        };
+        const diff = { additions: manyLinks(3), removals: [] };
+        start();
+        server.failNext = 1;
+        await assert.rejects(() => syncModule.commit(diff));
+        assert.deepEqual(storage.listKeys(""), [], "a refused commit writes nothing to the language's storage");
+
+        start(); // the restart: a new instance over the same storage
+        assert.equal(server.posts, 1, "a restarted instance sends nothing by itself");
+        await syncModule.commit(diff); // the executor's retry
+        assert.equal(server.posts, 2);
+        assert.equal(server.sequence, 1, "the server accepted the diff once");
+        assert.equal(store.allLinks().links.length, 3);
     });
 
     it("an accepted commit is in the store and is not echoed back to the executor", async () => {
@@ -643,7 +676,6 @@ describe("sync: bootstrap", () => {
     it("holds the snapshot's undecryptable links, so catchUp re-reads the key ring", async () => {
         const transport = new MockTransport();
         resetAdapters();
-        syncModule._resetBatchStateForTests();
         initAdapters({ storage: new MockStorage(), transport, config });
         store.initStore(simpleHash);
         emittedDiffs = [];
@@ -731,347 +763,6 @@ describe("sync: render / currentRevision", () => {
         assert.equal(syncModule.currentRevision(), "");
         store.setRevision("rev-x");
         assert.equal(syncModule.currentRevision(), "rev-x");
-    });
-});
-
-// ---------------------------------------------------------------------------
-// coalesceDiffs — pure logic
-// ---------------------------------------------------------------------------
-
-describe("sync: coalesceDiffs (batch merge safety)", () => {
-    function link(overrides: Partial<LinkExpression["data"]> & { sig?: string; author?: string }): LinkExpression {
-        const { sig, author, ...data } = overrides;
-        return {
-            author: author ?? "did:key:zAuthor",
-            timestamp: "2026-01-01T00:00:00.000Z",
-            data: { source: "s", target: "t", predicate: "p", ...data },
-            proof: { signature: sig ?? "", key: "key" },
-        };
-    }
-
-    it("merges consecutive pure additions into a single segment (bulk-add hot path)", () => {
-        const diffs = Array.from({ length: 1500 }, (_, i) => ({
-            additions: [link({ source: `s${i}` })],
-            removals: [] as LinkExpression[],
-        }));
-        const segments = syncModule.coalesceDiffs(diffs);
-        assert.equal(segments.length, 1, "1500 pure additions should collapse to one POST");
-        assert.equal(segments[0].additions.length, 1500);
-        assert.equal(segments[0].removals.length, 0);
-    });
-
-    it("splits when a later diff adds a link that an earlier diff removed (remove-then-add preserves ordering)", () => {
-        // User intent: remove X, then re-add X → X should exist afterwards.
-        // Merging would give additions:[X],removals:[X]. Server applies adds
-        // then removes, and X would be gone. Split forces two POSTs so the
-        // server applies them in caller order.
-        const X = link({ source: "x", sig: "sig-X" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [], removals: [X] },
-            { additions: [X], removals: [] },
-        ]);
-        assert.equal(segments.length, 2);
-        assert.deepEqual(segments[0].removals, [X]);
-        assert.deepEqual(segments[1].additions, [X]);
-    });
-
-    it("splits when a later diff removes a link that an earlier diff added", () => {
-        // User intent: add X, then remove X → X should be gone.
-        // Merging here would happen to give the right answer (adds-then-removes
-        // in server order), but caller-visible ordering is still preserved by
-        // splitting — critical for anything relying on emitted-diff sequence.
-        const X = link({ source: "x", sig: "sig-X" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [X], removals: [] },
-            { additions: [], removals: [X] },
-        ]);
-        assert.equal(segments.length, 2);
-    });
-
-    it("merges when link identities never collide across the boundary", () => {
-        const X = link({ source: "x", sig: "sig-X" });
-        const Y = link({ source: "y", sig: "sig-Y" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [X], removals: [] },
-            { additions: [Y], removals: [] },
-            { additions: [], removals: [X] },
-        ]);
-        // First two diffs merge (X-add + Y-add, no collision). Third splits
-        // because removing X collides with the segment's X-add.
-        assert.equal(segments.length, 2);
-        assert.deepEqual(segments[0].additions.map((l) => l.data.source), ["x", "y"]);
-        assert.deepEqual(segments[1].removals.map((l) => l.data.source), ["x"]);
-    });
-
-    it("uses canonical fields (not signature) — same link with different signatures collides", () => {
-        // Two links with identical canonical fields but different
-        // signatures ARE the same link from the server's perspective
-        // (linkHash ignores the signature). A signature-based identity
-        // would let remove(oldSig) + add(newSig) merge into one segment
-        // and the server would apply add-then-remove → X gone, contrary
-        // to caller intent. Canonical-only identity forces the split.
-        const oldSig = link({ source: "x", sig: "sig-old" });
-        const reSigned = link({ source: "x", sig: "sig-new" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [], removals: [oldSig] },
-            { additions: [reSigned], removals: [] },
-        ]);
-        assert.equal(segments.length, 2, "identity must treat re-signed links as the same link");
-    });
-
-    it("works for signature-less fixtures via canonical fields", () => {
-        // Same canonical fields, no signature at all → same identity.
-        const X = link({ source: "x", sig: "" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [], removals: [X] },
-            { additions: [X], removals: [] },
-        ]);
-        assert.equal(segments.length, 2, "signature-less links must still collide by canonical fields");
-    });
-
-    it("collides regardless of whether one side has a signature and the other doesn't", () => {
-        // Locks in the identity invariant across the mixed-signature case:
-        // remove(unsigned copy) then add(signed copy) of the same logical
-        // link must still split into two segments, because canonical
-        // identity ignores the signature entirely.
-        const signed = link({ source: "x", sig: "sig-X" });
-        const unsigned = link({ source: "x", sig: "" });
-        const segments = syncModule.coalesceDiffs([
-            { additions: [], removals: [unsigned] },
-            { additions: [signed], removals: [] },
-        ]);
-        assert.equal(segments.length, 2, "same link identity must split regardless of signature presence");
-    });
-
-    it("distinguishes links whose fields would collide under naïve pipe-serialisation", () => {
-        // author="a|b" timestamp="t" vs author="a" timestamp="b|t" would
-        // collide under `${author}|${timestamp}`. JSON serialisation
-        // escapes the boundary so identities stay distinct — meaning a
-        // remove of A must NOT be treated as a conflict with a segment
-        // containing B, and vice versa.
-        const A: LinkExpression = {
-            author: "a|b",
-            timestamp: "t",
-            data: { source: "s", target: "t", predicate: "p" },
-            proof: { signature: "", key: "k" },
-        };
-        const B: LinkExpression = {
-            author: "a",
-            timestamp: "b|t",
-            data: { source: "s", target: "t", predicate: "p" },
-            proof: { signature: "", key: "k" },
-        };
-        // Adding both together shouldn't count as a self-conflict when a
-        // later diff removes A: only A's segment should conflict.
-        const segments = syncModule.coalesceDiffs([
-            { additions: [A, B], removals: [] },
-            { additions: [], removals: [A] },
-        ]);
-        assert.equal(segments.length, 2);
-        assert.equal(segments[1].removals[0].author, "a|b");
-    });
-});
-
-// ---------------------------------------------------------------------------
-// enqueueCommitBatched / drainCommitBatch — flush behavior
-// ---------------------------------------------------------------------------
-
-describe("sync: enqueueCommitBatched", () => {
-    function makeCommitTransport(): { transport: MockTransport; posts: any[] } {
-        const transport = new MockTransport();
-        const posts: any[] = [];
-        transport.route(
-            (url, method) => method === "POST" && url.endsWith("/commit"),
-            (_url, _method, body) => {
-                posts.push(JSON.parse(body));
-                return { status: 200, headers: {}, body: "{}" };
-            },
-        );
-        return { transport, posts };
-    }
-
-    it("collapses a burst of 1500 addLinks into ONE POST (the stress-test hot path)", async () => {
-        const { transport, posts } = makeCommitTransport();
-        setup(transport);
-        for (let i = 0; i < 1500; i++) {
-            syncModule.enqueueCommitBatched({
-                additions: [{
-                    author: "did:key:zAuthor",
-                    timestamp: `2026-01-01T00:00:00.${String(i).padStart(3, "0")}Z`,
-                    data: { source: `s${i}`, target: "t", predicate: "p" },
-                    proof: { signature: `sig-${i}`, key: "k" },
-                }],
-                removals: [],
-            });
-        }
-        await syncModule.drainCommitBatch();
-        assert.equal(posts.length, 1, "microtask flush should coalesce the burst into one POST");
-        assert.equal(posts[0].additions.length, 1500);
-    });
-
-    it("splits into two POSTs when remove(X) is followed by add(X)", async () => {
-        const { transport, posts } = makeCommitTransport();
-        setup(transport);
-        const X: LinkExpression = {
-            author: "did:key:zAuthor",
-            timestamp: "2026-01-01T00:00:00.000Z",
-            data: { source: "x", target: "t", predicate: "p" },
-            proof: { signature: "sig-X", key: "k" },
-        };
-        syncModule.enqueueCommitBatched({ additions: [], removals: [X] });
-        syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
-        await syncModule.drainCommitBatch();
-        assert.equal(posts.length, 2, "must not swap remove-then-add into add-then-remove");
-        assert.deepEqual(posts[0].removals.length, 1);
-        assert.deepEqual(posts[1].additions.length, 1);
-    });
-
-    it("drainCommitBatch flushes anything still pending (used by teardown)", async () => {
-        const { transport, posts } = makeCommitTransport();
-        setup(transport);
-        syncModule.enqueueCommitBatched({
-            additions: [{
-                author: "did:key:zAuthor",
-                timestamp: "2026-01-01T00:00:00.000Z",
-                data: { source: "s", target: "t", predicate: "p" },
-                proof: { signature: "sig", key: "k" },
-            }],
-            removals: [],
-        });
-        await syncModule.drainCommitBatch();
-        assert.equal(posts.length, 1);
-    });
-
-    it("retries a failing segment with backoff and succeeds when the server recovers", async () => {
-        const transport = new MockTransport();
-        let calls = 0;
-        transport.route(
-            (url, method) => method === "POST" && url.endsWith("/commit"),
-            () => {
-                calls++;
-                if (calls < 3) return { status: 500, headers: {}, body: "transient" };
-                return { status: 200, headers: {}, body: "{}" };
-            },
-        );
-        setup(transport);
-        syncModule.enqueueCommitBatched({
-            additions: [{
-                author: "did:key:zAuthor",
-                timestamp: "2026-01-01T00:00:00.000Z",
-                data: { source: "s", target: "t", predicate: "p" },
-                proof: { signature: "sig", key: "k" },
-            }],
-            removals: [],
-        });
-        await syncModule.drainCommitBatch();
-        assert.equal(calls, 3, "must retry up to MAX_COMMIT_ATTEMPTS on transient failure");
-        assert.ok(!syncStates.includes("LinkLanguageInstalledButNotSynced"),
-            "successful retry should not emit the not-synced state");
-    });
-
-    it("a throwing emitSyncState during a failed flush does not poison the flush chain", async () => {
-        // Regression: _inflight is a single promise chain. If a flush
-        // rejects (e.g. because emitSyncState throws after resetAdapters),
-        // every subsequent `_inflight.then(flushBatch)` would be skipped
-        // and no future enqueue would ever POST. The terminal `.catch()`
-        // on the chain — plus emitSyncStateSafe wrapping the emit — must
-        // keep the chain live.
-        const transport = new MockTransport();
-        const posts: any[] = [];
-        let shouldFail = true;
-        transport.route(
-            (url, method) => method === "POST" && url.endsWith("/commit"),
-            (_url, _method, body) => {
-                posts.push(JSON.parse(body));
-                if (shouldFail) return { status: 500, headers: {}, body: "hard failure" };
-                return { status: 200, headers: {}, body: "{}" };
-            },
-        );
-        resetAdapters();
-        syncModule._resetBatchStateForTests();
-        initAdapters({ storage: new MockStorage(), transport, config });
-        store.initStore(simpleHash);
-        emittedDiffs = [];
-        syncStates = [];
-        keyRing = null;
-        // Throw from emitSyncState — simulates a torn-down runtime.
-        syncModule.initSync({
-            config,
-            getToken: async () => "test-token",
-            emitDiff: (diff) => emittedDiffs.push(diff),
-            emitSyncState: () => { throw new Error("runtime torn down"); },
-            getKeyRing: () => keyRing,
-        });
-
-        // First flush: hard-fails all retries → tries to emit → emitter throws.
-        const X: LinkExpression = {
-            author: "did:key:zAuthor",
-            timestamp: "2026-01-01T00:00:00.000Z",
-            data: { source: "x", target: "t", predicate: "p" },
-            proof: { signature: "sig-X", key: "k" },
-        };
-        syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
-        // Await one flush cycle only — drainCommitBatch would re-schedule
-        // the permanently-failing segment indefinitely.
-        await syncModule._awaitInflightForTests();
-        assert.equal(posts.length, 3, "first flush must attempt all 3 retries");
-
-        // Now the server recovers. The chain must still be live — the
-        // next enqueue must actually POST. The re-enqueued X from the
-        // failed flush coalesces with Y into one successful commit.
-        shouldFail = false;
-        const Y: LinkExpression = {
-            author: "did:key:zAuthor",
-            timestamp: "2026-01-01T00:00:00.001Z",
-            data: { source: "y", target: "t", predicate: "p" },
-            proof: { signature: "sig-Y", key: "k" },
-        };
-        syncModule.enqueueCommitBatched({ additions: [Y], removals: [] });
-        await syncModule.drainCommitBatch();
-        assert.ok(posts.length > 3, "chain must still be live after the poisoning attempt");
-        const successfulAdds = posts.slice(3).flatMap((p: any) => p.additions);
-        assert.ok(
-            successfulAdds.some((a: any) => a.data.source === "y"),
-            "Y must appear in a successful commit after the chain survived",
-        );
-    });
-
-    it("re-enqueues failed segments for the next flush cycle", async () => {
-        // When a segment fails all retries, it and all remaining
-        // downstream segments get re-enqueued into the pending queue
-        // so the next flush picks them up automatically.
-        const transport = new MockTransport();
-        const posts: any[] = [];
-        let failCount = 0;
-        transport.route(
-            (url, method) => method === "POST" && url.endsWith("/commit"),
-            (_url, _method, body) => {
-                posts.push(JSON.parse(body));
-                failCount++;
-                // Fail the first 3 attempts (one full retry cycle),
-                // then succeed so the drain can settle.
-                if (failCount <= 3) return { status: 500, headers: {}, body: "hard failure" };
-                return { status: 200, headers: {}, body: "{}" };
-            },
-        );
-        setup(transport);
-        const X: LinkExpression = {
-            author: "did:key:zAuthor",
-            timestamp: "2026-01-01T00:00:00.000Z",
-            data: { source: "x", target: "t", predicate: "p" },
-            proof: { signature: "sig-X", key: "k" },
-        };
-        // Forces three segments: remove(X); add(X); remove(X).
-        syncModule.enqueueCommitBatched({ additions: [], removals: [X] });
-        syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
-        syncModule.enqueueCommitBatched({ additions: [], removals: [X] });
-        await syncModule.drainCommitBatch();
-        // First flush: segment 1 fails 3 times → re-enqueued with segments 2+3.
-        // Second flush: segment 1 succeeds (attempt 4), then segments 2+3.
-        assert.ok(posts.length > 3,
-            `re-enqueued segments should produce more POSTs than the initial 3 retries (got ${posts.length})`);
-        assert.ok(syncStates.includes("LinkLanguageInstalledButNotSynced"),
-            "must report LinkLanguageInstalledButNotSynced on first failure");
     });
 });
 
