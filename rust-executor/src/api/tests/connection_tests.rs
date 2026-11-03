@@ -590,3 +590,78 @@ async fn a_token_that_expired_gets_401_and_ends_the_connection() {
         .expect("serve returns once the token stops working")
         .unwrap();
 }
+
+/// A handler map whose `perspective.subscribeQuery` never answers: it reports each call that
+/// starts on `started` and each one dropped (cancelled) on `dropped`.
+fn hanging_subscribe(
+    started: mpsc::UnboundedSender<()>,
+    dropped: mpsc::UnboundedSender<()>,
+) -> HandlerMap {
+    use crate::api::guards::Guard;
+    use crate::api::ws_handler::{NoParams, WsRpcError};
+    struct OnDrop(mpsc::UnboundedSender<()>);
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+    let mut map = HandlerMap::new();
+    // Every method needs a guard, or the dispatcher refuses it before the handler runs.
+    map.method::<NoParams, bool>("perspective.subscribeQuery", move |_, _| {
+        let (started, dropped) = (started.clone(), dropped.clone());
+        async move {
+            let _dropped = OnDrop(dropped);
+            started.send(()).unwrap();
+            std::future::pending::<Result<Value, WsRpcError>>().await
+        }
+    })
+    .guard(Guard::Open);
+    map
+}
+
+#[tokio::test]
+async fn closing_the_socket_cancels_a_live_query_still_opening() {
+    let (started, mut starts) = mpsc::unbounded_channel();
+    let (dropped, mut drops) = mpsc::unbounded_channel();
+    let mut socket = Socket::open_with_handlers(hanging_subscribe(started, dropped)).await;
+    socket.send(json!({ "id": "s", "type": "perspective.subscribeQuery" }));
+    tokio::time::timeout(Duration::from_secs(5), starts.recv())
+        .await
+        .expect("the subscribe call starts");
+
+    // The client gives up and goes away while the first result is still being computed
+    // (#1595): nobody is left to receive it, so the call must not keep running.
+    socket.close().await;
+    tokio::time::timeout(Duration::from_secs(5), drops.recv())
+        .await
+        .expect("closing the socket cancels the subscribe call");
+}
+
+#[tokio::test]
+async fn a_connection_runs_a_bounded_number_of_live_query_opens_at_once() {
+    use crate::api::ws_rpc::MAX_OPENING_LIVE_QUERIES;
+    let (started, mut starts) = mpsc::unbounded_channel();
+    let (dropped, _drops) = mpsc::unbounded_channel();
+    let socket = Socket::open_with_handlers(hanging_subscribe(started, dropped)).await;
+    // A client that abandons each subscribe and asks again, as the waker did (#1595).
+    for i in 0..MAX_OPENING_LIVE_QUERIES + 4 {
+        socket.send(json!({ "id": format!("s{i}"), "type": "perspective.subscribeQuery" }));
+    }
+    for _ in 0..MAX_OPENING_LIVE_QUERIES {
+        tokio::time::timeout(Duration::from_secs(5), starts.recv())
+            .await
+            .expect("calls up to the cap start");
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), starts.recv())
+            .await
+            .is_err(),
+        "a call beyond the cap started while {MAX_OPENING_LIVE_QUERIES} were running"
+    );
+
+    // Cancelling one running call frees a turn for a waiting one.
+    socket.send(json!({ "id": "c", "type": "request.cancel", "params": { "targetId": "s0" } }));
+    tokio::time::timeout(Duration::from_secs(5), starts.recv())
+        .await
+        .expect("a waiting call starts once a running one is cancelled");
+}

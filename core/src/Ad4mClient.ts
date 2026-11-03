@@ -109,6 +109,15 @@ export class Ad4mClient {
         return this.#apiClient.onAuthFailed(callback)
     }
 
+    /**
+     * Reconnect now if the connection to the executor dropped and the client is
+     * waiting out its backoff: for a host that knows the executor is back (it
+     * restarted it, or the device woke). A no-op while connected or connecting.
+     */
+    reconnectNow(): void {
+        this.#apiClient.reconnectNow()
+    }
+
     /** Close all event connections and clear in-memory caches */
     close(): void {
         this.#agentClient.clearByDidCache()

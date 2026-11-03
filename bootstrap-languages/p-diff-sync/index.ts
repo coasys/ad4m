@@ -9,7 +9,7 @@
  */
 
 import { BUNDLE, DNA_ROLE, ZOME_NAME } from './build/happ.js';
-import { Mutex } from "https://esm.sh/v135/async-mutex@0.4.0";
+import { Mutex } from "./vendor/async-mutex@0.4.0.mjs";
 import {
     defineLanguage,
     agentDid,

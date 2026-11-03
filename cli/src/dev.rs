@@ -11,6 +11,8 @@ pub enum DevFunctions {
     /// Generate bootstrap seed from a local prototype JSON file declaring languages to be published
     GenerateBootstrap {
         agent_path: String,
+        /// The agent's passphrase, or `-` to read it from the first line of
+        /// stdin, which keeps it out of the process list.
         passphrase: String,
         seed_proto: String,
     },
@@ -127,6 +129,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 "Attempting to generate a new bootstrap seed using agent path: {:?}\n",
                 agent_path
             );
+            let passphrase = resolve_passphrase(passphrase, std::io::stdin().lock())?;
 
             //Load the seed proto first so we know that works before making new agent path
             let seed_proto = fs::read_to_string(seed_proto)?;
@@ -253,6 +256,23 @@ pub async fn run(command: DevFunctions) -> Result<()> {
     }
 }
 
+/// The passphrase argument itself, or for `-` the first line of `stdin`
+/// without its line ending.
+fn resolve_passphrase(arg: String, mut stdin: impl std::io::BufRead) -> Result<String> {
+    if arg != "-" {
+        return Ok(arg);
+    }
+    let mut line = String::new();
+    stdin.read_line(&mut line)?;
+    let passphrase = line.trim_end_matches(['\n', '\r']);
+    if passphrase.is_empty() {
+        return Err(anyhow!(
+            "passphrase `-` given, but stdin held no passphrase"
+        ));
+    }
+    Ok(passphrase.to_string())
+}
+
 /// Starts an executor and resolves when it stops. That is `Ok` only when the
 /// REST API thread returned cleanly, `Err` when the API failed to start (e.g.
 /// the port is taken) or the executor panicked.
@@ -362,6 +382,24 @@ mod tests {
     /// Bounds every test: with the executor handle ignored, a workflow that
     /// never finishes would hang instead of failing.
     const BOUND: Duration = Duration::from_secs(2);
+
+    #[test]
+    fn a_passphrase_argument_is_taken_as_given() {
+        let passphrase = resolve_passphrase("secret".into(), &b"from stdin\n"[..]).unwrap();
+        assert_eq!(passphrase, "secret");
+    }
+
+    #[test]
+    fn a_dash_reads_the_first_stdin_line_without_its_line_ending() {
+        let passphrase = resolve_passphrase("-".into(), &b"pass word \r\nsecond\n"[..]).unwrap();
+        assert_eq!(passphrase, "pass word ");
+    }
+
+    #[test]
+    fn a_dash_with_empty_stdin_is_an_error() {
+        assert!(resolve_passphrase("-".into(), &b""[..]).is_err());
+        assert!(resolve_passphrase("-".into(), &b"\n"[..]).is_err());
+    }
 
     #[tokio::test]
     async fn executor_error_fails_the_workflow() {

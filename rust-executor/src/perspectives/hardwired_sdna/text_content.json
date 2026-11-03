@@ -1,9 +1,8 @@
 {
   "target_class": "ad4m://TextContent",
   "abstract": true,
-  "interpretation_hint": "Text a view or an LLM can read: a message, a note, a block of a document. It may contain HTML or Markdown. Its mentions, when it has any, are the agents (DIDs) it mentions.",
+  "interpretation_hint": "Text a view or an LLM can read: a message, a note, a block of a document. It may contain HTML or Markdown.",
   "properties": [
-    {"path": "ad4m://text", "name": "text", "min_count": 1, "max_count": 1},
-    {"path": "ad4m://mentions", "name": "mentions", "node_kind": "IRI", "relation_kind": "hasMany", "collection": true}
+    {"path": "ad4m://text", "name": "text", "max_count": 1}
   ]
 }
