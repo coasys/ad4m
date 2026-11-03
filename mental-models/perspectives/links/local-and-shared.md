@@ -10,7 +10,7 @@ Every stored link has a **link status**: `Shared` (the default) or `Local`. In a
 
 | Path | Status used |
 |---|---|
-| `perspective.addLink`, `addLinks`, `linkMutations` additions | the `status` parameter (`parse_link_status`): missing, `"shared"` or `"SHARED"` means `Shared`; any other value means `Local` |
+| `perspective.addLink`, `addLinks`, `linkMutations` additions | the `status` parameter (`parse_link_status`): missing means `Shared`; `"shared"` or `"local"` in any casing means that status; any other value is refused (400) |
 | `perspective.removeLinks`, `linkMutations` removals | the status the link was stored with, not the call's |
 | Model property declared `local: true`, SHACL action with `local` | `Local` (`execute_commands`) |
 | Links that arrive from the link language | always `Shared` (`diff_from_link_language`); a diff does not add, relabel or remove a link stored as `Local` (`persist_remote_diff`) |

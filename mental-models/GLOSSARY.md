@@ -250,7 +250,7 @@ One definition per term, in alphabetical order. Each entry gives the code name i
 
 **Peers (local, remote)** (`Language::set_local_agents`, `Language::others`): The agents on this executor that use a link language, and the other agents that the link language reports. [Link languages](languages/link-languages/README.md)
 
-**Pending diff** (`perspective_diff` table, `add_pending_diff`, `pending_diffs_loop`): A shared diff that the link language did not accept yet, queued in SQLite for retry. [Neighbourhood sync](perspectives/neighbourhoods/sync.md)
+**Pending diff** (`perspective_diff` table, `add_pending_diff`, `pending_diffs_loop`): A shared diff that the link language did not accept yet, queued in SQLite for retry. One that the language fails alone while it accepts the diffs after it is parked (`park_pending_diffs`): its row is kept but never sent again. [Neighbourhood sync](perspectives/neighbourhoods/sync.md)
 
 **Perspective** (`PerspectiveInstance`, `PerspectiveHandle`): A graph of signed links that the executor stores for one or more owning agents. [Perspectives](perspectives/README.md)
 
