@@ -334,10 +334,6 @@ async fn main() -> Result<()> {
         
         let _ = ctrlc::set_handler(move || {
             println!("Received CTRL-C! Exiting...");
-            // The local AI runtimes are the executor's children: they go with it.
-            rust_executor::ai_service::local::stop_children_blocking(
-                std::time::Duration::from_secs(3),
-            );
             exit(0);
         });
 

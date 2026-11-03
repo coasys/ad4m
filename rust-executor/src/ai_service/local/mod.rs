@@ -1350,16 +1350,25 @@ pub fn autostart() {
     });
 }
 
-/// At executor shutdown.
+/// How long a runtime has after SIGTERM when the executor exits. With the Holochain
+/// conductor's stop beside it, under the 4 s a signal leaves the executor's shutdown.
+const EXIT_GRACE: Duration = Duration::from_secs(2);
+
+/// At executor shutdown: every runtime gets SIGTERM at once and SIGKILL after
+/// [`EXIT_GRACE`], so the stop fits in the deadline the executor's shutdown has (a runtime
+/// that ignores SIGTERM would otherwise hold it for the supervisor's 5 s, per runtime).
 pub async fn stop_on_exit() {
+    let _ = tokio::task::spawn_blocking(|| stop_children_blocking(EXIT_GRACE)).await;
+    // The children are gone: this ends their supervisors and marks the endpoints down.
     stop_all().await;
     let _ = std::fs::remove_file(pid_file(&LocalPaths::from_config()));
 }
 
 /// Stop the runtimes from a thread that cannot await, right before the process exits:
-/// the CLI's Ctrl-C handler and the launcher's Quit call `std::process::exit` without the
-/// executor's shutdown. SIGTERM, up to `grace` for them to go, then SIGKILL. Linux would
-/// kill them anyway (`PR_SET_PDEATHSIG`); macOS and Windows would not.
+/// the executor's shutdown ([`stop_on_exit`]) and the launcher's Quit, which calls
+/// `std::process::exit` without that shutdown. SIGTERM, up to `grace` for them to go, then
+/// SIGKILL. After a crash Linux kills them anyway (`PR_SET_PDEATHSIG`); macOS and Windows
+/// would not.
 pub fn stop_children_blocking(grace: Duration) {
     use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
     let pids: Vec<Pid> = MANAGED_PORTS
@@ -1636,6 +1645,95 @@ mod tests {
         assert_eq!(polite.wait().unwrap().signal(), Some(libc::SIGTERM));
         assert_eq!(stubborn.wait().unwrap().signal(), Some(libc::SIGKILL));
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// The executor's shutdown (what a signal runs before the process exits) stops the
+    /// runtimes it supervises, one that ignores SIGTERM too, within the deadline a signal
+    /// leaves it, and leaves none of them supervised.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_executor_shutdown_stops_the_supervised_runtimes() {
+        use crate::config::{Ad4mConfig, GLOBAL_AD4M_CONFIG};
+        let store = tempfile::tempdir().unwrap();
+        let saved_config = GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        crate::config::set_global_config(Ad4mConfig {
+            local_ai_dir: Some(store.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+
+        // The fake runtimes do not listen themselves: the test holds their ports.
+        let mut listeners = Vec::new();
+        let mut pids = Vec::new();
+        for (provider, script) in [
+            (Provider::LlamaServer, "exec sleep 60"),
+            // Ignores SIGTERM (inherited through exec), as whisper-server in effect does.
+            (Provider::WhisperServer, "trap '' TERM; exec sleep 60"),
+        ] {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            listeners.push(listener);
+            let supervised = Supervised::start(
+                ChildSpec {
+                    name: provider.as_str().into(),
+                    program: PathBuf::from("/bin/sh"),
+                    args: vec!["-c".into(), script.into()],
+                    env: vec![],
+                    cwd: store.path().to_path_buf(),
+                    port,
+                    readiness: Readiness::Tcp,
+                    log_file: store.path().join(format!("{}.log", provider.as_str())),
+                },
+                Timing {
+                    start_timeout: Duration::from_secs(5),
+                    probe_interval: Duration::from_millis(100),
+                    backoff: Duration::from_millis(20),
+                },
+                RestartBudget::standard(),
+            );
+            let status = supervised.wait_until_settled(Duration::from_secs(10)).await;
+            assert_eq!(status.phase, Phase::Running, "{provider:?}");
+            pids.push(status.pid.unwrap());
+            MANAGED_PORTS.write().unwrap().insert(
+                port,
+                ManagedPort {
+                    status: supervised.watch(),
+                    readiness: Readiness::Tcp,
+                    served: vec![],
+                },
+            );
+            RUNNING.lock().await.insert(
+                provider,
+                Running {
+                    supervised,
+                    endpoint_id: None,
+                },
+            );
+        }
+
+        let started = Instant::now();
+        crate::clean_up_before_exit().await;
+        let took = started.elapsed();
+
+        let alive = |pid: u32| {
+            // SAFETY: signal 0 only checks that the process exists.
+            unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        };
+        let still_alive: Vec<u32> = pids.iter().copied().filter(|p| alive(*p)).collect();
+        let running_left = RUNNING.lock().await.len();
+        let ports_left = MANAGED_PORTS.read().unwrap().len();
+        *GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = saved_config;
+        drop(listeners);
+
+        assert!(still_alive.is_empty(), "still running: {still_alive:?}");
+        assert_eq!(running_left, 0, "no runtime is left supervised");
+        assert_eq!(ports_left, 0, "no managed port is left");
+        assert!(
+            took < Duration::from_secs(4),
+            "the stop took {took:?}, past the deadline a signal leaves the shutdown"
+        );
     }
 
     /// `ai.localInstall`'s answer is the status after the install: it says no install runs
