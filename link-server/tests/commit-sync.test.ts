@@ -351,3 +351,41 @@ test("sync from an early cursor returns every later diff, past 10,000 commits", 
     assert.equal(all.body.diffs.length, later + 1);
   });
 });
+
+test("render still returns the whole active set for a room whose early diffs were pruned before this change", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    const links: LinkExpression[] = [];
+    for (let i = 0; i < 5; i++) {
+      const link = await createSignedLink(agent, { source: `s${i}`, predicate: "p", target: `t${i}` });
+      links.push(link);
+      const res = await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [link], removals: [] }, token);
+      assert.equal(res.status, 200);
+    }
+    const removed = await postJson(
+      `${server.url}/rooms/${roomId}/commit`, { additions: [], removals: [links[4]] }, token,
+    );
+    assert.equal(removed.status, 200);
+
+    // A server that ran the old pruning deleted the room's early diff rows
+    // and kept the active set they built.
+    server.built.db.raw.prepare("DELETE FROM diffs WHERE room_id = ? AND sequence <= ?").run(roomId, 3);
+
+    const sync = await getJson<{ diffs: PerspectiveDiff[] }>(`${server.url}/rooms/${roomId}/sync?since=0`, token);
+    assert.equal(sync.body.diffs.length, 3, "the gap stays in the log");
+
+    const render = await getJson<{ links: LinkExpression[]; revision: string }>(
+      `${server.url}/rooms/${roomId}/render`, token,
+    );
+    assert.equal(render.status, 200);
+    assert.deepEqual(
+      render.body.links.map((l) => l.data.source).sort(),
+      ["s0", "s1", "s2", "s3"],
+      "render answers from the active set, so it repairs a member behind the gap",
+    );
+    assert.equal(render.body.revision, computeRevision(links.slice(0, 4).map(linkHashOf)));
+  });
+});
