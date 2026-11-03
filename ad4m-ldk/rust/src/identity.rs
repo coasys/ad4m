@@ -161,7 +161,7 @@ pub struct AgentRecord {
     /// only when the log lists `signedBy` and that key is valid at this seq (a key revoked at
     /// seq N signs nothing valid anchored at or after N), and the seq is at or below the log's
     /// head. The person is the record's did and the key id is read from the log, so the anchor
-    /// carries neither; nor a hash, since a fork freezes the identity anyway.
+    /// carries neither; nor a hash, since the store keeps one branch of a fork.
     #[serde(default)]
     pub anchor: Option<u64>,
     /// `coasys:agent-record` scheme over {profile, version, anchor}.

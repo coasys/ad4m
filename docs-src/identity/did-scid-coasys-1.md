@@ -403,8 +403,9 @@ The anchor carries no DID, key id or hash. The identity is known from the conten
 keyed by its did:scid, and a link's author key maps to its identity through a key lookup that
 the verifier confirms against the log (a key enters a log only with its own co-signature). The
 key id is read from the log, which lists the signing key. A hash would only tell forked
-branches apart, and a fork is only detected, never resolved (sections 8 and 11): it already
-freezes the identity, so a hash would add bytes to every record and link and enable no check.
+branches apart, and a fork is only detected, never resolved (sections 8 and 11): the store
+keeps the branch it held, and a fork by the current master freezes the identity there until a
+`rotate` (section 14), so a hash would add bytes to every record and link and enable no check.
 
 The anchor is not a parameter of the signer's `did:key`. A `did:key` has one fixed DID
 document, so a version of it means nothing, and the `did:key` method defines no DID parameters.
@@ -538,10 +539,20 @@ Coasys identity store adds these checks:
   valid at the head of the log it holds when the record arrives (section 10, anchors).
 - **Expiry window.** The store refuses a bot scope's `expires` in the past or more than 400
   days ahead.
-- **Forks freeze.** An append whose event sits at a seq the store holds, differs from the
-  stored event and replays on the events before it is a fork (section 11). The store keeps it
-  as evidence with the competing event, serves the log it held, and takes no further event or
-  signed request for that identity.
+- **Forks by the current master freeze.** An append whose event sits at a seq the store holds,
+  differs from the stored event and replays on the events before it is a fork (section 11).
+  The store keeps a fork as evidence with the competing event, one per signing master (a
+  further competing event by a master that already has a recorded fork is answered with that
+  fork), answers it with the fork, and serves the log it held. The identity is frozen only
+  while the competing event's signing master is the current master at the head of the held
+  log; a competing `rotate` is signed by the master it names, so it freezes once the held log
+  rotates onto that master, until a further `rotate`. A fork signed by a master the held
+  log has rotated away from (at the fork's seq or later) freezes nothing: rotation is the remedy
+  for a stolen master, and a retired master must not be able to lock the identity out. While
+  frozen the store takes no signed request and one kind of append only: a `rotate`, which the
+  committed next key signs (a holder of the current master alone cannot). Once it is appended
+  the competing event's signer is no longer current, so the freeze ends by the same rule. The
+  store derives the freeze from the recorded fork and the held log; it stores no flag.
 - **Proof of work for a log with no vouching note**, below.
 
 ### Proof of work for a log with no vouching note

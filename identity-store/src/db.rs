@@ -9,7 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use ad4m_hash_chain::store::SqliteChainStore;
-use ad4m_hash_chain::{ChainType, ForkEvidence};
+use ad4m_hash_chain::{ChainType, ForkEvidence, Multikey};
 use ad4m_identity_core::{fold, Event, KelChain, KeyState};
 use ad4m_ldk::identity::{KeyIndexEntry, SignedHead};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -77,6 +77,13 @@ CREATE TABLE IF NOT EXISTS claims (
     device_key TEXT NOT NULL,
     claimed_at INTEGER NOT NULL,
     PRIMARY KEY (scid, offer_id)
+);
+CREATE TABLE IF NOT EXISTS fork_signers (
+    scid   TEXT NOT NULL,
+    signer TEXT NOT NULL,
+    seq    INTEGER NOT NULL,
+    theirs TEXT NOT NULL,
+    PRIMARY KEY (scid, signer)
 );
 ";
 
@@ -155,11 +162,69 @@ pub fn load_chain_before(
     Ok(Some(chain))
 }
 
-/// The first fork recorded for `scid`, if any: the store froze the identity then.
-pub fn first_fork(conn: &Connection, scid: &str) -> Result<Option<ForkEvidence>, ApiError> {
-    Ok(SqliteChainStore::forks_in(conn, KEL, &scid.to_string())?
-        .into_iter()
-        .next())
+/// The recorded fork that freezes `scid`, if any (the fork rule of `identity-store/AGENTS.md`,
+/// section 14 of `docs-src/identity/did-scid-coasys-1.md`): a fork whose rival event was signed
+/// by the master that is current at the head of the held log `held`. A fork signed by a master
+/// the held log has rotated away from (at the fork's seq or later) stays recorded and served as
+/// evidence but freezes nothing, so a retired (stolen) master cannot lock the identity out. A
+/// `rotate` appended on the held log retires the rival's signer and so ends the freeze. Derived
+/// from the fork rows and `held` each time (one primary-key lookup in `fork_signers`): nothing
+/// about a freeze is stored.
+pub fn freezing_fork(
+    conn: &Connection,
+    scid: &str,
+    held: &KelChain,
+) -> Result<Option<ForkEvidence>, ApiError> {
+    let Some(current) = held.state().current_master() else {
+        return Ok(None);
+    };
+    signer_fork(conn, scid, &current.sign)
+}
+
+/// The fork recorded for `scid` whose rival event `signer` signed, if any.
+fn signer_fork(
+    conn: &Connection,
+    scid: &str,
+    signer: &Multikey,
+) -> Result<Option<ForkEvidence>, ApiError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT f.seq, c.ours, f.theirs FROM fork_signers f
+         JOIN chain_forks c ON c.type = ?1 AND c.chain = f.scid AND c.seq = f.seq
+                           AND c.theirs = f.theirs
+         WHERE f.scid = ?2 AND f.signer = ?3",
+    )?;
+    Ok(stmt
+        .query_row(params![KEL, scid, signer], |row| {
+            Ok(ForkEvidence {
+                chain: scid.to_string(),
+                seq: from_sql(row.get(0)?),
+                ours: row.get(1)?,
+                theirs: row.get(2)?,
+            })
+        })
+        .optional()?)
+}
+
+/// Records the fork `fork` (rival event `theirs_json`, signed by the master `signer`) and
+/// answers the evidence to send back. The store keeps at most one fork per identity and signing
+/// master: a second rival by a master that already has one adds nothing and is answered with the
+/// recorded fork, so the fork rows of an identity are bounded by the masters its log ever had.
+/// Call inside the append's transaction.
+pub(crate) fn record_fork(
+    conn: &Connection,
+    fork: ForkEvidence,
+    theirs_json: &str,
+    signer: &Multikey,
+) -> Result<ForkEvidence, ApiError> {
+    if let Some(recorded) = signer_fork(conn, &fork.chain, signer)? {
+        return Ok(recorded);
+    }
+    SqliteChainStore::record_fork_in(conn, KEL, &fork, theirs_json)?;
+    conn.execute(
+        "INSERT INTO fork_signers (scid, signer, seq, theirs) VALUES (?1, ?2, ?3, ?4)",
+        params![fork.chain, signer, to_sql(fork.seq)?, fork.theirs],
+    )?;
+    Ok(fork)
 }
 
 /// Up to `limit` stored events of `scid` from `from`: their JSON and when they were stored.

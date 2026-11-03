@@ -569,9 +569,9 @@ fn import_appends_detects_gaps_and_forks() {
     let mut shuffled: Vec<Event> = log.events[2..].to_vec();
     shuffled.reverse();
     match import(&mut chain, &shuffled).unwrap() {
-        ImportOutcome::Appended { head, count } => {
+        ImportOutcome::Appended { head, entries } => {
             assert_eq!(head, log.chain.head());
-            assert_eq!(count, 5);
+            assert_eq!(entries, log.events[2..].to_vec());
         }
         other => panic!("{other:?}"),
     }

@@ -494,7 +494,7 @@ Rules for an implementation:
   when the record arrives (`403 signer` otherwise): a revoked key cannot backdate a new record
   to an anchor before its revocation, and a record the store took before the revocation stays
   valid. The language on read checks at the anchor and relies on that admission. The DID is the record's, the key id is in the log, and
-  a fork freezes the identity anyway, so the anchor carries no DID, key id or hash.
+  the store keeps one branch of a fork, so the anchor carries no DID, key id or hash.
 
 The executor-side contract is `IdentityBackend` (`rust-executor/src/identity/backend.rs`); the
 calls it makes today are `log`, `keyOwner`, `append`, `openOffer`, `listOffers`, `claimOffer`

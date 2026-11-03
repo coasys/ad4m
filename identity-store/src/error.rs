@@ -52,8 +52,9 @@ impl ApiError {
     }
 
     /// `409 {error:"forked", head, fork}`: the store holds a fork of the log (two validly signed
-    /// events at `fork.seq`), so the identity is frozen and the store takes no further write
-    /// for it. `head` is the head the store keeps serving.
+    /// events at `fork.seq`). The answer to the append that brought the fork, and to every
+    /// append and signed request while the fork freezes the identity (`db::freezing_fork`).
+    /// `head` is the head the store keeps serving.
     pub fn forked(head: &SignedHead, fork: &ad4m_hash_chain::ForkEvidence) -> Self {
         Self::new(
             StatusCode::CONFLICT,
