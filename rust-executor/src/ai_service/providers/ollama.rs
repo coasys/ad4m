@@ -591,10 +591,12 @@ impl RemoteChat for OllamaChat {
             .await
             .map_err(|e| super::http::UpstreamUnreachable::new(&self.endpoint, &e, ""))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let err_body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Ollama API error {status}: {err_body}"));
+        if !response.status().is_success() {
+            return Err(
+                super::http::UpstreamStatus::read(response, &self.endpoint, "")
+                    .await
+                    .into(),
+            );
         }
 
         let parsed: ChatResponse = response
@@ -650,10 +652,12 @@ impl RemoteChat for OllamaChat {
             .await
             .map_err(|e| super::http::UpstreamUnreachable::new(&self.endpoint, &e, ""))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let err_body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Ollama API error {status}: {err_body}"));
+        if !response.status().is_success() {
+            return Err(
+                super::http::UpstreamStatus::read(response, &self.endpoint, "")
+                    .await
+                    .into(),
+            );
         }
 
         let mut stream = response.bytes_stream();

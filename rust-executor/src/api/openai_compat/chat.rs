@@ -34,7 +34,7 @@ use futures::Stream;
 use uuid::Uuid;
 
 use super::errors::{OpenAIError, OpenAIJson};
-use super::model_selector::resolve;
+use super::model_selector::{resolve, Resolved};
 use super::native_tools;
 use super::passthrough::{self, Route, Upstream};
 use super::tool_grammar::{self, ExtractedToolCall, ToolCallConstraint, ToolChoice};
@@ -67,7 +67,7 @@ pub async fn chat_completions(
     let req: ChatCompletionRequest =
         serde_json::from_value(body).map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
     let endpoint_kind = resolved.endpoint.kind;
-    let model_id = resolved.model.id;
+    let model_id = resolved.model.id.clone();
 
     let tools: Vec<ToolDef> = req.tools.clone().unwrap_or_default();
     let has_tools = !tools.is_empty();
@@ -101,7 +101,7 @@ pub async fn chat_completions(
         return native_tools::chat_with_native_tools(
             auth,
             req.model.clone(),
-            model_id,
+            &resolved,
             &req.messages,
             &tools,
             req.stream,
@@ -137,7 +137,7 @@ pub async fn chat_completions(
         chat_stream(
             auth,
             req.model.clone(),
-            model_id,
+            &resolved,
             messages,
             tools_active,
             call_limit,
@@ -147,7 +147,7 @@ pub async fn chat_completions(
         chat_oneshot(
             auth,
             req.model.clone(),
-            model_id,
+            &resolved,
             messages,
             tools_active,
             call_limit,
@@ -172,7 +172,7 @@ pub async fn completions(
     }
     let req: CompletionRequest =
         serde_json::from_value(body).map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
-    let model_id = resolved.model.id;
+    let model_id = resolved.model.id.clone();
     let prompt = req
         .prompt
         .into_single()
@@ -195,7 +195,7 @@ pub async fn completions(
             None,
         )
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(|e| resolved.failure(e))?;
 
     // Billing is now inside AIService::prompt_messages via bill_ai_operation
     // (host_rates-based, shared with WS-RPC path). No handler-level bill_compute here.
@@ -229,7 +229,7 @@ fn requested_model(body: &serde_json::Value) -> &str {
 async fn chat_oneshot(
     auth: RequestContext,
     requested_model: String,
-    model_id: String,
+    resolved: &Resolved,
     messages: Vec<(String, String)>,
     tools_active: bool,
     call_limit: usize,
@@ -247,13 +247,13 @@ async fn chat_oneshot(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
         .prompt_messages(
-            model_id,
+            resolved.model.id.clone(),
             messages,
             auth.user_did().map(str::to_string),
             None,
         )
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(|e| resolved.failure(e))?;
 
     // Billing is now inside AIService::prompt_messages via bill_ai_operation.
 
@@ -307,7 +307,7 @@ async fn chat_oneshot(
 async fn chat_stream(
     auth: RequestContext,
     requested_model: String,
-    model_id: String,
+    resolved: &Resolved,
     messages: Vec<(String, String)>,
     tools_active: bool,
     call_limit: usize,
@@ -321,9 +321,13 @@ async fn chat_stream(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let (token_rx, done_rx) = service
-        .prompt_messages_stream(model_id, messages, auth.user_did().map(str::to_string))
+        .prompt_messages_stream(
+            resolved.model.id.clone(),
+            messages,
+            auth.user_did().map(str::to_string),
+        )
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(|e| resolved.failure(e))?;
 
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = epoch_seconds();

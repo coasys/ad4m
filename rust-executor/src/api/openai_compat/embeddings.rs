@@ -63,11 +63,8 @@ pub async fn embeddings(
             auth.user_did().map(str::to_string),
         )
         .await
-        .map_err(|e| {
-            // `embed_batch` already acted on what the failure says about the endpoint.
-            log::warn!("v1/embeddings model={}: {e}", resolved.model.name);
-            OpenAIError::from_upstream(&e)
-        })?;
+        // `embed_batch` already acted on what the failure says about the endpoint.
+        .map_err(|e| resolved.failure(e))?;
     // One info line per batch; see rust-executor/LOGGING.md.
     log::info!(
         "🤖 embed batch model={} n={} tokens_in={} latency_total={}ms (openai-compat)",

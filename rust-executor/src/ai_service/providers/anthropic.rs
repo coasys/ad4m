@@ -362,13 +362,16 @@ impl AnthropicChat {
                 super::http::UpstreamUnreachable::new(&self.endpoint, &e, &self.api_key)
             })?;
 
-        let status = response.status();
-        if !status.is_success() {
+        if !response.status().is_success() {
             // Anthropic puts the useful part in the body (`error.message`);
             // the status alone does not distinguish a bad key from a bad
-            // model name, and both are things an operator has to fix.
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Anthropic API error {}: {}", status, body));
+            // model name, and both are things an operator has to fix. Typed, so
+            // `/v1` answers with the upstream's status (`OpenAIError::from_upstream`).
+            return Err(
+                super::http::UpstreamStatus::read(response, &self.endpoint, &self.api_key)
+                    .await
+                    .into(),
+            );
         }
 
         Ok(response)

@@ -630,13 +630,15 @@ mod wire_tests {
             .chat(ChatRequest::new("m", vec![]))
             .await
             .unwrap_err();
-        // Typed, so a caller can tell the endpoint is down (and re-check it).
+        // Typed, so a caller can tell the endpoint is down (and re-check it), and `/v1`
+        // answers a 503 for it (`OpenAIError::from_upstream`).
         assert!(
             error
                 .downcast_ref::<crate::ai_service::providers::http::UpstreamUnreachable>()
                 .is_some(),
             "{error}"
         );
+        assert!(!error.to_string().contains("sk-test"), "{error}");
 
         let error = OpenAiChat::new("sk-test", url(&server.url()))
             .chat(ChatRequest::new("m", vec![]))

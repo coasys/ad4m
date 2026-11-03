@@ -23,6 +23,17 @@ pub struct Resolved {
     pub endpoint: Endpoint,
 }
 
+impl Resolved {
+    /// The client's view of a failed call to this model through the AI service: an
+    /// upstream answer keeps its status (plan §5.4, as on the passthrough). The service has
+    /// acted on what the failure says about the endpoint already. A failure that did not
+    /// come from an upstream is a 500.
+    pub fn failure(&self, error: anyhow::Error) -> OpenAIError {
+        log::warn!("v1 model={}: {error}", self.model.name);
+        OpenAIError::from_upstream(&error)
+    }
+}
+
 fn db_error(e: impl std::fmt::Display) -> OpenAIError {
     OpenAIError::internal(format!("Database error: {e}"))
 }

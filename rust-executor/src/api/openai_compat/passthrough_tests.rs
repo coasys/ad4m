@@ -1455,3 +1455,137 @@ async fn none_reaches_llama_server_without_the_tools() {
     assert!(sent[0].get("tool_choice").is_none(), "{}", sent[0]);
     assert_eq!(sent[0]["temperature"], 0.2);
 }
+
+/// A model the executor answers itself (not forwarded), loaded into a fresh AIService.
+async fn answered_here(kind: EndpointKind, url: &str, key: &str, native_tools: Option<bool>) {
+    fresh();
+    let upstream = endpoint("here", kind, url, key);
+    save(&upstream);
+    let id = model_with_tools("chat", ModelType::Llm, &upstream, "m", native_tools);
+    crate::ai_service::AIService::init_global_instance()
+        .await
+        .unwrap();
+    crate::ai_service::AIService::global_instance()
+        .await
+        .unwrap()
+        .reload_model(id)
+        .await
+        .unwrap();
+}
+
+fn a_tool() -> Value {
+    json!([{ "type": "function", "function": {
+        "name": "get_time", "parameters": { "type": "object", "properties": {} } } }])
+}
+
+/// What a client gets from each path the executor answers itself when the upstream
+/// answers `status`: Anthropic chat (plain and with tools, which go as native tools),
+/// Anthropic `/v1/completions`, and the text-tools path of a llama-server model.
+async fn failures_answered_here(
+    status: usize,
+    body: &str,
+) -> Vec<(String, axum::response::Response)> {
+    let mut out = Vec::new();
+    for (case, kind, path, native, request) in [
+        (
+            "anthropic chat",
+            EndpointKind::Anthropic,
+            "/v1/messages",
+            None,
+            json!({ "model": "chat", "messages": hello() }),
+        ),
+        (
+            "anthropic tools",
+            EndpointKind::Anthropic,
+            "/v1/messages",
+            None,
+            json!({ "model": "chat", "messages": hello(), "tools": a_tool() }),
+        ),
+        (
+            "anthropic completion",
+            EndpointKind::Anthropic,
+            "/v1/messages",
+            None,
+            json!({ "model": "chat", "prompt": "hi" }),
+        ),
+        (
+            "llama-server text tools",
+            EndpointKind::LlamaServer,
+            "/v1/chat/completions",
+            Some(false),
+            json!({ "model": "chat", "messages": hello(), "tools": a_tool() }),
+        ),
+    ] {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", path)
+            .with_status(status)
+            .with_header("retry-after", "7")
+            .with_body(body)
+            .expect(1)
+            .create_async()
+            .await;
+        answered_here(kind, &server.url(), "sk-secret-key", native).await;
+        let response = if request.get("prompt").is_some() {
+            chat::completions(user(), OpenAIJson(request))
+                .await
+                .into_response()
+        } else {
+            chat(user(), request).await
+        };
+        mock.assert_async().await;
+        assert!(
+            test_seam::calls().is_empty(),
+            "{case}: a failure bills nothing"
+        );
+        out.push((case.to_string(), response));
+    }
+    out
+}
+
+#[tokio::test]
+async fn the_executors_own_text_paths_keep_the_upstream_status() {
+    for (case, response) in
+        failures_answered_here(404, r#"{"error":{"message":"no such model"}}"#).await
+    {
+        assert_eq!(response.status(), 404, "{case}");
+        let error = body_json(response).await;
+        assert_eq!(error["error"]["code"], "model_not_found", "{case}");
+        assert_eq!(error["error"]["message"], "no such model", "{case}");
+    }
+    for (case, response) in failures_answered_here(429, "slow down").await {
+        assert_eq!(response.status(), 429, "{case}");
+        assert_eq!(response.headers()["retry-after"], "7", "{case}");
+    }
+    for (case, response) in failures_answered_here(401, "bad key sk-secret-key").await {
+        assert_eq!(response.status(), 502, "{case}");
+        let text = body_text(response).await;
+        assert!(text.contains("upstream_auth"), "{case}: {text}");
+        assert!(!text.contains("sk-secret-key"), "{case}: {text}");
+    }
+    for (case, response) in failures_answered_here(500, "boom").await {
+        assert_eq!(response.status(), 502, "{case}");
+        assert_eq!(
+            body_json(response).await["error"]["type"],
+            "upstream_error",
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_anthropic_endpoint_that_refuses_connections_is_a_503() {
+    answered_here(
+        EndpointKind::Anthropic,
+        "http://127.0.0.1:1",
+        "sk-ant",
+        None,
+    )
+    .await;
+    let response = chat(user(), json!({ "model": "chat", "messages": hello() })).await;
+    assert_eq!(response.status(), 503);
+    assert_eq!(
+        body_json(response).await["error"]["type"],
+        "upstream_unavailable"
+    );
+}
