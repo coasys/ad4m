@@ -1079,12 +1079,13 @@ mod tests {
 
     /// A fake platform Worker: the rows of the shared database in memory, served on the
     /// routes that `SharedDb` calls for the `shared:platform` namespace. Records each request
-    /// it serves. A request to any other route fails [`FakeSharedStore::finish`].
+    /// it serves. A request to any other route gets mockito's 501, which fails the `SharedDb`
+    /// call.
     struct FakeSharedStore {
         server: mockito::ServerGuard,
         requests: Arc<std::sync::Mutex<Vec<String>>>,
-        routes: Vec<mockito::Mock>,
-        other_routes: Vec<mockito::Mock>,
+        /// The routes live as long as the store: mockito removes a dropped mock.
+        _routes: Vec<mockito::Mock>,
     }
 
     /// The rows of the fake store: route of the table (`/shared:platform/users`) → row id →
@@ -1165,16 +1166,10 @@ mod tests {
                     })
                     .create()
             };
-            let other_routes = ["GET", "POST", "DELETE"]
-                .into_iter()
-                .map(|method| server.mock(method, Matcher::Any).expect(0).create())
-                .collect();
-
             FakeSharedStore {
                 server,
                 requests,
-                routes: vec![upsert, get_row, list],
-                other_routes,
+                _routes: vec![upsert, get_row, list],
             }
         }
 
@@ -1184,13 +1179,6 @@ mod tests {
 
         fn requests(&self) -> Vec<String> {
             self.requests.lock().unwrap().clone()
-        }
-
-        fn finish(self) {
-            for route in &self.other_routes {
-                route.assert();
-            }
-            drop(self.routes);
         }
     }
 
@@ -1280,7 +1268,6 @@ mod tests {
         assert_eq!(LocalDb.get_user(&email).unwrap().did, did);
 
         assert_eq!(store.requests(), Vec::<String>::new());
-        store.finish();
     }
 
     // Users and perspective metadata stay on the shared database: written and read through the
@@ -1335,6 +1322,5 @@ mod tests {
                 "GET /shared:platform/perspectives".to_string(),
             ]
         );
-        store.finish();
     }
 }

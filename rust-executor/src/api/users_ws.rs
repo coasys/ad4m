@@ -645,7 +645,6 @@ mod session_revocation_tests {
     use crate::agent::session::{AuthError, Session};
     use crate::agent::AgentContext;
     use crate::api::ws_handler::build_handler_map;
-    use crate::db::Ad4mDb;
     use crate::test_utils::{granted_token, managed_user, setup_agent, setup_wallet};
     use crate::types::RequestContext;
     use crate::user_management::generate_user_jwt;
