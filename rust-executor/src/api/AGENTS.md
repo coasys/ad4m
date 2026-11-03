@@ -117,8 +117,10 @@ Notes on some methods:
   user's agent too; its handler checks the principal for a named user.
 - `Operator`: `runtime.importData` writes rows as they are in the file, granted notifications
   and password hashes included. `user.credits` sets the balance of the account named by email.
-  The stubs `runtime.unyt*` answer 501 to the operator until each gets a handler and its real
-  guard.
+  The Unyt wallet methods (`runtime.unytAgentKey`, `unytHotAgentPubkey`, `unytWalletBalance`,
+  `unytWalletHistory`, `unytSendHot`, `unytReinstallDna`) act on the one wallet of the
+  executor, so only the operator calls them; users and apps get 403. The key methods answer
+  the public key only: the private key stays in the Holochain keystore.
 - `runtime.exportData` (`Executor`) has two kinds. A `perspective` export checks
   `get_perspective_with_access` in its handler, so an app exports only the main agent's
   perspectives. A `db` export names no perspective and checks nothing past the guard: it writes

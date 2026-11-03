@@ -358,6 +358,18 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
         notifications.push(created.as_str().unwrap().to_string());
     }
 
+    // The executor's Unyt agent: the public key that `runtime.unytAgentKey` and
+    // `runtime.unytHotAgentPubkey` answer, and the bootstrap auth material signed with its
+    // private key, which must stay in the executor. The private key itself stays in the
+    // Holochain keystore, which no unit test starts.
+    let unyt_public_key = holochain::prelude::AgentPubKey::from_raw_32(vec![9; 32]).to_string();
+    let unyt_auth_material = format!("leak-unyt-auth-material-{}", id());
+    Ad4mDb::with_global_instance(|db| {
+        db.set_setting("unyt_agent_key", &unyt_public_key)?;
+        db.set_setting("unyt_auth_material", &unyt_auth_material)
+    })
+    .unwrap();
+
     let app_auth = AuthInfo {
         app_name: "Leak test app".to_string(),
         app_desc: "seeded by the secret-leak test".to_string(),
@@ -421,6 +433,7 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
         ("user password", password.clone()),
         ("webhook credential", webhook_credential.clone()),
         ("provider API key", provider_key.clone()),
+        ("Unyt bootstrap auth material", unyt_auth_material.clone()),
     ]);
 
     let specs = map.specs();
@@ -518,6 +531,18 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
     );
     let users = operator_answer("user.list");
     assert!(users.contains(&user_email), "{users}");
+    // The Unyt key reads give the operator the public key and nothing more; every other
+    // principal gets the guard's 403.
+    for method in ["runtime.unytAgentKey", "runtime.unytHotAgentPubkey"] {
+        assert_eq!(operator_answer(method), json!(unyt_public_key).to_string());
+        for principal in ["app", "user", "anonymous"] {
+            let text = &answers[&(method, principal)];
+            assert!(
+                text.starts_with("error 403"),
+                "{method} as {principal}: {text}"
+            );
+        }
+    }
     let operator_events = operator_events.lock().unwrap();
     assert!(operator_events
         .iter()

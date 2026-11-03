@@ -1,7 +1,10 @@
 import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
-import type { HostRate, UnytVersionInfo } from "../generated/api"
+import type { HostRate, UnytSendHotResult, UnytVersionInfo } from "../generated/api"
+import type { RuntimeUnytSendHotParams } from "../generated/api/RuntimeUnytSendHotParams"
+import type { RuntimeUnytWalletHistoryParams } from "../generated/api/RuntimeUnytWalletHistoryParams"
+import type { JsonValue } from "../generated/api/serde_json/JsonValue"
 import { LanguageMeta } from "../language/LanguageMeta"
 
 export class RuntimeClient {
@@ -192,22 +195,29 @@ export class RuntimeClient {
         return (await this.#apiClient.call('user.emailTest', { action: 'set-expiry', email, verificationType, expiresAt })) === true
     }
 
-    // ---- Unyt / mHOT methods ----
+    // ---- Unyt / mHOT methods: the executor's wallet, operator only ----
 
+    /** The executor's Unyt agent public key ("uhCAk…"); made in the keystore on the first call. */
     async unytAgentKey(): Promise<string> {
         return this.#apiClient.call('runtime.unytAgentKey', {})
     }
 
+    /** The address that receives HOT: the same public key as {@link unytAgentKey}. */
     async unytHotAgentPubkey(): Promise<string> {
         return this.#apiClient.call('runtime.unytHotAgentPubkey', {})
     }
 
-    async unytWalletBalance(): Promise<string> {
+    /** The Unyt zome's `get_ledger` output. */
+    async unytWalletBalance(): Promise<JsonValue> {
         return this.#apiClient.call('runtime.unytWalletBalance', {})
     }
 
-    async unytWalletHistory(page?: number, perPage?: number): Promise<string> {
-        return this.#apiClient.call('runtime.unytWalletHistory', { page, perPage })
+    /** The Unyt zome's `get_history` output: one page, `perPage` entries (default 50). */
+    async unytWalletHistory(page?: number, perPage?: number): Promise<JsonValue> {
+        const params: RuntimeUnytWalletHistoryParams = {}
+        if (page !== undefined) params.page = page
+        if (perPage !== undefined) params.perPage = perPage
+        return this.#apiClient.call('runtime.unytWalletHistory', params)
     }
 
     /** Installed and bundled DNA versions, and why the last install failed (`installError`). */
@@ -221,12 +231,17 @@ export class RuntimeClient {
         return this.#apiClient.call('runtime.setUnytMembraneProof', { proof })
     }
 
-    async unytReinstallDna(): Promise<{ success: boolean; message: string }> {
+    /** Removes the Unyt alliance DNA and installs the bundled one. Throws when it fails. */
+    async unytReinstallDna(): Promise<boolean> {
         return this.#apiClient.call('runtime.unytReinstallDna', {})
     }
 
-    async unytSendHot(recipient: string, amount: string): Promise<{ success: boolean; message: string }> {
-        return this.#apiClient.call('runtime.unytSendHot', { recipient, amount })
+    /** Offers `amount` HOT to `recipient` (a Unyt agent key); the executor accepts when the
+     *  recipient commits. Throws when the proposal fails. */
+    async unytSendHot(recipient: string, amount: string, note?: string): Promise<UnytSendHotResult> {
+        const params: RuntimeUnytSendHotParams = { recipient, amount }
+        if (note !== undefined) params.note = note
+        return this.#apiClient.call('runtime.unytSendHot', params)
     }
 
     async setUserCredits(email: string, amount: number): Promise<boolean> {

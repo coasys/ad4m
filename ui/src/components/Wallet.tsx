@@ -122,13 +122,18 @@ const Wallet = () => {
 
       // Fetch balance
       try {
-        const balStr = await client.runtime.unytWalletBalance();
-        if (balStr) {
-          try {
-            setBalance(JSON.parse(balStr));
-          } catch {
-            setBalance({ wHOT: balStr });
-          }
+        const ledger = await client.runtime.unytWalletBalance();
+        if (ledger && typeof ledger === "object" && !Array.isArray(ledger)) {
+          setBalance(
+            Object.fromEntries(
+              Object.entries(ledger).map(([unit, amount]) => [
+                unit,
+                typeof amount === "string" ? amount : JSON.stringify(amount),
+              ]),
+            ),
+          );
+        } else if (ledger !== null) {
+          setBalance({ wHOT: String(ledger) });
         }
       } catch (e: any) {
         console.error("Failed to fetch balance:", e);
@@ -147,15 +152,8 @@ const Wallet = () => {
       // Fetch history
       {
         try {
-          const histStr = await client.runtime.unytWalletHistory(undefined, 50);
-          if (histStr) {
-            try {
-              const parsed = JSON.parse(histStr);
-              setHistory(parsed);
-            } catch {
-              setHistory([]);
-            }
-          }
+          const history = await client.runtime.unytWalletHistory(undefined, 50);
+          setHistory(Array.isArray(history) ? history : []);
         } catch (e: any) {
           console.error("Failed to fetch history:", e);
           errors.push(`History: ${e.message}`);
@@ -216,12 +214,10 @@ const Wallet = () => {
         resolved,
         sendAmount,
       );
-      setSendResult(result?.message || "Unknown result");
-      if (result?.success) {
-        setSendRecipient("");
-        setSendAmount("");
-        fetchWalletData();
-      }
+      setSendResult(`Sent: proposal ${result.proposalHash}`);
+      setSendRecipient("");
+      setSendAmount("");
+      fetchWalletData();
     } catch (e: any) {
       setSendResult(`Error: ${e.message}`);
     } finally {
@@ -233,12 +229,8 @@ const Wallet = () => {
     if (!client) return;
     setReinstalling(true);
     try {
-      const result = await client.runtime.unytReinstallDna();
-      if (result?.success) {
-        fetchWalletData();
-      } else {
-        setError(result?.message || "Reinstall failed");
-      }
+      await client.runtime.unytReinstallDna();
+      fetchWalletData();
     } catch (e: any) {
       setError(`Reinstall error: ${e.message}`);
     } finally {

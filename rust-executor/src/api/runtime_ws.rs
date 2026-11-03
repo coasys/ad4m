@@ -26,7 +26,7 @@ use super::types::{
     AddAgentInfosRequest, ExportRequest, FriendsListRequest, HostRate, ImportRequest,
     LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput,
     NotificationUpdateInput, OpenLinkRequest, SetHostRatesRequest, SetStatusRequest,
-    SetUnytMembraneProofRequest, UnytVersionInfo, VerifySignatureRequest,
+    SetUnytMembraneProofRequest, UnytSendHotResult, UnytVersionInfo, VerifySignatureRequest,
 };
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -702,12 +702,88 @@ async fn unyt_version_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<
     })?)
 }
 
-// ── Stubs for unyt endpoints ──
+// ── Unyt wallet of the executor ──
+//
+// The executor has one Unyt wallet; these methods act on it. The guard admits only the
+// operator, so the handlers do no permission checks of their own.
 
-async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    Err(WsRpcError::not_implemented(
-        "Not yet implemented on the server",
-    ))
+/// Default page size of `runtime.unytWalletHistory`.
+const UNYT_HISTORY_PER_PAGE: u32 = 50;
+
+/// The executor's Unyt agent public key ("uhCAk…"). It makes the key in the Holochain
+/// keystore on the first call; only the public key leaves the keystore.
+async fn unyt_agent_key(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let key = crate::unyt_service::get_or_create_agent_key()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::String(key))
+}
+
+/// The address that receives HOT: the public key of the agent that holds the wallet, the
+/// same key as `runtime.unytAgentKey`.
+async fn unyt_hot_agent_pubkey(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let key = crate::unyt_service::get_or_create_agent_key()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::String(key))
+}
+
+/// The Unyt zome's `get_ledger` output.
+async fn unyt_wallet_balance(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    crate::unyt_service::get_ledger()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))
+}
+
+/// The Unyt zome's `get_history` output, one page.
+async fn unyt_wallet_history(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let body: RuntimeUnytWalletHistoryParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let per_page = body.per_page.unwrap_or(UNYT_HISTORY_PER_PAGE);
+    if per_page == 0 {
+        return Err(WsRpcError::bad_request("'perPage' must be at least 1"));
+    }
+    crate::unyt_service::get_history(body.page.map(u64::from), u64::from(per_page))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))
+}
+
+/// Offers `amount` HOT to `recipient`. The executor accepts when the recipient commits.
+async fn unyt_send_hot(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: RuntimeUnytSendHotParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    if body.recipient.trim().is_empty() {
+        return Err(WsRpcError::bad_request("'recipient' must not be empty"));
+    }
+    let amount = body.amount.trim().trim_start_matches('-');
+    if amount.is_empty() {
+        return Err(WsRpcError::bad_request("'amount' must not be empty"));
+    }
+    let proposal_hash =
+        crate::unyt_service::send_hot(body.recipient.trim(), amount, body.note.as_deref())
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(UnytSendHotResult { proposal_hash })?)
+}
+
+/// Removes the Unyt alliance DNA and installs the bundled one.
+async fn unyt_reinstall_dna(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    crate::unyt_service::reinstall()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -863,24 +939,26 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, UnytVersionInfo>("runtime.unytVersionInfo", unyt_version_info)
         .read()
         .guard(Guard::Cap(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
-    // Always error: the remaining unyt endpoints have no implementation yet. The operator
-    // gets the 501, every other caller the guard's 403.
-    // Operator until implemented: set the real guard with the handler.
-    map.method::<NoParams, ()>("runtime.unytAgentKey", stub_not_impl)
+    // The executor's Unyt wallet: its key, balance and history, and the calls that move
+    // HOT or replace the DNA. Only the operator; users and apps get the guard's 403.
+    map.method::<NoParams, String>("runtime.unytAgentKey", unyt_agent_key)
         .read()
         .guard(Guard::Operator);
-    map.method::<RuntimeUnytSendHotParams, ()>("runtime.unytSendHot", stub_not_impl)
-        .guard(Guard::Operator);
-    map.method::<NoParams, ()>("runtime.unytWalletBalance", stub_not_impl)
+    map.method::<NoParams, String>("runtime.unytHotAgentPubkey", unyt_hot_agent_pubkey)
         .read()
         .guard(Guard::Operator);
-    map.method::<RuntimeUnytWalletHistoryParams, ()>("runtime.unytWalletHistory", stub_not_impl)
+    map.method::<NoParams, Value>("runtime.unytWalletBalance", unyt_wallet_balance)
         .read()
         .guard(Guard::Operator);
-    map.method::<NoParams, ()>("runtime.unytHotAgentPubkey", stub_not_impl)
-        .read()
+    map.method::<RuntimeUnytWalletHistoryParams, Value>(
+        "runtime.unytWalletHistory",
+        unyt_wallet_history,
+    )
+    .read()
+    .guard(Guard::Operator);
+    map.method::<RuntimeUnytSendHotParams, UnytSendHotResult>("runtime.unytSendHot", unyt_send_hot)
         .guard(Guard::Operator);
-    map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl)
+    map.method::<NoParams, bool>("runtime.unytReinstallDna", unyt_reinstall_dna)
         .guard(Guard::Operator);
 }
 
@@ -890,8 +968,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RuntimeUnytWalletHistoryParams {
+    /// Passed to the Unyt zome's `get_history` as `high_boundary`.
     #[ts(optional)]
     pub page: Option<u32>,
+    /// Entries per page; defaults to 50.
     #[ts(optional)]
     pub per_page: Option<u32>,
 }
@@ -900,8 +980,13 @@ pub struct RuntimeUnytWalletHistoryParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RuntimeUnytSendHotParams {
+    /// The recipient's Unyt agent public key.
     pub recipient: String,
+    /// HOT to send, as a decimal string.
     pub amount: String,
+    /// A note on the proposal.
+    #[ts(optional)]
+    pub note: Option<String>,
 }
 
 #[derive(Deserialize, TS)]
