@@ -143,6 +143,21 @@ pub fn migrate_links_from_rusqlite_to_sparql(
         // no-op besides the clone.
         total_literal_conversions += convert_link_literal_uris(&mut link_expr);
 
+        // The store refuses a link in its own metadata vocabulary (#1564);
+        // skipping one is not a failed migration.
+        if crate::perspectives::sparql_store::is_link_metadata(
+            link_expr.data.predicate.as_deref().unwrap_or(""),
+        ) {
+            log::warn!(
+                "Not migrating a link in the metadata vocabulary for perspective {}: {} -[{}]-> {}",
+                perspective_uuid,
+                link_expr.data.source,
+                link_expr.data.predicate.as_deref().unwrap_or(""),
+                link_expr.data.target
+            );
+            continue;
+        }
+
         match sparql_store.add_link(&link_expr) {
             Ok(_) => {
                 migrated_count += 1;

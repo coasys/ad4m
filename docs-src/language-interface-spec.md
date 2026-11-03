@@ -453,6 +453,11 @@ as `extern "C"`.
 | `agentGetAllLocalUserDids()` | `string[]` |
 | `agentDidForUser(email: string)` | `string` |
 | `agentCreateSignedExpressionForUser(email, data)` | `Expression` |
+| `agentOpenSealed(sealed: SealedBox)` | `string` (plaintext, hex) |
+
+`agentOpenSealed` opens only boxes sealed (`{ ephemeralPublicKey, nonce,
+ciphertext }`, hex) to the acting agent, and throws for any other. The format is
+in `host-contract.md` ("Sealed boxes").
 
 #### Ambient acting-agent contract
 

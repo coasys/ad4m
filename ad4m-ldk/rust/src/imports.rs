@@ -27,6 +27,10 @@ extern "C" {
     pub fn agent_sign(payload: &[u8]) -> Result<Vec<u8>, JsValue>;
     #[wasm_bindgen(js_name = "agentSignStringHex", catch)]
     pub fn agent_sign_string_hex(payload: &str) -> Result<String, JsValue>;
+    /// Opens a box sealed to the calling agent; returns the plaintext as hex.
+    /// Fails for a box sealed to any other DID.
+    #[wasm_bindgen(js_name = "agentOpenSealed", catch)]
+    pub fn agent_open_sealed(sealed: JsValue) -> Result<String, JsValue>;
     #[wasm_bindgen(js_name = "agentCreateSignedExpression", catch)]
     pub fn agent_create_signed_expression(data: JsValue) -> Result<JsValue, JsValue>;
 

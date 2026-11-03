@@ -622,6 +622,8 @@ const NOT_WRAPPED: &[&str] = &[
     "instance_remove_from_collection",
     "instance_transcript",
     "instance_update",
+    "template_read",
+    "template_update",
 ];
 
 /// The session of `caller`, holding `caps` where the row gives it capabilities: the matrix's
@@ -940,6 +942,26 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
                 .await
             })
         }),
+        tool("template_read", Read, |h, uuid| {
+            Box::pin(async move {
+                h.template_read(Parameters(instances::template_tools::TemplateToolParams {
+                    perspective_id: uuid,
+                    base_uri: "matrix://e".into(),
+                    arguments: Default::default(),
+                }))
+                .await
+            })
+        }),
+        tool("template_update", Write, |h, uuid| {
+            Box::pin(async move {
+                h.template_update(Parameters(instances::template_tools::TemplateToolParams {
+                    perspective_id: uuid,
+                    base_uri: "matrix://e".into(),
+                    arguments: Default::default(),
+                }))
+                .await
+            })
+        }),
         tool("instance_remove", Write, |h, uuid| {
             Box::pin(async move {
                 h.instance_remove(Parameters(instances::InstanceRemoveParams {
@@ -1012,7 +1034,6 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
             Box::pin(async move {
                 h.get_mention_waker_config(Parameters(subscriptions::MentionWakerConfigParams {
                     perspective_id: uuid,
-                    name_override: None,
                 }))
                 .await
             })

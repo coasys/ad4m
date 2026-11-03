@@ -13,6 +13,7 @@ use crate::wallet::wallet_backend;
 
 pub mod capabilities;
 pub mod grants;
+pub mod sealed_box;
 pub mod session;
 pub mod signatures;
 

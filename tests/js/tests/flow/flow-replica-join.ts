@@ -10,9 +10,15 @@
  * catch-up as Bob's clients see it:
  *
  *  - Bob's FIRST `flow-state-changed` for the instance is the catch-up:
- *    `caughtUp: true`, `from: null`, `firedProposals: []`, `to: "Mid"`.
- *    `from: null` says Bob had no row before it; no normal event comes
- *    first, so the history was not replayed to him as a settle.
+ *    `caughtUp: true`, `from: null`, `firedProposals: []`, `to` in
+ *    `Ready`/`Mid`. `from: null` says Bob had no row before it; no normal
+ *    event comes first, so the history was not replayed to him as a settle.
+ *  - The catch-up may land on any prefix of Alice's history. The
+ *    server-link-language delivers her commits as separate diffs, often
+ *    more than 160 ms apart, and the debounced pass can run between them:
+ *    the instance has arrived, the Begin vote has not. Bob is then caught
+ *    up at `Ready`, and his next event is an ordinary Ready → Mid with
+ *    Begin fired. p-diff-sync may deliver it in one diff or in several.
  *  - `flowStates()` and `FlowInstance.findAll` then read `Mid` on Bob's side.
  *  - When Alice settles Mid → Done, Bob gets an ordinary event
  *    (`caughtUp: false`, `from: "Mid"`, the settling proposal fired).
@@ -117,15 +123,33 @@ export default function flowReplicaJoinTests(
         // ── The catch-up, with nothing done by Bob ──────────────────────────
         await waitUntil(() => forInstance().length > 0, 60_000, "Bob's catch-up event");
         const [first] = forInstance();
+        expect(["Ready", "Mid"], "the catch-up lands on a prefix of Alice's history").to.include(
+          first.to,
+        );
         expect(first, "Bob's first event for the run is the catch-up").to.deep.equal({
           perspectiveUuid: bobP.uuid,
           agentDid: bobDid,
           instance: inst.uri,
           from: null,
-          to: "Mid",
+          to: first.to,
           firedProposals: [],
           caughtUp: true,
         });
+        // Caught up before Alice's Begin vote arrived: the vote then settles
+        // Ready → Mid for Bob as an ordinary event.
+        const settledIn = first.to === "Ready" ? 1 : 0;
+        if (settledIn) {
+          await waitUntil(() => forInstance().length > 1, 60_000, "Bob's event for Ready → Mid");
+          expect(forInstance()[1], "the rest of the history settles in").to.deep.equal({
+            perspectiveUuid: bobP.uuid,
+            agentDid: bobDid,
+            instance: inst.uri,
+            from: "Ready",
+            to: "Mid",
+            firedProposals: [begin.proposalUri],
+            caughtUp: false,
+          });
+        }
 
         const states = await bobP.flowStates([inst.uri]);
         expect(states.map((s) => [s.instance, s.currentState])).to.deep.equal([[inst.uri, "Mid"]]);
@@ -142,13 +166,19 @@ export default function flowReplicaJoinTests(
           { timeoutMs: 90_000, intervalMs: 2_000, label: "Bob's findAll sees Alice's run" },
         );
         expect(bobView[0].currentStateName, "findAll reads the caught-up state").to.equal("Mid");
-        expect(forInstance(), "and nothing was replayed as a settle").to.have.lengthOf(1);
+        expect(forInstance(), "and nothing was replayed as a settle").to.have.lengthOf(
+          1 + settledIn,
+        );
 
         // ── A new settle is an ordinary event for Bob ───────────────────────
         const finish = await inst.proposeTransition("Done");
         expect(finish.outcomes.map((o) => o.toState)).to.deep.equal(["Done"]);
-        await waitUntil(() => forInstance().length > 1, 180_000, "Bob's event for Mid → Done");
-        expect(forInstance()[1]).to.deep.equal({
+        await waitUntil(
+          () => forInstance().length > 1 + settledIn,
+          180_000,
+          "Bob's event for Mid → Done",
+        );
+        expect(forInstance()[1 + settledIn]).to.deep.equal({
           perspectiveUuid: bobP.uuid,
           agentDid: bobDid,
           instance: inst.uri,

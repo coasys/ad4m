@@ -15,7 +15,7 @@ REST/WS shim. Split plan: spec item 6.
 
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
-handlers), `runtime`, `users`. Each exposes `register_ws_handlers(&mut HandlerMap)`
+handlers), `runtime`, `users`, and `agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
@@ -143,7 +143,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-193 methods: Cap 72, Executor 33, Open 5, Operator 16, Owns 67.
+194 methods: Cap 72, Executor 33, Open 5, Operator 16, Owns 68.
 
 | Method | Guard |
 |---|---|
@@ -259,6 +259,7 @@ the guard checked:
 | `perspective.removeLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.removeSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.resyncSubscription` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.runAgent` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretationWithHarness` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
@@ -510,6 +511,13 @@ them against those two guards.
   bypass `events.watch`), and `ws_rpc::serve` ends them when the socket closes, and again as each
   call still in flight ends (a late subscribe). No keepalive; subscribing without a connection
   (REST) is a 400.
+- Opening a live query (`subscribeQuery` / `modelSubscribe`) is the one kind of call that a socket
+  close cancels (its `cancel_token` is a child of `Connection::closed`); every other call still
+  finishes after the close. One connection runs at most `MAX_OPENING_LIVE_QUERIES` (8) of these
+  opens at once, and the rest wait, cancellably. A subscribe cancelled before its reply
+  unregisters its query again (`open_subscription`). Cancelling cannot stop a SPARQL statement
+  that is already running: it stops at the next await, and the plain `subscribeQuery` first
+  result has none (#1595).
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and

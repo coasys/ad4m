@@ -359,16 +359,18 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
     Some(Value::Object(obj))
 }
 
+/// The keys a `properties` selection never strips.
+pub(super) const ALWAYS_KEPT: [&str; 2] = ["id", "baseExpression"];
+
 /// Strip an instance down to only the requested properties.
 ///
-/// `id` and `baseExpression` are always preserved.  Included relation
+/// [`ALWAYS_KEPT`] is always preserved.  Included relation
 /// names are added to the keep-list by the caller.
 pub(super) fn filter_properties(instance: Value, requested: &[String]) -> Value {
     if let Value::Object(mut obj) = instance {
-        let always_keep = ["id", "baseExpression"];
         let keys: Vec<String> = obj.keys().cloned().collect();
         for key in keys {
-            if always_keep.contains(&key.as_str()) {
+            if ALWAYS_KEPT.contains(&key.as_str()) {
                 continue;
             }
             if !requested.iter().any(|r| r == &key) {

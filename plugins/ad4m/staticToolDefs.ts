@@ -701,7 +701,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "get_documentation",
-    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux \u2014 for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. No authentication needed.",
+    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux \u2014 for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. topic='template' is the guide to editing a WE template with template_read and template_update, and names the topics under it (template/...) for its components and props.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GetDocumentationParams",
@@ -709,45 +709,163 @@ export const STATIC_TOOL_DEFS: McpTool[] =
       "type": "object",
       "properties": {
         "topic": {
-          "description": "Which document: \"overview\" (start here), \"usage\", \"flux\", \"models\"\nor \"architecture\"",
-          "$ref": "#/$defs/DocTopic"
+          "description": "Which document: \"overview\" (start here), \"usage\", \"flux\", \"models\" or \"architecture\";\n\"template\" for editing a WE template, and the topics under it that it names",
+          "type": "string"
         }
       },
       "required": [
         "topic"
-      ],
-      "$defs": {
-        "DocTopic": {
-          "description": "Which document to return.",
-          "oneOf": [
-            {
-              "description": "What AD4M is, the static tool surface, the workflow, and the rules\nthat keep data usable by humans and other agents. Start here.",
-              "type": "string",
-              "const": "overview"
-            },
-            {
-              "description": "Perspectives, links, languages, neighbourhoods, and the SHACL subject\nclass (social DNA) format in detail.",
-              "type": "string",
-              "const": "architecture"
-            },
-            {
-              "description": "How to actually use the tools: reading and writing instances, the\ncontainment tree, and the common traps.",
-              "type": "string",
-              "const": "usage"
-            },
-            {
-              "description": "App-specific, kept for spaces the Flux app created: its data model\n(channels, messages, posts, tasks) and the recipes for reading and\nreplying in a channel humans can see. A space made by any other app\nis described by `describe_perspective`, not by this topic.",
-              "type": "string",
-              "const": "flux"
-            },
-            {
-              "description": "Authoring subject classes: when to add one, how to write a shape that\nis writable and findable, and what changing a class does to the\ninstances that already exist.",
-              "type": "string",
-              "const": "models"
-            }
-          ]
+      ]
+    }
+  },
+  {
+    "name": "template_read",
+    "description": "Read the template being edited. With no arguments: its version, and the template \u2014 whole, or as an outline of every node with the parts `about` names in full when it is too large to send \u2014 plus the space's own data models. With `ids`, those nodes in full; with `find`, the nodes whose type or text matches. Read the `template` documentation topic before a first edit.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Node ids, e.g. \"n12\"."
+        },
+        "find": {
+          "type": "string",
+          "description": "Text or a type to look for, e.g. \"Load more\"."
+        },
+        "about": {
+          "type": "string",
+          "description": "What the edit is about, in words \u2014 chooses which nodes of a large template come back in full."
+        },
+        "perspective_id": {
+          "type": "string",
+          "description": "Perspective UUID"
+        },
+        "base_uri": {
+          "type": "string",
+          "description": "URI of the Template record"
         }
-      }
+      },
+      "required": [
+        "perspective_id",
+        "base_uri"
+      ]
+    }
+  },
+  {
+    "name": "template_update",
+    "description": "Apply patches to the template and SAVE them, as one change everybody sees. Put every patch an edit needs in one call. Pass the version template_read gave: a template that has changed since is refused. `dry_run` checks the patches without saving. Each patch targets a node by its id, with exactly one of node, insert, remove or split.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "description": "The version template_read answered with."
+        },
+        "patches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "targetId": {
+                "type": "string",
+                "description": "For node (update): the id of the node to merge into. For insert/remove: the id of the PARENT node whose children/routes array to modify. Use \"\" for root."
+              },
+              "node": {
+                "type": "object",
+                "description": "Partial node to merge (JSON Merge Patch). Absent keys preserved, null deletes a key. Mutually exclusive with insert/remove."
+              },
+              "insert": {
+                "type": "object",
+                "properties": {
+                  "children": {
+                    "type": "object",
+                    "properties": {
+                      "node": {
+                        "type": "object",
+                        "description": "The new node to insert."
+                      },
+                      "after": {
+                        "type": "string",
+                        "description": "ID of sibling to insert after. Omit to append."
+                      },
+                      "before": {
+                        "type": "string",
+                        "description": "ID of sibling to insert before."
+                      }
+                    },
+                    "required": [
+                      "node"
+                    ]
+                  },
+                  "routes": {
+                    "type": "object",
+                    "properties": {
+                      "node": {
+                        "type": "object",
+                        "description": "The new route node to insert."
+                      },
+                      "after": {
+                        "type": "string",
+                        "description": "ID of sibling route to insert after. Omit to append."
+                      },
+                      "before": {
+                        "type": "string",
+                        "description": "ID of sibling route to insert before."
+                      }
+                    },
+                    "required": [
+                      "node"
+                    ]
+                  }
+                },
+                "description": "Insert into children or routes array. Mutually exclusive with node/remove."
+              },
+              "remove": {
+                "type": "object",
+                "properties": {
+                  "children": {
+                    "type": "string",
+                    "description": "ID of child to remove."
+                  },
+                  "routes": {
+                    "type": "string",
+                    "description": "ID of route to remove."
+                  }
+                },
+                "description": "Remove from children or routes array by child ID. Mutually exclusive with node/insert."
+              },
+              "split": {
+                "type": "boolean",
+                "description": "targetId is a $ref: give THIS use of the shared shape a copy of its own, so a later patch to it changes nowhere else. Every other use keeps sharing the definition. Use it when a request means one of several places that currently look alike; patch the definition itself when it means all of them. The copy is returned with fresh ids, so patch it on the next turn. Mutually exclusive with node/insert/remove."
+              }
+            },
+            "required": [
+              "targetId"
+            ]
+          }
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Check the patches and save nothing."
+        },
+        "perspective_id": {
+          "type": "string",
+          "description": "Perspective UUID"
+        },
+        "base_uri": {
+          "type": "string",
+          "description": "URI of the Template record"
+        }
+      },
+      "required": [
+        "perspective_id",
+        "base_uri",
+        "version",
+        "patches"
+      ]
     }
   }
 ];

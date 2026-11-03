@@ -137,7 +137,7 @@ pub(crate) async fn get_perspective_with_access(
 
 /// Refuses a write whose managed agent's account has no credits left. `agent_did` is the
 /// managed agent the request acts as; the main agent pays nothing.
-fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
+pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
     if global_free {
@@ -192,12 +192,12 @@ const DEFAULT_LINK_WRITE: f64 = 0.25;
 /// fire-and-forget deduction that logs on `InsufficientCredits` but
 /// doesn't halt the loop. A pass that ends with zero bases used to be
 /// free regardless of how many completions it burned.
-struct WsHarnessCreditGate {
+pub(super) struct WsHarnessCreditGate {
     agent_did: Option<String>,
 }
 
 impl WsHarnessCreditGate {
-    fn new(agent_did: Option<String>) -> Self {
+    pub(super) fn new(agent_did: Option<String>) -> Self {
         Self { agent_did }
     }
 }
