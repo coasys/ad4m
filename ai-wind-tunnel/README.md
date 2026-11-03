@@ -9,6 +9,7 @@ hardware are derived from the evidence and only from it.
 |---|---|
 | `matrix.json` | The cells: per provider and service, the models (a manifest `modelId` or the provider's own name) and the reason a provider cannot serve a service. |
 | `../rust-executor/src/ai_service/local/manifest.json` | Runtimes (llama-server, whisper-server builds per `<os>-<arch>-<backend>`) and model files, with URL, sha256, size, licence and memory. The executor's local AI setup will install from it; the wind tunnel installs from it the same way. |
+| (manifest `memoryBytes`) | What serving a model takes: the peak GPU memory (CPU-only servers: resident memory) measured on the reference run with the cell's `serverFlags` (llama-server: 8k context, 4 slots), rounded up to 0.1 GB. The fit rule and the local setup read it. |
 | `hardware-classes.json` | Ordered rules from a machine (OS, arch, RAM, GPUs, usable backends) to its hardware class. |
 | `hardware-class-fixtures.json` | Machines and the class each must get. Every classifier (TS here, Rust in the executor) runs them. |
 | `evidence/<class>/<date>-<fingerprint>.json` | One file per run: the fingerprint, every cell's status, checks and metrics. Schema v1. |
@@ -120,6 +121,40 @@ whisper-server answers `POST /inference` by default. Started with
 executor's transcription client posts to. It is registered as an `OPEN_AI_AUDIO` endpoint. It
 lists no `/v1/models`, so the executor's health check does not see it as reachable;
 transcription works regardless (the evidence records the endpoint health per cell).
+
+### Thinking models
+
+Qwen3.5 thinks by default. The cells turn it off where it can be turned off, because an
+app's `ai.prompt` has no way to (it sends no `max_tokens` and no thinking switch):
+
+- llama-server is started with `--reasoning off` for LLMs. Without it, `ai.prompt` on
+  Qwen3.5 thinks until the 8k context is spent and returns an empty answer.
+- Ollama requests send `reasoning_effort: "none"`: the executor passes `/v1` chat through to
+  Ollama's OpenAI route, where the reasoning otherwise fills `max_tokens` and no content
+  comes. Ollama's `/v1/completions` applies the chat template and thinks whatever the
+  request says (only its native raw `/api/generate` continues text), so the Ollama completion
+  cell fails on a thinking model. That is the provider's behaviour, recorded as found.
+- vLLM and llama-server requests carry `chat_template_kwargs: {enable_thinking: false}`.
+
+The flags each server ran with are in the cell's `serverFlags` and in its recommendation.
+
+### llama-server's ROCm build needs the system ROCm
+
+The manifest's `linux-x64-rocm` build links the system ROCm runtime (`libamdhip64`,
+rocBLAS, hipBLAS) rather than shipping it. Without those libraries on the search path it
+finds no device and runs on the CPU without saying so. The run puts `/opt/rocm/lib` and
+`/opt/rocm/core-*/lib` on its `LD_LIBRARY_PATH` (`AI_WT_ROCM_LIB` overrides), and every GPU
+cell checks that the server held at least half the model in GPU memory, so a CPU fallback
+fails rather than passing for the GPU. A local setup that installs the ROCm build must check
+for a ROCm runtime the same way.
+
+### vLLM on AMD
+
+vLLM has no official image for consumer or APU AMD GPUs. On Strix Halo (gfx1151) the
+community image `kyuz0/vllm-therock-gfx1151` (ROCm 10, vLLM 0.33) works:
+`AI_WT_VLLM_ROCM_IMAGE=kyuz0/vllm-therock-gfx1151:rocm10.0.0-torch2.11.0-vllm0.33.0`. Its
+first start compiles kernels for several minutes (`serverReadyMs`). Without the variable the
+vLLM cells are skipped on AMD.
 
 ## Adding evidence and regenerating recommendations
 

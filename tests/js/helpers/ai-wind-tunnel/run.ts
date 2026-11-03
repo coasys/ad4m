@@ -308,6 +308,8 @@ async function main() {
             log(`${provider} ${variant.label} ${c.service} ${modelKey(model)}: ${status}${result.reason ? ` (${result.reason.slice(0, 300)})` : ""}`);
           }
           await served.release().catch(() => {});
+          // vLLM knows its version once a model serves.
+          if (session.version) run.version = session.version;
         }
       }
     }
@@ -322,7 +324,12 @@ async function main() {
     finishedAt: new Date().toISOString(),
     hardwareClass,
     fingerprint: fp,
-    executor: { commit: ex?.commit ?? "not started", binary: path.basename(ex?.binary ?? "ad4m-executor") },
+    executor: {
+      commit: ex?.commit ?? "not started",
+      binary: path.basename(ex?.binary ?? "ad4m-executor"),
+      ...(ex?.version ? { version: ex.version } : {}),
+      ...(ex ? { harnessCommit: ex.harnessCommit } : {}),
+    },
     options: { repeat: opts.repeat, concurrency: opts.concurrency, providers: opts.providers, services: opts.services, direct: opts.direct },
     providers: providerRuns,
     cells: results,

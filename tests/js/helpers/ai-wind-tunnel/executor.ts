@@ -23,7 +23,11 @@ export interface WtExecutor {
   /** `http://127.0.0.1:<port>/v1`. */
   v1: string;
   binary: string;
+  /** The commit the binary was built from, or "unknown". */
   commit: string;
+  /** The commit of the wind tunnel that ran. */
+  harnessCommit: string;
+  version?: string;
   dataPath: string;
   pid: number;
   endpoint(name: string, kind: EndpointKindId, url: string): Promise<AiEndpoint>;
@@ -31,12 +35,22 @@ export interface WtExecutor {
   stop(): Promise<void>;
 }
 
-function gitCommit(): string {
+function gitCommit(): string | null {
   try {
     return execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
   } catch {
-    return "unknown";
+    return null;
   }
+}
+
+/**
+ * The commit the executor binary was built from: AI_WT_EXECUTOR_COMMIT, else this checkout's
+ * HEAD when the binary is this checkout's own build, else unknown (a binary does not say).
+ */
+function executorCommit(binary: string): string {
+  if (process.env.AI_WT_EXECUTOR_COMMIT) return process.env.AI_WT_EXECUTOR_COMMIT;
+  if (path.resolve(binary).startsWith(path.join(REPO_ROOT, "target"))) return gitCommit() ?? "unknown";
+  return "unknown";
 }
 
 export async function startExecutor(log: (s: string) => void): Promise<WtExecutor> {
@@ -65,7 +79,15 @@ export async function startExecutor(log: (s: string) => void): Promise<WtExecuto
     token,
     v1: `http://127.0.0.1:${apiPort}/v1`,
     binary,
-    commit: gitCommit(),
+    commit: executorCommit(binary),
+    harnessCommit: gitCommit() ?? "unknown",
+    version: (() => {
+      try {
+        return execFileSync(binary, ["--version"], { encoding: "utf8" }).trim();
+      } catch {
+        return undefined;
+      }
+    })(),
     dataPath,
     pid: proc.pid!,
     async endpoint(name, kind, url) {

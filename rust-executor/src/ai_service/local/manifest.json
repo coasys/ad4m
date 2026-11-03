@@ -149,7 +149,7 @@
       "sizeBytes": 811843840,
       "license": "Apache-2.0",
       "params": "0.8B",
-      "memoryBytes": 1460000000
+      "memoryBytes": 2800000000
     },
     "qwen3.5-2b-q4_k_m": {
       "service": "llm",
@@ -159,7 +159,7 @@
       "sizeBytes": 1280835840,
       "license": "Apache-2.0",
       "params": "2B",
-      "memoryBytes": 2100000000
+      "memoryBytes": 4100000000
     },
     "qwen3.5-4b-q4_k_m": {
       "service": "llm",
@@ -169,7 +169,7 @@
       "sizeBytes": 2740937888,
       "license": "Apache-2.0",
       "params": "4B",
-      "memoryBytes": 3800000000
+      "memoryBytes": 7900000000
     },
     "nomic-embed-text-v1.5-q8_0": {
       "service": "embeddings",
@@ -179,7 +179,7 @@
       "sizeBytes": 146146432,
       "license": "Apache-2.0",
       "params": "137M",
-      "memoryBytes": 300000000
+      "memoryBytes": 800000000
     },
     "whisper-small-q5_1": {
       "service": "stt",
@@ -189,7 +189,7 @@
       "sizeBytes": 190085487,
       "license": "MIT",
       "params": "244M",
-      "memoryBytes": 600000000
+      "memoryBytes": 500000000
     },
     "whisper-base.en-q5_1": {
       "service": "stt",
@@ -199,7 +199,7 @@
       "sizeBytes": 59721011,
       "license": "MIT",
       "params": "74M",
-      "memoryBytes": 260000000
+      "memoryBytes": 300000000
     }
   }
 }

@@ -151,7 +151,8 @@ export interface Evidence {
   finishedAt: string;
   hardwareClass: string;
   fingerprint: Fingerprint;
-  executor: { commit: string; binary: string; version?: string };
+  /** `commit`: what the binary was built from ("unknown" when nobody said); `harnessCommit`: the wind tunnel's. */
+  executor: { commit: string; binary: string; version?: string; harnessCommit?: string };
   options: { repeat: number; concurrency: number[]; providers: ProviderId[]; services: Service[]; direct: boolean };
   providers: Partial<Record<ProviderId, ProviderRun>>;
   cells: CellResult[];
