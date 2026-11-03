@@ -108,6 +108,55 @@ impl SqliteChainStore {
         .map_err(backend)
     }
 
+    /// [`ChainStore::record_fork`] through any connection or transaction, so a caller records a
+    /// fork with its own writes. Recording the same fork twice keeps one record.
+    pub fn record_fork_in(
+        conn: &Connection,
+        ty: ChainType,
+        fork: &ForkEvidence,
+        theirs_json: &str,
+    ) -> Result<(), StoreError> {
+        conn.execute(
+            "INSERT OR IGNORE INTO chain_forks (type, chain, seq, ours, theirs, theirs_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                ty,
+                fork.chain,
+                to_sql(fork.seq)?,
+                fork.ours,
+                fork.theirs,
+                theirs_json
+            ],
+        )
+        .map(|_| ())
+        .map_err(backend)
+    }
+
+    /// [`ChainStore::forks`] through any connection or transaction.
+    pub fn forks_in(
+        conn: &Connection,
+        ty: ChainType,
+        chain: &ChainId,
+    ) -> Result<Vec<ForkEvidence>, StoreError> {
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT seq, ours, theirs FROM chain_forks
+                 WHERE type = ?1 AND chain = ?2 ORDER BY seq, rowid",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(params![ty, chain], |row| {
+                Ok(ForkEvidence {
+                    chain: chain.clone(),
+                    seq: from_sql(row.get(0)?),
+                    ours: row.get(1)?,
+                    theirs: row.get(2)?,
+                })
+            })
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+    }
+
     /// [`ChainStore::append`] inside the caller's transaction, so the caller commits the
     /// append with its own writes (the identity store's one-transaction rule) or rolls all of
     /// them back.
@@ -261,40 +310,11 @@ impl ChainStore for SqliteChainStore {
         theirs_json: &str,
     ) -> Result<(), StoreError> {
         let conn = self.lock()?;
-        conn.execute(
-            "INSERT OR IGNORE INTO chain_forks (type, chain, seq, ours, theirs, theirs_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                ty,
-                fork.chain,
-                to_sql(fork.seq)?,
-                fork.ours,
-                fork.theirs,
-                theirs_json
-            ],
-        )
-        .map(|_| ())
-        .map_err(backend)
+        Self::record_fork_in(&conn, ty, fork, theirs_json)
     }
 
     async fn forks(&self, ty: ChainType, chain: &ChainId) -> Result<Vec<ForkEvidence>, StoreError> {
         let conn = self.lock()?;
-        let mut stmt = conn
-            .prepare_cached(
-                "SELECT seq, ours, theirs FROM chain_forks
-                 WHERE type = ?1 AND chain = ?2 ORDER BY seq, rowid",
-            )
-            .map_err(backend)?;
-        let rows = stmt
-            .query_map(params![ty, chain], |row| {
-                Ok(ForkEvidence {
-                    chain: chain.clone(),
-                    seq: from_sql(row.get(0)?),
-                    ours: row.get(1)?,
-                    theirs: row.get(2)?,
-                })
-            })
-            .map_err(backend)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+        Self::forks_in(&conn, ty, chain)
     }
 }

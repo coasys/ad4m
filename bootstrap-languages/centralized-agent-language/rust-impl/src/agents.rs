@@ -5,7 +5,7 @@
 //!   Agent as an AD4M expression (`createSignedExpression`: hex Ed25519 signature of
 //!   `sha256(json(data) || timestamp)` by the agent's did:key), and that whole signed
 //!   expression is the record's `profile`. The record's `sig` is the agent key's signature
-//!   (through the host's `agentSign`) of the `coasys:link` bytes of
+//!   (through the host's `agentSign`) of the `coasys:agent-record` bytes of
 //!   `{profile, version, anchor: null}`, so it covers the signed expression too. Sent as
 //!   `PUT /v1/agents/{did}` with no signed request.
 //! - `get` reads `GET /v1/agents/{did}` and keeps the record only when its signature holds:
@@ -28,8 +28,8 @@
 //!   `did:scid` profile that is not exactly an expression of that form is ignored.
 
 use ad4m_hash_chain::{decode_ed25519_multikey, decode_proof_value, encode_proof_value};
-use ad4m_identity_core::{fold_json, verify_signed, KelChain, LINK_DOMAIN};
-use ad4m_ldk::identity::{AgentRecord, AgentRecordProof, IdentityErrorCode, LogPage};
+use ad4m_identity_core::{fold_json, verify_signed, HeadStatement, KelChain, AGENT_RECORD_DOMAIN};
+use ad4m_ldk::identity::{AgentRecord, AgentRecordProof, IdentityErrorCode};
 use ad4m_ldk::prelude::{Expression, LanguageError, LanguageResult};
 use serde_json::Value;
 
@@ -47,9 +47,14 @@ pub trait AgentKey {
     fn signed_expression(&self, data: &Value) -> LanguageResult<Expression>;
 }
 
+/// The most log pages [`read_log`] reads for one record: 64 pages of 256 events.
+pub const MAX_LOG_READ_PAGES: usize = 64;
+/// The most bytes [`read_log`] reads for one record: two of the largest pages.
+pub const MAX_LOG_READ_BYTES: usize = 2 * ad4m_ldk::identity::MAX_LOG_PAGE_BYTES;
+
 fn signature_holds(record: &AgentRecord, key: &str) -> bool {
     decode_proof_value(&record.sig)
-        .is_some_and(|sig| verify_signed(LINK_DOMAIN, &record.signed_value(), key, &sig))
+        .is_some_and(|sig| verify_signed(AGENT_RECORD_DOMAIN, &record.signed_value(), key, &sig))
 }
 
 fn invalid(reason: impl Into<String>) -> LanguageError {
@@ -117,7 +122,7 @@ pub fn did_key_record(
         anchor: None,
         sig: String::new(),
     };
-    let bytes = ad4m_identity_core::signing_bytes(LINK_DOMAIN, &record.signed_value())
+    let bytes = ad4m_identity_core::signing_bytes(AGENT_RECORD_DOMAIN, &record.signed_value())
         .map_err(|_| invalid("profile"))?;
     let sig: [u8; 64] = agent
         .sign(&bytes)?
@@ -287,21 +292,57 @@ async fn verified<H: Http>(
 }
 
 /// The whole log of `did` from the store, replayed (every event's signatures checked).
-/// `None` when the store holds none or the events do not replay.
+/// `None` when the store holds none, the events do not replay, or the log is not the one the
+/// store signed: the last page's head must be signed (`coasys:head`) by one of the configured
+/// store keys (`storeKeys`; none configured trusts no head) and name this log, and the replayed
+/// log must end exactly at that head. So neither a hostile host nor anyone on the path can
+/// serve a shortened log under the store's name. A signed head carries no freshness: the store
+/// itself can still serve an older head with its prefix (`did-scid-coasys-1.md`, section 13).
+/// At most [`MAX_LOG_READ_PAGES`] pages and [`MAX_LOG_READ_BYTES`] bytes are read, whatever
+/// head the store names; more is `invalid` (`too-large`).
 pub async fn read_log<H: Http>(store: &Store<H>, did: &str) -> LanguageResult<Option<KelChain>> {
+    let trusted = store.store_keys();
+    if trusted.is_empty() {
+        return Ok(None);
+    }
     let mut events: Vec<Value> = Vec::new();
-    loop {
-        let Some(page): Option<LogPage> = store.log(did, events.len() as u64).await? else {
+    let mut bytes = 0usize;
+    let mut pages = 0usize;
+    let head = loop {
+        if pages == MAX_LOG_READ_PAGES {
+            return Err(invalid("too-large"));
+        }
+        pages += 1;
+        let Some((page, size)) = store.log_sized(did, events.len() as u64).await? else {
             return Ok(None);
         };
-        let done = page.events.is_empty()
-            || events.len() as u64 + page.events.len() as u64 > page.head.seq;
-        events.extend(page.events);
-        if done {
-            break;
+        bytes = bytes.saturating_add(size);
+        if bytes > MAX_LOG_READ_BYTES {
+            return Err(invalid("too-large"));
         }
+        let empty = page.events.is_empty();
+        events.extend(page.events);
+        if empty || events.len() as u64 > page.head.seq {
+            break page.head;
+        }
+    };
+    let Ok(chain) = fold_json(&events) else {
+        return Ok(None);
+    };
+    let signed = HeadStatement {
+        scid: &head.scid,
+        seq: head.seq,
+        hash: &head.hash,
+        time: head.time,
+        store: &head.store,
     }
-    Ok(fold_json(&events).ok())
+    .verify(&head.sig, &trusted);
+    let folded = chain.head();
+    let names_this_log = ad4m_identity_core::scid_of(did) == Some(head.scid.as_str());
+    if !signed || !names_this_log || folded.seq != head.seq || folded.hash != head.hash {
+        return Ok(None);
+    }
+    Ok(Some(chain))
 }
 
 /// `version` (unix milliseconds) as an ISO 8601 timestamp, `YYYY-MM-DDTHH:MM:SS.mmmZ`.

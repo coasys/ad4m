@@ -453,8 +453,15 @@ Rules for an implementation:
   in Rust). A network failure or the 10-second host timeout is `unavailable`.
 - **The store's base URL comes from the language settings** (`{"storeUrl": "https://…"}`),
   which the executor fills from its config key `identity.storeUrl` before the language loads.
-  The executor accepts a head from the language only when one of the keys in its config key
-  `identity.storeKeys` signed it (`coasys:head`).
+  The URL is `https`, or plain `http` to a loopback address only; the language refuses any
+  other as `invalid` (`store-url`) and sends nothing. The executor accepts a head from the
+  language only when one of the keys in its config key `identity.storeKeys` signed it
+  (`coasys:head`), and fills the same keys into the `storeKeys` setting
+  (`{"storeKeys": ["z6Mk…"]}`): when the language reads a log itself (to check a `did:scid`
+  agent record), it keeps the log only when it ends exactly at a head one of those keys signed
+  for that log, and reads at most 64 pages and two pages' worth of bytes. A signed head
+  carries no freshness (an older one verifies as well), so it proves the store held at least
+  that log, never that the log ends there.
 - `expressionGet` / `expressionCreate` keep working for agent profiles, on the store's
   `/v1/agents/{did}` routes. A `did:key` record's `profile` is the Agent as the agent's signed
   AD4M expression (the host's `createSignedExpression`), and `expressionGet` answers that
@@ -465,7 +472,7 @@ Rules for an implementation:
   it exactly as stored plus one field, `proof.record` = `{version, anchor, sig}` of the record
   (`AgentRecordProof`), and ignores a record whose profile is not of that form. The executor
   then checks the record itself at its anchor, from signed data only: removing `proof.record`
-  gives back `profile`, `sig` must hold over `{profile, version, anchor}` (`coasys:link`) by
+  gives back `profile`, `sig` must hold over `{profile, version, anchor}` (`coasys:agent-record`) by
   `proof.key`, and that key must be valid at `anchor` in the log. A profile the store took
   before a revocation so stays valid after it, as the anchor rule below says.
 - **An agent record's `anchor` is one seq.** `sig` covers `{profile, version, anchor}`. A

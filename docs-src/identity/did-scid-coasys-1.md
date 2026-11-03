@@ -485,7 +485,11 @@ GET /v1/logs/<scid>?from=<n>
     past the head gives an empty `events`.
   - `head`: the host's head `{scid, seq, hash, …}`. A host may sign it (the Coasys identity
     store signs it under `coasys:head` with `time`, `store` and `sig`); a resolver that does
-    not trust the host's key reads it only as a hint of how far to page.
+    not trust the host's key reads it only as a hint of how far to page. A signed head carries
+    no freshness: its `time` is when the host stored that head, and an older signed head (with
+    the prefix of the log it covers) verifies as well as the current one. A reader that trusts
+    the key learns that the host held at least that log, never that the log ends there; it
+    reads over an authenticated channel (HTTPS) and never takes a head below one it holds.
   - `appendedAt`: one unix time per event, when the host stored it. It is the host's claim
     and no part of the verifiable history.
 
@@ -525,6 +529,10 @@ Coasys identity store adds these checks:
   the key keeps it, so a revoked key can never enter another log on that host.
 - **Expiry window.** The store refuses a bot scope's `expires` in the past or more than 400
   days ahead.
+- **Forks freeze.** An append whose event sits at a seq the store holds, differs from the
+  stored event and replays on the events before it is a fork (section 11). The store keeps it
+  as evidence with the competing event, serves the log it held, and takes no further event or
+  signed request for that identity.
 - **Proof of work for a log with no vouching note**, below.
 
 ### Proof of work for a log with no vouching note
@@ -560,8 +568,8 @@ of the system signs, so that wallets and apps interoperate.
 Every domain other than `coasys:kel` (section 7) signs `JCS(value + {"domain": domain})` with
 Ed25519 (the value is an object without a `domain` member). The registry is
 `ad4m_identity_core::domain::SIGNING_DOMAINS`:
-`coasys:kel`, `coasys:link`, `coasys:store-request`, `coasys:head`, `coasys:vouch`,
-`coasys:offer`, `coasys:claim`, `coasys:pause`, `coasys:inbox`, `coasys:session`,
-`coasys:account`, `coasys:room-key`, `coasys:bot-grant`. These labels enter a hash or a key
+`coasys:kel`, `coasys:link`, `coasys:agent-record`, `coasys:store-request`, `coasys:head`,
+`coasys:vouch`, `coasys:offer`, `coasys:claim`, `coasys:pause`, `coasys:inbox`,
+`coasys:session`, `coasys:account`, `coasys:room-key`, `coasys:bot-grant`. These labels enter a hash or a key
 derivation and are never signing domains; every signing API refuses them: `coasys:pow`,
 `coasys:pair-id:1`, `coasys:pair-key:1`, `coasys:match`, `coasys:wrap:1`, `coasys:auth:1`.

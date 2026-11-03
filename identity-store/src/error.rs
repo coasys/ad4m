@@ -51,6 +51,17 @@ impl ApiError {
         )
     }
 
+    /// `409 {error:"forked", head, fork}`: the store holds a fork of the log (two validly signed
+    /// events at `fork.seq`), so the identity is frozen and the store takes no further write
+    /// for it. `head` is the head the store keeps serving.
+    pub fn forked(head: &SignedHead, fork: &ad4m_hash_chain::ForkEvidence) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            json!({ "error": "forked", "head": head,
+                    "fork": { "seq": fork.seq, "ours": fork.ours, "theirs": fork.theirs } }),
+        )
+    }
+
     /// `409 {error:"key-taken", key}` (the one-key check).
     pub fn key_taken(key: &str) -> Self {
         Self::new(

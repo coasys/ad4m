@@ -35,7 +35,21 @@ serves the identity interface, both on the shared identity store (`identity-stor
 - No token interface: the executor answers `disabled`.
 
 The store's base URL is the `storeUrl` language setting (`{"storeUrl": "https://…"}`), read on
-every call; without it, `https://store.coasys.org`.
+every call; without it, `https://store.coasys.org`. It must be `https`, or plain `http` to a
+loopback address (a store on the same machine); any other URL is `invalid` (`store-url`) and
+nothing is sent.
+
+The `storeKeys` setting (`{"storeKeys": ["z6Mk…"]}`, the executor's `identity.storeKeys`)
+lists the store keys the language trusts. To check a `did:scid` record it reads the person's
+log and keeps it only when the last page's head is signed (`coasys:head`) by one of those keys,
+names that log, and is exactly the head the replayed events end at; without `storeKeys` no
+`did:scid` record verifies. A signed head carries no freshness: the store can still serve an
+older head with its prefix. A log read stops at 64 pages and two pages' worth of bytes
+(`invalid` `too-large`), whatever head the store names.
+
+Record signatures use their own domain, `coasys:agent-record`, and a record's `version` is
+unix milliseconds: the store refuses one more than 5 minutes past its clock, so no write can
+push the version out of the owner's reach.
 
 Every call goes to that store. A did:scid `src` hint names another host of a log; the executor
 fetches it itself, never through the language. A log page over 256 events or 257 × 64 KiB is

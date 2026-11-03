@@ -217,8 +217,11 @@ struct Recorded {
 struct Host {
     calls: Rc<RefCell<Vec<Recorded>>>,
     url: Rc<RefCell<String>>,
-    /// Fixed replies for `https://` bases: the suite has no TLS.
+    /// Fixed replies for URL prefixes (an `https://` base: the suite has no TLS; or one path
+    /// of the real store, to stand in for a hostile one).
     remotes: Rc<RefCell<Vec<(String, HttpReply)>>>,
+    /// The `storeKeys` setting.
+    keys: Rc<RefCell<Vec<String>>>,
 }
 
 fn fetch_blocking(
@@ -307,7 +310,10 @@ impl Http for Host {
             .remotes
             .borrow()
             .iter()
-            .find(|(base, _)| url.starts_with(&format!("{base}/")))
+            .find(|(base, _)| {
+                url.strip_prefix(base.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?']))
+            })
             .map(|(_, reply)| reply.clone());
         match reply {
             Some(reply) => Ok(reply),
@@ -317,16 +323,25 @@ impl Http for Host {
 }
 
 impl Host {
+    /// A host whose settings name the store at `url` and trust no store key.
     fn on(url: &str) -> (Host, Store<Host>) {
         let host = Host::default();
         *host.url.borrow_mut() = url.to_string();
-        let settings = host.url.clone();
+        let (url, keys) = (host.url.clone(), host.keys.clone());
         // The language's settings JSON, as the executor fills it.
         let store = Store::new(host.clone(), move || {
-            centralized_agent_language::store::store_url_from(
-                &json!({ "storeUrl": settings.borrow().clone() }).to_string(),
+            centralized_agent_language::store::store_settings_from(
+                &json!({ "storeUrl": url.borrow().clone(), "storeKeys": keys.borrow().clone() })
+                    .to_string(),
             )
         });
+        (host, store)
+    }
+
+    /// A host whose settings name `server` and trust its store key.
+    fn of(server: &StoreProcess) -> (Host, Store<Host>) {
+        let (host, store) = Host::on(&server.url);
+        host.keys.borrow_mut().push(server.key.clone());
         (host, store)
     }
 
@@ -340,8 +355,10 @@ impl Host {
     }
 }
 
-/// The agent the host runs the language for: an Ed25519 key from a label, and a clock (the
-/// system's, or a fixed instant in unix milliseconds).
+/// The agent the host runs the language for: an Ed25519 key from a label, and the time its
+/// signed expressions carry (the system's, or a fixed instant in unix milliseconds, for a
+/// pinned fixture). The clock the language reads (`now_ms`, a record's version) is always the
+/// system's: the store refuses a version past its own clock.
 struct TestAgentKey(SigningKey, Option<u64>);
 
 impl TestAgentKey {
@@ -368,19 +385,17 @@ impl AgentKey for TestAgentKey {
         Ok(self.0.sign(bytes).to_bytes().to_vec())
     }
     fn now_ms(&self) -> u64 {
-        self.1.unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64
-        })
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
     }
     /// As the executor's `create_signed_expression` (`rust-executor/src/agent/mod.rs`) signs for
     /// the host's `createSignedExpression`: data with sorted keys, a millisecond UTC timestamp,
     /// the hex Ed25519 signature of `hash_data_and_timestamp`.
     fn signed_expression(&self, data: &Value) -> LanguageResult<Expression> {
         let data = sorted(data);
-        let timestamp = agents::iso_time_ms(self.now_ms());
+        let timestamp = agents::iso_time_ms(self.1.unwrap_or_else(|| self.now_ms()));
         let signature = self.0.sign(&hash_data_and_timestamp(&data, &timestamp));
         let did = self.did()?;
         Ok(Expression {
@@ -541,7 +556,7 @@ fn link_with(
 fn the_log_calls_answer_and_refuse_as_the_store_does() {
     let server = StoreProcess::start();
     let mut apps = Apps::start();
-    let (_host, store) = Host::on(&server.url);
+    let (_host, store) = Host::of(&server);
     let alice = apps.run("person", json!({ "name": "alice log" }));
     let did = alice["did"].as_str().unwrap();
 
@@ -613,7 +628,7 @@ fn the_log_calls_answer_and_refuse_as_the_store_does() {
 fn a_key_index_wait_answers_within_a_second_of_the_append() {
     let server = StoreProcess::start();
     let mut apps = Apps::start();
-    let (_host, store) = Host::on(&server.url);
+    let (_host, store) = Host::of(&server);
     let name = "carol wait";
     let p = person(&mut apps, &store, name);
     let did = p["did"].as_str().unwrap().to_string();
@@ -655,7 +670,7 @@ fn a_key_index_wait_answers_within_a_second_of_the_append() {
 fn the_offer_calls_answer_and_refuse_as_the_store_does() {
     let server = StoreProcess::start();
     let mut apps = Apps::start();
-    let (_host, store) = Host::on(&server.url);
+    let (_host, store) = Host::of(&server);
     let name = "dave offers";
     let p = person(&mut apps, &store, name);
     let did = p["did"].as_str().unwrap().to_string();
@@ -815,7 +830,7 @@ fn the_offer_calls_answer_and_refuse_as_the_store_does() {
 fn attach_note_checks_the_signed_request_then_the_store_has_no_vouching_service() {
     let server = StoreProcess::start();
     let mut apps = Apps::start();
-    let (_host, store) = Host::on(&server.url);
+    let (_host, store) = Host::of(&server);
     let name = "fay notes";
     let p = person(&mut apps, &store, name);
     let did = p["did"].as_str().unwrap();
@@ -845,7 +860,7 @@ fn attach_note_checks_the_signed_request_then_the_store_has_no_vouching_service(
 fn put_agent_stores_a_did_scid_record_and_records_by_a_revoked_or_foreign_key_are_ignored() {
     let server = StoreProcess::start();
     let mut apps = Apps::start();
-    let (_host, store) = Host::on(&server.url);
+    let (_host, store) = Host::of(&server);
     let name = "gus records";
     let p = person(&mut apps, &store, name);
     let did = p["did"].as_str().unwrap().to_string();
@@ -1041,7 +1056,7 @@ fn assert_carries_its_record(expression: &Expression, record: &AgentRecord) {
     assert_eq!(rebuilt.signed_value(), record.signed_value());
     let sig = ad4m_hash_chain::decode_proof_value(&binding.sig).unwrap();
     assert!(ad4m_identity_core::verify_signed(
-        ad4m_identity_core::LINK_DOMAIN,
+        ad4m_identity_core::AGENT_RECORD_DOMAIN,
         &rebuilt.signed_value(),
         key.strip_prefix("did:key:").unwrap(),
         &sig
@@ -1052,7 +1067,7 @@ fn assert_carries_its_record(expression: &Expression, record: &AgentRecord) {
 fn a_did_scid_profile_is_answered_only_when_its_record_binds_it_exactly() {
     let server = StoreProcess::start();
     let mut apps = Apps::start();
-    let (_host, store) = Host::on(&server.url);
+    let (_host, store) = Host::of(&server);
     let name = "lee binds";
     let p = person(&mut apps, &store, name);
     let did = p["did"].as_str().unwrap().to_string();
@@ -1118,7 +1133,7 @@ fn a_did_scid_profile_is_answered_only_when_its_record_binds_it_exactly() {
 #[test]
 fn expression_create_and_get_for_a_did_key_agent_use_the_stores_agent_route() {
     let server = StoreProcess::start();
-    let (host, store) = Host::on(&server.url);
+    let (host, store) = Host::of(&server);
     let agent = TestAgentKey::new("agent jo");
     let did = agent.did().unwrap();
     let content = json!({
@@ -1196,7 +1211,7 @@ const PROFILE_FIXTURE: &str = r#"{"author":"did:key:z6MkmCaBGuSHkLjurVa3zQKf8shz
 #[test]
 fn fixture_profile_expression_is_pinned() {
     let server = StoreProcess::start();
-    let (_host, store) = Host::on(&server.url);
+    let (_host, store) = Host::of(&server);
     let agent = TestAgentKey::at("agent fixture", 1_800_000_000_123);
     let did = agent.did().unwrap();
     let content = json!({
@@ -1217,7 +1232,7 @@ fn fixture_profile_expression_is_pinned() {
 #[test]
 fn a_did_key_record_carrying_another_agents_expression_is_ignored() {
     let server = StoreProcess::start();
-    let (_host, store) = Host::on(&server.url);
+    let (_host, store) = Host::of(&server);
     let jo = TestAgentKey::new("agent jo");
     let kim = TestAgentKey::new("agent kim");
     let jo_did = jo.did().unwrap();
@@ -1244,9 +1259,11 @@ fn a_did_key_record_carrying_another_agents_expression_is_ignored() {
     // A plain profile with no signed expression: nothing the executor could verify.
     let mut plain = agents::did_key_record(&jo, &naming_kim, 3).unwrap();
     plain.profile = agent(&jo_did);
-    let bytes =
-        ad4m_identity_core::signing_bytes(ad4m_identity_core::LINK_DOMAIN, &plain.signed_value())
-            .unwrap();
+    let bytes = ad4m_identity_core::signing_bytes(
+        ad4m_identity_core::AGENT_RECORD_DOMAIN,
+        &plain.signed_value(),
+    )
+    .unwrap();
     plain.sig = ad4m_hash_chain::encode_proof_value(&jo.0.sign(&bytes).to_bytes());
     block_on(store.put_agent(&plain, None)).unwrap();
     assert!(block_on(agents::get(&store, &jo_did, now_s()))
@@ -1269,7 +1286,7 @@ fn a_did_key_record_carrying_another_agents_expression_is_ignored() {
 fn bodies_are_the_inputs_canonical_json_and_the_signed_request_travels_unchanged() {
     let server = StoreProcess::start();
     let mut apps = Apps::start();
-    let (host, store) = Host::on(&server.url);
+    let (host, store) = Host::of(&server);
     let name = "kim bytes";
     let p = apps.run("person", json!({ "name": name }));
     let did = p["did"].as_str().unwrap();
@@ -1363,7 +1380,7 @@ fn changing_the_store_setting_moves_every_call_and_a_silent_store_is_unavailable
 fn a_log_page_over_the_stores_limits_is_refused() {
     let server = StoreProcess::start();
     let mut apps = Apps::start();
-    let (host, store) = Host::on(&server.url);
+    let (host, store) = Host::of(&server);
     let p = person(&mut apps, &store, "omar large");
     let did = p["did"].as_str().unwrap();
     let page = block_on(store.log(did, 0)).unwrap().unwrap();
@@ -1407,4 +1424,201 @@ fn a_log_page_over_the_stores_limits_is_refused() {
             did.rsplit(':').next().unwrap()
         )
     );
+}
+
+/// A `did:scid` person with a linked phone and a record by d1 the store took: answers the did,
+/// the scid and the record.
+fn scid_person_with_record(
+    apps: &mut Apps,
+    server: &StoreProcess,
+    store: &Store<Host>,
+    name: &str,
+) -> (String, String, AgentRecord) {
+    let p = person(apps, store, name);
+    let did = p["did"].as_str().unwrap().to_string();
+    let scid = p["scid"].as_str().unwrap().to_string();
+    link(apps, store, name, &did, &format!("{name} phone"));
+    let profile = scid_profile(apps, name, "d1", &did);
+    let record: AgentRecord = serde_json::from_value(apps.run(
+        "record",
+        json!({ "name": name, "signer": "d1", "profile": profile, "version": 1 }),
+    ))
+    .unwrap();
+    let path = format!("/v1/agents/{did}");
+    let body = serde_json::to_value(&record).unwrap();
+    let req = apps.signed(server, name, "d1", Some("d1"), "PUT", &path, Some(&body));
+    block_on(store.put_agent(&record, Some(&req))).unwrap();
+    (did, scid, record)
+}
+
+#[test]
+fn a_record_verifies_only_on_a_log_that_ends_at_a_head_a_configured_store_key_signed() {
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (host, store) = Host::of(&server);
+    let (did, scid, record) = scid_person_with_record(&mut apps, &server, &store, "una heads");
+    let kept = block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .unwrap();
+    assert_carries_its_record(&kept, &record);
+    // A third event, so a log cut after #1 still holds the record's anchor.
+    let revoke = apps.run("revoke", json!({ "name": "una heads", "ids": ["d2"] }));
+    block_on(store.append(&did, &append_req(vec![revoke.clone()]))).unwrap();
+    apps.run("push", json!({ "name": "una heads", "event": revoke }));
+    assert_eq!(record.anchor, Some(1));
+    let page = block_on(store.log(&did, 0)).unwrap().unwrap();
+    assert_eq!(page.events.len(), 3);
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_some());
+
+    // No configured store key: no head is trusted, so no did:scid record verifies.
+    let trusted = host.keys.replace(Vec::new());
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_none());
+    // Another key only: the store's head does not count.
+    *host.keys.borrow_mut() = vec!["z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".into()];
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_none());
+    *host.keys.borrow_mut() = trusted;
+
+    // A host on the path serves the log; the record comes from the real store.
+    let log_path = format!("{}/v1/logs/{scid}", server.url);
+    let serve_log = |page: Value| {
+        host.remotes.borrow_mut().clear();
+        host.serve(
+            &log_path,
+            HttpReply {
+                status: 200,
+                body: page.to_string(),
+            },
+        );
+    };
+    // The genuine page, served by the stand-in: kept.
+    serve_log(serde_json::to_value(&page).unwrap());
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_some());
+    // The log cut short under the genuine head (#0 and #1, then an empty page): the events
+    // replay and hold the record's anchor, but the replayed head is not the signed one.
+    let mut short = serde_json::to_value(&page).unwrap();
+    short["events"] = json!(page.events[..2]);
+    short["appendedAt"] = json!(page.appended_at[..2]);
+    let mut short_head = short.clone();
+    let mut past = short.clone();
+    past["events"] = json!([]);
+    past["appendedAt"] = json!([]);
+    host.remotes.borrow_mut().clear();
+    for (from, body) in [(0, &short), (2, &past)] {
+        host.serve(
+            &format!("{log_path}?from={from}"),
+            HttpReply {
+                status: 200,
+                body: body.to_string(),
+            },
+        );
+    }
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_none());
+    let short_reads = host
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.url.starts_with(&log_path))
+        .map(|c| c.url.clone())
+        .collect::<Vec<_>>();
+    assert!(short_reads.ends_with(&[format!("{log_path}?from=0"), format!("{log_path}?from=2")]));
+    // Cut short with a head moved to match it: the signature no longer holds.
+    short_head["head"]["seq"] = json!(1);
+    short_head["head"]["hash"] = json!(ad4m_hash_chain::entry_hash_json(&page.events[1]).unwrap());
+    serve_log(short_head);
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_none());
+    // The genuine head of another log: refused, though the signature holds.
+    let other = person(&mut apps, &store, "vic heads");
+    let other_page = block_on(store.log(other["did"].as_str().unwrap(), 0))
+        .unwrap()
+        .unwrap();
+    let mut foreign = serde_json::to_value(&page).unwrap();
+    foreign["head"] = serde_json::to_value(&other_page.head).unwrap();
+    serve_log(foreign);
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn a_log_read_is_bounded_whatever_head_the_store_names() {
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (host, store) = Host::of(&server);
+    let (did, scid, _) = scid_person_with_record(&mut apps, &server, &store, "wes bounds");
+    let page = block_on(store.log(&did, 0)).unwrap().unwrap();
+    let log_path = format!("{}/v1/logs/{scid}", server.url);
+    let too_large = IdentityErrorCode::Invalid {
+        reason: "too-large".into(),
+    };
+    // A head far past the events, and pages that never run out.
+    let reads_before = host
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.url.starts_with(&log_path))
+        .count();
+    let mut endless = serde_json::to_value(&page).unwrap();
+    endless["head"]["seq"] = json!(1_000_000_000u64);
+    host.serve(
+        &log_path,
+        HttpReply {
+            status: 200,
+            body: endless.to_string(),
+        },
+    );
+    assert_eq!(
+        refusal(block_on(agents::get(&store, &did, now_s()))),
+        too_large
+    );
+    let pages = host
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.url.starts_with(&log_path))
+        .count();
+    assert_eq!(pages - reads_before, agents::MAX_LOG_READ_PAGES);
+    // Pages each within the page limit, together past the byte limit.
+    let mut padded = endless;
+    padded["pad"] = json!("x".repeat(MAX_LOG_PAGE_BYTES - 4096));
+    host.remotes.borrow_mut().clear();
+    host.serve(
+        &log_path,
+        HttpReply {
+            status: 200,
+            body: padded.to_string(),
+        },
+    );
+    assert_eq!(
+        refusal(block_on(agents::get(&store, &did, now_s()))),
+        too_large
+    );
+}
+
+#[test]
+fn a_store_over_plain_http_is_called_only_on_a_loopback_address() {
+    let server = StoreProcess::start();
+    let (host, store) = Host::of(&server);
+    assert!(server.url.starts_with("http://127.0.0.1:"));
+    assert!(block_on(store.pow_params()).is_ok());
+    *host.url.borrow_mut() = "http://store.example".into();
+    let calls = host.calls.borrow().len();
+    assert_eq!(
+        refusal(block_on(store.pow_params())),
+        IdentityErrorCode::Invalid {
+            reason: "store-url".into()
+        }
+    );
+    assert_eq!(host.calls.borrow().len(), calls, "nothing was sent");
 }
