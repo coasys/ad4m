@@ -899,3 +899,12 @@ async fn a_link_without_the_master_key_never_opens_an_offer() {
         ))
     ));
 }
+
+/// A screen's `Debug` never shows the words: a surface that logs a screen, or a test that
+/// panics with one, must not put the 12 words in a log or a crash report.
+#[test]
+fn a_create_screen_never_shows_the_words_in_debug_output() {
+    let (_flow, screen) = CreateFlow::start(&OsRandom);
+    assert!(matches!(&screen, CreateScreen::ShowWords(words) if words.len() == 12));
+    assert_eq!(format!("{screen:?}"), "ShowWords(<12 words>)");
+}

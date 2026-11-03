@@ -2657,7 +2657,7 @@ impl LanguageController {
                             log::warn!(
                                 "verify_expression_proof: INVALID signature for author={}, sig={}",
                                 expr.author,
-                                &expr.proof.signature[..20.min(expr.proof.signature.len())]
+                                expr.proof.signature.chars().take(20).collect::<String>()
                             );
                         }
                         if let Some(proof) = expr_json.get_mut("proof") {
@@ -3353,6 +3353,28 @@ mod agent_language_profile_tests {
 
         // Without the identity module no did:scid author verifies.
         assert_eq!(verdict(profile).await, INVALID);
+    }
+
+    /// The warning for an invalid signature shows a prefix of `proof.signature`. A `did:scid`
+    /// author reaches it before the signature is hex-decoded (no identity module, a `proof.key`
+    /// that is no device key), so the prefix is cut by characters, not bytes: a peer's
+    /// non-ASCII signature reads invalid instead of panicking the read.
+    #[tokio::test]
+    async fn a_did_scid_expression_with_a_non_ascii_signature_reads_invalid_without_a_panic() {
+        // A running executor logs warnings; with no logger, `log::warn!` never builds its
+        // arguments, and the prefix is cut only when they are.
+        let level = log::max_level();
+        log::set_max_level(log::LevelFilter::Warn);
+        let log = TestLog::new(38);
+        let mut profile = scid_profile(&did_of(&log), &log.device);
+        profile["proof"]["signature"] =
+            JsonValue::from(format!("{}\u{e9}\u{2026}", "a".repeat(19)));
+        let without_module = verdict(profile.clone()).await;
+        let cache = cache_of(&[&log]).await;
+        let with_module = verdict_with(profile, Some(&cache)).await;
+        log::set_max_level(level);
+        assert_eq!(without_module, INVALID);
+        assert_eq!(with_module, INVALID);
     }
 
     #[tokio::test]

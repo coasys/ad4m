@@ -33,6 +33,26 @@ use types::IdentityForkEvent;
 
 static SERVICE: OnceLock<Arc<IdentityService>> = OnceLock::new();
 
+/// `identity.storeKeys` as the executor can use them: each a bare Ed25519 multikey (`z6Mk…`),
+/// which a signed head's `store` names as `did:key:<multikey>` and `verify_head` compares
+/// without the prefix. Any other form (a `did:key:` prefix, a space after the comma, an empty
+/// string) never matches a head, while `KelCache::trusts_a_store` would say the executor trusts
+/// one: `identity.publish` and `identity.claimOffer` would then commit at the store, the cache
+/// would accept no head, and the agent's key would be taken for a log it can never bind to. So
+/// the executor refuses to start with such an entry.
+pub fn check_store_keys(keys: &[String]) -> Result<(), String> {
+    match keys
+        .iter()
+        .find(|key| ad4m_hash_chain::decode_ed25519_multikey(key).is_none())
+    {
+        None => Ok(()),
+        Some(bad) => Err(format!(
+            "identity.storeKeys: {bad:?} is not an Ed25519 multikey; give the store's key as the \
+             bare multikey (z6Mk…), without did:key: and without spaces"
+        )),
+    }
+}
+
 /// The identity settings of the executor's config (`identity.storeUrl`, `identity.storeKeys`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IdentitySettings {
@@ -283,6 +303,24 @@ mod tests {
             assert!(written.is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
             assert!(temp_files_in(&lang).is_empty());
+        }
+    }
+
+    /// A store key the executor cannot match against a head is refused before the executor
+    /// starts, named in the error: the cache must never say it trusts a store it cannot check.
+    #[test]
+    fn store_keys_must_be_bare_ed25519_multikeys() {
+        let key = crate::identity::head::test_store_key::TestStoreKey::new(1).multikey();
+        assert_eq!(check_store_keys(&[]), Ok(()));
+        assert_eq!(check_store_keys(&[key.clone()]), Ok(()));
+        for bad in [
+            format!(" {key}"),
+            format!("did:key:{key}"),
+            String::new(),
+            "z6MkA".to_string(),
+        ] {
+            let err = check_store_keys(&[key.clone(), bad.clone()]).unwrap_err();
+            assert!(err.contains(&format!("{bad:?}")), "{err}");
         }
     }
 }

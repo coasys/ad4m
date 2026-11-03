@@ -369,3 +369,45 @@ async fn agent_status_for_a_managed_user_carries_no_private_key() {
     assert_no_private_keys(&did_document, &secrets, "the user's DID document");
     assert_public_document_present(&did_document, &user_did, "the user's DID document");
 }
+
+/// `agent.lock`'s reply and its `agent-status-changed` event carry the identity the main
+/// agent's device key speaks for, as `agent.status` does: a hook that takes the event as the
+/// new status (`useMe`) would otherwise show `identity: null` after every lock or unlock.
+#[tokio::test]
+async fn lock_reply_and_its_event_carry_the_agents_identity() {
+    setup_wallet();
+    setup_agent();
+    let did = main_did();
+    let scid = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
+    crate::db::Ad4mDb::with_global_instance(|db| db.set_agent_identity(&did, scid, 1)).unwrap();
+    let identity = ad4m_identity_core::did_of(scid);
+    let mut events = get_global_pubsub().await.subscribe_events();
+
+    let reply = handlers()
+        .dispatch(
+            "agent.lock",
+            json!({ "passphrase": "pw-1229" }),
+            admin_ctx(),
+        )
+        .await
+        .expect("agent.lock");
+    let event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.expect("event");
+            if event.topic == Topic::AgentStatusChanged {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("agent.lock publishes agent-status-changed");
+    // Unlock before asserting, so a failure here leaves the wallet usable.
+    let _ = AgentService::with_mutable_global_instance(|s| s.unlock("pw-1229".into()));
+
+    assert_eq!(reply["identity"], json!(identity), "{reply}");
+    let payload = event.payload.to_string();
+    assert!(
+        payload.contains(&format!("\"identity\":\"{identity}\"")),
+        "{payload}"
+    );
+}

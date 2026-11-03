@@ -253,7 +253,8 @@ pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
 }
 
 async fn announce_startup_failure(message: String) {
-    let mut status = AgentService::with_global_instance(|agent_service| agent_service.dump());
+    let mut status =
+        AgentService::with_global_instance(|agent_service| agent_service.dump()).with_identity();
     status.error = Some(message);
     get_global_pubsub()
         .await
