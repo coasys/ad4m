@@ -158,7 +158,38 @@ pub(crate) async fn publish_model_status(
     ));
 }
 
-/// Check `endpoint` now: store the health, and publish it when it changed.
+/// Publish `model-status` for each upstream model on `before` whose status `health` changes.
+/// Managed users do not get `ai-endpoint-status` (it names the URL): this is how they learn
+/// that a model's endpoint went down or came back.
+async fn publish_model_changes(before: &Endpoint, health: &EndpointHealth) {
+    let models = match Ad4mDb::with_global_instance(|db| db.get_models()) {
+        Ok(models) => models,
+        Err(e) => {
+            log::warn!("AI endpoint health: could not read the models: {e}");
+            return;
+        }
+    };
+    let after = Endpoint {
+        health: health.clone(),
+        ..before.clone()
+    };
+    let mut remote_models: Vec<String> = models
+        .into_iter()
+        .filter(|model| model.endpoint_id == before.id)
+        .map(|model| model.remote_model)
+        .collect();
+    remote_models.sort();
+    remote_models.dedup();
+    for remote_model in remote_models {
+        let status = after.model_status(&remote_model);
+        if status.state != before.model_status(&remote_model).state {
+            publish_model_status(&before.id, &remote_model, status).await;
+        }
+    }
+}
+
+/// Check `endpoint` now: store the health, and publish it, and the statuses of the models
+/// on it that it changes, when it changed.
 pub async fn check_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
     // Add and update refuse such an endpoint, but a migrated or imported one can hold a
     // key for a plain-HTTP remote host: probing it would send the key in the clear.
@@ -185,6 +216,7 @@ pub async fn check_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
         || health.detail != endpoint.health.detail;
     if changed {
         publish_health(&endpoint.id, &health).await;
+        publish_model_changes(endpoint, &health).await;
     }
     Ok(health)
 }
@@ -542,6 +574,91 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.downcast_ref::<EndpointNotFound>().is_some());
+    }
+
+    /// The next `model-status` event about `endpoint_id`, or `None` within a second.
+    async fn next_model_status(
+        events: &mut tokio::sync::broadcast::Receiver<Arc<Event>>,
+        endpoint_id: &str,
+    ) -> Option<Arc<Event>> {
+        let next = async {
+            loop {
+                let event = events.recv().await.ok()?;
+                if event.topic == Topic::AiModelStatus && event.payload["endpointId"] == endpoint_id
+                {
+                    return Some(event);
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(1), next)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    // Managed users do not get `ai-endpoint-status` (it names the URL): the `model-status`
+    // of each model on the endpoint is how they learn it went down or came back.
+    #[tokio::test]
+    async fn a_change_of_health_publishes_the_status_of_each_model_on_the_endpoint() {
+        let service = service().await;
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_body(r#"{"data":[{"id":"qwen3"}]}"#)
+            .create_async()
+            .await;
+        let view = service
+            .add_endpoint(input("vllm", &server.url(), None))
+            .await
+            .unwrap();
+        // Two models on one upstream model: one event names them both.
+        for name in ["a", "b"] {
+            service
+                .add_model(crate::types::ModelInput {
+                    name: name.into(),
+                    model_type: crate::types::ModelType::Llm,
+                    endpoint_id: view.id.clone(),
+                    remote_model: "qwen3".into(),
+                    native_tools: None,
+                })
+                .await
+                .unwrap();
+        }
+        let mut events = get_global_pubsub().await.subscribe_events();
+
+        let mut down = stored_endpoint(&view.id).unwrap();
+        down.base_url = url::Url::parse("http://127.0.0.1:1").unwrap();
+        check_health(&down).await.unwrap();
+        let event = next_model_status(&mut events, &view.id)
+            .await
+            .expect("no model-status when the endpoint went down");
+        assert_eq!(event.audience, Audience::Everyone);
+        assert_eq!(event.payload["remoteModel"], "qwen3");
+        assert_eq!(event.payload["status"]["state"], "ENDPOINT_DOWN");
+        assert!(
+            !event.payload.to_string().contains("127.0.0.1"),
+            "{}",
+            event.payload
+        );
+        assert!(
+            next_model_status(&mut events, &view.id).await.is_none(),
+            "one event per upstream model"
+        );
+
+        check_health(&stored_endpoint(&view.id).unwrap())
+            .await
+            .unwrap();
+        let event = next_model_status(&mut events, &view.id)
+            .await
+            .expect("no model-status when the endpoint came back");
+        assert_eq!(event.payload["status"]["state"], "READY");
+
+        // Unchanged: nothing.
+        check_health(&stored_endpoint(&view.id).unwrap())
+            .await
+            .unwrap();
+        assert!(next_model_status(&mut events, &view.id).await.is_none());
     }
 
     #[tokio::test]

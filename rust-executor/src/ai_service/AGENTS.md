@@ -41,7 +41,9 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
 
 - `mod.rs`: `ai.addEndpoint` / `updateEndpoint` / `removeEndpoint` (probe once before a
   save; an update reloads the models on it), `check_health` and the 60 s
-  health loop (`ai-endpoint-status`, to the main agent's sessions only),
+  health loop (`ai-endpoint-status`, to the main agent's sessions only; a change also
+  publishes `model-status`, to everyone, for each model on the endpoint whose status it
+  changes: that is how managed users see an endpoint go down or come back),
   `after_failed_request` (a refused connection or key re-checks the endpoint at once, a
   404 publishes the model `MISSING`; called by `/v1`, `ChatModel`, `embed_batch` and the
   transcription stream worker, so a client keeps its connection error typed as
