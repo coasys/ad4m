@@ -25,12 +25,26 @@ use crate::vault::Vault;
 use crate::{fold, ClientError, Random};
 
 /// What the surface shows at each step.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub enum CreateScreen {
     /// The 12 words, to write down (screen capture off).
     ShowWords(Vec<String>),
     /// Ask for the words at these positions (counted from 1).
     ConfirmWords { positions: [usize; 2] },
+}
+
+/// Never the words: a surface that logs a screen, or a test that panics with one, must not put
+/// the 12 words in a log or a crash report.
+impl std::fmt::Debug for CreateScreen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CreateScreen::ShowWords(words) => write!(f, "ShowWords(<{} words>)", words.len()),
+            CreateScreen::ConfirmWords { positions } => f
+                .debug_struct("ConfirmWords")
+                .field("positions", positions)
+                .finish(),
+        }
+    }
 }
 
 /// The identity made.

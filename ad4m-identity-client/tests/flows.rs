@@ -101,6 +101,8 @@ struct TestExecutor {
     lose_publish_answer: Cell<bool>,
     /// The next `identity.publish` fails before it reaches the store.
     refuse_publish: Cell<bool>,
+    /// A dishonest store: every claimed offer is listed with another `enc` key.
+    swap_enc: Cell<bool>,
 }
 
 impl TestExecutor {
@@ -113,6 +115,7 @@ impl TestExecutor {
             publishes: Cell::new(0),
             lose_publish_answer: Cell::new(false),
             refuse_publish: Cell::new(false),
+            swap_enc: Cell::new(false),
         }
     }
 
@@ -317,6 +320,16 @@ impl ExecutorRpc for TestExecutor {
                     .await;
                 if code != 200 {
                     return Err(Self::refused(code, &body));
+                }
+                let mut body = body;
+                if self.swap_enc.get() {
+                    // The real device key (the match code holds) with another enc key.
+                    for listing in body.as_array_mut().into_iter().flatten() {
+                        if listing["state"]["state"] == "claimed" {
+                            listing["state"]["claim"]["encKey"] =
+                                json!(ad4m_identity_core::encode_x25519_multikey(&[9; 32]));
+                        }
+                    }
                 }
                 Ok(body)
             }
@@ -833,4 +846,46 @@ async fn a_link_without_the_master_key_never_opens_an_offer() {
             ad4m_identity_client::VaultError::NotFound
         ))
     ));
+}
+
+/// The holder signs an `add` only for a claim whose co-signature covers the keys the store
+/// shows. The match code covers the device key alone, so a dishonest store could otherwise list
+/// the real device key with another `enc` key, the one a master key is later sealed to.
+#[tokio::test]
+async fn the_holder_refuses_a_claim_whose_co_signature_does_not_cover_its_keys() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 11).await;
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Node,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    claim(&b, &flow.link(), None).await.unwrap();
+
+    a.rpc().swap_enc.set(true);
+    let err = flow.wait_for_claim().await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Protocol(why) if why.contains("co-signature")),
+        "{err}"
+    );
+    // Nothing reached the log: the incept is the only publish.
+    assert_eq!(a.rpc().publishes.get(), 1);
+}
+
+/// A screen's `Debug` never shows the words: a surface that logs a screen, or a test that
+/// panics with one, must not put the 12 words in a log or a crash report.
+#[test]
+fn a_create_screen_never_shows_the_words_in_debug_output() {
+    let (_flow, screen) = CreateFlow::start(&OsRandom);
+    assert!(matches!(&screen, CreateScreen::ShowWords(words) if words.len() == 12));
+    assert_eq!(format!("{screen:?}"), "ShowWords(<12 words>)");
 }

@@ -10,10 +10,14 @@
 //! 4. [`LinkFlow::confirm`] after the person sees the same code: the `add` that spends the
 //!    claim, signed by the current master key (`identity.publish`).
 
-use ad4m_hash_chain::{encode_proof_value, hash_bytes};
+use ad4m_hash_chain::{decode_proof_value, encode_proof_value, hash_bytes};
 use ad4m_identity_core::build::add_claimed;
-use ad4m_identity_core::link::{self, ClaimView, Offer, OfferKind, OfferString, SignedBy};
-use ad4m_identity_core::{signing_bytes, KelChain, REQUEST_DOMAIN};
+use ad4m_identity_core::link::{
+    self, ClaimBody, ClaimView, Offer, OfferKind, OfferString, SignedBy, CLAIM_DOMAIN,
+};
+use ad4m_identity_core::{
+    is_ed25519_multikey, is_x25519_multikey, signing_bytes, verify_signed, KelChain, REQUEST_DOMAIN,
+};
 use ad4m_ldk::identity::{OfferState, RequestBody, SignedHead, SignedRequest};
 use serde_json::json;
 
@@ -56,6 +60,37 @@ fn b58_random(random: &dyn Random, len: usize) -> String {
     let mut bytes = vec![0u8; len];
     random.fill(&mut bytes);
     bs58::encode(bytes).into_string()
+}
+
+/// The holder's check of the claim view the store answered for `offer`, before the master key
+/// signs it into the log: the keys are well formed, and the claim's co-signature by
+/// `device_key` covers `scid`, `offer_id`, `device_key`, `enc_key` and `can_keep_master`. The
+/// match code covers `device_key` only, so without this a store could answer the real device
+/// key with another `enc_key` (where the device's messages, and later the master key, are
+/// sealed to) or another `can_keep_master`, and the person would confirm it. The same check is
+/// `link::verify_claim_view` in `ad4m-identity-core` from identity/core 9e2121d76 on; this one
+/// goes once that reaches this branch.
+fn check_claim_view(offer: &Offer, view: &ClaimView) -> Result<(), ClientError> {
+    let refused = |why: &str| ClientError::Protocol(format!("the store's claim view: {why}"));
+    if !is_ed25519_multikey(&view.device_key) {
+        return Err(refused("deviceKey is not an Ed25519 multikey"));
+    }
+    if !is_x25519_multikey(&view.enc_key) {
+        return Err(refused("encKey is not an X25519 multikey"));
+    }
+    let body = ClaimBody {
+        scid: &offer.scid,
+        offer_id: &offer.offer_id,
+        device_key: &view.device_key,
+        enc_key: &view.enc_key,
+        can_keep_master: view.can_keep_master,
+    };
+    let sig =
+        decode_proof_value(&view.co_sig).ok_or_else(|| refused("the co-signature is malformed"))?;
+    if !verify_signed(CLAIM_DOMAIN, &body, &view.device_key, &sig) {
+        return Err(refused("the co-signature does not cover these keys"));
+    }
+    Ok(())
 }
 
 /// The identity's log through the executor, refreshed and folded here.
@@ -217,6 +252,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
                 Some(OfferState::Claimed { claim }) => {
                     let view: ClaimView = serde_json::from_value(json!(claim))
                         .map_err(|e| ClientError::Protocol(e.to_string()))?;
+                    check_claim_view(&self.offer, &view)?;
                     return Ok(Claimed {
                         match_code: link::match_code(
                             &self.offer.scid,
