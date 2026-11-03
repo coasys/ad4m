@@ -140,6 +140,8 @@ WORKDIR /home/builder/ad4m
 COPY --chown=builder:builder Cargo.toml Cargo.lock package.json pnpm-lock.yaml pnpm-workspace.yaml rust-toolchain.toml deno.lock turbo.json ./
 COPY --chown=builder:builder .cargo/ ./.cargo/
 COPY --chown=builder:builder rust-executor/ ./rust-executor/
+# The local AI recommendations and hardware classes the executor embeds (include_str!).
+COPY --chown=builder:builder ai-wind-tunnel/ ./ai-wind-tunnel/
 COPY --chown=builder:builder rust-client/ ./rust-client/
 COPY --chown=builder:builder cli/ ./cli/
 COPY --chown=builder:builder core/ ./core/

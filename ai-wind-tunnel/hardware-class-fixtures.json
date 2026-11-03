@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "description": "Fingerprints and the class hardware-classes.json gives each. The executor's Rust classifier and the wind tunnel's TypeScript one both pass every case.",
+  "cases": [
+    {
+      "name": "MacBook Air M2 8 GB",
+      "fingerprint": { "os": "macos", "arch": "aarch64", "ramBytes": 8589934592, "gpu": { "vendor": "apple", "type": "unified", "vramBytes": null } },
+      "expected": "apple-silicon-8gb"
+    },
+    {
+      "name": "MacBook Pro M3 18 GB",
+      "fingerprint": { "os": "macos", "arch": "aarch64", "ramBytes": 19327352832, "gpu": { "vendor": "apple", "type": "unified", "vramBytes": null } },
+      "expected": "apple-silicon-16gb"
+    },
+    {
+      "name": "Mac mini M4 Pro 24 GB",
+      "fingerprint": { "os": "macos", "arch": "aarch64", "ramBytes": 25769803776, "gpu": { "vendor": "apple", "type": "unified", "vramBytes": null } },
+      "expected": "apple-silicon-24gb"
+    },
+    {
+      "name": "Mac Studio M2 Max 64 GB",
+      "fingerprint": { "os": "macos", "arch": "aarch64", "ramBytes": 68719476736, "gpu": { "vendor": "apple", "type": "unified", "vramBytes": null } },
+      "expected": "apple-silicon-48gb"
+    },
+    {
+      "name": "Intel MacBook Pro 16 GB",
+      "fingerprint": { "os": "macos", "arch": "x86_64", "ramBytes": 17179869184, "gpu": { "vendor": "intel", "type": "integrated", "vramBytes": 1610612736 } },
+      "expected": "igpu-16gb"
+    },
+    {
+      "name": "Linux desktop, RTX 3060 12 GB, 32 GB RAM",
+      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 33554432000, "gpu": { "vendor": "nvidia", "type": "discrete", "vramBytes": 12884901888 } },
+      "expected": "nvidia-12gb"
+    },
+    {
+      "name": "Linux server, RTX 2060 6 GB, 16 GB RAM",
+      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 16486170624, "gpu": { "vendor": "nvidia", "type": "discrete", "vramBytes": 6442450944 } },
+      "expected": "nvidia-6gb"
+    },
+    {
+      "name": "Windows, RTX 4090 24 GB",
+      "fingerprint": { "os": "windows", "arch": "x86_64", "ramBytes": 68719476736, "gpu": { "vendor": "nvidia", "type": "discrete", "vramBytes": 25757220864 } },
+      "expected": "nvidia-24gb"
+    },
+    {
+      "name": "Windows laptop, GTX 1650 4 GB, 16 GB RAM",
+      "fingerprint": { "os": "windows", "arch": "x86_64", "ramBytes": 17095983104, "gpu": { "vendor": "nvidia", "type": "discrete", "vramBytes": 4294967296 } },
+      "expected": "cpu-16gb"
+    },
+    {
+      "name": "Linux, Radeon RX 7900 XTX 24 GB",
+      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 67108864000, "gpu": { "vendor": "amd", "type": "discrete", "vramBytes": 25753026560 } },
+      "expected": "dgpu-24gb"
+    },
+    {
+      "name": "Linux, Intel Arc A770 16 GB",
+      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 33554432000, "gpu": { "vendor": "intel", "type": "discrete", "vramBytes": 17179869184 } },
+      "expected": "dgpu-12gb"
+    },
+    {
+      "name": "Linux, AMD Strix Halo (Radeon 8060S), 128 GB unified",
+      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 131891142656, "gpu": { "vendor": "amd", "type": "integrated", "vramBytes": 536870912 } },
+      "expected": "igpu-32gb"
+    },
+    {
+      "name": "Windows laptop, Intel Iris Xe, 16 GB",
+      "fingerprint": { "os": "windows", "arch": "x86_64", "ramBytes": 16834306048, "gpu": { "vendor": "intel", "type": "integrated", "vramBytes": 134217728 } },
+      "expected": "igpu-16gb"
+    },
+    {
+      "name": "Linux, no GPU, 64 GB",
+      "fingerprint": { "os": "linux", "arch": "x86_64", "ramBytes": 67108864000, "gpu": null },
+      "expected": "cpu-32gb"
+    },
+    {
+      "name": "Linux arm64 board, 8 GB",
+      "fingerprint": { "os": "linux", "arch": "aarch64", "ramBytes": 8253046784, "gpu": null },
+      "expected": "cpu-8gb"
+    },
+    {
+      "name": "Old laptop, 4 GB",
+      "fingerprint": { "os": "windows", "arch": "x86_64", "ramBytes": 4294967296, "gpu": null },
+      "expected": "cpu-8gb"
+    }
+  ]
+}

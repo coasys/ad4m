@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "description": "Ordered rules from a hardware fingerprint to a hardware class: the first rule whose every condition holds names the class. A fingerprint is { os, arch, ramBytes, gpu: { vendor, type, vramBytes } | null }, where gpu is the device a GPU backend would use (the discrete GPU with the most memory, else the integrated or unified one). Thresholds are GiB of memory as the OS reports it, a little under the marketed size because firmware reserves some. `smaller` names, per class, the next class down: a plan for a class without measurements walks it to the nearest measured one.",
+  "rules": [
+    { "class": "apple-silicon-48gb", "when": { "os": ["macos"], "arch": ["aarch64"], "minRamGiB": 44 } },
+    { "class": "apple-silicon-24gb", "when": { "os": ["macos"], "arch": ["aarch64"], "minRamGiB": 22 } },
+    { "class": "apple-silicon-16gb", "when": { "os": ["macos"], "arch": ["aarch64"], "minRamGiB": 14 } },
+    { "class": "apple-silicon-8gb", "when": { "os": ["macos"], "arch": ["aarch64"] } },
+    { "class": "nvidia-24gb", "when": { "gpuVendor": ["nvidia"], "gpuType": ["discrete"], "minVramGiB": 20 } },
+    { "class": "nvidia-12gb", "when": { "gpuVendor": ["nvidia"], "gpuType": ["discrete"], "minVramGiB": 11 } },
+    { "class": "nvidia-6gb", "when": { "gpuVendor": ["nvidia"], "gpuType": ["discrete"], "minVramGiB": 5.5 } },
+    { "class": "dgpu-24gb", "when": { "gpuVendor": ["amd", "intel"], "gpuType": ["discrete"], "minVramGiB": 20 } },
+    { "class": "dgpu-12gb", "when": { "gpuVendor": ["amd", "intel"], "gpuType": ["discrete"], "minVramGiB": 11 } },
+    { "class": "dgpu-6gb", "when": { "gpuVendor": ["amd", "intel"], "gpuType": ["discrete"], "minVramGiB": 5.5 } },
+    { "class": "igpu-32gb", "when": { "gpuType": ["integrated"], "minRamGiB": 28 } },
+    { "class": "igpu-16gb", "when": { "gpuType": ["integrated"], "minRamGiB": 14 } },
+    { "class": "cpu-32gb", "when": { "minRamGiB": 28 } },
+    { "class": "cpu-16gb", "when": { "minRamGiB": 14 } },
+    { "class": "cpu-8gb", "when": {} }
+  ],
+  "smaller": {
+    "apple-silicon-48gb": "apple-silicon-24gb",
+    "apple-silicon-24gb": "apple-silicon-16gb",
+    "apple-silicon-16gb": "apple-silicon-8gb",
+    "apple-silicon-8gb": "cpu-8gb",
+    "nvidia-24gb": "nvidia-12gb",
+    "nvidia-12gb": "nvidia-6gb",
+    "nvidia-6gb": "cpu-16gb",
+    "dgpu-24gb": "dgpu-12gb",
+    "dgpu-12gb": "dgpu-6gb",
+    "dgpu-6gb": "cpu-16gb",
+    "igpu-32gb": "igpu-16gb",
+    "igpu-16gb": "cpu-16gb",
+    "cpu-32gb": "cpu-16gb",
+    "cpu-16gb": "cpu-8gb",
+    "cpu-8gb": null
+  }
+}
