@@ -461,6 +461,9 @@ impl From<CanonError> for FormatError {
             CanonError::Integer(n) => FormatError::BigInteger(n),
             CanonError::NotObject => FormatError::Type("event".into()),
             CanonError::Serde(reason) => FormatError::NotCanonical(reason),
+            CanonError::NotCanonical => {
+                FormatError::NotCanonical(CanonError::NotCanonical.to_string())
+            }
         }
     }
 }
