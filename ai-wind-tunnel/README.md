@@ -58,7 +58,8 @@ process tree and the GPU memory its DRM clients hold (amdgpu `fdinfo`, CUDA thro
 `nvidia-smi`), the executor's view of the endpoint's health, and whether the model fits the
 machine: model memory ≤ min(GPU budget − 1 GiB, RAM − 4 GiB). With direct calls on (the
 default) the same request also goes straight to the provider, and `executorOverheadMs` is the
-difference of the medians. Each measurement is repeated (`--repeat`, default 3) and reported
+difference of the medians (each timed prompt carries its own nonce and the order of the two
+calls alternates, so neither rides on the other's prompt cache). Each measurement is repeated (`--repeat`, default 3) and reported
 as median, p95, min, max and mean.
 
 WER normalises case, punctuation, hyphens and whole numbers ("9" and "nine" are one word).

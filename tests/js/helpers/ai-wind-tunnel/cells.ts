@@ -38,6 +38,17 @@ export interface CellOutcome {
 
 const nonce = () => `[${Math.random().toString(36).slice(2, 10)}] `;
 
+/** The executor's call and the direct one, in alternating order by repetition `i`. */
+async function fairPair(i: number, viaExecutor: () => Promise<unknown>, direct: (() => Promise<unknown>) | null): Promise<void> {
+  if (direct && i % 2 === 1) {
+    await direct();
+    await viaExecutor();
+  } else {
+    await viaExecutor();
+    if (direct) await direct();
+  }
+}
+
 /**
  * Request fields that turn thinking off: the chat template's switch for llama-server and
  * vLLM, `reasoning_effort: "none"` for Ollama's OpenAI route (the executor passes `/v1`
@@ -139,12 +150,15 @@ export async function llmCell(env: CellEnv): Promise<CellOutcome> {
     const promptTokens = long.usage?.prompt_tokens ?? Math.round((nonce() + PROMPTS.longContext + PROMPTS.system).length / 4);
     if (long.ttftMs) prefill.push((promptTokens * 1000) / long.ttftMs);
 
-    const short = await postJson(url, chat(PROMPTS.factual, { max_tokens: 16 }), ex.token);
-    lat.push(short.ms);
-    if (env.directV1) {
-      const r = await postJson(`${env.directV1}/chat/completions`, { ...chat(PROMPTS.factual, { max_tokens: 16 }), model: env.remoteModel });
-      direct.push(r.ms);
-    }
+    // Each call its own nonce (no prompt-cache hit from the call before) and the order
+    // alternating, so the executor-vs-direct difference is the executor's, not the cache's.
+    await fairPair(
+      i,
+      async () => lat.push((await postJson(url, chat(nonce() + PROMPTS.factual, { max_tokens: 16 }), ex.token)).ms),
+      env.directV1
+        ? async () => direct.push((await postJson(`${env.directV1}/chat/completions`, { ...chat(nonce() + PROMPTS.factual, { max_tokens: 16 }), model: env.remoteModel })).ms)
+        : null,
+    );
   }
   metrics.ttftMs = summarize(ttft);
   metrics.decodeTps = summarize(tps);
@@ -176,7 +190,7 @@ export async function completionCell(env: CellEnv): Promise<CellOutcome> {
   const { ex } = env;
   const checks: Check[] = [];
   const metrics: Record<string, Metric> = {};
-  const body = (model: string) => ({ model, prompt: PROMPTS.completion, max_tokens: 16, temperature: 0 });
+  const body = (model: string, prefix = "") => ({ model, prompt: prefix + PROMPTS.completion, max_tokens: 16, temperature: 0 });
   await attempt(checks, "continuation (/v1/completions)", async () => {
     const r = await postJson(`${ex.v1}/completions`, body(env.modelName), ex.token);
     metrics.firstRequestMs = Math.round(r.ms);
@@ -185,8 +199,11 @@ export async function completionCell(env: CellEnv): Promise<CellOutcome> {
   });
   const lat: number[] = [], direct: number[] = [];
   for (let i = 0; i < env.repeat; i++) {
-    lat.push((await postJson(`${ex.v1}/completions`, body(env.modelName), ex.token)).ms);
-    if (env.directV1) direct.push((await postJson(`${env.directV1}/completions`, body(env.remoteModel))).ms);
+    await fairPair(
+      i,
+      async () => lat.push((await postJson(`${ex.v1}/completions`, body(env.modelName, nonce()), ex.token)).ms),
+      env.directV1 ? async () => direct.push((await postJson(`${env.directV1}/completions`, body(env.remoteModel, nonce()))).ms) : null,
+    );
   }
   metrics.latencyMs = summarize(lat);
   if (env.directV1) {
