@@ -17,7 +17,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 |---|---|
 | `src/main.rs` | `identity-store [serve]`, `identity-store keygen`; configuration from the environment |
 | `src/lib.rs` | `Store` (database, head key, clock, settings, the change signal for waits), `Settings`, `Clock`, `Fault` |
-| `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`), log replay, key-index rows |
+| `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`, `fork_signers`), log replay, key-index rows |
 | `src/log.rs` | `POST …/events` with the admission checks (below), log pages, heads, the key index; `admit_new_log` (the brake's place) |
 | `src/offers.rs` | the offer routes, the claim route, the device's state poll, the store's side of the claim check (`check_spend`, `spend`, `supersede`) |
 | `src/request.rs` | signed requests (`X-Coasys-Request`): checks, nonce replay guard, `percent_decode` |
@@ -169,15 +169,23 @@ tests name them by these names.
   caps are per topic, not per caller address: behind a proxy every caller has one address.
 - **Forks**: an event at a seq the store holds, with another hash than the stored one, that
   replays on the stored events before it (every proof checked) is a fork. The store records it
-  in `chain_forks` with the event's JSON (`SqliteChainStore::record_fork_in`) and answers
-  `409 {error:"forked", head, fork:{seq, ours, theirs}}`. Only the master signs events, so a
-  fork means two master-signed events at one seq: duplicity, two wallets with the same words
-  racing, or a retired (stolen) master signing on the prefix where it was current. A resent
-  stored event, an event past the head and one that does not replay are plain `409 {head}`.
+  in `chain_forks` with the event's JSON (`SqliteChainStore::record_fork_in`) and its signing
+  master (the last master of the state that replay gives) in `fork_signers` (`db::record_fork`,
+  same transaction), and answers `409 {error:"forked", head, fork:{seq, ours, theirs}}`. It
+  keeps **one fork per identity and signing master** (`fork_signers` primary key
+  `(scid, signer)`): a further rival by a master that already has one is answered with the
+  recorded fork and stores nothing, so the fork rows of an identity are bounded by the masters
+  its log ever had, whatever a thief with a retired master files. Only the master signs events,
+  so a fork means two master-signed events at one seq: duplicity, two wallets with the same
+  words racing, or a retired (stolen) master signing on the prefix where it was current. A
+  resent stored event, an event past the head and one that does not replay are plain
+  `409 {head}`.
 - **The freeze** (`db::freezing_fork`, derived from the fork rows and the held log each time,
-  no stored flag): the identity is frozen only while a recorded fork's signing master (the
-  rival event replayed on the stored prefix again; the last master of that state) is the
-  current master at the held head. A fork by a master the held log rotated away from at the
+  no stored flag): the identity is frozen only while a recorded fork's signing master is the
+  current master at the held head (one primary-key lookup of `fork_signers`, no replay). A
+  rival `rotate` is signed by the master it names: a twin rotating onto the committed next key
+  freezes nothing until the owner rotates onto that same key, and then freezes until a second
+  `rotate` retires it. A fork by a master the held log rotated away from at the
   fork's seq or later is kept and answered as evidence but freezes nothing, so a thief with a
   retired master cannot lock the identity out after the owner rotates. While frozen, every
   signed request and every append whose first event is not a `rotate` answers `409 forked`; a

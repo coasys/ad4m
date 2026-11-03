@@ -537,9 +537,12 @@ Coasys identity store adds these checks:
   days ahead.
 - **Forks by the current master freeze.** An append whose event sits at a seq the store holds,
   differs from the stored event and replays on the events before it is a fork (section 11).
-  The store keeps every fork as evidence with the competing event, answers it with the fork,
-  and serves the log it held. The identity is frozen only while the competing event's signing
-  master is the current master at the head of the held log. A fork signed by a master the held
+  The store keeps a fork as evidence with the competing event, one per signing master (a
+  further competing event by a master that already has a recorded fork is answered with that
+  fork), answers it with the fork, and serves the log it held. The identity is frozen only
+  while the competing event's signing master is the current master at the head of the held
+  log; a competing `rotate` is signed by the master it names, so it freezes once the held log
+  rotates onto that master, until a further `rotate`. A fork signed by a master the held
   log has rotated away from (at the fork's seq or later) freezes nothing: rotation is the remedy
   for a stolen master, and a retired master must not be able to lock the identity out. While
   frozen the store takes no signed request and one kind of append only: a `rotate`, which the

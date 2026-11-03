@@ -202,6 +202,104 @@ async fn a_fork_signed_by_a_retired_master_is_recorded_but_does_not_freeze_the_i
 }
 
 #[tokio::test]
+async fn many_rivals_by_one_retired_master_keep_one_fork_and_leave_the_owner_free() {
+    // The thief holds m0, which Alice retired at seq 2, and files 200 distinct rivals at seq 2
+    // (each an `add` of another device, all replaying on seqs 0-1). The store keeps one fork per
+    // signing master, so it records the first and answers every later one with it: the fork
+    // rows stay at one however many the thief files, and the freeze check reads that one row.
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let phone = Device::new("alice phone");
+    t.link(&mut alice, &phone, OfferKind::Device, None).await;
+    let mut thief = Person::new("alice");
+    thief.push(alice.events[1].clone());
+    let rotate = alice.rotate(&[]);
+    let reply = t.append_push(&mut alice, rotate).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let rotated_hash = alice.chain.head().hash;
+
+    let mut first = None;
+    for i in 0..200 {
+        let device = Device::new(&format!("thief device {i}"));
+        let (offer, s) = thief.offer(OfferKind::Device, None, None, t.now() + 300);
+        let claim = device.claim(&thief.scid(), &offer.offer.offer_id, s, false);
+        let rival = thief.add_claimed(&offer.offer, &device.view(&claim, t.now()));
+        assert_eq!(rival.seq, 2);
+        let theirs = ad4m_identity_core::event_hash(&rival).unwrap();
+        let recorded = first.get_or_insert(theirs).clone();
+        let reply = t.append(&alice.scid(), &[&rival]).await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.body["error"], "forked");
+        assert_eq!(t.count("chain_forks"), 1, "rival {i}");
+        assert_eq!(reply.body["fork"]["seq"], 2);
+        assert_eq!(reply.body["fork"]["ours"], json!(rotated_hash));
+        assert_eq!(reply.body["fork"]["theirs"], json!(recorded));
+    }
+    assert_eq!(t.count("chain_forks"), 1);
+    assert_eq!(t.count("fork_signers"), 1);
+
+    let revoke = alice.revoke(&["d2"]);
+    let reply = t.append_push(&mut alice, revoke).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(head_of(&reply.body).seq, 3);
+    let reply = put_own_record(&t, &alice, 1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
+#[tokio::test]
+async fn a_rival_rotate_onto_the_next_key_freezes_once_the_owner_rotates_onto_it_until_a_second_rotate(
+) {
+    // A twin holding the words rotates at seq 1 onto m1, the committed next key. Its signer, m1,
+    // is not the held log's current master (m0), so nothing freezes yet. When Alice rotates onto
+    // that same m1, the rival's signer becomes current and the identity freezes; her rotate onto
+    // m2 retires m1 and ends it.
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let phone = Device::new("alice phone");
+    t.link(&mut alice, &phone, OfferKind::Device, None).await;
+    let twin = Person::new("alice");
+    let rival = twin.rotate(&[]);
+    assert_eq!(rival.seq, 1);
+    let theirs = ad4m_identity_core::event_hash(&rival).unwrap();
+    let reply = t.append(&alice.scid(), &[&rival]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.body["error"], "forked");
+    assert_eq!(reply.body["fork"]["seq"], 1);
+    assert_eq!(reply.body["fork"]["theirs"], json!(theirs));
+    assert_eq!(t.count("chain_forks"), 1);
+    let reply = put_own_record(&t, &alice, 1).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+    let rotate = alice.rotate(&[]);
+    let reply = t.append_push(&mut alice, rotate).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(head_of(&reply.body).seq, 2);
+
+    // Frozen on m1: no append but a `rotate`, no signed request.
+    let revoke = alice.revoke(&["d2"]);
+    let reply = t.append(&alice.scid(), &[&revoke]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.body["error"], "forked");
+    assert_eq!(reply.body["fork"]["theirs"], json!(theirs));
+    let reply = put_own_record(&t, &alice, 2).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.body["error"], "forked");
+
+    let rotate = alice.rotate(&[]);
+    let reply = t.append_push(&mut alice, rotate).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(head_of(&reply.body).seq, 3);
+    let revoke = alice.revoke(&["d2"]);
+    let reply = t.append_push(&mut alice, revoke).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let reply = put_own_record(&t, &alice, 2).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(t.count("chain_forks"), 1);
+}
+
+#[tokio::test]
 async fn a_key_of_log_a_in_an_incept_of_log_b_is_taken_also_after_a_revoked_it() {
     let t = TestStore::new();
     let mut alice = Person::new("alice");

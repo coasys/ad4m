@@ -2,7 +2,7 @@
 //! and the key index.
 
 use ad4m_hash_chain::store::{SqliteChainStore, StoreError, StoredEntry};
-use ad4m_hash_chain::{ForkEvidence, Head};
+use ad4m_hash_chain::{ForkEvidence, Head, Multikey};
 use ad4m_identity_core::{
     error_code, event_hash, pow, ChainError, DeviceKey, Event, FoldError, KelChain, KelPolicy,
     KeyLife, Op,
@@ -129,14 +129,17 @@ fn listed_keys(event: &Event) -> Vec<&str> {
 
 /// The fork `event` makes with the stored log `stored` of `scid`, when it is one: an event at a
 /// seq the store holds, with another hash than the stored event there, that replays on the
-/// stored events before it (every proof checked by the identity core). `None` for a resend of
-/// a stored event, an event past the head (a gap) and an event that does not replay.
+/// stored events before it (every proof checked by the identity core). Answers the evidence and
+/// the master that signed the event, read from that replay: the last master of the state after
+/// it (an `incept` or `rotate` is signed by the master it names, every other event by the master
+/// current before it). `None` for a resend of a stored event, an event past the head (a gap)
+/// and an event that does not replay.
 fn competing_event(
     conn: &Connection,
     scid: &str,
     stored: &KelChain,
     event: &Event,
-) -> Result<Option<ForkEvidence>, ApiError> {
+) -> Result<Option<(ForkEvidence, Multikey)>, ApiError> {
     let Some(ours) = stored.hash_at(event.seq) else {
         return Ok(None);
     };
@@ -146,20 +149,29 @@ fn competing_event(
     if &theirs == ours {
         return Ok(None);
     }
-    let replays = if event.seq == 0 {
-        event.scid == scid && KelChain::genesis(&KelPolicy, event).is_ok()
+    let after = if event.seq == 0 {
+        if event.scid != scid {
+            return Ok(None);
+        }
+        KelChain::genesis(&KelPolicy, event).ok()
     } else {
         match db::load_chain_before(conn, scid, event.seq)? {
-            Some(mut prefix) => prefix.append(&KelPolicy, event).is_ok(),
-            None => false,
+            Some(mut prefix) => prefix.append(&KelPolicy, event).is_ok().then_some(prefix),
+            None => None,
         }
     };
-    Ok(replays.then(|| ForkEvidence {
-        chain: scid.to_string(),
-        seq: event.seq,
-        ours: ours.clone(),
-        theirs,
-    }))
+    let Some(signer) = after.and_then(|a| a.state().masters.last().map(|m| m.sign.clone())) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        ForkEvidence {
+            chain: scid.to_string(),
+            seq: event.seq,
+            ours: ours.clone(),
+            theirs,
+        },
+        signer,
+    )))
 }
 
 fn current_head(conn: &Connection, scid: &str) -> Result<SignedHead, ApiError> {
@@ -250,12 +262,13 @@ impl Store {
                     // A validly signed event at a seq the store holds, other than the stored
                     // one, is a fork: the store records it (with the event, so anyone can check
                     // it) and answers `409 forked`. It freezes the identity only when its signer
-                    // is the held log's current master (`db::freezing_fork`). Anything else is a
-                    // plain conflict.
-                    if let Some(fork) = competing_event(&tx, scid, &existing, first)? {
+                    // is the held log's current master (`db::freezing_fork`). One fork is kept
+                    // per signing master: a further rival by the same master is answered with
+                    // the recorded fork and adds nothing. Anything else is a plain conflict.
+                    if let Some((fork, signer)) = competing_event(&tx, scid, &existing, first)? {
                         let theirs = ad4m_hash_chain::entry_json(first)
                             .map_err(|e| ApiError::invalid("malformed", e.to_string()))?;
-                        SqliteChainStore::record_fork_in(&tx, KEL, &fork, &theirs)?;
+                        let fork = db::record_fork(&tx, fork, &theirs, &signer)?;
                         let head = current_head(&tx, scid)?;
                         tx.commit()?;
                         drop(conn);

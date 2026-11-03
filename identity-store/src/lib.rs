@@ -3,7 +3,7 @@
 //!
 //! One SQLite file holds the hash-chain module's tables (`chain_heads`, `chain_entries`,
 //! `chain_forks`, type `coasys:kel`) and the store's own (`logs`, `heads`, `keys`, `agents`,
-//! `nonces`, `feed`, `offers`, `claims`). The store replays every event with the identity core
+//! `nonces`, `feed`, `offers`, `claims`, `fork_signers`). The store replays every event with the identity core
 //! before it appends, and commits each append with its head, key-index rows, feed items and
 //! the claim it spends in one transaction (the one-transaction rule of
 //! `identity-store/AGENTS.md`). It can withhold an event, never forge one: every client checks
