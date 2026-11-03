@@ -116,6 +116,8 @@ pub struct LocalPlan {
     pub reasons: Vec<String>,
     /// The recommendations' `generatedAt`.
     pub recommendations_generated_at: String,
+    /// The operator's device (`local_ai_device`); `null`: the best one detection found.
+    pub device: Option<Backend>,
 }
 
 /// One service's candidates: the recommendation of each measured class along the chain,
@@ -204,6 +206,44 @@ pub fn default_flags(service: Service) -> Vec<String> {
         Service::Stt | Service::Tts => &[],
     };
     flags.iter().map(|f| f.to_string()).collect()
+}
+
+/// The plan with the operator's device (`local_ai_device`): only that backend's builds,
+/// and the CPU's for a runtime the manifest builds no other way, are used, and the budget
+/// and the class follow from it (a device held to the CPU plans by its RAM). The device is
+/// used also when detection did not find it, with a reason: detection can miss a driver.
+/// `None`: the best backend detection found, as [`plan`].
+pub fn plan_with_device(
+    data: &Data,
+    hardware: &LocalHardware,
+    device: Option<Backend>,
+    installed: &dyn Fn(&str) -> bool,
+) -> LocalPlan {
+    let Some(device) = device else {
+        return plan(data, hardware, installed);
+    };
+    let mut held = hardware.clone();
+    held.backends = if device == Backend::Cpu {
+        vec![Backend::Cpu]
+    } else {
+        vec![device, Backend::Cpu]
+    };
+    super::hardware::finish(&mut held, &data.classes);
+    let mut planned = plan(data, &held, installed);
+    planned.device = Some(device);
+    planned.reasons.insert(
+        0,
+        if hardware.backends.contains(&device) {
+            format!("local_ai_device is {}: the plan uses no other GPU backend", device.as_str())
+        } else {
+            format!(
+                "local_ai_device is {}, which detection did not find on this device: a {} build that finds no device runs on the CPU",
+                device.as_str(),
+                device.as_str()
+            )
+        },
+    );
+    planned
 }
 
 /// A recommendation and the measured class it comes from.
@@ -413,6 +453,7 @@ pub fn plan(data: &Data, hardware: &LocalHardware, installed: &dyn Fn(&str) -> b
         disk_free_bytes: hardware.disk_free_bytes,
         reasons,
         recommendations_generated_at: data.recommendations.generated_at.clone(),
+        device: None,
     }
 }
 
@@ -740,6 +781,83 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r.contains("nemo-speech has no GPU build for linux-x64")));
+    }
+
+    // dev chose its device by cargo feature and detection; here detection picks the backend
+    // (CUDA, Metal, Vulkan, ROCm, CPU) and `local_ai_device` overrides it.
+    #[test]
+    fn the_operators_device_overrides_detection() {
+        let data = data(full());
+        let hardware = nvidia_12(&data, 32);
+        let builds = |plan: &LocalPlan| -> Vec<(String, Backend)> {
+            plan.runtimes
+                .iter()
+                .map(|r| (r.build.clone(), r.backend))
+                .collect()
+        };
+
+        // Detected: CUDA for chat, Vulkan for transcription.
+        let detected = plan_with_device(&data, &hardware, None, &nothing_installed);
+        assert_eq!(detected, plan(&data, &hardware, &nothing_installed));
+        assert_eq!(detected.device, None);
+
+        // Held to the CPU: CPU builds, the budget by RAM, the CPU class's models.
+        let cpu = plan_with_device(&data, &hardware, Some(Backend::Cpu), &nothing_installed);
+        assert_eq!(cpu.device, Some(Backend::Cpu));
+        assert_eq!(
+            builds(&cpu),
+            vec![
+                ("linux-x64-cpu".to_string(), Backend::Cpu),
+                ("linux-x64-cpu".to_string(), Backend::Cpu)
+            ]
+        );
+        assert_eq!(cpu.memory_budget_bytes, 28 * GIB);
+        assert_ne!(cpu.hardware_class, detected.hardware_class);
+        assert!(cpu.reasons[0].starts_with("local_ai_device is cpu"), "{:?}", cpu.reasons);
+
+        // Vulkan on an NVIDIA GPU: Vulkan builds for both runtimes.
+        let vulkan = plan_with_device(&data, &hardware, Some(Backend::Vulkan), &nothing_installed);
+        assert_eq!(
+            builds(&vulkan),
+            vec![
+                ("linux-x64-vulkan".to_string(), Backend::Vulkan),
+                ("linux-x64-vulkan".to_string(), Backend::Vulkan)
+            ]
+        );
+
+        // ROCm, which detection did not find: llama-server's ROCm build (not swapped for
+        // Vulkan), nemo-speech, which has no ROCm build, on the CPU; both said.
+        let rocm = plan_with_device(&data, &hardware, Some(Backend::Rocm), &nothing_installed);
+        assert_eq!(
+            builds(&rocm),
+            vec![
+                ("linux-x64-rocm".to_string(), Backend::Rocm),
+                ("linux-x64-cpu".to_string(), Backend::Cpu)
+            ]
+        );
+        assert!(
+            rocm.reasons[0].contains("which detection did not find"),
+            "{:?}",
+            rocm.reasons
+        );
+        assert!(rocm
+            .reasons
+            .iter()
+            .any(|r| r.contains("nemo-speech has no GPU build")));
+    }
+
+    #[test]
+    fn a_mac_held_to_metal_or_the_cpu_uses_only_those_builds() {
+        let data = data(full());
+        let mut mac = device(&data, 16, vec![], vec![Backend::Cpu, Backend::Metal]);
+        mac.os = "macos".into();
+        mac.arch = "arm64".into();
+        let metal = plan_with_device(&data, &mac, Some(Backend::Metal), &nothing_installed);
+        assert_eq!(metal.runtimes[0].backend, Backend::Metal);
+        // The test manifest has no CPU build of nemo-speech for a Mac (nor any llama-server
+        // build): held to the CPU, nothing runs there.
+        let cpu = plan_with_device(&data, &mac, Some(Backend::Cpu), &nothing_installed);
+        assert!(cpu.runtimes.is_empty(), "{:?}", cpu.runtimes);
     }
 
     fn amd_igpu(data: &Data, backends: Vec<Backend>) -> LocalHardware {

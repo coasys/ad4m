@@ -309,6 +309,12 @@ pub async fn current_plan() -> Result<LocalPlan> {
 }
 
 async fn plan_at(paths: &LocalPaths) -> Result<LocalPlan> {
+    plan_for(paths, crate::config::get_global_config().local_ai_device).await
+}
+
+/// The plan for this device held to `device` (`None`: the best one detected), against the
+/// store's files.
+async fn plan_for(paths: &LocalPaths, device: Option<Backend>) -> Result<LocalPlan> {
     let data = data::embedded()?;
     let hardware = hardware_at(paths.clone()).await?;
     let store = Store::new(&paths.store);
@@ -316,7 +322,9 @@ async fn plan_at(paths: &LocalPaths) -> Result<LocalPlan> {
         let manifest = data.manifest.clone();
         tokio::task::spawn_blocking(move || store.installed_digests(&manifest)).await?
     };
-    Ok(plan::plan(data, &hardware, &|sha| installed.contains(sha)))
+    Ok(plan::plan_with_device(data, &hardware, device, &|sha| {
+        installed.contains(sha)
+    }))
 }
 
 fn autostart_enabled() -> bool {
@@ -476,8 +484,55 @@ async fn run_install(work: impl std::future::Future<Output = Result<()>>) -> Res
 }
 
 async fn install_at(paths: &LocalPaths, params: &InstallParams) -> Result<()> {
+    install_for(
+        paths,
+        params,
+        crate::config::get_global_config().local_ai_device,
+    )
+    .await
+}
+
+/// `ai.localInstall` without an executor (`ad4m-executor local-ai install`, the Docker
+/// image's `INCLUDE_MODELS`): download what the plan for this device, held to `device`,
+/// names into `store` and keep the selection in `state`; start nothing. `progress` gets
+/// each `ai-local-progress` event. An executor whose state is `state` (or a copy of it)
+/// and whose store is `store` starts them with no download (`local_ai_autostart`).
+pub async fn install_into(
+    store: PathBuf,
+    state: PathBuf,
+    device: Option<Backend>,
+    services: Option<Vec<Service>>,
+    progress: impl Fn(ProgressEvent) + Send + 'static,
+) -> Result<()> {
+    let mut events = get_global_pubsub().await.subscribe_events();
+    let reporter = tokio::spawn(async move {
+        while let Ok(event) = events.recv().await {
+            if event.topic == Topic::AiLocalProgress {
+                if let Ok(step) = serde_json::from_value(event.payload.clone()) {
+                    progress(step);
+                }
+            }
+        }
+    });
+    let paths = LocalPaths { store, state };
+    let params = InstallParams {
+        services,
+        start: Some(false),
+    };
+    // Not `run_install`: its answer is the status, which reads this executor's database,
+    // and there is none here.
+    let outcome = install_for(&paths, &params, device).await;
+    reporter.abort();
+    outcome
+}
+
+async fn install_for(
+    paths: &LocalPaths,
+    params: &InstallParams,
+    device: Option<Backend>,
+) -> Result<()> {
     let data = data::embedded()?;
-    let mut plan = plan_at(paths).await?;
+    let mut plan = plan_for(paths, device).await?;
     if let Some(wanted) = &params.services {
         plan.models.retain(|m| wanted.contains(&m.service));
         plan.runtimes

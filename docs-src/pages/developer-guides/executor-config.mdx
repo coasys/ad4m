@@ -58,6 +58,7 @@ ignored, and the error names the key by its path, e.g.
 | `ai_defaults` | object: `llm`, `embedding`, `transcription` → model name | none | file only, see below |
 | `local_ai_dir` | string (path) | `~/.local/share/ad4m/local-ai`, `~/Library/Application Support/ad4m/local-ai`, `%LOCALAPPDATA%\ad4m\local-ai` | `--local-ai-dir` / `AD4M_LOCAL_AI_DIR` |
 | `local_ai_autostart` | bool | `true` | `--local-ai-autostart` / `AD4M_LOCAL_AI_AUTOSTART` |
+| `local_ai_device` | `cpu`, `cuda`, `metal`, `vulkan` or `rocm` | the best backend detected | `--local-ai-device` / `AD4M_LOCAL_AI_DEVICE` |
 | `log_config` | object: crate → level | see below | `RUST_LOG` overrides it |
 | `multi_user_config.enabled` | bool | `false` | `--enable-multi-user` / `AD4M_ENABLE_MULTI_USER` |
 | `multi_user_config.tls_config` | object or `null` | no TLS | see below |

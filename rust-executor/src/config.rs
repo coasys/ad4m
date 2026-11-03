@@ -170,6 +170,8 @@ pub struct Ad4mConfig {
     pub local_ai_dir: Option<String>,
     /// Start the installed local AI runtimes with the executor. Unset: yes.
     pub local_ai_autostart: Option<bool>,
+    /// The device local AI plans for. Unset: the best one detected.
+    pub local_ai_device: Option<crate::ai_service::local::hardware::Backend>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -549,6 +551,7 @@ impl Ad4mConfig {
             ai_settings: None,
             local_ai_dir: None,
             local_ai_autostart: None,
+            local_ai_device: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,
