@@ -1,0 +1,205 @@
+{
+  "schemaVersion": 1,
+  "runtimes": {
+    "llama-server": {
+      "provider": "llama-server",
+      "version": "b11669",
+      "license": "MIT",
+      "source": "https://github.com/ggml-org/llama.cpp/releases/tag/b11669",
+      "builds": {
+        "linux-x64-cpu": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-ubuntu-x64.tar.gz",
+          "sha256": "cf07c1c112d709bd67e522017471de57ed0ec8bea031d732c5422351c07f65ac",
+          "sizeBytes": 17851611,
+          "binary": "llama-b11669/llama-server"
+        },
+        "linux-x64-vulkan": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-ubuntu-vulkan-x64.tar.gz",
+          "sha256": "e8709e5ba6c1b093dea7f3de57f4aba842f9a188fba6b465782d65d6fcfa4d9f",
+          "sizeBytes": 30497889,
+          "binary": "llama-b11669/llama-server"
+        },
+        "linux-x64-rocm": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-ubuntu-rocm-10.0-x64.tar.gz",
+          "sha256": "02d36f06accd8fdcb2d41078361b21fb2df5d139f169bf4efcb8424a7dbbef01",
+          "sizeBytes": 245070738,
+          "binary": "llama-b11669/llama-server"
+        },
+        "linux-x64-cuda": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "sha256": "4703ed1a3cd6e8504affb6cb9866f501e96d634d68a002dc9a8251c9e2819b49",
+          "sizeBytes": 172525113,
+          "binary": "llama-b11669/llama-server",
+          "extras": [
+            {
+              "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/cudart-llama-b11669-bin-ubuntu-cuda-12.8-x64.tar.gz",
+              "sha256": "ab3eda89a82096bcba00b6448218c3c11eec2016b0f38d64884dc29736549f26",
+              "sizeBytes": 594377811
+            }
+          ]
+        },
+        "linux-arm64-cpu": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-ubuntu-arm64.tar.gz",
+          "sha256": "9ac6fda2058d35677608a06f751a50122ddfa4ce0ddb7f084466b8e79b6d4a99",
+          "sizeBytes": 13900160,
+          "binary": "llama-b11669/llama-server"
+        },
+        "linux-arm64-vulkan": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-ubuntu-vulkan-arm64.tar.gz",
+          "sha256": "d283522e479c0d532e3a04d715dd852ffb2d95925caa6d41ef2ba53a65e46a51",
+          "sizeBytes": 24187561,
+          "binary": "llama-b11669/llama-server"
+        },
+        "macos-arm64-metal": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz",
+          "sha256": "dbed55493d72bc1ba2babc8770d669c2289b5bc4ee9fb2a4dfc158d45b7d13fd",
+          "sizeBytes": 12191582,
+          "binary": "llama-b11669/llama-server"
+        },
+        "macos-x64-cpu": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-x64.tar.gz",
+          "sha256": "cab28238d78158109b48deb27b05d50e0dcef56275d2e76da9ca8281526c7532",
+          "sizeBytes": 11677404,
+          "binary": "llama-b11669/llama-server"
+        },
+        "windows-x64-cpu": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-win-cpu-x64.zip",
+          "sha256": "37b3efcf962847ca869745fd4ccf7f5e7e8dacfeff9fa3523b4ca8cdc66d632b",
+          "sizeBytes": 19537886,
+          "binary": "llama-server.exe"
+        },
+        "windows-x64-vulkan": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-win-vulkan-x64.zip",
+          "sha256": "2c07574e7bde71321cb785282b20cc821e951132149eeceeea32ddebdbf0598e",
+          "sizeBytes": 32182350,
+          "binary": "llama-server.exe"
+        },
+        "windows-x64-rocm": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-win-rocm-10.0-x64.zip",
+          "sha256": "940aa2c42450500f73ddbbcf40c5101ce44062d8a9775e9cffc23804433f17ca",
+          "sizeBytes": 258449188,
+          "binary": "llama-server.exe"
+        },
+        "windows-x64-cuda": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-win-cuda-12.4-x64.zip",
+          "sha256": "c2da1f73ed176ae093ac5aceb978a7b167a16113f6d74c6789eeaee2135cb8dc",
+          "sizeBytes": 266582698,
+          "binary": "llama-server.exe",
+          "extras": [
+            {
+              "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/cudart-llama-bin-win-cuda-12.4-x64.zip",
+              "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+              "sizeBytes": 391443627
+            }
+          ]
+        },
+        "windows-arm64-cpu": {
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-win-cpu-arm64.zip",
+          "sha256": "9cff39ffed17edcd03a7d876073f74d7b48cd43a1e5eafdd59ee094185ad871b",
+          "sizeBytes": 12442177,
+          "binary": "llama-server.exe"
+        }
+      }
+    },
+    "whisper-server": {
+      "provider": "whisper-server",
+      "version": "b5454",
+      "license": "MIT",
+      "source": "https://github.com/ggml-org/whisper.cpp/releases/tag/b5454",
+      "builds": {
+        "linux-x64-cpu": {
+          "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-ubuntu-x64.tar.gz",
+          "sha256": "a72becf15d7917f990f6313867a52638b82b7f9ef237fb0c980dac56a135781c",
+          "sizeBytes": 10364195,
+          "binary": "whisper-bin-ubuntu-x64/whisper-server"
+        },
+        "linux-arm64-cpu": {
+          "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-ubuntu-arm64.tar.gz",
+          "sha256": "6b95ebfc60447df48e70ef00a73bdc3f41679ed2d01ef465827206a2ff325149",
+          "sizeBytes": 4608377,
+          "binary": "whisper-bin-ubuntu-arm64/whisper-server"
+        },
+        "windows-x64-cpu": {
+          "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+          "sha256": "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb",
+          "sizeBytes": 8928640,
+          "binary": "Release/whisper-server.exe"
+        },
+        "windows-x64-cuda": {
+          "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-win-cuda-12.4.0-x64.zip",
+          "sha256": "afef0b881c500958921c3f5523b50e59ee2ec9b6f5cbd25b324c51ed308a957a",
+          "sizeBytes": 684913404,
+          "binary": "Release/whisper-server.exe"
+        },
+        "windows-arm64-cpu": {
+          "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-win-cpu-arm64.zip",
+          "sha256": "28c37e7b598c3d9bbfef94f3bd67f2ee6f12b7c86f3da5edcf5e4308d615ff6d",
+          "sizeBytes": 4371193,
+          "binary": "Release/whisper-server.exe"
+        }
+      }
+    }
+  },
+  "models": {
+    "qwen3.5-0.8b-q8_0": {
+      "service": "llm",
+      "provider": "llama-server",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf",
+      "sha256": "0ad885ffd4bb022fc4f0d33a3308fa108ef8613159d3b3a67e23abca056b7a6c",
+      "sizeBytes": 811843840,
+      "license": "Apache-2.0",
+      "params": "0.8B",
+      "memoryBytes": 1460000000
+    },
+    "qwen3.5-2b-q4_k_m": {
+      "service": "llm",
+      "provider": "llama-server",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+      "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+      "sizeBytes": 1280835840,
+      "license": "Apache-2.0",
+      "params": "2B",
+      "memoryBytes": 2100000000
+    },
+    "qwen3.5-4b-q4_k_m": {
+      "service": "llm",
+      "provider": "llama-server",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+      "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+      "sizeBytes": 2740937888,
+      "license": "Apache-2.0",
+      "params": "4B",
+      "memoryBytes": 3800000000
+    },
+    "nomic-embed-text-v1.5-q8_0": {
+      "service": "embeddings",
+      "provider": "llama-server",
+      "url": "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf",
+      "sha256": "3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7",
+      "sizeBytes": 146146432,
+      "license": "Apache-2.0",
+      "params": "137M",
+      "memoryBytes": 300000000
+    },
+    "whisper-small-q5_1": {
+      "service": "stt",
+      "provider": "whisper-server",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
+      "sha256": "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
+      "sizeBytes": 190085487,
+      "license": "MIT",
+      "params": "244M",
+      "memoryBytes": 600000000
+    },
+    "whisper-base.en-q5_1": {
+      "service": "stt",
+      "provider": "whisper-server",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin",
+      "sha256": "4baf70dd0d7c4247ba2b81fafd9c01005ac77c2f9ef064e00dcf195d0e2fdd2f",
+      "sizeBytes": 59721011,
+      "license": "MIT",
+      "params": "74M",
+      "memoryBytes": 260000000
+    }
+  }
+}
