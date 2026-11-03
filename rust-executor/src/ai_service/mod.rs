@@ -558,7 +558,7 @@ impl AIService {
             .add_model(&model)
             .and_then(|id| db.get_model(id))
             .map_err(|e| anyhow::anyhow!("{}", e))?
-            .expect("since we just added it");
+            .ok_or_else(|| anyhow::anyhow!("Model disappeared after add — concurrent removal?"))?;
         self.init_model(model.clone()).await?;
         Ok(model.id)
     }

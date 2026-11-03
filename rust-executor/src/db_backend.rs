@@ -412,8 +412,8 @@ macro_rules! run_on_local_db {
     };
 }
 
-/// The error a domain method returns when the global `Ad4mDb` is not open (or its lock is
-/// poisoned), for each error type that `Ad4mDb` methods return.
+/// The error a domain method returns when the global `Ad4mDb` is not open, for each error
+/// type that `Ad4mDb` methods return.
 trait DbNotOpen {
     fn db_not_open(reason: &str) -> Self;
 }
@@ -435,7 +435,9 @@ impl DbNotOpen for rusqlite::Error {
 
 /// Runs `f` on the global `Ad4mDb` under its lock. An error, not a panic, when the database
 /// is not open: some executor code runs before the database opens (unlock, Holochain start)
-/// and handles the error.
+/// and handles the error. A lock poisoned by a panic elsewhere still serves the database,
+/// as `agent/grants.rs` does: an error there would read as "no data" at call sites that
+/// fall back on one.
 fn on_ad4m_db<T, E: DbNotOpen>(f: impl FnOnce(&Ad4mDb) -> Result<T, E>) -> Result<T, E> {
     let instance = Ad4mDb::global_instance();
     let guard = instance
@@ -1187,6 +1189,32 @@ mod tests {
         if Ad4mDb::global_instance().lock().unwrap().is_none() {
             Ad4mDb::init_global_instance(":memory:").unwrap();
         }
+    }
+
+    // A database that is not open is an error, not a panic (dev panicked).
+    #[test]
+    fn a_closed_database_is_an_error() {
+        let _closed = crate::test_utils::DbClosed::now();
+        let err = LocalDb.get_free_hosting_enabled().unwrap_err();
+        assert!(err.to_string().contains("the database is not open"), "{err}");
+    }
+
+    // A lock that a panic poisoned still serves the database. An error would reach call sites
+    // that read it as free hosting or single-user mode (dev panicked, so they refused).
+    #[test]
+    fn a_poisoned_lock_still_serves_the_database() {
+        ensure_local_db();
+        let _ = std::thread::spawn(|| {
+            let _guard = Ad4mDb::global_instance()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            panic!("poisoning the database lock");
+        })
+        .join();
+        assert!(Ad4mDb::global_instance().is_poisoned());
+        let read = LocalDb.get_free_hosting_enabled();
+        Ad4mDb::global_instance().clear_poison();
+        assert!(read.is_ok(), "{read:?}");
     }
 
     // A shared-mode executor keeps its own SQLite database: every domain method (users, grants,
