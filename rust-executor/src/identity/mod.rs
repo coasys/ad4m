@@ -3,9 +3,10 @@
 //! `identity.*` calls. See `AGENTS.md` in this directory.
 //!
 //! The executor holds device keys only (the wallet key `main`, one per managed user); master
-//! keys and the 12 words stay with the apps (`ad4m-identity-client`). Logs arrive only through
-//! the agent language ([`backend`]) and are kept, after `fold`, in the executor database
-//! ([`cache`]).
+//! keys and the 12 words stay with the apps (`ad4m-identity-client`). A master key sealed to
+//! the desktop app's computer opens here only inside `identity.takeMaster`, for its custody
+//! service ([`inbox`]). Logs arrive only through the agent language ([`backend`]) and are
+//! kept, after `fold`, in the executor database ([`cache`]).
 
 pub mod backend;
 pub mod cache;
@@ -13,9 +14,11 @@ pub mod claim;
 pub mod custody;
 pub mod device;
 pub mod head;
+pub mod inbox;
 pub mod key_login;
 pub mod operator;
 pub mod person;
+pub mod record;
 pub mod rekey;
 pub mod resolver;
 pub mod service;
@@ -82,6 +85,7 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         store_url: settings.store_url.clone(),
         resolver: Arc::new(resolver),
         challenges: Default::default(),
+        inbox: Default::default(),
     };
     let service = Arc::new(service);
     if SERVICE.set(service.clone()).is_err() {
@@ -91,9 +95,12 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
             handle.spawn(run_recheck(service.clone()));
+            handle.spawn(inbox::run_pull(service.clone()));
             handle.spawn(key_login::run_key_session_watch(service));
         }
-        Err(_) => log::error!("identity: no runtime for the re-check of links and key sessions"),
+        Err(_) => log::error!(
+            "identity: no runtime for the re-check of links, the inbox pull and key sessions"
+        ),
     }
     Ok(())
 }

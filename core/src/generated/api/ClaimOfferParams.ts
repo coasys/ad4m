@@ -11,4 +11,9 @@ offer: string,
 /**
  * A name for this device the holder sees on the confirm card (at most 64 characters).
  */
-hint?: string, };
+hint?: string, 
+/**
+ * The claim says this device may keep the master key: only an executor started with
+ * `--custody-channel` (the desktop app's) may say so. Default `false`.
+ */
+canKeepMaster?: boolean, };

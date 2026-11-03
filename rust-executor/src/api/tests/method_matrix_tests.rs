@@ -646,6 +646,20 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "offer": "coasys:offer:1:x" }),
     ),
     ("identity.joinStatus", || json!({ "offerId": "o" })),
+    ("identity.inboxAck", || json!({ "id": "m" })),
+    (
+        "identity.inboxPut",
+        || json!({ "address": { "pre": "a" }, "sealed": "s", "request": signed_request() }),
+    ),
+    (
+        "identity.recordPut",
+        || json!({ "record": { "version": 1, "wrapped": {}, "nonce": "n", "ciphertext": "c" } }),
+    ),
+    (
+        "identity.postRequest",
+        || json!({ "body": { "kind": "send-master" } }),
+    ),
+    ("identity.deleteRequest", || json!({ "id": "r" })),
     // Key sessions.
     (
         "user.loginWithKey",
@@ -1107,7 +1121,11 @@ fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
             "agent.signSessionStatement",
             "agent.unlock",
             "identity.custodyStatus",
+            "identity.inbox",
+            "identity.inboxAck",
+            "identity.prepareDevice",
             "identity.rekey",
+            "identity.takeMaster",
             "runtime.quit",
         ]
     );
@@ -1247,8 +1265,12 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "agent.signSessionStatement",
             "identity.claimOffer",
             "identity.custodyStatus",
+            "identity.inbox",
+            "identity.inboxAck",
+            "identity.prepareDevice",
             "identity.rekey",
             "identity.resetLog",
+            "identity.takeMaster",
             "runtime.config",
             "runtime.grantNotification",
             "runtime.importData",

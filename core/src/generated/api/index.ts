@@ -113,6 +113,28 @@ export type { SignedHead } from "./SignedHead";
 export type { SignedOffer } from "./SignedOffer";
 export type { SignedRequest } from "./SignedRequest";
 export type { SkippedSource } from "./SkippedSource";
+// The device inbox, the private details record and the request box.
+export type { DeleteRequestParams } from "./DeleteRequestParams";
+export type { DeviceRequest } from "./DeviceRequest";
+export type { DeviceRequestBody } from "./DeviceRequestBody";
+export type { InboxAckParams } from "./InboxAckParams";
+export type { InboxAddress } from "./InboxAddress";
+export type { InboxBind } from "./InboxBind";
+export type { InboxEntry } from "./InboxEntry";
+export type { InboxMessageEvent } from "./InboxMessageEvent";
+export type { InboxMessageType } from "./InboxMessageType";
+export type { InboxPutParams } from "./InboxPutParams";
+export type { InboxStored } from "./InboxStored";
+export type { LinkTicketEvent } from "./LinkTicketEvent";
+export type { PostRequestParams } from "./PostRequestParams";
+export type { PreparedDevice } from "./PreparedDevice";
+export type { RecordParams } from "./RecordParams";
+export type { RecordPutParams } from "./RecordPutParams";
+export type { RecordStored } from "./RecordStored";
+export type { RequestPosted } from "./RequestPosted";
+export type { RequestsParams } from "./RequestsParams";
+export type { SealedRecord } from "./SealedRecord";
+export type { TakenMaster } from "./TakenMaster";
 // Key sessions: login with a device key (user.sessionChallenge, user.loginWithKey, ...).
 export type { EndAllSessionsParams } from "./EndAllSessionsParams";
 export type { EndedSessions } from "./EndedSessions";

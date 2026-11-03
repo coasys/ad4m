@@ -785,6 +785,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            inbox: Default::default(),
         }
     }
 
@@ -804,6 +805,7 @@ mod tests {
                 cache: self.service.cache.clone(),
                 store_url: None,
                 challenges: Default::default(),
+                inbox: Default::default(),
             };
             self.store = store;
             self

@@ -1,6 +1,7 @@
-//! `ad4m-executor init --operator <did>` and `ad4m-executor claim <link>`: name the identity
-//! that operates this executor, and join it by claiming an offer link that identity's app
-//! opened.
+//! `ad4m-executor init --operator <did>`, `ad4m-executor claim <link>` and
+//! `ad4m-executor link-code`: name the identity that operates this executor, and join it by
+//! claiming an offer link that identity's app opened, or by showing a device string the app
+//! scans.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -81,20 +82,35 @@ pub async fn claim(
         );
         return Ok(());
     }
-    let deadline = claimed.expires + CONFIRM_GRACE_S;
+    follow_join(
+        &client,
+        &claimed.did,
+        &claimed.offer_id,
+        claimed.expires + CONFIRM_GRACE_S,
+    )
+    .await
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Follows this executor's claim of `offer_id` (of `did`) until the holder confirms, the offer
+/// ends, or `deadline` passes.
+async fn follow_join(client: &WsRpcClient, did: &str, offer_id: &str, deadline: u64) -> Result<()> {
     loop {
         let join: Join = client
-            .call(
-                "identity.joinStatus",
-                json!({ "offerId": claimed.offer_id }),
-            )
+            .call("identity.joinStatus", json!({ "offerId": offer_id }))
             .await?;
         match join.state.as_str() {
             "claimed" => {}
             "spent" => {
                 println!(
                     "Joined {} as {} (event {}).",
-                    join.did.unwrap_or(claimed.did),
+                    join.did.unwrap_or_else(|| did.to_string()),
                     join.key_id.unwrap_or_else(|| "?".into()),
                     join.seq.map_or_else(|| "?".to_string(), |s| s.to_string())
                 );
@@ -102,15 +118,94 @@ pub async fn claim(
             }
             other => bail!("the offer ended unconfirmed: it is {other}"),
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if now > deadline {
+        if now() > deadline {
             bail!("the holder did not confirm before the offer's confirm window closed");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedDevice {
+    device: String,
+    expires: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkTicket {
+    did: String,
+    offer_id: String,
+    match_code: String,
+}
+
+/// How long a holder's offer lives after the store takes it
+/// (`ad4m_identity_core::link::OFFER_TTL_S`).
+const OFFER_TTL_S: u64 = 300;
+
+/// `text` as a QR code of Unicode half blocks, with its quiet zone.
+pub fn qr_code(text: &str) -> Result<String> {
+    let code = qrcode::QrCode::new(text.as_bytes())
+        .map_err(|e| anyhow!("the device string does not fit a QR code: {e}"))?;
+    Ok(code
+        .render::<qrcode::render::unicode::Dense1x2>()
+        .quiet_zone(true)
+        .build())
+}
+
+/// `ad4m-executor link-code`: asks the executor at `executor_url` (a loopback address) for a
+/// fresh device string, prints it with its QR code, and once the executor claimed the offer
+/// of the holder that scanned it (`link-ticket`), prints the identity and the match code and
+/// follows the claim until the holder confirms.
+pub async fn link_code(executor_url: &str, token: &str) -> Result<()> {
+    if !is_loopback_url(executor_url) {
+        bail!(
+            "link-code runs only on the executor's own machine: {executor_url} is not a \
+             loopback address (use ws://127.0.0.1:<port>/api/v1/ws)"
+        );
+    }
+    let client = WsRpcClient::connect(executor_url, token)
+        .await
+        .with_context(|| format!("cannot reach the executor at {executor_url}"))?;
+    let mut events = client.watch_events(json!({ "link-ticket": null })).await?;
+    let prepared: PreparedDevice = client.call("identity.prepareDevice", json!({})).await?;
+    println!("Scan this code with an app that holds your master key, or paste the string:");
+    println!("{}", qr_code(&prepared.device)?);
+    println!("{}", prepared.device);
+    println!(
+        "It is valid for {} minutes; run `ad4m-executor link-code` again for a new one.",
+        prepared.expires.saturating_sub(now()).div_ceil(60)
+    );
+    let wait = Duration::from_secs(prepared.expires.saturating_sub(now()));
+    let ticket = tokio::time::timeout(wait, async {
+        loop {
+            match events.recv().await {
+                Ok(event) if event["type"] == "link-ticket" => {
+                    return serde_json::from_value::<LinkTicket>(event).map_err(Into::into);
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(e) => return Err(anyhow!("the executor closed the connection: {e}")),
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "no app's offer was claimed before the device string expired (the executor's log \
+             says why it refused one)"
+        )
+    })??;
+    println!("Claimed the offer of {}.", ticket.did);
+    println!("Match code: {}", ticket.match_code);
+    println!("Confirm on the app that it shows the same code.");
+    follow_join(
+        &client,
+        &ticket.did,
+        &ticket.offer_id,
+        now() + OFFER_TTL_S + CONFIRM_GRACE_S,
+    )
+    .await
 }
 
 /// The admin credential a subcommand presents: the file `AD4M_ADMIN_CREDENTIAL_FILE` names
@@ -170,6 +265,19 @@ pub async fn rekey(executor_url: &str, token: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The device string's QR code is Unicode half blocks with a quiet zone, one text line
+    /// per two module rows.
+    #[test]
+    fn a_device_string_prints_as_a_qr_code() {
+        let text = qr_code("coasys:device:1:abc").unwrap();
+        assert!(text.contains('█') || text.contains('▀') || text.contains('▄'));
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() > 10);
+        assert!(lines
+            .iter()
+            .all(|l| l.chars().count() == lines[0].chars().count()));
+    }
 
     #[test]
     fn rekey_reaches_only_a_loopback_executor() {

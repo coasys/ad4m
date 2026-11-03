@@ -10,9 +10,11 @@
 use std::time::Duration;
 
 use ad4m_ldk::identity::{
-    AgentRecord, AppendRequest, Claim, ClaimReceipt, ForbiddenReason, IdentityErrorCode,
-    KeyIndexEntry, LogPage, OfferListing, OfferOpened, OfferProgress, RateLimitScope, SignedHead,
-    SignedOffer, SignedRequest,
+    AgentRecord, AppendRequest, Claim, ClaimReceipt, DeviceRequest, ForbiddenReason,
+    IdentityErrorCode, InboxAddress, InboxAuth, InboxMessage, InboxStored, InboxWrite,
+    KeyIndexEntry, LogPage, OfferListing, OfferOpened, OfferProgress, PostedRequest,
+    RateLimitScope, RecordStored, RequestPosted, SealedRecord, SignedHead, SignedOffer,
+    SignedRequest,
 };
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -121,6 +123,57 @@ pub trait IdentityBackend: Send + Sync {
         key: &str,
         wait_s: u8,
     ) -> Result<OfferProgress, IdentityError>;
+    /// Writes a sealed message to an inbox, with the master-signed request of the write.
+    async fn inbox_put(
+        &self,
+        address: &InboxAddress,
+        write: &InboxWrite,
+        req: &SignedRequest,
+    ) -> Result<InboxStored, IdentityError>;
+    /// The messages of an inbox, oldest first, waiting up to `wait_s` (0–8) for one.
+    async fn inbox_list(
+        &self,
+        address: &InboxAddress,
+        auth: &InboxAuth,
+        wait_s: u8,
+    ) -> Result<Vec<InboxMessage>, IdentityError>;
+    /// Deletes message `id` of an inbox.
+    async fn inbox_ack(
+        &self,
+        address: &InboxAddress,
+        id: &str,
+        auth: &InboxAuth,
+    ) -> Result<(), IdentityError>;
+    /// The identity's sealed private record; `None` before the first write.
+    async fn get_record(
+        &self,
+        did: &str,
+        req: &SignedRequest,
+    ) -> Result<Option<SealedRecord>, IdentityError>;
+    async fn put_record(
+        &self,
+        did: &str,
+        record: &SealedRecord,
+        req: &SignedRequest,
+    ) -> Result<RecordStored, IdentityError>;
+    async fn post_request(
+        &self,
+        did: &str,
+        post: &PostedRequest,
+        req: &SignedRequest,
+    ) -> Result<RequestPosted, IdentityError>;
+    async fn list_requests(
+        &self,
+        did: &str,
+        since: u64,
+        req: &SignedRequest,
+    ) -> Result<Vec<DeviceRequest>, IdentityError>;
+    async fn delete_request(
+        &self,
+        did: &str,
+        id: &str,
+        req: &SignedRequest,
+    ) -> Result<(), IdentityError>;
 }
 
 /// The script that calls `export` with `args` (JSON literals) on the language and answers
@@ -283,6 +336,106 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityOfferState,
             &[did.into(), offer_id.into(), key.into(), wait_s.into()],
+        )
+        .await
+    }
+
+    async fn inbox_put(
+        &self,
+        address: &InboxAddress,
+        write: &InboxWrite,
+        req: &SignedRequest,
+    ) -> Result<InboxStored, IdentityError> {
+        self.call(
+            Capability::IdentityInboxPut,
+            &[json(address)?, json(write)?, json(req)?],
+        )
+        .await
+    }
+
+    async fn inbox_list(
+        &self,
+        address: &InboxAddress,
+        auth: &InboxAuth,
+        wait_s: u8,
+    ) -> Result<Vec<InboxMessage>, IdentityError> {
+        self.call(
+            Capability::IdentityInboxList,
+            &[json(address)?, json(auth)?, wait_s.into()],
+        )
+        .await
+    }
+
+    async fn inbox_ack(
+        &self,
+        address: &InboxAddress,
+        id: &str,
+        auth: &InboxAuth,
+    ) -> Result<(), IdentityError> {
+        self.call(
+            Capability::IdentityInboxAck,
+            &[json(address)?, id.into(), json(auth)?],
+        )
+        .await
+    }
+
+    async fn get_record(
+        &self,
+        did: &str,
+        req: &SignedRequest,
+    ) -> Result<Option<SealedRecord>, IdentityError> {
+        self.call(Capability::IdentityGetRecord, &[did.into(), json(req)?])
+            .await
+    }
+
+    async fn put_record(
+        &self,
+        did: &str,
+        record: &SealedRecord,
+        req: &SignedRequest,
+    ) -> Result<RecordStored, IdentityError> {
+        self.call(
+            Capability::IdentityPutRecord,
+            &[did.into(), json(record)?, json(req)?],
+        )
+        .await
+    }
+
+    async fn post_request(
+        &self,
+        did: &str,
+        post: &PostedRequest,
+        req: &SignedRequest,
+    ) -> Result<RequestPosted, IdentityError> {
+        self.call(
+            Capability::IdentityPostRequest,
+            &[did.into(), json(post)?, json(req)?],
+        )
+        .await
+    }
+
+    async fn list_requests(
+        &self,
+        did: &str,
+        since: u64,
+        req: &SignedRequest,
+    ) -> Result<Vec<DeviceRequest>, IdentityError> {
+        self.call(
+            Capability::IdentityListRequests,
+            &[did.into(), since.into(), json(req)?],
+        )
+        .await
+    }
+
+    async fn delete_request(
+        &self,
+        did: &str,
+        id: &str,
+        req: &SignedRequest,
+    ) -> Result<(), IdentityError> {
+        self.call(
+            Capability::IdentityDeleteRequest,
+            &[did.into(), id.into(), json(req)?],
         )
         .await
     }

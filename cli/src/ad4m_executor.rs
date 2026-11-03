@@ -147,6 +147,12 @@ enum Domain {
     /// the admin credential from AD4M_ADMIN_CREDENTIAL_FILE (or --admin-credential,
     /// AD4M_ADMIN_CREDENTIAL). The old key stays for history.
     Rekey,
+    /// Show this executor's device string and its QR code for an app to scan (for a server
+    /// with no address an app can reach). The executor reads its pre-join inbox for 5 minutes;
+    /// once it claimed the offer the app sent, this prints the identity and the match code, and waits
+    /// until the app confirms. Runs only on the executor's own machine, with the admin
+    /// credential (as `rekey`), and needs an operator recorded with `init --operator`.
+    LinkCode,
     /// Inspect the settings `run` would start with
     Config {
         #[command(subcommand)]
@@ -203,6 +209,13 @@ async fn main() -> Result<()> {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
+            // The device key comes with the agent (`agent.generate`, after `run`), and only a
+            // running executor reads its pre-join inbox: the device string comes from there.
+            println!(
+                "To link it: start it (`ad4m-executor run`), then claim an offer with \
+                 `ad4m-executor claim <link>`, or show its device string and QR code with \
+                 `ad4m-executor link-code`."
+            );
         }
         return Ok(());
     };
@@ -242,6 +255,24 @@ async fn main() -> Result<()> {
             Err(e) => Err(e),
         };
         if let Err(e) = rekeyed {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if let Domain::LinkCode = args.domain {
+        let executor_url = match args.executor_url {
+            Some(url) => url,
+            None => startup::get_executor_url()?,
+        };
+        let shown = match identity::admin_credential(args.admin_credential, |name| {
+            std::env::var(name).ok()
+        }) {
+            Ok(token) => identity::link_code(&executor_url, &token).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = shown {
             eprintln!("{e}");
             std::process::exit(1);
         }

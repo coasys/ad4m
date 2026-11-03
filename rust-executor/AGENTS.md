@@ -46,7 +46,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `tool_bundles/` | Tool bundles: an app's JS for its agents' tools, one bare `JsRuntime` per bundle with two ops (random bytes, a log line); time limit on load and every call, memory cap on heap and ArrayBuffers. `builtin.rs` compiles in WE's template tools (`template_read` / `template_update` in `mcp/`), downloaded from a WE release by `build.rs` (version and sha256 pinned there) | `src/tool_bundles/AGENTS.md` |
 | `holochain_service/` | Embedded Holochain conductor behind an actor channel; signal fan-in | `src/holochain_service/AGENTS.md` |
 | `agent/` | Agent keys/DID, signing, multi-user (managed agents by DID; a user's email is only the login name), `capabilities/` (auth tokens, capability defs) | — |
-| `identity/` | `did:scid:coasys:1` on the executor: `KelCache` (key logs on `ad4m-hash-chain`'s `SqliteChainStore` in `ad4m_db.sqlite`), the agent-language backend, the operator record and first-link rule, `ClaimService`, the `identity.*` calls (handlers in `api/identity_ws.rs`), the `identity-fork` event | `src/identity/AGENTS.md` |
+| `identity/` | `did:scid:coasys:1` on the executor: `KelCache` (key logs on `ad4m-hash-chain`'s `SqliteChainStore` in `ad4m_db.sqlite`), the agent-language backend, the operator record and first-link rule, `ClaimService`, the `identity.*` calls (handlers in `api/identity_ws.rs`), the device inbox, the private record and the request box, the `identity-fork`, `link-ticket` and `inbox-message` events | `src/identity/AGENTS.md` |
 | `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
 | `db_backend.rs` | `SharedDb` HTTP backend for stateless/hosted mode; only used when `config.db_backend == "shared"` | — |
 | `pubsub.rs` | Global broadcast bus: one channel of typed events (`events.rs`: `Topic`, `Audience`, `Event`) for every event (live query updates too, as `Event::for_connection`); feeds `api/events_ws.rs` | `src/api/AGENTS.md` |
@@ -80,7 +80,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   machine (`Session::is_operator_on_this_machine`: the admin credential, or no token on an
   executor without one, on a loopback listener). Every other caller, the admin credential on
   a network listener included, gets 403 `local-only`. It is on `agent.unlock`,
-  `identity.rekey`, `identity.custodyStatus` and `runtime.quit`, and `runtime.setConfig`
+  `identity.rekey`, `identity.custodyStatus`, `identity.takeMaster`, `identity.prepareDevice`,
+  `identity.inbox`, `identity.inboxAck` and `runtime.quit`, and `runtime.setConfig`
   refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
   An executor on `--localhost false` without TLS has no loopback listener, so these calls
   answer on no listener there.
@@ -183,8 +184,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   only while the backup holds exactly those keys. Write the agent file only through
   `AgentService::save` / `try_save`.
 - **Identity** (`identity/`): an agent's device key (the wallet key) may speak
-  for a `did:scid` whose log lists it; the master key and the 12 words never reach the executor
-  (apps hold them through `ad4m-identity-client`). The configured store's logs come through the
+  for a `did:scid` whose log lists it; the 12 words never reach the executor and the master key
+  rests in none (apps hold them through `ad4m-identity-client`; a master key sealed to the
+  desktop app's computer opens only inside `identity.takeMaster`, for its custody service). The configured store's logs come through the
   agent language (`Capability::Identity*`, refused on any other language); a DID URL's foreign
   `src` is read by the executor itself (`identity/src_fetch.rs`, public addresses only at
   connect). Both are kept after `fold` in `KelCache`; a head counts only under a key of the
@@ -200,7 +202,13 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   public HTTPS host unless `identity.allowPrivateSrc` is set. `identity.rekey` (local only, or
   `ad4m-executor rekey`) gives the main agent a new wallet key and moves every place that holds
   its DID (`identity/rekey.rs`); tokens signed with the old key stop working.
-  `identity.custodyStatus` is the custody channel (`identity/custody.rs`).
+  `identity.custodyStatus` and `identity.takeMaster` are the custody channel
+  (`identity/custody.rs`). The device inbox (`identity/inbox.rs`): the main agent's joined
+  inbox is read at start, unlock, binding and every 15 minutes; an executor with the custody
+  channel keeps a master key message for `identity.takeMaster`, every other deletes it
+  unopened. `identity.prepareDevice` (and `ad4m-executor link-code`) shows a device string and
+  claims the ticket a holder pushes to its pre-join inbox (`link-ticket`); the private record
+  and the request box pass through `identity/record.rs`.
 
 ## Do / don't
 

@@ -43,11 +43,13 @@ pub enum Topic {
     FlowStateChanged,
     IdentityFork,
     ConfigChanged,
+    LinkTicket,
+    InboxMessage,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 26] = [
+    pub const ALL: [Topic; 28] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -74,6 +76,8 @@ impl Topic {
         Topic::FlowStateChanged,
         Topic::IdentityFork,
         Topic::ConfigChanged,
+        Topic::LinkTicket,
+        Topic::InboxMessage,
     ];
 
     /// The event type on the wire: the `type` field of the socket message and the key
@@ -106,6 +110,8 @@ impl Topic {
             Topic::FlowStateChanged => "flow-state-changed",
             Topic::IdentityFork => "identity-fork",
             Topic::ConfigChanged => "config-changed",
+            Topic::LinkTicket => "link-ticket",
+            Topic::InboxMessage => "inbox-message",
         }
     }
 
@@ -124,11 +130,15 @@ impl Topic {
         match self {
             // `agent.status`, `agent.get`; a fork shows in `identity.status`. `runtime.config`
             // has the operator guard and checks no capability: the operator audience of
-            // `config-changed` keeps it from every other session.
+            // `config-changed` keeps it from every other session. `identity.prepareDevice` and
+            // `identity.inbox` are the operator's on this machine: the local operator audience
+            // of `link-ticket` and `inbox-message` keeps them from every other session.
             Topic::AgentStatusChanged
             | Topic::AgentUpdated
             | Topic::IdentityFork
-            | Topic::ConfigChanged => caps::AGENT_READ_CAPABILITY.clone(),
+            | Topic::ConfigChanged
+            | Topic::LinkTicket
+            | Topic::InboxMessage => caps::AGENT_READ_CAPABILITY.clone(),
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).
             Topic::AppsChanged => caps::AGENT_PERMIT_CAPABILITY.clone(),
             // `hosting.info`; the main agent's copy needs RUNTIME_USER_MANAGEMENT_READ instead
@@ -201,6 +211,9 @@ pub enum Audience {
     /// The operator's sessions only: for what only the operator may read, such as the main
     /// agent's state on a perspective the main agent does not own.
     Operator,
+    /// The operator's sessions on this machine only (`Session::is_operator_on_this_machine`):
+    /// for what only a `.local_only()` method reads.
+    LocalOperator,
 }
 
 impl Audience {

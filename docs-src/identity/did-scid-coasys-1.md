@@ -630,3 +630,34 @@ other than the stored version plus one); a reader refuses a version lower than o
 days ahead. The host keeps the post with the signed store request it came with, whose
 `bodyHash` is the hash of `JCS({body, expires})`, so a reader checks the poster itself. A
 request changes no key and no log event by itself.
+
+**An executor as a device.** An AD4M executor is a device whose key is its wallet key. It
+reads its joined inbox when it starts, when its wallet unlocks, when its key joins an
+identity, and every 15 minutes, one read at a time. It reads a pre-join inbox only while a
+device string it showed is valid (until `exp`, five minutes), at most once a second; showing
+a new string ends the read of the last one.
+
+- A master key is the only body a joined inbox carries. An executor started without the
+  custody channel (a server, a host) keeps no master key: it deletes each message of its
+  joined inbox unopened and logs an error. Its claims never say `canKeepMaster`.
+- An executor with the custody channel (the desktop app's) opens each new message to learn
+  its type, wipes the plaintext, leaves the message at the host and tells the operator on its
+  machine (`inbox-message {id, kind}`, never a body). Its custody service then calls
+  `identity.takeMaster`: the executor opens the messages again, oldest first, checks each
+  against its refreshed copy of the log as above, and answers the first current master key
+  (`{messageId, did, index, secret}`) or `null`. A stale key, or one that fails a check, is
+  deleted. The message stays until the custody service acknowledges it
+  (`identity.inboxAck`) after storing the key. Only the admin credential on a loopback
+  listener of an executor started with `--custody-channel` gets this answer; an app, a network
+  listener, a device-key login and an operator without a credential are refused (403
+  `no-custody-channel`). The key reaches the answer only: no log line, event, store or
+  language, and the executor wipes its copy.
+- A master key in a pre-join inbox is dropped: a master key never travels before the device
+  joined. A valid offer ticket is claimed under the executor's first-link rule (no operator
+  record, or one naming another identity, refuses it), with `canKeepMaster` exactly when the
+  executor has the custody channel; only a claim made shows the identity and the match code
+  (`link-ticket`). The ticket is deleted either way; one whose log cannot be read now waits
+  for the next read.
+- The executor never opens the private record. It passes the record and request-box calls
+  with a store request the caller signed with the master key, or signs one with its own key
+  (always for a post).

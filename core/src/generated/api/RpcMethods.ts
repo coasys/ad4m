@@ -37,7 +37,9 @@ import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 import type { CreateUserRequest } from "./CreateUserRequest";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
+import type { DeleteRequestParams } from "./DeleteRequestParams";
 import type { DeviceKeys } from "./DeviceKeys";
+import type { DeviceRequest } from "./DeviceRequest";
 import type { DeviceView } from "./DeviceView";
 import type { DidResolutionResult } from "./DidResolutionResult";
 import type { EmbedRequest } from "./EmbedRequest";
@@ -65,6 +67,10 @@ import type { IdentityLog } from "./IdentityLog";
 import type { IdentityStatus } from "./IdentityStatus";
 import type { ImportAgentRequest } from "./ImportAgentRequest";
 import type { ImportRequest } from "./ImportRequest";
+import type { InboxAckParams } from "./InboxAckParams";
+import type { InboxEntry } from "./InboxEntry";
+import type { InboxPutParams } from "./InboxPutParams";
+import type { InboxStored } from "./InboxStored";
 import type { InteractionMeta } from "./InteractionMeta";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
 import type { JoinStatus } from "./JoinStatus";
@@ -145,15 +151,22 @@ import type { PerspectiveUpdateParams } from "./PerspectiveUpdateParams";
 import type { PerspectiveUpdateSubjectParams } from "./PerspectiveUpdateSubjectParams";
 import type { PerspectiveUuidParams } from "./PerspectiveUuidParams";
 import type { PerspectiveVerifyFlowReceiptParams } from "./PerspectiveVerifyFlowReceiptParams";
+import type { PostRequestParams } from "./PostRequestParams";
+import type { PreparedDevice } from "./PreparedDevice";
 import type { PromptRequest } from "./PromptRequest";
 import type { ProposeOutcome } from "./ProposeOutcome";
 import type { PublishLanguageRequest } from "./PublishLanguageRequest";
 import type { PublishNeighbourhoodRequest } from "./PublishNeighbourhoodRequest";
 import type { PublishParams } from "./PublishParams";
+import type { RecordParams } from "./RecordParams";
+import type { RecordPutParams } from "./RecordPutParams";
+import type { RecordStored } from "./RecordStored";
 import type { RenewSessionParams } from "./RenewSessionParams";
 import type { RenewedSession } from "./RenewedSession";
 import type { RequestCapabilityRequest } from "./RequestCapabilityRequest";
 import type { RequestPaymentRequest } from "./RequestPaymentRequest";
+import type { RequestPosted } from "./RequestPosted";
+import type { RequestsParams } from "./RequestsParams";
 import type { ResetLogParams } from "./ResetLogParams";
 import type { ResolveParams } from "./ResolveParams";
 import type { RunAgentRequest } from "./RunAgentRequest";
@@ -171,6 +184,7 @@ import type { RuntimeSetFreeHostingEnabledParams } from "./RuntimeSetFreeHosting
 import type { RuntimeUnytSendHotParams } from "./RuntimeUnytSendHotParams";
 import type { RuntimeUnytWalletHistoryParams } from "./RuntimeUnytWalletHistoryParams";
 import type { RuntimeUpdateNotificationParams } from "./RuntimeUpdateNotificationParams";
+import type { SealedRecord } from "./SealedRecord";
 import type { SentMessage } from "./SentMessage";
 import type { SessionChallenge } from "./SessionChallenge";
 import type { SessionInfo } from "./SessionInfo";
@@ -201,6 +215,7 @@ import type { SignMessageRequest } from "./SignMessageRequest";
 import type { SignSessionStatementParams } from "./SignSessionStatementParams";
 import type { SignedHead } from "./SignedHead";
 import type { SignedKeyStatement } from "./SignedKeyStatement";
+import type { TakenMaster } from "./TakenMaster";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
 import type { UnytVersionInfo } from "./UnytVersionInfo";
@@ -278,16 +293,26 @@ export interface RpcMethods {
   "identity.claimOffer": { params: ClaimOfferParams; result: ClaimOfferResult };
   "identity.cosignIncept": { params: CosignInceptParams; result: JsonValue };
   "identity.custodyStatus": { params: Record<string, never>; result: DeviceKeys };
+  "identity.deleteRequest": { params: DeleteRequestParams; result: boolean };
   "identity.devices": { params: Record<string, never>; result: Array<DeviceView> };
+  "identity.inbox": { params: Record<string, never>; result: Array<InboxEntry> };
+  "identity.inboxAck": { params: InboxAckParams; result: boolean };
+  "identity.inboxPut": { params: InboxPutParams; result: InboxStored };
   "identity.joinStatus": { params: JoinStatusParams; result: JoinStatus };
   "identity.log": { params: LogParams; result: IdentityLog };
   "identity.offers": { params: OffersParams; result: Array<OfferListing> };
   "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
+  "identity.postRequest": { params: PostRequestParams; result: RequestPosted };
+  "identity.prepareDevice": { params: Record<string, never>; result: PreparedDevice };
   "identity.publish": { params: PublishParams; result: SignedHead };
+  "identity.record": { params: RecordParams; result: SealedRecord | null };
+  "identity.recordPut": { params: RecordPutParams; result: RecordStored };
   "identity.rekey": { params: Record<string, never>; result: DeviceKeys };
+  "identity.requests": { params: RequestsParams; result: Array<DeviceRequest> };
   "identity.resetLog": { params: ResetLogParams; result: boolean };
   "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
+  "identity.takeMaster": { params: Record<string, never>; result: TakenMaster | null };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
   "language.get": { params: LanguageAddressParams; result: LanguageHandle };
@@ -469,9 +494,12 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "hosting.walletHistory",
   "identity.custodyStatus",
   "identity.devices",
+  "identity.inbox",
   "identity.joinStatus",
   "identity.log",
   "identity.offers",
+  "identity.record",
+  "identity.requests",
   "identity.resolve",
   "identity.status",
   "language.all",

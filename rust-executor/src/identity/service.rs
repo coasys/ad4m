@@ -143,6 +143,9 @@ pub struct IdentityService {
     pub resolver: Arc<super::resolver::Resolver>,
     /// The open challenges of key logins (`user.sessionChallenge`).
     pub challenges: super::key_login::Challenges,
+    /// The device inbox: what this executor read of it, the open pre-join read, the pull's
+    /// wake-up.
+    pub inbox: super::inbox::Inbox,
 }
 
 impl IdentityService {
@@ -333,6 +336,8 @@ impl IdentityService {
             // The main agent's status gains its identity (a managed agent's status event names
             // the main agent's, so only the main agent's changes here).
             if agent.is_main_agent() {
+                // A device that joined reads its inbox at once.
+                super::inbox::wake();
                 let status = crate::agent::AgentService::with_global_instance(|a| a.dump());
                 crate::pubsub::get_global_pubsub()
                     .await
@@ -480,8 +485,8 @@ impl IdentityService {
         convert(&listings).map_err(|e| WsRpcError::internal(e.to_string()))
     }
 
-    /// `identity.devices`: the identity's device keys, from the log (the executor has no
-    /// private record yet, so no names).
+    /// `identity.devices`: the identity's device keys, from the log (the executor never opens
+    /// the private record, so no names).
     pub async fn devices(&self, agent: &AgentContext) -> Result<Vec<DeviceView>, WsRpcError> {
         let (agent_did, key) = device_key(agent).map_err(WsRpcError::internal)?;
         let Some(scid) = db(|db| db.agent_identity(&agent_did))? else {
@@ -648,6 +653,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            inbox: Default::default(),
         }
     }
 
@@ -774,6 +780,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            inbox: Default::default(),
         };
         let scid = ours.scid();
         let did = did_of(&scid);
@@ -907,6 +914,69 @@ mod tests {
         ) -> Result<ad4m_ldk::identity::OfferProgress, IdentityError> {
             self.inner.offer_state(did, offer_id, key, wait_s).await
         }
+        async fn inbox_put(
+            &self,
+            address: &ad4m_ldk::identity::InboxAddress,
+            write: &ad4m_ldk::identity::InboxWrite,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<ad4m_ldk::identity::InboxStored, IdentityError> {
+            self.inner.inbox_put(address, write, req).await
+        }
+        async fn inbox_list(
+            &self,
+            address: &ad4m_ldk::identity::InboxAddress,
+            auth: &ad4m_ldk::identity::InboxAuth,
+            wait_s: u8,
+        ) -> Result<Vec<ad4m_ldk::identity::InboxMessage>, IdentityError> {
+            self.inner.inbox_list(address, auth, wait_s).await
+        }
+        async fn inbox_ack(
+            &self,
+            address: &ad4m_ldk::identity::InboxAddress,
+            id: &str,
+            auth: &ad4m_ldk::identity::InboxAuth,
+        ) -> Result<(), IdentityError> {
+            self.inner.inbox_ack(address, id, auth).await
+        }
+        async fn get_record(
+            &self,
+            did: &str,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<Option<ad4m_ldk::identity::SealedRecord>, IdentityError> {
+            self.inner.get_record(did, req).await
+        }
+        async fn put_record(
+            &self,
+            did: &str,
+            record: &ad4m_ldk::identity::SealedRecord,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<ad4m_ldk::identity::RecordStored, IdentityError> {
+            self.inner.put_record(did, record, req).await
+        }
+        async fn post_request(
+            &self,
+            did: &str,
+            post: &ad4m_ldk::identity::PostedRequest,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<ad4m_ldk::identity::RequestPosted, IdentityError> {
+            self.inner.post_request(did, post, req).await
+        }
+        async fn list_requests(
+            &self,
+            did: &str,
+            since: u64,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<Vec<ad4m_ldk::identity::DeviceRequest>, IdentityError> {
+            self.inner.list_requests(did, since, req).await
+        }
+        async fn delete_request(
+            &self,
+            did: &str,
+            id: &str,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<(), IdentityError> {
+            self.inner.delete_request(did, id, req).await
+        }
     }
 
     /// With `identity.storeKeys` unset (the default), the executor can accept no store head, so
@@ -938,6 +1008,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            inbox: Default::default(),
         };
         let incept = incept_listing(&agent, 53);
         let cosigned = service.cosign_incept(&agent, &incept).await.unwrap();
@@ -970,10 +1041,7 @@ mod tests {
         };
         let refused = service
             .claims()
-            .claim_for_main(&crate::identity::types::ClaimOfferParams {
-                offer: offer.encode(),
-                hint: None,
-            })
+            .claim_for_main(&offer, false, None)
             .await
             .expect_err("a claim the executor cannot finish is refused");
         assert!(

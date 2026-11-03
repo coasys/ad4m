@@ -4,21 +4,20 @@
 //!
 //! `claim_for_main` claims with the main wallet key and first runs the first-link rule
 //! (`operator::first_link_check`): every path that claims for the main agent calls it, the
-//! `identity.claimOffer` handler today and a pre-join ticket path when one exists, so the
-//! rule never depends on an RPC guard. Claims for a hosted tenant's agent are not
-//! here yet.
+//! `identity.claimOffer` handler and the pre-join ticket path of `identity.prepareDevice`
+//! (`inbox`), so the rule never depends on an RPC guard. Claims for a hosted tenant's agent
+//! are not here yet.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::did_of;
-use ad4m_identity_core::link;
+use ad4m_identity_core::link::{self, OfferString};
 
 use super::device::{device_key, enc_key_of, WalletSigner};
 use super::operator::first_link_check;
 use super::service::{
-    backend_error, cache_error, db, error, first_link_error, now, parse_offer, store_base,
-    IdentityService,
+    backend_error, cache_error, db, error, first_link_error, now, store_base, IdentityService,
 };
-use super::types::{convert, ClaimOfferParams, ClaimOfferResult, JoinStatus};
+use super::types::{convert, ClaimOfferResult, JoinStatus};
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
 use crate::db::JoinRow;
@@ -52,16 +51,19 @@ impl ClaimService<'_> {
         }))
     }
 
-    /// Claims `params.offer` with the main wallet key. Refuses `no-operator` with no operator
+    /// Claims `offer` with the main wallet key, on every path that claims for the main agent
+    /// (`identity.claimOffer`, a pre-join ticket). Refuses `no-operator` with no operator
     /// record and `first-link` while the main key is in no log and the offer is not of the
     /// recorded operator; `already-linked` while the main key speaks for an
-    /// identity (a revoked key needs a new main key, which no call makes yet).
+    /// identity (a revoked key needs a new main key: `identity.rekey`). `can_keep_master` goes
+    /// into the claim the main key co-signs.
     pub async fn claim_for_main(
         &self,
-        params: &ClaimOfferParams,
+        offer: &OfferString,
+        can_keep_master: bool,
+        hint: Option<String>,
     ) -> Result<ClaimOfferResult, WsRpcError> {
         self.identity.refuse_without_store_keys()?;
-        let offer = parse_offer(&params.offer)?;
         let offer_did = did_of(&offer.scid);
         let record = db(|db| db.operator_record())?;
         if self.main_is_linked().await? {
@@ -91,9 +93,8 @@ impl ClaimService<'_> {
             secret,
             &signer,
             enc,
-            // An executor never keeps the master key: `canKeepMaster` is false.
-            false,
-            params.hint.clone(),
+            can_keep_master,
+            hint,
         )
         .map_err(|e| WsRpcError::bad_request(format!("invalid: {e}")))?;
         signer.check().map_err(WsRpcError::internal)?;
@@ -115,7 +116,7 @@ impl ClaimService<'_> {
         Ok(ClaimOfferResult {
             did: offer_did,
             match_code: link::match_code(&offer.scid, &offer.offer_id, signer.key().as_str()),
-            offer_id: offer.offer_id,
+            offer_id: offer.offer_id.clone(),
             kind: convert(&receipt.kind).map_err(|e| WsRpcError::internal(e.to_string()))?,
             expires: receipt.expires,
         })

@@ -13,8 +13,8 @@ use ad4m_identity_client::flows::create::{resume, CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::LinkFlow;
 use ad4m_identity_client::flows::revoke::{key_id_of, revoke};
 use ad4m_identity_client::{
-    ClientError, ExecutorRpc, MasterUse, MemoryVault, OsRandom, Random, RpcError, SystemClock,
-    Vault, ViaExecutor,
+    ClientError, Clock, ExecutorRpc, MasterUse, MemoryVault, OsRandom, Random, RpcError,
+    SystemClock, Vault, ViaExecutor,
 };
 use ad4m_identity_core::build::{cosign, Signer};
 use ad4m_identity_core::link::{self, OfferKind, OfferString};
@@ -714,6 +714,7 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
         &vault,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &SystemClock,
         &OsRandom,
@@ -750,6 +751,51 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 }
 
+/// An offer bound to a scanned device key: its ticket carries the offer string's fields and
+/// the signed offer bound to that key, another key's claim is refused, and the bound device
+/// links as with an unbound offer.
+#[tokio::test]
+async fn a_bound_offer_takes_only_its_device_and_gives_its_ticket() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let stranger = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 8).await;
+
+    let device_key = b.rpc().device_key();
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Device,
+        Some(&device_key),
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let ticket = flow.ticket();
+    assert_eq!(ticket.offer_string().encode(), flow.offer_string());
+    assert_eq!(
+        ticket.signed_offer.offer.device_key.as_deref(),
+        Some(device_key.as_str())
+    );
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    let now = SystemClock.now();
+    link::verify_offer(&ticket.signed_offer, &chain, now).unwrap();
+
+    let refused = claim(&stranger, &flow.offer_string(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, 403, "{}", refused.message);
+    let claimed_b = claim(&b, &flow.offer_string(), None).await.unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+    assert_eq!(claimed.match_code, claimed_b["matchCode"]);
+    assert_eq!(flow.confirm(&claimed).await.unwrap().seq, 1);
+}
+
 #[tokio::test]
 async fn revoke_ends_the_second_executors_key() {
     let store = TestStore::new();
@@ -762,6 +808,7 @@ async fn revoke_ends_the_second_executors_key() {
         &vault,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &SystemClock,
         &OsRandom,
@@ -800,6 +847,7 @@ async fn revoke_ends_the_second_executors_key() {
         &vault,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &SystemClock,
         &OsRandom,
@@ -823,6 +871,7 @@ async fn a_link_without_the_master_key_never_opens_an_offer() {
             &empty,
             &did,
             OfferKind::Node,
+            None,
             STORE_URL,
             &SystemClock,
             &OsRandom

@@ -427,6 +427,7 @@ impl Session {
         let in_audience = match &event.audience {
             Audience::Everyone => true,
             Audience::Operator => self.is_operator(),
+            Audience::LocalOperator => self.is_operator_on_this_machine(),
             Audience::Dids(dids) => self.acts_as_did().is_some_and(|did| dids.contains(&did)),
         };
         in_audience && self.may(&event.capability)

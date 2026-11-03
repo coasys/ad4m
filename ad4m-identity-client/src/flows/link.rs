@@ -12,7 +12,10 @@
 
 use ad4m_hash_chain::{encode_proof_value, hash_bytes};
 use ad4m_identity_core::build::add_claimed;
-use ad4m_identity_core::link::{self, ClaimView, Offer, OfferKind, OfferString, SignedBy};
+use ad4m_identity_core::inbox::OfferTicket;
+use ad4m_identity_core::link::{
+    self, ClaimView, Offer, OfferKind, OfferString, SignedBy, SignedOffer,
+};
 use ad4m_identity_core::{signing_bytes, KelChain, REQUEST_DOMAIN};
 use ad4m_ldk::identity::{OfferState, RequestBody, SignedHead, SignedRequest};
 use serde_json::json;
@@ -48,6 +51,7 @@ pub struct LinkFlow<'a, R: ExecutorRpc> {
     /// The store's `did:key`, from the head the executor accepted: what a signed request names.
     store: String,
     offer: Offer,
+    signed: SignedOffer,
     offer_string: OfferString,
     _secret: Secret<[u8; 32]>,
 }
@@ -86,12 +90,16 @@ async fn store_of<R: ExecutorRpc>(
 
 impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
     /// Opens an offer of `kind` (`Node` for an executor) for the identity `did`, whose store
-    /// is at `store_url`, and makes its link.
+    /// is at `store_url`, and makes its link. With `device_key` (the signing key of a device
+    /// string the holder scanned) the offer is bound to it: only that key may claim it, and its
+    /// [`LinkFlow::ticket`] goes to the device's pre-join inbox.
+    #[allow(clippy::too_many_arguments)]
     pub async fn open(
         executor: &'a ViaExecutor<R>,
         vault: &dyn Vault,
         did: &str,
         kind: OfferKind,
+        device_key: Option<&str>,
         store_url: &str,
         clock: &'a dyn Clock,
         random: &'a dyn Random,
@@ -111,7 +119,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             kind,
             commit: link::offer_commit(secret.expose()),
             expires: clock.now() + link::OFFER_TTL_S,
-            device_key: None,
+            device_key: device_key.map(str::to_string),
             bot: None,
         };
         let signer = unlocked.signer(clock.now())?;
@@ -131,7 +139,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             kel_hash: head.hash.clone(),
         };
         let signed = link::sign_offer(offer.clone(), by, signer)?;
-        let wire: ad4m_ldk::identity::SignedOffer = serde_json::from_value(json!(signed))
+        let wire: ad4m_ldk::identity::SignedOffer = serde_json::from_value(json!(&signed))
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
         let opened = executor.open_offer(&wire).await?;
         if opened.offer_id != offer.offer_id {
@@ -153,6 +161,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             did: did.to_string(),
             store,
             offer,
+            signed,
             offer_string,
             _secret: secret,
         })
@@ -170,6 +179,18 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
 
     pub fn offer_id(&self) -> &str {
         &self.offer.offer_id
+    }
+
+    /// The offer as a ticket for the device's inbox (`InboxBody::OfferTicket`): the offer
+    /// string's fields and the signed offer, which the device checks against the log.
+    pub fn ticket(&self) -> OfferTicket {
+        OfferTicket {
+            store: self.offer_string.store.clone(),
+            scid: self.offer_string.scid.clone(),
+            offer_id: self.offer_string.offer_id.clone(),
+            s: self.offer_string.s.clone(),
+            signed_offer: self.signed.clone(),
+        }
     }
 
     /// A list request signed by the current master key at `chain`'s head.
