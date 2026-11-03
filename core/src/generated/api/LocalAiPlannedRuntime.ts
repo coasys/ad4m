@@ -5,11 +5,11 @@ import type { LocalAiService } from "./LocalAiService";
 
 export type LocalAiPlannedRuntime = { 
 /**
- * The manifest's runtime id: `llama.cpp`, `whisper.cpp`.
+ * The manifest's runtime id: `llama-server`, `whisper-server`.
  */
 runtimeId: string, provider: LocalAiProvider, version: string, 
 /**
- * The manifest's build key: `linux-x86_64-vulkan`.
+ * The manifest's build key: `linux-x64-vulkan`.
  */
 build: string, backend: LocalAiBackend, 
 /**

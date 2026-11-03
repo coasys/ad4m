@@ -10,4 +10,8 @@ modelId: string, provider: LocalAiProvider, sizeBytes: number, memoryBytes: numb
 /**
  * The measured class the recommendation comes from.
  */
-fromClass: string, evidence: Array<string>, metrics: Record<string, unknown>, };
+fromClass: string, evidence: Array<string>, metrics: Record<string, unknown>, 
+/**
+ * The flags the server runs this model with: the measurement's, else the defaults.
+ */
+serverFlags: Array<string>, };

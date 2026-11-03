@@ -12,7 +12,7 @@ export type LocalAiHardware = {
  */
 os: string, 
 /**
- * `x86_64` or `aarch64`.
+ * `x64` or `arm64` (the names the manifest's build keys use).
  */
 arch: string, cpu: LocalAiCpu, ramBytes: number, availableRamBytes: number, gpus: Array<LocalAiGpu>, 
 /**

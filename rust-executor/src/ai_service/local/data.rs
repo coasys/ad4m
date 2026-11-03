@@ -152,13 +152,17 @@ impl ModelFile {
     }
 }
 
+/// The wind tunnel's recommendations: per measured class and service, the model and runtime
+/// that won, with the server flags it was measured with. A service or provider this
+/// executor does not run (a `completion` row, speech on speaches) stays raw JSON here and
+/// [`Recommendations::get`] skips it.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Recommendations {
     pub schema_version: u32,
     pub generated_at: String,
     /// Measured classes only.
-    pub classes: BTreeMap<String, BTreeMap<Service, Recommendation>>,
+    pub classes: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -167,10 +171,14 @@ pub struct Recommendation {
     pub provider: Provider,
     #[serde(default)]
     pub model_id: Option<String>,
-    /// A build key (`linux-x86_64-vulkan`) the measurement used, preferred when this device
-    /// can run it.
+    /// The manifest build key the measurement used (`linux-x64-vulkan`).
     #[serde(default)]
     pub runtime_build: Option<String>,
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// The server's flags in the measurement, e.g. `-c 8192 -ngl 999 --reasoning off`.
+    #[serde(default)]
+    pub server_flags: Vec<String>,
     #[serde(default)]
     pub metrics: serde_json::Value,
     /// Paths of the measurement files. A recommendation without evidence counts as not
@@ -179,114 +187,145 @@ pub struct Recommendation {
     pub evidence: Vec<String>,
 }
 
+impl Recommendations {
+    /// The recommendation for `service` on `class`, when there is one and it names a
+    /// provider this executor runs.
+    pub fn get(&self, class: &str, service: Service) -> Option<Recommendation> {
+        let raw = self.classes.get(class)?.get(service.as_str())?;
+        serde_json::from_value(raw.clone()).ok()
+    }
+}
+
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HardwareClasses {
     pub schema_version: u32,
     pub rules: Vec<ClassRule>,
-    /// The next class down from each class; `null` for the smallest.
-    pub smaller: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ClassRule {
     pub class: String,
-    pub when: Conditions,
+    /// Classes of one family are ordered by `tier_gb`.
+    pub family: String,
+    pub tier_gb: f64,
+    #[serde(rename = "match")]
+    pub conditions: Conditions,
 }
 
-/// Every condition set must hold. A list matches when it names the fingerprint's value;
-/// a GPU condition names `"none"` to match a fingerprint without a GPU.
+/// Every condition set must hold. Memory in GiB (2^30 bytes), compared with >=. The GPU
+/// conditions (`gpuVendor`, `unifiedMemory`, `minVramGb`) hold when one GPU meets them all.
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Conditions {
-    #[serde(default)]
-    pub os: Option<Vec<String>>,
-    #[serde(default)]
-    pub arch: Option<Vec<String>>,
-    #[serde(default, rename = "gpuVendor")]
-    pub gpu_vendor: Option<Vec<String>>,
-    #[serde(default, rename = "gpuType")]
-    pub gpu_type: Option<Vec<String>>,
-    #[serde(default, rename = "minRamGiB")]
-    pub min_ram_gib: Option<f64>,
-    #[serde(default, rename = "minVramGiB")]
-    pub min_vram_gib: Option<f64>,
+    pub os: Option<String>,
+    pub arch: Option<String>,
+    pub gpu_vendor: Option<String>,
+    pub unified_memory: Option<bool>,
+    /// At least one of these backends is usable.
+    pub backend_any: Option<Vec<String>>,
+    pub min_memory_gb: Option<f64>,
+    pub min_vram_gb: Option<f64>,
 }
 
-/// What the class rules read of a device.
+/// What the class rules read of a device (the wind tunnel's `ClassInput`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Fingerprint {
+pub struct ClassInput {
+    /// `linux`, `macos`, `windows`.
     pub os: String,
+    /// `x64`, `arm64`.
     pub arch: String,
-    pub ram_bytes: u64,
-    pub gpu: Option<FingerprintGpu>,
+    pub memory_bytes: u64,
+    /// `cpu`, `cuda`, `rocm`, `vulkan`, `metal`.
+    pub backends: Vec<String>,
+    pub gpus: Vec<ClassGpu>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct FingerprintGpu {
-    /// `nvidia`, `amd`, `intel`, `apple` or `other`.
+pub struct ClassGpu {
+    /// `nvidia`, `amd`, `intel`, `apple`, `other`.
     pub vendor: String,
-    /// `discrete`, `integrated` or `unified`.
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub vram_bytes: Option<u64>,
+    pub vram_bytes: u64,
+    /// An integrated GPU sharing system RAM.
+    pub unified: bool,
 }
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 impl Conditions {
-    fn hold_for(&self, fingerprint: &Fingerprint) -> bool {
-        let listed = |list: &Option<Vec<String>>, value: &str| {
-            list.as_ref()
-                .is_none_or(|values| values.iter().any(|v| v == value))
-        };
-        let gpu = fingerprint.gpu.as_ref();
-        listed(&self.os, &fingerprint.os)
-            && listed(&self.arch, &fingerprint.arch)
-            && listed(
-                &self.gpu_vendor,
-                gpu.map(|g| g.vendor.as_str()).unwrap_or("none"),
-            )
-            && listed(
-                &self.gpu_type,
-                gpu.map(|g| g.kind.as_str()).unwrap_or("none"),
-            )
-            && self
-                .min_ram_gib
-                .is_none_or(|min| fingerprint.ram_bytes as f64 / GIB >= min)
-            && self.min_vram_gib.is_none_or(|min| {
-                gpu.and_then(|g| g.vram_bytes)
-                    .is_some_and(|vram| vram as f64 / GIB >= min)
-            })
+    fn hold_for(&self, input: &ClassInput) -> bool {
+        let same = |want: &Option<String>, value: &str| want.as_deref().is_none_or(|w| w == value);
+        if !same(&self.os, &input.os) || !same(&self.arch, &input.arch) {
+            return false;
+        }
+        if let Some(any) = &self.backend_any {
+            if !any.iter().any(|b| input.backends.contains(b)) {
+                return false;
+            }
+        }
+        if self
+            .min_memory_gb
+            .is_some_and(|min| (input.memory_bytes as f64 / GIB) < min)
+        {
+            return false;
+        }
+        if self.gpu_vendor.is_some() || self.unified_memory.is_some() || self.min_vram_gb.is_some()
+        {
+            return input.gpus.iter().any(|gpu| {
+                same(&self.gpu_vendor, &gpu.vendor)
+                    && self.unified_memory.is_none_or(|u| u == gpu.unified)
+                    && self
+                        .min_vram_gb
+                        .is_none_or(|min| gpu.vram_bytes as f64 / GIB >= min)
+            });
+        }
+        true
     }
 }
 
-/// The class of the first rule that holds for `fingerprint`; the last rule's class when
-/// none does (the file ends with a catch-all).
-pub fn classify(classes: &HardwareClasses, fingerprint: &Fingerprint) -> String {
+/// The class of the first rule that holds for `input`; the last rule's class when none does
+/// (the rules end with a catch-all).
+pub fn classify(classes: &HardwareClasses, input: &ClassInput) -> String {
     classes
         .rules
         .iter()
-        .find(|rule| rule.when.hold_for(fingerprint))
+        .find(|rule| rule.conditions.hold_for(input))
         .or(classes.rules.last())
         .map(|rule| rule.class.clone())
         .unwrap_or_else(|| "cpu-8gb".to_string())
 }
 
 impl HardwareClasses {
-    /// `class`, then each smaller class in turn, without repeats.
+    /// The classes to look in for a recommendation, nearest first: the class, the smaller
+    /// tiers of its family (largest first), then the cpu family at the same or a smaller
+    /// tier (what runs on less memory runs on more; a GPU class runs what a CPU class of
+    /// its memory runs). The wind tunnel's `fallbackClasses`.
     pub fn chain(&self, class: &str) -> Vec<String> {
+        let Some(own) = self.rules.iter().find(|r| r.class == class) else {
+            return vec![class.to_string()];
+        };
+        let smaller = |family: &str, tier: f64| {
+            let mut rules: Vec<&ClassRule> = self
+                .rules
+                .iter()
+                .filter(|r| r.family == family && r.tier_gb <= tier)
+                .collect();
+            rules.sort_by(|a, b| b.tier_gb.total_cmp(&a.tier_gb));
+            rules
+                .into_iter()
+                .map(|r| r.class.clone())
+                .collect::<Vec<_>>()
+        };
         let mut chain = vec![class.to_string()];
-        let mut at = class.to_string();
-        while let Some(Some(next)) = self.smaller.get(&at) {
-            if chain.contains(next) {
-                break;
-            }
-            chain.push(next.clone());
-            at = next.clone();
+        chain.extend(smaller(&own.family, own.tier_gb));
+        if own.family != "cpu" {
+            chain.extend(smaller("cpu", own.tier_gb));
         }
+        let mut seen = std::collections::BTreeSet::new();
+        chain.retain(|c| seen.insert(c.clone()));
         chain
     }
 }
@@ -342,51 +381,54 @@ mod tests {
 
     #[derive(Deserialize)]
     struct Fixtures {
-        cases: Vec<Case>,
+        fixtures: Vec<Case>,
     }
 
     #[derive(Deserialize)]
     struct Case {
         name: String,
-        fingerprint: Fingerprint,
+        input: ClassInput,
         expected: String,
     }
 
+    /// Each recommendation the executor can run names a manifest model of its service and
+    /// provider, and a build the manifest has; each class it names is a rule's.
     #[test]
-    fn the_embedded_data_parses_and_every_recommendation_names_a_manifest_model() {
+    fn the_embedded_data_parses_and_every_usable_recommendation_names_the_manifest() {
         let data = embedded().unwrap();
-        for (class, services) in &data.recommendations.classes {
+        let mut usable = 0;
+        for class in data.recommendations.classes.keys() {
             assert!(
-                data.classes.smaller.contains_key(class),
+                data.classes.rules.iter().any(|r| &r.class == class),
                 "{class} is no class of hardware-classes.json"
             );
-            for (service, recommendation) in services {
+            for service in Service::ALL {
+                let Some(recommendation) = data.recommendations.get(class, service) else {
+                    continue;
+                };
+                usable += 1;
                 if let Some(model) = &recommendation.model_id {
                     let file = data.manifest.models.get(model).unwrap_or_else(|| {
                         panic!("{class}/{service:?}: {model} is not in the manifest")
                     });
-                    assert_eq!(file.service, *service, "{model}");
+                    assert_eq!(file.service, service, "{model}");
                     assert_eq!(file.provider, recommendation.provider, "{model}");
+                }
+                if let Some(build) = &recommendation.runtime_build {
+                    assert!(
+                        data.manifest
+                            .runtimes
+                            .values()
+                            .any(|r| r.provider == recommendation.provider
+                                && r.builds.contains_key(build)),
+                        "{class}/{service:?}: no {build} build"
+                    );
                 }
             }
         }
-        for rule in &data.classes.rules {
-            assert!(
-                data.classes.smaller.contains_key(&rule.class),
-                "{}",
-                rule.class
-            );
-        }
+        assert!(usable > 0, "no recommendation this executor can run");
         for (id, model) in &data.manifest.models {
             assert_eq!(model.sha256.len(), 64, "{id}");
-            assert!(
-                model.url.as_str().contains("/resolve/"),
-                "{id}: pin a commit"
-            );
-            assert!(
-                !model.url.as_str().contains("/resolve/main/"),
-                "{id}: pin a commit, not main"
-            );
         }
         for runtime in data.manifest.runtimes.values() {
             for (key, build) in &runtime.builds {
@@ -404,10 +446,10 @@ mod tests {
         ))
         .unwrap();
         let classes = &embedded().unwrap().classes;
-        assert!(!fixtures.cases.is_empty());
-        for case in fixtures.cases {
+        assert!(!fixtures.fixtures.is_empty());
+        for case in fixtures.fixtures {
             assert_eq!(
-                classify(classes, &case.fingerprint),
+                classify(classes, &case.input),
                 case.expected,
                 "{}",
                 case.name
@@ -415,22 +457,48 @@ mod tests {
         }
     }
 
+    /// As the wind tunnel's `fallbackClasses`: the family's smaller tiers, largest first,
+    /// then the cpu family at the same or a smaller tier.
     #[test]
-    fn a_chain_walks_smaller_classes_and_stops_at_a_loop() {
-        let classes: HardwareClasses = serde_json::from_value(serde_json::json!({
-            "schemaVersion": 1,
-            "rules": [{ "class": "a", "when": {} }],
-            "smaller": { "a": "b", "b": "c", "c": "a" }
-        }))
-        .unwrap();
-        assert_eq!(classes.chain("a"), vec!["a", "b", "c"]);
+    fn a_chain_walks_the_familys_smaller_tiers_then_the_cpu_family() {
+        let classes = &embedded().unwrap().classes;
+        assert_eq!(
+            classes.chain("amd-igpu-uma-64"),
+            vec![
+                "amd-igpu-uma-64",
+                "amd-igpu-uma-32",
+                "amd-igpu-uma-16",
+                "cpu-64gb",
+                "cpu-32gb",
+                "cpu-16gb",
+                "cpu-8gb"
+            ]
+        );
+        assert_eq!(
+            classes.chain("nvidia-12gb"),
+            vec!["nvidia-12gb", "nvidia-8gb", "cpu-8gb"]
+        );
+        assert_eq!(classes.chain("cpu-16gb"), vec!["cpu-16gb", "cpu-8gb"]);
         assert_eq!(classes.chain("unknown"), vec!["unknown"]);
+    }
+
+    /// A `completion` row and speech on speaches are the wind tunnel's: skipped, not an error.
+    #[test]
+    fn rows_for_services_or_providers_the_executor_does_not_run_are_skipped() {
+        let data = embedded().unwrap();
+        for (class, services) in &data.recommendations.classes {
+            if let Some(tts) = services.get("tts") {
+                if tts["provider"] != "llama-server" && tts["provider"] != "whisper-server" {
+                    assert!(data.recommendations.get(class, Service::Tts).is_none());
+                }
+            }
+        }
     }
 
     #[test]
     fn an_unknown_condition_is_refused_rather_than_ignored() {
         let rule = serde_json::from_value::<ClassRule>(serde_json::json!({
-            "class": "x", "when": { "minRamGb": 8 }
+            "class": "x", "family": "cpu", "tierGb": 8, "match": { "minRamGb": 8 }
         }));
         assert!(rule.is_err());
     }

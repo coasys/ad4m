@@ -4,14 +4,19 @@
 //!
 //! Rules:
 //! - The recommendation of a service comes from the device's class, or the nearest smaller
-//!   measured class (`hardware-classes.json`'s `smaller` chain). A recommendation without
-//!   evidence, or naming a model the manifest lacks, counts as not measured.
+//!   measured class ([`super::data::HardwareClasses::chain`]: the family's smaller tiers,
+//!   then the cpu family). A recommendation without evidence, or naming a model the
+//!   manifest lacks, counts as not measured. Its `serverFlags` go to the server with the
+//!   model; without any, the defaults ([`default_flags`]: no thinking for chat).
 //! - The models of all services run at once, so their memory adds up. It fits when the sum
 //!   is at most the budget, min(GPU budget − 1 GiB, RAM − 4 GiB). When it does not, the
 //!   service with the largest model steps down its chain, until it fits or nothing can step.
 //! - The runtime build of a provider is the recommendation's build when this device can run
-//!   it, else the best backend this device has that the manifest builds (CUDA 13, CUDA 12,
-//!   Metal, Vulkan, CPU).
+//!   it, else the best backend this device has that the manifest builds (CUDA, Metal,
+//!   Vulkan, ROCm, CPU). Vulkan replaces a recommended ROCm build where it runs: the ROCm
+//!   build runs on the CPU, unannounced, unless the system ROCm libraries load, and the
+//!   wind tunnel measured Vulkan as the AMD iGPU's chat backend. One llama-server serves
+//!   chat and embeddings, so they share the chat model's build.
 //! - The download must fit the free disk space with 1 GiB to spare.
 
 use serde::{Deserialize, Serialize};
@@ -23,10 +28,10 @@ use super::hardware::{Backend, LocalHardware, GIB};
 
 /// Backends best first.
 const BACKEND_PREFERENCE: [Backend; 5] = [
-    Backend::Cuda13,
-    Backend::Cuda12,
+    Backend::Cuda,
     Backend::Metal,
     Backend::Vulkan,
+    Backend::Rocm,
     Backend::Cpu,
 ];
 
@@ -37,11 +42,11 @@ pub const PLANNED_SERVICES: [Service; 3] = [Service::Llm, Service::Embeddings, S
 #[serde(rename_all = "camelCase")]
 #[ts(rename = "LocalAiPlannedRuntime")]
 pub struct PlannedRuntime {
-    /// The manifest's runtime id: `llama.cpp`, `whisper.cpp`.
+    /// The manifest's runtime id: `llama-server`, `whisper-server`.
     pub runtime_id: String,
     pub provider: Provider,
     pub version: String,
-    /// The manifest's build key: `linux-x86_64-vulkan`.
+    /// The manifest's build key: `linux-x64-vulkan`.
     pub build: String,
     pub backend: Backend,
     /// The archive and its extras.
@@ -70,6 +75,8 @@ pub struct PlannedModel {
     pub evidence: Vec<String>,
     #[ts(type = "Record<string, unknown>")]
     pub metrics: serde_json::Value,
+    /// The flags the server runs this model with: the measurement's, else the defaults.
+    pub server_flags: Vec<String>,
 }
 
 /// A service the plan leaves out, and why.
@@ -118,7 +125,7 @@ fn candidates(data: &Data, chain: &[String], service: Service) -> Vec<(String, R
     chain
         .iter()
         .filter_map(|class| {
-            let recommendation = data.recommendations.classes.get(class)?.get(&service)?;
+            let recommendation = data.recommendations.get(class, service)?;
             let model_id = recommendation.model_id.as_ref()?;
             let measured = !recommendation.evidence.is_empty();
             let known = data
@@ -127,18 +134,25 @@ fn candidates(data: &Data, chain: &[String], service: Service) -> Vec<(String, R
                 .get(model_id)
                 .is_some_and(|m| m.service == service && m.provider == recommendation.provider);
             (measured && known && seen.insert(model_id.clone()))
-                .then(|| (class.clone(), recommendation.clone()))
+                .then(|| (class.clone(), recommendation))
         })
         .collect()
 }
 
-/// The build of `provider`'s runtime for this device, and the backend it uses.
+/// The build of `provider`'s runtime for this device, the backend it uses, and why it is
+/// not the preferred one when it is not.
 fn runtime_build<'a>(
     data: &'a Data,
     hardware: &LocalHardware,
     provider: Provider,
     preferred: Option<&str>,
-) -> Option<(&'a String, &'a super::data::Runtime, String, Backend)> {
+) -> Option<(
+    &'a String,
+    &'a super::data::Runtime,
+    String,
+    Backend,
+    Option<String>,
+)> {
     let (runtime_id, runtime) = data
         .manifest
         .runtimes
@@ -154,13 +168,48 @@ fn runtime_build<'a>(
     };
     if let Some(key) = preferred {
         if let Some(backend) = usable(key) {
-            return Some((runtime_id, runtime, key.to_string(), backend));
+            let vulkan = format!("{platform}-vulkan");
+            if backend == Backend::Rocm && usable(&vulkan).is_some() {
+                return Some((
+                    runtime_id,
+                    runtime,
+                    vulkan.clone(),
+                    Backend::Vulkan,
+                    Some(format!(
+                        "{runtime_id} runs {vulkan}, not the recommended {key}: the ROCm build falls back to the CPU without the system ROCm libraries"
+                    )),
+                ));
+            }
+            return Some((runtime_id, runtime, key.to_string(), backend, None));
         }
     }
     BACKEND_PREFERENCE.iter().find_map(|backend| {
         let key = format!("{platform}-{}", backend.as_str());
-        usable(&key).map(|backend| (runtime_id, runtime, key, backend))
+        usable(&key).map(|backend| {
+            let note = preferred.map(|p| {
+                format!("{runtime_id} runs {key}: this device cannot run the recommended {p}")
+            });
+            (runtime_id, runtime, key, backend, note)
+        })
     })
+}
+
+/// The server flags of a model without measured ones: chat without thinking (Qwen3.5 thinks
+/// until the context is full and `ai.prompt` answers ""), embeddings only on the embedding
+/// model, whisper-server on the OpenAI path.
+pub fn default_flags(service: Service) -> Vec<String> {
+    let flags: &[&str] = match service {
+        Service::Llm => &["--reasoning", "off"],
+        Service::Embeddings => &["--embeddings"],
+        Service::Stt => &[
+            "--request-path",
+            "/v1/audio",
+            "--inference-path",
+            "/transcriptions",
+        ],
+        Service::Tts => &[],
+    };
+    flags.iter().map(|f| f.to_string()).collect()
 }
 
 /// A recommendation and the measured class it comes from.
@@ -279,12 +328,31 @@ pub fn plan(data: &Data, hardware: &LocalHardware, installed: &dyn Fn(&str) -> b
             from_class: from_class.clone(),
             evidence: recommendation.evidence.clone(),
             metrics: recommendation.metrics.clone(),
+            server_flags: if recommendation.server_flags.is_empty() {
+                default_flags(*service)
+            } else {
+                recommendation.server_flags.clone()
+            },
         });
         if let Some(existing) = runtimes.iter_mut().find(|r| r.provider == file.provider) {
             existing.services.push(*service);
+            if let Some(wanted) = recommendation
+                .runtime_build
+                .as_ref()
+                .filter(|w| **w != existing.build)
+            {
+                reasons.push(format!(
+                    "{} runs on {}'s {} ({} was measured on {wanted}): one {} serves both",
+                    service.as_str(),
+                    existing.services[0].as_str(),
+                    existing.build,
+                    service.as_str(),
+                    existing.runtime_id
+                ));
+            }
             continue;
         }
-        let Some((runtime_id, runtime, key, backend)) = runtime_build(
+        let Some((runtime_id, runtime, key, backend, note)) = runtime_build(
             data,
             hardware,
             file.provider,
@@ -293,6 +361,7 @@ pub fn plan(data: &Data, hardware: &LocalHardware, installed: &dyn Fn(&str) -> b
             continue;
         };
         let build = &runtime.builds[&key];
+        reasons.extend(note);
         if backend == Backend::Cpu && hardware.backends.iter().any(|b| *b != Backend::Cpu) {
             reasons.push(format!(
                 "{} has no GPU build for {} in the manifest: {} runs on the CPU",
@@ -368,11 +437,11 @@ mod tests {
         json!({
             "schemaVersion": 1,
             "runtimes": {
-                "llama.cpp": { "provider": "llama-server", "version": "b1", "builds": {
-                    "linux-x86_64-cpu": build("lcpu"), "linux-x86_64-vulkan": build("lvulkan"),
-                    "linux-x86_64-cuda13": build("lcuda13") } },
-                "whisper.cpp": { "provider": "whisper-server", "version": "b2", "builds": {
-                    "linux-x86_64-cpu": build("wcpu") } }
+                "llama-server": { "provider": "llama-server", "version": "b1", "builds": {
+                    "linux-x64-cpu": build("lcpu"), "linux-x64-vulkan": build("lvulkan"),
+                    "linux-x64-rocm": build("lrocm"), "linux-x64-cuda": build("lcuda") } },
+                "whisper-server": { "provider": "whisper-server", "version": "b2", "builds": {
+                    "linux-x64-cpu": build("wcpu") } }
             },
             "models": {
                 "big": model("llm", "llama-server", 6_000_000_000, 7 * GIB),
@@ -392,11 +461,13 @@ mod tests {
         let classes = json!({
             "schemaVersion": 1,
             "rules": [
-                { "class": "gpu-12gb", "when": { "gpuType": ["discrete"], "minVramGiB": 11 } },
-                { "class": "cpu-16gb", "when": { "minRamGiB": 14 } },
-                { "class": "cpu-8gb", "when": {} }
-            ],
-            "smaller": { "gpu-12gb": "cpu-16gb", "cpu-16gb": "cpu-8gb", "cpu-8gb": null }
+                { "class": "gpu-12gb", "family": "gpu", "tierGb": 12,
+                  "match": { "unifiedMemory": false, "backendAny": ["cuda", "vulkan"], "minVramGb": 11 } },
+                { "class": "igpu-32", "family": "igpu", "tierGb": 32,
+                  "match": { "gpuVendor": "amd", "unifiedMemory": true, "backendAny": ["rocm", "vulkan"], "minMemoryGb": 28 } },
+                { "class": "cpu-16gb", "family": "cpu", "tierGb": 16, "match": { "minMemoryGb": 14 } },
+                { "class": "cpu-8gb", "family": "cpu", "tierGb": 8, "match": {} }
+            ]
         });
         Data::parse(
             &manifest().to_string(),
@@ -417,15 +488,28 @@ mod tests {
         })
     }
 
+    fn gpu(vendor: GpuVendor, kind: GpuType, vram_gib: u64) -> GpuInfo {
+        GpuInfo {
+            vendor,
+            kind,
+            name: "g".into(),
+            vram_bytes: Some(vram_gib * GIB),
+            shared_bytes: None,
+            driver: None,
+            cuda_version: None,
+            source: "test".into(),
+        }
+    }
+
     fn device(
         data: &Data,
         ram_gib: u64,
-        gpu_gib: Option<u64>,
+        gpus: Vec<GpuInfo>,
         backends: Vec<Backend>,
     ) -> LocalHardware {
         let mut hardware = LocalHardware {
             os: "linux".into(),
-            arch: "x86_64".into(),
+            arch: "x64".into(),
             cpu: CpuInfo {
                 brand: "c".into(),
                 physical_cores: Some(4),
@@ -434,19 +518,7 @@ mod tests {
             },
             ram_bytes: ram_gib * GIB,
             available_ram_bytes: ram_gib * GIB,
-            gpus: gpu_gib
-                .map(|g| GpuInfo {
-                    vendor: GpuVendor::Nvidia,
-                    kind: GpuType::Discrete,
-                    name: "card".into(),
-                    vram_bytes: Some(g * GIB),
-                    shared_bytes: None,
-                    driver: None,
-                    cuda_version: Some("13.0".into()),
-                    source: "nvml".into(),
-                })
-                .into_iter()
-                .collect(),
+            gpus,
             backends,
             gpu_budget_bytes: None,
             memory_budget_bytes: 0,
@@ -459,6 +531,15 @@ mod tests {
         hardware
     }
 
+    fn nvidia_12(data: &Data, ram_gib: u64) -> LocalHardware {
+        device(
+            data,
+            ram_gib,
+            vec![gpu(GpuVendor::Nvidia, GpuType::Discrete, 12)],
+            vec![Backend::Cpu, Backend::Vulkan, Backend::Cuda],
+        )
+    }
+
     fn nothing_installed(_: &str) -> bool {
         false
     }
@@ -466,17 +547,7 @@ mod tests {
     #[test]
     fn a_gpu_device_gets_its_class_models_and_the_best_build_it_can_run() {
         let data = data(full());
-        let hardware = device(
-            &data,
-            32,
-            Some(12),
-            vec![
-                Backend::Cpu,
-                Backend::Vulkan,
-                Backend::Cuda12,
-                Backend::Cuda13,
-            ],
-        );
+        let hardware = nvidia_12(&data, 32);
         let plan = plan(&data, &hardware, &nothing_installed);
         assert_eq!(plan.hardware_class, "gpu-12gb");
         let ids: Vec<_> = plan.models.iter().map(|m| m.model_id.as_str()).collect();
@@ -485,20 +556,20 @@ mod tests {
         let llama = plan
             .runtimes
             .iter()
-            .find(|r| r.runtime_id == "llama.cpp")
+            .find(|r| r.runtime_id == "llama-server")
             .unwrap();
-        assert_eq!(llama.build, "linux-x86_64-cuda13");
+        assert_eq!(llama.build, "linux-x64-cuda");
         assert_eq!(llama.services, vec![Service::Llm, Service::Embeddings]);
         let whisper = plan
             .runtimes
             .iter()
-            .find(|r| r.runtime_id == "whisper.cpp")
+            .find(|r| r.runtime_id == "whisper-server")
             .unwrap();
         assert_eq!(whisper.backend, Backend::Cpu);
         assert!(plan
             .reasons
             .iter()
-            .any(|r| r.contains("whisper.cpp has no GPU build")));
+            .any(|r| r.contains("whisper-server has no GPU build")));
         assert_eq!(plan.download_bytes, plan.total_bytes);
         assert_eq!(plan.memory_bytes, 7 * GIB + GIB / 4 + GIB / 2);
     }
@@ -507,12 +578,12 @@ mod tests {
     #[test]
     fn an_unmeasured_class_falls_back_to_the_nearest_smaller_measured_one() {
         let data = data(full());
-        let hardware = device(&data, 16, None, vec![Backend::Cpu]);
+        let hardware = device(&data, 16, vec![], vec![Backend::Cpu]);
         assert_eq!(hardware.hardware_class, "cpu-16gb");
         let plan = plan(&data, &hardware, &nothing_installed);
         assert!(plan.models.iter().all(|m| m.from_class == "cpu-8gb"));
         assert_eq!(plan.models[0].model_id, "small");
-        assert_eq!(plan.runtimes[0].build, "linux-x86_64-cpu");
+        assert_eq!(plan.runtimes[0].build, "linux-x64-cpu");
         assert!(plan.fits);
     }
 
@@ -521,7 +592,7 @@ mod tests {
         let mut recommendations = full();
         recommendations["gpu-12gb"]["llm"] = recommendation("big", "llama-server", false);
         let data = data(recommendations);
-        let hardware = device(&data, 32, Some(12), vec![Backend::Cpu, Backend::Cuda13]);
+        let hardware = nvidia_12(&data, 32);
         let plan = plan(&data, &hardware, &nothing_installed);
         let llm = plan
             .models
@@ -546,11 +617,25 @@ mod tests {
         assert_eq!(without.unavailable[0].service, Service::Stt);
     }
 
+    /// A service or a provider the executor does not run (the wind tunnel's `completion`
+    /// rows, speech on speaches) is not a recommendation here.
+    #[test]
+    fn rows_the_executor_cannot_run_are_ignored() {
+        let mut recommendations = full();
+        recommendations["gpu-12gb"]["completion"] = recommendation("small", "llama-server", true);
+        recommendations["gpu-12gb"]["tts"] =
+            json!({ "provider": "speaches", "remoteModel": "kokoro", "evidence": ["e.json"] });
+        let data = data(recommendations);
+        let plan = plan(&data, &nvidia_12(&data, 32), &nothing_installed);
+        assert_eq!(plan.models.len(), 3);
+        assert!(plan.fits);
+    }
+
     /// 12 GiB of VRAM but 8 GiB of RAM: the budget is 4 GiB, the 7 GiB model steps down.
     #[test]
     fn the_largest_model_steps_down_until_the_set_fits_the_budget() {
         let data = data(full());
-        let hardware = device(&data, 8, Some(12), vec![Backend::Cpu, Backend::Cuda13]);
+        let hardware = nvidia_12(&data, 8);
         assert_eq!(hardware.memory_budget_bytes, 4 * GIB);
         let plan = plan(&data, &hardware, &nothing_installed);
         assert_eq!(plan.models[0].model_id, "small");
@@ -561,7 +646,7 @@ mod tests {
     #[test]
     fn a_set_that_cannot_fit_says_so_with_the_numbers() {
         let data = data(full());
-        let hardware = device(&data, 6, None, vec![Backend::Cpu]);
+        let hardware = device(&data, 6, vec![], vec![Backend::Cpu]);
         let plan = plan(&data, &hardware, &nothing_installed);
         assert!(!plan.fits);
         assert!(
@@ -576,7 +661,7 @@ mod tests {
     #[test]
     fn installed_files_leave_the_download_and_a_full_disk_does_not_fit() {
         let data = data(full());
-        let mut hardware = device(&data, 16, None, vec![Backend::Cpu]);
+        let mut hardware = device(&data, 16, vec![], vec![Backend::Cpu]);
         let small_sha = data.manifest.models["small"].sha256.clone();
         let plan_with = plan(&data, &hardware, &|sha| sha == small_sha);
         assert!(plan_with.models[0].installed);
@@ -594,37 +679,105 @@ mod tests {
     #[test]
     fn a_platform_without_a_build_leaves_its_services_out() {
         let data = data(full());
-        let mut hardware = device(&data, 16, None, vec![Backend::Cpu]);
+        let mut hardware = device(&data, 16, vec![], vec![Backend::Cpu]);
         hardware.os = "macos".into();
-        hardware.arch = "aarch64".into();
+        hardware.arch = "arm64".into();
         let plan = plan(&data, &hardware, &nothing_installed);
         assert!(plan.models.is_empty());
         assert!(!plan.fits);
         assert_eq!(plan.unavailable.len(), 3);
-        assert!(plan.unavailable[0].reason.contains("macos-aarch64"));
+        assert!(plan.unavailable[0].reason.contains("macos-arm64"));
     }
 
-    /// The embedded data on the smoke-test device: a Strix Halo APU, 128 GB, Vulkan.
+    fn amd_igpu(data: &Data, backends: Vec<Backend>) -> LocalHardware {
+        let mut igpu = gpu(GpuVendor::Amd, GpuType::Integrated, 0);
+        igpu.vram_bytes = Some(GIB / 2);
+        igpu.shared_bytes = Some(30 * GIB);
+        device(data, 64, vec![igpu], backends)
+    }
+
+    /// The ROCm build runs on the CPU without the system ROCm libraries: where Vulkan runs,
+    /// a recommended ROCm build becomes Vulkan, with the reason. Without Vulkan it stays.
     #[test]
-    fn the_embedded_data_plans_vulkan_llama_and_cpu_whisper_on_strix_halo() {
+    fn a_recommended_rocm_build_becomes_vulkan_where_vulkan_runs() {
+        let mut on_rocm = recommendation("big", "llama-server", true);
+        on_rocm["runtimeBuild"] = json!("linux-x64-rocm");
+        let mut recommendations = full();
+        recommendations["igpu-32"] = json!({ "llm": on_rocm });
+        let data = data(recommendations);
+
+        let both = amd_igpu(&data, vec![Backend::Cpu, Backend::Vulkan, Backend::Rocm]);
+        assert_eq!(both.hardware_class, "igpu-32");
+        let plan = plan(&data, &both, &nothing_installed);
+        assert_eq!(plan.runtimes[0].build, "linux-x64-vulkan");
+        assert!(plan
+            .reasons
+            .iter()
+            .any(|r| r.contains("not the recommended linux-x64-rocm")));
+
+        let rocm_only = amd_igpu(&data, vec![Backend::Cpu, Backend::Rocm]);
+        let plan = super::plan(&data, &rocm_only, &nothing_installed);
+        assert_eq!(plan.runtimes[0].build, "linux-x64-rocm");
+    }
+
+    /// The measurement's flags go with the model; without any, chat runs without thinking.
+    #[test]
+    fn models_carry_the_measured_server_flags_or_the_defaults() {
+        let mut measured = recommendation("big", "llama-server", true);
+        measured["serverFlags"] = json!(["-c", "8192", "-ngl", "999", "--reasoning", "off"]);
+        let mut recommendations = full();
+        recommendations["gpu-12gb"]["llm"] = measured;
+        let data = data(recommendations);
+        let plan = plan(&data, &nvidia_12(&data, 32), &nothing_installed);
+        let flags = |service| {
+            plan.models
+                .iter()
+                .find(|m| m.service == service)
+                .unwrap()
+                .server_flags
+                .join(" ")
+        };
+        assert_eq!(flags(Service::Llm), "-c 8192 -ngl 999 --reasoning off");
+        assert_eq!(flags(Service::Embeddings), "--embeddings");
+        assert_eq!(
+            flags(Service::Stt),
+            "--request-path /v1/audio --inference-path /transcriptions"
+        );
+        assert_eq!(default_flags(Service::Llm), vec!["--reasoning", "off"]);
+    }
+
+    /// The embedded data on the smoke-test device: a Strix Halo APU, 128 GB, Vulkan. The
+    /// wind tunnel measured this class: Qwen3.5 4B on Vulkan, nomic (measured on ROCm, here
+    /// on the chat model's Vulkan llama-server), whisper small on the CPU.
+    #[test]
+    fn the_embedded_data_plans_the_measured_set_on_strix_halo() {
         let data = crate::ai_service::local::data::embedded().unwrap();
-        let mut hardware = device(data, 122, None, vec![Backend::Cpu, Backend::Vulkan]);
-        hardware.gpus = vec![GpuInfo {
-            vendor: GpuVendor::Amd,
-            kind: GpuType::Integrated,
-            name: "Radeon 8060S".into(),
-            vram_bytes: Some(GIB / 2),
-            shared_bytes: Some(61 * GIB),
-            driver: None,
-            cuda_version: None,
-            source: "sysfs+vulkan".into(),
-        }];
-        crate::ai_service::local::hardware::finish(&mut hardware, &data.classes);
-        assert_eq!(hardware.hardware_class, "igpu-32gb");
+        let mut strix = gpu(GpuVendor::Amd, GpuType::Integrated, 0);
+        strix.vram_bytes = Some(GIB / 2);
+        strix.shared_bytes = Some(61 * GIB);
+        strix.source = "sysfs+vulkan".into();
+        let hardware = device(data, 122, vec![strix], vec![Backend::Cpu, Backend::Vulkan]);
+        assert_eq!(hardware.hardware_class, "amd-igpu-uma-128");
         let plan = plan(data, &hardware, &nothing_installed);
         assert!(plan.fits, "{:?}", plan.reasons);
         let builds: Vec<_> = plan.runtimes.iter().map(|r| r.build.as_str()).collect();
-        assert_eq!(builds, vec!["linux-x86_64-vulkan", "linux-x86_64-cpu"]);
-        assert_eq!(plan.models.len(), 3);
+        assert_eq!(builds, vec!["linux-x64-vulkan", "linux-x64-cpu"]);
+        let ids: Vec<_> = plan.models.iter().map(|m| m.model_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "qwen3.5-4b-q4_k_m",
+                "nomic-embed-text-v1.5-q8_0",
+                "whisper-small-q5_1"
+            ]
+        );
+        assert!(plan.models[0]
+            .server_flags
+            .join(" ")
+            .contains("--reasoning off"));
+        assert!(plan
+            .models
+            .iter()
+            .all(|m| m.from_class == "amd-igpu-uma-128"));
     }
 }

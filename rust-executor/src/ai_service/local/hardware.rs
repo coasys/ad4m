@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use ts_rs::TS;
 
-use super::data::{classify, Fingerprint, FingerprintGpu, HardwareClasses};
+use super::data::{classify, ClassGpu, ClassInput, HardwareClasses};
 
 pub const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -31,19 +31,23 @@ pub enum Backend {
     Cpu,
     Metal,
     Vulkan,
-    Cuda12,
-    Cuda13,
+    /// NVIDIA, with a driver for CUDA 12 or later.
+    Cuda,
+    /// AMD, with the system ROCm (HIP) libraries: llama.cpp's ROCm build does not ship them
+    /// and runs on the CPU without them.
+    Rocm,
 }
 
 impl Backend {
-    /// The suffix of a manifest build key (`linux-x86_64-<backend>`).
+    /// The suffix of a manifest build key (`linux-x64-<backend>`), and the name the class
+    /// rules use (`backendAny`).
     pub fn as_str(self) -> &'static str {
         match self {
             Backend::Cpu => "cpu",
             Backend::Metal => "metal",
             Backend::Vulkan => "vulkan",
-            Backend::Cuda12 => "cuda12",
-            Backend::Cuda13 => "cuda13",
+            Backend::Cuda => "cuda",
+            Backend::Rocm => "rocm",
         }
     }
 
@@ -52,8 +56,8 @@ impl Backend {
             Backend::Cpu,
             Backend::Metal,
             Backend::Vulkan,
-            Backend::Cuda12,
-            Backend::Cuda13,
+            Backend::Cuda,
+            Backend::Rocm,
         ]
         .into_iter()
         .find(|b| b.as_str() == suffix)
@@ -155,7 +159,7 @@ pub struct CpuInfo {
 pub struct LocalHardware {
     /// `linux`, `macos` or `windows`.
     pub os: String,
-    /// `x86_64` or `aarch64`.
+    /// `x64` or `arm64` (the names the manifest's build keys use).
     pub arch: String,
     pub cpu: CpuInfo,
     #[ts(type = "number")]
@@ -195,20 +199,30 @@ impl LocalHardware {
             .or_else(|| self.gpus.first())
     }
 
-    pub fn fingerprint(&self) -> Fingerprint {
-        Fingerprint {
+    /// What the class rules read.
+    pub fn class_input(&self) -> ClassInput {
+        ClassInput {
             os: self.os.clone(),
             arch: self.arch.clone(),
-            ram_bytes: self.ram_bytes,
-            gpu: self.primary_gpu().map(|gpu| FingerprintGpu {
-                vendor: gpu.vendor.as_str().to_string(),
-                kind: gpu.kind.as_str().to_string(),
-                vram_bytes: gpu.vram_bytes,
-            }),
+            memory_bytes: self.ram_bytes,
+            backends: self
+                .backends
+                .iter()
+                .map(|b| b.as_str().to_string())
+                .collect(),
+            gpus: self
+                .gpus
+                .iter()
+                .map(|gpu| ClassGpu {
+                    vendor: gpu.vendor.as_str().to_string(),
+                    vram_bytes: gpu.vram_bytes.unwrap_or(0),
+                    unified: gpu.kind != GpuType::Discrete,
+                })
+                .collect(),
         }
     }
 
-    /// The build key prefix of this device: `linux-x86_64`.
+    /// The build key prefix of this device: `linux-x64`.
     pub fn platform(&self) -> String {
         format!("{}-{}", self.os, self.arch)
     }
@@ -276,7 +290,7 @@ pub fn detect(storage_dir: &Path, classes: &HardwareClasses) -> LocalHardware {
         .clone();
     let mut hardware = LocalHardware {
         os: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
+        arch: arch_name(std::env::consts::ARCH).to_string(),
         cpu,
         ram_bytes,
         available_ram_bytes: system.available_memory(),
@@ -293,6 +307,34 @@ pub fn detect(storage_dir: &Path, classes: &HardwareClasses) -> LocalHardware {
     hardware
 }
 
+/// Rust's architecture name as the manifest writes it: `x64`, `arm64`.
+pub fn arch_name(rust_arch: &str) -> &str {
+    match rust_arch {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    }
+}
+
+/// Whether the system ROCm (HIP) runtime is installed: `ROCM_PATH`, else `/opt/rocm`.
+fn rocm_installed() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let root = std::env::var("ROCM_PATH")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "/opt/rocm".to_string());
+    let lib = Path::new(&root).join("lib");
+    std::fs::read_dir(lib).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("libamdhip64.so")
+        })
+    })
+}
+
 /// Fill in what follows from the rest: the GPU budget (only with a GPU backend to use it),
 /// the memory budget and the class.
 pub fn finish(hardware: &mut LocalHardware, classes: &HardwareClasses) {
@@ -303,7 +345,7 @@ pub fn finish(hardware: &mut LocalHardware, classes: &HardwareClasses) {
         None
     };
     hardware.memory_budget_bytes = memory_budget(hardware.ram_bytes, hardware.gpu_budget_bytes);
-    hardware.hardware_class = classify(classes, &hardware.fingerprint());
+    hardware.hardware_class = classify(classes, &hardware.class_input());
 }
 
 fn cpu_features() -> Vec<String> {
@@ -406,8 +448,7 @@ fn probe_gpus(ram_bytes: u64, cpu_brand: &str) -> GpuProbe {
             });
         }
         match nvml.cuda_version {
-            Some(v) if v >= 13000 => probe.backends.extend([Backend::Cuda12, Backend::Cuda13]),
-            Some(v) if v >= 12000 => probe.backends.push(Backend::Cuda12),
+            Some(v) if v >= 12000 => probe.backends.push(Backend::Cuda),
             _ => probe
                 .notes
                 .push("The NVIDIA driver supports no CUDA 12 or 13: Vulkan or the CPU runs".into()),
@@ -497,6 +538,9 @@ fn probe_gpus(ram_bytes: u64, cpu_brand: &str) -> GpuProbe {
                 });
             }
         }
+    }
+    if probe.gpus.iter().any(|g| g.vendor == GpuVendor::Amd) && rocm_installed() {
+        probe.backends.push(Backend::Rocm);
     }
     if cfg!(target_os = "windows") {
         probe.notes.push(
@@ -944,7 +988,7 @@ mod tests {
     fn the_primary_gpu_is_the_largest_discrete_one() {
         let mut hardware = LocalHardware {
             os: "linux".into(),
-            arch: "x86_64".into(),
+            arch: "x64".into(),
             cpu: CpuInfo {
                 brand: "c".into(),
                 physical_cores: Some(8),
@@ -976,7 +1020,7 @@ mod tests {
                     "nvml",
                 ),
             ],
-            backends: vec![Backend::Cpu, Backend::Cuda12, Backend::Vulkan],
+            backends: vec![Backend::Cpu, Backend::Cuda, Backend::Vulkan],
             gpu_budget_bytes: None,
             memory_budget_bytes: 0,
             disk_free_bytes: None,
