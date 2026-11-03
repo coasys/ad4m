@@ -66,7 +66,7 @@ proptest! {
             let outcome = import(&mut imported, &TestPolicy, &batch).unwrap();
             prop_assert_eq!(
                 outcome,
-                ImportOutcome::Appended { head: imported.head(), count: (end - at) as u32 }
+                ImportOutcome::Appended { head: imported.head(), entries: entries[at..end].to_vec() }
             );
             at = end;
         }
