@@ -377,6 +377,7 @@ RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data \
     && chown -R ad4m:ad4m /opt/ad4m/flux-dist/
 
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=644 docker/ai-env.sh /usr/local/lib/ad4m/ai-env.sh
 
 WORKDIR /data
 

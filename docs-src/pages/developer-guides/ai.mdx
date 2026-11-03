@@ -88,7 +88,7 @@ The executor config file can declare endpoints, models and defaults, applied at 
 }
 ```
 
-The Docker image reads `AD4M_AI_OLLAMA_URL`, `AD4M_AI_LLM_MODEL`, `AD4M_AI_EMBEDDING_MODEL`, `AD4M_AI_TRANSCRIPTION_URL` and `AD4M_AI_TRANSCRIPTION_MODEL`; `docker/compose.ai.yml` runs it with Ollama and speaches.
+The Docker image registers model servers from the environment: Ollama (`AD4M_AI_OLLAMA_URL`, `AD4M_AI_LLM_MODEL`, `AD4M_AI_EMBEDDING_MODEL`), llama-server (`AD4M_AI_LLAMA_SERVER_URL`, `AD4M_AI_LLAMA_SERVER_API_KEY`, `AD4M_AI_LLAMA_SERVER_LLM_MODEL`, `AD4M_AI_LLAMA_SERVER_EMBEDDING_MODEL`), any other OpenAI-shaped server (`AD4M_AI_OPENAI_COMPATIBLE_URL`, `AD4M_AI_OPENAI_COMPATIBLE_API_KEY`, `AD4M_AI_OPENAI_COMPATIBLE_LLM_MODEL`, `AD4M_AI_OPENAI_COMPATIBLE_EMBEDDING_MODEL`) and a transcription server (`AD4M_AI_TRANSCRIPTION_URL`, `AD4M_AI_TRANSCRIPTION_API_KEY`, `AD4M_AI_TRANSCRIPTION_MODEL`). The first server that names a model of a type supplies that type's default. `docker/compose.ai.yml` runs it with Ollama and speaches; `docker/ai-env.sh` documents every variable.
 
 ## Using AI in Your Application
 

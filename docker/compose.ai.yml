@@ -12,6 +12,13 @@
 # "AI endpoints from the environment"). The model names are the ones onboarding
 # recommends (core/src/ai/recommendedModels.ts); any model the servers serve works.
 # For a GPU, give the ollama and speaches services one (and use speaches' CUDA image).
+#
+# Other servers register the same way (docker/ai-env.sh lists every variable):
+#   llama-server:  AD4M_AI_LLAMA_SERVER_URL, AD4M_AI_LLAMA_SERVER_API_KEY,
+#                  AD4M_AI_LLAMA_SERVER_LLM_MODEL, AD4M_AI_LLAMA_SERVER_EMBEDDING_MODEL
+#   vLLM, LocalAI, a gateway:  AD4M_AI_OPENAI_COMPATIBLE_URL, AD4M_AI_OPENAI_COMPATIBLE_API_KEY,
+#                  AD4M_AI_OPENAI_COMPATIBLE_LLM_MODEL, AD4M_AI_OPENAI_COMPATIBLE_EMBEDDING_MODEL
+#   a transcription server with a key:  AD4M_AI_TRANSCRIPTION_API_KEY
 
 services:
   ad4m:
