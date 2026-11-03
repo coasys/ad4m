@@ -82,11 +82,12 @@ pub fn fold_json(events: &[Value]) -> Result<KelChain, ChainError<FoldError>> {
 }
 
 /// The module's `import` with `KelPolicy`: sorts by `seq`, answers `Appended`, `AlreadyHave`,
-/// `Gap` or `Fork`, and changes nothing unless it appended.
+/// `Gap` or `Fork`, and changes nothing unless it appended. `Appended` carries the events it
+/// appended: a caller stores those, never its own copies (a stripped twin hashes the same).
 pub fn import(
     chain: &mut KelChain,
     events: &[Event],
-) -> Result<ImportOutcome, ChainError<FoldError>> {
+) -> Result<ImportOutcome<Event>, ChainError<FoldError>> {
     ad4m_hash_chain::import(chain, &KelPolicy, events)
 }
 
@@ -94,7 +95,7 @@ pub fn import(
 pub fn import_json(
     chain: &mut KelChain,
     events: &[Value],
-) -> Result<ImportOutcome, ChainError<FoldError>> {
+) -> Result<ImportOutcome<Event>, ChainError<FoldError>> {
     import(chain, &parse_events(events)?)
 }
 

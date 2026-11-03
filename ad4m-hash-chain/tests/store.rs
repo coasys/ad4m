@@ -187,6 +187,42 @@ async fn contract_suite<S: ChainStore + 'static>(make: impl Fn() -> S) {
         (t1.await.unwrap(), t2.await.unwrap())
     };
     check_race(a, b, &racing.head(TY, &chain).await.unwrap().unwrap());
+
+    // Import, then store what `Appended` names: a batch that carries a copy of an entry
+    // stripped of its proof (same hash) before the signed copy stores the signed copy, and a
+    // cold load of the stored text folds.
+    let mut stripped = entries[3].clone();
+    stripped.proof.clear();
+    for batch in [
+        vec![stripped.clone(), entries[3].clone(), entries[4].clone()],
+        vec![entries[4].clone(), entries[3].clone(), stripped.clone()],
+    ] {
+        let store = make();
+        store.append(TY, &chain, None, &rows[..3]).await.unwrap();
+        let mut held = fold(&TestPolicy, &entries[..3]).unwrap();
+        let expect = held.head();
+        let ImportOutcome::Appended {
+            head,
+            entries: accepted,
+        } = import(&mut held, &TestPolicy, &batch).unwrap()
+        else {
+            panic!("expected Appended");
+        };
+        let appended = store
+            .append(TY, &chain, Some(&expect), &stored(&accepted))
+            .await
+            .unwrap();
+        assert_eq!(appended, head);
+        let cold: Vec<TestEntry> = store
+            .range(TY, &chain, 0, 100)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.entry().unwrap())
+            .collect();
+        assert_eq!(cold, entries[..5].to_vec());
+        assert_eq!(fold(&TestPolicy, &cold).unwrap().head(), head);
+    }
 }
 
 fn check_race(a: Result<Head, StoreError>, b: Result<Head, StoreError>, stored_head: &Head) {

@@ -332,28 +332,38 @@ fn step<P: ChainPolicy>(
 }
 
 /// [`step`] on the first of `copies` (one entry, several proof sets) that passes; the first
-/// copy's error when none does.
-fn step_any<P: ChainPolicy>(
+/// copy's error when none does. Gives the hash and the copy that passed.
+///
+/// `state` is the caller's staged state, so a failed step may leave it changed: the last
+/// (often the only) copy steps on it in place, and only a copy with others still to try
+/// steps on a clone.
+fn step_any<'e, P: ChainPolicy>(
     policy: &P,
     id: &ChainId,
     head: &Head,
     state: &mut P::State,
-    copies: &[&P::Entry],
-) -> Result<Hash, ChainError<P::Error>> {
+    copies: &[&'e P::Entry],
+) -> Result<(Hash, &'e P::Entry), ChainError<P::Error>> {
+    let Some((last, others)) = copies.split_last() else {
+        return Err(ChainError::Empty);
+    };
     let mut first_error = None;
-    for entry in copies {
+    for entry in others {
         let mut attempt = state.clone();
         match step(policy, id, head, &mut attempt, entry) {
             Ok(hash) => {
                 *state = attempt;
-                return Ok(hash);
+                return Ok((hash, entry));
             }
             Err(e) => {
                 first_error.get_or_insert(e);
             }
         }
     }
-    Err(first_error.unwrap_or(ChainError::Empty))
+    match step(policy, id, head, state, last) {
+        Ok(hash) => Ok((hash, last)),
+        Err(e) => Err(first_error.unwrap_or(e)),
+    }
 }
 
 /// Replays `entries` in the order given: `genesis` on the first, then the checks of `append` on
@@ -423,9 +433,12 @@ pub fn compare(ours: &[Hash], theirs: &[Hash], from: u64, chain: &ChainId) -> Op
 
 /// What [`import`] did with a batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ImportOutcome {
-    /// New entries continued our head.
-    Appended { head: Head, count: u32 },
+pub enum ImportOutcome<E> {
+    /// New entries continued our head. `entries` are the copies appended, owned and in seq
+    /// order, one per new seq: persist these, not the batch. Copies of one entry share a
+    /// hash, so a batch may hold one without its proof beside the one that passed; only the
+    /// one that passed is here. Never empty.
+    Appended { head: Head, entries: Vec<E> },
     /// Every entry matches what we hold.
     AlreadyHave,
     /// The first new entry does not continue our head: fetch from `have + 1`.
@@ -444,6 +457,10 @@ pub enum ImportOutcome {
 /// (same hash, other proofs) are all tried, in batch order: the first that passes appends,
 /// and the batch fails only when none does.
 ///
+/// `Appended` carries the copies that were appended. A caller that persists the import
+/// stores those, never its own pick from the batch: a copy stripped of its proof hashes the
+/// same as the signed one, and stored, it fails the next `fold`.
+///
 /// `Fork` is hash-only evidence: the competing entry has a canonical form and names this
 /// chain, but its proofs are not verified and the policy is not applied to it. Verify it
 /// before treating the fork as authenticated or passing it to `ChainStore::record_fork`.
@@ -451,7 +468,7 @@ pub fn import<P: ChainPolicy>(
     chain: &mut Chain<P>,
     policy: &P,
     entries: &[P::Entry],
-) -> Result<ImportOutcome, ChainError<P::Error>> {
+) -> Result<ImportOutcome<P::Entry>, ChainError<P::Error>> {
     let mut items: Vec<(u64, Hash, &P::Entry)> = Vec::with_capacity(entries.len());
     for entry in entries {
         let hash = checked_hash(entry)?;
@@ -506,21 +523,26 @@ pub fn import<P: ChainPolicy>(
         });
     }
 
+    // One staged state for the whole batch: an error drops it, so a step may fail on it.
     let mut state = chain.state.clone();
     let mut at = head;
     let mut added = Vec::with_capacity(new.len());
+    let mut accepted = Vec::with_capacity(new.len());
     for (_, _, copies) in &new {
-        let hash = step_any(policy, &chain.id, &at, &mut state, copies)?;
+        let (hash, entry) = step_any(policy, &chain.id, &at, &mut state, copies)?;
         at = Head {
             seq: at.seq + 1,
             hash: hash.clone(),
         };
         added.push(hash);
+        accepted.push(entry);
     }
-    let count = u32::try_from(added.len()).unwrap_or(u32::MAX);
     chain.state = state;
     chain.hashes.extend(added);
-    Ok(ImportOutcome::Appended { head: at, count })
+    Ok(ImportOutcome::Appended {
+        head: at,
+        entries: accepted.into_iter().cloned().collect(),
+    })
 }
 
 // The TypeScript shapes the wasm exports return: `{ kind: "same" }`, `{ kind: "fork", fork }`, …
@@ -547,14 +569,16 @@ impl Serialize for Compare {
     }
 }
 
-impl Serialize for ImportOutcome {
+/// `{ kind: "appended", head, count }`: the vectors pin the chain after the import, so the
+/// appended entries are given as their number only.
+impl<E> Serialize for ImportOutcome<E> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(None)?;
         match self {
-            ImportOutcome::Appended { head, count } => {
+            ImportOutcome::Appended { head, entries } => {
                 map.serialize_entry("kind", "appended")?;
                 map.serialize_entry("head", head)?;
-                map.serialize_entry("count", count)?;
+                map.serialize_entry("count", &entries.len())?;
             }
             ImportOutcome::AlreadyHave => map.serialize_entry("kind", "already-have")?,
             ImportOutcome::Gap { have, first } => {

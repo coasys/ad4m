@@ -1,7 +1,9 @@
 //! Storage of chains (feature `store`): the [`ChainStore`] trait and [`MemoryChainStore`]. The
 //! SQLite adapter is [`SqliteChainStore`] (feature `sqlite`).
 //!
-//! A store checks no hash, link or proof: the caller runs `Chain::append` or `import` first.
+//! A store checks no hash, link or proof: the caller runs `Chain::append` or `import` first,
+//! and after `import` stores the entries `ImportOutcome::Appended` carries (the copies that
+//! passed), not its own pick from the batch.
 //! It checks only that an append continues the head the caller expects, so two writers that
 //! race on one chain get one success and one [`StoreError::Conflict`].
 
@@ -70,7 +72,8 @@ pub trait ChainStore: Send + Sync {
         limit: u32,
     ) -> Result<Vec<StoredEntry>, StoreError>;
     /// Appends only when the stored head equals `expect` (None for a new chain). The store checks nothing else:
-    /// the caller ran `Chain::append` or `import` first.
+    /// the caller ran `Chain::append` or `import` first (after `import`: `entries` are the
+    /// ones `ImportOutcome::Appended` carries).
     /// (It does refuse, as `Backend`, an empty batch or entries that do not run on from `expect`.)
     async fn append(
         &self,
