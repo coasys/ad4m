@@ -111,6 +111,7 @@ dependencies = [
  "multihash-codetable",
  "once_cell",
  "ort",
+ "ort-sys",
  "os_info",
  "oxigraph",
  "percent-encoding",
