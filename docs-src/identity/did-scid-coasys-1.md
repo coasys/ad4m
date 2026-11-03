@@ -233,11 +233,11 @@ before `?` and `#`; it is what the document's `id` holds, whatever `src` the URL
 3. **Verification.** The resolver folds the events with the rules of section 5, each event
    parsed as JSON under P1–P7. Event #0 must give the SCID of the DID. Any failure means the
    source gave no valid log: the resolver skips it and tries the next source. It may stop at
-   the first source that gives a valid log or read further sources for a longer one; either
-   way it keeps the longest valid log it holds. A shorter valid log never replaces a longer one
-   (it is a prefix, or a fork). Two valid logs that differ at one seq are a fork: the resolver
-   answers with the log it held first, and reports the fork in the DID resolution metadata
-   (`coasys:fork`: the seq and the two event hashes).
+   the first source that gives a valid log or read further sources for a longer one. Of two
+   valid logs where one is a prefix of the other, it keeps the longer. Two valid logs that
+   differ at one seq are a fork: the resolver keeps the log it held first, whichever is longer,
+   and reports the fork in the DID resolution metadata (`coasys:fork`: the seq and the two
+   event hashes).
 4. **The DID document.** The resolver derives the DID document (section 9) from the state
    after the head. With `versionId=<seq>`, it derives it from the state after that seq.
    DID Core defines `versionId` only as an identifier of a version of the DID document and

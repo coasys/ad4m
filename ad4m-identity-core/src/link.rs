@@ -5,9 +5,10 @@
 //! key or bot scope) and signs it with the current master key ([`sign_offer`], domain
 //! `coasys:offer`). It hands the device an offer string that carries `s` ([`OfferString`]). The
 //! device makes a [`Claim`]: its signing key, its X25519 key, `s`, and a co-signature over
-//! [`ClaimBody`] (domain `coasys:claim`). Both sides show the [`match_code`]; the holder then
-//! appends the `add` that spends the claim (`build::add_claimed`), and the store checks it with
-//! [`check_add`] (the claim check of `identity-store/AGENTS.md`).
+//! [`ClaimBody`] (domain `coasys:claim`). Both sides show the [`match_code`]; the holder checks
+//! the store's [`ClaimView`] with [`verify_claim_view`], then appends the `add` that spends the
+//! claim (`build::add_claimed`), and the store checks it with [`check_add`] (the claim check of
+//! `identity-store/AGENTS.md`).
 //!
 //! Pure functions: no I/O, no clock (callers pass `now`), no randomness (callers draw `s` and
 //! the offer id).
@@ -432,6 +433,40 @@ pub fn verify_claim(scid: &str, c: &Claim) -> Result<(), LinkError> {
     }
     let sig = decode_proof_value(&c.co_sig).ok_or(LinkError::CoSig)?;
     if !verify_signed(CLAIM_DOMAIN, &claim_body(scid, c), &c.device_key, &sig) {
+        return Err(LinkError::CoSig);
+    }
+    Ok(())
+}
+
+/// The holder's check of a [`ClaimView`] the store answered for `offer`: the keys are well
+/// formed, the hint is short, and the co-signature by `device_key` covers `scid`, `offer_id`,
+/// `device_key`, `enc_key` and `can_keep_master`. The match code covers `device_key` only, so
+/// without this check a store could answer a view with another `enc_key` (where the device's
+/// messages, and later the master key, are sealed to) or another `can_keep_master`, and the
+/// master would sign it into the log. A holder calls it before `build::add_claimed`. Needs no `s`.
+pub fn verify_claim_view(offer: &Offer, view: &ClaimView) -> Result<(), LinkError> {
+    if !is_ed25519_multikey(&view.device_key) {
+        return Err(malformed("deviceKey is an Ed25519 multikey"));
+    }
+    if !is_x25519_multikey(&view.enc_key) {
+        return Err(malformed("encKey is an X25519 multikey"));
+    }
+    if view
+        .hint
+        .as_ref()
+        .is_some_and(|h| h.chars().count() > HINT_MAX_CHARS)
+    {
+        return Err(malformed("hint is at most 64 characters"));
+    }
+    let body = ClaimBody {
+        scid: &offer.scid,
+        offer_id: &offer.offer_id,
+        device_key: &view.device_key,
+        enc_key: &view.enc_key,
+        can_keep_master: view.can_keep_master,
+    };
+    let sig = decode_proof_value(&view.co_sig).ok_or(LinkError::CoSig)?;
+    if !verify_signed(CLAIM_DOMAIN, &body, &view.device_key, &sig) {
         return Err(LinkError::CoSig);
     }
     Ok(())
