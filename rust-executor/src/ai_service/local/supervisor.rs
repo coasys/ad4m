@@ -3,14 +3,15 @@
 //! - It listens on `127.0.0.1` only, on a port [`choose_port`] picks: the one it had, when
 //!   free, else a free one, never a port `ai.detectEndpoints` probes (11434, 9931, 8080,
 //!   8000, 5092), so it never shadows a user's own server.
-//! - Ready means an HTTP probe answers 200 (llama-server's public `/health`) or, for a
-//!   server without one (whisper-server), a TCP connect.
+//! - Ready means an HTTP probe answers 200 (llama-server's public `/health`, nemo-speech's
+//!   `/ready`, which answers 503 until its model is loaded and warmed up) or, for a server
+//!   without one, a TCP connect.
 //! - A child that exits, or stops answering three probes in a row, is restarted with the
 //!   budget WE's executor supervisor uses: 3 restarts, given back after 5 healthy minutes.
 //!   After that it stays down, failed, with the reason.
 //! - It stops with the executor: on Linux the kernel sends it SIGKILL when the executor dies
 //!   (`PR_SET_PDEATHSIG`, set from a thread that lives as long as the process; not SIGTERM:
-//!   whisper-server catches it and may not exit, and an executor that is gone cannot follow
+//!   a server may catch it and not exit, and an executor that is gone cannot follow
 //!   up; llama-server's router takes its model processes down with it); everywhere
 //!   the executor's shutdown stops it, and the next start stops one a crash left behind
 //!   (the pid file, checked against the binary's path).
@@ -24,7 +25,7 @@ use tokio::sync::watch;
 use ts_rs::TS;
 
 /// Ports a managed runtime never takes: what `ai.detectEndpoints` probes (the upstream
-/// defaults of llama-server, whisper-server, Ollama, vLLM, speaches).
+/// defaults of llama-server, whisper.cpp's server, Ollama, vLLM, speaches).
 pub fn avoided_ports() -> Vec<u16> {
     crate::ai_service::endpoints::detect::PROBED_PORTS.to_vec()
 }

@@ -42,7 +42,7 @@ pub const PLANNED_SERVICES: [Service; 3] = [Service::Llm, Service::Embeddings, S
 #[serde(rename_all = "camelCase")]
 #[ts(rename = "LocalAiPlannedRuntime")]
 pub struct PlannedRuntime {
-    /// The manifest's runtime id: `llama-server`, `whisper-server`.
+    /// The manifest's runtime id: `llama-server`, `nemo-speech`.
     pub runtime_id: String,
     pub provider: Provider,
     pub version: String,
@@ -196,18 +196,12 @@ fn runtime_build<'a>(
 
 /// The server flags of a model without measured ones: chat without thinking (Qwen3.5 thinks
 /// until the context is full and `ai.prompt` answers ""), embeddings only on the embedding
-/// model, whisper-server on the OpenAI path.
+/// model. nemo-speech needs none: the executor sets its device and turns its playground off.
 pub fn default_flags(service: Service) -> Vec<String> {
     let flags: &[&str] = match service {
         Service::Llm => &["--reasoning", "off"],
         Service::Embeddings => &["--embeddings"],
-        Service::Stt => &[
-            "--request-path",
-            "/v1/audio",
-            "--inference-path",
-            "/transcriptions",
-        ],
-        Service::Tts => &[],
+        Service::Stt | Service::Tts => &[],
     };
     flags.iter().map(|f| f.to_string()).collect()
 }
@@ -440,6 +434,10 @@ mod tests {
                 "llama-server": { "provider": "llama-server", "version": "b1", "builds": {
                     "linux-x64-cpu": build("lcpu"), "linux-x64-vulkan": build("lvulkan"),
                     "linux-x64-rocm": build("lrocm"), "linux-x64-cuda": build("lcuda") } },
+                "nemo-speech": { "provider": "nemo-speech", "version": "0.3.0", "builds": {
+                    "linux-x64-cpu": build("ncpu"), "linux-x64-vulkan": build("nvulkan"),
+                    "macos-arm64-metal": build("nmetal") } },
+                // The wind tunnel's baselines: the executor leaves them out.
                 "whisper-server": { "provider": "whisper-server", "version": "b2", "builds": {
                     "linux-x64-cpu": build("wcpu") } }
             },
@@ -447,7 +445,8 @@ mod tests {
                 "big": model("llm", "llama-server", 6_000_000_000, 7 * GIB),
                 "small": model("llm", "llama-server", 1_300_000_000, 2 * GIB),
                 "embed": model("embeddings", "llama-server", 150_000_000, GIB / 4),
-                "whisper": model("stt", "whisper-server", 60_000_000, GIB / 2)
+                "parakeet": model("stt", "nemo-speech", 700_000_000, GIB / 2),
+                "whisper": model("stt", "whisper-server", 60_000_000, GIB / 3)
             }
         })
     }
@@ -478,13 +477,16 @@ mod tests {
     }
 
     fn full() -> serde_json::Value {
+        let mut parakeet = recommendation("parakeet", "nemo-speech", true);
+        parakeet["runtimeBuild"] = json!("linux-x64-vulkan");
+        parakeet["serverFlags"] = json!(["--device", "vulkan", "--no-ui"]);
         json!({
             "gpu-12gb": { "llm": recommendation("big", "llama-server", true),
                           "embeddings": recommendation("embed", "llama-server", true),
-                          "stt": recommendation("whisper", "whisper-server", true) },
+                          "stt": parakeet },
             "cpu-8gb": { "llm": recommendation("small", "llama-server", true),
                          "embeddings": recommendation("embed", "llama-server", true),
-                         "stt": recommendation("whisper", "whisper-server", true) }
+                         "stt": parakeet }
         })
     }
 
@@ -551,7 +553,7 @@ mod tests {
         let plan = plan(&data, &hardware, &nothing_installed);
         assert_eq!(plan.hardware_class, "gpu-12gb");
         let ids: Vec<_> = plan.models.iter().map(|m| m.model_id.as_str()).collect();
-        assert_eq!(ids, vec!["big", "embed", "whisper"]);
+        assert_eq!(ids, vec!["big", "embed", "parakeet"]);
         assert!(plan.fits, "{:?}", plan.reasons);
         let llama = plan
             .runtimes
@@ -560,16 +562,23 @@ mod tests {
             .unwrap();
         assert_eq!(llama.build, "linux-x64-cuda");
         assert_eq!(llama.services, vec![Service::Llm, Service::Embeddings]);
-        let whisper = plan
+        let nemo = plan
             .runtimes
             .iter()
-            .find(|r| r.runtime_id == "whisper-server")
+            .find(|r| r.runtime_id == "nemo-speech")
             .unwrap();
-        assert_eq!(whisper.backend, Backend::Cpu);
-        assert!(plan
-            .reasons
-            .iter()
-            .any(|r| r.contains("whisper-server has no GPU build")));
+        assert_eq!(
+            (nemo.build.as_str(), nemo.backend),
+            ("linux-x64-vulkan", Backend::Vulkan)
+        );
+        assert_eq!(nemo.services, vec![Service::Stt]);
+        assert_eq!(
+            plan.runtimes.len(),
+            2,
+            "no whisper-server: {:?}",
+            plan.runtimes
+        );
+        assert!(plan.reasons.is_empty(), "{:?}", plan.reasons);
         assert_eq!(plan.download_bytes, plan.total_bytes);
         assert_eq!(plan.memory_bytes, 7 * GIB + GIB / 4 + GIB / 2);
     }
@@ -610,7 +619,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("stt");
-        recommendations["cpu-8gb"]["stt"] = recommendation("whisper", "whisper-server", false);
+        recommendations["cpu-8gb"]["stt"] = recommendation("parakeet", "nemo-speech", false);
         let data = super::tests::data(recommendations);
         let without = super::plan(&data, &hardware, &nothing_installed);
         assert!(without.models.iter().all(|m| m.service != Service::Stt));
@@ -676,17 +685,61 @@ mod tests {
         assert!(full_disk.reasons.iter().any(|r| r.contains("disk")));
     }
 
+    /// The test manifest builds llama-server for Linux only and nemo-speech for macOS too: a
+    /// Mac gets transcription on Metal and is told why chat and embeddings are missing.
     #[test]
     fn a_platform_without_a_build_leaves_its_services_out() {
         let data = data(full());
-        let mut hardware = device(&data, 16, vec![], vec![Backend::Cpu]);
+        let mut hardware = device(&data, 16, vec![], vec![Backend::Cpu, Backend::Metal]);
         hardware.os = "macos".into();
         hardware.arch = "arm64".into();
         let plan = plan(&data, &hardware, &nothing_installed);
+        let unavailable: Vec<_> = plan.unavailable.iter().map(|u| u.service).collect();
+        assert_eq!(unavailable, vec![Service::Llm, Service::Embeddings]);
+        assert!(plan.unavailable[0].reason.contains("macos-arm64"));
+        assert_eq!(plan.models.len(), 1);
+        assert_eq!(
+            (plan.runtimes[0].build.as_str(), plan.runtimes[0].backend),
+            ("macos-arm64-metal", Backend::Metal)
+        );
+        assert!(plan.reasons[0].contains("cannot run the recommended linux-x64-vulkan"));
+
+        hardware.backends = vec![Backend::Cpu];
+        let plan = super::plan(&data, &hardware, &nothing_installed);
         assert!(plan.models.is_empty());
         assert!(!plan.fits);
         assert_eq!(plan.unavailable.len(), 3);
-        assert!(plan.unavailable[0].reason.contains("macos-arm64"));
+    }
+
+    /// Transcription runs the recommended Vulkan build where Vulkan runs, else the CPU build,
+    /// with both reasons.
+    #[test]
+    fn transcription_falls_back_to_the_cpu_build_without_vulkan() {
+        let data = data(full());
+        let hardware = device(
+            &data,
+            16,
+            vec![gpu(GpuVendor::Nvidia, GpuType::Discrete, 4)],
+            vec![Backend::Cpu, Backend::Cuda],
+        );
+        let plan = plan(&data, &hardware, &nothing_installed);
+        let nemo = plan
+            .runtimes
+            .iter()
+            .find(|r| r.provider == Provider::NemoSpeech)
+            .unwrap();
+        assert_eq!(
+            (nemo.build.as_str(), nemo.backend),
+            ("linux-x64-cpu", Backend::Cpu)
+        );
+        assert!(plan
+            .reasons
+            .iter()
+            .any(|r| r == "nemo-speech runs linux-x64-cpu: this device cannot run the recommended linux-x64-vulkan"));
+        assert!(plan
+            .reasons
+            .iter()
+            .any(|r| r.contains("nemo-speech has no GPU build for linux-x64")));
     }
 
     fn amd_igpu(data: &Data, backends: Vec<Backend>) -> LocalHardware {
@@ -739,16 +792,15 @@ mod tests {
         };
         assert_eq!(flags(Service::Llm), "-c 8192 -ngl 999 --reasoning off");
         assert_eq!(flags(Service::Embeddings), "--embeddings");
-        assert_eq!(
-            flags(Service::Stt),
-            "--request-path /v1/audio --inference-path /transcriptions"
-        );
+        assert_eq!(flags(Service::Stt), "--device vulkan --no-ui");
+        assert!(default_flags(Service::Stt).is_empty());
         assert_eq!(default_flags(Service::Llm), vec!["--reasoning", "off"]);
     }
 
     /// The embedded data on the smoke-test device: a Strix Halo APU, 128 GB, Vulkan. The
     /// wind tunnel measured this class: Qwen3.5 4B on Vulkan, nomic (measured on ROCm, here
-    /// on the chat model's Vulkan llama-server), whisper small on the CPU.
+    /// on the chat model's Vulkan llama-server), Parakeet v3 on nemo-speech's Vulkan build
+    /// with its device flag.
     #[test]
     fn the_embedded_data_plans_the_measured_set_on_strix_halo() {
         let data = crate::ai_service::local::data::embedded().unwrap();
@@ -761,15 +813,20 @@ mod tests {
         let plan = plan(data, &hardware, &nothing_installed);
         assert!(plan.fits, "{:?}", plan.reasons);
         let builds: Vec<_> = plan.runtimes.iter().map(|r| r.build.as_str()).collect();
-        assert_eq!(builds, vec!["linux-x64-vulkan", "linux-x64-cpu"]);
+        assert_eq!(builds, vec!["linux-x64-vulkan", "linux-x64-vulkan"]);
+        assert_eq!(plan.runtimes[1].provider, Provider::NemoSpeech);
         let ids: Vec<_> = plan.models.iter().map(|m| m.model_id.as_str()).collect();
         assert_eq!(
             ids,
             vec![
                 "qwen3.5-4b-q4_k_m",
                 "nomic-embed-text-v1.5-q8_0",
-                "whisper-small-q5_1"
+                "parakeet-tdt-0.6b-v3-q8_0"
             ]
+        );
+        assert_eq!(
+            plan.models[2].server_flags.join(" "),
+            "--device vulkan --no-ui"
         );
         assert!(plan.models[0]
             .server_flags

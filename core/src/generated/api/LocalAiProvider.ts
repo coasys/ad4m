@@ -3,4 +3,4 @@
 /**
  * The server program a runtime build provides.
  */
-export type LocalAiProvider = "llama-server" | "whisper-server";
+export type LocalAiProvider = "llama-server" | "nemo-speech";

@@ -208,7 +208,8 @@ pub async fn check_health(endpoint: &Endpoint) -> Result<EndpointHealth> {
     // Add and update refuse such an endpoint, but a migrated or imported one can hold a
     // key for a plain-HTTP remote host: probing it would send the key in the clear.
     let health = if endpoint.managed {
-        // whisper-server lists no models: the supervisor's liveness check is the health.
+        // The supervisor knows a runtime that is starting or stopped; a running one is
+        // checked by its listing (nemo-speech) or liveness (llama-server).
         crate::ai_service::local::managed_health(endpoint).await
     } else if refuse_cleartext_key(endpoint).is_err() {
         EndpointHealth {

@@ -21,6 +21,19 @@ export function kindLabel(kind: EndpointKind): string {
   return ENDPOINT_KINDS.find((k) => k.kind === kind)?.label ?? kind;
 }
 
+/**
+ * How the launcher names an endpoint's server. A managed endpoint (local AI) by the runtime
+ * the executor runs for it, not by the kind's examples: its transcription server is
+ * nemo-speech, which no user-added transcription server need be.
+ */
+export function endpointLabel(endpoint: Pick<AiEndpoint, "kind" | "managed">): string {
+  if (endpoint.managed) {
+    if (endpoint.kind === "LLAMA_SERVER") return "llama-server";
+    if (endpoint.kind === "OPEN_AI_AUDIO") return "nemo-speech (Parakeet)";
+  }
+  return kindLabel(endpoint.kind);
+}
+
 /** The capability a model type needs from its endpoint. */
 export function capabilityOf(modelType: ModelType) {
   switch (modelType) {

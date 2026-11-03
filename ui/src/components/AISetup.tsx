@@ -58,7 +58,7 @@ function describeDevice(hardware: LocalAiHardware): string {
 
 /**
  * Onboarding's AI page. First choice: local AI on this device: the executor detects the
- * hardware, picks models that fit, downloads llama.cpp and whisper.cpp with the models,
+ * hardware, picks models that fit, downloads llama.cpp and nemo-speech with the models,
  * runs them and registers them. Else a model server (one already on this computer, or a
  * remote API with a key), or no AI.
  */

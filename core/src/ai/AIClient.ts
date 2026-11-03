@@ -96,7 +96,7 @@ export class AIClient {
         return this.#apiClient.call('ai.deleteUpstreamModel', { endpointId, remoteModel });
     }
 
-    // ── Local AI: the executor runs llama.cpp and whisper.cpp itself ──
+    // ── Local AI: the executor runs llama.cpp and nemo-speech itself ──
 
     /**
      * The executor's device: OS, CPU, RAM, GPUs, the backends a runtime can use, the memory

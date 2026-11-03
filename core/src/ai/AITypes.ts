@@ -15,7 +15,7 @@ export type { EndpointState } from "../generated/api/EndpointState";
 export type { DetectedEndpoint } from "../generated/api/DetectedEndpoint";
 export type { DiscoveredModel } from "../generated/api/DiscoveredModel";
 export type { AiDiscoverModelsParams } from "../generated/api/AiDiscoverModelsParams";
-// Local AI (`ai.local*`): the executor's own llama.cpp and whisper.cpp runtimes.
+// Local AI (`ai.local*`): the executor's own llama.cpp and nemo-speech runtimes.
 export type { LocalAiHardware } from "../generated/api/LocalAiHardware";
 export type { LocalAiPlan } from "../generated/api/LocalAiPlan";
 export type { LocalAiStatus } from "../generated/api/LocalAiStatus";

@@ -72,12 +72,12 @@ The executor still runs no model in-process: `local/` installs and supervises mo
 
 | File | Does |
 |---|---|
-| `data.rs` | embeds `local/manifest.json` (runtime builds and model files: URL, size, sha256, memory) and `ai-wind-tunnel/{recommendations,hardware-classes}.json` (schema v1); `classify` (passes `ai-wind-tunnel/hardware-class-fixtures.json`, as the wind tunnel's TS `classify` does) and `chain` (its `fallbackClasses`: the family's smaller tiers, then the cpu family); `Recommendations::get` skips rows the executor cannot run (`completion`, speech on speaches). The wind tunnel owns these files |
+| `data.rs` | embeds `local/manifest.json` (runtime builds and model files: URL, size, sha256, memory) and `ai-wind-tunnel/{recommendations,hardware-classes}.json` (schema v1); `classify` (passes `ai-wind-tunnel/hardware-class-fixtures.json`, as the wind tunnel's TS `classify` does) and `chain` (its `fallbackClasses`: the family's smaller tiers, then the cpu family); `Recommendations::get` skips rows the executor cannot run (`completion`, speech on speaches); the manifest keeps only runtimes and models of a `Provider` (llama-server, nemo-speech): whisper-server and sherpa-onnx are the wind tunnel's baselines. The wind tunnel owns these files |
 | `hardware.rs` | `ai.localHardware`: sysinfo (RAM, CPU, disk), std CPU features, NVML and the Vulkan loader opened with `libloading` when present (no `wgpu`), amdgpu sysfs, macOS sysctl. GPU probes run once per process. `memory_budget` = min(GPU − 1 GiB, RAM − 4 GiB) |
 | `plan.rs` | pure `plan()`: per service the recommendation of the class or the nearest smaller measured one (no evidence = unmeasured), memory sum vs budget with step-down, build per provider (recommended, else CUDA > Metal > Vulkan > ROCm > CPU; a recommended ROCm build becomes Vulkan where Vulkan runs: the ROCm build silently runs on the CPU without the system ROCm libraries), each model's `serverFlags` (measured, else `default_flags`: `--reasoning off` for chat), disk check |
 | `install.rs` | the store (`downloads/`, `runtime/<id>/<version>-<build>/`, `models/`), `download` (`.part` + `Range` resume, sha256 and size before rename), `unpack` (tar.gz, zip; no path escapes), macOS quarantine strip |
-| `supervisor.rs` | `Supervised` child: loopback port (`choose_port`, never the `detect.rs` ports), readiness (llama `/health`, whisper TCP), `RestartBudget` (3, reset after 5 healthy min), SIGTERM then SIGKILL, Linux `PR_SET_PDEATHSIG` from one long-lived spawner thread, `reap_stale` by pid + exe path |
-| `mod.rs` | `install` / `start` / `stop` / `remove` / `status`, `register` (endpoints `This device (llama.cpp)` / `This device (whisper.cpp)`, models named by manifest id, defaults), `managed_health` (what `check_health` uses for a managed endpoint: whisper-server lists no models), `autostart` (`local_ai_autostart`), `stop_on_exit` (run by the executor's shutdown, `clean_up_before_exit` in `lib.rs`, and by `runtime.quit`: SIGTERM to all at once, SIGKILL after 2 s, inside the 4 s a signal leaves the shutdown), `stop_children_blocking` (the same from a thread that cannot await: the launcher's Quit, which exits without the executor's shutdown) |
+| `supervisor.rs` | `Supervised` child: loopback port (`choose_port`, never the `detect.rs` ports), readiness (llama `/health`, nemo-speech `/ready`), `RestartBudget` (3, reset after 5 healthy min), SIGTERM then SIGKILL, Linux `PR_SET_PDEATHSIG` from one long-lived spawner thread, `reap_stale` by pid + exe path |
+| `mod.rs` | `install` / `start` / `stop` / `remove` / `status`, `register` (endpoints `This device (llama.cpp)` / `This device (NeMo Speech)`, models named by manifest id; a nemo-speech model's `remote_model` is the id its `/v1/models` lists, `parakeet-tdt-0.6b-v3.oss-align.q8_0`, since it refuses any other; the chat model `native_tools: true`; defaults), `managed_health` (what `check_health` uses for a managed endpoint: the supervisor's phase, then llama-server's liveness or nemo-speech's listing), `autostart` (`local_ai_autostart`), `stop_on_exit` (run by the executor's shutdown, `clean_up_before_exit` in `lib.rs`, and by `runtime.quit`: SIGTERM to all at once, SIGKILL after 2 s, inside the 4 s a signal leaves the shutdown), `stop_children_blocking` (the same from a thread that cannot await: the launcher's Quit, which exits without the executor's shutdown) |
 
 - Storage: the store is per user, shared by agents (`local_ai_dir` / `AD4M_LOCAL_AI_DIR`,
   else `dirs::data_local_dir()/ad4m/local-ai`); per-executor state (`selection.json`,
@@ -90,8 +90,11 @@ The executor still runs no model in-process: `local/` installs and supervises mo
   per start, and after a start on a GPU build `spawn_gpu_check` reads the DRM fdinfo of its
   processes: under half the chat model's size in GPU memory is `onGpu: false` (Linux, AMD
   or Intel; NVIDIA is not checked),
-  `--offline`. whisper-server: `--request-path /v1/audio --inference-path /transcriptions`,
-  no key (loopback only).
+  `--offline`, `jinja = true` on the chat model (tool calls through its chat template).
+  nemo-speech: `serve --config <state>/nemo-speech.yaml --asr-model <gguf> --host 127.0.0.1
+  --port P --device <the build's backend> --no-ui`; the key is `http.api-key` in that YAML
+  (mode 0600, so `ps` does not show it); a measured `--device` is replaced by the build's,
+  so a CPU fallback never asks for Vulkan.
 - `ai.updateEndpoint` / `ai.removeEndpoint` refuse a managed endpoint (`refuse_managed`);
   `ai.detectEndpoints` skips the managed ports.
 - RPCs (`api/ai_ws.rs`): `ai.localHardware` / `localPlan` / `localStatus` are

@@ -13,9 +13,11 @@
 //!
 //! Two runtimes: llama.cpp's `llama-server` in router mode serves the chat and embedding
 //! models on one port (a preset file names them; `LLAMA_API_KEY` holds a random key per start),
-//! whisper.cpp's `whisper-server` serves transcription on `/v1/audio/transcriptions` (it
-//! takes no key; it listens on loopback only). The executor's per-agent state (selection,
-//! ports, pids, logs) lives in `<app data>/local-ai/`; the files in the shared store.
+//! NVIDIA NeMo-Speech.cpp's `nemo-speech serve` serves transcription (Parakeet) on
+//! `/v1/audio/transcriptions` and lists its model on `/v1/models` (its key in a config file
+//! only its user reads). Both listen on loopback only. The executor's per-agent state
+//! (selection, ports, pids, logs) lives in `<app data>/local-ai/`; the files in the shared
+//! store.
 
 pub mod data;
 pub mod hardware;
@@ -50,7 +52,7 @@ use crate::types::{
 
 /// The names of the managed endpoints.
 const LLAMA_ENDPOINT: &str = "This device (llama.cpp)";
-const WHISPER_ENDPOINT: &str = "This device (whisper.cpp)";
+const NEMO_SPEECH_ENDPOINT: &str = "This device (NeMo Speech)";
 
 /// At most this often per item an install publishes its progress.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -258,6 +260,10 @@ struct ManagedPort {
     status: tokio::sync::watch::Receiver<ProcessStatus>,
     readiness: Readiness,
     served: Vec<String>,
+    /// The runtime lists what it serves on `/v1/models` (nemo-speech): a running one's
+    /// health is that listing, as for any endpoint. Else (llama-server) the liveness probe
+    /// and `served`.
+    lists_models: bool,
 }
 
 lazy_static! {
@@ -401,7 +407,7 @@ pub async fn status() -> LocalStatus {
 fn endpoint_name(provider: Provider) -> &'static str {
     match provider {
         Provider::LlamaServer => LLAMA_ENDPOINT,
-        Provider::WhisperServer => WHISPER_ENDPOINT,
+        Provider::NemoSpeech => NEMO_SPEECH_ENDPOINT,
     }
 }
 
@@ -632,7 +638,8 @@ pub async fn start() -> Result<LocalStatus> {
     Ok(status().await)
 }
 
-/// A random key for llama-server (`LLAMA_API_KEY`): 32 bytes, hex.
+/// A random key for a runtime (llama-server's `LLAMA_API_KEY`, nemo-speech's config file):
+/// 32 bytes, hex.
 fn random_key() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 32];
@@ -681,6 +688,11 @@ fn llama_presets(models: &[&SelectedModel]) -> String {
             model.server_flags.clone()
         };
         let mut keys = preset_keys(&flags);
+        // Tool calls go through the chat template: on by default in b11669, set so that a
+        // build with another default still parses them.
+        if model.service == Service::Llm && !keys.iter().any(|(k, _)| k.contains("jinja")) {
+            keys.push(("jinja".into(), "true".into()));
+        }
         // An embedding model is served as one, whatever its flags say.
         if model.service == Service::Embeddings
             && !keys
@@ -703,10 +715,6 @@ fn child_spec(
     port: u16,
     key: &str,
 ) -> Result<ChildSpec> {
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .to_string();
     let models = selection.models_of(runtime.provider);
     let (args, readiness) = match runtime.provider {
         Provider::LlamaServer => {
@@ -728,40 +736,31 @@ fn child_spec(
                 Readiness::Http("/health".into()),
             )
         }
-        Provider::WhisperServer => {
+        Provider::NemoSpeech => {
             let model = models
                 .first()
-                .ok_or_else(|| anyhow!("whisper-server has no model selected"))?;
+                .ok_or_else(|| anyhow!("nemo-speech has no model selected"))?;
+            // The key in a config file only this user reads: `ps` shows arguments to every
+            // user. `/ready` needs no key.
+            let config = paths.state.join("nemo-speech.yaml");
+            write_private(&config, &format!("http:\n  api-key: \"{key}\"\n"))?;
             let mut args: Vec<String> = vec![
+                "serve".into(),
+                "--config".into(),
+                config.to_string_lossy().into_owned(),
+                "--asr-model".into(),
+                model.path.to_string_lossy().into_owned(),
                 "--host".into(),
                 "127.0.0.1".into(),
                 "--port".into(),
                 port.to_string(),
-                "--model".into(),
-                model.path.to_string_lossy().into_owned(),
+                // The build's backend: `auto` would take a GPU a CPU build was chosen over,
+                // and a measured `vulkan` must not reach a CPU build.
+                "--device".into(),
+                nemo_device(runtime.backend).into(),
             ];
-            // The measured flags, without any that would move it off loopback or its port.
-            let mut flags = if model.server_flags.is_empty() {
-                plan::default_flags(Service::Stt)
-            } else {
-                model.server_flags.clone()
-            };
-            let mut i = 0;
-            while i < flags.len() {
-                if matches!(flags[i].as_str(), "--host" | "--port" | "-m" | "--model") {
-                    flags.drain(i..(i + 2).min(flags.len()));
-                } else {
-                    i += 1;
-                }
-            }
-            if !flags.iter().any(|f| f == "--inference-path") {
-                flags.extend(plan::default_flags(Service::Stt));
-            }
-            if !flags.iter().any(|f| f == "-t" || f == "--threads") {
-                flags.extend(["--threads".to_string(), threads]);
-            }
-            args.extend(flags);
-            (args, Readiness::Tcp)
+            args.extend(nemo_flags(&model.server_flags));
+            (args, Readiness::Http("/ready".into()))
         }
     };
     let mut env = Vec::new();
@@ -811,6 +810,69 @@ fn child_spec(
     })
 }
 
+/// nemo-speech's `--device` for a build's backend.
+fn nemo_device(backend: Option<Backend>) -> &'static str {
+    match backend {
+        Some(Backend::Cpu) => "cpu",
+        Some(Backend::Vulkan) => "vulkan",
+        Some(Backend::Metal) => "metal",
+        Some(Backend::Cuda) => "cuda",
+        _ => "auto",
+    }
+}
+
+/// The measured flags of a nemo-speech model, without those the executor sets (where it
+/// listens, its key, its model, its device, its config) and without the playground
+/// (`--no-ui` always).
+fn nemo_flags(measured: &[String]) -> Vec<String> {
+    const WITH_VALUE: [&str; 11] = [
+        "--host",
+        "--port",
+        "--api-key",
+        "--asr-model",
+        "--device",
+        "--backend",
+        "--config",
+        "--cors-origin",
+        "--tls-cert",
+        "--tls-key",
+        "--http.api-key",
+    ];
+    let mut flags = Vec::new();
+    let mut i = 0;
+    while i < measured.len() {
+        let flag = measured[i].as_str();
+        if WITH_VALUE.contains(&flag) {
+            i += 2;
+            continue;
+        }
+        if !matches!(flag, "--open" | "--no-ui") {
+            flags.push(measured[i].clone());
+        }
+        i += 1;
+    }
+    flags.push("--no-ui".into());
+    flags
+}
+
+/// Write `text` to `path`, readable by this user only.
+fn write_private(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        // An older file keeps its mode through `open`.
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    options.open(path)?.write_all(text.as_bytes())?;
+    Ok(())
+}
+
 /// The pids of this executor's runtimes, for the next start to stop if a crash left them.
 fn pid_file(paths: &LocalPaths) -> PathBuf {
     paths.state.join("pids.json")
@@ -858,10 +920,7 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
         selection
             .ports
             .insert(runtime.provider.as_str().to_string(), port);
-        let key = match runtime.provider {
-            Provider::LlamaServer => random_key(),
-            Provider::WhisperServer => String::new(),
-        };
+        let key = random_key();
         let spec = child_spec(paths, &runtime, &selection, port, &key)?;
         let readiness = spec.readiness.clone();
         let supervised = Supervised::start(spec, Timing::default(), RestartBudget::standard());
@@ -879,6 +938,7 @@ async fn start_at(paths: &LocalPaths, make_default: bool) -> Result<()> {
                     status: supervised.watch(),
                     readiness,
                     served,
+                    lists_models: runtime.provider == Provider::NemoSpeech,
                 },
             );
         let settled = supervised
@@ -1093,10 +1153,7 @@ fn spawn_gpu_check(
 /// build, Linux, an AMD or Intel GPU; the chat model's file size (else the largest model's).
 async fn gpu_check_for(runtime: &SelectedRuntime, selection: &Selection) -> Option<u64> {
     let backend = runtime.backend?;
-    if backend == Backend::Cpu
-        || !cfg!(target_os = "linux")
-        || runtime.provider != Provider::LlamaServer
-    {
+    if backend == Backend::Cpu || !cfg!(target_os = "linux") {
         return None;
     }
     let hardware = hardware().await.ok()?;
@@ -1117,6 +1174,35 @@ async fn gpu_check_for(runtime: &SelectedRuntime, selection: &Selection) -> Opti
         .filter(|bytes| *bytes > 0)
 }
 
+/// The id requests name `model` by. llama-server's router serves each model under its preset
+/// name, the manifest id. nemo-speech serves its model under the id it reads from the file
+/// (Parakeet v3 Q8_0: `parakeet-tdt-0.6b-v3.oss-align.q8_0`) and refuses any other: the id its
+/// `/v1/models` lists, else the id an earlier start registered, else the manifest id.
+fn remote_model(
+    provider: Provider,
+    model: &SelectedModel,
+    health: Option<&EndpointHealth>,
+    registered: Option<&str>,
+) -> String {
+    match provider {
+        Provider::LlamaServer => model.model_id.clone(),
+        Provider::NemoSpeech => health
+            .filter(|h| h.state == EndpointState::Reachable)
+            .and_then(|h| h.served_models.first().cloned())
+            .or_else(|| registered.map(str::to_string))
+            .unwrap_or_else(|| model.model_id.clone()),
+    }
+}
+
+/// Whether the executor sends a model tools as definitions. The managed chat model: yes.
+/// llama-server renders them with the model's chat template (`--jinja`), parses the calls
+/// and honours `parallel_tool_calls: false`; a call `tool_choice` forces (`"required"`, a
+/// named function), which it does not enforce, `/v1` makes by a schema it does enforce
+/// (`api::openai_compat::forced_call`).
+fn native_tools(model: &SelectedModel) -> Option<bool> {
+    (model.provider == Provider::LlamaServer && model.service == Service::Llm).then_some(true)
+}
+
 /// Register `runtime` as a managed endpoint with its models; make each the default of its
 /// type when `make_default`, or when the type has none. Answers the endpoint id.
 async fn register(
@@ -1135,7 +1221,7 @@ async fn register(
                 .map(|m| m.service.capability())
                 .collect::<Vec<AiCapability>>(),
         ),
-        Provider::WhisperServer => (EndpointKind::OpenAiAudio, vec![AiCapability::Transcription]),
+        Provider::NemoSpeech => (EndpointKind::OpenAiAudio, vec![AiCapability::Transcription]),
     };
     let mut capabilities = capabilities;
     capabilities.sort();
@@ -1176,23 +1262,34 @@ async fn register(
             }
         }
     }
-    if let Err(e) = super::endpoints::check_health(&endpoint).await {
-        log::warn!("Local AI: health of {name}: {e}");
-    }
+    let health = super::endpoints::check_health(&endpoint)
+        .await
+        .map_err(|e| log::warn!("Local AI: health of {name}: {e}"))
+        .ok();
 
     let rows = Ad4mDb::with_global_instance(|db| db.get_models())?;
     for model in models {
         let model_type = model.service.model_type();
+        let row = rows.iter().find(|row| row.name == model.model_id);
         let input = ModelInput {
             name: model.model_id.clone(),
             model_type: model_type.clone(),
             endpoint_id: endpoint.id.clone(),
-            remote_model: model.model_id.clone(),
-            native_tools: None,
+            remote_model: remote_model(
+                runtime.provider,
+                model,
+                health.as_ref(),
+                row.filter(|r| r.endpoint_id == endpoint.id)
+                    .map(|r| r.remote_model.as_str()),
+            ),
+            native_tools: native_tools(model),
         };
-        let id = match rows.iter().find(|row| row.name == model.model_id) {
+        let id = match row {
             Some(row) if row.endpoint_id == endpoint.id => {
-                if row.model_type != model_type || row.remote_model != input.remote_model {
+                if row.model_type != model_type
+                    || row.remote_model != input.remote_model
+                    || row.native_tools != input.native_tools
+                {
                     service.update_model(row.id.clone(), input).await?;
                 }
                 row.id.clone()
@@ -1280,8 +1377,9 @@ pub async fn remove(params: RemoveParams) -> Result<bool> {
     Ok(true)
 }
 
-/// The health of a managed endpoint: whether the supervisor's runtime on its port runs and
-/// answers its probe. whisper-server lists no models, so a listing cannot tell.
+/// The health of a managed endpoint: whether the supervisor's runtime on its port runs, and
+/// then for nemo-speech its `/v1/models` listing (with the key), for llama-server its
+/// liveness probe. A runtime that is starting, restarting, stopped or failed says so.
 pub async fn managed_health(endpoint: &Endpoint) -> EndpointHealth {
     let checked_at = Some(chrono::Utc::now().timestamp_millis());
     let entry = endpoint.base_url.port().and_then(|port| {
@@ -1295,6 +1393,7 @@ pub async fn managed_health(endpoint: &Endpoint) -> EndpointHealth {
                     m.status.borrow().clone(),
                     m.readiness.clone(),
                     m.served.clone(),
+                    m.lists_models,
                 )
             })
     });
@@ -1306,7 +1405,17 @@ pub async fn managed_health(endpoint: &Endpoint) -> EndpointHealth {
     };
     match entry {
         None => down("Local AI is not running: start it with ai.localStart".into()),
-        Some((port, status, readiness, served)) => match status.phase {
+        Some((_, status, _, _, true)) if status.phase == Phase::Running => {
+            super::providers::discovery::discover_for(
+                endpoint.kind,
+                endpoint.base_url.clone(),
+                endpoint.api_key.expose(),
+                super::providers::discovery::PROBE_TIMEOUT,
+            )
+            .health()
+            .await
+        }
+        Some((port, status, readiness, served, _)) => match status.phase {
             Phase::Running if supervisor::probe(port, &readiness).await => EndpointHealth {
                 state: EndpointState::Reachable,
                 checked_at,
@@ -1504,7 +1613,7 @@ mod tests {
     }
 
     #[test]
-    fn llama_server_listens_on_loopback_with_its_key_and_whisper_on_the_openai_path() {
+    fn llama_server_and_nemo_speech_listen_on_loopback_with_their_keys_out_of_the_arguments() {
         let dir = tempfile::tempdir().unwrap();
         let paths = LocalPaths {
             store: dir.path().join("store"),
@@ -1515,7 +1624,7 @@ mod tests {
             runtimes: vec![],
             models: vec![
                 selected(Service::Llm, "chat", Provider::LlamaServer),
-                selected(Service::Stt, "whisper-base-q5_1", Provider::WhisperServer),
+                selected(Service::Stt, "parakeet-v3", Provider::NemoSpeech),
             ],
             ports: BTreeMap::new(),
         };
@@ -1557,51 +1666,207 @@ mod tests {
                 .contains("[chat]")
         );
 
-        let whisper = SelectedRuntime {
-            provider: Provider::WhisperServer,
-            runtime_id: "whisper.cpp".into(),
-            version: "b2".into(),
+        let nemo = SelectedRuntime {
+            provider: Provider::NemoSpeech,
+            runtime_id: "nemo-speech".into(),
+            version: "0.3.0".into(),
             build: "linux-x64-cpu".into(),
-            binary: dir.path().join("rt/whisper-server"),
+            binary: dir.path().join("rt/bin/nemo-speech"),
             lib_dirs: vec![],
             services: vec![Service::Stt],
             backend: Some(Backend::Cpu),
         };
-        let spec = child_spec(&paths, &whisper, &selection, 40002, "").unwrap();
-        let args = spec.args.join(" ");
-        assert!(args.contains("--host 127.0.0.1 --port 40002"));
-        assert!(args.contains("--request-path /v1/audio --inference-path /transcriptions"));
-        assert!(args.contains("whisper-base-q5_1"));
-        assert!(args.contains("--threads"));
-        assert_eq!(spec.readiness, Readiness::Tcp);
-        assert!(spec.env.is_empty());
-
-        // The measured flags, with its thread count; never a host or port of its own.
+        // Measured on Vulkan, with a host and a key of its own: this CPU build gets none of it.
         let mut measured = selection.clone();
         measured.models[1].server_flags = [
-            "--request-path",
-            "/v1/audio",
-            "--inference-path",
-            "/transcriptions",
-            "-t",
-            "8",
+            "--device",
+            "vulkan",
+            "--no-ui",
             "--host",
             "0.0.0.0",
+            "--api-key",
+            "x",
+            "--open",
+            "--access-log",
         ]
         .map(String::from)
         .to_vec();
-        let args = child_spec(&paths, &whisper, &measured, 40002, "")
+        let spec = child_spec(&paths, &nemo, &measured, 40002, "n3mo").unwrap();
+        let args = spec.args.join(" ");
+        let config = paths.state.join("nemo-speech.yaml");
+        assert_eq!(
+            args,
+            format!(
+                "serve --config {} --asr-model {} --host 127.0.0.1 --port 40002 --device cpu --access-log --no-ui",
+                config.display(),
+                measured.models[1].path.display()
+            )
+        );
+        assert!(!args.contains("n3mo"), "the key stays out of the arguments");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "http:\n  api-key: \"n3mo\"\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&config).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert_eq!(spec.readiness, Readiness::Http("/ready".into()));
+        assert!(spec.env.is_empty());
+
+        let vulkan = SelectedRuntime {
+            backend: Some(Backend::Vulkan),
+            ..nemo
+        };
+        let args = child_spec(&paths, &vulkan, &selection, 40002, "k")
             .unwrap()
             .args
             .join(" ");
-        assert!(
-            args.ends_with("--request-path /v1/audio --inference-path /transcriptions -t 8"),
-            "{args}"
+        assert!(args.ends_with("--device vulkan --no-ui"), "{args}");
+    }
+
+    /// nemo-speech refuses a model name it does not list: requests name the listed id.
+    #[test]
+    fn nemo_speech_models_are_registered_under_the_id_the_server_lists() {
+        let model = selected(
+            Service::Stt,
+            "parakeet-tdt-0.6b-v3-q8_0",
+            Provider::NemoSpeech,
         );
-        assert!(
-            !args.contains("0.0.0.0") && !args.contains("--threads"),
-            "{args}"
+        let listed = EndpointHealth {
+            state: EndpointState::Reachable,
+            checked_at: None,
+            detail: None,
+            served_models: vec!["parakeet-tdt-0.6b-v3.oss-align.q8_0".into()],
+        };
+        assert_eq!(
+            remote_model(Provider::NemoSpeech, &model, Some(&listed), Some("old")),
+            "parakeet-tdt-0.6b-v3.oss-align.q8_0"
         );
+        let down = EndpointHealth {
+            state: EndpointState::Unreachable,
+            served_models: vec![],
+            ..listed.clone()
+        };
+        assert_eq!(
+            remote_model(Provider::NemoSpeech, &model, Some(&down), Some("old")),
+            "old"
+        );
+        assert_eq!(
+            remote_model(Provider::NemoSpeech, &model, None, None),
+            "parakeet-tdt-0.6b-v3-q8_0"
+        );
+        let chat = selected(Service::Llm, "qwen", Provider::LlamaServer);
+        assert_eq!(
+            remote_model(Provider::LlamaServer, &chat, Some(&listed), None),
+            "qwen"
+        );
+    }
+
+    /// The managed chat model takes tools as definitions, rendered by its chat template.
+    #[test]
+    fn the_managed_chat_model_takes_tools_as_definitions_through_its_template() {
+        let chat = selected(Service::Llm, "qwen", Provider::LlamaServer);
+        let embed = selected(Service::Embeddings, "nomic", Provider::LlamaServer);
+        let stt = selected(Service::Stt, "parakeet", Provider::NemoSpeech);
+        assert_eq!(native_tools(&chat), Some(true));
+        assert_eq!(native_tools(&embed), None);
+        assert_eq!(native_tools(&stt), None);
+        let ini = llama_presets(&[&chat, &embed]);
+        let section = |name: &str| {
+            ini.split(&format!("[{name}]"))
+                .nth(1)
+                .unwrap()
+                .split("\n[")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert!(section("qwen").contains("jinja = true"), "{ini}");
+        assert!(!section("nomic").contains("jinja"), "{ini}");
+        let mut off = chat.clone();
+        off.server_flags = vec!["--no-jinja".into()];
+        let ini = llama_presets(&[&off]);
+        assert!(
+            ini.contains("no-jinja = true") && !ini.contains("\njinja"),
+            "{ini}"
+        );
+    }
+
+    /// A running nemo-speech is as healthy as its `/v1/models` listing with the key says: the
+    /// served ids are the listed ones, a refused key is `Unauthorized`. One that is starting
+    /// says so without a request.
+    #[tokio::test]
+    async fn a_running_nemo_speech_is_checked_by_its_listing() {
+        let mut server = mockito::Server::new_async().await;
+        let listing = server
+            .mock("GET", "/v1/models")
+            .match_header("authorization", "Bearer good")
+            .with_body(r#"{"object":"list","data":[{"id":"parakeet-tdt-0.6b-v3.oss-align.q8_0","object":"model","capability":"transcription"}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let refused = server
+            .mock("GET", "/v1/models")
+            .match_header("authorization", "Bearer bad")
+            .with_status(401)
+            .with_body(r#"{"error":{"message":"missing or invalid bearer token"}}"#)
+            .create_async()
+            .await;
+        let base_url = Url::parse(&server.url()).unwrap();
+        let port = base_url.port().unwrap();
+        let (tx, rx) = tokio::sync::watch::channel(ProcessStatus {
+            phase: Phase::Running,
+            pid: None,
+            port,
+            restarts: 0,
+            detail: None,
+        });
+        MANAGED_PORTS.write().unwrap().insert(
+            port,
+            ManagedPort {
+                status: rx,
+                readiness: Readiness::Http("/ready".into()),
+                served: vec!["parakeet-tdt-0.6b-v3-q8_0".into()],
+                lists_models: true,
+            },
+        );
+        let endpoint = |key: &str| Endpoint {
+            id: "e".into(),
+            name: NEMO_SPEECH_ENDPOINT.into(),
+            kind: EndpointKind::OpenAiAudio,
+            base_url: base_url.clone(),
+            api_key: Secret::new(key),
+            capabilities: vec![AiCapability::Transcription],
+            max_num_ctx: None,
+            request_timeout_secs: None,
+            max_concurrent: None,
+            managed: true,
+            health: EndpointHealth::default(),
+        };
+        let health = managed_health(&endpoint("good")).await;
+        assert_eq!(
+            health.state,
+            EndpointState::Reachable,
+            "{:?}",
+            health.detail
+        );
+        assert_eq!(
+            health.served_models,
+            vec!["parakeet-tdt-0.6b-v3.oss-align.q8_0".to_string()]
+        );
+        assert_eq!(
+            managed_health(&endpoint("bad")).await.state,
+            EndpointState::Unauthorized
+        );
+        tx.send_modify(|s| s.phase = Phase::Starting);
+        let starting = managed_health(&endpoint("good")).await;
+        MANAGED_PORTS.write().unwrap().remove(&port);
+        assert_eq!(starting.detail.as_deref(), Some("Local AI is starting"));
+        listing.assert_async().await;
+        refused.assert_async().await;
     }
 
     /// The exit path of the CLI and the launcher, which cannot await: every managed child
@@ -1613,7 +1878,7 @@ mod tests {
             .arg("60")
             .spawn()
             .unwrap();
-        // Ignores SIGTERM, as whisper-server in effect does.
+        // Ignores SIGTERM, as a runtime stuck in a model load may.
         let mut stubborn = std::process::Command::new("/bin/sh")
             .args(["-c", "trap '' TERM; while true; do sleep 0.1; done"])
             .spawn()
@@ -1635,6 +1900,7 @@ mod tests {
                     status: rx,
                     readiness: Readiness::Tcp,
                     served: vec![],
+                    lists_models: false,
                 },
             );
         }
@@ -1669,8 +1935,8 @@ mod tests {
         let mut pids = Vec::new();
         for (provider, script) in [
             (Provider::LlamaServer, "exec sleep 60"),
-            // Ignores SIGTERM (inherited through exec), as whisper-server in effect does.
-            (Provider::WhisperServer, "trap '' TERM; exec sleep 60"),
+            // Ignores SIGTERM (inherited through exec), as a runtime stuck in a load may.
+            (Provider::NemoSpeech, "trap '' TERM; exec sleep 60"),
         ] {
             let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -1702,6 +1968,7 @@ mod tests {
                     status: supervised.watch(),
                     readiness: Readiness::Tcp,
                     served: vec![],
+                    lists_models: false,
                 },
             );
             RUNNING.lock().await.insert(

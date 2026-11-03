@@ -72,25 +72,51 @@ impl Service {
 pub enum Provider {
     /// llama.cpp's `llama-server` in router mode: chat and embeddings on one port.
     LlamaServer,
-    /// whisper.cpp's `whisper-server`: `/v1/audio/transcriptions`.
-    WhisperServer,
+    /// NVIDIA NeMo-Speech.cpp's `nemo-speech serve`: `/v1/audio/transcriptions` and
+    /// `/v1/models`.
+    NemoSpeech,
 }
 
 impl Provider {
     pub fn as_str(self) -> &'static str {
         match self {
             Provider::LlamaServer => "llama-server",
-            Provider::WhisperServer => "whisper-server",
+            Provider::NemoSpeech => "nemo-speech",
         }
     }
 }
 
+/// The runtimes and models the executor runs. The manifest also lists the wind tunnel's
+/// baselines and candidates (whisper-server, sherpa-onnx, llama-server audio models): an entry
+/// whose provider is not a [`Provider`] is left out; any other malformed entry is an error.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
     pub schema_version: u32,
+    #[serde(deserialize_with = "known_providers")]
     pub runtimes: BTreeMap<String, Runtime>,
+    #[serde(deserialize_with = "known_providers")]
     pub models: BTreeMap<String, ModelFile>,
+}
+
+/// The entries of a manifest map whose `provider` this executor runs.
+fn known_providers<'de, D, T>(deserializer: D) -> Result<BTreeMap<String, T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    use serde::de::Error;
+    let raw = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    let mut known = BTreeMap::new();
+    for (id, entry) in raw {
+        if serde_json::from_value::<Provider>(entry["provider"].clone()).is_err() {
+            continue;
+        }
+        let parsed =
+            serde_json::from_value(entry).map_err(|e| D::Error::custom(format!("{id}: {e}")))?;
+        known.insert(id, parsed);
+    }
+    Ok(known)
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -497,11 +523,43 @@ mod tests {
         let data = embedded().unwrap();
         for (class, services) in &data.recommendations.classes {
             if let Some(tts) = services.get("tts") {
-                if tts["provider"] != "llama-server" && tts["provider"] != "whisper-server" {
+                if tts["provider"] != "llama-server" && tts["provider"] != "nemo-speech" {
                     assert!(data.recommendations.get(class, Service::Tts).is_none());
                 }
             }
         }
+    }
+
+    /// The manifest's wind-tunnel-only runtimes and models (whisper-server, sherpa-onnx) are
+    /// left out; a malformed entry of a provider the executor runs is still an error.
+    #[test]
+    fn manifest_entries_of_providers_the_executor_does_not_run_are_left_out() {
+        let data = embedded().unwrap();
+        let runtimes: Vec<_> = data.manifest.runtimes.keys().map(String::as_str).collect();
+        assert_eq!(runtimes, vec!["llama-server", "nemo-speech"]);
+        assert!(data
+            .manifest
+            .models
+            .contains_key("parakeet-tdt-0.6b-v3-q8_0"));
+        assert!(!data.manifest.models.contains_key("whisper-small-q5_1"));
+        assert!(data
+            .manifest
+            .models
+            .values()
+            .all(|m| matches!(m.provider, Provider::LlamaServer | Provider::NemoSpeech)));
+
+        let broken = serde_json::json!({
+            "schemaVersion": 1,
+            "runtimes": { "nemo-speech": { "provider": "nemo-speech", "version": "0.3.0" } },
+            "models": {}
+        });
+        let error = serde_json::from_value::<Manifest>(broken).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("nemo-speech: missing field `builds`"),
+            "{error}"
+        );
     }
 
     #[test]

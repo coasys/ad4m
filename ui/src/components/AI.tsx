@@ -4,7 +4,7 @@ import { Ad4minContext } from "../context/Ad4minContext";
 import "../index.css";
 import ModelCard from "./ModelCard";
 import ModelModal from "./ModelModal";
-import { kindLabel } from "./aiSetup";
+import { endpointLabel } from "./aiSetup";
 
 const MODEL_TYPES: ModelType[] = ["LLM", "EMBEDDING", "TRANSCRIPTION", "SPEECH"];
 
@@ -158,7 +158,7 @@ const AI = () => {
                   {endpoints.map((endpoint) => (
                     <j-flex key={endpoint.id} a="center" j="between" gap="300">
                       <j-text nomargin color="ui-0">
-                        {endpoint.name}: {kindLabel(endpoint.kind)} at {endpoint.baseUrl} (
+                        {endpoint.name}: {endpointLabel(endpoint)} at {endpoint.baseUrl} (
                         {endpoint.managed ? "local AI, " : ""}
                         {endpoint.health.state.toLowerCase()})
                       </j-text>

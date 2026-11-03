@@ -5,7 +5,7 @@ import type { LocalAiService } from "./LocalAiService";
 
 export type LocalAiPlannedRuntime = { 
 /**
- * The manifest's runtime id: `llama-server`, `whisper-server`.
+ * The manifest's runtime id: `llama-server`, `nemo-speech`.
  */
 runtimeId: string, provider: LocalAiProvider, version: string, 
 /**
