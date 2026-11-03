@@ -547,14 +547,18 @@ impl AIService {
         })
     }
 
-    /// The client of the LLM `model_id` (an id, after `default` was resolved).
+    /// The client of the LLM `model_id` (an id, after `default` was resolved). None is the
+    /// caller's mistake (an [`InvalidModel`](crate::db::InvalidModel)): a task names a model
+    /// that is not an LLM, or none.
     async fn chat_model(&self, model_id: &str) -> Result<ChatModel> {
         self.llms
             .lock()
             .await
             .get(model_id)
             .cloned()
-            .ok_or_else(|| anyhow!("No LLM with id '{model_id}' is loaded"))
+            .ok_or_else(|| {
+                crate::db::InvalidModel(format!("No LLM with id '{model_id}' is loaded")).into()
+            })
     }
 
     /// Rewrites a task. Refused unless its model is a loaded LLM.
