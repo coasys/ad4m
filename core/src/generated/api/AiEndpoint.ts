@@ -15,4 +15,10 @@ requestTimeoutSecs?: number | null,
 /**
  * At most this many requests to this endpoint at once; the rest queue. Unset: no limit.
  */
-maxConcurrent?: number | null, health: EndpointHealth, };
+maxConcurrent?: number | null, 
+/**
+ * The executor's own local AI runs this server (`ai.localInstall`): its URL, key and
+ * models follow the supervisor, `ai.updateEndpoint` and `ai.removeEndpoint` refuse it,
+ * and its health is the supervisor's liveness check. `ai.localRemove` removes it.
+ */
+managed: boolean, health: EndpointHealth, };

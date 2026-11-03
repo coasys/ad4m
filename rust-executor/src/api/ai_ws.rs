@@ -7,6 +7,7 @@ use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::ai_service::endpoints::EndpointNotFound;
+use crate::ai_service::local;
 use crate::ai_service::providers::discovery::discover_for;
 use crate::ai_service::providers::http::{
     is_transport_safe, CLEARTEXT_KEY_REFUSAL, DISCOVERY_TIMEOUT,
@@ -478,6 +479,66 @@ async fn close_transcription_stream(
     Ok(Value::String("true".to_string()))
 }
 
+// ── Local AI ──
+
+/// The answer to a failed local AI call: an install while one runs, a plan that does not
+/// fit, nothing installed to start, or a write to a managed endpoint is a bad request.
+fn local_error(e: anyhow::Error) -> WsRpcError {
+    if e.downcast_ref::<local::LocalAiRefused>().is_some()
+        || e.downcast_ref::<crate::db::InvalidEndpoint>().is_some()
+    {
+        WsRpcError::bad_request(e.to_string())
+    } else {
+        WsRpcError::internal(format!("{e:#}"))
+    }
+}
+
+/// This device: OS, CPU, memory, GPUs, the backends a runtime can use, the memory budget.
+async fn local_hardware(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(
+        local::hardware().await.map_err(local_error)?,
+    )?)
+}
+
+/// What `ai.localInstall` would download and run here, and whether it fits.
+async fn local_plan(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(
+        local::current_plan().await.map_err(local_error)?,
+    )?)
+}
+
+async fn local_status(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(local::status().await)?)
+}
+
+/// Downloads the plan's runtimes and models (progress as `ai-local-progress`), then starts
+/// and registers them. Minutes for a first install.
+async fn local_install(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: local::InstallParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    Ok(serde_json::to_value(
+        local::install(body).await.map_err(local_error)?,
+    )?)
+}
+
+async fn local_start(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(
+        local::start().await.map_err(local_error)?,
+    )?)
+}
+
+async fn local_stop(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(local::stop().await)?)
+}
+
+async fn local_remove(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: local::RemoveParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    Ok(serde_json::to_value(
+        local::remove(body).await.map_err(local_error)?,
+    )?)
+}
+
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     // The executor's models (without keys), which users read too.
     map.method::<NoParams, Vec<ModelView>>("ai.models", list_models)
@@ -516,6 +577,29 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, Vec<DetectedEndpoint>>("ai.detectEndpoints", detect_endpoints)
         .read()
         .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // ── Local AI: reads for the main agent's sessions, process control for the operator.
+    // Installing downloads gigabytes and starts processes on this machine: no app token
+    // does that, only the admin credential (or a loopback executor without one).
+    map.method::<NoParams, local::hardware::LocalHardware>("ai.localHardware", local_hardware)
+        .read()
+        .guard(Guard::Executor(AI_READ_CAPABILITY.clone()));
+    map.method::<NoParams, local::plan::LocalPlan>("ai.localPlan", local_plan)
+        .read()
+        .guard(Guard::Executor(AI_READ_CAPABILITY.clone()));
+    map.method::<NoParams, local::LocalStatus>("ai.localStatus", local_status)
+        .read()
+        .guard(Guard::Executor(AI_READ_CAPABILITY.clone()));
+    map.method::<local::InstallParams, local::LocalStatus>("ai.localInstall", local_install)
+        .long()
+        .guard(Guard::Operator);
+    map.method::<NoParams, local::LocalStatus>("ai.localStart", local_start)
+        .long()
+        .guard(Guard::Operator);
+    map.method::<NoParams, local::LocalStatus>("ai.localStop", local_stop)
+        .guard(Guard::Operator);
+    map.method::<local::RemoveParams, bool>("ai.localRemove", local_remove)
+        .guard(Guard::Operator);
+
     // Ollama only. Progress goes out as `model-status`.
     map.method::<AiUpstreamModelParams, bool>("ai.pullModel", pull_model)
         .long()
@@ -1004,5 +1088,78 @@ mod endpoint_guard_tests {
                 "{method} as a user: endpoints are the operator's"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod local_ai_guard_tests {
+    use super::*;
+    use crate::api::ws_handler::build_handler_map;
+    use serde_json::json;
+
+    const READS: [&str; 3] = ["ai.localHardware", "ai.localPlan", "ai.localStatus"];
+    const CONTROL: [&str; 4] = [
+        "ai.localInstall",
+        "ai.localStart",
+        "ai.localStop",
+        "ai.localRemove",
+    ];
+
+    /// Reads: an app on the main agent with AI READ; never a managed user. Installing,
+    /// starting, stopping and removing download files and start processes on this machine:
+    /// the operator only, not even an app holding every capability.
+    #[tokio::test]
+    async fn local_ai_reads_are_the_main_agents_and_process_control_the_operators() {
+        let map = build_handler_map();
+        let operator = RequestContext::operator_for_test();
+        let app = RequestContext::app_for_test(vec![AI_READ_CAPABILITY.clone()]);
+        let app_all = RequestContext::app_for_test(vec![ALL_CAPABILITY.clone()]);
+        let user =
+            RequestContext::user_for_test("did:key:local-ai-user", vec![ALL_CAPABILITY.clone()]);
+        let params = json!({});
+
+        for method in READS {
+            assert!(
+                map.admit(method, &params, &operator).await.is_ok(),
+                "{method}"
+            );
+            assert!(
+                map.admit(method, &params, &app).await.is_ok(),
+                "{method} as an app"
+            );
+            assert_eq!(
+                map.admit(method, &params, &user).await.map_err(|e| e.code),
+                Err(403),
+                "{method} as a managed user"
+            );
+        }
+        for method in CONTROL {
+            assert!(
+                map.admit(method, &params, &operator).await.is_ok(),
+                "{method}"
+            );
+            for (who, ctx) in [("an app with *", &app_all), ("a managed user", &user)] {
+                let refused = map.admit(method, &params, ctx).await.unwrap_err();
+                assert_eq!(refused.code, 403, "{method} as {who}");
+                assert_eq!(refused.message, super::super::guards::OPERATOR_ONLY);
+            }
+        }
+    }
+
+    /// The install's params are its contract: a service the executor does not know is a
+    /// 400 before the guard.
+    #[tokio::test]
+    async fn an_install_names_known_services_only() {
+        let map = build_handler_map();
+        let operator = RequestContext::operator_for_test();
+        let ok = json!({ "services": ["llm", "embeddings", "stt"], "start": false });
+        assert!(map.admit("ai.localInstall", &ok, &operator).await.is_ok());
+        let bad = json!({ "services": ["video"] });
+        assert_eq!(
+            map.admit("ai.localInstall", &bad, &operator)
+                .await
+                .map_err(|e| e.code),
+            Err(400)
+        );
     }
 }

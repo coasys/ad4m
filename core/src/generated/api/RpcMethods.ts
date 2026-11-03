@@ -69,6 +69,11 @@ import type { LanguageMeta } from "./LanguageMeta";
 import type { LanguageRef } from "./LanguageRef";
 import type { LanguageWriteSettingsParams } from "./LanguageWriteSettingsParams";
 import type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesRequest";
+import type { LocalAiHardware } from "./LocalAiHardware";
+import type { LocalAiInstallParams } from "./LocalAiInstallParams";
+import type { LocalAiPlan } from "./LocalAiPlan";
+import type { LocalAiRemoveParams } from "./LocalAiRemoveParams";
+import type { LocalAiStatus } from "./LocalAiStatus";
 import type { LockAgentRequest } from "./LockAgentRequest";
 import type { Model } from "./Model";
 import type { ModelStatus } from "./ModelStatus";
@@ -225,6 +230,13 @@ export interface RpcMethods {
   "ai.embed": { params: EmbedRequest; result: string };
   "ai.endpoints": { params: Record<string, never>; result: Array<AiEndpoint> };
   "ai.getDefaultModel": { params: AiGetDefaultModelParams; result: Model | null };
+  "ai.localHardware": { params: Record<string, never>; result: LocalAiHardware };
+  "ai.localInstall": { params: LocalAiInstallParams; result: LocalAiStatus };
+  "ai.localPlan": { params: Record<string, never>; result: LocalAiPlan };
+  "ai.localRemove": { params: LocalAiRemoveParams; result: boolean };
+  "ai.localStart": { params: Record<string, never>; result: LocalAiStatus };
+  "ai.localStatus": { params: Record<string, never>; result: LocalAiStatus };
+  "ai.localStop": { params: Record<string, never>; result: LocalAiStatus };
   "ai.modelStatus": { params: AiIdParams; result: ModelStatus };
   "ai.models": { params: Record<string, never>; result: Array<Model> };
   "ai.prompt": { params: PromptRequest; result: string };
@@ -414,6 +426,9 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.discoverModels",
   "ai.endpoints",
   "ai.getDefaultModel",
+  "ai.localHardware",
+  "ai.localPlan",
+  "ai.localStatus",
   "ai.modelStatus",
   "ai.models",
   "ai.tasks",
@@ -488,6 +503,8 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "agent.generate",
   "agent.unlock",
   "ai.embed",
+  "ai.localInstall",
+  "ai.localStart",
   "ai.prompt",
   "ai.pullModel",
   "language.applyTemplate",

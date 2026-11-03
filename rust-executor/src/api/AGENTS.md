@@ -143,7 +143,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-201 methods: Cap 72, Executor 40, Open 5, Operator 16, Owns 68.
+208 methods: Cap 72, Executor 43, Open 5, Operator 20, Owns 68.
 
 | Method | Guard |
 |---|---|
@@ -180,6 +180,13 @@ the guard checked:
 | `ai.embed` | `Cap(artificial intelligence:PROMPT)` |
 | `ai.endpoints` | `Executor(artificial intelligence:READ)` |
 | `ai.getDefaultModel` | `Cap(artificial intelligence:READ)` |
+| `ai.localHardware` | `Executor(artificial intelligence:READ)` |
+| `ai.localInstall` | `Operator` |
+| `ai.localPlan` | `Executor(artificial intelligence:READ)` |
+| `ai.localRemove` | `Operator` |
+| `ai.localStart` | `Operator` |
+| `ai.localStatus` | `Executor(artificial intelligence:READ)` |
+| `ai.localStop` | `Operator` |
 | `ai.modelStatus` | `Cap(artificial intelligence:READ)` |
 | `ai.models` | `Cap(artificial intelligence:READ)` |
 | `ai.prompt` | `Owns(Task taskId, artificial intelligence:PROMPT)` |
