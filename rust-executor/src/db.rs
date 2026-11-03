@@ -2130,21 +2130,55 @@ impl Ad4mDb {
         Ok(())
     }
 
-    /// The additions of the perspective's parked diffs (`is_pending = 0`). Their links
-    /// stay in the store as Shared, but must not reach the link language again.
-    pub fn get_parked_additions(
+    /// The additions of every diff of the perspective still in `perspective_diff`: queued
+    /// (`is_pending = 1`, the commit loop sends them) or parked (`is_pending = 0`, never
+    /// sent again). A sent diff's row is deleted. Their links stay in the store as
+    /// Shared, but the fallback sync must not send them: the queue owns them.
+    ///
+    /// An imported row is stored without a shape check. A row whose additions do not
+    /// read as links is skipped with a warning naming its id: failing the whole read
+    /// would stop the fallback sync on every attempt.
+    pub fn get_unsent_additions(
         &self,
         perspective_uuid: &str,
     ) -> Ad4mDbResult<Vec<LinkExpression>> {
         let mut stmt = self.conn.prepare(
-            "SELECT additions FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2 ORDER BY id",
+            "SELECT id, additions FROM perspective_diff WHERE perspective = ?1 ORDER BY id",
         )?;
-        let rows = stmt.query_map(params![perspective_uuid, false], |row| {
-            row.get::<_, String>(0)
+        let rows = stmt.query_map(params![perspective_uuid], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)))
         })?;
         let mut additions = Vec::new();
         for row in rows {
-            additions.extend(serde_json::from_str::<Vec<LinkExpression>>(&row?)?);
+            let (id, raw) = row?;
+            // Each addition on its own: one malformed entry must not take the row's
+            // readable links out of the exclusion set.
+            let elements = raw
+                .map_err(AnyError::from)
+                .and_then(|raw| Ok(serde_json::from_str::<Vec<serde_json::Value>>(&raw)?));
+            let elements = match elements {
+                Ok(elements) => elements,
+                Err(e) => {
+                    log::warn!(
+                        "perspective {}: skipping diff {}, its additions are not a list: {}",
+                        perspective_uuid,
+                        id,
+                        e
+                    );
+                    continue;
+                }
+            };
+            for element in elements {
+                match serde_json::from_value::<LinkExpression>(element) {
+                    Ok(link) => additions.push(link),
+                    Err(e) => log::warn!(
+                        "perspective {}: skipping an addition of diff {} that does not read as a link: {}",
+                        perspective_uuid,
+                        id,
+                        e
+                    ),
+                }
+            }
         }
         Ok(additions)
     }
@@ -5044,6 +5078,54 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert_eq!(diff.additions.len(), 2);
         assert_eq!(diff.removals.len(), 0);
+    }
+
+    /// An imported row is stored without a shape check, so one parked row may not
+    /// parse. It must not hide the readable parked rows: the fallback sync reads
+    /// them on every attempt and gives up when the read fails.
+    #[test]
+    fn an_unreadable_parked_row_does_not_hide_the_readable_ones() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+        db.conn
+            .execute(
+                "INSERT INTO perspective_diff (perspective, additions, removals, is_pending) VALUES (?1, ?2, ?3, ?4)",
+                params![p_uuid, "{\"not\": \"a list of links\"}", "[]", false],
+            )
+            .unwrap();
+        let parked = construct_dummy_link_expression(LinkStatus::Shared);
+        db.add_pending_diff(
+            &p_uuid,
+            &PerspectiveDiff {
+                additions: vec![parked.clone()],
+                removals: vec![],
+            },
+        )
+        .unwrap();
+        let (_, ids) = db.get_pending_diffs(&p_uuid, None).unwrap();
+        db.park_pending_diffs(&p_uuid, ids).unwrap();
+
+        assert_eq!(db.get_unsent_additions(&p_uuid).unwrap(), vec![parked]);
+    }
+
+    #[test]
+    fn a_malformed_addition_does_not_hide_the_readable_links_of_its_row() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+        let good = construct_dummy_link_expression(LinkStatus::Shared);
+        let additions = serde_json::to_string(&vec![
+            serde_json::to_value(&good).unwrap(),
+            serde_json::json!({"not": "a link"}),
+        ])
+        .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO perspective_diff (perspective, additions, removals, is_pending) VALUES (?1, ?2, ?3, ?4)",
+                params![p_uuid, additions, "[]", false],
+            )
+            .unwrap();
+
+        assert_eq!(db.get_unsent_additions(&p_uuid).unwrap(), vec![good]);
     }
 
     /// The notifications table of executors that named the owner by email.
