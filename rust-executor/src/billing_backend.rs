@@ -384,11 +384,21 @@ impl BillingBackend for LocalBillingBackend {
 
 /// HTTP client that delegates billing operations to the platform Worker's
 /// `/internal/billing/` API for shared-mode executors.
+///
+/// Every request runs on a runtime of its own (`runtime`), whatever thread calls: an
+/// executor handler on a multi-thread runtime, a current-thread runtime, or a plain thread
+/// such as the transcription worker. The connections of `client` and their pool then always
+/// belong to one live runtime.
 pub struct SharedBillingBackend {
     base_url: String,
     token: String,
     client: reqwest::Client,
+    /// `None` only after `drop` has shut it down.
+    runtime: Option<tokio::runtime::Runtime>,
 }
+
+/// A reply: its status and its body as text.
+type Reply = (reqwest::StatusCode, String);
 
 impl SharedBillingBackend {
     pub fn new(base_url: String, token: String) -> Self {
@@ -399,65 +409,94 @@ impl SharedBillingBackend {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("Failed to build SharedBillingBackend HTTP client"),
+            runtime: Some(
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .thread_name("shared-billing-http")
+                    .enable_all()
+                    .build()
+                    .expect("Failed to build the SharedBillingBackend runtime"),
+            ),
         }
     }
 
-    fn auth_header(&self) -> String {
-        format!("Bearer {}", self.token)
-    }
+    /// Sends `method path` (with a JSON `body`, if any) and reads the whole reply, on the
+    /// backend's runtime. The caller's thread waits: inside a multi-thread runtime it leaves
+    /// the worker pool first (`block_in_place`), so other tasks keep running. A transport
+    /// failure is `Err`; any HTTP status is `Ok`, for the caller to read.
+    fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<Reply, AnyError> {
+        let mut builder = self
+            .client
+            .request(method.clone(), format!("{}{}", self.base_url, path))
+            .header("Authorization", format!("Bearer {}", self.token));
+        if let Some(body) = body {
+            builder = builder.json(body);
+        }
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow!("SharedBillingBackend is shut down"))?;
 
-    /// Run an async reqwest future from a synchronous trait method.
-    ///
-    /// On a multi-thread tokio runtime, `block_in_place` moves the current worker out of
-    /// the pool and `block_on` drives the future there; this avoids the panic that
-    /// `reqwest::blocking` triggers inside a runtime. `block_in_place` panics on a
-    /// current-thread runtime, so there, and outside any runtime, the future runs on a
-    /// runtime of its own on a scoped thread.
-    fn block_on<F>(&self, f: F) -> F::Output
-    where
-        F: std::future::Future + Send,
-        F::Output: Send,
-    {
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(|| handle.block_on(f))
+        let (tx, rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            let reply = async {
+                let resp = builder.send().await?;
+                let status = resp.status();
+                // A body that cannot be read is empty: the status already tells whether
+                // the Worker did the operation (a committed debit stays committed).
+                let text = resp.text().await.unwrap_or_else(|e| {
+                    log::warn!("SharedBillingBackend: reply body unreadable: {}", e);
+                    String::new()
+                });
+                Ok::<Reply, reqwest::Error>((status, text))
             }
-            _ => std::thread::scope(|scope| {
-                scope
-                    .spawn(|| {
-                        tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .expect("a runtime for a billing request")
-                            .block_on(f)
-                    })
-                    .join()
-                    .expect("billing request thread")
-            }),
+            .await;
+            // The caller has stopped waiting only if it panicked: nothing to tell.
+            let _ = tx.send(reply);
+        });
+        let wait = || rx.recv();
+        let reply = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(wait)
+            }
+            _ => wait(),
         }
+        .map_err(|_| {
+            anyhow!(
+                "SharedBillingBackend {} {}: the request task ended",
+                method,
+                path
+            )
+        })?;
+
+        reply.map_err(|e| anyhow!("SharedBillingBackend {} {} failed: {}", method, path, e))
+    }
+
+    /// A 2xx reply's body as JSON; any other status is `Err`.
+    fn json_reply(
+        method: &str,
+        path: &str,
+        (status, text): Reply,
+    ) -> Result<serde_json::Value, AnyError> {
+        if !status.is_success() {
+            return Err(anyhow!(
+                "SharedBillingBackend {} {} returned {}: {}",
+                method,
+                path,
+                status,
+                text
+            ));
+        }
+        serde_json::from_str(&text).map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
     }
 
     fn get_json(&self, path: &str) -> Result<serde_json::Value, AnyError> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .block_on(
-                self.client
-                    .get(&url)
-                    .header("Authorization", self.auth_header())
-                    .send(),
-            )
-            .map_err(|e| anyhow!("SharedBillingBackend GET {} failed: {}", path, e))?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "SharedBillingBackend GET {} returned {}",
-                path,
-                resp.status()
-            ));
-        }
-
-        self.block_on(resp.json())
-            .map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
+        Self::json_reply("GET", path, self.request(reqwest::Method::GET, path, None)?)
     }
 
     fn post_json(
@@ -465,30 +504,11 @@ impl SharedBillingBackend {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, AnyError> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .block_on(
-                self.client
-                    .post(&url)
-                    .header("Authorization", self.auth_header())
-                    .json(body)
-                    .send(),
-            )
-            .map_err(|e| anyhow!("SharedBillingBackend POST {} failed: {}", path, e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body_text = self.block_on(resp.text()).unwrap_or_default();
-            return Err(anyhow!(
-                "SharedBillingBackend POST {} returned {}: {}",
-                path,
-                status,
-                body_text
-            ));
-        }
-
-        self.block_on(resp.json())
-            .map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
+        Self::json_reply(
+            "POST",
+            path,
+            self.request(reqwest::Method::POST, path, Some(body))?,
+        )
     }
 
     fn put_json(
@@ -496,58 +516,28 @@ impl SharedBillingBackend {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, AnyError> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .block_on(
-                self.client
-                    .put(&url)
-                    .header("Authorization", self.auth_header())
-                    .json(body)
-                    .send(),
-            )
-            .map_err(|e| anyhow!("SharedBillingBackend PUT {} failed: {}", path, e))?;
+        Self::json_reply(
+            "PUT",
+            path,
+            self.request(reqwest::Method::PUT, path, Some(body))?,
+        )
+    }
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body_text = self.block_on(resp.text()).unwrap_or_default();
-            return Err(anyhow!(
-                "SharedBillingBackend PUT {} returned {}: {}",
-                path,
-                status,
-                body_text
-            ));
-        }
-
-        self.block_on(resp.json())
-            .map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
+    fn delete_json(&self, path: &str) -> Result<serde_json::Value, AnyError> {
+        Self::json_reply(
+            "DELETE",
+            path,
+            self.request(reqwest::Method::DELETE, path, None)?,
+        )
     }
 
     /// GET that reads 404 as `Ok(None)`; any other non-2xx or transport failure is `Err`.
     fn get_json_or_not_found(&self, path: &str) -> Result<Option<serde_json::Value>, AnyError> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .block_on(
-                self.client
-                    .get(&url)
-                    .header("Authorization", self.auth_header())
-                    .send(),
-            )
-            .map_err(|e| anyhow!("SharedBillingBackend GET {} failed: {}", path, e))?;
-
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        let reply = self.request(reqwest::Method::GET, path, None)?;
+        if reply.0 == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "SharedBillingBackend GET {} returned {}",
-                path,
-                resp.status()
-            ));
-        }
-
-        self.block_on(resp.json())
-            .map(Some)
-            .map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
+        Self::json_reply("GET", path, reply).map(Some)
     }
 
     /// POST a debit of the agent `agent_did`: 402 is `InsufficientCredits`, 404 is
@@ -559,33 +549,23 @@ impl SharedBillingBackend {
         body: &serde_json::Value,
         agent_did: &str,
     ) -> Result<serde_json::Value, BillingError> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .block_on(
-                self.client
-                    .post(&url)
-                    .header("Authorization", self.auth_header())
-                    .json(body)
-                    .send(),
-            )
-            .map_err(|e| {
-                BillingError::Other(anyhow!("SharedBillingBackend POST {} failed: {}", path, e))
-            })?;
+        let (status, text) = self
+            .request(reqwest::Method::POST, path, Some(body))
+            .map_err(BillingError::Other)?;
 
-        match resp.status().as_u16() {
+        match status.as_u16() {
             402 => return Err(BillingError::InsufficientCredits),
             404 => return Err(BillingError::UserNotFound(agent_did.to_string())),
-            _ if !resp.status().is_success() => {
+            _ if !status.is_success() => {
                 return Err(BillingError::Other(anyhow!(
                     "SharedBillingBackend POST {} returned {}",
                     path,
-                    resp.status()
+                    status
                 )))
             }
             _ => {}
         }
 
-        let text = self.block_on(resp.text()).unwrap_or_default();
         if text.trim().is_empty() {
             return Ok(serde_json::Value::Null);
         }
@@ -598,28 +578,15 @@ impl SharedBillingBackend {
             serde_json::Value::Null
         }))
     }
+}
 
-    fn delete_json(&self, path: &str) -> Result<serde_json::Value, AnyError> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .block_on(
-                self.client
-                    .delete(&url)
-                    .header("Authorization", self.auth_header())
-                    .send(),
-            )
-            .map_err(|e| anyhow!("SharedBillingBackend DELETE {} failed: {}", path, e))?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "SharedBillingBackend DELETE {} returned {}",
-                path,
-                resp.status()
-            ));
+impl Drop for SharedBillingBackend {
+    /// Shuts the runtime down without waiting, so the backend may be dropped on any thread,
+    /// a runtime's included.
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
         }
-
-        self.block_on(resp.json())
-            .map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
     }
 }
 
@@ -819,7 +786,8 @@ impl BillingBackend for SharedBillingBackend {
             .collect()
     }
 
-    /// 404 is an unpriced operation (`Ok(None)`); every other failure is `Err`.
+    /// 404 is an unpriced operation (`Ok(None)`); every other failure is `Err`, and so is a
+    /// reply without a numeric `price`: it is not "unpriced".
     fn get_rate(&self, description: &str) -> Result<Option<f64>, AnyError> {
         let Some(result) = self.get_json_or_not_found(&format!(
             "/billing/rates/{}",
@@ -828,7 +796,11 @@ impl BillingBackend for SharedBillingBackend {
         else {
             return Ok(None);
         };
-        Ok(result.get("price").and_then(|v| v.as_f64()))
+        result
+            .get("price")
+            .and_then(|v| v.as_f64())
+            .map(Some)
+            .ok_or_else(|| anyhow!("Missing 'price' in rate response for {}", description))
     }
 
     fn set_rates(&self, rates: &[(String, f64)]) -> Result<(), AnyError> {
@@ -961,13 +933,64 @@ mod tests {
         mock.assert();
     }
 
+    /// Calls the backend twice from the runtime the test runs in: each call sends and reads
+    /// its reply, the second reuses the client and its pooled connection, and dropping the
+    /// backend inside the runtime does not panic.
+    async fn credits_twice_from_a_runtime() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", format!("{DID_PATH}/credits").as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"credits":7}"#)
+            .expect(2)
+            .create_async()
+            .await;
+        let backend = SharedBillingBackend::new(server.url(), "bill-tok".to_string());
+        assert_eq!(backend.get_agent_credits(DID).unwrap(), 7.0);
+        assert_eq!(backend.get_agent_credits(DID).unwrap(), 7.0);
+        mock.assert_async().await;
+        drop(backend);
+    }
+
+    // An executor handler: a worker of the multi-thread runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shared_calls_from_a_multi_thread_runtime() {
+        credits_twice_from_a_runtime().await;
+    }
+
+    // A current-thread runtime, where `block_in_place` is not allowed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_shared_calls_from_a_current_thread_runtime() {
+        credits_twice_from_a_runtime().await;
+    }
+
+    // A plain thread, as the transcription worker: no runtime. The second call reuses the
+    // connection of the first; with a runtime per call it found that runtime gone.
+    #[test]
+    fn test_shared_calls_from_a_plain_thread_reuse_the_client() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", format!("{DID_PATH}/credits").as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"credits":7}"#)
+            .expect(3)
+            .create();
+        let backend = SharedBillingBackend::new(server.url(), "bill-tok".to_string());
+        for _ in 0..3 {
+            assert_eq!(backend.get_agent_credits(DID).unwrap(), 7.0);
+        }
+        mock.assert();
+    }
+
     #[test]
     fn test_shared_get_user_credits() {
         let mut server = mockito::Server::new();
         let url = server.url();
 
         let mock = server
-            .mock("GET", "/billing/user@test.com/credits")
+            .mock("GET", "/billing/user%40test.com/credits")
             .match_header("Authorization", "Bearer bill-tok")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -986,7 +1009,7 @@ mod tests {
         let url = server.url();
 
         let mock = server
-            .mock("PUT", "/billing/user@test.com/credits")
+            .mock("PUT", "/billing/user%40test.com/credits")
             .match_body(mockito::Matcher::Json(
                 serde_json::json!({ "amount": 100.0 }),
             ))
@@ -1200,6 +1223,15 @@ mod tests {
             .create();
         assert!(backend.get_rate("failing").is_err());
         failing.assert();
+
+        let priceless = server
+            .mock("GET", "/billing/rates/priceless")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{}"#)
+            .create();
+        assert!(backend.get_rate("priceless").is_err());
+        priceless.assert();
     }
 
     #[test]
@@ -1279,7 +1311,7 @@ mod tests {
             .with_body(r#"{"enabled":true}"#)
             .create();
         let user = server
-            .mock("GET", "/billing/user@test.com/free-access")
+            .mock("GET", "/billing/user%40test.com/free-access")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"enabled":false}"#)

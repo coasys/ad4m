@@ -116,8 +116,9 @@ Notes on some methods:
   `Cap(agent:UPDATE)`, as `agent.removeApp`: since #1399 an app a user approved acts as the
   user's agent too; its handler checks the principal for a named user.
 - `Operator`: `runtime.importData` writes rows as they are in the file, granted notifications
-  and password hashes included. The stubs `user.credits` and `runtime.unyt*` answer 501 to the
-  operator until each gets a handler and its real guard.
+  and password hashes included. `user.credits` sets the balance of the account named by email.
+  The stubs `runtime.unyt*` answer 501 to the operator until each gets a handler and its real
+  guard.
 - `runtime.exportData` (`Executor`) has two kinds. A `perspective` export checks
   `get_perspective_with_access` in its handler, so an app exports only the main agent's
   perspectives. A `db` export names no perspective and checks nothing past the guard: it writes
