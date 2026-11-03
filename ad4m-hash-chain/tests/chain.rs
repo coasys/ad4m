@@ -5,7 +5,7 @@ mod common;
 
 use ad4m_hash_chain::{
     compare, entry_hash, entry_hash_json, fold, import, verify_proof, CanonError, Chain,
-    ChainError, Compare, ForkEvidence, ImportOutcome, ProofError,
+    ChainError, ChainPolicy, Compare, ForkEvidence, ImportOutcome, ProofError,
 };
 use common::*;
 use serde_json::json;
@@ -712,7 +712,7 @@ fn a_shuffled_batch_imports_as_the_sorted_batch() {
         got,
         ImportOutcome::Appended {
             head: sorted_chain.head(),
-            count: 6
+            entries: entries[2..].to_vec()
         }
     );
     assert_eq!(snapshot(&shuffled_chain), snapshot(&sorted_chain));
@@ -739,12 +739,12 @@ fn a_batch_past_our_head_is_a_gap_until_the_missing_entries_arrive() {
                 seq: 3,
                 hash: entry_hash(&entries[3]).unwrap()
             },
-            count: 2
+            entries: entries[2..4].to_vec()
         }
     );
     assert!(matches!(
         import(&mut chain, &TestPolicy, &entries[4..]).unwrap(),
-        ImportOutcome::Appended { count: 2, .. }
+        ImportOutcome::Appended { entries: e, .. } if e == entries[4..]
     ));
     assert_eq!(chain.head().seq, 5);
 }
@@ -755,7 +755,7 @@ fn a_repeated_batch_is_already_have() {
     let mut chain = fold(&TestPolicy, &entries[..1]).unwrap();
     assert!(matches!(
         import(&mut chain, &TestPolicy, &entries).unwrap(),
-        ImportOutcome::Appended { count: 3, .. }
+        ImportOutcome::Appended { entries: e, .. } if e == entries[1..]
     ));
     assert_eq!(
         import(&mut chain, &TestPolicy, &entries).unwrap(),
@@ -823,7 +823,7 @@ fn import_keeps_the_copy_of_an_entry_whose_proof_holds() {
             import(&mut chain, &TestPolicy, &batch).unwrap(),
             ImportOutcome::Appended {
                 head: chain.head(),
-                count: 2
+                entries: full[3..].to_vec()
             }
         );
         assert_eq!(
@@ -843,6 +843,111 @@ fn import_keeps_the_copy_of_an_entry_whose_proof_holds() {
     .unwrap_err();
     assert_eq!(policy_err(&err), Some(&TestError::MissingProof));
     assert_eq!(snapshot(&chain), before);
+}
+
+#[test]
+fn appended_names_the_copy_with_the_proof_not_the_first_in_the_batch() {
+    // Stripping a proof needs no key and keeps the hash: a caller that stores its own pick
+    // from the batch (the first copy at each seq) stores an entry the next fold refuses.
+    let full = make_chain("c", 1, 3);
+    let mut stripped = full[1].clone();
+    stripped.proof.clear();
+    for batch in [
+        vec![stripped.clone(), full[1].clone()],
+        vec![full[1].clone(), stripped.clone()],
+        vec![stripped.clone(), full[1].clone(), stripped.clone()],
+    ] {
+        let mut chain = fold(&TestPolicy, &full[..1]).unwrap();
+        let ImportOutcome::Appended { head, entries } =
+            import(&mut chain, &TestPolicy, &batch).unwrap()
+        else {
+            panic!("expected Appended");
+        };
+        assert_eq!(head, chain.head());
+        assert_eq!(entries, vec![full[1].clone()]);
+        assert_eq!(entries[0].proof.len(), 1);
+        // What a cold load folds: the held entry 0, then what the outcome says to store.
+        let reload = [full[0].clone(), entries[0].clone()];
+        assert_eq!(
+            snapshot(&fold(&TestPolicy, &reload).unwrap()),
+            snapshot(&chain)
+        );
+    }
+}
+
+#[test]
+fn appended_serializes_its_count_of_entries() {
+    let entries = make_chain("c", 1, 4);
+    let mut chain = fold(&TestPolicy, &entries[..1]).unwrap();
+    let outcome = import(&mut chain, &TestPolicy, &entries[1..]).unwrap();
+    assert_eq!(
+        serde_json::to_value(&outcome).unwrap(),
+        json!({"kind": "appended", "head": chain.head(), "count": 3})
+    );
+}
+
+thread_local! {
+    static STATE_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// `TestState` that counts its clones (per thread, so parallel tests do not mix).
+#[derive(Debug, PartialEq, Eq)]
+struct CountedState(TestState);
+
+impl Clone for CountedState {
+    fn clone(&self) -> Self {
+        STATE_CLONES.with(|n| n.set(n.get() + 1));
+        CountedState(self.0.clone())
+    }
+}
+
+struct CountingPolicy;
+
+impl ChainPolicy for CountingPolicy {
+    type Entry = TestEntry;
+    type State = CountedState;
+    type Error = TestError;
+    const TYPE: &'static str = TestPolicy::TYPE;
+    const DOMAIN: &'static str = TestPolicy::DOMAIN;
+
+    fn genesis(&self, entry: &TestEntry) -> Result<(String, CountedState), TestError> {
+        let (id, state) = TestPolicy.genesis(entry)?;
+        Ok((id, CountedState(state)))
+    }
+
+    fn chain_of(&self, entry: &TestEntry) -> String {
+        TestPolicy.chain_of(entry)
+    }
+
+    fn apply(&self, state: &mut CountedState, entry: &TestEntry) -> Result<(), TestError> {
+        TestPolicy.apply(&mut state.0, entry)
+    }
+}
+
+/// The clones of the state that `import` of `batch` makes on a chain holding `held`.
+fn import_clones(held: &[TestEntry], batch: &[TestEntry]) -> usize {
+    let mut chain = fold(&CountingPolicy, held).unwrap();
+    STATE_CLONES.with(|n| n.set(0));
+    assert!(matches!(
+        import(&mut chain, &CountingPolicy, batch).unwrap(),
+        ImportOutcome::Appended { .. }
+    ));
+    STATE_CLONES.with(|n| n.get())
+}
+
+#[test]
+fn import_clones_the_state_once_per_batch_and_once_per_extra_copy() {
+    let entries = make_chain("c", 1, 65);
+    // 64 entries with one copy each: the staged state only.
+    assert!(import_clones(&entries[..1], &entries[1..]) <= 1);
+
+    // A second copy of one entry: one more clone, for the copy that has another to fall
+    // back on.
+    let mut stripped = entries[10].clone();
+    stripped.proof.clear();
+    let mut batch = entries[1..].to_vec();
+    batch.insert(9, stripped);
+    assert!(import_clones(&entries[..1], &batch) <= 2);
 }
 
 #[test]
@@ -872,7 +977,7 @@ fn chain_error_codes_have_the_typescript_shape() {
     let e: ChainError<TestError> = ChainError::Policy(TestError::NoKey);
     assert_eq!(e.code(), json!({"code": "policy", "reason": "NoKey"}));
     assert_eq!(e.to_string(), "NoKey");
-    let outcome = ImportOutcome::Gap { have: 1, first: 4 };
+    let outcome: ImportOutcome<TestEntry> = ImportOutcome::Gap { have: 1, first: 4 };
     assert_eq!(
         serde_json::to_value(&outcome).unwrap(),
         json!({"kind": "gap", "have": 1, "first": 4})

@@ -45,6 +45,13 @@ identity core, not here).
   (the wasm exports) has no text: what `JSON.stringify` gives is what is hashed.
 - `import` keeps every copy of a new entry that shares a hash (the hash leaves out
   `proof`) and appends the first copy that passes; it fails only when none does.
+  `ImportOutcome::Appended { head, entries }` carries the copies it appended (owned, in
+  seq order): a caller persists those, never its own pick from the batch, because a copy
+  stripped of its proof hashes the same and fails the next `fold`. The serialized form
+  (vectors) gives `count` only.
+- `import` clones the state once per batch, plus once for each copy that has another copy
+  of its entry still to try; a single copy steps on the staged state in place
+  (`tests/chain.rs` counts the clones).
 - The SQLite store answers as the memory store does (`range` past `i64::MAX` is empty)
   and reads a negative stored integer as an error. Its expect check is a compare-and-set
   in the head-row write itself. A deferred transaction whose snapshot another connection
