@@ -31,7 +31,7 @@ pub struct StoredEntry {
 impl StoredEntry {
     /// The stored form of `entry`: its hash and its JCS text, proofs included.
     pub fn from_entry<E: Entry>(entry: &E, stored_at: u64) -> Result<Self, CanonError> {
-        let value = serde_json::to_value(entry).map_err(|e| CanonError::Serde(e.to_string()))?;
+        let value = crate::jcs::to_value(entry)?;
         Ok(StoredEntry {
             seq: entry.seq(),
             hash: entry_hash_json(&value)?,
@@ -40,9 +40,10 @@ impl StoredEntry {
         })
     }
 
-    /// Parses the stored text back into an entry.
-    pub fn entry<E: Entry>(&self) -> Result<E, serde_json::Error> {
-        serde_json::from_str(&self.json)
+    /// Parses the stored text back into an entry ([`crate::entry_from_json`]: the text must
+    /// be the entry's JCS text).
+    pub fn entry<E: Entry>(&self) -> Result<E, CanonError> {
+        crate::entry_from_json(&self.json)
     }
 }
 

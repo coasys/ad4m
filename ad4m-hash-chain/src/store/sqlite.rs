@@ -47,12 +47,15 @@ fn backend(e: rusqlite::Error) -> StoreError {
     StoreError::Backend(e.to_string())
 }
 
-fn to_sql(n: u64) -> Result<i64, StoreError> {
-    i64::try_from(n).map_err(|_| StoreError::Backend(format!("{n} does not fit an SQLite integer")))
+/// Seqs and times are stored as SQLite integers. A stored negative one is an error when
+/// read, never 0.
+fn u64_at(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<u64> {
+    let n: i64 = row.get(idx)?;
+    u64::try_from(n).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(idx, n))
 }
 
-fn from_sql(n: i64) -> u64 {
-    n.max(0) as u64
+fn to_sql(n: u64) -> Result<i64, StoreError> {
+    i64::try_from(n).map_err(|_| StoreError::Backend(format!("{n} does not fit an SQLite integer")))
 }
 
 /// A [`ChainStore`] on one SQLite connection. Calls block the calling task for the time
@@ -99,7 +102,7 @@ impl SqliteChainStore {
             params![ty, chain],
             |row| {
                 Ok(Head {
-                    seq: from_sql(row.get(0)?),
+                    seq: u64_at(row, 0)?,
                     hash: row.get(1)?,
                 })
             },
@@ -148,7 +151,7 @@ impl SqliteChainStore {
             .query_map(params![ty, chain], |row| {
                 Ok(ForkEvidence {
                     chain: chain.clone(),
-                    seq: from_sql(row.get(0)?),
+                    seq: u64_at(row, 0)?,
                     ours: row.get(1)?,
                     theirs: row.get(2)?,
                 })
@@ -198,13 +201,19 @@ fn append_steps(
     expect: Option<&Head>,
     entries: &[StoredEntry],
 ) -> Result<Head, StoreError> {
-    let current = SqliteChainStore::head_in(tx, ty, chain)?;
-    if current.as_ref() != expect {
-        return Err(StoreError::Conflict(current));
-    }
-    let head = continued_head(expect, entries)?;
-    // Compare-and-set on the head row, so a writer on another connection that slipped in
-    // between the read and this write still loses.
+    let head = match continued_head(expect, entries) {
+        Ok(head) => head,
+        Err(e) => {
+            // A stale expect is reported before a bad batch, as the memory store does.
+            let current = SqliteChainStore::head_in(tx, ty, chain)?;
+            if current.as_ref() != expect {
+                return Err(StoreError::Conflict(current));
+            }
+            return Err(e);
+        }
+    };
+    // The expect check is a compare-and-set on the head row: the write itself checks the
+    // head, so no read can go stale before it.
     let changed = match expect {
         Some(old) => tx
             .execute(
@@ -267,6 +276,10 @@ impl ChainStore for SqliteChainStore {
         from: u64,
         limit: u32,
     ) -> Result<Vec<StoredEntry>, StoreError> {
+        // A seq past i64::MAX is never stored (`to_sql` refuses it), so nothing is from there on.
+        let Ok(from) = i64::try_from(from) else {
+            return Ok(vec![]);
+        };
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare_cached(
@@ -275,12 +288,12 @@ impl ChainStore for SqliteChainStore {
             )
             .map_err(backend)?;
         let rows = stmt
-            .query_map(params![ty, chain, to_sql(from)?, limit], |row| {
+            .query_map(params![ty, chain, from, limit], |row| {
                 Ok(StoredEntry {
-                    seq: from_sql(row.get(0)?),
+                    seq: u64_at(row, 0)?,
                     hash: row.get(1)?,
                     json: row.get(2)?,
-                    stored_at: from_sql(row.get(3)?),
+                    stored_at: u64_at(row, 3)?,
                 })
             })
             .map_err(backend)?;
