@@ -9,6 +9,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ed25519, x25519 } from "@noble/curves/ed25519";
+import { gcm } from "@noble/ciphers/aes";
 
 import type { AgentAdapter } from "../src/adapters.js";
 import {
@@ -193,6 +194,39 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         assert.equal(wire.timestamp, undefined);
         assert.equal(wire.proof, undefined);
         assert.equal((wire.data as any).ciphertext.includes(Buffer.from("s3cr3t").toString("hex")), false);
+    });
+
+    it("writes ciphertext and nonce in base64, a third shorter than hex", () => {
+        const roomKey = generateRoomKey();
+        const wire = encryptLinkForWire(makeLink(), roomKey, 1);
+        const data = wire.data as { ciphertext: string; nonce: string };
+        assert.match(data.nonce, /^[A-Za-z0-9+/]{16}$/, "a 12-byte nonce is 16 base64 characters");
+        const ciphertextBytes = Buffer.from(data.ciphertext, "base64");
+        assert.equal(ciphertextBytes.toString("base64"), data.ciphertext, "the ciphertext is canonical base64");
+        assert.equal(data.ciphertext.length, 4 * Math.ceil(ciphertextBytes.length / 3));
+        assert.ok(data.ciphertext.length < 0.7 * ciphertextBytes.length * 2, "shorter than the hex form");
+    });
+
+    it("opens a link an older build wrote in hex", () => {
+        const roomKey = generateRoomKey();
+        const link = makeLink({ source: "written-in-hex" });
+        const nonce = randomBytes(12);
+        const plaintext = new TextEncoder().encode(JSON.stringify({
+            author: link.author, timestamp: link.timestamp, proof: link.proof, data: link.data,
+        }));
+        const ciphertext = gcm(roomKey, nonce).encrypt(plaintext);
+        const hexWire = {
+            data: { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) },
+            link_hash: encryptLinkForWire(link, roomKey).link_hash,
+            key_version: 1,
+        };
+        assert.deepEqual(decryptLinkFromWire(hexWire, new Map([[1, roomKey]])), link);
+        // The same bytes in base64 open too.
+        const b64Wire = {
+            ...hexWire,
+            data: { ciphertext: Buffer.from(ciphertext).toString("base64"), nonce: Buffer.from(nonce).toString("base64") },
+        };
+        assert.deepEqual(decryptLinkFromWire(b64Wire, new Map([[1, roomKey]])), link);
     });
 
     it("uses a fresh nonce per call (different ciphertext for identical input)", () => {

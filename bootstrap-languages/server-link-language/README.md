@@ -113,8 +113,8 @@ self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 |---|---|
 | `POST /rooms/:roomId/auth` | DID challenge-response. Step 1: `{did}` → `{challenge}`. Step 2: `{did, challenge, signature}` → `{token}` |
 | `POST /rooms/:roomId/commit` | Push a `{additions, removals}` diff |
-| `GET /rooms/:roomId/sync?since=<sequence>` | Pull diffs newer than `sequence` → `{diffs[], revision, sequence}` |
-| `GET /rooms/:roomId/render` | Full current snapshot → `{links[], revision}` |
+| `GET /rooms/:roomId/sync?since=<sequence>&limit=100` | Pull up to 100 diffs newer than `sequence` → `{diffs[] (each with its sequence), revision, sequence, next}` |
+| `GET /rooms/:roomId/render?limit=500[&next=<cursor>]` | One page of the snapshot pinned at `upto` → `{links[], revision, sequence, upto, next}` |
 | `GET /rooms/:roomId/peers` | Connected agent DIDs → `{peers: string[]}` |
 | `GET /rooms/:roomId/revision` | `{revision, sequence}` |
 | `GET /rooms/:roomId/acl` | `{admin, members: [{did}]}` |
@@ -194,13 +194,21 @@ costs that one link, not the rest of its batch or the other held links.
 
 ### Sync strategy
 
-- `init()` runs a one-shot `bootstrap()`: fetch the full `/render` snapshot,
-  apply it to the local store as the room's current state (emitting what it
-  adds and removes), and record the sequence cursor — far cheaper than
-  replaying the room's entire diff history on every fresh instance. A stored
-  link whose encrypted copy in the snapshot no key opens yet is kept.
+- `init()` runs `bootstrap()`: load the room's current state as a paged
+  `/render` snapshot pinned at `upto`, then tail `/sync?since=upto` (link-server
+  README, "Paged snapshot, then tail") — far cheaper than replaying the
+  room's entire diff history on every fresh instance. Each page (500 links)
+  is applied and emitted as its own diff and the cursor is stored after it
+  (`render/progress`), so a restart resumes at the next page and a
+  `catchUp()` (the WebSocket's `onOpen`, the runtime's `sync()`) finishes a
+  render in progress before it tails. After the last page, stored links no
+  page brought are removed and emitted once; links that arrived after `upto`
+  meanwhile (own commits, pushes) and a stored link whose encrypted copy no
+  key opens yet are kept. Against a server that does not page, the first
+  answer is the whole set and the tail is empty.
 - The WebSocket pushes live diffs. On every (re)connect, `ws-client.ts`'s
-  `onOpen` handler also triggers an HTTP catch-up (`GET /sync?since=<cursor>`)
+  `onOpen` handler also triggers an HTTP catch-up (`GET /sync?since=<cursor>`,
+  100 diffs a page)
   as a belt-and-braces gap-fill for whatever happened while offline.
 - `sync.sync()` (called by the runtime on its own timer) always performs the
   same HTTP catch-up. This is deliberately unconditional rather than

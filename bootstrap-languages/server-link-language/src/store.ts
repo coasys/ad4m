@@ -12,6 +12,10 @@
  *   sequence                         → last applied server sequence number
  *   held/{link_hash}                 → {op, link}: an inbound wire link this
  *                                      agent holds no key for yet (see sync.ts)
+ *   render/progress                  → {upto, next, page}: a paged /render in
+ *                                      progress, so a restart resumes it
+ *   render/seen/{id}                 → JSON string[]: hashes one render page
+ *                                      (or a commit during the render) brought
  */
 
 import { getStorage } from "./adapters.js";
@@ -250,4 +254,51 @@ export function heldLinks(): HeldLink[] {
 export function clearHeld(): void {
     const storage = getStorage();
     for (const key of storage.listKeys(HELD_PREFIX)) storage.delete(key);
+}
+
+// ---------------------------------------------------------------------------
+// Paged /render in progress (see sync.ts, bootstrap)
+// ---------------------------------------------------------------------------
+
+export interface RenderProgress {
+    /** The snapshot's pinned sequence; null until the first page came back. */
+    upto: number | null;
+    /** Cursor of the next page; null for the first. */
+    next: string | null;
+    /** Pages applied so far. */
+    page: number;
+}
+
+const RENDER_PROGRESS_KEY = "render/progress";
+const RENDER_SEEN_PREFIX = "render/seen/";
+
+export function getRenderProgress(): RenderProgress | null {
+    const raw = getStorage().get(RENDER_PROGRESS_KEY);
+    return raw ? (JSON.parse(raw) as RenderProgress) : null;
+}
+
+export function setRenderProgress(progress: RenderProgress): void {
+    getStorage().put(RENDER_PROGRESS_KEY, JSON.stringify(progress));
+}
+
+/** Records hashes the render must not remove. `id` names the page or commit, so a retried page overwrites its own record. */
+export function addRenderSeen(id: string, hashes: string[]): void {
+    getStorage().put(RENDER_SEEN_PREFIX + id, JSON.stringify(hashes));
+}
+
+export function renderSeen(): Set<string> {
+    const storage = getStorage();
+    const seen = new Set<string>();
+    for (const key of storage.listKeys(RENDER_SEEN_PREFIX)) {
+        const raw = storage.get(key);
+        if (raw) for (const h of JSON.parse(raw) as string[]) seen.add(h);
+    }
+    return seen;
+}
+
+/** Ends a render: drops its progress and its seen hashes. */
+export function clearRender(): void {
+    const storage = getStorage();
+    for (const key of storage.listKeys(RENDER_SEEN_PREFIX)) storage.delete(key);
+    storage.delete(RENDER_PROGRESS_KEY);
 }

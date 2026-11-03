@@ -76,6 +76,33 @@ export function hexToBytes(hex: string): Uint8Array {
     return out;
 }
 
+export function bytesToBase64(bytes: Uint8Array): string {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+}
+
+export function base64ToBytes(b64: string): Uint8Array {
+    const binary = atob(b64.trim());
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+}
+
+/** A 12-byte nonce in hex: what every link written before base64 carries. */
+const HEX_NONCE = new RegExp(`^[0-9a-fA-F]{${AES_NONCE_BYTES * 2}}$`);
+
+/**
+ * The bytes of an encrypted link's `{ciphertext, nonce}`. Links are written
+ * in base64; links written by older builds are hex, and rooms keep them. The
+ * nonce tells which: 12 bytes are 24 characters in hex and 16 in base64, so
+ * the two never look alike.
+ */
+export function decodeWireCiphertext(data: { ciphertext: string; nonce: string }): { ciphertext: Uint8Array; nonce: Uint8Array } {
+    const decode = HEX_NONCE.test(data.nonce.trim()) ? hexToBytes : base64ToBytes;
+    return { ciphertext: decode(data.ciphertext), nonce: decode(data.nonce) };
+}
+
 function utf8ToBytes(str: string): Uint8Array {
     return new TextEncoder().encode(str);
 }
@@ -335,7 +362,7 @@ export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array, ke
     const ciphertext = gcm(roomKey, nonce).encrypt(plaintext);
 
     return {
-        data: { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) },
+        data: { ciphertext: bytesToBase64(ciphertext), nonce: bytesToBase64(nonce) },
         link_hash: linkHash,
         ...(keyVersion !== undefined ? { key_version: keyVersion } : {}),
     };
@@ -366,8 +393,7 @@ export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKeyOrRing:
     } else {
         roomKey = roomKeyOrRing;
     }
-    const nonce = hexToBytes(wireLink.data.nonce);
-    const ciphertext = hexToBytes(wireLink.data.ciphertext);
+    const { ciphertext, nonce } = decodeWireCiphertext(wireLink.data);
     const plaintext = gcm(roomKey, nonce).decrypt(ciphertext);
     const parsed = JSON.parse(bytesToUtf8(plaintext));
 

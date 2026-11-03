@@ -155,12 +155,20 @@ export interface SyncResponse {
     diffs: SyncDiffEntry[];
     revision: string;
     sequence: number;
+    /** Paged answer only: the `since` of the next page; null on the last
+     *  page and from a server that does not page (it sends the whole log). */
+    next: number | null;
 }
 
 export interface RenderResponse {
     links: WireLinkExpression[];
     revision: string;
     sequence: number;
+    /** The sequence the snapshot is pinned at: tail `/sync` from here. A
+     *  server that does not page sends the whole set at `sequence`. */
+    upto: number;
+    /** Cursor of the next page; null on the last page. */
+    next: string | null;
 }
 
 export interface PeersResponse {

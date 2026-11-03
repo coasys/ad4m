@@ -117,22 +117,38 @@ export async function commitDiff(config: RoomConfig, token: string, diff: WirePe
     };
 }
 
-export async function fetchSync(config: RoomConfig, token: string, since: number): Promise<SyncResponse> {
-    const url = roomUrl(config, `/sync?since=${encodeURIComponent(String(since))}`);
-    const res = await request<Partial<SyncResponse>>(url, "GET", jsonHeaders(token));
+/** The diff log after `since`. With `limit`, one page of at most `limit`
+ *  diffs; a server that does not page ignores it and sends the rest of the log. */
+export async function fetchSync(config: RoomConfig, token: string, since: number, limit?: number): Promise<SyncResponse> {
+    const query = `since=${encodeURIComponent(String(since))}` + (limit !== undefined ? `&limit=${limit}` : "");
+    const res = await request<Partial<SyncResponse>>(roomUrl(config, `/sync?${query}`), "GET", jsonHeaders(token));
     return {
         diffs: res.diffs ?? [],
         revision: res.revision ?? "",
         sequence: typeof res.sequence === "number" ? res.sequence : since,
+        next: typeof res.next === "number" && res.next > since ? res.next : null,
     };
 }
 
-export async function fetchRender(config: RoomConfig, token: string): Promise<RenderResponse> {
-    const res = await request<Partial<RenderResponse>>(roomUrl(config, "/render"), "GET", jsonHeaders(token));
+/** The room's active links. With `page`, one page of the snapshot (`next`
+ *  absent for the first); a server that does not page sends them all. */
+export async function fetchRender(
+    config: RoomConfig,
+    token: string,
+    page?: { limit: number; next: string | null },
+): Promise<RenderResponse> {
+    let path = "/render";
+    if (page) {
+        path += `?limit=${page.limit}` + (page.next !== null ? `&next=${encodeURIComponent(page.next)}` : "");
+    }
+    const res = await request<Partial<RenderResponse>>(roomUrl(config, path), "GET", jsonHeaders(token));
+    const sequence = typeof res.sequence === "number" ? res.sequence : 0;
     return {
         links: res.links ?? [],
         revision: res.revision ?? "",
-        sequence: typeof res.sequence === "number" ? res.sequence : 0,
+        sequence,
+        upto: typeof res.upto === "number" ? res.upto : sequence,
+        next: typeof res.next === "string" && res.next.length > 0 ? res.next : null,
     };
 }
 

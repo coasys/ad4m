@@ -1,5 +1,6 @@
 import path from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
+import compressPlugin from "@fastify/compress";
 import websocketPlugin from "@fastify/websocket";
 import { AuthManager, ChallengeStore } from "./auth.js";
 import { LinkServerDB } from "./db.js";
@@ -87,6 +88,12 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
     logger,
     bodyLimit: opts.bodyLimit ?? 10 * 1024 * 1024, // 10 MiB
   });
+  // Compresses JSON answers (above 1 kB) for a client that sends
+  // Accept-Encoding: the Deno host's fetch sends it and decodes br/gzip. A
+  // client that sends none gets the uncompressed body, as before. Request
+  // bodies stay uncompressed: decompressing them would let a small upload
+  // grow past bodyLimit.
+  await app.register(compressPlugin, { globalDecompression: false });
   await app.register(websocketPlugin, {
     options: {
       // Cap inbound WebSocket frames at 1 MiB — link diffs and telepresence

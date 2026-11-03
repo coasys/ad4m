@@ -628,8 +628,12 @@ describe("sync: bootstrap", () => {
         const linkB = makeLink({ source: "b" });
 
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
+            (url, method) => method === "GET" && url.includes("/render"),
             () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [linkA, linkB], revision: "rev-snap", sequence: 7 }) }),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=7"),
+            () => jsonResponse({ diffs: [], revision: "rev-snap", sequence: 7 }),
         );
 
         await syncModule.bootstrap();
@@ -665,12 +669,16 @@ describe("sync: bootstrap", () => {
         const encLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 3);
 
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
+            (url, method) => method === "GET" && url.includes("/render"),
             () => ({
                 status: 200,
                 headers: {},
                 body: JSON.stringify({ links: [plainLink, encLink], revision: "rev-1", sequence: 1 }),
             }),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }) }),
         );
 
         await syncModule.bootstrap();
@@ -680,11 +688,7 @@ describe("sync: bootstrap", () => {
 
         // catchUp with empty diffs — should still attempt refresh because
         // bootstrap held the version 3 link.
-        transport.route(
-            (url, method) => method === "GET" && url.includes("/sync"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }) }),
-        );
-
+        refreshCalled = false;
         await syncModule.catchUp();
         assert.equal(refreshCalled, true, "catchUp should retry key ring refresh for versions tracked by bootstrap");
     });
@@ -700,8 +704,12 @@ describe("sync: bootstrap", () => {
 
         const freshLink = makeLink({ source: "fresh" });
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
+            (url, method) => method === "GET" && url.includes("/render"),
             () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [freshLink], revision: "rev-2", sequence: 5 }) }),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=5"),
+            () => jsonResponse({ diffs: [], revision: "rev-2", sequence: 5 }),
         );
 
         await syncModule.bootstrap();
@@ -709,7 +717,11 @@ describe("sync: bootstrap", () => {
         const links = store.allLinks().links;
         assert.equal(links.length, 1, "stale link should have been removed");
         assert.equal(links[0].data.source, "fresh");
-        assert.deepEqual(emittedDiffs, [{ additions: [freshLink], removals: [staleLink] }]);
+        // The page is emitted as it arrives; the removal step runs once, after the last page.
+        assert.deepEqual(emittedDiffs, [
+            { additions: [freshLink], removals: [] },
+            { additions: [], removals: [staleLink] },
+        ]);
     });
 });
 
@@ -1122,7 +1134,7 @@ describe("sync: no history is lost", () => {
             () => jsonResponse({ diffs: [], revision: "rev-2", sequence: 2 }),
         );
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
+            (url, method) => method === "GET" && url.includes("/render"),
             () => { throw new Error("timed out after 10000 ms"); },
         );
 
@@ -1150,7 +1162,7 @@ describe("sync: no history is lost", () => {
         const a = encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1);
         const b = encryptLinkForWire(makeLink({ source: "b" }), roomKey, 1);
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
+            (url, method) => method === "GET" && url.includes("/render"),
             () => jsonResponse({ links: [a, b], revision: "rev-7", sequence: 7 }),
         );
         transport.route(
@@ -1173,7 +1185,7 @@ describe("sync: no history is lost", () => {
         const roomKey = generateRoomKey();
         const a = encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1);
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
+            (url, method) => method === "GET" && url.includes("/render"),
             () => jsonResponse({ links: [a], revision: "rev-1", sequence: 1 }),
         );
         transport.route(
@@ -1228,8 +1240,12 @@ describe("sync: no history is lost", () => {
         const gone = makeLink({ source: "gone" });
         store.applyDiff({ additions: [kept, gone], removals: [] });
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
+            (url, method) => method === "GET" && url.includes("/render"),
             () => jsonResponse({ links: [encryptLinkForWire(kept, roomKey, 1)], revision: "rev-3", sequence: 3 }),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=3"),
+            () => jsonResponse({ diffs: [], revision: "rev-3", sequence: 3 }),
         );
 
         await syncModule.bootstrap();

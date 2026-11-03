@@ -24,6 +24,7 @@ import type {
     Link,
     LinkExpression,
     PerspectiveDiff,
+    RenderResponse,
     SyncDiffEntry,
     WireLinkExpression,
     WirePerspectiveDiff,
@@ -241,7 +242,15 @@ function openOrHoldDiff(wire: WirePerspectiveDiff): PerspectiveDiff {
 /** One inbound diff (a catch-up entry or a WebSocket push) at `sequence`.
  *  Returns what it changed, which is what was emitted. */
 export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: number, revision: string): PerspectiveDiff {
-    const emitted = applyAndEmit(openOrHoldDiff(wireDiff));
+    const opened = openOrHoldDiff(wireDiff);
+    const emitted = applyAndEmit(opened);
+    // A diff pushed during a paged render is after its `upto`: no page carries
+    // its links, so the render's removal step must keep them.
+    if (store.getRenderProgress() && (wireDiff.additions?.length ?? 0) > 0) {
+        const kept = opened.additions.map(store.hashLink);
+        for (const wireLink of wireDiff.additions ?? []) if (wireLink.link_hash) kept.push(wireLink.link_hash);
+        store.addRenderSeen(`diff-${sequence}`, kept);
+    }
     if (revision) store.setRevision(revision);
     if (Number.isFinite(sequence)) store.setSequence(sequence);
     return emitted;
@@ -300,6 +309,10 @@ export async function commit(diff: PerspectiveDiff): Promise<void> {
     const wire = toWireDiff(diff);
     const res = await withToken((token) => api.commitDiff(config, token, wire));
     store.applyDiff(diff);
+    // A render in progress would remove these links: no page it reads carries them.
+    if (store.getRenderProgress() && diff.additions.length > 0) {
+        store.addRenderSeen(`commit-${res.sequence ?? Date.now()}`, diff.additions.map(store.hashLink));
+    }
     if (typeof res.sequence === "number" && res.sequence === store.getSequence() + 1) {
         store.setSequence(res.sequence);
         if (res.revision) store.setRevision(res.revision);
@@ -583,41 +596,97 @@ export async function _awaitInflightForTests(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Loads the server's current link set (`/render`) as the authoritative state:
- * stored links it lacks are removed, its links are added, both emitted. Held
- * links from before are dropped (the snapshot supersedes them); the
+ * Loads the server's current link set as the authoritative state: a paged
+ * `/render` snapshot pinned at `upto`, then the diff log after `upto`
+ * (`catchUp`). Each page is applied and emitted as its own diff, and the
+ * cursor is stored after it, so a restart (or a retry) resumes at the next
+ * page. After the last page, stored links no page brought are removed and
+ * emitted once: the snapshot is the room's state at `upto`, and the log
+ * after it carries every later add and remove.
+ *
+ * Held links from before are dropped (the snapshot supersedes them); the
  * snapshot's own links that no key opens yet are held. A stored link whose
  * encrypted copy is held stays: the key ring not being loaded yet must not
- * delete links the executor holds.
+ * delete links the executor holds. A link this agent commits during the
+ * render stays too (`commit` records it).
  */
 export async function bootstrap(): Promise<void> {
-    const { config } = deps();
-
-    const rendered = await withToken((token) => api.fetchRender(config, token));
-
-    store.clearHeld();
-    const additions: LinkExpression[] = [];
-    const heldIds = new Set<string>();
-    for (const wireLink of rendered.links) {
-        const link = openOrHold(wireLink, "add");
-        if (link) additions.push(link);
-        else heldIds.add(heldId(wireLink));
+    if (!_rendering && !store.getRenderProgress()) {
+        store.clearHeld();
+        store.setRenderProgress({ upto: null, next: null, page: 0 });
     }
-    if (heldIds.size > 0) {
+    await catchUp();
+}
+
+/** Links per `/render` page, diffs per `/sync` page. A page of 500 encrypted
+ *  links is about 0.5 MB, 0.33 MB compressed (link-server `npm run bench`),
+ *  so a page fits the host's 10 s fetch deadline down to about 40 kB/s. */
+export const RENDER_PAGE_LIMIT = 500;
+export const SYNC_PAGE_LIMIT = 100;
+let _renderPageLimit = RENDER_PAGE_LIMIT;
+let _syncPageLimit = SYNC_PAGE_LIMIT;
+
+/** Test-only: small pages, so a test room of a few links spans several. */
+export function _setPageLimitsForTests(render = RENDER_PAGE_LIMIT, sync = SYNC_PAGE_LIMIT): void {
+    _renderPageLimit = render;
+    _syncPageLimit = sync;
+}
+
+let _rendering: Promise<void> | null = null;
+
+/** The render in progress, one at a time: `bootstrap` and `catchUp` share it. */
+function finishRender(): Promise<void> {
+    _rendering ??= renderPages().finally(() => { _rendering = null; });
+    return _rendering;
+}
+
+async function renderPages(): Promise<void> {
+    const { config } = deps();
+    const stored = store.getRenderProgress();
+    if (!stored) return;
+    let progress: store.RenderProgress = stored;
+    let upto = progress.upto;
+    for (;;) {
+        const cursor = { limit: _renderPageLimit, next: progress.next };
+        const page: RenderResponse = await withToken((token) => api.fetchRender(config, token, cursor));
+        upto ??= page.upto;
+
+        const additions: LinkExpression[] = [];
+        const seen: string[] = [];
+        for (const wireLink of page.links) {
+            const link = openOrHold(wireLink, "add");
+            if (link) {
+                additions.push(link);
+                seen.push(store.hashLink(link));
+            } else {
+                seen.push(heldId(wireLink));
+            }
+        }
+        applyAndEmit({ additions, removals: [] });
+        store.addRenderSeen(`page-${progress.page}`, seen);
+        progress = { upto, next: page.next, page: progress.page + 1 };
+        store.setRenderProgress(progress);
+        if (page.next === null) break;
+    }
+
+    const seen = store.renderSeen();
+    const removals = store
+        .allLinks()
+        .links.filter((link) => !seen.has(store.hashLink(link)) && !seen.has(wireLinkHash(link)));
+    applyAndEmit({ additions: [], removals });
+    const held = store.heldLinks().length;
+    if (held > 0) {
         console.warn(
-            `[server-link-language] bootstrap: ${heldIds.size} link(s) wait for a room key this agent ` +
+            `[server-link-language] bootstrap: ${held} link(s) wait for a room key this agent ` +
             "does not hold yet; they are applied once it does",
         );
     }
-
-    const inSnapshot = new Set(additions.map(store.hashLink));
-    const removals = store
-        .allLinks()
-        .links.filter((link) => !inSnapshot.has(store.hashLink(link)) && !heldIds.has(wireLinkHash(link)));
-
-    applyAndEmit({ additions, removals });
-    if (rendered.revision) store.setRevision(rendered.revision);
-    if (typeof rendered.sequence === "number") store.setSequence(rendered.sequence);
+    console.log(
+        `[server-link-language] bootstrap: snapshot at sequence ${upto} loaded in ${progress.page} page(s), ` +
+        `${removals.length} stale link(s) removed`,
+    );
+    store.setSequence(upto ?? 0);
+    store.clearRender();
 }
 
 // ---------------------------------------------------------------------------
@@ -625,7 +694,8 @@ export async function bootstrap(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Fetches everything since our last known sequence and applies it.
+ * Fetches everything since our last known sequence and applies it, a page
+ * at a time; first it finishes a paged render in progress (`bootstrap`).
  * Idempotent by construction: `since` only advances after a diff is
  * applied (or held), so a WebSocket that already delivered everything
  * live simply gets back an empty `diffs[]` here — there's no separate
@@ -635,26 +705,32 @@ export async function bootstrap(): Promise<void> {
  */
 export async function catchUp(): Promise<PerspectiveDiff> {
     const { config } = deps();
-    const since = store.getSequence();
-    const res = await withToken((token) => api.fetchSync(config, token, since));
-    console.log(
-        `[server-link-language] catchUp: since=${since}, received ${res.diffs.length} diff(s), ` +
-        `revision=${res.revision}, sequence=${res.sequence}`,
-    );
+    if (store.getRenderProgress()) await finishRender();
 
     const emitted: PerspectiveDiff = { additions: [], removals: [] };
     const collect = (diff: PerspectiveDiff) => {
         emitted.additions.push(...diff.additions);
         emitted.removals.push(...diff.removals);
     };
-    for (const rawEntry of res.diffs) {
-        const entry = normalizeSyncEntry(rawEntry, res.revision, res.sequence);
-        collect(applyInboundWireDiff(entry.diff, entry.sequence, entry.revision));
-    }
-
-    if (res.diffs.length === 0 && res.revision) {
-        store.setRevision(res.revision);
-        store.setSequence(res.sequence);
+    let since = store.getSequence();
+    for (;;) {
+        const res = await withToken((token) => api.fetchSync(config, token, since, _syncPageLimit));
+        console.log(
+            `[server-link-language] catchUp: since=${since}, received ${res.diffs.length} diff(s), ` +
+            `revision=${res.revision}, sequence=${res.sequence}` + (res.next !== null ? `, next=${res.next}` : ""),
+        );
+        // The room's revision belongs to its latest sequence: only the last page sets it.
+        const last = res.next === null;
+        for (const rawEntry of res.diffs) {
+            const entry = normalizeSyncEntry(rawEntry, last ? res.revision : "", res.next ?? res.sequence);
+            collect(applyInboundWireDiff(entry.diff, entry.sequence, entry.revision));
+        }
+        if (res.diffs.length === 0 && res.revision) {
+            store.setRevision(res.revision);
+            store.setSequence(res.sequence);
+        }
+        if (res.next === null) break;
+        since = res.next;
     }
 
     const { refreshKeyRing } = deps();

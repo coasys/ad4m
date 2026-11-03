@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS server_identity (
   private_key TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_links_room ON links(room_id);
+-- The keyset of a paged /render: (sequence, link_hash) within a room.
+CREATE INDEX IF NOT EXISTS idx_links_room_seq_hash ON links(room_id, sequence, link_hash);
 CREATE INDEX IF NOT EXISTS idx_diffs_room_seq ON diffs(room_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_acl_room ON acl(room_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_room_did ON sessions(room_id, did);
@@ -209,6 +211,11 @@ export class LinkServerDB {
       ),
       removeLink: this.raw.prepare("DELETE FROM links WHERE room_id = ? AND link_hash = ?"),
       getActiveLinkRows: this.raw.prepare("SELECT * FROM links WHERE room_id = ?"),
+      getActiveLinkPage: this.raw.prepare(
+        `SELECT * FROM links
+         WHERE room_id = ? AND sequence <= ? AND (sequence > ? OR (sequence = ? AND link_hash > ?))
+         ORDER BY sequence ASC, link_hash ASC LIMIT ?`
+      ),
 
       getNextSequence: this.raw.prepare(
         "SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM diffs WHERE room_id = ?"
@@ -222,6 +229,9 @@ export class LinkServerDB {
       ),
       getDiffsSince: this.raw.prepare(
         "SELECT * FROM diffs WHERE room_id = ? AND sequence > ? ORDER BY sequence ASC"
+      ),
+      getDiffPageSince: this.raw.prepare(
+        "SELECT * FROM diffs WHERE room_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?"
       ),
 
       createSession: this.raw.prepare(
@@ -381,6 +391,25 @@ export class LinkServerDB {
     );
   }
 
+  /**
+   * One page of the active links that were added at or before `upto`, in
+   * `(sequence, link_hash)` order, strictly after the cursor `after`
+   * (`{sequence: 0, hash: ""}` for the first page). A link added after
+   * `upto` gets a sequence above it, so the pages of one `upto` never shift:
+   * links removed meanwhile drop out, and the diff log after `upto` carries
+   * every change the pages miss.
+   */
+  getActiveLinkPage(
+    roomId: string,
+    upto: number,
+    after: { sequence: number; hash: string },
+    limit: number
+  ): LinkRow[] {
+    return this.stmts.getActiveLinkPage.all(
+      roomId, upto, after.sequence, after.sequence, after.hash, limit
+    ) as LinkRow[];
+  }
+
   // ---- diffs (append-only log) ----
 
   getNextSequence(roomId: string): number {
@@ -404,6 +433,11 @@ export class LinkServerDB {
 
   getDiffsSince(roomId: string, since: number): DiffRow[] {
     return this.stmts.getDiffsSince.all(roomId, since) as DiffRow[];
+  }
+
+  /** At most `limit` diffs after `since`, in sequence order. */
+  getDiffPageSince(roomId: string, since: number, limit: number): DiffRow[] {
+    return this.stmts.getDiffPageSince.all(roomId, since, limit) as DiffRow[];
   }
 
   getDiffsSinceParsed(

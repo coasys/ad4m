@@ -109,6 +109,18 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   commit at exactly cursor + 1 the cursor moves past it, so catch-up does
   not fetch our own links back; otherwise another agent's diff is in
   between and the cursor stays.
+- **The startup snapshot is paged and resumable.** `bootstrap()` stores
+  `render/progress` before the first `/render` page and after each one;
+  `catchUp()` finishes a stored render first (single flight, `finishRender`),
+  so the tail never starts from a cursor the snapshot has not reached. The
+  removal step runs once, after the last page, against `render/seen/*`: the
+  pages' hashes plus links that `commit` and `applyInboundWireDiff` stored
+  during the render (after `upto`, so in no page). Drop either record and a
+  member's own fresh link is removed and re-added.
+- **Encrypted links are written in base64, read in hex or base64.**
+  `encryptLinkForWire` writes base64; `decodeWireCiphertext` reads either,
+  telling them apart by the 12-byte nonce (24 hex or 16 base64 characters).
+  Rooms keep the hex links older builds wrote: never drop the hex path.
 - **A 401 replaces the session.** `commit`, `bootstrap` and `catchUp` run
   their request through `withToken` (src/sync.ts): on a 401 it drops the
   cached token (`invalidateToken` → `auth.invalidateSession()`),
