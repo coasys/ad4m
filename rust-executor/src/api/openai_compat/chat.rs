@@ -9,6 +9,10 @@
 //! When the request carries `tools` for a model without native tools, we inject the
 //! Hermes/Qwen `<tools>…</tools>` block as a system message (see
 //! [`super::tool_grammar`]) and recover any `<tool_call>` blocks from the text afterwards.
+//! `tool_choice: "required"` or a named function sends the endpoint a JSON schema of the
+//! call(s) to decode against ([`ToolCallConstraint`]), checks the calls that come back
+//! against it, and asks once more when they break it; `parallel_tool_calls: false` keeps
+//! one call.
 //! Assistant `tool_calls` and `role:"tool"` results are folded back into prompt text,
 //! since the text path has no tool role.
 //!
@@ -33,7 +37,7 @@ use super::errors::{OpenAIError, OpenAIJson};
 use super::model_selector::resolve;
 use super::native_tools;
 use super::passthrough::{self, Route, Upstream};
-use super::tool_grammar::{self, ExtractedToolCall, ToolChoice};
+use super::tool_grammar::{self, ExtractedToolCall, ToolCallConstraint, ToolChoice};
 use super::types::{
     ChatChoice, ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
     ChatCompletionResponse, ChatMessage, ChatMessageContent, ChatResponseMessage, CompletionChoice,
@@ -44,7 +48,7 @@ use crate::agent::capabilities::AI_PROMPT_CAPABILITY;
 use crate::agent::session::Session;
 use crate::ai_service::AIService;
 use crate::billing::check_compute_credits;
-use crate::types::{ModelType, RequestContext};
+use crate::types::{EndpointKind, ModelType, RequestContext};
 
 /// `POST /v1/chat/completions` — handles both streaming (`stream: true`)
 /// and non-streaming responses.
@@ -62,6 +66,7 @@ pub async fn chat_completions(
     }
     let req: ChatCompletionRequest =
         serde_json::from_value(body).map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
+    let endpoint_kind = resolved.endpoint.kind;
     let model_id = resolved.model.id;
 
     let tools: Vec<ToolDef> = req.tools.clone().unwrap_or_default();
@@ -70,10 +75,29 @@ pub async fn chat_completions(
     // Tools are "active" (rendered + potentially constrained + parsed out)
     // unless the caller explicitly disabled them with tool_choice: "none".
     let tools_active = has_tools && choice != ToolChoice::None;
+    let parallel = req.parallel_tool_calls.unwrap_or(true);
+    if let ToolChoice::Named(name) = &choice {
+        if !tools.iter().any(|tool| &tool.function.name == name) {
+            return Err(OpenAIError::invalid_request(format!(
+                "`tool_choice` names `{name}`, which is not one of `tools`"
+            )));
+        }
+    }
 
-    // A provider that carries tools as data gets them that way, and answers
-    // with structured calls instead of text to parse them out of.
-    if tools_active && AIService::model_supports_native_tools(&model_id) {
+    // `required` or a named function: made under a schema the endpoint decodes against,
+    // and checked (`constrained_tool_calls`). A request gets here for it only when its
+    // server does not enforce `tool_choice` (`passthrough::enforces_tool_choice`).
+    let constraint = if tools_active {
+        ToolCallConstraint::for_choice(&tools, &choice, parallel)
+    } else {
+        None
+    };
+
+    // A provider that carries tools as data gets them that way, and answers with structured
+    // calls instead of text to parse them out of; for a forced call only Anthropic, whose
+    // calls come back as data (it does not take `tool_choice` from this executor yet).
+    let native = tools_active && AIService::model_supports_native_tools(&model_id);
+    if native && (constraint.is_none() || endpoint_kind == EndpointKind::Anthropic) {
         return native_tools::chat_with_native_tools(
             auth,
             req.model.clone(),
@@ -98,10 +122,37 @@ pub async fn chat_completions(
         messages.push(flatten_message(m));
     }
 
+    if let Some(constraint) = constraint {
+        let (calls, usage) = constrained_tool_calls(&auth, model_id, messages, &constraint).await?;
+        return Ok(if req.stream {
+            stream_tool_calls(&auth, req.model, calls)
+        } else {
+            tool_calls_response(req.model, calls, usage)
+        });
+    }
+
+    // Without parallel calls a turn makes one, as OpenAI's `parallel_tool_calls: false`.
+    let call_limit = if parallel { usize::MAX } else { 1 };
     if req.stream {
-        chat_stream(auth, req.model.clone(), model_id, messages, tools_active).await
+        chat_stream(
+            auth,
+            req.model.clone(),
+            model_id,
+            messages,
+            tools_active,
+            call_limit,
+        )
+        .await
     } else {
-        chat_oneshot(auth, req.model.clone(), model_id, messages, tools_active).await
+        chat_oneshot(
+            auth,
+            req.model.clone(),
+            model_id,
+            messages,
+            tools_active,
+            call_limit,
+        )
+        .await
     }
 }
 
@@ -137,7 +188,12 @@ pub async fn completions(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
-        .prompt_messages(model_id, messages, auth.user_did().map(str::to_string))
+        .prompt_messages(
+            model_id,
+            messages,
+            auth.user_did().map(str::to_string),
+            None,
+        )
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
@@ -176,6 +232,7 @@ async fn chat_oneshot(
     model_id: String,
     messages: Vec<(String, String)>,
     tools_active: bool,
+    call_limit: usize,
 ) -> Result<axum::response::Response, OpenAIError> {
     // NOTE: WS-RPC `ai.prompt` on dev does not bill today (only pre-checks).
     // /v1 billing is correct for the public API surface; the WS-RPC gap
@@ -189,14 +246,21 @@ async fn chat_oneshot(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
-        .prompt_messages(model_id, messages, auth.user_did().map(str::to_string))
+        .prompt_messages(
+            model_id,
+            messages,
+            auth.user_did().map(str::to_string),
+            None,
+        )
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
     // Billing is now inside AIService::prompt_messages via bill_ai_operation.
 
     let tool_calls = if tools_active {
-        to_openai_tool_calls(tool_grammar::extract_tool_calls(&result.text))
+        let mut calls = tool_grammar::extract_tool_calls(&result.text);
+        calls.truncate(call_limit);
+        to_openai_tool_calls(calls)
     } else {
         Vec::new()
     };
@@ -246,6 +310,7 @@ async fn chat_stream(
     model_id: String,
     messages: Vec<(String, String)>,
     tools_active: bool,
+    call_limit: usize,
 ) -> Result<axum::response::Response, OpenAIError> {
     if let Some(agent_did) = auth.user_did() {
         check_compute_credits(agent_did)
@@ -311,8 +376,9 @@ async fn chat_stream(
                     accumulated.push_str(&token);
                 }
 
-                let tool_calls =
-                    to_openai_tool_calls(tool_grammar::extract_tool_calls(&accumulated));
+                let mut calls = tool_grammar::extract_tool_calls(&accumulated);
+                calls.truncate(call_limit);
+                let tool_calls = to_openai_tool_calls(calls);
 
                 if !tool_calls.is_empty() {
                     for (i, call) in tool_calls.into_iter().enumerate() {
@@ -456,6 +522,151 @@ fn emit_final(
     let _ = event_tx.send(Ok(
         Event::default().data(serde_json::to_string(&final_chunk).unwrap())
     ));
+}
+
+/// How many times the model is asked for a turn that keeps to a [`ToolCallConstraint`],
+/// for a server that cannot hold it to one (or a model that still breaks it).
+const CONSTRAINED_ATTEMPTS: usize = 2;
+
+/// The calls of a turn that `tool_choice` requires (`"required"` or a named function). The
+/// endpoint decodes against the constraint's schema where it can; the calls that come back
+/// are checked against it, and a turn that breaks it is asked for once more. Each attempt
+/// is billed: the model ran. The usage is the sum of the attempts.
+async fn constrained_tool_calls(
+    auth: &RequestContext,
+    model_id: String,
+    messages: Vec<(String, String)>,
+    constraint: &ToolCallConstraint,
+) -> Result<(Vec<ToolCall>, Usage), OpenAIError> {
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
+            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+    }
+    let service = AIService::global_instance()
+        .await
+        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+    let schema = constraint.schema();
+    let mut usage = Usage {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+    };
+    let mut broken = String::new();
+    for attempt in 1..=CONSTRAINED_ATTEMPTS {
+        let result = service
+            .prompt_messages(
+                model_id.clone(),
+                messages.clone(),
+                auth.user_did().map(str::to_string),
+                Some(schema.clone()),
+            )
+            .await
+            .map_err(|e| OpenAIError::from_upstream(&e))?;
+        usage.prompt_tokens += result.prompt_tokens as u64;
+        usage.completion_tokens += result.completion_tokens as u64;
+        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        match constraint.check(tool_grammar::extract_tool_calls(&result.text)) {
+            Ok(calls) => return Ok((to_openai_tool_calls(calls), usage)),
+            Err(reason) => {
+                log::warn!(
+                    "/v1 tool_choice on model {model_id}: attempt {attempt} of \
+                     {CONSTRAINED_ATTEMPTS} broke it: {reason}"
+                );
+                broken = reason;
+            }
+        }
+    }
+    Err(OpenAIError::tool_call_not_made(format!(
+        "The model did not make the tool call that tool_choice requires: {broken}"
+    )))
+}
+
+/// A `chat.completion` that answers with `calls`.
+fn tool_calls_response(
+    requested_model: String,
+    calls: Vec<ToolCall>,
+    usage: Usage,
+) -> axum::response::Response {
+    Json(ChatCompletionResponse {
+        id: format!("chatcmpl-{}", Uuid::new_v4()),
+        object: "chat.completion",
+        created: epoch_seconds(),
+        model: requested_model,
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatResponseMessage {
+                role: "assistant",
+                content: None,
+                tool_calls: Some(calls),
+            },
+            finish_reason: "tool_calls",
+        }],
+        usage,
+    })
+    .into_response()
+}
+
+/// The SSE stream of a turn that made `calls`: the role, one delta per call, the
+/// `tool_calls` finish and `[DONE]`. The calls were checked before the first byte, so a
+/// turn that broke its constraint is an HTTP error rather than a stream that ends in one.
+fn stream_tool_calls(
+    auth: &RequestContext,
+    requested_model: String,
+    calls: Vec<ToolCall>,
+) -> axum::response::Response {
+    let id = format!("chatcmpl-{}", Uuid::new_v4());
+    let created = epoch_seconds();
+    let chunk = |delta: ChatChunkDelta, finish_reason: Option<&'static str>| {
+        let chunk = ChatCompletionChunk {
+            id: id.clone(),
+            object: "chat.completion.chunk",
+            created,
+            model: requested_model.clone(),
+            choices: vec![ChatChunkChoice {
+                index: 0,
+                delta,
+                finish_reason,
+            }],
+        };
+        Ok::<_, Infallible>(Event::default().data(serde_json::to_string(&chunk).unwrap()))
+    };
+    let mut events = vec![chunk(
+        ChatChunkDelta {
+            role: Some("assistant"),
+            ..ChatChunkDelta::default()
+        },
+        None,
+    )];
+    for (index, call) in calls.into_iter().enumerate() {
+        events.push(chunk(
+            ChatChunkDelta {
+                tool_calls: Some(vec![ToolCallDelta {
+                    index: index as u32,
+                    id: Some(call.id),
+                    kind: Some("function"),
+                    function: Some(FunctionCallDelta {
+                        name: Some(call.function.name),
+                        arguments: Some(call.function.arguments),
+                    }),
+                }]),
+                ..ChatChunkDelta::default()
+            },
+            None,
+        ));
+    }
+    events.push(chunk(ChatChunkDelta::default(), Some("tool_calls")));
+    events.push(Ok(Event::default().data("[DONE]")));
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    spawn_until_over(&auth.session, async move {
+        for event in events {
+            if event_tx.send(event).is_err() {
+                return;
+            }
+        }
+    });
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
+    Sse::new(stream).into_response()
 }
 
 /// Convert recovered tool calls into OpenAI response `tool_calls[]`,

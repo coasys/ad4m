@@ -108,7 +108,7 @@ await client.ai.setDefaultModel("LLM", modelId);
 const { state } = await client.ai.modelStatus(modelId);
 ```
 
-`nativeTools` says whether prompts with tools send them as tool definitions. Left out it is on for Ollama and Anthropic and off for an OpenAI-shaped server, where tool support depends on the model and the server's flags (llama-server `--jinja`, vLLM `--enable-auto-tool-choice`); with it off the executor renders the tools into the prompt and reads the calls back from the text.
+`nativeTools` says whether prompts with tools send them as tool definitions. Left out it is on for Ollama and Anthropic and off for an OpenAI-shaped server, where tool support depends on the model and the server's flags (llama-server `--jinja`, vLLM `--enable-auto-tool-choice`); with it off the executor renders the tools into the prompt and reads the calls back from the text. On that text path, `tool_choice: "required"` or a named function sends the server a JSON schema of the call (as `response_format` `json_schema`, or Ollama's `format`), which llama-server, vLLM, Ollama and OpenAI decode against; the executor checks the calls that come back against it, asks once more when they break it, and otherwise answers 502 `tool_call_not_made`. `parallel_tool_calls: false` keeps one call.
 
 ### 2. Creating AI Tasks
 

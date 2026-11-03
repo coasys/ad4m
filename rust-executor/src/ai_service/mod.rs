@@ -178,11 +178,19 @@ impl ChatModel {
         })
     }
 
-    /// One completion of `turns`, with `tools` as definitions, in a slot of the endpoint's
+    /// One completion of `turns`, with `tools` as definitions and the reply constrained to
+    /// `json_schema` when given ([`ChatRequest::json_schema`]), in a slot of the endpoint's
     /// concurrency cap when it has one.
-    async fn chat(&self, turns: Vec<ChatTurn>, tools: Vec<ToolSpec>) -> Result<ChatReply> {
+    async fn chat(
+        &self,
+        turns: Vec<ChatTurn>,
+        tools: Vec<ToolSpec>,
+        json_schema: Option<serde_json::Value>,
+    ) -> Result<ChatReply> {
         let _slot = endpoints::request_slot(&self.endpoint).await;
-        let request = ChatRequest::new(self.remote_model.clone(), turns).with_tools(tools);
+        let request = ChatRequest::new(self.remote_model.clone(), turns)
+            .with_tools(tools)
+            .with_json_schema(json_schema);
         let reply = self.client.chat(request).await;
         self.after(reply)
     }
@@ -632,11 +640,16 @@ impl AIService {
     /// Run a chat-style prompt on `model_id` with a stateless message list and return the
     /// full response text and token counts. Backs the `/v1/chat/completions` paths the
     /// executor answers itself (Anthropic, the text tool fallback) and the harness.
+    ///
+    /// `json_schema` constrains the reply's text to JSON matching it, where the model's
+    /// server can decode against a schema ([`ChatRequest::json_schema`]); the caller
+    /// validates what comes back.
     pub async fn prompt_messages(
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
         bill_to: Option<String>,
+        json_schema: Option<serde_json::Value>,
     ) -> Result<PromptResult> {
         let resolved = Self::replace_model_variables(&model_id)?;
         let chat = self.chat_model(&resolved).await?;
@@ -648,7 +661,7 @@ impl AIService {
             resolved,
             truncate_for_log(&final_prompt)
         );
-        let text = chat.chat(turns, Vec::new()).await?.text;
+        let text = chat.chat(turns, Vec::new(), json_schema).await?.text;
         let completion_tokens = estimate_token_count(&text);
         log::debug!(
             "🤖 prompt_messages output model={} text={:?}",
@@ -721,7 +734,7 @@ impl AIService {
             }))
             .sum();
 
-        let reply = chat.chat(turns, tools).await?;
+        let reply = chat.chat(turns, tools, None).await?;
         let completion_tokens = estimate_reply_tokens(&reply);
 
         log::debug!(
@@ -816,7 +829,7 @@ impl AIService {
         let text_result: Result<String> = async {
             let chat = self.chat_model(&model_id).await?;
             Ok(chat
-                .chat(turns_for_task(&task, prompt), Vec::new())
+                .chat(turns_for_task(&task, prompt), Vec::new(), None)
                 .await?
                 .text)
         }
@@ -1598,7 +1611,7 @@ mod tests {
                 remote_model: "m".into(),
                 endpoint: Arc::new(endpoint),
             };
-            let calls = (0..4).map(|_| chat.chat(vec![ChatTurn::user("hi")], vec![]));
+            let calls = (0..4).map(|_| chat.chat(vec![ChatTurn::user("hi")], vec![], None));
             for reply in futures::future::join_all(calls).await {
                 assert_eq!(reply.unwrap().text, "ok");
             }

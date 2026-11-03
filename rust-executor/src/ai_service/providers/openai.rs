@@ -98,6 +98,14 @@ fn build_body(request: ChatRequest, stream: bool) -> Value {
     }
     if let Some(response_format) = request.response_format {
         body["response_format"] = response_format;
+    } else if let Some(schema) = request.json_schema {
+        // OpenAI's structured-output shape. llama-server reads `json_schema.schema` from it
+        // into its grammar (tools/server/server-common.cpp, "Handle response_format"), and
+        // vLLM's OpenAI-compatible server decodes against it (docs: features/structured_outputs).
+        body["response_format"] = json!({
+            "type": "json_schema",
+            "json_schema": { "name": "reply", "schema": schema },
+        });
     }
     if stream {
         body["stream"] = json!(true);
@@ -535,6 +543,34 @@ mod wire_tests {
         );
         assert_eq!(reply.usage.input_tokens, Some(12));
         assert_eq!(reply.usage.output_tokens, Some(5));
+    }
+
+    #[test]
+    fn a_json_schema_goes_out_as_response_format_and_the_callers_own_format_wins() {
+        let schema = json!({ "type": "object", "properties": { "a": { "type": "string" } } });
+        let constrained = ChatRequest::new("m", vec![ChatTurn::user("hi")])
+            .with_json_schema(Some(schema.clone()));
+        for stream in [false, true] {
+            let body = build_body(constrained.clone(), stream);
+            assert_eq!(
+                body["response_format"],
+                json!({
+                    "type": "json_schema",
+                    "json_schema": { "name": "reply", "schema": schema },
+                }),
+                "stream: {stream}"
+            );
+        }
+
+        let mut own = constrained;
+        own.response_format = Some(json!({ "type": "json_object" }));
+        assert_eq!(
+            build_body(own, false)["response_format"],
+            json!({ "type": "json_object" })
+        );
+
+        let free = build_body(ChatRequest::new("m", vec![ChatTurn::user("hi")]), false);
+        assert!(free.get("response_format").is_none(), "{free}");
     }
 
     #[tokio::test]

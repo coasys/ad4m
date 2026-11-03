@@ -42,6 +42,10 @@ comes through here: it runs none itself.
   carrying tools rather than dropping them. A provider that does not translate
   `tool_choice` / `response_format` refuses a request carrying them
   (`ChatRequest::refuse_openai_options`).
+- `ChatRequest::json_schema` is a decoding constraint, not a caller option: the OpenAI-shaped
+  client sends it as `response_format` `json_schema` (unless the caller set its own
+  `response_format`), Ollama's native client as `format`, Anthropic not at all. The caller
+  validates the reply whichever answered (`/v1` text-tools path: `tool_grammar::ToolCallConstraint`).
 - Whether a *model* gets tools as data is `Model::uses_native_tools(endpoint)`: the client can,
   and the model's `native_tools` flag (default on for Anthropic and Ollama, off for
   OpenAI-shaped servers) says it should.

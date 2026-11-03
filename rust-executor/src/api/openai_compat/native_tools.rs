@@ -17,10 +17,11 @@
 //! full and framed as SSE afterwards — which is also what the injected path
 //! does whenever tools are active, so a client sees no difference in shape.
 //!
-//! `tool_choice: "required"`, a named function and `parallel_tool_calls: false` are not
-//! enforced on this path, nor on the injected one. A model on an OpenAI-shaped endpoint
-//! that takes tools natively gets the request as written through the `/v1` passthrough,
-//! fields included; wiring them through here means a provider-level request field.
+//! A forced call (`tool_choice: "required"` or a named function) reaches this path only for
+//! Anthropic, where it is not enforced yet (the Anthropic client does not translate
+//! `tool_choice`). OpenAI and vLLM get it as written through the `/v1` passthrough and
+//! enforce it; every other endpoint makes it on the injected path under a schema the server
+//! decodes against (`chat::constrained_tool_calls`, `passthrough::enforces_tool_choice`).
 
 use std::convert::Infallible;
 

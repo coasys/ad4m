@@ -102,14 +102,21 @@ impl Upstream {
     }
 
     /// The upstream of a `/v1/chat/completions` `body` for `resolved`, by the rule of
-    /// [`Self::of`] plus one: a request with active tools (`tools` given, `tool_choice` not
+    /// [`Self::of`] plus two: a request with active tools (`tools` given, `tool_choice` not
     /// `"none"`) is forwarded only to a model that takes tools as definitions
-    /// (`Model::uses_native_tools`). For any other, the executor renders the tools into
-    /// the prompt and reads the calls back out of the text.
+    /// (`Model::uses_native_tools`), and one that forces a call (`tool_choice: "required"`
+    /// or a named function) only to a server that enforces the choice
+    /// ([`enforces_tool_choice`]). For any other, the executor renders the tools into the
+    /// prompt and reads the calls back out of the text, a forced call under a schema the
+    /// server decodes against (`chat::constrained_tool_calls`).
     pub fn for_chat(resolved: &Resolved, body: &Value) -> Option<Upstream> {
         let upstream = Self::of(resolved)?;
-        let takes_tools = || resolved.model.uses_native_tools(&resolved.endpoint);
-        (!tools_active(body) || takes_tools()).then_some(upstream)
+        if !tools_active(body) {
+            return Some(upstream);
+        }
+        let takes_tools = resolved.model.uses_native_tools(&resolved.endpoint);
+        let held_to_it = !forces_a_call(body) || enforces_tool_choice(resolved.endpoint.kind);
+        (takes_tools && held_to_it).then_some(upstream)
     }
 }
 
@@ -119,6 +126,40 @@ fn tools_active(body: &Value) -> bool {
         .and_then(Value::as_array)
         .is_some_and(|tools| !tools.is_empty());
     has_tools && body.get("tool_choice").and_then(Value::as_str) != Some("none")
+}
+
+/// Whether `body` forces a tool call: `tool_choice` is `"required"` or names a function.
+pub(super) fn forces_a_call(body: &Value) -> bool {
+    match body.get("tool_choice") {
+        Some(Value::String(choice)) => choice == "required",
+        Some(choice @ Value::Object(_)) => choice.pointer("/function/name").is_some(),
+        _ => false,
+    }
+}
+
+/// Whether a server of `kind` holds the model to a forced `tool_choice` itself. OpenAI does;
+/// vLLM does by structured outputs, with or without `--enable-auto-tool-choice`
+/// (docs.vllm.ai, features/tool_calling: named function calling and `required`).
+/// llama-server does not: b11669 lets a model answer `required` in text, and refuses the
+/// named form as the wrong type and falls back to `auto`. Ollama's OpenAI API lists
+/// `tool_choice` as unsupported (docs/api/openai-compatibility). An OpenAI-compatible
+/// server is unknown, so it is not trusted to.
+pub(super) fn enforces_tool_choice(kind: EndpointKind) -> bool {
+    matches!(kind, EndpointKind::OpenAi | EndpointKind::Vllm)
+}
+
+/// `body` for llama-server when it says `tool_choice: "none"`: without `tools` and
+/// `tool_choice`. llama-server still offers the tools to the model then, and their call
+/// markup comes back as text; a request without tools is what `none` asks for.
+fn without_refused_tools(kind: EndpointKind, body: &mut Value) {
+    let refused = body.get("tool_choice").and_then(Value::as_str) == Some("none");
+    if kind == EndpointKind::LlamaServer && refused {
+        if let Some(object) = body.as_object_mut() {
+            object.remove("tools");
+            object.remove("tool_choice");
+            object.remove("parallel_tool_calls");
+        }
+    }
 }
 
 /// Map a failure of `upstream` for the client, and act on what it says about the endpoint:
@@ -321,6 +362,9 @@ pub async fn forward_completion(
     }
     let client_model = body.get("model").cloned().unwrap_or(Value::Null);
     body["model"] = Value::String(upstream.remote_model.clone());
+    if route == Route::ChatCompletions {
+        without_refused_tools(upstream.endpoint.kind, &mut body);
+    }
     let stream = body.get("stream").and_then(Value::as_bool) == Some(true);
     let client_wants_usage = body
         .pointer("/stream_options/include_usage")
