@@ -158,6 +158,43 @@ fn bot_key_lapses_and_comes_back_with_a_later_scope() {
 }
 
 #[test]
+fn a_scope_names_a_listed_bot_key_and_known_actions() {
+    let mut log = Log::new();
+    let bot_id = log.add(bot(&["read"], 2_000_000_000));
+    let scope = |can: &[&str]| BotScope {
+        can: can.iter().map(|s| s.to_string()).collect(),
+        expires: 2_100_000_000,
+    };
+    let signed = |log: &Log, key: &str, can: &[&str]| {
+        let mut event = build::scope_unsigned(&log.chain, &key.to_string(), &scope(can)).unwrap();
+        sign(&mut event, "m0", &master(0));
+        event
+    };
+    assert_eq!(
+        log.try_push(&signed(&log, "d9", &["read"])),
+        Err(ChainError::Policy(FoldError::UnknownKey("d9".into())))
+    );
+    assert_eq!(
+        log.try_push(&signed(&log, &bot_id, &[])),
+        Err(ChainError::Policy(FoldError::EmptyScope))
+    );
+    assert_eq!(
+        log.try_push(&signed(&log, &bot_id, &["read", "admin"])),
+        Err(ChainError::Policy(FoldError::Format(
+            ad4m_identity_core::FormatError::UnknownAction("admin".into())
+        )))
+    );
+    // Every listed action folds, `join` included.
+    log.scope(&bot_id, &["join"], 2_100_000_000);
+    let at = log.seq();
+    assert_eq!(
+        log.chain.state().bot_scope_at(&bot_id, at).unwrap().can,
+        vec!["join".to_string()]
+    );
+    log.scope(&bot_id, &["read", "write", "join"], 2_200_000_000);
+}
+
+#[test]
 fn standing_key_has_no_expiry_and_is_never_scoped() {
     let log = Log::incept(vec![
         device(1, KeyLife::Standing),
