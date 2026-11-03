@@ -518,7 +518,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             store_keys: config.identity_store_keys.clone().unwrap_or_default(),
             allow_private_src: config.identity_allow_private_src.unwrap_or(false),
         };
-        if let Err(e) = crate::identity::check_store_keys(&settings.store_keys) {
+        if let Err(e) = crate::identity::check_store_keys(&settings.store_keys)
+            .and_then(|_| crate::identity::check_store_url(settings.store_url.as_deref()))
+        {
             return failed_start(e);
         }
         if let Err(e) = crate::identity::init(&db_path, &settings) {

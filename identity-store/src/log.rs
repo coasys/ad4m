@@ -2,9 +2,10 @@
 //! and the key index.
 
 use ad4m_hash_chain::store::{SqliteChainStore, StoreError, StoredEntry};
-use ad4m_hash_chain::Head;
+use ad4m_hash_chain::{ForkEvidence, Head};
 use ad4m_identity_core::{
-    error_code, pow, ChainError, DeviceKey, Event, FoldError, KelChain, KelPolicy, KeyLife, Op,
+    error_code, event_hash, pow, ChainError, DeviceKey, Event, FoldError, KelChain, KelPolicy,
+    KeyLife, Op,
 };
 use ad4m_ldk::identity::{AppendRequest, KeyIndexEntry, LogPage, SignedHead};
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -12,7 +13,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 use crate::db::{self, to_sql, KEL};
 use crate::error::ApiError;
 use crate::offers;
-use crate::{Fault, Store};
+use crate::{Fault, Store, Topic};
 
 /// Events per append.
 pub const MAX_EVENTS: usize = 32;
@@ -37,8 +38,8 @@ fn chain_error(e: &ChainError<FoldError>) -> ApiError {
 /// `docs-src/identity/did-scid-coasys-1.md`). There is no brake yet: no
 /// bucket per address, no store-wide ceiling and no required proof of work. A proof that is
 /// sent must still meet `POW_BITS`, so the request format and the client's work stay those
-/// of the format. The brake adds the buckets and makes the proof required here, before any
-/// replay.
+/// of the format. The brake adds the buckets and makes the proof required here; it runs once
+/// event #0 has replayed and before the rest of the append replays.
 pub fn admit_new_log(
     scid: &str,
     proof: Option<&ad4m_ldk::identity::Pow>,
@@ -98,6 +99,41 @@ fn listed_keys(event: &Event) -> Vec<&str> {
         Op::Rotate { master, .. } => vec![master.as_str()],
         Op::Revoke { .. } | Op::Scope { .. } => Vec::new(),
     }
+}
+
+/// The fork `event` makes with the stored log `stored` of `scid`, when it is one: an event at a
+/// seq the store holds, with another hash than the stored event there, that replays on the
+/// stored events before it (every proof checked by the identity core). `None` for a resend of
+/// a stored event, an event past the head (a gap) and an event that does not replay.
+fn competing_event(
+    conn: &Connection,
+    scid: &str,
+    stored: &KelChain,
+    event: &Event,
+) -> Result<Option<ForkEvidence>, ApiError> {
+    let Some(ours) = stored.hash_at(event.seq) else {
+        return Ok(None);
+    };
+    let Ok(theirs) = event_hash(event) else {
+        return Ok(None);
+    };
+    if &theirs == ours {
+        return Ok(None);
+    }
+    let replays = if event.seq == 0 {
+        event.scid == scid && KelChain::genesis(&KelPolicy, event).is_ok()
+    } else {
+        match db::load_chain_before(conn, scid, event.seq)? {
+            Some(mut prefix) => prefix.append(&KelPolicy, event).is_ok(),
+            None => false,
+        }
+    };
+    Ok(replays.then(|| ForkEvidence {
+        chain: scid.to_string(),
+        seq: event.seq,
+        ours: ours.clone(),
+        theirs,
+    }))
 }
 
 fn current_head(conn: &Connection, scid: &str) -> Result<SignedHead, ApiError> {
@@ -170,8 +206,25 @@ impl Store {
                         "a vouching token or a proof of work comes only with event #0",
                     ));
                 }
+                // A forked identity is frozen: the store takes no event after a fork.
+                if let Some(fork) = db::first_fork(&tx, scid)? {
+                    return Err(ApiError::forked(&current_head(&tx, scid)?, &fork));
+                }
                 let head = existing.head();
                 if first.seq != head.seq + 1 || first.prev.as_ref() != Some(&head.hash) {
+                    // A validly signed event at a seq the store holds, other than the stored
+                    // one, is a fork: the store records it (with the event, so anyone can check
+                    // it) and freezes the identity. Anything else is a plain conflict.
+                    if let Some(fork) = competing_event(&tx, scid, &existing, first)? {
+                        let theirs = ad4m_hash_chain::entry_json(first)
+                            .map_err(|e| ApiError::invalid("malformed", e.to_string()))?;
+                        SqliteChainStore::record_fork_in(&tx, KEL, &fork, &theirs)?;
+                        let head = current_head(&tx, scid)?;
+                        tx.commit()?;
+                        drop(conn);
+                        self.changed(&[Topic::offers(scid)]);
+                        return Err(ApiError::forked(&head, &fork));
+                    }
                     return Err(ApiError::conflict(&current_head(&tx, scid)?));
                 }
                 chain = existing;
@@ -259,7 +312,11 @@ impl Store {
         db::put_head(&tx, &signed)?;
         tx.commit()?;
         drop(conn);
-        self.changed();
+        let mut topics = vec![Topic::offers(scid)];
+        for event in &events {
+            topics.extend(listed_keys(event).into_iter().map(Topic::key));
+        }
+        self.changed(&topics);
         Ok(signed)
     }
 

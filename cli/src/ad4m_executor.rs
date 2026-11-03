@@ -123,7 +123,8 @@ enum Domain {
         network_bootstrap_seed: Option<String>,
         /// The did:scid of the identity that operates this executor. Recorded only while the
         /// data folder has no operator; another identity never replaces it (only the recorded
-        /// operator can).
+        /// operator can). On a data folder already initialized, only the operator is recorded
+        /// (the seed stays, unless --network-bootstrap-seed is given too).
         #[arg(long)]
         operator: Option<String>,
     },
@@ -171,19 +172,20 @@ async fn main() -> Result<()> {
         operator,
     } = args.domain
     {
-        let db = identity::database_path(data_path.as_deref());
-        match rust_executor::init::init(data_path, network_bootstrap_seed) {
-            Ok(()) => println!("Successfully initialized AD4M executor!"),
-            Err(e) => {
-                println!("Failed to initialize AD4M executor: {}", e);
-                std::process::exit(1);
-            }
-        };
-        if let Some(operator) = operator {
-            if let Err(e) = identity::record_operator(&db, &operator) {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
+        let done = identity::init_with_operator(
+            data_path,
+            network_bootstrap_seed,
+            operator.as_deref(),
+            |data_path, seed| {
+                rust_executor::init::init(data_path, seed)
+                    .map_err(|e| anyhow::anyhow!("Failed to initialize AD4M executor: {e}"))?;
+                println!("Successfully initialized AD4M executor!");
+                Ok(())
+            },
+        );
+        if let Err(e) = done {
+            eprintln!("{e}");
+            std::process::exit(1);
         }
         return Ok(());
     };

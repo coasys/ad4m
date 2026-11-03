@@ -165,9 +165,9 @@ pub(crate) async fn verify_expression_at<T: serde::Serialize>(
     };
     let mut admitted = admits().await;
     if let Some(backend) = backend {
-        let stale =
-            admitted && !cache.refreshed_within(scid_from(&expr.author), now, ADMIT_FRESHNESS);
-        if !admitted || stale {
+        // Admitted or not, a log is read from the store at most once per window: a key that
+        // does not speak (or an author the store lacks) must not cost a store call per read.
+        if !cache.refreshed_within(scid_from(&expr.author), now, ADMIT_FRESHNESS) {
             // A failed refresh changes nothing in the cache: the cached trusted head answers.
             // It counts as an attempt, so an unreachable store is tried once per window, not on
             // every read.
@@ -201,7 +201,7 @@ impl RecordProof {
     }
 }
 
-/// Whether `record.sig` is `key`'s `coasys:link` signature over the agent record
+/// Whether `record.sig` is `key`'s `coasys:agent-record` signature over the agent record
 /// `{profile, version, anchor}`, `profile` being `expr` as the record stores it: `author`,
 /// `timestamp`, `data` and `proof: {key, signature}`, without `proof.record` or the
 /// `proof.valid`/`proof.invalid` flags (the typed expression carries none of them).
@@ -221,7 +221,7 @@ fn record_signature_holds<T: serde::Serialize>(
     Ok(
         ad4m_hash_chain::decode_proof_value(&agent_record.sig).is_some_and(|sig| {
             ad4m_identity_core::verify_signed(
-                ad4m_identity_core::LINK_DOMAIN,
+                ad4m_identity_core::AGENT_RECORD_DOMAIN,
                 &agent_record.signed_value(),
                 key,
                 &sig,
@@ -567,8 +567,9 @@ pub fn parse_src(src: &str) -> Result<SrcKind, String> {
 /// link-local, CGNAT (100.64/10), benchmarking (198.18/15), multicast, unspecified, "this
 /// network" (0/8), reserved (240/4, broadcast) or IETF protocol (192.0.0/24). An IPv6 address
 /// that carries an IPv4 one (mapped `::ffff:a.b.c.d`, compatible `::a.b.c.d`, NAT64
-/// `64:ff9b::/96` and the local-use `64:ff9b:1::/48`, 6to4 `2002::/16`) is judged by that IPv4
-/// address (for NAT64, its last 32 bits).
+/// `64:ff9b::/96`, 6to4 `2002::/16`) is judged by that IPv4 address. The local-use NAT64
+/// prefix `64:ff9b:1::/48` is never public (RFC 8215: not globally routable; and for a /48
+/// prefix RFC 6052 does not place the IPv4 address in the last 32 bits).
 pub fn is_public(ip: IpAddr) -> bool {
     fn v4_public(ip: std::net::Ipv4Addr) -> bool {
         let o = ip.octets();
@@ -595,9 +596,13 @@ pub fn is_public(ip: IpAddr) -> bool {
             if s[..5] == [0, 0, 0, 0, 0] && (s[5] == 0xffff || s[5] == 0) {
                 return v4_public(embedded(12));
             }
-            // NAT64: the well-known prefix and the local-use one (64:ff9b:1::/48, RFC 8215).
-            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || s[..3] == [0x64, 0xff9b, 1] {
+            // NAT64: the well-known prefix carries the IPv4 address in its last 32 bits.
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
                 return v4_public(embedded(12));
+            }
+            // The local-use NAT64 prefix (RFC 8215) reaches only a local translator.
+            if s[..3] == [0x64, 0xff9b, 1] {
+                return false;
             }
             if s[0] == 0x2002 {
                 return v4_public(embedded(2));
@@ -1517,6 +1522,9 @@ mod tests {
             "198.19.255.255",
             "64:ff9b:1::a00:1",
             "64:ff9b:1:ffff::7f00:1",
+            // The local-use prefix is refused whatever it carries.
+            "64:ff9b:1::808:808",
+            "64:ff9b:1:808:808::",
             "::ffff:198.18.0.1",
         ] {
             assert!(!is_public(ip.parse().unwrap()), "{ip} must be refused");
@@ -1531,7 +1539,6 @@ mod tests {
             "::ffff:8.8.8.8",
             "198.17.255.255",
             "198.20.0.1",
-            "64:ff9b:1::808:808",
             "64:ff9b::808:808",
         ] {
             assert!(is_public(ip.parse().unwrap()), "{ip} is public");
@@ -2181,6 +2188,34 @@ mod tests {
         log.events.push(event);
     }
 
+    /// A `did:key` the cached log lists only past its trusted seq (the store-signed head) does
+    /// not resolve to that person, even though the index names it and the log lists it: the
+    /// master alone can add any key. The store is down, so no read advances the head.
+    #[tokio::test]
+    async fn a_did_key_listed_only_past_the_trusted_seq_is_not_found() {
+        let mut log = TestLog::new(91);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        let added = ed25519_dalek::SigningKey::from_bytes(&[92; 32]);
+        add_key(&mut log, &added, 93);
+        cache.ingest(&log.scid(), &log.events).await.unwrap();
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        store.store_down.store(true, Ordering::SeqCst);
+        let (resolver, _) = resolver(cache, store, None);
+        let result = resolver
+            .resolve(&format!("did:key:{}", added.key()), false)
+            .await;
+        let meta = &result.did_resolution_metadata;
+        assert_eq!(meta.error.as_deref(), Some("notFound"), "{result:?}");
+        assert_eq!(meta.key_index_mismatch, None);
+        assert!(meta.key_id.is_none());
+        // d1, listed at the trusted seq, resolves from the same log.
+        let d1 = resolver
+            .resolve(&format!("did:key:{}", log.device.key()), false)
+            .await;
+        assert_eq!(d1.did_resolution_metadata.key_id.as_deref(), Some("d1"));
+    }
+
     /// A log only ingested (as a foreign `src` serves it) that lists the victim's key: the key
     /// does not speak for the log's person, so an expression by it authored as that person is
     /// invalid, with or without a record.
@@ -2616,6 +2651,41 @@ mod tests {
         );
     }
 
+    /// A key the log does not admit (here one it never listed) reads the store once per
+    /// `ADMIT_FRESHNESS` window too, not on every verification, store up or down.
+    #[tokio::test]
+    async fn a_key_that_does_not_speak_reads_the_store_once_per_window() {
+        let log = TestLog::new(86);
+        let did = did_of(&log.scid());
+        let store = FakeStore::new(log.events.clone());
+        let cache = trusting();
+        let stranger = ed25519_dalek::SigningKey::from_bytes(&[87; 32]);
+        let expr: crate::types::Expression<Value> =
+            serde_json::from_value(signed_profile(&did, &stranger)).unwrap();
+        let backend: &dyn IdentityBackend = &store;
+        let verify = |now: u64| verify_expression_at(&cache, Some(backend), &expr, None, now);
+        let now = super::super::service::now();
+        assert!(!verify(now).await.unwrap());
+        assert_eq!(store.log_calls.load(Ordering::SeqCst), 1);
+        assert!(!verify(now + 5).await.unwrap());
+        assert!(!verify(now + ADMIT_FRESHNESS - 5).await.unwrap());
+        assert_eq!(
+            store.log_calls.load(Ordering::SeqCst),
+            1,
+            "no read within the window"
+        );
+
+        store.store_down.store(true, Ordering::SeqCst);
+        assert!(!verify(now + ADMIT_FRESHNESS + 5).await.unwrap());
+        assert_eq!(store.log_calls.load(Ordering::SeqCst), 2);
+        assert!(!verify(now + ADMIT_FRESHNESS + 10).await.unwrap());
+        assert_eq!(
+            store.log_calls.load(Ordering::SeqCst),
+            2,
+            "a failed read counts as the window's read"
+        );
+    }
+
     /// `coasys:headTrusted` follows `KelCache::trusted`: once the key that signed the accepted
     /// head leaves `identity.storeKeys`, the cached log answers with an untrusted head.
     #[tokio::test]
@@ -2702,7 +2772,7 @@ pub(crate) mod test_profiles {
         })
     }
 
-    /// `profile` with `proof.record`: `signer`'s `coasys:link` signature over the agent record
+    /// `profile` with `proof.record`: `signer`'s `coasys:agent-record` signature over the agent record
     /// `{profile, version, anchor}`, as the agent language answers a `did:scid` profile.
     pub fn with_record(profile: &Value, signer: &SigningKey, version: u64, anchor: u64) -> Value {
         let record = ad4m_ldk::identity::AgentRecord {
@@ -2714,7 +2784,7 @@ pub(crate) mod test_profiles {
             sig: String::new(),
         };
         let bytes = ad4m_identity_core::signing_bytes(
-            ad4m_identity_core::LINK_DOMAIN,
+            ad4m_identity_core::AGENT_RECORD_DOMAIN,
             &record.signed_value(),
         )
         .unwrap();

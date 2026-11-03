@@ -38,8 +38,8 @@ const PAGE: u64 = 256;
 /// The most pages one read of a log takes from one source (the store's refresh here, the
 /// resolver's reads too): 64 × 256 events, far past any person's log.
 pub(super) const MAX_PAGES: usize = 64;
-/// The most logs whose refresh time the cache remembers; past it the times start over (every
-/// log stale once).
+/// The most logs whose refresh time the cache remembers; past it the oldest time goes (that
+/// log is stale once), never the others.
 const REFRESHED_BOUND: usize = 4096;
 
 /// Why the cache refused or could not answer.
@@ -548,11 +548,19 @@ impl KelCache {
         result
     }
 
-    /// Marks `scid`'s log as read from the store (or tried) at `at`.
+    /// Marks `scid`'s log as read from the store (or tried) at `at`. At [`REFRESHED_BOUND`] logs
+    /// the one read longest ago is forgotten, so many SCIDs (each failing read notes one) cannot
+    /// make every log stale at once.
     pub(crate) fn note_refreshed(&self, scid: &str, at: u64) {
         if let Ok(mut refreshed) = self.refreshed.lock() {
             if refreshed.len() >= REFRESHED_BOUND && !refreshed.contains_key(scid) {
-                refreshed.clear();
+                let oldest = refreshed
+                    .iter()
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(scid, _)| scid.clone());
+                if let Some(oldest) = oldest {
+                    refreshed.remove(&oldest);
+                }
             }
             refreshed.insert(scid.to_string(), at);
         }
@@ -653,6 +661,51 @@ pub(crate) mod tests {
                 .unwrap();
         let meta = Connection::open_with_flags(&name, flags).unwrap();
         KelCache::with(store, meta, store_keys).unwrap()
+    }
+
+    /// `trusted` answers only while the cached event at the accepted head's seq has the head's
+    /// hash: a store-signed head over another event at that seq trusts nothing.
+    #[tokio::test]
+    async fn a_head_whose_hash_is_not_the_cached_events_trusts_nothing() {
+        let log = TestLog::new(94);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        let scid = log.scid();
+        assert_eq!(
+            cache.trusted(&scid).await.unwrap().map(|(_, seq)| seq),
+            Some(0)
+        );
+
+        let other = TestLog::new(95).chain().head().hash.clone();
+        assert_ne!(other, log.chain().head().hash);
+        let signed = store_key().sign_head(&scid, 0, &other, 2);
+        cache.accept_head(&signed).unwrap();
+        assert!(cache.trusted(&scid).await.unwrap().is_none());
+    }
+
+    /// At the bound the oldest refresh time goes and every other log stays fresh: many SCIDs
+    /// (failing reads note one each) never make every log stale at once.
+    #[test]
+    fn past_the_bound_only_the_oldest_refresh_time_goes() {
+        let cache = trusting();
+        let now = 1_000_000;
+        cache.note_refreshed("oldest", now - 50);
+        for i in 0..REFRESHED_BOUND - 2 {
+            cache.note_refreshed(&format!("junk{i}"), now - 10);
+        }
+        cache.note_refreshed("real", now);
+        cache.note_refreshed("another", now);
+        assert!(
+            !cache.refreshed_within("oldest", now, 60),
+            "the oldest went"
+        );
+        assert!(
+            cache.refreshed_within("real", now, 60),
+            "the others stay fresh"
+        );
+        assert!(cache.refreshed_within("junk0", now, 60));
+        assert!(cache.refreshed_within("another", now, 60));
+        assert_eq!(cache.refreshed.lock().unwrap().len(), REFRESHED_BOUND);
     }
 
     /// The store key [`FakeStore`] signs its heads with.

@@ -383,15 +383,15 @@ clocks.
 
 - A signature by a device key `k` of identity X, anchored at seq `s`, holds only when X's log
   lists `k` and `key_valid_at(k, s)` (section 6). A key revoked at *N* signs nothing valid
-  anchored at or after *N*; content anchored below *N* that was admitted before the revocation
-  stays valid.
+  anchored at or after *N*; content anchored below *N* stays valid.
 - An anchor past the head of the log the verifier holds is refused.
 - The signer picks the anchor, so the anchor alone cannot stop a holder of a revoked key from
-  backdating new content to a seq below *N*. The host that admits signed content (for an agent
-  record, the store that takes the `PUT`) orders arrivals: when the content arrives it also
-  checks `k` listed and valid at the head of the log it holds, and refuses the content
-  otherwise, whatever anchor it names. A revoked key so cannot backdate new content past that
-  host. Readers check at the anchor and rely on that host's admission for arrival order.
+  backdating new content to a seq below *N*. A host that admits signed content can order
+  arrivals, as host policy (section 14): when the content arrives it also checks `k` listed
+  and valid at the head of the log it holds, and refuses the content otherwise, whatever
+  anchor it names. The Coasys identity store does so for agent records. A revoked key so
+  cannot backdate new content past such a host; readers check at the anchor and may rely on
+  its admission for arrival order. Admission never changes whether a signature holds.
 - A reader that first sees a signature after the key's revocation, anchored before it, and
   did not get it through such a host, may flag it. That is the reader's policy; the signature
   holds.
@@ -489,10 +489,11 @@ GET /v1/logs/<scid>?from=<n>
   - `head`: the host's head `{scid, seq, hash, …}`. A host may sign it (the Coasys identity
     store signs it under `coasys:head` with `time`, `store` and `sig`); a resolver that does
     not trust the host's key reads it only as a hint of how far to page. A signed head proves
-    authenticity, not freshness: it says the host held this head, never that the host holds no
-    later one now. Its `time` is when the head was appended, not when it was read, so a host
-    (or anyone replaying its answer) can serve an older signed head, and no signed statement
-    proves a read is current.
+    authenticity, not freshness: its `time` is when the host stored that head, not when it was
+    read, so a host (or anyone replaying its answer) can serve an older signed head, and with
+    the prefix of the log it covers it verifies as well as the current one. A reader that
+    trusts the key learns that the host held at least that log, never that the log ends there;
+    it reads over an authenticated channel (HTTPS) and never takes a head below one it holds.
   - `appendedAt`: one unix time per event, when the host stored it. It is the host's claim
     and no part of the verifiable history.
 
@@ -530,8 +531,14 @@ Coasys identity store adds these checks:
 - **One key per identity.** A host may require that a signing key appears in at most one log
   it holds (rule K8 already holds within one log). Revoked keys count: a log that ever listed
   the key keeps it, so a revoked key can never enter another log on that host.
+- **Signers valid at the head.** The store takes an agent record only when its signing key is
+  valid at the head of the log it holds when the record arrives (section 10, anchors).
 - **Expiry window.** The store refuses a bot scope's `expires` in the past or more than 400
   days ahead.
+- **Forks freeze.** An append whose event sits at a seq the store holds, differs from the
+  stored event and replays on the events before it is a fork (section 11). The store keeps it
+  as evidence with the competing event, serves the log it held, and takes no further event or
+  signed request for that identity.
 - **Proof of work for a log with no vouching note**, below.
 
 ### Proof of work for a log with no vouching note
@@ -567,8 +574,8 @@ of the system signs, so that wallets and apps interoperate.
 Every domain other than `coasys:kel` (section 7) signs `JCS(value + {"domain": domain})` with
 Ed25519 (the value is an object without a `domain` member). The registry is
 `ad4m_identity_core::domain::SIGNING_DOMAINS`:
-`coasys:kel`, `coasys:link`, `coasys:store-request`, `coasys:head`, `coasys:vouch`,
-`coasys:offer`, `coasys:claim`, `coasys:pause`, `coasys:inbox`, `coasys:session`,
-`coasys:account`, `coasys:room-key`, `coasys:bot-grant`. These labels enter a hash or a key
+`coasys:kel`, `coasys:link`, `coasys:agent-record`, `coasys:store-request`, `coasys:head`,
+`coasys:vouch`, `coasys:offer`, `coasys:claim`, `coasys:pause`, `coasys:inbox`,
+`coasys:session`, `coasys:account`, `coasys:room-key`, `coasys:bot-grant`. These labels enter a hash or a key
 derivation and are never signing domains; every signing API refuses them: `coasys:pow`,
 `coasys:pair-id:1`, `coasys:pair-key:1`, `coasys:match`, `coasys:wrap:1`, `coasys:auth:1`.

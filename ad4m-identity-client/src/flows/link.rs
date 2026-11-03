@@ -102,7 +102,10 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             .to_string();
         let chain = chain_of(executor, did).await?;
         let store = store_of(executor, did).await?;
-        let unlocked = vault.unlock(&scid, MasterUse::Link, clock.now())?;
+        // The unlock and the offer start at the same time, so the unlock lasts exactly to the
+        // end of the store's confirm grace ([`MasterUse::ttl_s`]).
+        let now = clock.now();
+        let unlocked = vault.unlock(&scid, MasterUse::Link, now)?;
         let mut s = zeroize::Zeroizing::new([0u8; link::SECRET_LEN]);
         random.fill(&mut s[..]);
         let secret = Secret::new(*s);
@@ -111,7 +114,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             offer_id: b58_random(random, link::OFFER_ID_LEN),
             kind,
             commit: link::offer_commit(secret.expose()),
-            expires: clock.now() + link::OFFER_TTL_S,
+            expires: now + link::OFFER_TTL_S,
             device_key: None,
             bot: None,
         };
@@ -209,6 +212,10 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         // state as it is and later ones wait for the claim.
         let mut wait = 0;
         loop {
+            // Past the offer's expiry the offer ended, whatever the unlock says.
+            if self.clock.now() >= self.offer.expires {
+                return Err(ClientError::OfferEnded("expired".into()));
+            }
             let request = self.list_request(&chain)?;
             let listings = self.executor.offers(&request, wait).await?;
             wait = LIST_WAIT_S;
@@ -245,9 +252,6 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
                 }
                 // The list holds open and claimed offers only.
                 None => return Err(ClientError::OfferEnded("closed".into())),
-            }
-            if self.clock.now() >= self.offer.expires {
-                return Err(ClientError::OfferEnded("expired".into()));
             }
         }
     }

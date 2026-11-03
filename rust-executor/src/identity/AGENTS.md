@@ -82,15 +82,19 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   the main agent only the operator (the admin credential the custody service holds), never an
   app token on the main agent; a user's session (or an app the user approved) for its own
   managed agent.
-- `identity.storeUrl` reaches the agent language only through `write_agent_language_settings`
-  (atomic: temp file + rename). When it fails, `LanguageController::install_agent_language`
+- `identity.storeUrl` and `identity.storeKeys` reach the agent language only through
+  `write_agent_language_settings` (atomic: temp file + rename), as its `storeUrl` and
+  `storeKeys` settings, on every start: an unset key removes the setting, so an earlier run's
+  store never stays in force. The language keeps a `did:scid` log only under a head signed by
+  a key of `storeKeys`. `"storeUrl": ""` stops startup (`check_store_url`: the language would
+  read it as the production store). When the write fails, `LanguageController::install_agent_language`
   does not load the agent language, so no profile or identity call goes to an older or the
   default store; identity calls answer `unavailable`.
 - An expression by a `did:scid` author verifies only under its `proof.key` (a bare `did:key`)
   and only when its own signature holds under that key. Which seq of the log counts:
   - With `proof.record` (`{version, anchor, sig}`, which the agent language adds to a
     `did:scid` profile from its agent record): the record's anchor. `sig` must be the key's
-    `coasys:link` signature over `{profile, version, anchor}`, `profile` the expression without
+    `coasys:agent-record` signature over `{profile, version, anchor}`, `profile` the expression without
     `proof.record` (and without `proof.valid`/`proof.invalid`), as `AgentRecord::signed_value`
     builds it; the anchor must be at or below the trusted seq (not merely the cached head);
     the log must list the key as a device key, valid at the anchor by the clock now
@@ -107,8 +111,11 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
 
   The expression's own timestamp never counts. When the cached log does not admit the key (no
   log or no store-signed head yet, a trusted seq below the anchor, or a device added since),
-  the read refreshes that one log from the configured store once (which advances the accepted
-  head) and checks again; a store that cannot answer leaves it `valid: false`.
+  the read refreshes that one log from the configured store (which advances the accepted
+  head) and checks again; a store that cannot answer leaves it `valid: false`. That refresh
+  too happens at most once per `ADMIT_FRESHNESS` window per log, so a key that does not speak,
+  or an author the store lacks, never costs a store call (up to its 15 s timeout) per read.
+  The in-memory refresh times are bounded (4096 logs): past the bound the oldest one goes.
 - **A positive verdict is fresh for `resolver::ADMIT_FRESHNESS` (60 s).** When the cached log
   admits the key but last refreshed from the configured store longer ago than that (the time is
   kept in memory only, so after a restart every log is stale), the read refreshes it once and
@@ -135,7 +142,13 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   `expressionGet` of the `did:scid`, `proof.record.version`) when that is not below it, so a
   device whose clock runs ahead never blocks the others; the signed request: the same
   key at the accepted head, for the store that signed that head. A failure is logged, never
-  fails the did:key publish, and the next profile publish tries again.
+  fails the did:key publish, and the next profile publish tries again. The record is signed
+  under `coasys:agent-record` (`AGENT_RECORD_DOMAIN`), which the store and the agent language
+  check; the store refuses a `version` more than 300 s past its clock.
+- **After unlock every profile is published again**: the main agent's, then each managed
+  user's with a stored profile (`AgentService::publish_managed_profiles`, from
+  `unlock_main_agent`), so profiles an earlier agent language held reach the configured store.
+  A failure is logged and the next user is tried.
 
 ## DID resolution (`identity.resolve`)
 
@@ -189,8 +202,8 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   `notFound`, no mismatch flag. A confirmed key → SCID sits in a bounded in-memory map.
 - **`src` and SSRF.** A `src` comes from untrusted input and executors run on servers. Public
   means `resolver::is_public`: no loopback, RFC 1918, fc00::/7, link-local, CGNAT 100.64/10,
-  multicast, unspecified, 0/8, 240/4, 192.0.0/24, and IPv4-mapped/compatible/NAT64/6to4 forms
-  of those. Up front, without a connection (`coasys:skipped` says why): HTTPS only (another
+  multicast, unspecified, 0/8, 240/4, 192.0.0/24, and IPv4-mapped/compatible/NAT64
+  (`64:ff9b::/96`)/6to4 forms of those; no local-use NAT64 `64:ff9b:1::/48` at all. Up front, without a connection (`coasys:skipped` says why): HTTPS only (another
   scheme is skipped), no user info, query or fragment; an IP literal must be public and a
   `localhost` name is refused (`src_fetch::refuse_private_host`).
 - **The transport enforces the address policy.** `SrcFetch`'s reqwest client resolves names

@@ -25,6 +25,10 @@ use serde_json::Value;
 /// The production store, used when the settings name none.
 pub const DEFAULT_STORE_URL: &str = "https://store.coasys.org";
 pub const REQUEST_HEADER: &str = "X-Coasys-Request";
+/// The largest reply body the language takes from the store, on every route and status: a log
+/// page ([`MAX_LOG_PAGE_BYTES`]) is the largest answer a store gives. The host's `httpFetch`
+/// has read the body by then; the cap bounds what the language parses and keeps.
+pub const MAX_REPLY_BYTES: usize = MAX_LOG_PAGE_BYTES;
 
 /// What the host's `httpFetch` answers.
 #[derive(Debug, Clone)]
@@ -44,17 +48,65 @@ pub trait Http {
     ) -> impl Future<Output = Result<HttpReply, String>>;
 }
 
-/// The store URL from the language settings JSON (`{"storeUrl": …}`), or the default.
-pub fn store_url_from(settings: &str) -> String {
-    serde_json::from_str::<Value>(settings)
-        .ok()
-        .and_then(|v| {
-            v.get("storeUrl")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
+/// What the language reads from its settings on every call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreSettings {
+    /// `storeUrl`: the store's base URL (the default store when unset).
+    pub url: String,
+    /// `storeKeys`: the store keys (Ed25519 multikeys) a signed head must be signed by before
+    /// the language reads a log through it (the executor fills it from `identity.storeKeys`).
+    /// Empty: no head is trusted, so no `did:scid` record verifies.
+    pub keys: Vec<String>,
+}
+
+/// The settings from the language settings JSON (`{"storeUrl": …, "storeKeys": […]}`).
+pub fn store_settings_from(settings: &str) -> StoreSettings {
+    let value = serde_json::from_str::<Value>(settings).unwrap_or(Value::Null);
+    let url = value
+        .get("storeUrl")
+        .and_then(Value::as_str)
         .filter(|url| !url.is_empty())
-        .unwrap_or_else(|| DEFAULT_STORE_URL.to_string())
+        .unwrap_or(DEFAULT_STORE_URL)
+        .to_string();
+    let keys = value
+        .get("storeKeys")
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    StoreSettings { url, keys }
+}
+
+/// True when the language may call a store at `url`: `https`, or plain `http` to a loopback
+/// address only (a store on the same machine, as in tests). Plain `http` across a network would
+/// let anyone on the path change every answer.
+pub fn transport_allowed(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if host_port.is_empty() {
+        return false;
+    }
+    if scheme.eq_ignore_ascii_case("https") {
+        return true;
+    }
+    if !scheme.eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let host = match host_port.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host_port.split(':').next().unwrap_or(""),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 fn forbidden_reason(error: &str) -> Option<ForbiddenReason> {
@@ -187,7 +239,7 @@ pub fn scid_of(did: &str) -> LanguageResult<&str> {
 /// The store client over a host's `httpFetch`.
 pub struct Store<H: Http> {
     http: H,
-    url: Box<dyn Fn() -> String>,
+    settings: Box<dyn Fn() -> StoreSettings>,
 }
 
 /// Options of one request.
@@ -199,22 +251,33 @@ pub struct Send<'a> {
 }
 
 impl<H: Http> Store<H> {
-    pub fn new(http: H, url: impl Fn() -> String + 'static) -> Self {
+    /// A store client that reads its settings (URL and keys) through `settings` on every call.
+    pub fn new(http: H, settings: impl Fn() -> StoreSettings + 'static) -> Self {
         Store {
             http,
-            url: Box::new(url),
+            settings: Box::new(settings),
         }
     }
 
+    /// The configured store keys a signed head must be signed by.
+    pub fn store_keys(&self) -> Vec<String> {
+        (self.settings)().keys
+    }
+
     /// Sends one request to the configured store and answers the raw reply. Only a network
-    /// failure fails here.
+    /// failure fails here, a store URL the language does not call ([`transport_allowed`]),
+    /// which is `invalid` (`store-url`), and a reply body over [`MAX_REPLY_BYTES`] whatever
+    /// its status, which is `invalid` (`too-large`).
     pub async fn send(
         &self,
         method: &str,
         path: &str,
         options: Send<'_>,
     ) -> LanguageResult<HttpReply> {
-        let url = (self.url)();
+        let url = (self.settings)().url;
+        if !transport_allowed(&url) {
+            return Err(invalid("store-url"));
+        }
         let base = url.trim_end_matches('/');
         let query: Vec<String> = options
             .query
@@ -238,10 +301,15 @@ impl<H: Http> Store<H> {
             headers.insert(REQUEST_HEADER.into(), encode_request(req)?.into());
         }
         let headers = Value::Object(headers).to_string();
-        self.http
+        let reply = self
+            .http
             .fetch(&url, method, &headers, &body)
             .await
-            .map_err(|_| unavailable())
+            .map_err(|_| unavailable())?;
+        if reply.body.len() > MAX_REPLY_BYTES {
+            return Err(invalid("too-large"));
+        }
+        Ok(reply)
     }
 
     /// Sends and answers the parsed body of a 2xx reply; any other status is its refusal.
@@ -291,9 +359,19 @@ impl<H: Http> Store<H> {
     }
 
     /// One page of `did`'s log from `from`, from the configured store. A reply larger than
-    /// [`MAX_LOG_PAGE_BYTES`] or a page of more than [`LOG_PAGE_EVENTS`] events is refused as
+    /// [`MAX_REPLY_BYTES`] or a page of more than [`LOG_PAGE_EVENTS`] events is refused as
     /// `invalid` (`too-large`).
     pub async fn log(&self, did: &str, from: u64) -> LanguageResult<Option<LogPage>> {
+        Ok(self.log_sized(did, from).await?.map(|(page, _)| page))
+    }
+
+    /// [`Store::log`] with the size of the reply body in bytes, for a reader that bounds what
+    /// it reads in total.
+    pub async fn log_sized(
+        &self,
+        did: &str,
+        from: u64,
+    ) -> LanguageResult<Option<(LogPage, usize)>> {
         let path = format!("/v1/logs/{}", segment(scid_of(did)?));
         let query = Send {
             query: vec![("from", from.to_string())],
@@ -306,14 +384,11 @@ impl<H: Http> Store<H> {
         if !(200..300).contains(&reply.status) {
             return Err(refusal_of(reply.status, &reply.body).into());
         }
-        if reply.body.len() > MAX_LOG_PAGE_BYTES {
-            return Err(invalid("too-large"));
-        }
         let page: LogPage = serde_json::from_str(&reply.body).map_err(|_| unavailable())?;
         if page.events.len() > LOG_PAGE_EVENTS as usize {
             return Err(invalid("too-large"));
         }
-        Ok(Some(page))
+        Ok(Some((page, reply.body.len())))
     }
 
     pub async fn head(&self, did: &str) -> LanguageResult<Option<SignedHead>> {
@@ -524,9 +599,48 @@ mod tests {
 
     #[test]
     fn the_store_url_comes_from_the_settings() {
-        assert_eq!(store_url_from(r#"{"storeUrl":"http://x"}"#), "http://x");
-        assert_eq!(store_url_from(""), DEFAULT_STORE_URL);
-        assert_eq!(store_url_from(r#"{"storeUrl":""}"#), DEFAULT_STORE_URL);
+        let url = |settings: &str| store_settings_from(settings).url;
+        assert_eq!(url(r#"{"storeUrl":"http://x"}"#), "http://x");
+        assert_eq!(url(""), DEFAULT_STORE_URL);
+        assert_eq!(url(r#"{"storeUrl":""}"#), DEFAULT_STORE_URL);
+        assert_eq!(
+            store_settings_from(r#"{"storeUrl":"https://s","storeKeys":["z6MkA",3,"z6MkB"]}"#),
+            StoreSettings {
+                url: "https://s".into(),
+                keys: vec!["z6MkA".into(), "z6MkB".into()]
+            }
+        );
+        assert!(store_settings_from(r#"{"storeKeys":"z6MkA"}"#)
+            .keys
+            .is_empty());
+    }
+
+    #[test]
+    fn plain_http_is_taken_only_to_a_loopback_address() {
+        for url in [
+            "https://store.coasys.org",
+            "HTTPS://store.example:8443/base",
+            "http://127.0.0.1:8080",
+            "http://127.9.9.9",
+            "http://localhost:3000/",
+            "http://[::1]:8080",
+            "http://user@127.0.0.1:1",
+        ] {
+            assert!(transport_allowed(url), "{url}");
+        }
+        for url in [
+            "http://store.coasys.org",
+            "http://10.0.0.1:8080",
+            "http://127.0.0.1.attacker.example",
+            "http://localhost.attacker.example",
+            "http://127.0.0.1@attacker.example",
+            "http://[::2]:80",
+            "ftp://127.0.0.1",
+            "store.coasys.org",
+            "https://",
+        ] {
+            assert!(!transport_allowed(url), "{url}");
+        }
     }
 
     #[test]

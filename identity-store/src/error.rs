@@ -51,6 +51,17 @@ impl ApiError {
         )
     }
 
+    /// `409 {error:"forked", head, fork}`: the store holds a fork of the log (two validly signed
+    /// events at `fork.seq`), so the identity is frozen and the store takes no further write
+    /// for it. `head` is the head the store keeps serving.
+    pub fn forked(head: &SignedHead, fork: &ad4m_hash_chain::ForkEvidence) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            json!({ "error": "forked", "head": head,
+                    "fork": { "seq": fork.seq, "ours": fork.ours, "theirs": fork.theirs } }),
+        )
+    }
+
     /// `409 {error:"key-taken", key}` (the one-key check).
     pub fn key_taken(key: &str) -> Self {
         Self::new(
@@ -101,11 +112,14 @@ impl ApiError {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": error }))
     }
 
-    /// `500`: the store failed (its database); nothing was committed.
+    /// `500 {error: "internal"}`: the store failed (its database); nothing was committed. The
+    /// detail goes to the store's log (stderr), never into the body: it can name tables,
+    /// paths and stored data.
     pub fn internal(detail: impl Into<String>) -> Self {
+        eprintln!("identity-store: internal error: {}", detail.into());
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            json!({ "error": "internal", "detail": detail.into() }),
+            json!({ "error": "internal" }),
         )
     }
 }
@@ -132,5 +146,19 @@ impl IntoResponse for ApiError {
             }
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_database_failure_answers_a_generic_body() {
+        let error = ApiError::from(rusqlite::Error::InvalidColumnName(
+            "secret_column in /var/lib/store.sqlite".into(),
+        ));
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.body, json!({ "error": "internal" }));
     }
 }

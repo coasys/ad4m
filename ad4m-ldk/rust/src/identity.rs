@@ -151,6 +151,8 @@ pub struct AgentRecord {
     /// (`proof.key`), with no `proof.valid`, `proof.invalid` or `proof.record`: the agent
     /// language answers it with [`AgentRecordProof`] added as `proof.record`.
     pub profile: serde_json::Value,
+    /// Unix milliseconds when the record was signed. A store takes a record only above the
+    /// stored version and at most 5 minutes past its own clock.
     pub version: u64,
     /// The device did:key that signed.
     pub signed_by: String,
@@ -162,14 +164,14 @@ pub struct AgentRecord {
     /// carries neither; nor a hash, since a fork freezes the identity anyway.
     #[serde(default)]
     pub anchor: Option<u64>,
-    /// `coasys:link` scheme over {profile, version, anchor}.
+    /// `coasys:agent-record` scheme over {profile, version, anchor}.
     pub sig: String,
 }
 
 /// `proof.record` on a `did:scid` profile expression from the agent language: the binding of
 /// the agent record it came in. With `proof.key` as the record's `signedBy` and the expression
 /// minus `proof.record` as the record's `profile`, a reader rebuilds the [`AgentRecord`] and
-/// checks `sig` over [`AgentRecord::signed_value`] under `coasys:link`, then the key at
+/// checks `sig` over [`AgentRecord::signed_value`] under `coasys:agent-record`, then the key at
 /// `anchor` in the person's log: a record signed before a revocation stays valid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -183,7 +185,7 @@ pub struct AgentRecordProof {
 }
 
 impl AgentRecord {
-    /// What `sig` covers under the `coasys:link` scheme: `{profile, version, anchor}`.
+    /// What `sig` covers under the `coasys:agent-record` scheme: `{profile, version, anchor}`.
     pub fn signed_value(&self) -> serde_json::Value {
         serde_json::json!({ "profile": self.profile, "version": self.version, "anchor": self.anchor })
     }

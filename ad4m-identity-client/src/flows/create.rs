@@ -25,10 +25,10 @@ use crate::vault::Vault;
 use crate::{fold, ClientError, Random};
 
 /// What the surface shows at each step.
-#[derive(PartialEq, Eq)]
 pub enum CreateScreen {
-    /// The 12 words, to write down (screen capture off).
-    ShowWords(Vec<String>),
+    /// The 12 words, to write down (screen capture off). Zeroed when the screen drops; read
+    /// them with [`Secret::expose`].
+    ShowWords(Secret<Vec<String>>),
     /// Ask for the words at these positions (counted from 1).
     ConfirmWords { positions: [usize; 2] },
 }
@@ -38,7 +38,9 @@ pub enum CreateScreen {
 impl std::fmt::Debug for CreateScreen {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CreateScreen::ShowWords(words) => write!(f, "ShowWords(<{} words>)", words.len()),
+            CreateScreen::ShowWords(words) => {
+                write!(f, "ShowWords(<{} words>)", words.expose().len())
+            }
             CreateScreen::ConfirmWords { positions } => f
                 .debug_struct("ConfirmWords")
                 .field("positions", positions)
@@ -90,7 +92,7 @@ impl CreateFlow {
             CreateFlow {
                 step: Some(Step::Shown(words)),
             },
-            CreateScreen::ShowWords(shown),
+            CreateScreen::ShowWords(Secret::new(shown)),
         )
     }
 

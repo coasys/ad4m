@@ -6,7 +6,7 @@
 //!   `did:scid` and signed by the device key the way `create_signed_expression` signs, with
 //!   `proof.key` the bare device `did:key`;
 //! - `anchor`: the log's trusted seq ([`KelCache::trusted`](super::cache::KelCache::trusted));
-//! - `sig`: the device key's `coasys:link` signature over `{profile, version, anchor}`;
+//! - `sig`: the device key's `coasys:agent-record` signature over `{profile, version, anchor}`;
 //! - a signed request by the same device key at the trusted head, for the store that signed it.
 //!
 //! The store admits it, the agent language answers it with `proof.record`, and
@@ -14,7 +14,7 @@
 
 use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes};
 use ad4m_identity_core::build::Signer;
-use ad4m_identity_core::{did_of, signing_bytes, LINK_DOMAIN, REQUEST_DOMAIN};
+use ad4m_identity_core::{did_of, signing_bytes, AGENT_RECORD_DOMAIN, REQUEST_DOMAIN};
 use ad4m_ldk::identity::{AgentRecord, RequestBody, SignedHead, SignedRequest};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
@@ -84,7 +84,8 @@ pub fn person_record(
         anchor: Some(head.seq),
         sig: String::new(),
     };
-    let bytes = signing_bytes(LINK_DOMAIN, &record.signed_value()).map_err(|e| e.to_string())?;
+    let bytes =
+        signing_bytes(AGENT_RECORD_DOMAIN, &record.signed_value()).map_err(|e| e.to_string())?;
     record.sig = encode_proof_value(&signer.sign(&bytes));
 
     // The agent language sends the record as its canonical JSON.
@@ -336,7 +337,7 @@ mod tests {
         );
         let sig = decode_proof_value(&record.sig).unwrap();
         assert!(verify_signed(
-            LINK_DOMAIN,
+            AGENT_RECORD_DOMAIN,
             &record.signed_value(),
             &world.key,
             &sig

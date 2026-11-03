@@ -703,9 +703,9 @@ impl LanguageController {
         Ok(())
     }
 
-    /// Writes `identity.storeUrl` into the agent language's settings, then installs and loads
-    /// it. The language sends agent profiles and every identity call to its `storeUrl`; when
-    /// that setting cannot be written, the language is not loaded at all, so profile and
+    /// Writes `identity.storeUrl` and `identity.storeKeys` into the agent language's settings,
+    /// then installs and loads it. The language sends agent profiles and every identity call to
+    /// its `storeUrl`; when the settings cannot be written, the language is not loaded at all, so profile and
     /// identity calls fail (the identity calls as `unavailable`) instead of reaching an older
     /// store or the language's default one.
     pub(crate) async fn install_agent_language(
@@ -718,7 +718,7 @@ impl LanguageController {
             .map_err(|e| LanguageError::LoadError {
                 address: agent_language.to_string(),
                 message: format!(
-                    "identity.storeUrl could not be written to the agent language's settings \
+                    "identity.storeUrl and identity.storeKeys could not be written to the agent language's settings \
                      ({e}); the agent language is not loaded, so no profile or identity call \
                      reaches a store other than the configured one"
                 ),
@@ -3564,7 +3564,8 @@ mod agent_language_profile_tests {
             (JsonValue::Bool(false), JsonValue::Bool(true))
         );
 
-        // A store record's multibase `coasys:link` signature is not an AD4M expression proof.
+        // A store record's multibase `coasys:agent-record` signature is not an AD4M
+        // expression proof.
         let mut record_sig = expression;
         record_sig["proof"]["signature"] = JsonValue::from("z3Jx6Yb4rD9aQnL2");
         assert_eq!(

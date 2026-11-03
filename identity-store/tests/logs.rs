@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use identity_store::{Fault, Settings};
 use serde_json::{json, Value};
 
-use common::agent::{did_key_record, key, multikey, Device, Person};
+use common::agent::{did_key, did_key_record, key, multikey, Device, Person};
 use common::{verify_head, TestStore, T0};
 
 fn head_of(body: &Value) -> SignedHead {
@@ -35,17 +35,25 @@ async fn an_append_on_the_head_passes_the_same_seq_again_and_a_gap_get_409_with_
     t.link(&mut alice, &phone, OfferKind::Device, None).await;
     assert_eq!(alice.head_seq(), 1);
 
-    // The same seq again: an event at seq 1 that differs from the stored one.
+    // The same seq again: the stored event resent, and an event at seq 1 that differs from the
+    // stored one but does not replay (a broken proof). Both are plain conflicts, no fork.
+    let stored = alice.events[1].clone();
+    let reply = t.append(&alice.scid(), &[&stored]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.body["error"], "conflict");
     let mut fork = Person::new("alice");
     let other = Device::new("alice other");
     let (offer, s) = fork.offer(OfferKind::Device, None, None, t.now() + 300);
     let claim = other.claim(&fork.scid(), &offer.offer.offer_id, s, false);
-    let add = fork.add_claimed(&offer.offer, &other.view(&claim, t.now()));
+    let mut add = fork.add_claimed(&offer.offer, &other.view(&claim, t.now()));
+    add.proof[0].proof_value = alice.events[0].proof[0].proof_value.clone();
     let reply = t.append(&alice.scid(), &[&add]).await;
     assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.body["error"], "conflict");
     let head = head_of(&reply.body);
     assert_eq!(head.seq, 1);
     assert_eq!(head.hash, alice.chain.head().hash);
+    assert_eq!(t.count("chain_forks"), 0);
 
     // A gap: seq 3 on a head at 1.
     let revoke = alice.revoke(&["d2"]);
@@ -59,6 +67,77 @@ async fn an_append_on_the_head_passes_the_same_seq_again_and_a_gap_get_409_with_
     let reply = t.append_push(&mut alice, revoke).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     assert_eq!(head_of(&reply.body).seq, 2);
+}
+
+#[tokio::test]
+async fn a_validly_signed_competing_event_is_recorded_as_a_fork_and_freezes_the_identity() {
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let phone = Device::new("alice phone");
+    t.link(&mut alice, &phone, OfferKind::Device, None).await;
+    let stored_hash = alice.chain.head().hash;
+
+    // The master signs a second event at seq 1: it replays on #0, so it is a fork.
+    let mut twin = Person::new("alice");
+    let other = Device::new("alice other");
+    let (offer, s) = twin.offer(OfferKind::Device, None, None, t.now() + 300);
+    let claim = other.claim(&twin.scid(), &offer.offer.offer_id, s, false);
+    let competitor = twin.add_claimed(&offer.offer, &other.view(&claim, t.now()));
+    let reply = t.append(&alice.scid(), &[&competitor]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.body["error"], "forked");
+    let theirs = ad4m_identity_core::event_hash(&competitor).unwrap();
+    assert_eq!(reply.body["fork"]["seq"], 1);
+    assert_eq!(reply.body["fork"]["ours"], json!(stored_hash));
+    assert_eq!(reply.body["fork"]["theirs"], json!(theirs));
+    assert_eq!(head_of(&reply.body).hash, stored_hash);
+    // The evidence is kept with the competing event, so anyone can check it.
+    let (count, json_text): (i64, String) = {
+        let conn = t.store.db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*), MAX(theirs_json) FROM chain_forks WHERE chain = ?1",
+            [alice.scid()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(count, 1);
+    let kept: ad4m_identity_core::Event = serde_json::from_str(&json_text).unwrap();
+    assert_eq!(kept, competitor);
+    // Sending it again records nothing new.
+    let reply = t.append(&alice.scid(), &[&competitor]).await;
+    assert_eq!(reply.body["error"], "forked");
+    assert_eq!(t.count("chain_forks"), 1);
+
+    // Frozen: an event that continues the head is refused, and so is a signed request.
+    let revoke = alice.revoke(&["d2"]);
+    let reply = t.append(&alice.scid(), &[&revoke]).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.body["error"], "forked");
+    assert_eq!(t.store.head(&alice.scid()).unwrap().unwrap().seq, 1);
+    let path = format!("/v1/agents/{}", alice.did());
+    let record = alice.agent_record(&alice.device_key(1), json!({ "perspective": {} }), 1);
+    let body = serde_json::to_vec(&record).unwrap();
+    let header = alice.request(
+        "d1",
+        &alice.device_key(1),
+        "PUT",
+        &path,
+        &body,
+        t.now() + 60,
+    );
+    let reply = t.send("PUT", &path, Some(body), Some(header)).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.body["error"], "forked");
+    // The log stays readable as the store held it.
+    let page = t.get(&format!("/v1/logs/{}", alice.scid())).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert_eq!(page.body["events"].as_array().unwrap().len(), 2);
+
+    // Another identity is not affected.
+    let bob = Person::new("bob");
+    t.publish(&bob).await;
 }
 
 #[tokio::test]
@@ -454,6 +533,23 @@ async fn signed_requests_expired_replayed_wrong_body_bot_key_and_revoked_key_are
     body_at.kel_seq = 40;
     let unknown = Person::sign_request(body_at, &d1);
     assert!(refused(send(unknown).await).contains("position"));
+    // A held seq with another seq's hash.
+    let mut wrong_hash = alice.request_body("d1", "POST", &path, &body, later);
+    assert!(wrong_hash.kel_seq > 0);
+    wrong_hash.kel_hash = alice.chain.hash_at(0).unwrap().clone();
+    let wrong_hash = Person::sign_request(wrong_hash, &d1);
+    assert!(refused(send(wrong_hash).await).contains("position"));
+    // Another method on the same path.
+    let as_get = alice.request("d1", &d1, "GET", &path, &body, later);
+    assert!(refused(send(as_get).await).contains("method"));
+    // A nonce that is not 16 bytes of base58btc: 400 request.
+    for nonce in ["short", "0OIl0OIl0OIl0OIl0OIl0OIl"] {
+        let mut odd = alice.request_body("d1", "POST", &path, &body, later);
+        odd.nonce = nonce.to_string();
+        let reply = send(Person::sign_request(odd, &d1)).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+        assert_eq!(reply.body["error"], "request");
+    }
     // No header at all.
     let reply = t.send("POST", &path, Some(body.clone()), None).await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
@@ -525,6 +621,56 @@ async fn a_body_over_64_kib_gets_413_and_33_events_get_400() {
 }
 
 #[tokio::test]
+async fn a_signed_head_carries_the_store_time_of_its_append() {
+    let t = TestStore::new();
+    let alice = Person::new("alice");
+    t.set_now(T0 + 5);
+    let head = head_of(&t.append(&alice.scid(), &[&alice.events[0]]).await.body);
+    assert_eq!(head.time, T0 + 5);
+    assert!(verify_head(&head, &[t.store_key()]));
+    let served: SignedHead =
+        serde_json::from_value(t.get(&format!("/v1/heads/{}", alice.scid())).await.body).unwrap();
+    assert_eq!(served.time, T0 + 5);
+}
+
+#[tokio::test]
+async fn a_signed_request_of_one_identity_is_refused_on_another_identitys_route() {
+    // Bob's master signs requests for Alice's offer routes. Each names Bob's did, so it is a
+    // valid request of Bob's log for that path; only the route's identity refuses it.
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    let bob = Person::new("bob");
+    t.publish(&alice).await;
+    t.publish(&bob).await;
+    let phone = Device::new("alice phone");
+    let (offer, _) = t
+        .claimed_offer(&mut alice, &phone, OfferKind::Device, None)
+        .await;
+    let id = offer.offer.offer_id.clone();
+    let later = t.now() + 60;
+    let refused = |reply: common::Reply| {
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+        assert_eq!(reply.body["error"], "signer");
+        assert!(reply.body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("another identity"));
+    };
+    let list = format!("/v1/offers/{}", alice.scid());
+    let by_bob = bob.master_request("GET", &list, b"", later);
+    refused(t.send("GET", &list, None, Some(by_bob)).await);
+    let cancel = format!("/v1/offers/{}/{id}", alice.scid());
+    let by_bob = bob.master_request("DELETE", &cancel, b"", later);
+    refused(t.send("DELETE", &cancel, None, Some(by_bob)).await);
+    // Alice's offer is untouched, and her own master lists it.
+    let by_alice = alice.master_request("GET", &list, b"", later);
+    let reply = t.send("GET", &list, None, Some(by_alice)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body.as_array().unwrap().len(), 1);
+    assert_eq!(reply.body[0]["state"]["state"], "claimed");
+}
+
+#[tokio::test]
 async fn a_new_log_with_no_note_passes_without_a_proof_and_a_sent_proof_must_meet_the_bits() {
     let t = TestStore::new();
     let alice = Person::new("alice");
@@ -555,6 +701,29 @@ async fn a_new_log_with_no_note_passes_without_a_proof_and_a_sent_proof_must_mee
         )
         .await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(reply.body["error"], "pow");
+    assert_eq!(t.count("logs"), 0);
+    // A proof below the store's bits that names its own `bits`: the store checks its own, 403.
+    let mut start = 0u128;
+    let weak = loop {
+        let p = pow::solve_range(&alice.scid(), 1, start, 1 << 16).expect("a 1-bit proof");
+        if !pow::check(&alice.scid(), &p, 8) {
+            break p;
+        }
+        let bytes: [u8; 16] = bs58::decode(&p.nonce)
+            .into_vec()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        start = u128::from_be_bytes(bytes) + 1;
+    };
+    let reply = t
+        .post(
+            &path,
+            &json!({ "events": events, "pow": { "nonce": weak.nonce, "bits": 1 } }),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
     assert_eq!(reply.body["error"], "pow");
     assert_eq!(t.count("logs"), 0);
     // A proof that meets the bits: 200.
@@ -876,6 +1045,113 @@ async fn a_did_scid_record_signed_by_the_master_is_refused() {
     let by_master = alice.master_request("PUT", &path, &body, t.now() + 60);
     let reply = t.send("PUT", &path, Some(body), Some(by_master)).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
+#[tokio::test]
+async fn a_version_past_the_store_clock_is_refused_so_a_revoked_thief_cannot_freeze_the_record() {
+    use identity_store::agents::version_ceiling;
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let phone = Device::new("alice phone");
+    let phone_id = t.link(&mut alice, &phone, OfferKind::Device, None).await;
+    let d1 = alice.device_key(1);
+    let path = format!("/v1/agents/{}", alice.did());
+    let profile = json!({ "perspective": { "links": [] } });
+    let put = |alice: &Person, record: &ad4m_ldk::identity::AgentRecord| {
+        let body = serde_json::to_vec(record).unwrap();
+        let header = alice.request("d1", &d1, "PUT", &path, &body, t.now() + 60);
+        t.send("PUT", &path, Some(body), Some(header))
+    };
+
+    // The largest safe integer, the old freeze, and one past the ceiling: 400 version.
+    for version in [9_007_199_254_740_991, version_ceiling(t.now()) + 1] {
+        let reply = put(
+            &alice,
+            &alice.agent_record(&phone.key, profile.clone(), version),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+        assert_eq!(reply.body["error"], "version");
+    }
+    assert_eq!(t.get(&path).await.status, StatusCode::NOT_FOUND);
+
+    // A thief with the phone's key writes at the ceiling while the key is valid.
+    let top = version_ceiling(t.now());
+    let thief = alice.agent_record(&phone.key, json!({ "perspective": {}, "thief": 1 }), top);
+    let reply = put(&alice, &thief).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    // Alice revokes the phone a second later; the thief's record stays (it was valid).
+    t.set_now(t.now() + 1);
+    let revoke = alice.revoke(&[&phone_id]);
+    assert_eq!(
+        t.append_push(&mut alice, revoke).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(t.get(&path).await.body["version"], json!(top));
+    // The revoked key writes nothing more, at any version.
+    let again = alice.agent_record(&phone.key, profile.clone(), top + 1);
+    assert_eq!(put(&alice, &again).await.status, StatusCode::FORBIDDEN);
+    // Alice republishes at once: one above the stored version is under the clock's ceiling.
+    let mine = alice.agent_record(&d1, profile.clone(), top + 1);
+    let reply = put(&alice, &mine).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(
+        t.get(&path).await.body,
+        serde_json::to_value(&mine).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_did_key_record_at_the_ceiling_is_replaced_by_the_owner_a_second_later() {
+    use identity_store::agents::version_ceiling;
+    let t = TestStore::new();
+    let guest = key("guest");
+    let profile = json!({ "perspective": { "links": [] } });
+    let path = format!("/v1/agents/{}", did_key(&guest));
+    let send = |record: &ad4m_ldk::identity::AgentRecord| {
+        t.send(
+            "PUT",
+            &path,
+            Some(serde_json::to_vec(record).unwrap()),
+            None,
+        )
+    };
+    // Any code the key signs for (another language on the agent's executor) writes at the
+    // ceiling; a version past it is refused.
+    let past = did_key_record(&guest, profile.clone(), version_ceiling(t.now()) + 1);
+    assert_eq!(send(&past).await.body["error"], "version");
+    let top = version_ceiling(t.now());
+    assert_eq!(
+        send(&did_key_record(&guest, profile.clone(), top))
+            .await
+            .status,
+        StatusCode::OK
+    );
+    // In the same second one above it is past the ceiling; a second later it passes.
+    let next = did_key_record(&guest, profile, top + 1);
+    assert_eq!(send(&next).await.status, StatusCode::BAD_REQUEST);
+    t.set_now(t.now() + 1);
+    let reply = send(&next).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
+#[tokio::test]
+async fn a_record_signed_under_the_link_domain_is_refused() {
+    let t = TestStore::new();
+    let guest = key("guest");
+    let mut record = did_key_record(&guest, json!({ "perspective": { "links": [] } }), 1);
+    record.sig = common::agent::sign_record_in(ad4m_identity_core::LINK_DOMAIN, &record, &guest);
+    let reply = t
+        .send(
+            "PUT",
+            &format!("/v1/agents/{}", record.did),
+            Some(serde_json::to_vec(&record).unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "signer");
 }
 
 #[tokio::test]

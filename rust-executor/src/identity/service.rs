@@ -665,6 +665,51 @@ mod tests {
         }
     }
 
+    /// The first-link rule runs inside `claim_for_main`: while the main key is in no log, an
+    /// offer of an identity other than the recorded operator's is refused `first-link`, and
+    /// with no record `no-operator`, before the claim reaches the store.
+    #[tokio::test]
+    async fn claim_for_main_refuses_an_offer_of_another_identity_than_the_operator() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let service = test_service();
+        let operator = did_of(&TestLog::new(5).scid());
+        let offer = ad4m_identity_core::link::OfferString {
+            store: "https://store.example".into(),
+            scid: TestLog::new(6).scid(),
+            offer_id: bs58::encode([2u8; 16]).into_string(),
+            s: bs58::encode([1u8; 32]).into_string(),
+        };
+        let claim = || async {
+            service
+                .claims()
+                .claim_for_main(&crate::identity::types::ClaimOfferParams {
+                    offer: offer.encode(),
+                    hint: None,
+                })
+                .await
+                .expect_err("the claim is refused")
+        };
+
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(Some(&operator)))
+            .unwrap();
+        let refused = claim().await;
+        assert!(
+            refused.message.starts_with("first-link"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(refused.code, 403);
+
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        let refused = claim().await;
+        assert!(
+            refused.message.starts_with("no-operator"),
+            "{}",
+            refused.message
+        );
+    }
+
     #[tokio::test]
     async fn with_an_operator_record_the_main_agent_co_signs_no_incept() {
         crate::test_utils::setup_wallet();

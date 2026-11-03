@@ -23,7 +23,7 @@ pub struct ExpressionProof {
     /// `expressionGet` answers a `did:scid` agent's profile as the record stores it, plus this
     /// field and nothing else, so a reader can check the record itself at its anchor: removing
     /// `proof.record` gives back the record's `profile` exactly, and `sig` is the record
-    /// signature over `{profile, version, anchor}` (`coasys:link`) by `proof.key`, the record's
+    /// signature over `{profile, version, anchor}` (`coasys:agent-record`) by `proof.key`, the record's
     /// `signedBy`. Absent on every other expression. See
     /// [`AgentRecordProof`](crate::identity::AgentRecordProof).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -532,7 +532,16 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
 
         log::info!("AD4M init complete");
 
-        spawn_main_agent_publish();
+        // The main agent's profile, then every managed user's, so the profiles an earlier
+        // agent language held reach the configured store.
+        tokio::spawn(async {
+            if let Err(e) =
+                AgentService::publish_agent_to_language(&AgentContext::main_agent()).await
+            {
+                log::warn!("Error publishing agent expression: {}", e);
+            }
+            AgentService::publish_managed_profiles().await;
+        });
     }
 
     let mut agent = {
