@@ -8,13 +8,17 @@ master key for the person.
 
 | File | What |
 |---|---|
-| `src/lib.rs` | `Clock`, `Random` (the surface passes both: no clock or randomness of its own), `SystemClock` (not wasm32), `OsRandom`, `ClientError` |
+| `src/lib.rs` | `Clock`, `Random` (the surface passes both: no clock or randomness of its own), `SystemClock` (not wasm32), `OsRandom`, `RandomRng` (a `Random` as the core's seal RNG), `ClientError` |
 | `src/secret.rs` | `Secret<T>`: zeroed on drop, `Debug` prints `<redacted>`, no `Serialize`, no `Clone` |
-| `src/vault.rs` | `Vault`, `Unlocked` (one unlock per flow, 300 s), `MasterSigner` (`Signer` + `index`), `KeySigner`, `MasterUse` (`Link`, `Revoke`), `VaultError`; the trait has `store_master`, `unlock` and the pending incept of a `create` (`store_pending_incept`, `pending_incepts`, `incept_published`); `MemoryVault` (tests and feature `test-vault`, never in a release build) |
-| `src/executor.rs` | `ExecutorRpc` (one RPC call), `ViaExecutor` (the typed `identity.*` calls the flows make: status, log, cosignIncept, publish, openOffer, offers; claiming is the joining executor's call, `ad4m-executor claim`); feature `ws`: `ExecutorRpc` for `ad4m-client`'s `WsRpcClient` |
+| `src/vault.rs` | `Vault`, `Unlocked` (one unlock per flow, 300 s), `MasterSigner` (`Signer` + `index` + `seal_self`: the key seals itself into an inbox `master` body), `KeySigner` (a master key in memory, for a surface's vault too), `MasterUse` (`Link`, `Revoke`, `SendMaster`), `VaultError`, `PendingPush`; the trait has `store_master`, `unlock`, the pending incept of a `create` (`store_pending_incept`, `pending_incepts`, `incept_published`) and the retry list of master-key pushes (`keep_push`, `pending_pushes`, `push_done`); `MemoryVault` (tests and feature `test-vault`, never in a release build) |
+| `src/executor.rs` | `ExecutorRpc` (one RPC call), `ViaExecutor` (the typed `identity.*` calls the flows make: status, log, cosignIncept, publish, openOffer, offers, inboxPut, takeMaster (`TakenMaster`, its secret a `Secret`), inboxAck, record, recordPut, unwrapRecordKey, requests, postRequest, deleteRequest; claiming is the joining executor's call, `ad4m-executor claim`); feature `ws`: `ExecutorRpc` for `ad4m-client`'s `WsRpcClient` |
+| `src/request.rs` | (crate) the log folded, the store the executor accepted the head from, the master key's position at the head, `master_request` (a store request the master key signs) |
+| `src/record.rs` | The private details record, the one place that opens, merges and writes it: `read` (the executor's sealed record, its entry's key unwrapped by the executor, decrypted here), `merge` (the `Change`s, then the entries and pending revocations of keys no longer valid at the head go), `write` (newest version + changes, sealed to the log's readers as the next version; a stale version or changed readers read and merge again, at most 4 times, then `RecordBusy`) |
 | `src/flows/create.rs` | `CreateFlow` (words shown → two typed back → `finish`): master #0, `incept` listing the executor's key as `d1`, `identity.cosignIncept`, fold, the vault keeps master #0 and the co-signed incept, then `identity.publish`; `resume` publishes a kept incept again after a failed or unanswered publish |
-| `src/flows/link.rs` | `LinkFlow`: `open` (offer signed by the current master at the head, offer link), `wait_for_claim` (master-signed list requests; the match code), `confirm` (the `add` that spends the claim) |
-| `src/flows/revoke.rs` | `revoke` (a `revoke` signed by the current master), `key_id_of` |
+| `src/flows/link.rs` | `LinkFlow`: `open` (offer signed by the current master at the head, offer link), `scan` (the holder read a device string: an offer bound to its key, the ticket sealed to its `enc` into its pre-join inbox; refuses a string past `exp` or for another store), `wait_for_claim` (master-signed list requests; the match code; `Claimed::can_keep_master`), `may_keep`, `confirm` (the `add` that spends the claim; with `keep_master` the master key into the device's inbox; the device's `DeviceEntry` into the record; answers `Linked`) |
+| `src/flows/master.rs` | `send_master` (`check_app` before the unlock: a device key that can take it, listed in the record as a desktop or phone app; one unlock, the push, `holdsMaster: "offered"`), `retry_pushes` (the vault's retry list for one identity), `take_master` (the device's side: `identity.takeMaster`, checked against its own fold, `store_master`, `inboxAck`, `holdsMaster: true`); `push` (crate): on the retry list while the put runs, kept on a 5xx or 429 |
+| `src/flows/revoke.rs` | `revoke` (a `revoke` signed by the current master, then the record without the revoked devices; answers `Revoked`), `key_id_of` |
+| `src/flows/requests.rs` | `check_poster` (the request's signed store request: its device key, valid at the head and at the position it names, over `JCS({body, expires})`), `answer` (refuses an expired request and a `confirm-revoke` naming a key not valid at the head; `send-master` as `send_master`; `confirm-revoke` without `rotate`; then the master-signed delete; `rotate` is `NeedsWords`) |
 | `examples/holder.rs` | the flows over JSON lines against a real executor (features `ws,test-vault`), for `tests/js/tests/identity.test.ts` |
 | `tests/flows.rs` | the flows against a real `identity-store` (router in process) through a test executor |
 
@@ -35,6 +39,23 @@ master key for the person.
   held log with the store's head).
 - `create` publishes no proof of work: the store has no brake yet and admits a `#0` without
   one; the `pow` step comes with the brake.
+- **A master key leaves the vault only sealed.** `MasterSigner::seal_self` builds, signs and
+  seals the `master` body inside the signer; the payload's copy of the secret is wiped there.
+  It goes only to a device key valid at the head, without the bot mark, and then only to a
+  claim with `canKeepMaster` on a `device` offer (`LinkFlow::may_keep`), or to a device the
+  record lists as a desktop or phone app (`send_master`, a `send-master` request).
+- **One place merges the record** (`record::write`). Every flow that changes it passes
+  `Change`s; nothing else seals or writes a record. A step after a publish or a push (the
+  record write, the push after a link) reports its own outcome in the answer (`Linked`,
+  `Sent`, `Revoked`, `Taken`): the published event stands either way.
+- **Custody before the push.** A push is on the vault's retry list before the inbox write and
+  forgotten once the store takes it, or refuses it for good (any 4xx but 429), or its device
+  key leaves the log; `retry_pushes` runs at each start and unlock.
+- The app reads the record as its executor's device (`identity.unwrapRecordKey` opens the
+  record key of the executor's entry, local only); a surface with an `enc` key of its own (the
+  phone) reads the store directly once that client lands.
+- Not here yet: rotation (master *n*+1, its pushes to kept holders, the record rewrite on
+  `rotate`), restore with the recovery key, and setting the recovery key at `create`.
 
 ## Tests
 

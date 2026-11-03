@@ -81,8 +81,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   executor without one, on a loopback listener). Every other caller, the admin credential on
   a network listener included, gets 403 `local-only`. It is on `agent.unlock`,
   `identity.rekey`, `identity.custodyStatus`, `identity.takeMaster`, `identity.prepareDevice`,
-  `identity.inbox`, `identity.inboxAck` and `runtime.quit`, and `runtime.setConfig`
-  refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
+  `identity.inbox`, `identity.inboxAck`, `identity.unwrapRecordKey` and `runtime.quit`, and
+  `runtime.setConfig` refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
   An executor on `--localhost false` without TLS has no loopback listener, so these calls
   answer on no listener there.
 - **Prolog is off.** `prolog_service::PROLOG_MODE` is `Disabled`; Prolog query paths return empty.

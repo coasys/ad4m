@@ -1,5 +1,8 @@
 //! The private details record and the request box, through the agent language (spec section
-//! 17). The executor never opens a record: an app opens it with its own `enc` key. A read, a
+//! 17). The executor never decrypts a record: an app does. An app on this machine whose device
+//! is this executor (the desktop's custody service) has no `enc` key of its own, so the operator
+//! may have the executor unwrap the record key of its entry (`identity.unwrapRecordKey`), in
+//! the wallet, and decrypts the record with it. A read, a
 //! record write and a deletion pass the request the caller signed with the identity's master
 //! key (the custody service, a restoring app), or, when the caller gives none, sign one with
 //! this agent's device key at its [`DevicePosition`]. A post is the device key's only: the
@@ -16,8 +19,9 @@ use serde::Serialize;
 use super::device::{body_bytes, device_key, store_request, WalletSigner, REQUEST_TTL_S};
 use super::service::{backend_error, cache_error, db, now, IdentityService};
 use super::types::{
-    convert, DeleteRequestParams, DeviceRequest, PostRequestParams, RecordParams, RecordPutParams,
-    RecordStored, RequestPosted, RequestsParams, SealedRecord, SignedRequest,
+    convert, DeleteRequestParams, DeviceRequest, PostRequestParams, RecordKey, RecordParams,
+    RecordPutParams, RecordStored, RequestPosted, RequestsParams, SealedRecord, SignedRequest,
+    UnwrapRecordKeyParams,
 };
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
@@ -163,6 +167,33 @@ impl IdentityService {
             .await
             .map_err(backend_error)?;
         wire(&stored)
+    }
+
+    /// `identity.unwrapRecordKey`: the record key that `wrapped`, this device's entry of a
+    /// record of `agent`'s identity, seals to the agent's device key, opened in the wallet. A
+    /// locked wallet is 503 `unavailable`; an entry that does not open is 400 `open`.
+    pub async fn unwrap_record_key(
+        &self,
+        agent: &AgentContext,
+        params: &UnwrapRecordKeyParams,
+    ) -> Result<RecordKey, WsRpcError> {
+        let position = self.bound_position(agent).await?;
+        let wallet = crate::wallet::wallet_backend();
+        let name = agent
+            .wallet_key_name()
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        if !wallet.is_unlocked() {
+            return Err(super::service::error(
+                503,
+                "unavailable: the wallet is locked",
+            ));
+        }
+        let key = wallet
+            .unwrap_record_key(&name, &position.scid, &params.wrapped)
+            .map_err(|e| WsRpcError::bad_request(format!("open: {e}")))?;
+        Ok(RecordKey {
+            key: bs58::encode(key.as_ref()).into_string(),
+        })
     }
 
     /// `identity.requests`: the request box since `since` (unix seconds, default all).
@@ -458,5 +489,52 @@ pub(crate) mod tests {
             .unwrap();
         let seen = world.store.requests.lock().unwrap().clone();
         assert_eq!(seen.last().unwrap().1, given);
+    }
+
+    /// The record key of the agent's entry opens in the wallet and decrypts that version; an
+    /// entry sealed to another device's key does not open.
+    #[tokio::test]
+    async fn the_record_key_of_the_agents_entry_opens_in_the_wallet() {
+        use ad4m_identity_core::record::{decrypt_record, seal_record, PrivateRecord};
+        let world = Bound::new(73).await;
+        let chain = world.log.chain();
+        let record = PrivateRecord {
+            words_checked_at: Some(7),
+            ..Default::default()
+        };
+        let sealed = seal_record(&chain, 1, &record, None, &mut rand::rngs::OsRng).unwrap();
+        let key = world
+            .service
+            .unwrap_record_key(
+                &world.agent,
+                &UnwrapRecordKeyParams {
+                    wrapped: sealed.wrapped["d2"].clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let bytes: [u8; 32] = bs58::decode(&key.key)
+            .into_vec()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            decrypt_record(&sealed, &world.log.scid(), &bytes),
+            Ok(record)
+        );
+        assert!(!format!("{key:?}").contains(&key.key));
+
+        let refused = world
+            .service
+            .unwrap_record_key(
+                &world.agent,
+                &UnwrapRecordKeyParams {
+                    wrapped: sealed.wrapped["d1"].clone(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 400);
+        assert!(refused.message.starts_with("open"), "{}", refused.message);
     }
 }

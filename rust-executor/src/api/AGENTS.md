@@ -170,7 +170,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-227 methods: Cap 87, Executor 33, Open 8, Operator 29, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 9.
+228 methods: Cap 87, Executor 33, Open 8, Operator 30, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 10.
 
 | Method | Guard |
 |---|---|
@@ -249,6 +249,7 @@ the guard checked:
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
 | `identity.takeMaster` | `Operator`, local only |
+| `identity.unwrapRecordKey` | `Operator`, local only |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |

@@ -223,7 +223,8 @@ pub fn sign_payload(
     by: SignedBy,
     master: &dyn crate::build::Signer,
 ) -> Result<InboxPayload, InboxError> {
-    let bytes = payload_signing_bytes(&to, &body, sent_at, &by)?;
+    // The bytes hold the body, a master key's secret too: wiped once signed.
+    let bytes = Zeroizing::new(payload_signing_bytes(&to, &body, sent_at, &by)?);
     let sig = ad4m_hash_chain::encode_proof_value(&master.sign(&bytes));
     Ok(InboxPayload {
         to,

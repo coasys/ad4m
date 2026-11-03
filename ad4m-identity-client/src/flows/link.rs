@@ -1,32 +1,41 @@
 //! `link`, the holder's side: add a device or an executor to the identity. The device's side
-//! (the claim) runs on the executor (`identity.claimOffer`).
+//! (the claim) runs on the executor (`identity.claimOffer`, or the ticket of its pre-join inbox).
 //!
 //! 1. [`LinkFlow::open`]: one unlock of the vault for the whole flow; an offer signed by the
 //!    current master key at the log's head (`identity.openOffer`); the offer link carries the
 //!    secret `s` in its fragment only.
-//! 2. The surface hands the link over (QR code, paste, `ad4m-executor claim <link>`).
+//! 2. The surface hands the link over (QR code, paste, `ad4m-executor claim <link>`). Or the
+//!    holder scanned the device's string ([`LinkFlow::scan`]): the offer is bound to the
+//!    device's key, and its ticket, sealed to the device's `enc` key and signed by the master
+//!    key, goes into the device's pre-join inbox (`identity.inboxPut` with `bind`).
 //! 3. [`LinkFlow::wait_for_claim`]: master-signed list requests (`identity.offers`) until the
 //!    offer is claimed; the claim's device key gives the match code both sides show.
 //! 4. [`LinkFlow::confirm`] after the person sees the same code: the `add` that spends the
-//!    claim, signed by the current master key (`identity.publish`).
+//!    claim, signed by the current master key (`identity.publish`); then, when the person
+//!    ticked "Keep my master key on this device too", the master key into the device's inbox
+//!    ([`super::master`]); then the device's entry in the private record.
 
-use ad4m_hash_chain::{encode_proof_value, hash_bytes};
 use ad4m_identity_core::build::add_claimed;
-use ad4m_identity_core::inbox::OfferTicket;
-use ad4m_identity_core::link::{
-    self, ClaimView, Offer, OfferKind, OfferString, SignedBy, SignedOffer,
+use ad4m_identity_core::inbox::{
+    pre_address, seal, sign_payload, InboxAddress, InboxBody, OfferTicket,
 };
-use ad4m_identity_core::{signing_bytes, KelChain, REQUEST_DOMAIN};
-use ad4m_ldk::identity::{OfferState, RequestBody, SignedHead, SignedRequest};
+use ad4m_identity_core::link::{
+    self, ClaimView, DeviceString, Offer, OfferKind, OfferString, SignedOffer,
+};
+use ad4m_identity_core::record::{DeviceEntry, HoldsMaster};
+use ad4m_identity_core::{KelChain, KeyId};
+use ad4m_ldk::identity::{InboxBind, InboxWrite, OfferState, SignedHead, SignedRequest};
 use serde_json::json;
 
 use crate::executor::{ExecutorRpc, ViaExecutor};
+use crate::record::{self, Change};
+use crate::request::{
+    b58_random, body_bytes, chain_of, master_at_head, master_request, scid_of, store_of,
+    MasterPosition,
+};
 use crate::secret::Secret;
 use crate::vault::{MasterUse, Unlocked, Vault};
-use crate::{fold, ClientError, Clock, Random};
-
-/// How long a signed list request stays valid (the store takes at most 300 s).
-const REQUEST_TTL_S: u64 = 60;
+use crate::{ClientError, Clock, Random, RandomRng};
 
 /// The seconds each list request waits for a change (the store's longest wait).
 const LIST_WAIT_S: u8 = 8;
@@ -38,12 +47,29 @@ pub struct Claimed {
     pub match_code: String,
     pub device_key: String,
     pub hint: Option<String>,
+    /// The device says it may keep the master key (an app): the card shows "Keep my master key
+    /// on this device too" only then, and only for a `device` offer ([`LinkFlow::may_keep`]).
+    pub can_keep_master: bool,
     claim: ClaimView,
+}
+
+/// A link confirmed.
+#[derive(Debug)]
+pub struct Linked {
+    pub head: SignedHead,
+    /// The new device key's id in the log.
+    pub key_id: KeyId,
+    /// The master key put into the device's inbox, when the person chose to: its message id,
+    /// or why the push failed (a push that may pass later stays on the vault's retry list).
+    pub master: Option<Result<String, ClientError>>,
+    /// The record write that lists the device. The `add` stands either way.
+    pub record: Result<u64, ClientError>,
 }
 
 /// The holder's side of one link.
 pub struct LinkFlow<'a, R: ExecutorRpc> {
     executor: &'a ViaExecutor<R>,
+    vault: &'a dyn Vault,
     clock: &'a dyn Clock,
     random: &'a dyn Random,
     unlocked: Unlocked,
@@ -56,47 +82,15 @@ pub struct LinkFlow<'a, R: ExecutorRpc> {
     _secret: Secret<[u8; 32]>,
 }
 
-fn b58_random(random: &dyn Random, len: usize) -> String {
-    let mut bytes = vec![0u8; len];
-    random.fill(&mut bytes);
-    bs58::encode(bytes).into_string()
-}
-
-/// The identity's log through the executor, refreshed and folded here.
-async fn chain_of<R: ExecutorRpc>(
-    executor: &ViaExecutor<R>,
-    did: &str,
-) -> Result<KelChain, ClientError> {
-    fold(&executor.events(did).await?)
-}
-
-/// The `did:key` of the store whose head the executor accepted for `did`: a signed request is
-/// for that store only.
-async fn store_of<R: ExecutorRpc>(
-    executor: &ViaExecutor<R>,
-    did: &str,
-) -> Result<String, ClientError> {
-    executor
-        .log(did, 0, false)
-        .await?
-        .head
-        .map(|head| head.store)
-        .ok_or_else(|| {
-            ClientError::Protocol(format!(
-                "the executor accepted no head from the identity store for {did}"
-            ))
-        })
-}
-
 impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
     /// Opens an offer of `kind` (`Node` for an executor) for the identity `did`, whose store
     /// is at `store_url`, and makes its link. With `device_key` (the signing key of a device
     /// string the holder scanned) the offer is bound to it: only that key may claim it, and its
-    /// [`LinkFlow::ticket`] goes to the device's pre-join inbox.
+    /// [`LinkFlow::ticket`] goes to the device's pre-join inbox ([`LinkFlow::scan`] does both).
     #[allow(clippy::too_many_arguments)]
     pub async fn open(
         executor: &'a ViaExecutor<R>,
-        vault: &dyn Vault,
+        vault: &'a dyn Vault,
         did: &str,
         kind: OfferKind,
         device_key: Option<&str>,
@@ -104,9 +98,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         clock: &'a dyn Clock,
         random: &'a dyn Random,
     ) -> Result<LinkFlow<'a, R>, ClientError> {
-        let scid = ad4m_identity_core::scid_of(did)
-            .ok_or_else(|| ClientError::Protocol(format!("{did} is not a did:scid:coasys:1")))?
-            .to_string();
+        let scid = scid_of(did)?;
         let chain = chain_of(executor, did).await?;
         let store = store_of(executor, did).await?;
         let unlocked = vault.unlock(&scid, MasterUse::Link, clock.now())?;
@@ -123,21 +115,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             bot: None,
         };
         let signer = unlocked.signer(clock.now())?;
-        let head = chain.head();
-        let master = chain
-            .state()
-            .current_master()
-            .ok_or_else(|| ClientError::Protocol("the identity has ended".into()))?;
-        if master.sign != signer.key() {
-            return Err(ClientError::Protocol(
-                "the vault's master key is not the identity's current master".into(),
-            ));
-        }
-        let by = SignedBy {
-            key_id: master.id.clone(),
-            kel_seq: head.seq,
-            kel_hash: head.hash.clone(),
-        };
+        let by = master_at_head(&chain, signer)?;
         let signed = link::sign_offer(offer.clone(), by, signer)?;
         let wire: ad4m_ldk::identity::SignedOffer = serde_json::from_value(json!(&signed))
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
@@ -155,6 +133,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         };
         Ok(LinkFlow {
             executor,
+            vault,
             clock,
             random,
             unlocked,
@@ -165,6 +144,92 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             offer_string,
             _secret: secret,
         })
+    }
+
+    /// The holder scanned `device`'s string: opens an offer of `kind` bound to the device's
+    /// key and puts its [`LinkFlow::ticket`] into the device's pre-join inbox, sealed to the
+    /// device's `enc` key and signed by the master key. Refused when the string expired or
+    /// names another store than `store_url` (the device would never read the ticket).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scan(
+        executor: &'a ViaExecutor<R>,
+        vault: &'a dyn Vault,
+        did: &str,
+        kind: OfferKind,
+        device: &DeviceString,
+        store_url: &str,
+        clock: &'a dyn Clock,
+        random: &'a dyn Random,
+    ) -> Result<LinkFlow<'a, R>, ClientError> {
+        if clock.now() >= device.exp {
+            return Err(ClientError::Protocol(
+                "the device's code expired: it shows a new one".into(),
+            ));
+        }
+        if device.store.trim_end_matches('/') != store_url.trim_end_matches('/') {
+            return Err(ClientError::Protocol(format!(
+                "the device reads its inbox at {}, not at {store_url}",
+                device.store
+            )));
+        }
+        let flow = Self::open(
+            executor,
+            vault,
+            did,
+            kind,
+            Some(&device.sign),
+            store_url,
+            clock,
+            random,
+        )
+        .await?;
+        flow.put_ticket(device).await?;
+        Ok(flow)
+    }
+
+    /// Puts the ticket into the pre-join inbox of `device`.
+    async fn put_ticket(&self, device: &DeviceString) -> Result<(), ClientError> {
+        let now = self.clock.now();
+        let chain = chain_of(self.executor, &self.did).await?;
+        let signer = self.unlocked.signer(now)?;
+        let by = master_at_head(&chain, signer)?;
+        let pre = pre_address(&device.sign, &device.r)?;
+        let address = InboxAddress::Pre(pre.clone());
+        let ticket = InboxBody::OfferTicket(Box::new(self.ticket()));
+        let mut payload = sign_payload(device.sign.clone(), ticket, now, by.clone(), signer)?;
+        let sealed = seal(&device.enc, &address, &payload, &mut RandomRng(self.random));
+        if let InboxBody::OfferTicket(ticket) = &mut payload.body {
+            zeroize::Zeroize::zeroize(&mut ticket.s);
+        }
+        let bind = InboxBind {
+            scid: self.offer.scid.clone(),
+            offer_id: self.offer.offer_id.clone(),
+            sign: device.sign.clone(),
+            r: device.r.clone(),
+        };
+        let write = InboxWrite {
+            sealed: sealed?,
+            bind: Some(bind.clone()),
+        };
+        let at = MasterPosition {
+            did: &self.did,
+            store: &self.store,
+            by: &by,
+        };
+        let path = format!("/v1/inbox/pre/{pre}");
+        let request = master_request(
+            &at,
+            signer,
+            "PUT",
+            &path,
+            &body_bytes(&write)?,
+            self.random,
+            now,
+        )?;
+        self.executor
+            .inbox_put(&address, &write.sealed, Some(&bind), &request)
+            .await?;
+        Ok(())
     }
 
     /// The offer link (`https://coasys.id/o#coasys:offer:1:…`): the QR code shows it.
@@ -193,31 +258,24 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         }
     }
 
+    /// Whether the card may offer "Keep my master key on this device too" for `claimed`: a
+    /// `device` offer whose claim says the device may keep it.
+    pub fn may_keep(&self, claimed: &Claimed) -> bool {
+        self.offer.kind == OfferKind::Device && claimed.can_keep_master
+    }
+
     /// A list request signed by the current master key at `chain`'s head.
     fn list_request(&self, chain: &KelChain) -> Result<SignedRequest, ClientError> {
         let now = self.clock.now();
         let signer = self.unlocked.signer(now)?;
-        let master = chain
-            .state()
-            .current_master()
-            .ok_or_else(|| ClientError::Protocol("the identity has ended".into()))?;
-        let head = chain.head();
-        let req = RequestBody {
-            did: self.did.clone(),
-            store: self.store.clone(),
-            key_id: master.id.clone(),
-            kel_seq: head.seq,
-            kel_hash: head.hash.clone(),
-            method: "GET".into(),
-            path: format!("/v1/offers/{}", self.offer.scid),
-            body_hash: hash_bytes(b""),
-            nonce: b58_random(self.random, 16),
-            expires: now + REQUEST_TTL_S,
+        let by = master_at_head(chain, signer)?;
+        let at = MasterPosition {
+            did: &self.did,
+            store: &self.store,
+            by: &by,
         };
-        let bytes = signing_bytes(REQUEST_DOMAIN, &req)
-            .map_err(|e| ClientError::Protocol(e.to_string()))?;
-        let sig = encode_proof_value(&signer.sign(&bytes));
-        Ok(SignedRequest { req, sig })
+        let path = format!("/v1/offers/{}", self.offer.scid);
+        master_request(&at, signer, "GET", &path, b"", self.random, now)
     }
 
     /// Waits until the offer is claimed; fails when it ends unclaimed (expired, cancelled,
@@ -246,6 +304,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
                         ),
                         device_key: view.device_key.clone(),
                         hint: view.hint.clone(),
+                        can_keep_master: view.can_keep_master,
                         claim: view,
                     });
                 }
@@ -267,11 +326,69 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         }
     }
 
-    /// The person confirmed the same match code: appends the `add` that spends `claimed`.
-    pub async fn confirm(self, claimed: &Claimed) -> Result<SignedHead, ClientError> {
+    /// The person confirmed the same match code: appends the `add` that spends `claimed`;
+    /// then, with `keep_master` (only where [`LinkFlow::may_keep`]), puts the master key into
+    /// the device's inbox; then writes `device` (its name, kind, …) into the record, with
+    /// `holdsMaster: "offered"` when the master key went and `false` otherwise.
+    pub async fn confirm(
+        self,
+        claimed: &Claimed,
+        device: DeviceEntry,
+        keep_master: bool,
+    ) -> Result<Linked, ClientError> {
+        if keep_master && !self.may_keep(claimed) {
+            return Err(ClientError::NotAKeeper(claimed.device_key.clone()));
+        }
         let chain = chain_of(self.executor, &self.did).await?;
         let signer = self.unlocked.signer(self.clock.now())?;
         let event = add_claimed(&chain, signer, &self.offer, &claimed.claim)?;
-        Ok(self.executor.publish(std::slice::from_ref(&event)).await?)
+        let head = self.executor.publish(std::slice::from_ref(&event)).await?;
+        let chain = chain_of(self.executor, &self.did).await?;
+        let key_id = chain
+            .state()
+            .key_id_of(&claimed.device_key)
+            .cloned()
+            .ok_or_else(|| ClientError::Protocol("the log does not list the new key".into()))?;
+        let master = if keep_master {
+            let signer = self.unlocked.signer(self.clock.now())?;
+            Some(
+                super::master::push(
+                    self.executor,
+                    self.vault,
+                    &chain,
+                    &self.did,
+                    signer,
+                    &key_id,
+                    self.clock,
+                    self.random,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let holds_master = match master {
+            Some(Ok(_)) => HoldsMaster::Offered,
+            _ => HoldsMaster::No,
+        };
+        let record = record::write(
+            self.executor,
+            &self.did,
+            &[Change::Device {
+                key_id: key_id.clone(),
+                entry: DeviceEntry {
+                    holds_master,
+                    ..device
+                },
+            }],
+            self.random,
+        )
+        .await;
+        Ok(Linked {
+            head,
+            key_id,
+            master,
+            record,
+        })
     }
 }

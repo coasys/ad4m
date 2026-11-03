@@ -18,7 +18,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
 | `custody.rs` | The custody channel's guard `admit` (the admin credential on a loopback listener of an executor started with `--custody-channel`; else 403 `no-custody-channel`), and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster` and a `identity.claimOffer` with `canKeepMaster` |
 | `inbox.rs` | The device inbox: `Inbox` (the joined messages opened here, by id and type, never a body; one read of the joined inbox at a time; the open pre-join read; the pull's wake-up), `pull_inbox` (`identity.inbox`), `take_master` (`identity.takeMaster`), `inbox_ack`, `inbox_put`, `prepare_device` (`identity.prepareDevice`: the device string and the pre-join read; `take_ticket` claims and, once claimed, sends `link-ticket`), `run_pull` / `run_schedule` / `wake` (at start, at unlock and binding, every 15 minutes) |
-| `record.rs` | `DevicePosition` (an agent's device key at its log's trusted seq: what a store request it signs names; `device_position`, `bound_position`), and the private record and request box calls (`identity.record`, `recordPut`, `requests`, `postRequest`, `deleteRequest`): the request the caller's master key signed, or one the agent's device key signs; a post is the device key's only |
+| `record.rs` | `DevicePosition` (an agent's device key at its log's trusted seq: what a store request it signs names; `device_position`, `bound_position`), and the private record and request box calls (`identity.record`, `recordPut`, `unwrapRecordKey`, `requests`, `postRequest`, `deleteRequest`): the request the caller's master key signed, or one the agent's device key signs; a post is the device key's only |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
 | `person.rs` | the person's profile: `person_record` (the agent record under the `did:scid` and its signed request, by the device key at the trusted head), `IdentityService::publish_person_profile` |
 | `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key; `canKeepMaster` as the caller says, which only the custody channel may: `custody::admit` on the RPC path, the channel itself on the ticket path), `join_status` (the main agent's claims only) |
@@ -280,8 +280,13 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
 - The record and the request box pass a request the caller signed with the identity's master
   key (the custody service, a restoring app), or sign one with the agent's device key at its
   `DevicePosition`; `identity.postRequest` always signs with the device key (the store refuses
-  a master key's post). The executor never opens the record, so `identity.devices` has no
-  names: the app joins the opened record's entries by key id.
+  a master key's post). The executor never decrypts the record, so `identity.devices` has no
+  names: the app joins the opened record's entries by key id. The record key is wrapped to
+  this executor's `enc` key, and an app whose device is this executor (the desktop's custody
+  service) has no `enc` key of its own: **`identity.unwrapRecordKey`** (operator, local only)
+  opens the record key of the main agent's entry in the wallet (`WalletBackend::unwrap_record_key`,
+  the secret stays in that call) and answers it (`RecordKey`, wiped on drop); the app decrypts
+  the record with it.
 
 ## Do not
 

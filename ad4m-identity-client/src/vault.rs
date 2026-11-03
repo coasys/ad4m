@@ -7,19 +7,26 @@
 //! written yet), and [`MemoryVault`] for tests (feature `test-vault`, never in a release build).
 
 use ad4m_identity_core::build::Signer;
-use ad4m_identity_core::{Event, Multikey};
+use ad4m_identity_core::inbox::{seal, sign_payload, InboxAddress, InboxBody, InboxError};
+use ad4m_identity_core::link::SignedBy;
+use ad4m_identity_core::{Event, KeyId, Multikey};
+use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::secret::Secret;
+use crate::{Random, RandomRng};
 
 /// How long one unlock serves a flow: five minutes, then the surface asks again.
 pub const UNLOCK_TTL_S: u64 = 300;
 
 /// Why the surface asks for the unlock; shown in the OS prompt where the OS allows it. The
-/// flows unlock for a link and a revocation (`create` stores master #0 without an unlock).
+/// flows unlock for a link, a revocation and sending the master key to a device that keeps it
+/// (`create` stores master #0 without an unlock).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MasterUse {
     Link,
     Revoke,
+    SendMaster,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -42,6 +49,20 @@ pub enum VaultError {
 pub trait MasterSigner: Signer {
     /// The master key's index *n*.
     fn index(&self) -> u32;
+    /// This master key as `InboxBody::Master { did, index, secret }` in a payload to the device
+    /// key `to`, signed by this key at `by`, sealed to the device's `enc` key `to_enc` for
+    /// `address`. The secret leaves only sealed, and every copy made for the seal is wiped.
+    #[allow(clippy::too_many_arguments)]
+    fn seal_self(
+        &self,
+        did: &str,
+        to: &str,
+        to_enc: &str,
+        address: &InboxAddress,
+        by: SignedBy,
+        sent_at: u64,
+        random: &dyn Random,
+    ) -> Result<String, InboxError>;
 }
 
 /// One unlocked master key for one flow. Expires [`UNLOCK_TTL_S`] after the unlock; the key
@@ -93,6 +114,23 @@ pub trait Vault: Send + Sync {
     fn pending_incepts(&self) -> Result<Vec<Event>, VaultError>;
     /// The store holds `scid`'s incept: the vault forgets it (no error when it holds none).
     fn incept_published(&self, scid: &str) -> Result<(), VaultError>;
+    /// Keeps `push` on the retry list before the master key is put into the device's inbox
+    /// (`flows::master`); keeping one already listed is no change.
+    fn keep_push(&self, push: &PendingPush) -> Result<(), VaultError>;
+    /// The pushes kept and not yet confirmed sent.
+    fn pending_pushes(&self) -> Result<Vec<PendingPush>, VaultError>;
+    /// The push is done (the store took it) or no longer wanted: the vault forgets it (no error
+    /// when it holds none).
+    fn push_done(&self, push: &PendingPush) -> Result<(), VaultError>;
+}
+
+/// A master key to put into a device's inbox: the identity and the device's key id. The retry
+/// list keeps it until the store takes it; each try seals the master key current then.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPush {
+    pub scid: String,
+    pub key_id: KeyId,
 }
 
 /// A master key in memory: an Ed25519 key that zeroes on drop.
@@ -123,6 +161,30 @@ impl MasterSigner for KeySigner {
     fn index(&self) -> u32 {
         self.index
     }
+
+    fn seal_self(
+        &self,
+        did: &str,
+        to: &str,
+        to_enc: &str,
+        address: &InboxAddress,
+        by: SignedBy,
+        sent_at: u64,
+        random: &dyn Random,
+    ) -> Result<String, InboxError> {
+        let secret = Zeroizing::new(self.key.to_bytes());
+        let body = InboxBody::Master {
+            did: did.to_string(),
+            index: self.index,
+            secret: bs58::encode(secret.as_ref()).into_string(),
+        };
+        let mut payload = sign_payload(to.to_string(), body, sent_at, by, self)?;
+        let sealed = seal(to_enc, address, &payload, &mut RandomRng(random));
+        if let InboxBody::Master { secret, .. } = &mut payload.body {
+            secret.zeroize();
+        }
+        sealed
+    }
 }
 
 #[cfg(any(test, feature = "test-vault"))]
@@ -143,6 +205,7 @@ mod memory {
     pub struct MemoryVault {
         keys: Mutex<Keys>,
         pending: Mutex<Vec<Event>>,
+        pushes: Mutex<Vec<PendingPush>>,
         unlocks: Mutex<Vec<MasterUse>>,
     }
 
@@ -199,6 +262,23 @@ mod memory {
                 .lock()
                 .map_err(poisoned)?
                 .retain(|e| e.scid != scid);
+            Ok(())
+        }
+
+        fn keep_push(&self, push: &PendingPush) -> Result<(), VaultError> {
+            let mut pushes = self.pushes.lock().map_err(poisoned)?;
+            if !pushes.contains(push) {
+                pushes.push(push.clone());
+            }
+            Ok(())
+        }
+
+        fn pending_pushes(&self) -> Result<Vec<PendingPush>, VaultError> {
+            Ok(self.pushes.lock().map_err(poisoned)?.clone())
+        }
+
+        fn push_done(&self, push: &PendingPush) -> Result<(), VaultError> {
+            self.pushes.lock().map_err(poisoned)?.retain(|p| p != push);
             Ok(())
         }
     }

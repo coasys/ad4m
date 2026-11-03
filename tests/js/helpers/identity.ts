@@ -67,6 +67,9 @@ export class IdentityStore {
                 IDENTITY_STORE_KEY: path.join(this.dir, "store-key"),
                 IDENTITY_STORE_LISTEN: `127.0.0.1:${this.port}`,
                 POW_BITS: "8",
+                // A suite makes an identity's writes (offers, inbox puts, record writes, posts)
+                // within seconds; the store's per-identity bucket is not under test here.
+                IDENTITY_BURST: "100",
             },
         });
         child.stderr!.on("data", (d) => console.log(`[identity-store] ${d}`));
@@ -154,7 +157,8 @@ export class Holder {
             ? this.answers.shift()!
             : await new Promise<string>((resolve) => this.waiting.push(resolve));
         const answer = JSON.parse(line);
-        if (answer.error) throw new Error(answer.error);
+        // `null` is an answer too (`takeMaster` with none waiting, `record` before the first write).
+        if (answer?.error) throw new Error(answer.error);
         return answer;
     }
 
