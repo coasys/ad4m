@@ -442,7 +442,7 @@ fn on_ad4m_db<T, E: DbNotOpen>(f: impl FnOnce(&Ad4mDb) -> Result<T, E>) -> Resul
     let instance = Ad4mDb::global_instance();
     let guard = instance
         .lock()
-        .map_err(|_| E::db_not_open("its lock is poisoned"))?;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match guard.as_ref() {
         Some(db) => f(db),
         None => Err(E::db_not_open("not initialised")),
@@ -1196,7 +1196,10 @@ mod tests {
     fn a_closed_database_is_an_error() {
         let _closed = crate::test_utils::DbClosed::now();
         let err = LocalDb.get_free_hosting_enabled().unwrap_err();
-        assert!(err.to_string().contains("the database is not open"), "{err}");
+        assert!(
+            err.to_string().contains("the database is not open"),
+            "{err}"
+        );
     }
 
     // A lock that a panic poisoned still serves the database. An error would reach call sites
@@ -1205,7 +1208,8 @@ mod tests {
     fn a_poisoned_lock_still_serves_the_database() {
         ensure_local_db();
         let _ = std::thread::spawn(|| {
-            let _guard = Ad4mDb::global_instance()
+            let instance = Ad4mDb::global_instance();
+            let _guard = instance
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             panic!("poisoning the database lock");
