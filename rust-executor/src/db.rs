@@ -2149,17 +2149,33 @@ impl Ad4mDb {
         let mut additions = Vec::new();
         for row in rows {
             let (id, raw) = row?;
-            let parsed = raw
+            // Each addition on its own: one malformed entry must not take the row's
+            // readable links out of the exclusion set.
+            let elements = raw
                 .map_err(AnyError::from)
-                .and_then(|raw| Ok(serde_json::from_str::<Vec<LinkExpression>>(&raw)?));
-            match parsed {
-                Ok(links) => additions.extend(links),
-                Err(e) => log::warn!(
-                    "perspective {}: skipping parked diff {}, its additions do not read as links: {}",
-                    perspective_uuid,
-                    id,
-                    e
-                ),
+                .and_then(|raw| Ok(serde_json::from_str::<Vec<serde_json::Value>>(&raw)?));
+            let elements = match elements {
+                Ok(elements) => elements,
+                Err(e) => {
+                    log::warn!(
+                        "perspective {}: skipping parked diff {}, its additions are not a list: {}",
+                        perspective_uuid,
+                        id,
+                        e
+                    );
+                    continue;
+                }
+            };
+            for element in elements {
+                match serde_json::from_value::<LinkExpression>(element) {
+                    Ok(link) => additions.push(link),
+                    Err(e) => log::warn!(
+                        "perspective {}: skipping an addition of parked diff {} that does not read as a link: {}",
+                        perspective_uuid,
+                        id,
+                        e
+                    ),
+                }
             }
         }
         Ok(additions)
@@ -5088,6 +5104,26 @@ mod tests {
         db.park_pending_diffs(&p_uuid, ids).unwrap();
 
         assert_eq!(db.get_parked_additions(&p_uuid).unwrap(), vec![parked]);
+    }
+
+    #[test]
+    fn a_malformed_addition_does_not_hide_the_readable_links_of_its_row() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+        let good = construct_dummy_link_expression(LinkStatus::Shared);
+        let additions = serde_json::to_string(&vec![
+            serde_json::to_value(&good).unwrap(),
+            serde_json::json!({"not": "a link"}),
+        ])
+        .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO perspective_diff (perspective, additions, removals, is_pending) VALUES (?1, ?2, ?3, ?4)",
+                params![p_uuid, additions, "[]", false],
+            )
+            .unwrap();
+
+        assert_eq!(db.get_parked_additions(&p_uuid).unwrap(), vec![good]);
     }
 
     /// The notifications table of executors that named the owner by email.
