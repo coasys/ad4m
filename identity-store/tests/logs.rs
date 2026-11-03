@@ -621,6 +621,56 @@ async fn a_body_over_64_kib_gets_413_and_33_events_get_400() {
 }
 
 #[tokio::test]
+async fn a_signed_head_carries_the_store_time_of_its_append() {
+    let t = TestStore::new();
+    let alice = Person::new("alice");
+    t.set_now(T0 + 5);
+    let head = head_of(&t.append(&alice.scid(), &[&alice.events[0]]).await.body);
+    assert_eq!(head.time, T0 + 5);
+    assert!(verify_head(&head, &[t.store_key()]));
+    let served: SignedHead =
+        serde_json::from_value(t.get(&format!("/v1/heads/{}", alice.scid())).await.body).unwrap();
+    assert_eq!(served.time, T0 + 5);
+}
+
+#[tokio::test]
+async fn a_signed_request_of_one_identity_is_refused_on_another_identitys_route() {
+    // Bob's master signs requests for Alice's offer routes. Each names Bob's did, so it is a
+    // valid request of Bob's log for that path; only the route's identity refuses it.
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    let bob = Person::new("bob");
+    t.publish(&alice).await;
+    t.publish(&bob).await;
+    let phone = Device::new("alice phone");
+    let (offer, _) = t
+        .claimed_offer(&mut alice, &phone, OfferKind::Device, None)
+        .await;
+    let id = offer.offer.offer_id.clone();
+    let later = t.now() + 60;
+    let refused = |reply: common::Reply| {
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+        assert_eq!(reply.body["error"], "signer");
+        assert!(reply.body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("another identity"));
+    };
+    let list = format!("/v1/offers/{}", alice.scid());
+    let by_bob = bob.master_request("GET", &list, b"", later);
+    refused(t.send("GET", &list, None, Some(by_bob)).await);
+    let cancel = format!("/v1/offers/{}/{id}", alice.scid());
+    let by_bob = bob.master_request("DELETE", &cancel, b"", later);
+    refused(t.send("DELETE", &cancel, None, Some(by_bob)).await);
+    // Alice's offer is untouched, and her own master lists it.
+    let by_alice = alice.master_request("GET", &list, b"", later);
+    let reply = t.send("GET", &list, None, Some(by_alice)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body.as_array().unwrap().len(), 1);
+    assert_eq!(reply.body[0]["state"]["state"], "claimed");
+}
+
+#[tokio::test]
 async fn a_new_log_with_no_note_passes_without_a_proof_and_a_sent_proof_must_meet_the_bits() {
     let t = TestStore::new();
     let alice = Person::new("alice");
@@ -651,6 +701,29 @@ async fn a_new_log_with_no_note_passes_without_a_proof_and_a_sent_proof_must_mee
         )
         .await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(reply.body["error"], "pow");
+    assert_eq!(t.count("logs"), 0);
+    // A proof below the store's bits that names its own `bits`: the store checks its own, 403.
+    let mut start = 0u128;
+    let weak = loop {
+        let p = pow::solve_range(&alice.scid(), 1, start, 1 << 16).expect("a 1-bit proof");
+        if !pow::check(&alice.scid(), &p, 8) {
+            break p;
+        }
+        let bytes: [u8; 16] = bs58::decode(&p.nonce)
+            .into_vec()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        start = u128::from_be_bytes(bytes) + 1;
+    };
+    let reply = t
+        .post(
+            &path,
+            &json!({ "events": events, "pow": { "nonce": weak.nonce, "bits": 1 } }),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
     assert_eq!(reply.body["error"], "pow");
     assert_eq!(t.count("logs"), 0);
     // A proof that meets the bits: 200.

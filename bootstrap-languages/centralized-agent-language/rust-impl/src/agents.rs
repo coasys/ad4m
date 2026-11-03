@@ -292,14 +292,20 @@ async fn verified<H: Http>(
 }
 
 /// The whole log of `did` from the store, replayed (every event's signatures checked).
-/// `None` when the store holds none, the events do not replay, or the log is not the one the
-/// store signed: the last page's head must be signed (`coasys:head`) by one of the configured
-/// store keys (`storeKeys`; none configured trusts no head) and name this log, and the replayed
-/// log must end exactly at that head. So neither a hostile host nor anyone on the path can
-/// serve a shortened log under the store's name. A signed head carries no freshness: the store
-/// itself can still serve an older head with its prefix (`did-scid-coasys-1.md`, section 13).
-/// At most [`MAX_LOG_READ_PAGES`] pages and [`MAX_LOG_READ_BYTES`] bytes are read, whatever
-/// head the store names; more is `invalid` (`too-large`).
+/// `None` when the store holds none, the events do not replay, they are another identity's
+/// log, or the log is not the one the store signed:
+/// - event #0 derives the SCID (spec section 8, step 3), and the folded log's DID must be
+///   `did`, so a store that serves one identity's log under another's SCID gets no reader to
+///   take its keys as that identity's;
+/// - the last page's head must be signed (`coasys:head`) by one of the configured store keys
+///   (`storeKeys`; none configured trusts no head) and name this log, and the replayed log
+///   must end exactly at that head, so no one on the path can serve a shortened log under the
+///   store's name.
+///
+/// A signed head carries no freshness: the store itself can still serve an older head with its
+/// prefix (`did-scid-coasys-1.md`, section 13). At most [`MAX_LOG_READ_PAGES`] pages and
+/// [`MAX_LOG_READ_BYTES`] bytes are read, whatever head the store names; more is `invalid`
+/// (`too-large`).
 pub async fn read_log<H: Http>(store: &Store<H>, did: &str) -> LanguageResult<Option<KelChain>> {
     let trusted = store.store_keys();
     if trusted.is_empty() {
@@ -339,7 +345,12 @@ pub async fn read_log<H: Http>(store: &Store<H>, did: &str) -> LanguageResult<Op
     .verify(&head.sig, &trusted);
     let folded = chain.head();
     let names_this_log = ad4m_identity_core::scid_of(did) == Some(head.scid.as_str());
-    if !signed || !names_this_log || folded.seq != head.seq || folded.hash != head.hash {
+    if chain.state().did != did
+        || !signed
+        || !names_this_log
+        || folded.seq != head.seq
+        || folded.hash != head.hash
+    {
         return Ok(None);
     }
     Ok(Some(chain))
