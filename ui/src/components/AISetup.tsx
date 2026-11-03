@@ -14,6 +14,7 @@ import { open } from "@tauri-apps/plugin-shell";
 import { useCallback, useEffect, useState } from "react";
 import "../index.css";
 import {
+  basisNote,
   chatModels,
   endpointFor,
   kindLabel,
@@ -317,6 +318,7 @@ export default function AISetup(props: {
                   <j-flex key={m.modelId} a="center" j="between" gap="300">
                     <j-text nomargin size="400">
                       {SERVICE_LABELS[m.service] ?? m.service}: {m.modelId}
+                      {basisNote(m) && ` (${basisNote(m)})`}
                     </j-text>
                     <j-text nomargin size="400" color="ui-700">
                       {m.installed ? "downloaded" : gb(m.sizeBytes)}

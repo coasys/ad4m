@@ -34,6 +34,7 @@ export type { ImportRequest } from "./ImportRequest";
 export type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
 export type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesRequest";
 export type { LocalAiBackend } from "./LocalAiBackend";
+export type { LocalAiBasis } from "./LocalAiBasis";
 export type { LocalAiCpu } from "./LocalAiCpu";
 export type { LocalAiGpu } from "./LocalAiGpu";
 export type { LocalAiGpuType } from "./LocalAiGpuType";

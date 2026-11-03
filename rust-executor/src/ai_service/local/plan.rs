@@ -8,6 +8,10 @@
 //!   then the cpu family). A recommendation without evidence, or naming a model the
 //!   manifest lacks, counts as not measured. Its `serverFlags` go to the server with the
 //!   model; without any, the defaults ([`default_flags`]: no thinking for chat).
+//! - A service with no measured recommendation (or one whose runtime has no build for this
+//!   device) takes the manifest's smallest model of it, by memory then size, whose runtime
+//!   runs here ([`default_candidate`]), marked [`Basis::Default`]: the setup offers
+//!   something on every device, and a measured recommendation always wins.
 //! - The models of all services run at once, so their memory adds up. It fits when the sum
 //!   is at most the budget, min(GPU budget − 1 GiB, RAM − 4 GiB). When it does not, the
 //!   service with the largest model steps down its chain, until it fits or nothing can step.
@@ -56,6 +60,17 @@ pub struct PlannedRuntime {
     pub services: Vec<Service>,
 }
 
+/// What a planned model is chosen by.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename = "LocalAiBasis")]
+pub enum Basis {
+    /// The wind tunnel measured it on this device's class or a smaller one.
+    Measured,
+    /// Not measured on this hardware: the smallest model the manifest has for the service.
+    Default,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename = "LocalAiPlannedModel")]
@@ -70,8 +85,12 @@ pub struct PlannedModel {
     pub memory_bytes: u64,
     pub license: String,
     pub installed: bool,
-    /// The measured class the recommendation comes from.
+    /// `measured`: the wind tunnel's recommendation. `default`: no class on the chain was
+    /// measured for this service, so the plan takes the manifest's smallest model.
+    pub basis: Basis,
+    /// The measured class the recommendation comes from; for a default, this device's.
     pub from_class: String,
+    /// Empty for a default.
     pub evidence: Vec<String>,
     #[ts(type = "Record<string, unknown>")]
     pub metrics: serde_json::Value,
@@ -139,6 +158,32 @@ fn candidates(data: &Data, chain: &[String], service: Service) -> Vec<(String, R
                 .then(|| (class.clone(), recommendation))
         })
         .collect()
+}
+
+/// The default of a service no class on the chain was measured for: the manifest's smallest
+/// model of it (by memory, then download size) whose runtime this device runs, from this
+/// device's class, with no evidence, metrics or flags of its own.
+fn default_candidate(data: &Data, hardware: &LocalHardware, service: Service) -> Option<Candidate> {
+    let (model_id, file) = data
+        .manifest
+        .models
+        .iter()
+        .filter(|(_, m)| {
+            m.service == service && runtime_build(data, hardware, m.provider, None).is_some()
+        })
+        .min_by_key(|(id, m)| (m.memory_bytes, m.size_bytes, id.as_str()))?;
+    Some((
+        hardware.hardware_class.clone(),
+        Recommendation {
+            provider: file.provider,
+            model_id: Some(model_id.clone()),
+            runtime_build: None,
+            backend: None,
+            server_flags: vec![],
+            metrics: serde_json::json!({}),
+            evidence: vec![],
+        },
+    ))
 }
 
 /// The build of `provider`'s runtime for this device, the backend it uses, and why it is
@@ -262,35 +307,33 @@ pub fn plan(data: &Data, hardware: &LocalHardware, installed: &dyn Fn(&str) -> b
     // Each service: its candidates, and which one the plan is at.
     let mut picks: Vec<Pick> = Vec::new();
     for service in PLANNED_SERVICES {
-        let found = candidates(data, &chain, service);
+        // The measured candidates when this device runs their runtime, else the default.
+        let measured = candidates(data, &chain, service);
+        let unrunnable = measured
+            .first()
+            .map(|(_, r)| r.provider)
+            .filter(|p| runtime_build(data, hardware, *p, None).is_none());
+        let found: Vec<Candidate> = if measured.is_empty() || unrunnable.is_some() {
+            default_candidate(data, hardware, service)
+                .into_iter()
+                .collect()
+        } else {
+            measured
+        };
         if found.is_empty() {
-            unavailable.push(Unavailable {
-                service,
-                reason: format!(
-                    "No measured recommendation for {} on {} or a smaller class",
-                    service.as_str(),
-                    hardware.hardware_class
-                ),
-            });
-            continue;
-        }
-        let provider = found[0].1.provider;
-        if runtime_build(
-            data,
-            hardware,
-            provider,
-            found[0].1.runtime_build.as_deref(),
-        )
-        .is_none()
-        {
-            unavailable.push(Unavailable {
-                service,
-                reason: format!(
+            let reason = match unrunnable {
+                Some(provider) => format!(
                     "No {} build for {} in the manifest",
                     provider.as_str(),
                     hardware.platform()
                 ),
-            });
+                None => format!(
+                    "No {} model in the manifest runs on {}",
+                    service.as_str(),
+                    hardware.platform()
+                ),
+            };
+            unavailable.push(Unavailable { service, reason });
             continue;
         }
         picks.push((service, found, 0));
@@ -359,6 +402,12 @@ pub fn plan(data: &Data, hardware: &LocalHardware, installed: &dyn Fn(&str) -> b
             memory_bytes: file.memory_bytes,
             license: file.license.clone(),
             installed: installed(&file.sha256),
+            // Every measured candidate has evidence ([`candidates`]); a default has none.
+            basis: if recommendation.evidence.is_empty() {
+                Basis::Default
+            } else {
+                Basis::Measured
+            },
             from_class: from_class.clone(),
             evidence: recommendation.evidence.clone(),
             metrics: recommendation.metrics.clone(),
@@ -595,6 +644,7 @@ mod tests {
         assert_eq!(plan.hardware_class, "gpu-12gb");
         let ids: Vec<_> = plan.models.iter().map(|m| m.model_id.as_str()).collect();
         assert_eq!(ids, vec!["big", "embed", "parakeet"]);
+        assert!(plan.models.iter().all(|m| m.basis == Basis::Measured));
         assert!(plan.fits, "{:?}", plan.reasons);
         let llama = plan
             .runtimes
@@ -654,7 +704,7 @@ mod tests {
             ("small", "cpu-8gb")
         );
 
-        // No measurement anywhere: the service is left out, with the reason.
+        // No measurement anywhere: the service takes the manifest's smallest model, marked.
         let mut recommendations = full();
         recommendations["gpu-12gb"]
             .as_object_mut()
@@ -663,8 +713,93 @@ mod tests {
         recommendations["cpu-8gb"]["stt"] = recommendation("parakeet", "nemo-speech", false);
         let data = super::tests::data(recommendations);
         let without = super::plan(&data, &hardware, &nothing_installed);
-        assert!(without.models.iter().all(|m| m.service != Service::Stt));
-        assert_eq!(without.unavailable[0].service, Service::Stt);
+        let stt = without
+            .models
+            .iter()
+            .find(|m| m.service == Service::Stt)
+            .unwrap();
+        assert_eq!(
+            (stt.model_id.as_str(), stt.basis),
+            ("parakeet", Basis::Default)
+        );
+        assert!(without.unavailable.is_empty());
+    }
+
+    /// No class measured: each service gets the manifest's smallest model (by memory, then
+    /// size) on the best build this device runs, marked `default`, with no evidence.
+    #[test]
+    fn an_unmeasured_device_gets_the_smallest_models_marked_default() {
+        let data = data(json!({}));
+        let hardware = nvidia_12(&data, 32);
+        let plan = plan(&data, &hardware, &nothing_installed);
+        let ids: Vec<_> = plan.models.iter().map(|m| m.model_id.as_str()).collect();
+        assert_eq!(ids, vec!["small", "embed", "parakeet"]);
+        assert!(plan.models.iter().all(|m| m.basis == Basis::Default
+            && m.evidence.is_empty()
+            && m.from_class == "gpu-12gb"));
+        assert!(plan.unavailable.is_empty(), "{:?}", plan.unavailable);
+        assert!(plan.fits, "{:?}", plan.reasons);
+        let builds: Vec<_> = plan.runtimes.iter().map(|r| r.build.as_str()).collect();
+        assert_eq!(builds, vec!["linux-x64-cuda", "linux-x64-vulkan"]);
+        assert_eq!(plan.models[0].server_flags, default_flags(Service::Llm));
+        assert_eq!(
+            plan.models[1].server_flags,
+            default_flags(Service::Embeddings)
+        );
+    }
+
+    /// A measured service keeps its recommendation; only the unmeasured ones default.
+    #[test]
+    fn a_measured_service_keeps_its_recommendation_beside_defaults() {
+        let data =
+            data(json!({ "gpu-12gb": { "llm": recommendation("big", "llama-server", true) } }));
+        let plan = plan(&data, &nvidia_12(&data, 32), &nothing_installed);
+        let basis: Vec<_> = plan
+            .models
+            .iter()
+            .map(|m| (m.model_id.as_str(), m.basis))
+            .collect();
+        assert_eq!(
+            basis,
+            vec![
+                ("big", Basis::Measured),
+                ("embed", Basis::Default),
+                ("parakeet", Basis::Default)
+            ]
+        );
+    }
+
+    /// The smallest models still have to fit: when they do not, the plan says so.
+    #[test]
+    fn a_default_set_that_cannot_fit_says_so() {
+        let data = data(json!({}));
+        let plan = plan(
+            &data,
+            &device(&data, 6, vec![], vec![Backend::Cpu]),
+            &nothing_installed,
+        );
+        assert!(!plan.fits);
+        assert!(plan.reasons.iter().any(|r| r.contains("need 2.8 GiB")));
+    }
+
+    /// `local_ai_device: cpu` (`local-ai install --device cpu`) on an unmeasured GPU device:
+    /// the default models on the CPU builds.
+    #[test]
+    fn an_unmeasured_device_held_to_the_cpu_plans_the_cpu_builds() {
+        let data = data(json!({}));
+        let plan = plan_with_device(
+            &data,
+            &nvidia_12(&data, 32),
+            Some(Backend::Cpu),
+            &nothing_installed,
+        );
+        assert!(plan.fits, "{:?}", plan.reasons);
+        assert_eq!(plan.models.len(), 3);
+        assert!(plan.models.iter().all(|m| m.basis == Basis::Default));
+        assert!(plan
+            .runtimes
+            .iter()
+            .all(|r| r.build == "linux-x64-cpu" && r.backend == Backend::Cpu));
     }
 
     /// A service or a provider the executor does not run (the wind tunnel's `completion`
@@ -958,5 +1093,57 @@ mod tests {
             .models
             .iter()
             .all(|m| m.from_class == "amd-igpu-uma-128"));
+    }
+
+    /// A device of a class the wind tunnel has not measured: the RTX 3060 fixture of
+    /// `hardware-class-fixtures.json`. It gets the manifest's smallest chat model, nomic and
+    /// Parakeet v3, marked `default`, on CUDA; held to the CPU, on the CPU builds.
+    #[test]
+    fn the_embedded_data_plans_defaults_on_an_unmeasured_class() {
+        let data = crate::ai_service::local::data::embedded().unwrap();
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../ai-wind-tunnel/hardware-class-fixtures.json"
+        ))
+        .unwrap();
+        let fixture = fixtures["fixtures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "RTX 3060 12 GB, CUDA")
+            .unwrap();
+        let input = &fixture["input"];
+        let mut rtx = gpu(GpuVendor::Nvidia, GpuType::Discrete, 0);
+        rtx.vram_bytes = input["gpus"][0]["vramBytes"].as_u64();
+        let backends: Vec<Backend> = serde_json::from_value(input["backends"].clone()).unwrap();
+        let mut hardware = device(data, 0, vec![rtx], backends);
+        hardware.ram_bytes = input["memoryBytes"].as_u64().unwrap();
+        hardware.available_ram_bytes = hardware.ram_bytes;
+        crate::ai_service::local::hardware::finish(&mut hardware, &data.classes);
+        assert_eq!(hardware.hardware_class, fixture["expected"]);
+        assert!(data
+            .recommendations
+            .classes
+            .get(&hardware.hardware_class)
+            .is_none());
+
+        let expected = vec![
+            "qwen3.5-0.8b-q8_0",
+            "nomic-embed-text-v1.5-q8_0",
+            "parakeet-tdt-0.6b-v3-q8_0",
+        ];
+        let plan = plan(data, &hardware, &nothing_installed);
+        assert!(plan.fits, "{:?}", plan.reasons);
+        let ids: Vec<_> = plan.models.iter().map(|m| m.model_id.as_str()).collect();
+        assert_eq!(ids, expected);
+        assert!(plan.models.iter().all(|m| m.basis == Basis::Default));
+        let builds: Vec<_> = plan.runtimes.iter().map(|r| r.build.as_str()).collect();
+        assert_eq!(builds, vec!["linux-x64-cuda", "linux-x64-cuda"]);
+
+        let cpu = plan_with_device(data, &hardware, Some(Backend::Cpu), &nothing_installed);
+        assert!(cpu.fits, "{:?}", cpu.reasons);
+        let ids: Vec<_> = cpu.models.iter().map(|m| m.model_id.as_str()).collect();
+        assert_eq!(ids, expected);
+        let builds: Vec<_> = cpu.runtimes.iter().map(|r| r.build.as_str()).collect();
+        assert_eq!(builds, vec!["linux-x64-cpu", "linux-x64-cpu"]);
     }
 }

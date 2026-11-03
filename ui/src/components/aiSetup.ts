@@ -3,6 +3,7 @@ import type {
   AiEndpoint,
   DiscoveredModel,
   EndpointKind,
+  LocalAiPlannedModel,
   ModelType,
 } from "@coasys/ad4m";
 
@@ -32,6 +33,14 @@ export function endpointLabel(endpoint: Pick<AiEndpoint, "kind" | "managed">): s
     if (endpoint.kind === "OPEN_AI_AUDIO") return "nemo-speech (Parakeet)";
   }
   return kindLabel(endpoint.kind);
+}
+
+/**
+ * The note beside a planned local model the wind tunnel did not measure on this hardware
+ * (`basis: "default"`: the manifest's smallest model for the service), else none.
+ */
+export function basisNote(model: Pick<LocalAiPlannedModel, "basis">): string | null {
+  return model.basis === "default" ? "not measured on this hardware" : null;
 }
 
 /** The capability a model type needs from its endpoint. */

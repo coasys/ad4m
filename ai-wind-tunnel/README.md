@@ -213,7 +213,9 @@ real-time factor; TTS: round-trip
 WER, then real-time factor; embeddings: throughput). The first wins and cites every evidence
 file that measured it. A class with no evidence, or no candidate over the floor, has no
 recommendation; the executor's local setup then falls back to the nearest smaller measured
-class of the same family, then to the CPU classes (`fallbackClasses` in `hardware-class.ts`).
+class of the same family, then to the CPU classes (`fallbackClasses` in `hardware-class.ts`),
+and where none of those is measured, to the manifest's smallest model of the service, marked
+`basis: "default"` in the plan.
 
 ## Not in CI
 

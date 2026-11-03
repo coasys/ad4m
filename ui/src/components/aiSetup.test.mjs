@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  basisNote,
   chatModels,
   endpointLabel,
   parseMaxNumCtx,
@@ -81,4 +82,9 @@ test("setting the ceiling keeps the endpoint's other settings and its stored key
     maxConcurrent: undefined,
   });
   assert.equal("apiKey" in input, false);
+});
+
+test("a model the wind tunnel did not measure on this hardware says so; a measured one says nothing", () => {
+  assert.equal(basisNote({ basis: "default" }), "not measured on this hardware");
+  assert.equal(basisNote({ basis: "measured" }), null);
 });
