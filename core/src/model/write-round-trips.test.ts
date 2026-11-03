@@ -184,6 +184,18 @@ describe("RPCs per write", () => {
     expect(commands[1]).toContain("collectionSetter");
   });
 
+  it("create still clears an empty relation whose predicate an adder envelope in the same save wrote to", async () => {
+    // `tags` writes through `{action: 'adder'}` before `labels` (same predicate)
+    // is reached, so `labels: []` has links to clear.
+    const { proxy, sent } = countingProxy([RoundTripShared]);
+    const shared = new RoundTripShared(proxy);
+    shared.title = "standup";
+    shared.tags = { action: "adder", value: ["rt://tag/a"] } as any;
+    shared.labels = [];
+    await shared.save();
+    expect(commandsSent(sent).some((c) => c.includes("collectionSetter") && c.includes("rt://tag"))).toBe(true);
+  });
+
   it("update of an existing record with [] still clears the relation", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripCall]);
     const call = new RoundTripCall(proxy, "rt://call/1");

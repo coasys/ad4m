@@ -789,7 +789,7 @@ export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: numbe
  * A model query's rows; `totalCount` is set when the query asked for it
  * (`count: true`), `nextCursor` when a cursor query (`after`) got a full page.
  */
-export type QueryResults<T> = { results: T[]; totalCount?: number; nextCursor?: string };
+export type Page<T> = { results: T[]; totalCount?: number; nextCursor?: string };
 /** The result of `findAllAndCount()`, which always asks for the count. */
 export type ResultsWithTotalCount<T> = { results: T[]; totalCount: number };
 /**
