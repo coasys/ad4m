@@ -1584,6 +1584,51 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
       errorSpy.mockRestore();
     }
   });
+
+  it("paginateSubscribe() rejects a first answer without totalCount and ends its subscription", async () => {
+    const { mockClient, mockPerspective } = buildMocks({ instances: [] });
+    const builder = testModel("PaginateNoCount").query(mockPerspective);
+
+    await expect(builder.paginateSubscribe(10, 1, () => {})).rejects.toThrow(/totalCount/);
+
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "paginate-sub");
+    // The failed call left nothing for the builder to end.
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+  });
+
+  it("countSubscribe() rejects a first answer without totalCount and ends its subscription", async () => {
+    const { mockClient, mockPerspective } = buildMocks({ instances: [] });
+    const builder = testModel("CountNoCount").query(mockPerspective);
+
+    await expect(builder.countSubscribe(() => {})).rejects.toThrow(/totalCount/);
+
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "paginate-sub");
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+  });
+
+  it("countSubscribe() skips a pushed update without totalCount and keeps delivering", async () => {
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { mockPerspective, push } = buildMocks({ instances: [], totalCount: 1 });
+      const counts: number[] = [];
+      const builder = testModel("CountPushNoCount").query(mockPerspective);
+      expect(await builder.countSubscribe(c => counts.push(c))).toBe(1);
+
+      // The push runs the client's update dispatch: it must not throw.
+      expect(() => push({ result: { instances: [] } })).not.toThrow();
+      expect(counts).toEqual([]);
+      push({ result: { instances: [], totalCount: 2 } });
+      await settle();
+
+      expect(counts).toEqual([2]);
+      expect(errorSpy.mock.calls.some(args => args[0] === "Count subscription error:")).toBe(true);
+      builder.dispose();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });
 
 // ============================================================================
