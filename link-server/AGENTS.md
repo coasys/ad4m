@@ -62,7 +62,7 @@ There's no "enable E2E" endpoint and no per-room E2E state. **Every room is E2E 
 
 **Member keys are DIDs**: a member's X25519 key is the Montgomery form of the Ed25519 key in its `did:key`, so clients compute it from the DID and the server stores none. `/auth` takes `{did, challenge, signature}` only; the ACL response is `[{did}]`.
 
-**Unused columns in existing database files.** `SCHEMA` (`db.ts`) is `CREATE TABLE IF NOT EXISTS` with no migrations, so a database file created by an earlier schema keeps columns the code no longer names: `rooms.e2e_enabled` (`INTEGER DEFAULT 0`), `acl.x25519_public_key`/`x25519_signature`. They are nullable or defaulted, so inserts that omit them work, and nothing reads them. Rooms in such a file that hold plaintext links are not supported: start such a server on a fresh database.
+**Unused columns in existing database files.** `SCHEMA` (`db.ts`) is `CREATE TABLE IF NOT EXISTS` with no migrations, so a database file created by an earlier schema keeps columns the code no longer names: `rooms.e2e_enabled` (`INTEGER DEFAULT 0`), `acl.x25519_public_key`/`x25519_signature`. They are nullable or defaulted, so inserts that omit them work, and nothing reads them. Plaintext links that older language builds stored stay in such a file and are still served; the current language skips them on read, so members do not see them. Do not wipe the database to get rid of them: it also holds every room's ACL and key boxes, and after a wipe the first member to reconnect becomes the room's admin.
 
 **WebSocket keepalive**: connections use a 30-second ping/pong heartbeat. Sockets that miss a pong get terminated. This prevents stale connections from accumulating on the server.
 
