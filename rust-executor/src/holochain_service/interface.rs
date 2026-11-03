@@ -296,14 +296,15 @@ impl HolochainServiceInterface {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(HolochainServiceRequest::Shutdown(response_tx), None)?;
         match response_rx.await? {
-            HolochainServiceResponse::Shutdown(result) => {
-                result?;
-                // A stopped conductor is not running. A restart's `init` sets the new handle.
-                take_holochain_service().await;
-                Ok(())
-            }
+            HolochainServiceResponse::Shutdown(result) => result,
             _ => unreachable!(),
         }
+    }
+
+    /// Whether this conductor has stopped: its dispatch loop ends after a shutdown, which
+    /// closes the channel. The global keeps the handle until an `init` replaces it.
+    pub fn is_stopped(&self) -> bool {
+        self.sender.is_closed()
     }
 
     pub async fn get_agent_key(&self) -> Result<HoloHash<Agent>, AnyError> {
@@ -508,7 +509,9 @@ pub async fn set_holochain_service(service: HolochainServiceInterface) {
     *lock = Some(service);
 }
 
-/// Removes the conductor's handle and returns it.
+/// Removes the conductor's handle and returns it, so a test can run without the conductor
+/// an earlier test left and put it back after.
+#[cfg(test)]
 pub(crate) async fn take_holochain_service() -> Option<HolochainServiceInterface> {
     HOLOCHAIN_SERVICE.write().await.take()
 }
@@ -519,10 +522,10 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
 
-    /// A stopped conductor is not running: after its shutdown the global holds no handle, so
-    /// callers get `None` ("not running") instead of a handle whose channel is closed.
+    /// A shut-down conductor reports itself stopped: like the real dispatch loop, the fake
+    /// one ends after the shutdown, which closes the channel.
     #[tokio::test]
-    async fn a_shut_down_conductor_leaves_no_service_behind() {
+    async fn a_shut_down_conductor_reports_itself_stopped() {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Envelope>();
         let (_signal_tx, signal_rx) = tokio::sync::mpsc::unbounded_channel();
         let service = HolochainServiceInterface {
@@ -533,14 +536,16 @@ mod tests {
             while let Some(envelope) = receiver.recv().await {
                 if let HolochainServiceRequest::Shutdown(tx) = envelope.request {
                     let _ = tx.send(HolochainServiceResponse::Shutdown(Ok(())));
+                    break;
                 }
             }
         });
-        set_holochain_service(service.clone()).await;
+        assert!(!service.is_stopped());
 
         service.shutdown().await.unwrap();
+        tokio::task::yield_now().await;
 
-        assert!(maybe_get_holochain_service().await.is_none());
+        assert!(service.is_stopped());
     }
 
     #[tokio::test]

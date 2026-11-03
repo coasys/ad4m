@@ -170,7 +170,10 @@ async fn install_with_retries(installed: &mut bool) -> Result<(), AnyError> {
     let mut last_err = None;
     for attempt in 1..=5 {
         // A conductor that stopped since the last attempt will not come back for a retry.
-        if maybe_get_holochain_service().await.is_none() {
+        if !maybe_get_holochain_service()
+            .await
+            .is_some_and(|service| !service.is_stopped())
+        {
             return Err(HolochainNotRunning.into());
         }
         match install_alliance_dna(&data_path).await {
@@ -841,10 +844,11 @@ impl std::fmt::Display for HolochainNotRunning {
 impl std::error::Error for HolochainNotRunning {}
 
 /// The running Holochain service, or [`HolochainNotRunning`] at once when no conductor
-/// runs or starts.
+/// runs or starts, or the one there has stopped.
 async fn running_holochain_service() -> Result<HolochainServiceInterface, AnyError> {
     crate::holochain_service::holochain_service_once_started()
         .await
+        .filter(|service| !service.is_stopped())
         .ok_or_else(|| HolochainNotRunning.into())
 }
 
@@ -1653,6 +1657,52 @@ mod tests {
         if let Some(service) = running {
             crate::holochain_service::interface::set_holochain_service(service).await;
         }
+    }
+
+    /// A conductor that has shut down keeps its handle in the global until an `init`
+    /// replaces it. A wallet read must see it stopped and answer at once, not retry the
+    /// install against its closed channel.
+    #[tokio::test]
+    async fn wallet_read_with_a_stopped_conductor_fails_at_once() {
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        // The install reads the data path: give it one, so only the conductor can stop it.
+        {
+            let mut config = crate::config::GLOBAL_AD4M_CONFIG.lock().unwrap();
+            if config.is_none() {
+                *config = Some(crate::config::Ad4mConfig {
+                    app_data_path: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+                    ..Default::default()
+                });
+            }
+        }
+        set_membrane_proof("cHJvb2Y=").unwrap();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        drop(receiver);
+        let (_signal_tx, signal_rx) = mpsc::unbounded_channel();
+        let stopped = HolochainServiceInterface {
+            sender,
+            stream_receiver: Arc::new(Mutex::new(signal_rx)),
+        };
+        let running = crate::holochain_service::interface::take_holochain_service().await;
+        crate::holochain_service::interface::set_holochain_service(stopped).await;
+        let was_installed = std::mem::replace(&mut *INSTALL_ONCE.lock().await, false);
+
+        let ledger = tokio::time::timeout(Duration::from_secs(2), get_ledger()).await;
+
+        *INSTALL_ONCE.lock().await = was_installed;
+        crate::holochain_service::interface::take_holochain_service().await;
+        if let Some(service) = running {
+            crate::holochain_service::interface::set_holochain_service(service).await;
+        }
+        let err = ledger
+            .expect("get_ledger must not retry against a stopped conductor")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Holochain is not running"),
+            "unexpected error: {err}"
+        );
     }
 
     /// The install a request starts must not wait for a conductor that is gone (stopped by
