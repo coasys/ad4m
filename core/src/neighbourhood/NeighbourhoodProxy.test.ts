@@ -198,6 +198,25 @@ describe("NeighbourhoodProxy", () => {
       expect(ex.count("agent.status")).toBe(2);
     });
 
+    it("does not keep an answer that arrives after a reconnect it was sent before", async () => {
+      const ex = executor();
+      ex.defer();
+      const first = ex.join("room-1");
+      await Promise.resolve();
+      // The executor restarts while both reads are out; the old process's answers land after.
+      ex.reconnect();
+      ex.pending["agent.status"].shift()!.resolve({ did: "did:key:me" });
+      ex.pending["sfu.status"].shift()!.resolve(NAT);
+      await first;
+      const second = ex.join("room-2");
+      await Promise.resolve();
+      expect(ex.count("agent.status")).toBe(2);
+      expect(ex.count("sfu.status")).toBe(2);
+      ex.pending["agent.status"].shift()!.resolve({ did: "did:key:me" });
+      ex.pending["sfu.status"].shift()!.resolve(PUBLIC);
+      await second;
+    });
+
     it("asks for the SFU status again while the SFU is not available", async () => {
       const ex = executor();
       ex.answers["sfu.status"] = () => { throw new Error("SFU service not yet available"); };

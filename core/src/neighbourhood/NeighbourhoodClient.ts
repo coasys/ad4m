@@ -26,6 +26,8 @@ export class NeighbourhoodClient {
     #callerDidCache: string | null = null
     #sfuStatusCache: SfuStatus | null = null
     #clearOnReconnect: (() => void) | null = null
+    /** Bumped on each reconnect, so an answer from before it is not kept. */
+    #contextGeneration = 0
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
@@ -365,14 +367,19 @@ export class NeighbourhoodClient {
      */
     async sessionContext(): Promise<{ did: string | null; sfuStatus: SfuStatus | null }> {
         this.#clearOnReconnect ??= this.#apiClient.onReconnect(() => {
+            this.#contextGeneration++
             this.#callerDidCache = null
             this.#sfuStatusCache = null
         })
+        const generation = this.#contextGeneration
         const [did, sfuStatus] = await Promise.all([
             this.#callerDidCache ?? this.callerDid(),
             // Non-fatal: a session works without the SFU status.
             this.#sfuStatusCache ?? this.sfuStatus().catch((): null => null),
         ])
+        // A reconnect while this read was out means the answer may be the old process's: use it
+        // for this session, but do not keep it.
+        if (generation !== this.#contextGeneration) return { did: did || null, sfuStatus: sfuStatus ?? null }
         this.#callerDidCache = did || null
         this.#sfuStatusCache = sfuStatus ?? null
         return { did: this.#callerDidCache, sfuStatus: this.#sfuStatusCache }
