@@ -1,8 +1,9 @@
 import {
     agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_sign,
-    agent_sign_string_hex, agent_load, agent, agent_is_initialized, agent_is_unlocked, agent_unlock,
-    agent_lock, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user,
-    agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, save_agent_profile
+    agent_sign_string_hex, agent, agent_is_initialized, agent_is_unlocked,
+    agent_create_signed_expression_stringified, agent_create_signed_expression_for_user,
+    agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user,
+    agent_open_sealed
 } from 'ext:core/ops';
 
 ((globalThis) => {
@@ -49,8 +50,8 @@ import {
         signStringHex: (payload) => {
             return agent_sign_string_hex(payload);
         },
-        load: () => {
-            return agent_load();
+        openSealed: (sealed) => {
+            return agent_open_sealed(sealed);
         },
         agent: () => {
             return agent();
@@ -60,15 +61,6 @@ import {
         },
         isUnlocked: () => {
             return agent_is_unlocked();
-        },
-        unlock: (password) => {
-            return agent_unlock(password);
-        },
-        lock: () => {
-            return agent_lock();
-        },
-        save_agent_profile: (profile) => {
-            return save_agent_profile(profile);
         },
         createSignedExpressionForUser: (userEmail, data) => {
             if (typeof userEmail !== 'string' || userEmail.trim() === '') {

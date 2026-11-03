@@ -52,9 +52,10 @@ src/store.ts               — local link store (indexed) + sync cursor (revisio
 src/api.ts                  — typed HTTP client, one function per server endpoint
 src/auth.ts                  — DID challenge-response + JWT-expiry-driven token refresh
 src/ws-client.ts               — WebSocket lifecycle: typed dispatch, send queue, exponential-backoff reconnect
-src/sync.ts                     — commit / catch-up / bootstrap; the ONE inbound-diff choke point (applyInboundWireDiff)
+src/sync.ts                     — commit / catch-up / bootstrap; the ONE inbound path (openOrHold → applyAndEmit), held links (retryHeld)
 src/telepresence.ts              — online-agent roster + outbound signal/broadcast/status
-src/encryption.ts                 — X25519 derivation, sealed room-key exchange, AES-256-GCM link encryption
+src/encryption.ts                 — room keys sealed to DIDs via the executor, key ring, AES-256-GCM link encryption
+src/room-keys.ts                   — admin rotation (seals to every ACL member) and any member's grants
 tests/*.test.ts                    — node:test + tsx, one file per pure module, all use mock adapters (no real network/WS/Deno)
 ```
 
@@ -73,13 +74,51 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   does not break the swappable-adapter guarantee. Pure library
   imports (`@noble/curves`, `@noble/ciphers`, `@noble/hashes`) are fine
   anywhere — they contain no runtime coupling.
-- **`applyInboundWireDiff` (src/sync.ts) is the only place that calls
-  `emitDiff`.** The AD4M executor discards `perspectiveSyncSync()`'s return
-  value — `emitPerspectiveDiff` is the only thing that makes an inbound
-  link queryable. HTTP catch-up (`catchUp()`) and the WebSocket `"diff"`
-  handler (wired in `index.ts`) both funnel through this one function. If
-  you add a new inbound-diff source, route it through
-  `applyInboundWireDiff` — do not call `store.applyDiff` + emit separately.
+- **`applyAndEmit` (src/sync.ts) is the only place that calls `emitDiff`.**
+  The AD4M executor discards `perspectiveSyncSync()`'s return value —
+  `emitPerspectiveDiff` is the only thing that makes an inbound link
+  queryable. HTTP catch-up (`catchUp()` → `applyInboundWireDiff`), the
+  WebSocket `"diff"` handler (wired in `index.ts`), the startup snapshot
+  (`bootstrap()`) and `retryHeld()` all go through `openOrHold` and
+  `applyAndEmit`. It emits the change to the store (additions it lacked,
+  removals of links it held), so every link that enters the store is
+  emitted once and repeats emit nothing. If you add a new inbound-diff
+  source, route it through these — do not call `store.applyDiff` + emit
+  separately.
+- **A link no key opens yet is held, never dropped.** `openOrHold` stores it
+  under `held/<link_hash>` with its op; a later op on the same link replaces
+  it. `retryHeld()` opens what the key ring opens: `setupKeyRing` calls it
+  after every successful load, `catchUp` at the end of every cycle (re-reading
+  `/keys` first while anything is held). Because nothing is lost the cursor
+  may move past held links; there is no recovery re-bootstrap, key-ring-size
+  trigger or refresh cooldown. Never make delivery depend on a one-shot
+  request succeeding (BUG-103: a single `/render` timeout after a key grant
+  lost a member's history).
+- **A link the key it names does not open costs that link only.** Its
+  ciphertext or payload is malformed, and a key version is fixed by its
+  rotation's commitment, so no key ever opens it: `openWireLink` logs it and
+  returns `UNOPENABLE`, inbound skips it and `retryHeld` releases it. It must
+  never throw: a throw aborts the rest of a catch-up batch whose cursor has
+  already moved, and the held links `retryHeld` released before it.
+- **Commit: the store follows the server, nothing is echoed.**
+  `sync.commit()` writes a diff to the language's store only after the
+  server accepted the POST, so a failed commit leaves no local-only links.
+  It does NOT emit the diff back to the executor: the executor committed
+  those links and already holds them (the echo made it re-persist,
+  re-index and re-publish every link). When the server's answer puts the
+  commit at exactly cursor + 1 the cursor moves past it, so catch-up does
+  not fetch our own links back; otherwise another agent's diff is in
+  between and the cursor stays.
+- **A 401 replaces the session.** `commit`, `bootstrap` and `catchUp` run
+  their request through `withToken` (src/sync.ts): on a 401 it drops the
+  cached token (`invalidateToken` → `auth.invalidateSession()`),
+  re-authenticates and retries once. A WebSocket `auth-error` drops the
+  token before the reconnect for the same reason.
+- **The KV write cost is the host's.** `ad4m:host`'s KV
+  (rust-executor/src/js_core/host.js) keeps the store in memory and
+  rewrites its file once at the end of the turn that changed it, so the
+  store's one key per link is cheap within one synchronous `applyDiff`.
+  Keep store writes for a diff in one turn (no `await` between them).
 - **`sync.sync()` always does an HTTP catch-up**, regardless of WebSocket
   connection state. This is deliberate, not a missing optimization: because
   `since` only advances after a diff is actually applied, a live WebSocket
@@ -118,30 +157,49 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   (src/sync.ts) coalesces contiguous commits into segments and retries
   each segment up to 3 times with exponential backoff. If all attempts
   fail, the failed segments re-enqueue for the next flush cycle and the
-  language emits `LinkLanguageInstalledButNotSynced`. This keeps links
-  local-only until the server recovers, but a process restart loses the
+  language emits `LinkLanguageInstalledButNotSynced`. The language's store
+  only gets links the server accepted, so queued links stay out of it until
+  the server recovers, and a process restart loses the
   queue — a durable pending-commits queue (persisted in the KV store,
   retried by `sync()`) would close this gap.
 - **E2E encryption activates automatically — no plaintext mode.** The admin's
   language instance generates the initial room key during `init()` when no E2E
   exists yet. Subsequent rotations require explicit admin action.
-  `performRotation()` generates a fresh room key client-side, seals it to every
-  ACL member's X25519 public key, and POSTs only sealed envelopes — the server
-  never sees plaintext. It does NOT fire on presence events (`onPeerJoined` is
-  reconnect/wake, not ACL change — rotating there would mint a new version on
-  every reconnect). `onPeerJoined` only calls `performAdminKeyGrants()` to
-  grant historical keys to members who lack them (idempotent). The key ring
-  loads once during `init()`'s `setupKeyRing()` and the `version` field in
-  `KeysResponse` remains unused for mid-session detection — a periodic `/keys`
-  re-fetch or a dedicated WS push message would close that gap.
+  `performRotation()` (admin only) generates a fresh room key client-side,
+  seals it to the DID of every ACL member, including members that never
+  connected, and POSTs only sealed boxes — the server never sees plaintext.
+  It does NOT fire on presence events (`onPeerJoined` is reconnect/wake, not
+  ACL change — rotating there would mint a new version on every reconnect).
+  `performKeyGrants()` runs on every member that holds keys (at init, after
+  every sync, on `onPeerJoined`) and seals the versions it holds to ACL
+  members lacking them (idempotent; the server keeps the first box per member
+  and version and refuses versions the granter lacks). A member whose key
+  status is `pending` (no box it holds opens: no member holding a key has
+  been online since it joined, or its boxes are in an older format; an admin
+  in that state rotates, `adminRotates` in src/room-keys.ts) re-reads `/keys`
+  on a commit, on a `keys-granted` push, and on every sync while it holds
+  links it cannot open. A version whose box does not open is left out of the
+  ring (`buildKeyRing`), so one bad grant costs that version, not the room.
+  A failed re-read keeps a ring already loaded (`afterFailedKeyRead`): only a
+  member that never loaded one is `error`, so one failed `/keys` read never
+  refuses commits or holds inbound links.
+- **Room keys are sealed to DIDs.** A member's X25519 key is the Montgomery
+  form of the Ed25519 key in its `did:key`. The language seals itself
+  (`sealToDid`, src/encryption.ts) and opens with the `agentOpenSealed(box)`
+  host import (`AgentAdapter.openSealed`); it never holds an agent secret,
+  and auth sends no key. `tests/sealed-box.ts` is a noble reference of the
+  executor's opening for the mock agents; the test vector in
+  `tests/encryption.test.ts` is pinned in
+  `rust-executor/src/agent/sealed_box.rs` too: changing the format orphans
+  every sealed room key.
 - **E2E encryption wire format is unified.** Both client and server use
   the same `EncryptedLinkData` shape (`{ciphertext, nonce}`) in the link's
   `data` field for encrypted rooms — no separate `encrypted` field. The
   server treats link data as opaque (no E2E validation at commit time)
-  and stores only sealed `encryptedKey` envelopes (ECIES: ephemeral X25519
-  ECDH + HKDF-SHA256 + AES-256-GCM). Key generation and sealing happen
-  exclusively client-side. The server accepts client-registered X25519
-  public keys during auth.
+  and stores only sealed `encryptedKey` boxes (the executor's sealed box:
+  ephemeral X25519 ECDH + HKDF-SHA256 + AES-256-GCM). Key generation and
+  sealing happen exclusively client-side. The server stores no member keys:
+  the ACL is DIDs.
 - **E2E integration coverage via test matrix.** The integration suite
   (`tests/js/tests/integration.test.ts`) runs the full neighbourhood test
   battery for both `[holochain]` and `[server-link]` link-language

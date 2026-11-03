@@ -2,14 +2,18 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::types::{
-    AuthInfoInput, DecoratedLinkExpression, InteractionCall, LanguageMetaInput, LinkExpression,
-    LinkExpressionInput, LinkInput, LinkMutations, ModelType,
+    AuthInfoInput, InteractionCall, LanguageMetaInput, LinkExpression, LinkExpressionInput,
+    LinkInput, LinkMutations, ModelType,
 };
 
-// Re-export for use in handler files
-pub use crate::agent::capabilities::user_email_from_token;
-
 // ── Agent ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentsByDidsRequest {
+    pub dids: Vec<String>,
+}
 
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +30,7 @@ pub struct LockAgentRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct UnlockAgentRequest {
@@ -41,6 +46,7 @@ pub struct SignMessageRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct UpdateProfileRequest {
@@ -60,6 +66,12 @@ pub struct PublicPerspectiveInput {
 #[ts(export)]
 pub struct RequestCapabilityRequest {
     pub auth_info: AuthInfoInput,
+    // The agent the app asks to act as (#1399): a managed user's email or an agent's DID.
+    // Absent: the executor's main agent. (A plain comment: ts-rs copies doc comments into
+    // the generated type with trailing whitespace.)
+    #[serde(default)]
+    #[ts(optional)]
+    pub agent: Option<String>,
 }
 
 #[derive(Deserialize, TS)]
@@ -80,6 +92,7 @@ pub struct GenerateJwtRequest {
 // ── Entanglement ──
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct EntanglementProofInput {
@@ -148,6 +161,7 @@ pub struct UpdatePerspectiveRequest {
 
 /// Unified link mutation request (harmonised endpoint).
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct LinkMutationRequest {
@@ -164,16 +178,6 @@ pub struct LinkMutationRequest {
 pub struct LinkUpdateInput {
     pub old_link: LinkInput,
     pub new_link: LinkInput,
-}
-
-/// Unified link mutation response.
-#[derive(Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct LinkMutationResponse {
-    pub additions: Vec<DecoratedLinkExpression>,
-    pub removals: Vec<DecoratedLinkExpression>,
-    pub updates: Vec<DecoratedLinkExpression>,
 }
 
 /// Unified query request (harmonised: engine + query in one).
@@ -206,6 +210,7 @@ pub struct PublishNeighbourhoodRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct BroadcastRequest {
@@ -216,6 +221,7 @@ pub struct BroadcastRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct SignalRequest {
@@ -226,6 +232,7 @@ pub struct SignalRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct SetOnlineStatusRequest {
@@ -249,6 +256,21 @@ pub struct CreateExpressionRequest {
 #[ts(export)]
 pub struct ExpressionManyRequest {
     pub urls: Vec<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExpressionUrlRequest {
+    pub url: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExpressionInteractRequest {
+    pub url: String,
+    pub interaction_call: InteractionCall,
 }
 
 // ── Languages ──
@@ -296,6 +318,7 @@ pub struct OpenLinkRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct ExportRequest {
@@ -349,25 +372,6 @@ pub struct CreateUserRequest {
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct LoginUserRequest {
-    pub email: String,
-    pub password: String,
-    pub app_name: Option<String>,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct VerifyEmailRequest {
-    pub email: String,
-    pub code: String,
-    pub verification_type: Option<String>,
-    pub app_name: Option<String>,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct SetMultiUserRequest {
     pub enabled: bool,
 }
@@ -408,6 +412,7 @@ pub struct SetDefaultModelRequest {
 // ── Notifications ──
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct NotificationInput {
@@ -418,8 +423,31 @@ pub struct NotificationInput {
     pub trigger: String,
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
-    pub webhook_auth: String,
-    pub granted: Option<bool>,
+    /// Sent as the bearer credential to `webhookUrl`. Results and events say only
+    /// whether one is set (`hasWebhookAuth`).
+    #[ts(type = "string")]
+    pub webhook_auth: crate::secret::Secret,
+}
+
+/// `NotificationInput` for `runtime.updateNotification`. Clients see only `hasWebhookAuth`,
+/// so the credential is optional here.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationUpdateInput {
+    pub description: String,
+    pub app_name: String,
+    pub app_url: String,
+    pub app_icon_path: Option<String>,
+    pub trigger: String,
+    pub perspective_ids: Vec<String>,
+    pub webhook_url: String,
+    /// Without it the update keeps the stored credential, and fails if `webhookUrl`
+    /// changes too, because a credential goes only to the webhook it was set for. An empty
+    /// string clears it.
+    #[serde(default)]
+    #[ts(as = "Option<String>")]
+    pub webhook_auth: Option<crate::secret::Secret>,
 }
 
 /// Grant/revoke a notification (partial update for grant status only)
@@ -433,6 +461,7 @@ pub struct NotificationGrantRequest {
 // ── SDNA / Commands / Subjects ──
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct AddSdnaRequest {
@@ -443,6 +472,7 @@ pub struct AddSdnaRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct ExecuteCommandsRequest {
@@ -453,27 +483,6 @@ pub struct ExecuteCommandsRequest {
 }
 
 // ── Hosting ──
-
-#[derive(Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct HostingInfoResponse {
-    #[ts(type = "any | null")]
-    pub user_info: Option<serde_json::Value>,
-    #[ts(type = "any | null")]
-    pub rates: Option<serde_json::Value>,
-    #[ts(type = "any | null")]
-    pub version: Option<serde_json::Value>,
-}
-
-#[derive(Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct HostingWalletResponse {
-    #[ts(type = "any | null")]
-    pub balance: Option<serde_json::Value>,
-    pub pubkey: Option<String>,
-}
 
 // ── Verify Signature ──
 
@@ -488,21 +497,10 @@ pub struct VerifySignatureRequest {
 
 // ── Dev ──
 
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct EmailTestRequest {
-    pub action: String,
-    pub to: Option<String>,
-    pub email: Option<String>,
-    pub verification_type: Option<String>,
-    pub expires_at: Option<i64>,
-    pub expiry_seconds: Option<i64>,
-}
-
 // ── Additional Perspective Types ──
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct AddLinkRequest {
@@ -512,6 +510,7 @@ pub struct AddLinkRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct AddLinksBulkRequest {
@@ -521,6 +520,7 @@ pub struct AddLinksBulkRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RemoveLinksBulkRequest {
@@ -543,6 +543,7 @@ pub struct TranscriptTurn {
 /// SHACL subject classes. Shapes are resolved server-side from the
 /// perspective's registered classes, so callers pass only the transcript.
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RunInterpretationRequest {
@@ -605,6 +606,7 @@ pub struct RunInterpretationRequest {
 /// `{Class}_propose_link_child` tool surface (design v3 §6) and drives the
 /// extraction by tool calls rather than by emitting one big JSON blob.
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RunInterpretationWithHarnessRequest {
@@ -648,136 +650,8 @@ pub struct RunInterpretationWithHarnessRequest {
     pub emit_debug_events: Option<bool>,
 }
 
-/// Register a neighbourhood auto-processor on a perspective. The executor's
-/// watch loop then runs LLM interpretation automatically over new source items
-/// (mirrors what Flux does per channel), coordinating which peer processes each
-/// batch via the shared-graph `ProcessingClaim`. Emits step signals on the
-/// events WebSocket (`auto-processor-event`).
-///
-/// Server-side deserialization only: the TypeScript client hand-mirrors this as
-/// `AddAutoProcessorConfig` (uuid passed separately), so no `ts-rs` export is
-/// needed here.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddAutoProcessorRequest {
-    pub uuid: String,
-    /// Human-meaningful processor id (unique per perspective).
-    pub processor_id: String,
-    /// SPARQL `SELECT ?speaker ?text ?timestamp` over the source items to
-    /// interpret (e.g. a channel's messages). All three bindings are required:
-    /// `?timestamp` is what makes a turn identifiable, so the processed-turn
-    /// cursor can tell a re-gathered turn from the same wording said again
-    /// later. Copy `BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY` (it reads the body
-    /// link's reifier — `ad4m://ontology/author` + `ad4m://ontology/timestamp`
-    /// — rather than an app-level `ns://author` predicate) and swap in your own
-    /// body predicate; a query binding only speaker+text fails the gather.
-    pub source_scope_query: String,
-    /// URI namespace new interpreted instances are minted under (the spawn
-    /// scope), e.g. `soa://project/42/`. Omit for a per-processor default.
-    #[serde(default)]
-    pub base_prefix: Option<String>,
-    /// Class URIs (SHACL `target_class`) to materialize each pass.
-    pub interpretation_classes: Vec<String>,
-    /// Canonical flow URIs this processor is flow-aware of. Flow features
-    /// (flow-aware prompt, proposal pass, auto-spawn) run only on the flows
-    /// listed here. Omit or pass `[]` for no flow processing. `Option` rather
-    /// than `#[serde(default)]` so "omitted" and "explicitly empty" stay
-    /// distinguishable at the wire — the same distinction
-    /// `flow_filter: Option<&[String]>` preserves downstream — even though
-    /// both currently resolve to flow-blind.
-    #[serde(default)]
-    pub flows: Option<Vec<String>>,
-    /// Quiet-window (ms) after the last new item before a pass runs.
-    pub debounce_ms: i64,
-    /// Minimum items before a pass runs (Flux "wait for N inputs"). Default 1.
-    #[serde(default)]
-    pub batch_min: Option<usize>,
-    /// Cap on items per pass.
-    pub batch_max: usize,
-    /// Safety flush (ms) for a sub-`batch_min` batch; `None` = wait indefinitely.
-    #[serde(default)]
-    pub max_wait_ms: Option<i64>,
-    /// How long a won claim is authoritative before peers may re-claim (ms).
-    pub claim_ttl_ms: i64,
-    /// Optional serialized `DedupStrategy` JSON (else NormalizedString).
-    #[serde(default)]
-    pub dedup_strategy_json: Option<String>,
-    /// How far back (ms) each pass looks: turns older than `now - window` are
-    /// dropped, and the processed-turn cursor only counts runs that finished
-    /// inside the same window. Omit for **no window** — every gathered turn is
-    /// a candidate and the cursor is the unbounded union of this processor's
-    /// past runs.
-    #[serde(default)]
-    pub source_window_ms: Option<i64>,
-    /// Optional parent-scope filter for the dedup lookup: when set, only
-    /// existing instances of the interpretation classes that live under this
-    /// scope are candidates for upsert. Omit for the whole-perspective dedup
-    /// set (pre-scope behaviour).
-    #[serde(default)]
-    pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
-    /// Optional parent-scope target for newly minted instances: when set, every
-    /// base URI the pass CREATES is additionally linked as a child of
-    /// `mint_scope.id` via the scope's predicate. Upserts of pre-existing
-    /// instances are NOT linked. Must be the `Raw` variant of `Scope`
-    /// (id + predicate); `Model` scopes carry no linking predicate and error
-    /// at watch time.
-    #[serde(default)]
-    pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
-    /// Tool-call budget for the interpretation-pass harness this processor
-    /// runs. Omit / `0` → single-shot LLM path. `N > 0` → engage the
-    /// tool-calling harness with a cap of N calls per pass. Round-tripped
-    /// through the SDNA via `AutoProcessorConfig.maxToolCalls`.
-    #[serde(default)]
-    pub max_tool_calls: Option<u32>,
-    /// Enable full debug observability on the auto-processor's passes:
-    /// persist raw LLM prompt/response on the InterpretationRun +
-    /// emit `LlmRequestSent` / `LlmResponseReceived` (classic) and
-    /// `ToolCall` / `ToolResult` (harness) events. Round-tripped through
-    /// the SDNA via `AutoProcessorConfig.emitDebugEvents`.
-    #[serde(default)]
-    pub emit_debug_events: Option<bool>,
-}
-
-/// Stop a neighbourhood auto-processor by deleting its config instance.
-///
-/// The counterpart to [`AddAutoProcessorRequest`]. A processor's registration is a subject instance
-/// in the shared graph, which the watch loop re-reads on every tick, so removing that instance is
-/// what stops it — and stops it for the neighbourhood, since the config is `Shared` state rather
-/// than one peer's local record of it.
-///
-/// Server-side deserialization only, matching [`AddAutoProcessorRequest`]: the TypeScript client
-/// passes `uuid` separately and names only the processor.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoveAutoProcessorRequest {
-    pub uuid: String,
-    /// The `processorId` the processor was registered under.
-    pub processor_id: String,
-}
-
-/// `perspective.acceptInterpretation` / `perspective.rejectInterpretation` —
-/// resolve an LLM interpretation overlay's suggestion(s) on a base. `property`
-/// scopes to one predicate; omit it to accept/reject the whole base.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResolveInterpretationRequest {
-    pub uuid: String,
-    /// Base instance the overlay sits on.
-    pub base: String,
-    /// Real predicate to scope to; omit for the whole base.
-    #[serde(default)]
-    pub property: Option<String>,
-}
-
-/// `perspective.interpretationOverlays` — list pending overlay suggestions in a
-/// perspective so a UI can surface them for human accept/reject.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InterpretationOverlaysRequest {
-    pub uuid: String,
-}
-
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct LinkMutationsRequest {
@@ -786,6 +660,7 @@ pub struct LinkMutationsRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct AddLinkExpressionRequest {
@@ -795,6 +670,7 @@ pub struct AddLinkExpressionRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct UpdateLinkRequest {
@@ -804,6 +680,7 @@ pub struct UpdateLinkRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RemoveLinkRequest {
@@ -821,22 +698,21 @@ pub struct CommitBatchRequest {
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct SubscribeQueryRequest {
-    pub query: String,
-}
-
-#[derive(Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct SubscribeQueryResponse {
-    pub subscription_id: String,
-    pub result: String,
+pub struct DiscardBatchRequest {
+    pub batch_id: String,
 }
 
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct KeepAliveQueryRequest {
+pub struct SubscribeQueryRequest {
+    pub query: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ResyncSubscriptionRequest {
     pub subscription_id: String,
 }
 
@@ -848,12 +724,38 @@ pub struct DisposeQueryRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct CreateSubjectRequest {
     pub subject_class: String,
     pub expression_address: String,
     pub initial_values: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+/// Through an abstract class (#1435), dispatched to the record's own classes.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UpdateSubjectRequest {
+    pub subject_class: String,
+    pub expression_address: String,
+    /// A JSON object: property name → value.
+    pub values: String,
+    pub batch_id: Option<String>,
+}
+
+/// Runs the class's destructor; through an abstract class (#1435), that of
+/// each of the record's classes it reads.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RemoveSubjectRequest {
+    pub subject_class: String,
+    pub expression_address: String,
     pub batch_id: Option<String>,
 }
 
@@ -912,6 +814,47 @@ pub struct SetFreeHostingEnabledRequest {
     pub enabled: bool,
 }
 
+// ── Host rates ──
+
+/// Price in HOT the host charges for one metered operation.
+#[derive(Serialize, Deserialize, TS, Debug, Clone, PartialEq)]
+#[ts(export)]
+pub struct HostRate {
+    pub description: String,
+    #[serde(rename = "priceInHOT")]
+    pub price_in_hot: f64,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetHostRatesRequest {
+    pub rates: Vec<HostRate>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetUnytMembraneProofRequest {
+    /// Base64-encoded membrane proof from the hosting joining service.
+    pub proof: String,
+}
+
+/// The Unyt alliance DNA: installed and bundled versions, and why the last
+/// install failed. `setUnytMembraneProof` installs in the background, so this
+/// is where its outcome shows.
+#[derive(Serialize, Deserialize, TS, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UnytVersionInfo {
+    /// Version of the installed DNA; `null` until an install succeeds.
+    pub installed: Option<String>,
+    /// Version of the DNA bundled with this executor.
+    pub bundled: String,
+    /// Error of the last install that failed; `null` after a success or a new proof.
+    pub install_error: Option<String>,
+}
+
 // ── Hosting wallet ──
 
 #[derive(Deserialize, TS)]
@@ -931,35 +874,13 @@ pub struct RequestPaymentRequest {
 
 // ── Users: request verification ──
 
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct RequestVerificationRequest {
-    pub email: String,
-    #[ts(type = "any | null")]
-    pub app_info: Option<serde_json::Value>,
-}
-
 // ── AI Transcription ──
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenTranscriptionRequest {
-    pub model_id: String,
-    pub params: Option<crate::types::VoiceActivityParamsInput>,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeedTranscriptionRequest {
     pub stream_ids: Vec<String>,
     pub audio: Vec<f64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CloseTranscriptionRequest {
-    pub stream_id: String,
 }
 
 #[cfg(test)]

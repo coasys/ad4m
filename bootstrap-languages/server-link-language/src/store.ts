@@ -10,10 +10,12 @@
  *   links-by-pred/{predicate}/{hash} → link-hash
  *   revision                         → last known server revision hash
  *   sequence                         → last applied server sequence number
+ *   held/{link_hash}                 → {op, link}: an inbound wire link this
+ *                                      agent holds no key for yet (see sync.ts)
  */
 
 import { getStorage } from "./adapters.js";
-import type { LinkExpression, PerspectiveDiff, Perspective } from "./types.js";
+import type { LinkExpression, PerspectiveDiff, Perspective, WireLinkExpression } from "./types.js";
 
 let _hashFn: ((data: string) => string) | null = null;
 
@@ -102,6 +104,10 @@ function getLink(linkHash: string): LinkExpression | null {
     const raw = getStorage().get(linkKey(linkHash));
     if (!raw) return null;
     return JSON.parse(raw) as LinkExpression;
+}
+
+export function hasLink(link: LinkExpression): boolean {
+    return getStorage().get(linkKey(hashLink(link))) !== null;
 }
 
 export function applyDiff(diff: PerspectiveDiff): void {
@@ -204,4 +210,44 @@ export function getSequence(): number {
 export function setSequence(seq: number): void {
     if (!Number.isFinite(seq)) return;
     getStorage().put(SEQUENCE_KEY, String(seq));
+}
+
+// ---------------------------------------------------------------------------
+// Held wire links: inbound, not decryptable yet
+// ---------------------------------------------------------------------------
+
+export type HeldOp = "add" | "remove";
+
+export interface HeldLink {
+    id: string;
+    op: HeldOp;
+    link: WireLinkExpression;
+}
+
+const HELD_PREFIX = "held/";
+
+/** Keeps `link` until a key opens it. A later op on the same link replaces it. */
+export function holdLink(id: string, op: HeldOp, link: WireLinkExpression): void {
+    getStorage().put(HELD_PREFIX + id, JSON.stringify({ op, link }));
+}
+
+export function releaseHeld(id: string): void {
+    getStorage().delete(HELD_PREFIX + id);
+}
+
+export function heldLinks(): HeldLink[] {
+    const storage = getStorage();
+    const held: HeldLink[] = [];
+    for (const key of storage.listKeys(HELD_PREFIX)) {
+        const raw = storage.get(key);
+        if (!raw) continue;
+        const { op, link } = JSON.parse(raw) as { op: HeldOp; link: WireLinkExpression };
+        held.push({ id: key.slice(HELD_PREFIX.length), op, link });
+    }
+    return held;
+}
+
+export function clearHeld(): void {
+    const storage = getStorage();
+    for (const key of storage.listKeys(HELD_PREFIX)) storage.delete(key);
 }

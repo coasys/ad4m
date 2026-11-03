@@ -16,11 +16,30 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use crate::billing::BillingError;
-use crate::db::ComputeLogEntry;
+use crate::db::{Ad4mDb, ComputeLogEntry};
 
 /// Percent-encode an email address for safe use in URL path segments.
 fn encode_email(email: &str) -> String {
     urlencoding::encode(email).into_owned()
+}
+
+/// The shared billing API path of an agent resource: `/billing/agents/{did}/{rest}`.
+fn agent_path(agent_did: &str, rest: &str) -> String {
+    format!(
+        "/billing/agents/{}/{}",
+        urlencoding::encode(agent_did),
+        rest
+    )
+}
+
+/// The `email` of the account that owns the agent, from a shared billing reply. Empty
+/// when the reply names none: the operation itself has already succeeded.
+fn account_email(reply: &serde_json::Value) -> String {
+    reply
+        .get("email")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 // ── Tier limits ──────────────────────────────────────────────────────────────
@@ -47,47 +66,55 @@ pub struct TierLimitExceeded {
 /// Abstracts billing operations so the executor can use either a local SQLite
 /// database or a remote platform Worker as the billing store.
 ///
+/// Compute is billed to an agent, named by its DID. Credits, free access and the HoT
+/// wallet belong to the user account that owns the agent; account methods take the
+/// account's login email, where a caller names the account (admin, hosting info, Unyt).
+///
 /// Methods are synchronous — matches the WalletBackend / DbBackend pattern.
 /// SharedBillingBackend bridges to an async `reqwest::Client` via `block_in_place`.
 pub trait BillingBackend: Send + Sync {
-    // ── Credits ────────────────────────────────────────────────────────
+    // ── Agent compute (keyed by agent DID) ─────────────────────────────
 
-    /// Get the user's remaining credit balance.
-    fn get_credits(&self, email: &str) -> Result<f64, AnyError>;
+    /// The credits of the account that owns the agent `agent_did`.
+    fn get_agent_credits(&self, agent_did: &str) -> Result<f64, AnyError>;
 
-    /// Set the user's credit balance to an absolute value.
-    fn set_credits(&self, email: &str, amount: f64) -> Result<(), AnyError>;
+    /// Whether the account that owns the agent `agent_did` computes for free.
+    fn get_agent_free_access(&self, agent_did: &str) -> Result<bool, AnyError>;
 
-    /// Add credits to the user's balance.
-    fn add_credits(&self, email: &str, amount: f64) -> Result<(), AnyError>;
+    /// Add credits to the account that owns the agent `agent_did`.
+    /// Returns the account's email (whose hosting info changed).
+    fn add_agent_credits(&self, agent_did: &str, amount: f64) -> Result<String, AnyError>;
 
-    /// Atomically check that the user has sufficient credits and deduct them.
-    /// Does NOT log to compute_log — use for credit reservation (e.g. link writes).
-    /// Returns `BillingError::InsufficientCredits` if the user cannot afford the deduction.
-    fn deduct_credits_if_available(&self, email: &str, amount: f64) -> Result<(), BillingError>;
+    /// Atomically check that the account that owns the agent `agent_did` can afford
+    /// `amount` and deduct it. Does NOT log to compute_log — use for credit reservation
+    /// (e.g. link writes). Returns the account's email.
+    fn deduct_agent_credits_if_available(
+        &self,
+        agent_did: &str,
+        amount: f64,
+    ) -> Result<String, BillingError>;
 
-    /// Atomically deduct credits and log a compute event.
-    /// Returns `(row_id, credits_after)` on success.
-    /// Returns `BillingError::InsufficientCredits` if the user cannot afford the deduction.
+    /// Atomically deduct credits from the account that owns the agent `agent_did` and log
+    /// a compute event for the agent. Returns `(row_id, credits_after, account_email)`.
     fn deduct_credits_and_log(
         &self,
-        email: &str,
+        agent_did: &str,
         amount: f64,
         operation: &str,
         summary: Option<&str>,
-    ) -> Result<(i64, f64), BillingError>;
+    ) -> Result<(i64, f64, String), BillingError>;
 
     // ── Compute log ────────────────────────────────────────────────────
 
-    /// Query compute log entries for a user, ordered newest-first.
+    /// Compute log entries of the agent `agent_did`, newest-first.
     fn get_compute_log(
         &self,
-        email: &str,
+        agent_did: &str,
         since: Option<&str>,
         limit: i64,
     ) -> Result<Vec<ComputeLogEntry>, AnyError>;
 
-    /// Query compute log entries for ALL users (admin). Newest-first.
+    /// Compute log entries for ALL agents (operator). Newest-first.
     fn get_compute_log_all(
         &self,
         since: Option<&str>,
@@ -97,18 +124,48 @@ pub trait BillingBackend: Send + Sync {
     /// Delete log entries older than the given ISO 8601 timestamp.
     fn cleanup_compute_log(&self, before: &str) -> Result<usize, AnyError>;
 
+    // ── Accounts (keyed by login email) ────────────────────────────────
+
+    /// The account's remaining credit balance.
+    fn get_user_credits(&self, email: &str) -> Result<f64, AnyError>;
+
+    /// Set the account's credit balance to an absolute value.
+    fn set_user_credits(&self, email: &str, amount: f64) -> Result<(), AnyError>;
+
+    /// Add credits to the account's balance.
+    fn add_user_credits(&self, email: &str, amount: f64) -> Result<(), AnyError>;
+
+    /// Whether the account has free access.
+    fn get_user_free_access(&self, email: &str) -> Result<bool, AnyError>;
+
+    /// Enable or disable free access for the account.
+    fn set_user_free_access(&self, email: &str, enabled: bool) -> Result<(), AnyError>;
+
+    /// The account's HoloFuel/HoT wallet address.
+    fn get_user_hot_wallet(&self, email: &str) -> Result<Option<String>, AnyError>;
+
+    /// Set the account's HoloFuel/HoT wallet address.
+    fn set_user_hot_wallet(&self, email: &str, address: &str) -> Result<(), AnyError>;
+
+    /// Reverse lookup: `(email, agent_did)` of the account with this HoT wallet address.
+    fn get_user_by_hot_wallet_address(
+        &self,
+        address: &str,
+    ) -> Result<Option<(String, String)>, AnyError>;
+
     // ── Host rates ─────────────────────────────────────────────────────
 
     /// Get all host rates as (description, price) pairs.
     fn get_rates(&self) -> Result<Vec<(String, f64)>, AnyError>;
 
-    /// Get the rate for a specific operation description.
+    /// The rate for one operation description. `Ok(None)` means the operator has not
+    /// priced it; `Err` means the backend could not answer.
     fn get_rate(&self, description: &str) -> Result<Option<f64>, AnyError>;
 
     /// Replace all host rates with the given set.
     fn set_rates(&self, rates: &[(String, f64)]) -> Result<(), AnyError>;
 
-    // ── Free access ────────────────────────────────────────────────────
+    // ── Free hosting ───────────────────────────────────────────────────
 
     /// Check whether global free hosting mode is enabled.
     fn get_free_hosting_enabled(&self) -> Result<bool, AnyError>;
@@ -116,43 +173,26 @@ pub trait BillingBackend: Send + Sync {
     /// Enable or disable global free hosting mode.
     fn set_free_hosting_enabled(&self, enabled: bool) -> Result<(), AnyError>;
 
-    /// Check whether a specific user has free access.
-    fn get_user_free_access(&self, email: &str) -> Result<bool, AnyError>;
-
-    /// Enable or disable free access for a specific user.
-    fn set_user_free_access(&self, email: &str, enabled: bool) -> Result<(), AnyError>;
-
-    // ── HoT wallet (Unyt integration) ──────────────────────────────────
-
-    /// Get the user's HoloFuel/HoT wallet address.
-    fn get_user_hot_wallet(&self, email: &str) -> Result<Option<String>, AnyError>;
-
-    /// Set the user's HoloFuel/HoT wallet address.
-    fn set_user_hot_wallet(&self, email: &str, address: &str) -> Result<(), AnyError>;
-
-    /// Reverse lookup: find user email by HoT wallet address.
-    fn get_user_by_hot_wallet_address(&self, address: &str) -> Result<Option<String>, AnyError>;
-
     // ── Tier limits ───────────────────────────────────────────────────
 
-    /// Get the tier limits for a user. Returns `TierLimits::default()` (all
-    /// unlimited) if the user has no tier or the backend does not support tiers.
-    fn get_tier_limits(&self, _email: &str) -> Result<TierLimits, AnyError> {
+    /// The tier limits of the account that owns the agent `agent_did`. Returns
+    /// `TierLimits::default()` (all unlimited) if the backend does not support tiers.
+    fn get_tier_limits(&self, _agent_did: &str) -> Result<TierLimits, AnyError> {
         Ok(TierLimits::default())
     }
 
-    /// Check whether the user can create another resource of the given type.
+    /// Check whether the agent can create another resource of the given type.
     /// Returns `Ok(())` if allowed, `Err(TierLimitExceeded)` if not.
     ///
     /// `resource_type`: "perspective", "member", etc.
-    /// `current_count`: how many the user already has.
+    /// `current_count`: how many the agent already has.
     fn check_tier_limit(
         &self,
-        email: &str,
+        agent_did: &str,
         resource_type: &str,
         current_count: i64,
     ) -> Result<(), TierLimitExceeded> {
-        let limits = self.get_tier_limits(email).unwrap_or_default();
+        let limits = self.get_tier_limits(agent_did).unwrap_or_default();
 
         let cap = match resource_type {
             "perspective" => limits.max_perspectives,
@@ -211,70 +251,61 @@ impl LocalBillingBackend {
     }
 }
 
+/// Maps an `Ad4mDb` billing error onto `BillingError`: the DB reports a missing user and
+/// an unaffordable deduction as messages.
+fn billing_error(e: AnyError, agent_did: &str) -> BillingError {
+    let msg = e.to_string();
+    if msg.contains("Insufficient compute credits") {
+        BillingError::InsufficientCredits
+    } else if msg.starts_with("User not found") {
+        BillingError::UserNotFound(agent_did.to_string())
+    } else {
+        BillingError::Other(e)
+    }
+}
+
 impl BillingBackend for LocalBillingBackend {
-    fn get_credits(&self, email: &str) -> Result<f64, AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+    fn get_agent_credits(&self, agent_did: &str) -> Result<f64, AnyError> {
+        Ad4mDb::with_global_instance(|db| db.get_agent_credits(agent_did))
     }
 
-    fn set_credits(&self, email: &str, amount: f64) -> Result<(), AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.set_user_credits(email, amount))
+    fn get_agent_free_access(&self, agent_did: &str) -> Result<bool, AnyError> {
+        Ad4mDb::with_global_instance(|db| db.get_agent_free_access(agent_did))
     }
 
-    fn add_credits(&self, email: &str, amount: f64) -> Result<(), AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.add_user_credits(email, amount))
+    fn add_agent_credits(&self, agent_did: &str, amount: f64) -> Result<String, AnyError> {
+        Ad4mDb::with_global_instance(|db| db.add_agent_credits(agent_did, amount))
     }
 
-    fn deduct_credits_if_available(&self, email: &str, amount: f64) -> Result<(), BillingError> {
-        let result = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.deduct_user_credits_if_available(email, amount)
-        });
-        match result {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("Insufficient compute credits") {
-                    Err(BillingError::InsufficientCredits)
-                } else if msg.starts_with("User not found") {
-                    Err(BillingError::UserNotFound(email.to_string()))
-                } else {
-                    Err(BillingError::Other(e))
-                }
-            }
-        }
+    fn deduct_agent_credits_if_available(
+        &self,
+        agent_did: &str,
+        amount: f64,
+    ) -> Result<String, BillingError> {
+        Ad4mDb::with_global_instance(|db| db.deduct_agent_credits_if_available(agent_did, amount))
+            .map_err(|e| billing_error(e, agent_did))
     }
 
     fn deduct_credits_and_log(
         &self,
-        email: &str,
+        agent_did: &str,
         amount: f64,
         operation: &str,
         summary: Option<&str>,
-    ) -> Result<(i64, f64), BillingError> {
-        let result = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.deduct_credits_and_log(email, amount, operation, summary)
-        });
-        match result {
-            Ok((row_id, credits_after)) => Ok((row_id, credits_after)),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("Insufficient compute credits") {
-                    Err(BillingError::InsufficientCredits)
-                } else if msg.starts_with("User not found") {
-                    Err(BillingError::UserNotFound(email.to_string()))
-                } else {
-                    Err(BillingError::Other(e))
-                }
-            }
-        }
+    ) -> Result<(i64, f64, String), BillingError> {
+        Ad4mDb::with_global_instance(|db| {
+            db.deduct_credits_and_log(agent_did, amount, operation, summary)
+        })
+        .map_err(|e| billing_error(e, agent_did))
     }
 
     fn get_compute_log(
         &self,
-        email: &str,
+        agent_did: &str,
         since: Option<&str>,
         limit: i64,
     ) -> Result<Vec<ComputeLogEntry>, AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_compute_log(email, since, limit))
+        Ad4mDb::with_global_instance(|db| db.get_compute_log(agent_did, since, limit))
     }
 
     fn get_compute_log_all(
@@ -282,51 +313,66 @@ impl BillingBackend for LocalBillingBackend {
         since: Option<&str>,
         limit: i64,
     ) -> Result<Vec<ComputeLogEntry>, AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_compute_log_all(since, limit))
+        Ad4mDb::with_global_instance(|db| db.get_compute_log_all(since, limit))
     }
 
     fn cleanup_compute_log(&self, before: &str) -> Result<usize, AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.cleanup_compute_log(before))
+        Ad4mDb::with_global_instance(|db| db.cleanup_compute_log(before))
     }
 
-    fn get_rates(&self) -> Result<Vec<(String, f64)>, AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_host_rates())
+    fn get_user_credits(&self, email: &str) -> Result<f64, AnyError> {
+        Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
     }
 
-    fn get_rate(&self, description: &str) -> Result<Option<f64>, AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_host_rate(description))
+    fn set_user_credits(&self, email: &str, amount: f64) -> Result<(), AnyError> {
+        Ad4mDb::with_global_instance(|db| db.set_user_credits(email, amount))
     }
 
-    fn set_rates(&self, rates: &[(String, f64)]) -> Result<(), AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.set_host_rates(rates))
-    }
-
-    fn get_free_hosting_enabled(&self) -> Result<bool, AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
-    }
-
-    fn set_free_hosting_enabled(&self, enabled: bool) -> Result<(), AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(enabled))
+    fn add_user_credits(&self, email: &str, amount: f64) -> Result<(), AnyError> {
+        Ad4mDb::with_global_instance(|db| db.add_user_credits(email, amount))
     }
 
     fn get_user_free_access(&self, email: &str) -> Result<bool, AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+        Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
     }
 
     fn set_user_free_access(&self, email: &str, enabled: bool) -> Result<(), AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.set_user_free_access(email, enabled))
+        Ad4mDb::with_global_instance(|db| db.set_user_free_access(email, enabled))
     }
 
     fn get_user_hot_wallet(&self, email: &str) -> Result<Option<String>, AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email))
+        Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email))
     }
 
     fn set_user_hot_wallet(&self, email: &str, address: &str) -> Result<(), AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.set_user_hot_wallet(email, address))
+        Ad4mDb::with_global_instance(|db| db.set_user_hot_wallet(email, address))
     }
 
-    fn get_user_by_hot_wallet_address(&self, address: &str) -> Result<Option<String>, AnyError> {
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(address))
+    fn get_user_by_hot_wallet_address(
+        &self,
+        address: &str,
+    ) -> Result<Option<(String, String)>, AnyError> {
+        Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(address))
+    }
+
+    fn get_rates(&self) -> Result<Vec<(String, f64)>, AnyError> {
+        Ad4mDb::with_global_instance(|db| db.get_host_rates())
+    }
+
+    fn get_rate(&self, description: &str) -> Result<Option<f64>, AnyError> {
+        Ad4mDb::with_global_instance(|db| db.get_host_rate(description))
+    }
+
+    fn set_rates(&self, rates: &[(String, f64)]) -> Result<(), AnyError> {
+        Ad4mDb::with_global_instance(|db| db.set_host_rates(rates))
+    }
+
+    fn get_free_hosting_enabled(&self) -> Result<bool, AnyError> {
+        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
+    }
+
+    fn set_free_hosting_enabled(&self, enabled: bool) -> Result<(), AnyError> {
+        Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(enabled))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -362,12 +408,33 @@ impl SharedBillingBackend {
 
     /// Run an async reqwest future from a synchronous trait method.
     ///
-    /// Uses `block_in_place` to move the current tokio worker thread out of
-    /// the runtime pool, then `block_on` to drive the future. This avoids the
-    /// panic that `reqwest::blocking` triggers when called inside a tokio
-    /// runtime.
-    fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+    /// On a multi-thread tokio runtime, `block_in_place` moves the current worker out of
+    /// the pool and `block_on` drives the future there; this avoids the panic that
+    /// `reqwest::blocking` triggers inside a runtime. `block_in_place` panics on a
+    /// current-thread runtime, so there, and outside any runtime, the future runs on a
+    /// runtime of its own on a scoped thread.
+    fn block_on<F>(&self, f: F) -> F::Output
+    where
+        F: std::future::Future + Send,
+        F::Output: Send,
+    {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| handle.block_on(f))
+            }
+            _ => std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("a runtime for a billing request")
+                            .block_on(f)
+                    })
+                    .join()
+                    .expect("billing request thread")
+            }),
+        }
     }
 
     fn get_json(&self, path: &str) -> Result<serde_json::Value, AnyError> {
@@ -455,6 +522,83 @@ impl SharedBillingBackend {
             .map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
     }
 
+    /// GET that reads 404 as `Ok(None)`; any other non-2xx or transport failure is `Err`.
+    fn get_json_or_not_found(&self, path: &str) -> Result<Option<serde_json::Value>, AnyError> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .block_on(
+                self.client
+                    .get(&url)
+                    .header("Authorization", self.auth_header())
+                    .send(),
+            )
+            .map_err(|e| anyhow!("SharedBillingBackend GET {} failed: {}", path, e))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(anyhow!(
+                "SharedBillingBackend GET {} returned {}",
+                path,
+                resp.status()
+            ));
+        }
+
+        self.block_on(resp.json())
+            .map(Some)
+            .map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
+    }
+
+    /// POST a debit of the agent `agent_did`: 402 is `InsufficientCredits`, 404 is
+    /// `UserNotFound`. A 2xx body that is empty or not JSON reads as `null` (logged), so a
+    /// committed debit is never reported as failed for want of a readable reply.
+    fn post_billing(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        agent_did: &str,
+    ) -> Result<serde_json::Value, BillingError> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .block_on(
+                self.client
+                    .post(&url)
+                    .header("Authorization", self.auth_header())
+                    .json(body)
+                    .send(),
+            )
+            .map_err(|e| {
+                BillingError::Other(anyhow!("SharedBillingBackend POST {} failed: {}", path, e))
+            })?;
+
+        match resp.status().as_u16() {
+            402 => return Err(BillingError::InsufficientCredits),
+            404 => return Err(BillingError::UserNotFound(agent_did.to_string())),
+            _ if !resp.status().is_success() => {
+                return Err(BillingError::Other(anyhow!(
+                    "SharedBillingBackend POST {} returned {}",
+                    path,
+                    resp.status()
+                )))
+            }
+            _ => {}
+        }
+
+        let text = self.block_on(resp.text()).unwrap_or_default();
+        if text.trim().is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        Ok(serde_json::from_str(&text).unwrap_or_else(|e| {
+            log::warn!(
+                "SharedBillingBackend POST {} reply is not JSON: {}",
+                path,
+                e
+            );
+            serde_json::Value::Null
+        }))
+    }
+
     fn delete_json(&self, path: &str) -> Result<serde_json::Value, AnyError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
@@ -480,121 +624,76 @@ impl SharedBillingBackend {
 }
 
 impl BillingBackend for SharedBillingBackend {
-    fn get_credits(&self, email: &str) -> Result<f64, AnyError> {
-        let result = self.get_json(&format!("/billing/{}/credits", encode_email(email)))?;
+    fn get_agent_credits(&self, agent_did: &str) -> Result<f64, AnyError> {
+        let result = self.get_json(&agent_path(agent_did, "credits"))?;
         result
             .get("credits")
             .and_then(|v| v.as_f64())
             .ok_or_else(|| anyhow!("Missing 'credits' in response"))
     }
 
-    fn set_credits(&self, email: &str, amount: f64) -> Result<(), AnyError> {
-        self.put_json(
-            &format!("/billing/{}/credits", encode_email(email)),
-            &serde_json::json!({ "amount": amount }),
-        )?;
-        Ok(())
+    fn get_agent_free_access(&self, agent_did: &str) -> Result<bool, AnyError> {
+        let result = self.get_json(&agent_path(agent_did, "free-access"))?;
+        result
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| anyhow!("Missing 'enabled' in response"))
     }
 
-    fn add_credits(&self, email: &str, amount: f64) -> Result<(), AnyError> {
-        self.post_json(
-            &format!("/billing/{}/credits/add", encode_email(email)),
+    fn add_agent_credits(&self, agent_did: &str, amount: f64) -> Result<String, AnyError> {
+        let result = self.post_json(
+            &agent_path(agent_did, "credits/add"),
             &serde_json::json!({ "amount": amount }),
         )?;
-        Ok(())
+        Ok(account_email(&result))
     }
 
-    fn deduct_credits_if_available(&self, email: &str, amount: f64) -> Result<(), BillingError> {
-        let body = serde_json::json!({ "amount": amount });
-        let url = format!("{}/billing/{}/reserve", self.base_url, encode_email(email));
-        let resp = self
-            .block_on(
-                self.client
-                    .post(&url)
-                    .header("Authorization", self.auth_header())
-                    .json(&body)
-                    .send(),
-            )
-            .map_err(|e| {
-                BillingError::Other(anyhow!("SharedBillingBackend reserve failed: {}", e))
-            })?;
-
-        if resp.status().as_u16() == 402 {
-            return Err(BillingError::InsufficientCredits);
-        }
-        if resp.status().as_u16() == 404 {
-            return Err(BillingError::UserNotFound(email.to_string()));
-        }
-        if !resp.status().is_success() {
-            return Err(BillingError::Other(anyhow!(
-                "SharedBillingBackend reserve returned {}",
-                resp.status()
-            )));
-        }
-        Ok(())
+    fn deduct_agent_credits_if_available(
+        &self,
+        agent_did: &str,
+        amount: f64,
+    ) -> Result<String, BillingError> {
+        let result = self.post_billing(
+            &agent_path(agent_did, "reserve"),
+            &serde_json::json!({ "amount": amount }),
+            agent_did,
+        )?;
+        Ok(account_email(&result))
     }
 
     fn deduct_credits_and_log(
         &self,
-        email: &str,
+        agent_did: &str,
         amount: f64,
         operation: &str,
         summary: Option<&str>,
-    ) -> Result<(i64, f64), BillingError> {
-        let body = serde_json::json!({
-            "amount": amount,
-            "operation": operation,
-            "summary": summary,
-        });
-
-        let url = format!("{}/billing/{}/deduct", self.base_url, encode_email(email));
-        let resp = self
-            .block_on(
-                self.client
-                    .post(&url)
-                    .header("Authorization", self.auth_header())
-                    .json(&body)
-                    .send(),
-            )
-            .map_err(|e| {
-                BillingError::Other(anyhow!("SharedBillingBackend deduct failed: {}", e))
-            })?;
-
-        if resp.status().as_u16() == 402 {
-            return Err(BillingError::InsufficientCredits);
-        }
-        if resp.status().as_u16() == 404 {
-            return Err(BillingError::UserNotFound(email.to_string()));
-        }
-        if !resp.status().is_success() {
-            return Err(BillingError::Other(anyhow!(
-                "SharedBillingBackend deduct returned {}",
-                resp.status()
-            )));
-        }
-
-        let result: serde_json::Value = self
-            .block_on(resp.json())
-            .map_err(|e| BillingError::Other(anyhow!("SharedBillingBackend parse: {}", e)))?;
-
+    ) -> Result<(i64, f64, String), BillingError> {
+        let result = self.post_billing(
+            &agent_path(agent_did, "deduct"),
+            &serde_json::json!({
+                "amount": amount,
+                "operation": operation,
+                "summary": summary,
+            }),
+            agent_did,
+        )?;
         let row_id = result.get("rowId").and_then(|v| v.as_i64()).unwrap_or(0);
         let credits_after = result
             .get("creditsAfter")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
-
-        Ok((row_id, credits_after))
+        Ok((row_id, credits_after, account_email(&result)))
     }
 
     fn get_compute_log(
         &self,
-        email: &str,
+        agent_did: &str,
         since: Option<&str>,
         limit: i64,
     ) -> Result<Vec<ComputeLogEntry>, AnyError> {
-        let mut path = format!("/billing/{}/log?limit={}", encode_email(email), limit);
+        let mut path = format!("{}?limit={}", agent_path(agent_did, "log"), limit);
         if let Some(s) = since {
-            path.push_str(&format!("&since={}", s));
+            path.push_str(&format!("&since={}", urlencoding::encode(s)));
         }
         let result = self.get_json(&path)?;
         parse_compute_log_entries(&result)
@@ -607,82 +706,50 @@ impl BillingBackend for SharedBillingBackend {
     ) -> Result<Vec<ComputeLogEntry>, AnyError> {
         let mut path = format!("/billing/log?limit={}", limit);
         if let Some(s) = since {
-            path.push_str(&format!("&since={}", s));
+            path.push_str(&format!("&since={}", urlencoding::encode(s)));
         }
         let result = self.get_json(&path)?;
         parse_compute_log_entries(&result)
     }
 
     fn cleanup_compute_log(&self, before: &str) -> Result<usize, AnyError> {
-        let result = self.delete_json(&format!("/billing/log?before={}", before))?;
+        let result = self.delete_json(&format!(
+            "/billing/log?before={}",
+            urlencoding::encode(before)
+        ))?;
         Ok(result.get("deleted").and_then(|v| v.as_u64()).unwrap_or(0) as usize)
     }
 
-    fn get_rates(&self) -> Result<Vec<(String, f64)>, AnyError> {
-        let result = self.get_json("/billing/rates")?;
-        let rates = result
-            .get("rates")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| anyhow!("Missing 'rates' in response"))?;
-        rates
-            .iter()
-            .map(|r| {
-                let desc = r
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow!("Missing description"))?
-                    .to_string();
-                let price = r
-                    .get("price")
-                    .and_then(|v| v.as_f64())
-                    .ok_or_else(|| anyhow!("Missing price"))?;
-                Ok((desc, price))
-            })
-            .collect()
+    fn get_user_credits(&self, email: &str) -> Result<f64, AnyError> {
+        let result = self.get_json(&format!("/billing/{}/credits", encode_email(email)))?;
+        result
+            .get("credits")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| anyhow!("Missing 'credits' in response"))
     }
 
-    fn get_rate(&self, description: &str) -> Result<Option<f64>, AnyError> {
-        let result = self.get_json(&format!(
-            "/billing/rates/{}",
-            urlencoding::encode(description)
-        ))?;
-        Ok(result.get("price").and_then(|v| v.as_f64()))
-    }
-
-    fn set_rates(&self, rates: &[(String, f64)]) -> Result<(), AnyError> {
-        let rates_json: Vec<serde_json::Value> = rates
-            .iter()
-            .map(|(desc, price)| serde_json::json!({"description": desc, "price": price}))
-            .collect();
+    fn set_user_credits(&self, email: &str, amount: f64) -> Result<(), AnyError> {
         self.put_json(
-            "/billing/rates",
-            &serde_json::json!({ "rates": rates_json }),
+            &format!("/billing/{}/credits", encode_email(email)),
+            &serde_json::json!({ "amount": amount }),
         )?;
         Ok(())
     }
 
-    fn get_free_hosting_enabled(&self) -> Result<bool, AnyError> {
-        let result = self.get_json("/billing/config/free-hosting")?;
-        Ok(result
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true))
-    }
-
-    fn set_free_hosting_enabled(&self, enabled: bool) -> Result<(), AnyError> {
-        self.put_json(
-            "/billing/config/free-hosting",
-            &serde_json::json!({ "enabled": enabled }),
+    fn add_user_credits(&self, email: &str, amount: f64) -> Result<(), AnyError> {
+        self.post_json(
+            &format!("/billing/{}/credits/add", encode_email(email)),
+            &serde_json::json!({ "amount": amount }),
         )?;
         Ok(())
     }
 
     fn get_user_free_access(&self, email: &str) -> Result<bool, AnyError> {
         let result = self.get_json(&format!("/billing/{}/free-access", encode_email(email)))?;
-        Ok(result
+        result
             .get("enabled")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false))
+            .ok_or_else(|| anyhow!("Missing 'enabled' in response"))
     }
 
     fn set_user_free_access(&self, email: &str, enabled: bool) -> Result<(), AnyError> {
@@ -709,41 +776,92 @@ impl BillingBackend for SharedBillingBackend {
         Ok(())
     }
 
-    fn get_user_by_hot_wallet_address(&self, address: &str) -> Result<Option<String>, AnyError> {
-        let url = format!(
-            "{}/billing/lookup-by-wallet/{}",
-            self.base_url,
+    fn get_user_by_hot_wallet_address(
+        &self,
+        address: &str,
+    ) -> Result<Option<(String, String)>, AnyError> {
+        let Some(body) = self.get_json_or_not_found(&format!(
+            "/billing/lookup-by-wallet/{}",
             urlencoding::encode(address)
-        );
-        let resp = self
-            .block_on(
-                self.client
-                    .get(&url)
-                    .header("Authorization", self.auth_header())
-                    .send(),
-            )
-            .map_err(|e| anyhow!("SharedBillingBackend wallet lookup failed: {}", e))?;
-
-        if resp.status().as_u16() == 404 {
+        ))?
+        else {
             return Ok(None);
-        }
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "SharedBillingBackend wallet lookup returned {}",
-                resp.status()
-            ));
-        }
-        let body: serde_json::Value = self
-            .block_on(resp.json())
-            .map_err(|e| anyhow!("SharedBillingBackend wallet lookup parse: {}", e))?;
-        Ok(body
-            .get("email")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()))
+        };
+        let field = |name: &str| {
+            body.get(name)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow!("Missing '{}' in wallet lookup response", name))
+        };
+        Ok(Some((field("email")?, field("did")?)))
     }
 
-    fn get_tier_limits(&self, email: &str) -> Result<TierLimits, AnyError> {
-        let result = self.get_json(&format!("/billing/{}/tier-limits", encode_email(email)))?;
+    fn get_rates(&self) -> Result<Vec<(String, f64)>, AnyError> {
+        let result = self.get_json("/billing/rates")?;
+        let rates = result
+            .get("rates")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("Missing 'rates' in response"))?;
+        rates
+            .iter()
+            .map(|r| {
+                let desc = r
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("Missing description"))?
+                    .to_string();
+                let price = r
+                    .get("price")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| anyhow!("Missing price"))?;
+                Ok((desc, price))
+            })
+            .collect()
+    }
+
+    /// 404 is an unpriced operation (`Ok(None)`); every other failure is `Err`.
+    fn get_rate(&self, description: &str) -> Result<Option<f64>, AnyError> {
+        let Some(result) = self.get_json_or_not_found(&format!(
+            "/billing/rates/{}",
+            urlencoding::encode(description)
+        ))?
+        else {
+            return Ok(None);
+        };
+        Ok(result.get("price").and_then(|v| v.as_f64()))
+    }
+
+    fn set_rates(&self, rates: &[(String, f64)]) -> Result<(), AnyError> {
+        let rates_json: Vec<serde_json::Value> = rates
+            .iter()
+            .map(|(desc, price)| serde_json::json!({"description": desc, "price": price}))
+            .collect();
+        self.put_json(
+            "/billing/rates",
+            &serde_json::json!({ "rates": rates_json }),
+        )?;
+        Ok(())
+    }
+
+    /// A reply without `enabled` is an error, not "free hosting is on".
+    fn get_free_hosting_enabled(&self) -> Result<bool, AnyError> {
+        let result = self.get_json("/billing/config/free-hosting")?;
+        result
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| anyhow!("Missing 'enabled' in response"))
+    }
+
+    fn set_free_hosting_enabled(&self, enabled: bool) -> Result<(), AnyError> {
+        self.put_json(
+            "/billing/config/free-hosting",
+            &serde_json::json!({ "enabled": enabled }),
+        )?;
+        Ok(())
+    }
+
+    fn get_tier_limits(&self, agent_did: &str) -> Result<TierLimits, AnyError> {
+        let result = self.get_json(&agent_path(agent_did, "tier-limits"))?;
         Ok(TierLimits {
             max_perspectives: result.get("maxSpaces").and_then(|v| v.as_i64()),
             max_members_per_perspective: result.get("maxMembersPerSpace").and_then(|v| v.as_i64()),
@@ -820,8 +938,31 @@ mod tests {
 
     // ── SharedBillingBackend HTTP tests ────────────────────────────────
 
+    const DID: &str = "did:key:z6MkAgent";
+    // `agent_path` percent-encodes the DID: `:` becomes `%3A`.
+    const DID_PATH: &str = "/billing/agents/did%3Akey%3Az6MkAgent";
+
     #[test]
-    fn test_shared_get_credits() {
+    fn test_shared_get_agent_credits() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("GET", format!("{DID_PATH}/credits").as_str())
+            .match_header("Authorization", "Bearer bill-tok")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"credits":42.5}"#)
+            .create();
+
+        let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
+        let credits = backend.get_agent_credits(DID).unwrap();
+        assert!((credits - 42.5).abs() < f64::EPSILON);
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_get_user_credits() {
         let mut server = mockito::Server::new();
         let url = server.url();
 
@@ -830,47 +971,98 @@ mod tests {
             .match_header("Authorization", "Bearer bill-tok")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"credits":42.5}"#)
+            .with_body(r#"{"credits":3.0}"#)
             .create();
 
         let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
-        let credits = backend.get_credits("user@test.com").unwrap();
-        assert!((credits - 42.5).abs() < f64::EPSILON);
+        let credits = backend.get_user_credits("user@test.com").unwrap();
+        assert!((credits - 3.0).abs() < f64::EPSILON);
         mock.assert();
     }
 
     #[test]
-    fn test_shared_set_credits() {
+    fn test_shared_set_user_credits() {
         let mut server = mockito::Server::new();
         let url = server.url();
 
         let mock = server
             .mock("PUT", "/billing/user@test.com/credits")
+            .match_body(mockito::Matcher::Json(
+                serde_json::json!({ "amount": 100.0 }),
+            ))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"ok":true}"#)
             .create();
 
         let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
-        backend.set_credits("user@test.com", 100.0).unwrap();
+        backend.set_user_credits("user@test.com", 100.0).unwrap();
         mock.assert();
     }
 
     #[test]
-    fn test_shared_add_credits() {
+    fn test_shared_add_agent_credits_returns_the_account_email() {
         let mut server = mockito::Server::new();
         let url = server.url();
 
         let mock = server
-            .mock("POST", "/billing/user@test.com/credits/add")
+            .mock("POST", format!("{DID_PATH}/credits/add").as_str())
+            .match_body(mockito::Matcher::Json(
+                serde_json::json!({ "amount": 50.0 }),
+            ))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"ok":true}"#)
+            .with_body(r#"{"email":"user@test.com"}"#)
             .create();
 
         let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
-        backend.add_credits("user@test.com", 50.0).unwrap();
+        assert_eq!(
+            backend.add_agent_credits(DID, 50.0).unwrap(),
+            "user@test.com"
+        );
         mock.assert();
+    }
+
+    #[test]
+    fn test_shared_reserve_maps_402_and_404() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+        let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
+
+        let ok = server
+            .mock("POST", format!("{DID_PATH}/reserve").as_str())
+            .with_status(200)
+            .with_body("")
+            .expect(1)
+            .create();
+        // A committed reservation with an empty reply is still a success.
+        assert_eq!(
+            backend.deduct_agent_credits_if_available(DID, 1.0).unwrap(),
+            ""
+        );
+        ok.assert();
+        ok.remove();
+
+        let broke = server
+            .mock("POST", format!("{DID_PATH}/reserve").as_str())
+            .with_status(402)
+            .create();
+        assert!(matches!(
+            backend.deduct_agent_credits_if_available(DID, 1.0),
+            Err(BillingError::InsufficientCredits)
+        ));
+        broke.assert();
+        broke.remove();
+
+        let missing = server
+            .mock("POST", format!("{DID_PATH}/reserve").as_str())
+            .with_status(404)
+            .create();
+        assert!(matches!(
+            backend.deduct_agent_credits_if_available(DID, 1.0),
+            Err(BillingError::UserNotFound(did)) if did == DID
+        ));
+        missing.assert();
     }
 
     #[test]
@@ -879,18 +1071,24 @@ mod tests {
         let url = server.url();
 
         let mock = server
-            .mock("POST", "/billing/user@test.com/deduct")
+            .mock("POST", format!("{DID_PATH}/deduct").as_str())
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "amount": 7.5,
+                "operation": "ai_inference",
+                "summary": "test",
+            })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"rowId":7,"creditsAfter":92.5}"#)
+            .with_body(r#"{"rowId":7,"creditsAfter":92.5,"email":"user@test.com"}"#)
             .create();
 
         let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
-        let (row_id, credits_after) = backend
-            .deduct_credits_and_log("user@test.com", 7.5, "ai_inference", Some("test"))
+        let (row_id, credits_after, email) = backend
+            .deduct_credits_and_log(DID, 7.5, "ai_inference", Some("test"))
             .unwrap();
         assert_eq!(row_id, 7);
         assert!((credits_after - 92.5).abs() < f64::EPSILON);
+        assert_eq!(email, "user@test.com");
         mock.assert();
     }
 
@@ -900,33 +1098,31 @@ mod tests {
         let url = server.url();
 
         let mock = server
-            .mock("POST", "/billing/user@test.com/deduct")
+            .mock("POST", format!("{DID_PATH}/deduct").as_str())
             .with_status(402)
             .with_header("content-type", "application/json")
             .with_body(r#"{"error":"insufficient credits"}"#)
             .create();
 
         let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
-        let result = backend.deduct_credits_and_log("user@test.com", 1000.0, "ai_inference", None);
+        let result = backend.deduct_credits_and_log(DID, 1000.0, "ai_inference", None);
         assert!(matches!(result, Err(BillingError::InsufficientCredits)));
         mock.assert();
     }
 
     #[test]
-    fn test_shared_deduct_user_not_found() {
+    fn test_shared_deduct_transport_error_is_other() {
         let mut server = mockito::Server::new();
         let url = server.url();
 
         let mock = server
-            .mock("POST", "/billing/unknown@test.com/deduct")
-            .with_status(404)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"error":"not found"}"#)
+            .mock("POST", format!("{DID_PATH}/deduct").as_str())
+            .with_status(502)
             .create();
 
         let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
-        let result = backend.deduct_credits_and_log("unknown@test.com", 1.0, "test", None);
-        assert!(matches!(result, Err(BillingError::UserNotFound(_))));
+        let result = backend.deduct_credits_and_log(DID, 1.0, "test", None);
+        assert!(matches!(result, Err(BillingError::Other(_))));
         mock.assert();
     }
 
@@ -936,9 +1132,10 @@ mod tests {
         let url = server.url();
 
         let mock = server
-            .mock("GET", "/billing/user@test.com/log")
+            .mock("GET", format!("{DID_PATH}/log").as_str())
             .match_query(mockito::Matcher::AllOf(vec![
                 mockito::Matcher::UrlEncoded("limit".into(), "10".into()),
+                mockito::Matcher::UrlEncoded("since".into(), "2026-01-01T00:00:00+00:00".into()),
             ]))
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -946,7 +1143,9 @@ mod tests {
             .create();
 
         let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
-        let entries = backend.get_compute_log("user@test.com", None, 10).unwrap();
+        let entries = backend
+            .get_compute_log(DID, Some("2026-01-01T00:00:00+00:00"), 10)
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, 1);
         mock.assert();
@@ -972,6 +1171,37 @@ mod tests {
         mock.assert();
     }
 
+    // An unpriced model (404) is `Ok(None)`; a failing backend is `Err`, never a zero rate.
+    #[test]
+    fn test_shared_get_rate_tells_unpriced_from_failure() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+        let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
+
+        let priced = server
+            .mock("GET", "/billing/rates/gpt%204o")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"price":0.5}"#)
+            .create();
+        assert_eq!(backend.get_rate("gpt 4o").unwrap(), Some(0.5));
+        priced.assert();
+
+        let unpriced = server
+            .mock("GET", "/billing/rates/unpriced")
+            .with_status(404)
+            .create();
+        assert_eq!(backend.get_rate("unpriced").unwrap(), None);
+        unpriced.assert();
+
+        let failing = server
+            .mock("GET", "/billing/rates/failing")
+            .with_status(502)
+            .create();
+        assert!(backend.get_rate("failing").is_err());
+        failing.assert();
+    }
+
     #[test]
     fn test_shared_set_rates() {
         let mut server = mockito::Server::new();
@@ -979,6 +1209,9 @@ mod tests {
 
         let mock = server
             .mock("PUT", "/billing/rates")
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "rates": [{ "description": "link write", "price": 0.5 }]
+            })))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"ok":true}"#)
@@ -1009,22 +1242,83 @@ mod tests {
         get_mock.assert();
     }
 
+    // A failing backend or a reply without `enabled` is an error, never "free hosting on".
     #[test]
-    fn test_shared_user_free_access() {
+    fn test_shared_free_hosting_fails_closed() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+        let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
+
+        let failing = server
+            .mock("GET", "/billing/config/free-hosting")
+            .with_status(502)
+            .create();
+        assert!(backend.get_free_hosting_enabled().is_err());
+        failing.assert();
+        failing.remove();
+
+        let empty = server
+            .mock("GET", "/billing/config/free-hosting")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .create();
+        assert!(backend.get_free_hosting_enabled().is_err());
+        empty.assert();
+    }
+
+    #[test]
+    fn test_shared_agent_and_user_free_access() {
         let mut server = mockito::Server::new();
         let url = server.url();
 
-        let mock = server
-            .mock("GET", "/billing/user@test.com/free-access")
+        let agent = server
+            .mock("GET", format!("{DID_PATH}/free-access").as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"enabled":true}"#)
             .create();
+        let user = server
+            .mock("GET", "/billing/user@test.com/free-access")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"enabled":false}"#)
+            .create();
 
         let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
-        let free = backend.get_user_free_access("user@test.com").unwrap();
-        assert!(free);
-        mock.assert();
+        assert!(backend.get_agent_free_access(DID).unwrap());
+        assert!(!backend.get_user_free_access("user@test.com").unwrap());
+        agent.assert();
+        user.assert();
+    }
+
+    #[test]
+    fn test_shared_wallet_lookup() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+        let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
+
+        let found = server
+            .mock("GET", "/billing/lookup-by-wallet/uhCAk1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"email":"user@test.com","did":"did:key:z6MkAgent"}"#)
+            .create();
+        assert_eq!(
+            backend.get_user_by_hot_wallet_address("uhCAk1").unwrap(),
+            Some(("user@test.com".to_string(), DID.to_string()))
+        );
+        found.assert();
+
+        let unknown = server
+            .mock("GET", "/billing/lookup-by-wallet/uhCAk2")
+            .with_status(404)
+            .create();
+        assert_eq!(
+            backend.get_user_by_hot_wallet_address("uhCAk2").unwrap(),
+            None
+        );
+        unknown.assert();
     }
 
     #[test]
@@ -1033,12 +1327,12 @@ mod tests {
         let url = server.url();
 
         let mock = server
-            .mock("GET", "/billing/user@test.com/credits")
+            .mock("GET", format!("{DID_PATH}/credits").as_str())
             .with_status(500)
             .create();
 
         let backend = SharedBillingBackend::new(url, "bill-tok".to_string());
-        let result = backend.get_credits("user@test.com");
+        let result = backend.get_agent_credits(DID);
         assert!(result.is_err());
         mock.assert();
     }

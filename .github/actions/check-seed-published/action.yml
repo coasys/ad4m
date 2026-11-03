@@ -1,0 +1,79 @@
+# Fails unless every language a network seed pins can be installed by a node
+# that runs the seed: for each address, the store holds the bundle and a meta
+# for that address, and the meta's author is one of the seed's trustedAgents.
+#
+# It needs no key and computes no address: it reads what the store answers for
+# the addresses the seed names. It reads the meta's author; the signature is
+# checked by the node at install time (rust-executor/src/languages/mod.rs,
+# language_by_ref), so a forged meta still fails closed there.
+
+name: The seed's languages are published
+description: Every address in a network seed downloads from the bootstrap store, with a meta by a trusted agent.
+
+inputs:
+  seed:
+    description: Path of the seed JSON.
+    default: rust-executor/src/mainnet_seed.json
+  store:
+    description: Base URL of the bootstrap store worker.
+    default: https://bootstrap-store-gateway.perspect3vism.workers.dev
+
+runs:
+  using: composite
+  steps:
+    - name: Every pinned language is in the store, signed by a trusted agent
+      shell: bash
+      env:
+        SEED: ${{ inputs.seed }}
+        STORE: ${{ inputs.store }}
+      run: |
+        set -uo pipefail
+        command -v jq >/dev/null || { apt-get update -qq && apt-get install -y -qq jq >/dev/null; }
+        summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
+        bundle=$(mktemp)
+        trap 'rm -f "$bundle"' EXIT
+
+        # The worker answers ?key=K with a presigned URL for the object.
+        fetch() {
+          local url
+          url=$(curl -fsS --retry 3 -m 30 "$STORE?key=$1" | jq -er .url) || return 1
+          curl -fsS --retry 3 -m 120 "$url"
+        }
+
+        mapfile -t trusted < <(jq -r '.trustedAgents[]' "$SEED")
+        mapfile -t pinned < <(jq -r '(.knownLinkLanguages[], .agentLanguage, .perspectiveLanguage, .neighbourhoodLanguage) | select(. != "")' "$SEED")
+        if [ "${#trusted[@]}" -eq 0 ] || [ "${#pinned[@]}" -eq 0 ]; then
+          echo "::error::$SEED has no trustedAgents or no language addresses"
+          exit 1
+        fi
+
+        echo "| address | name | author | |" >> "$summary"
+        echo "|---|---|---|---|" >> "$summary"
+        failed=0
+        for address in "${pinned[@]}"; do
+          problem=""
+          name="" author=""
+          if ! meta=$(fetch "meta-$address"); then
+            problem="no meta in the store"
+          else
+            name=$(jq -r '.data.name // ""' <<<"$meta")
+            author=$(jq -r '.author // ""' <<<"$meta")
+            if [ "$(jq -r '.data.address // ""' <<<"$meta")" != "$address" ]; then
+              problem="the meta names another address"
+            elif ! printf '%s\n' "${trusted[@]}" | grep -qxF -- "$author"; then
+              problem="author is not in trustedAgents"
+            elif ! fetch "$address" > "$bundle" || [ ! -s "$bundle" ]; then
+              # A fetch that fails after writing some bytes is not a bundle.
+              problem="no bundle in the store"
+            fi
+          fi
+          if [ -n "$problem" ]; then
+            failed=1
+            echo "::error::$address ($name): $problem"
+            echo "| \`$address\` | $name | \`$author\` | ❌ $problem |" >> "$summary"
+          else
+            echo "ok $address $name $author"
+            echo "| \`$address\` | $name | \`$author\` | ✅ |" >> "$summary"
+          fi
+        done
+        exit $failed

@@ -27,7 +27,7 @@ import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Ad4mClient, Link, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
+import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
 import { FlowInstance, FlowInstanceRecord, FlowTransitionProposal, FlowTransition } from "@coasys/ad4m";
 import { Ad4mModel, Flag, Model, Property } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
@@ -101,10 +101,14 @@ describe("FlowTransitionProposal — @Model", function () {
       predicate: "ad4m://flow/to_state",
       target: "literal:string:tensionIdentified",
     }));
+    // The engine writes the proposer as the acting agent's own DID, signed by
+    // that agent; a `proposer` link naming anyone else is a claim the model
+    // (like the engine) does not read.
+    const me = (await ad4m.agent.me()).did;
     await p.add(new Link({
       source: proposal,
       predicate: "ad4m://flow/proposer",
-      target: "literal:string:did:example:alice",
+      target: `literal:string:${me}`,
     }));
     await p.add(new Link({
       source: proposal,
@@ -117,7 +121,7 @@ describe("FlowTransitionProposal — @Model", function () {
     expect(proposals[0].flowInstance).to.equal(flowInstance);
     expect(proposals[0].fromState).to.equal("collectingPerspectives");
     expect(proposals[0].toState).to.equal("tensionIdentified");
-    expect(proposals[0].proposer).to.equal("did:example:alice");
+    expect(proposals[0].proposer).to.equal(me);
     expect(proposals[0].evidenceHashes).to.equal("{}");
     // "When was this proposed?" is answered by Ad4mModel's built-in
     // `createdAt`, synthesised on hydration from the earliest link
@@ -225,6 +229,65 @@ describe("FlowTransitionProposal — @Model", function () {
       .to.equal(expectedTargetClass);
     expect(actual, "TS shape must match Rust SDNA path→name pairs")
       .to.deep.equal(expected);
+
+    // `outputsHash` (#1104) is the field a flow receipt pays out on, and the
+    // path→name map above cannot see cardinality or the setter. Compare the
+    // effective values against the same Rust SDNA JSON: an optional single
+    // value written through `setSingleTarget` — a divergence here means a
+    // TS-written commitment silently no-ops on the Rust reader.
+    const raw = fs.readFileSync(
+      path.join(SDNA_DIR, "flow_transition_proposal.json"),
+      "utf-8",
+    );
+    const rust = (JSON.parse(raw) as {
+      properties: Array<{
+        path: string;
+        min_count?: number;
+        max_count?: number;
+        setter?: unknown;
+      }>;
+    }).properties.find((prop) => prop.path === "ad4m://flow/outputs_hash");
+    expect(rust, "Rust SDNA must declare outputs_hash").to.exist;
+    const outputsHash = shape.properties.find(
+      (prop: any) => prop.path === "ad4m://flow/outputs_hash",
+    );
+    expect(outputsHash, "TS shape must declare outputsHash").to.exist;
+    expect(outputsHash.maxCount, "outputsHash is single-valued")
+      .to.equal(rust!.max_count);
+    expect(outputsHash.minCount ?? 0, "outputsHash is optional — empty on a non-terminal edge")
+      .to.equal(rust!.min_count);
+    expect(outputsHash.setter, "setter must match the Rust SDNA's setSingleTarget")
+      .to.deep.equal(rust!.setter);
+
+    // Votes are read, never written, through the model; and the vote getter
+    // restates the engine's rule, so both sides must carry the same one.
+    const rustProps = (JSON.parse(raw) as {
+      properties: Array<{ path: string; writable?: boolean; getter?: string; local?: boolean }>;
+    }).properties;
+    for (const path of ["ad4m://acceptedBy"]) {
+      const ts = shape.properties.find((prop: any) => prop.path === path);
+      const rs = rustProps.find((prop) => prop.path === path);
+      expect(ts, `TS shape must declare ${path}`).to.exist;
+      expect(ts.writable, `${path} is read-only on both sides`).to.equal(false);
+      expect(rs!.writable).to.equal(false);
+      expect(ts.adder ?? ts.setter, `${path} has no writer`).to.be.undefined;
+    }
+    expect(
+      shape.properties.find((prop: any) => prop.path === "ad4m://acceptedBy").getter,
+      "the vote getter must be the Rust SDNA's, byte for byte",
+    ).to.equal(rustProps.find((prop) => prop.path === "ad4m://acceptedBy")!.getter);
+    // `proposer` is read with the engine's rule too, so a forged proposer link
+    // neither replaces the real proposer nor drops their vote from the set.
+    expect(
+      shape.properties.find((prop: any) => prop.path === "ad4m://flow/proposer").getter,
+      "the proposer getter must be the Rust SDNA's, byte for byte",
+    ).to.equal(rustProps.find((prop) => prop.path === "ad4m://flow/proposer")!.getter);
+    // The fired mark left the graph (#1424): it is the executor's per-agent
+    // bookkeeping, read through `perspective.flowFired`. Neither shape may
+    // still declare it, or hydration would surface dead `Local` links.
+    expect(shape.properties.find((prop: any) => prop.path === "ad4m://flow/resolved_as")).to.be
+      .undefined;
+    expect(rustProps.find((prop) => prop.path === "ad4m://flow/resolved_as")).to.be.undefined;
   });
 });
 
@@ -274,17 +337,19 @@ describe("FlowInstanceRecord — @Model", function () {
       predicate: "ad4m://flow/base",
       target: "literal:string:ad4m%3A%2F%2Fsome-subject",
     }));
+    // What the pre-#1424 engine left on disk: a `Local` state cache link.
+    // The record no longer declares it, so it does not surface.
     await p.add(new Link({
       source: instance,
       predicate: "ad4m://flow/current_state",
       target: "literal:string:Scoped",
-    }));
+    }), "local");
 
     const all = await FlowInstanceRecord.findAll(p);
     expect(all.length).to.equal(1);
     expect(all[0].flowUri).to.equal("delivery://DeliveryFlow");
     expect(all[0].subject).to.equal("ad4m://some-subject");
-    expect(all[0].currentState).to.equal("Scoped");
+    expect((all[0] as any).currentState, "the state is not on the record").to.be.undefined;
     // `createdAt` is Ad4mModel's synthesised earliest-link timestamp
     // (ms since epoch after hydration); presence is enough for parity.
     expect(all[0].createdAt).to.be.a("number");
@@ -402,6 +467,15 @@ describe("FlowInstance.start — v5 API", function () {
     expect(all.length).to.equal(2);
     const bases = all.map((i) => i.subject).sort();
     expect(bases).to.deep.equal(["ad4m://task/a", "ad4m://task/b"]);
+  });
+
+  it("returns the running instance rather than minting a second on the same base", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const first = await FlowInstance.start(p, "Delivery", "ad4m://task/1");
+    const again = await FlowInstance.start(p, "Delivery", "ad4m://task/1");
+
+    expect(again.id).to.equal(first.id);
+    expect(await FlowInstance.findAll(p, { subject: "ad4m://task/1" })).to.have.length(1);
   });
 
   it("throws when the named flow is not registered on the perspective", async () => {
@@ -668,7 +742,7 @@ describe("FlowInstance wrapper — read + stub API", function () {
     await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
     const inst = await FlowInstance.start(p, "Delivery", "ad4m://task/currentstate");
 
-    const state = inst.currentState;
+    const state = inst.currentState!;
     expect(state.name).to.equal("Identified");
     // Object identity: same reference as the one on the shape.
     expect(state).to.equal(inst.shape.states[0]);
@@ -689,11 +763,10 @@ describe("FlowInstance wrapper — read + stub API", function () {
     await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
     const inst = await FlowInstance.start(p, "Delivery", "ad4m://task/terminal");
 
-    // Simulate consensus firing by mutating the underlying record directly —
-    // slice 10.6 wires this properly; today we exercise the wrapper's
-    // filter logic in isolation.
-    (inst.record as any).currentState = "Done";
-    expect(inst.availableTransitions).to.deep.equal([]);
+    // A wrapper whose recorded state is terminal — the wrapper's filter
+    // logic in isolation, without driving consensus to Done.
+    const done = FlowInstance.wrap(p, inst.shape, inst.record, "Done");
+    expect(done.availableTransitions).to.deep.equal([]);
   });
 
   it("proposals() returns an empty array when no transitions have been proposed", async () => {
@@ -723,7 +796,8 @@ describe("FlowInstance wrapper — read + stub API", function () {
     expect(inst.record.flowUri).to.equal(flow.flowUri);
     expect(inst.flowName).to.equal("Delivery");
     expect(inst.record.subject).to.equal("ad4m://task/record-access");
-    expect(inst.record.currentState).to.equal("Identified");
+    // The state is the wrapper's, read from the executor — not the record's.
+    expect(inst.currentStateName).to.equal("Identified");
   });
 });
 
@@ -805,5 +879,116 @@ describe("PerspectiveProxy.availableFlows — concrete-type matching", function 
   it("returns an empty array when no flows are registered", async () => {
     const found = await p.availableFlows("test-lang://anything");
     expect(found).to.deep.equal([]);
+  });
+});
+
+describe("FlowInstance.acceptProposal / rejectProposal — consensus write API", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+  let myDid: string;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-accept-reject");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+    myDid = (await ad4m.agent.me()).did;
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-accept-reject-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeDeliveryFlow(): SHACLFlow {
+    const flow = new SHACLFlow("Delivery", "flow://");
+    flow.inputTypes = ["ad4m://Task"];
+    const identified: FlowState = { name: "Identified", value: 0 };
+    const inProgress: FlowState = { name: "InProgress", value: 1 };
+    flow.addState(identified);
+    flow.addState(inProgress);
+    return flow;
+  }
+
+  async function seedProposal(instanceUri: string, fromState: string, toState: string): Promise<string> {
+    const proposal = `ad4m://flow/proposal/js-test-${Math.random().toString(36).slice(2)}`;
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/instance", target: instanceUri }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/from_state", target: `literal:string:${fromState}` }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/to_state", target: `literal:string:${toState}` }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/proposer", target: myDid }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/evidence_hashes", target: "literal:string:" }));
+    return proposal;
+  }
+
+  // The happy path — a vote that counts and an edge that settles — needs a
+  // proposal whose evidence seal the executor can reproduce, and that seal is
+  // computed inside the executor from the target state's `requires` guard. A
+  // client cannot construct one, so the settle path is covered by the Rust
+  // e2e (`flow_instance_e2e.rs`), which has the seal machinery. What the wire
+  // layer is responsible for, and what this pins, is that a proposal the fold
+  // would never count is refused here too rather than half-accepted.
+  it("acceptProposal refuses a proposal with an empty evidence seal and writes nothing", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await FlowInstance.start(p, "Delivery", "ad4m://task/1");
+    expect(instance.currentStateName).to.equal("Identified");
+    const proposal = await seedProposal(instance.uri, "Identified", "InProgress");
+
+    let message = "";
+    try {
+      await instance.acceptProposal(proposal);
+    } catch (e: any) {
+      message = String(e?.message ?? e);
+    }
+    expect(message, "accept must refuse a proposal that is not an atom").to.contain(
+      "not engine-visible",
+    );
+
+    // Refused means nothing was written — not our vote, and not a state move.
+    const votes = await p.get(
+      new LinkQuery({ source: proposal, predicate: "ad4m://acceptedBy" }),
+    );
+    expect(votes).to.have.lengthOf(0);
+
+    const all = await FlowInstance.findAll(p);
+    expect(all).to.have.lengthOf(1);
+    expect(all[0].currentStateName).to.equal("Identified");
+  });
+
+  it("rejectProposal retracts our own links and errors on unknown URIs", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await FlowInstance.start(p, "Delivery", "ad4m://task/2");
+    const proposal = await seedProposal(instance.uri, "Identified", "InProgress");
+
+    // We seeded the proposal, so every link on it is ours: the count is how
+    // many went, not a bare boolean. It must be > 0 or nothing was retracted.
+    const retracted = await instance.rejectProposal(proposal);
+    expect(retracted).to.be.a("number");
+    expect(retracted).to.be.greaterThan(0);
+
+    let threw = false;
+    try {
+      await instance.rejectProposal(proposal);
+    } catch {
+      threw = true;
+    }
+    expect(threw, "reject on a deleted proposal must error").to.equal(true);
+
+    const all = await FlowInstance.findAll(p);
+    expect(all[0].currentStateName).to.equal("Identified");
   });
 });

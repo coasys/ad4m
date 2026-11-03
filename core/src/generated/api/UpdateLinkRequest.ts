@@ -2,4 +2,4 @@
 import type { LinkExpressionInput } from "./LinkExpressionInput";
 import type { LinkInput } from "./LinkInput";
 
-export type UpdateLinkRequest = { oldLink: LinkExpressionInput, newLink: LinkInput, batchId: string | null, };
+export type UpdateLinkRequest = { oldLink: LinkExpressionInput, newLink: LinkInput, batchId?: string, };

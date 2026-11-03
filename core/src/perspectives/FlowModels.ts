@@ -9,26 +9,48 @@
  * Querying:
  *   const pending = await FlowTransitionProposal.findAll(perspective);
  *
- * Slice 5/7 of the flow-implementation arc (design doc §4.2). The Rust
- * engine does not yet mint these — that lands with the consensus firing
- * work in a later PR arc. This class defines the on-graph shape so:
- *   - clients can build UI over proposals immediately (Deliberation demo);
- *   - the SDNA-parity test locks TS/Rust drift the moment the JSON exists
- *     (`rust-executor/src/perspectives/hardwired_sdna/flow_transition_proposal.json`);
- *   - the engine can start writing into this shape when consensus lands
- *     without touching the client-side surface.
+ * Slice 5/7 of the flow-implementation arc (design doc §4.2). The Rust engine
+ * mints these as of #987 — see `flow_classes.rs` (`mint_proposal`, URIs at
+ * `ad4m://flow/proposal/{id}`) — and reads them back in
+ * `flow_instance/atom.rs`. A UI mints or joins them through
+ * `FlowInstance.proposeTransition`. This class is the client-side mirror:
+ *   - clients build UI over proposals without knowing the raw link predicates;
+ *   - the SDNA-parity test locks TS/Rust drift against
+ *     `rust-executor/src/perspectives/hardwired_sdna/flow_transition_proposal.json`.
  */
 
 import { Ad4mModel } from "../model/Ad4mModel";
 import { HasMany, Optional, Property } from "../model/decorators";
 import { Model } from "../model/decorators";
 
+/**
+ * The engine's proposer rule (`self_authored_proposer`: a `proposer` link
+ * signed by the DID it names) as a getter. Must match the `proposer` getter in
+ * `hardwired_sdna/flow_transition_proposal.json` byte for byte, as
+ * `ACCEPTED_BY_GETTER` must.
+ */
+export const PROPOSER_GETTER =
+  'SELECT ?target WHERE { ?source <ad4m://flow/proposer> ?target . FILTER EXISTS { ?_claim <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <ad4m://flow/proposer> ?target )>> ; <ad4m://ontology/author> ?_author ; <ad4m://ontology/proofValid> ?_valid . FILTER(STR(?_author) = STR(?target) && STR(?_valid) = "true") } }';
+
+/**
+ * The engine's vote rule (`signed_by`: the link's author is the DID it names,
+ * and its signature verified) as a getter over the link's reifier. Must match
+ * the `acceptedBy` getter in `hardwired_sdna/flow_transition_proposal.json`
+ * byte for byte: whichever side registers the class first decides the stored
+ * shape.
+ */
+export const ACCEPTED_BY_GETTER =
+  'SELECT ?target WHERE { ?source <ad4m://acceptedBy> ?target . FILTER EXISTS { ?_vote <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <ad4m://acceptedBy> ?target )>> ; <ad4m://ontology/author> ?_author ; <ad4m://ontology/proofValid> ?_valid . FILTER(STR(?_author) = STR(?target) && STR(?_valid) = "true") } }';
+
 // ── FlowTransitionProposal ──────────────────────────────────────────────────
 // Mirrors the Rust hardwired `flow_transition_proposal.json` SDNA (once wired
 // on the engine side; see file header). One node per proposed transition; the
-// URI is `ad4m://flow/proposal/<uuid>` when the engine mints it, but the class
-// carries no URI-format constraint — apps constructing proposals directly may
-// choose any URI they can defend as unique.
+// URI the engine mints is `ad4m://flow/proposal/<hash>` — the content address
+// of the proposer-signed fields under the `nonce` (#1108). The class carries
+// no URI-format constraint, but a proposal whose URI is not that content
+// address (including any app-chosen URI) is not engine-visible: co-signatures
+// name the URI, so the engine only counts proposals whose URI commits to
+// their fields.
 
 @Model({ name: "FlowTransitionProposal" })
 export class FlowTransitionProposal extends Ad4mModel {
@@ -50,8 +72,13 @@ export class FlowTransitionProposal extends Ad4mModel {
   @Property({ through: "ad4m://flow/to_state", required: true })
   toState: string = "";
 
-  /** DID of the agent that issued the proposal. */
-  @Property({ through: "ad4m://flow/proposer", required: true })
+  /**
+   * DID of the agent that issued the proposal, read the way the engine reads
+   * it: only from a `proposer` link signed by the DID it names. Any member
+   * can write a `proposer` link naming someone else, and an unchecked read
+   * would show that DID instead (and drop the real proposer from the voters).
+   */
+  @Property({ through: "ad4m://flow/proposer", required: true, getter: PROPOSER_GETTER, datatype: "xsd:string" })
   proposer: string = "";
 
   /**
@@ -74,6 +101,37 @@ export class FlowTransitionProposal extends Ad4mModel {
   evidenceHashes: string = "";
 
   /**
+   * The instances the proposer names as the run's outputs. Written only on
+   * a proposal into a terminal state; one link per output, ordering not
+   * significant. Each entry is the canonical JSON text of a
+   * `{ className, id }` pair (`FlowOutputRef`); `JSON.parse` it to read one.
+   */
+  @HasMany({ through: "ad4m://flow/output", datatype: "xsd:string" })
+  outputs: string[] = [];
+
+  /**
+   * SHA-256 (hex) over the named outputs' content (each instance as
+   * `model_query` returns it through its class), signed by the proposer
+   * next to the evidence seal. Co-signers load the outputs and recompute it
+   * before voting, and a flow receipt's output preimages must hash to it.
+   * Empty on a proposal into a non-terminal state.
+   */
+  @Property({ through: "ad4m://flow/outputs_hash" })
+  outputsHash: string = "";
+
+  /**
+   * The proposer's uniqueness salt for this proposal's content-addressed
+   * URI (`ad4m://flow/proposal/<hash>`; the hash covers the instance, the
+   * edge, the seal, the outputs commitment, the proposer DID and this
+   * nonce). The engine writes a UUID. A proposal without one — or whose URI
+   * does not match its own signed fields — is not engine-visible:
+   * co-signatures name the URI, so the URI must commit to what they sign
+   * (#1108).
+   */
+  @Property({ through: "ad4m://flow/nonce" })
+  nonce: string = "";
+
+  /**
    * URI of the `InterpretationRun` node that produced this proposal, when
    * the proposal came from an LLM extraction pass. Absent when a human
    * clicked "propose" in the UI or an external tool wrote the proposal
@@ -89,6 +147,22 @@ export class FlowTransitionProposal extends Ad4mModel {
    */
   @Optional({ through: "ad4m://flow/rationale" })
   rationale?: string;
+
+  /**
+   * DIDs that accepted this proposal, as the consensus engine counts them:
+   * an `ad4m://acceptedBy` link counts only when it is signed by the DID it
+   * names, since anyone can write one naming someone else, and each DID once.
+   * The proposer's vote is implicit and the proposer may also accept, so the
+   * voters are the *set* `{ proposer } ∪ acceptedBy`, not its sum.
+   * Read-only: vote with `acceptProposal`, withdraw with `rejectProposal`.
+   */
+  @HasMany({ through: "ad4m://acceptedBy", getter: ACCEPTED_BY_GETTER, readOnly: true })
+  acceptedBy: string[] = [];
+
+  // Whether this proposal settled an edge is not on the record: the
+  // executor keeps that per agent, outside the graph (#1424). Ask
+  // `PerspectiveProxy.flowFired(instance)` for the proposals your replica
+  // recorded as fired, or listen with `onFlowStateChanged`.
 
   // "When was this proposal written?" is answered by `Ad4mModel`'s built-in
   // `createdAt`, synthesized on hydration from the earliest link timestamp
@@ -147,9 +221,10 @@ export class FlowInstanceRecord extends Ad4mModel {
   @Property({ through: "ad4m://flow/base", required: true })
   subject: string = "";
 
-  /** Name of the state the flow is currently in. */
-  @Property({ through: "ad4m://flow/current_state", required: true })
-  currentState: string = "";
+  // The flow's state is not on the record. It is derived from the signed
+  // proposals, and each agent's executor keeps what it last derived outside
+  // the graph (#1424): read it with `PerspectiveProxy.flowStates`, or use
+  // the `FlowInstance` wrapper, whose `currentStateName` is filled from it.
 
   // "When was this flow started?" is answered by `Ad4mModel`'s built-in
   // `createdAt`, synthesized on hydration from the earliest link timestamp

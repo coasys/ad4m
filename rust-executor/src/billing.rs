@@ -35,7 +35,7 @@ pub mod test_seam {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct BillCall {
-        pub email: String,
+        pub agent_did: String,
         pub amount: f64,
         pub operation: String,
         pub summary: Option<String>,
@@ -76,10 +76,10 @@ pub mod test_seam {
         FORCED_RESULT.with(|f| *f.borrow_mut() = Some(r));
     }
 
-    pub(super) fn record(email: &str, amount: f64, operation: &str, summary: Option<&str>) {
+    pub(super) fn record(agent_did: &str, amount: f64, operation: &str, summary: Option<&str>) {
         CALLS.with(|c| {
             c.borrow_mut().push(BillCall {
-                email: email.to_string(),
+                agent_did: agent_did.to_string(),
                 amount,
                 operation: operation.to_string(),
                 summary: summary.map(|s| s.to_string()),
@@ -102,12 +102,18 @@ pub mod test_seam {
 const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // credits per link write
 
 /// Look up the link write rate from the billing backend, falling back to the default.
+/// A backend error also falls back to the default (never to zero), and is logged.
 pub fn get_link_write_rate() -> f64 {
-    billing_backend()
-        .get_rate("link write")
-        .ok()
-        .flatten()
-        .unwrap_or(DEFAULT_LINK_WRITE_RATE)
+    match billing_backend().get_rate("link write") {
+        Ok(rate) => rate.unwrap_or(DEFAULT_LINK_WRITE_RATE),
+        Err(e) => {
+            log::warn!(
+                "link write rate unavailable from the billing backend, using the default: {}",
+                e
+            );
+            DEFAULT_LINK_WRITE_RATE
+        }
+    }
 }
 
 /// Bill a single AI compute operation using the shared `host_rates` table.
@@ -133,7 +139,7 @@ pub fn get_link_write_rate() -> f64 {
 /// open_transcription_stream) is deliberate. Do not inline a
 /// different formula per surface — route through this helper.
 pub fn bill_ai_operation(
-    email: &str,
+    agent_did: &str,
     model_id: &str,
     operation: &str,
     unit_count: usize,
@@ -151,11 +157,20 @@ pub fn bill_ai_operation(
         .map(|m| m.name)
         .unwrap_or_else(|| model_id.to_string());
 
-    let rate = billing_backend()
-        .get_rate(&rate_key)
-        .ok()
-        .flatten()
-        .unwrap_or(0.0);
+    // An unpriced model is `Ok(None)` and costs nothing. A backend that cannot answer is
+    // an error, not a zero rate: the operation is not logged as metered when it was not.
+    let rate = match billing_backend().get_rate(&rate_key) {
+        Ok(rate) => rate.unwrap_or(0.0),
+        Err(e) => {
+            log::warn!(
+                "{}: no rate for model {} from the billing backend: {}",
+                operation,
+                rate_key,
+                e
+            );
+            return Err(BillingError::Other(e));
+        }
+    };
 
     let cost = unit_count as f64 * rate;
     if cost <= 0.0 {
@@ -179,13 +194,13 @@ pub fn bill_ai_operation(
         rate_key = rate_key
     );
 
-    match bill_compute(email, cost, operation, Some(&summary)) {
+    match bill_compute(agent_did, cost, operation, Some(&summary)) {
         Ok(()) => Ok(()),
         Err(BillingError::InsufficientCredits) => {
             log::warn!(
-                "{}: insufficient credits for user {} — delivering already-computed result",
+                "{}: insufficient credits for agent {} — delivering already-computed result",
                 operation,
-                email
+                agent_did
             );
             Err(BillingError::InsufficientCredits)
         }
@@ -196,35 +211,35 @@ pub fn bill_ai_operation(
     }
 }
 
-/// Read-only credit check. Returns Ok(()) if the user can afford compute.
-/// Used as a pre-check before link operations; the actual deduction happens
-/// after the operation via bill_compute with the exact cost.
+/// Read-only credit check for the account that owns the agent `agent_did`. Returns Ok(()) if
+/// it can afford compute. Used as a pre-check before link operations; the actual deduction
+/// happens after the operation via bill_compute with the exact cost.
 /// No-ops (allows) if free hosting is enabled or user has free access.
-pub fn check_compute_credits(email: &str) -> Result<(), anyhow::Error> {
+///
+/// A billing backend that cannot answer refuses the compute: an error is never "free".
+pub fn check_compute_credits(agent_did: &str) -> Result<(), anyhow::Error> {
     let backend = billing_backend();
-    let global_free = backend.get_free_hosting_enabled().unwrap_or(true);
-    if global_free {
+    if backend.get_free_hosting_enabled()? {
         return Ok(());
     }
-    let free = backend.get_user_free_access(email)?;
-    if free {
+    if backend.get_agent_free_access(agent_did)? {
         return Ok(());
     }
-    let credits = backend.get_credits(email)?;
+    let credits = backend.get_agent_credits(agent_did)?;
     if credits <= 0.0 {
         return Err(anyhow::anyhow!("Insufficient compute credits"));
     }
     Ok(())
 }
 
-/// Deduct credits and log a compute event for the given user email.
-/// No-ops if free hosting is enabled globally or the user has free access.
+/// Deduct credits from the account that owns the agent `agent_did` and log a compute event
+/// for the agent. No-ops if free hosting is enabled globally or the user has free access.
 ///
 /// This is the shared billing function callable from anywhere in the executor
 /// (e.g. AI service async tasks, perspective instance methods) without needing
 /// a REST RequestContext or auth token.
 pub fn bill_compute(
-    email: &str,
+    agent_did: &str,
     amount: f64,
     operation: &str,
     summary: Option<&str>,
@@ -234,7 +249,7 @@ pub fn bill_compute(
     // whether the underlying DB is initialised.
     #[cfg(test)]
     {
-        test_seam::record(email, amount, operation, summary);
+        test_seam::record(agent_did, amount, operation, summary);
         if let Some(forced) = test_seam::take_forced_result() {
             return forced;
         }
@@ -246,24 +261,13 @@ pub fn bill_compute(
     if global_free {
         return Ok(());
     }
-    let free = backend.get_user_free_access(email)?;
-    if free {
+    if backend.get_agent_free_access(agent_did)? {
         return Ok(());
     }
 
-    match backend.deduct_credits_and_log(email, amount, operation, summary) {
-        Ok((row_id, credits_after)) => {
-            crate::pubsub::push_compute_log_entry(
-                row_id,
-                email,
-                operation,
-                summary,
-                amount,
-                credits_after,
-            );
-            mark_credits_dirty(email);
-            Ok(())
-        }
-        Err(e) => Err(e),
+    let (_, _, email) = backend.deduct_credits_and_log(agent_did, amount, operation, summary)?;
+    if !email.is_empty() {
+        mark_credits_dirty(&email);
     }
+    Ok(())
 }

@@ -30,7 +30,7 @@ function Profile() {
 
   const fetchCurrentAgentProfile = useCallback(async () => {
     if (url) {
-      const client = await buildAd4mClient(url, false);
+      const client = await buildAd4mClient(url);
       const agent = await client!.agent.me();
 
       const profile = await fetchProfile(agent);

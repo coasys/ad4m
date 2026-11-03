@@ -1,0 +1,8 @@
+{
+  "target_class": "ad4m://Mentioning",
+  "abstract": true,
+  "interpretation_hint": "A record that mentions agents: a post, a message, a block of a document. Its mentions are the agents (DIDs) it mentions.",
+  "properties": [
+    {"path": "ad4m://mentions", "name": "mentions", "node_kind": "IRI", "relation_kind": "hasMany", "collection": true}
+  ]
+}

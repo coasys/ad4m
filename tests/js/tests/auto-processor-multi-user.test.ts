@@ -31,7 +31,6 @@ import { fileURLToPath } from "url";
 import { expect } from "chai";
 import {
   baseUrl,
-  sleep,
   startExecutor,
   runHcLocalServices,
   gracefulShutdown,
@@ -46,6 +45,7 @@ const __dirname = path.dirname(__filename);
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+const ADMIN_CREDENTIAL = "auto-processor-multi-user-admin";
 
 // Same shape as the two-executor test uses: speaker + timestamp come off the
 // body link's reifier, so `?speaker` is the DID that signed the body — which
@@ -85,9 +85,9 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
   before(async () => {
     [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
     registerPorts([apiPort, hcAdminPort, hcAppPort]);
-    if (!fs.existsSync(appDataPath)) {
-      fs.mkdirSync(appDataPath, { recursive: true });
-    }
+    // rmSync with force also clears a dangling symlink, which existsSync reports as missing.
+    fs.rmSync(appDataPath, { recursive: true, force: true });
+    fs.mkdirSync(appDataPath, { recursive: true });
 
     const localServices = await runHcLocalServices();
     proxyUrl = localServices.proxyUrl;
@@ -101,12 +101,14 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
       hcAdminPort,
       hcAppPort,
       false,
-      undefined,
+      // Multi-user mode needs an admin credential: without one a caller with no token is
+      // the operator, which a multi-user executor must not have.
+      ADMIN_CREDENTIAL,
       proxyUrl!,
       bootstrapUrl!,
     );
 
-    admin = new Ad4mClient(baseUrl(apiPort), undefined, false);
+    admin = new Ad4mClient(baseUrl(apiPort), ADMIN_CREDENTIAL);
     await admin.agent.generate("passphrase");
     await admin.runtime.setMultiUserEnabled(true);
 
@@ -129,8 +131,8 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     // Log in both — one JWT per user, one client per user.
     const aliceToken = await admin.agent.loginUser("alice@apmutest.local", "password");
     const bobToken = await admin.agent.loginUser("bob@apmutest.local", "password");
-    alice = new Ad4mClient(baseUrl(apiPort), aliceToken, false);
-    bob = new Ad4mClient(baseUrl(apiPort), bobToken, false);
+    alice = new Ad4mClient(baseUrl(apiPort), aliceToken);
+    bob = new Ad4mClient(baseUrl(apiPort), bobToken);
 
     // Trigger last_seen updates for both — the supervisor's freshness filter
     // is what decides whether to spawn a loop per user, and last_seen is set
@@ -162,7 +164,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     await ConversationSubgroup.register(aliceP);
 
     const events: AutoProcessorEvent[] = [];
-    await aliceP.addAutoProcessorEventListener((e) => events.push(e));
+    aliceP.on("auto-processor-event", (e) => events.push(e));
 
     await aliceP.addAutoProcessor({
       processorId: "managed-users-channel",
@@ -173,9 +175,6 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
       batchMax: 32,
       claimTtlMs: 60_000,
     } as any);
-
-    // Give the supervisor its first tick (5s) to spawn per-user loops.
-    await sleep(6_000);
 
     // `perspective.add` assigns the caller as the owner, so a strict
     // ownership regime would make Bob's `byUUID` return `null`

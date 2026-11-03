@@ -1,0 +1,1383 @@
+//! **Produced by flow**: which instances are valid outputs of a flow.
+//!
+//! [`receipt`](super::receipt) binds a completed run's outputs to a
+//! quorum-signed commitment (#1104), and [`verify`](super::verify) re-decides
+//! a receipt from its own contents. This module is the consumer seam on top
+//! of the two: the *general* question every app-facing surface asks —
+//!
+//! > *Is this instance a valid output of flow F \[settled into state S\]?*
+//!
+//! and its enumeration twin, *which instances are*. The role engine's
+//! `producedByFlow` gate (#1076) is one consumer of this question; the
+//! `perspective.flowValidOutputs` query and the model-query
+//! `where: { producedByFlow }` filter added here are two more. All of them
+//! answer it the same way, and that way fails closed.
+//!
+//! # The contract: what "valid output" means
+//!
+//! An instance is a valid output of flow F in state S iff **some receipt
+//! carried by the perspective**:
+//!
+//! 1. **verifies** under this replica's own catalogue — the whole of
+//!    [`verify_receipt`]: signatures re-checked, DNA hash equal, the carried
+//!    read-set re-folded, and the receipt's outputs hashing to the
+//!    `outputs_hash` the final edge's quorum signed;
+//! 2. was minted for **flow F** (`receipt.flow_uri`), under the DNA this
+//!    replica holds for it;
+//! 3. settled into **state S** (when the caller names one — otherwise any
+//!    terminal state);
+//! 4. **names the instance** among its committed outputs
+//!    ([`FlowReceipt::outputs`]) — the binding the quorum signed, never the
+//!    anyone-writable `granted_by` discovery edge.
+//!
+//! Every non-`Verified` verdict excludes the receipt — including the
+//! [`Undecidable`](super::verify::verdict::VerdictKind::Undecidable) kind. That is
+//! deliberately stricter than what `Undecidable` *means* ("this replica
+//! cannot decide", not "the receipt is bad"): a query that returns instances
+//! a payout system acts on must not return one on a receipt nobody could
+//! check. Fail closed, exactly as a payout system must (see
+//! [`VerdictKind`](super::verify::verdict::VerdictKind)).
+//!
+//! # The live-content check
+//!
+//! A receipt attests to an output's content **at completion**, and editing
+//! the output later does not invalidate the receipt — its preimages are
+//! frozen inside it and still hash to the signed commitment (the ratchet;
+//! see [`receipt`](super::receipt)). But the perspective-level query and the
+//! model-query filter answer about **live instances**, and an instance whose
+//! content has moved since the quorum signed is no longer the thing the
+//! quorum committed to. So [`flow_valid_outputs`] re-reads each candidate
+//! through its class — the same hydration the commitment was taken over —
+//! and keeps it only while the content still equals the carried preimage.
+//! `content` includes `updatedAt`, so even re-asserting the same value
+//! excludes the instance (that is #1104's definition of content, not a
+//! choice made here).
+//!
+//! The **pure** layer ([`valid_outputs`]) deliberately does *not* apply this
+//! check — it has no store to read from, and its consumers differ: the role
+//! engine dates a grant from the quorum's moment and must keep honouring it
+//! after the role instance accrues links, while an app asking "what may I
+//! pay out on" must not. Callers with a perspective get the checked answer;
+//! callers with only a receipt get the receipt's answer and the committed
+//! content to compare themselves.
+//!
+//! # Discovery is not trust
+//!
+//! Receipts for flow F are found through F's index — `F -->
+//! ad4m://flow/flow_receipt --> receipt` links, written at mint — and each
+//! receipt's `ad4m://flow/receipt_content` body. Any member can write either
+//! link, and a forged or damaged body proves nothing: everything above
+//! re-derives from the receipt's own contents.
+//!
+//! The read is **scoped to the flow** — only F's index entries are looked
+//! at, so other flows' receipts and stray bodies nobody indexed cost F
+//! nothing; a busy perspective is the normal case, not an attack. And
+//! candidates are **content-addressed** ([`load_flow_receipts`], #1177): an
+//! index entry counts only if a body under it is the receipt its URI names
+//! and that receipt names F. Junk is skipped with a warning at parse cost,
+//! and nothing is dropped except by its own content, so no number of junk
+//! entries can hide the one genuine receipt beside them (the rule from
+//! Lal's review of #1127: a truncated read must never read as "no valid
+//! outputs"). There is no count cap: the index is keyed by the flow
+//! *definition*, so a cap on it was tripped by the 257th honest completion
+//! of any flow, for good. What remains is reader CPU — one parse per junk
+//! body, one verification per body that hashes to its own URI — and the
+//! per-perspective [`VerdictMemo`] keeps repeat reads from paying it twice.
+//! Index and body links are flow links, so they are monotonic
+//! (`perspectives::monotonic`, #1176): nobody can remove a genuine
+//! receipt's index link.
+//!
+//! # The quorum time
+//!
+//! The role gate needs one thing the enumeration does not: **when** the
+//! instance was produced. [`first_produced_at`] answers it from the same
+//! verified set as [`valid_outputs`], as the earliest
+//! [`settled_at`](super::verify::ReceiptVerdict::Verified) among the
+//! receipts that name the instance. That is the moment the n-th distinct
+//! eligible voter signed, which no single party picks.
+//!
+//! # What is deliberately NOT here
+//!
+//! - **A rename of `ad4m://flow/granted_by`.** The edge name is
+//!   role-flavoured for a general mechanism. Nothing in the engine reads it:
+//!   #1076's role gate finds receipts through F's index like every other
+//!   consumer here. [`mint_flow_receipt`] still writes it for per-node
+//!   discovery. Rename or drop it is an open question.
+//! - **Automatic minting on completion.** [`mint_flow_receipt`] is an
+//!   explicit call; nothing here mints as a side effect of a vote. Whether
+//!   the engine should is a design question for the flow plan, not this PR.
+
+use super::atom::OutputRef;
+use super::receipt::{
+    is_canonical_receipt_uri, is_terminal_state, FlowReceipt, FLOW_GRANTED_BY_PREDICATE,
+    FLOW_RECEIPT_CONTENT_PREDICATE, FLOW_RECEIPT_PREDICATE, MAX_RECEIPT_BYTES, RECEIPT_URI_PREFIX,
+};
+use super::verify::memo::{settle, SettledRun, VerdictMemo};
+use super::verify::{verify_receipt, ReceiptVerdict};
+use super::FlowInstance;
+use crate::agent::AgentContext;
+use crate::perspectives::flow_context::{load_all_flow_instances, load_shacl_flows};
+use crate::perspectives::flow_evaluator::EvidenceItem;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::shacl_parser::SHACLFlow;
+use crate::types::{Link, LinkQuery, LinkStatus};
+use ad4m_client::literal::{Literal, LiteralValue};
+use serde::Serialize;
+use std::collections::{BTreeMap, HashMap};
+
+/// One instance a verified receipt speaks for. What the "valid outputs of
+/// flow F" query returns, and what the `producedByFlow` model-query filter
+/// admits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ValidOutput {
+    /// The instance, as `(className, id)` — the pair the quorum committed to.
+    pub output: OutputRef,
+    /// The instance's content **as the quorum committed to it**: the
+    /// `model_query` hydration at completion. A consumer that pays out on
+    /// the instance as it stands now compares this against a fresh read —
+    /// [`flow_valid_outputs`] already has.
+    pub content: String,
+    /// The terminal state the granting run settled into, re-derived by the
+    /// verifier (never read off the receipt on trust).
+    pub terminal_state: String,
+    /// The content-derived URI of the receipt that proves it, for callers
+    /// that want to fetch or re-verify the artifact itself.
+    pub receipt_uri: String,
+}
+
+/// The outputs of `flow_uri` that `receipts` prove — receipt-level, pure.
+///
+/// Only outputs of receipts that pass [`verify_receipt`] under `catalogue`
+/// are returned; a receipt for another flow, into another state than the
+/// named one, or with any non-`Verified` verdict (including the
+/// `Undecidable` kind — see the module header) contributes nothing. Each
+/// receipt stands alone: a forged receipt beside an honest one excludes
+/// itself, never its neighbour.
+///
+/// Deterministic: sorted by `(class, id, receipt_uri)` and deduplicated per
+/// `(output, terminal_state, content)`, so two replicas holding the same
+/// receipts enumerate the same list.
+///
+/// `memo`, when given, answers a receipt already verified under the same
+/// held definition from memory ([`VerdictMemo`]); the answer is the same
+/// without it.
+pub fn valid_outputs(
+    catalogue: &HashMap<String, SHACLFlow>,
+    flow_uri: &str,
+    state: Option<&str>,
+    receipts: &[FlowReceipt],
+    memo: Option<&VerdictMemo>,
+) -> Vec<ValidOutput> {
+    let mut out: Vec<ValidOutput> = verified_outputs(catalogue, flow_uri, state, receipts, memo)
+        .into_iter()
+        .map(|(output, _)| output)
+        .collect();
+    out.sort_by(|a, b| {
+        (&a.output, &a.terminal_state, &a.content, &a.receipt_uri).cmp(&(
+            &b.output,
+            &b.terminal_state,
+            &b.content,
+            &b.receipt_uri,
+        ))
+    });
+    out.dedup_by(|a, b| {
+        a.output == b.output && a.terminal_state == b.terminal_state && a.content == b.content
+    });
+    out
+}
+
+/// Every output a verified receipt for `flow_uri` \[in `state`\] speaks for,
+/// each with the quorum time of the run that produced it. Not sorted, not
+/// deduplicated. The one place the verdict is taken, so [`valid_outputs`],
+/// [`produced_by_flow`] and [`first_produced_at`] cannot disagree about
+/// which receipts count.
+fn verified_outputs(
+    catalogue: &HashMap<String, SHACLFlow>,
+    flow_uri: &str,
+    state: Option<&str>,
+    receipts: &[FlowReceipt],
+    memo: Option<&VerdictMemo>,
+) -> Vec<(ValidOutput, String)> {
+    let mut out = Vec::new();
+    for receipt in receipts {
+        // Cheap pre-check, but also a correctness one: a receipt for another
+        // flow may legitimately verify, and must still not answer a question
+        // about this one.
+        if receipt.flow_uri != flow_uri {
+            continue;
+        }
+        // Only what a `Verified` verdict says is used here, and only that is
+        // memoised; a non-verified receipt speaks for nothing, whatever the
+        // reason (logged where it is computed, in `settle`).
+        let settled = match memo {
+            Some(memo) => memo.settled(catalogue, receipt),
+            None => settle(catalogue, receipt),
+        };
+        let Some(SettledRun {
+            terminal_state,
+            settled_at,
+        }) = settled
+        else {
+            continue;
+        };
+        if let Some(state) = state {
+            if terminal_state != state {
+                continue;
+            }
+        }
+        let receipt_uri = match receipt.uri() {
+            Ok(uri) => uri,
+            Err(e) => {
+                // Verified material that cannot name itself would be carried
+                // under an unstable identity; exclude it rather than invent one.
+                log::warn!("valid_outputs: a verified receipt does not hash: {e:#}");
+                continue;
+            }
+        };
+        for item in &receipt.outputs {
+            out.push((
+                ValidOutput {
+                    output: OutputRef::of(item),
+                    content: item.content.clone(),
+                    terminal_state: terminal_state.clone(),
+                    receipt_uri: receipt_uri.clone(),
+                },
+                settled_at.clone(),
+            ));
+        }
+    }
+    out
+}
+
+/// Is `output` a valid output of `flow_uri` \[in `state`\], per `receipts`?
+/// The membership form of [`valid_outputs`] — one definition, so the two can
+/// never disagree.
+///
+/// Takes the whole `(class, id)` ref, never the id alone, for the reason
+/// [`FlowReceipt::speaks_for`] does (#1108): the quorum committed to the
+/// node's content as read through one class, and the same node read
+/// through another is other content it never saw.
+pub fn produced_by_flow(
+    catalogue: &HashMap<String, SHACLFlow>,
+    output: &OutputRef,
+    flow_uri: &str,
+    state: Option<&str>,
+    receipts: &[FlowReceipt],
+    memo: Option<&VerdictMemo>,
+) -> bool {
+    valid_outputs(catalogue, flow_uri, state, receipts, memo)
+        .iter()
+        .any(|v| &v.output == output)
+}
+
+/// When each valid output of `flow_uri` \[in `state`\] was first produced:
+/// the earliest quorum time among the verified receipts that name it. An
+/// output is a key exactly when [`produced_by_flow`] is true for it.
+///
+/// This is what the `producedByFlow` role gate dates a grant from
+/// ([`grant`](super::grant)). **Earliest wins** when several runs produced
+/// the same instance: the membership began at the first of them. Preferring
+/// the earlier, wider window is safe here because every candidate has been
+/// verified, so widening it costs a whole quorum under the reader's own
+/// rules, not a link write.
+///
+/// One map for every output, not one call per output, because verifying is
+/// the expensive part and the role gate asks about every matched instance of
+/// every candidate.
+///
+/// Like [`valid_outputs`] it applies no live-content check: a grant dated
+/// from a quorum stays granted after the role instance gains links (module
+/// header, § *The live-content check*).
+pub(crate) fn first_produced_at(
+    catalogue: &HashMap<String, SHACLFlow>,
+    flow_uri: &str,
+    state: Option<&str>,
+    receipts: &[FlowReceipt],
+    memo: Option<&VerdictMemo>,
+) -> BTreeMap<OutputRef, String> {
+    let mut first: BTreeMap<OutputRef, String> = BTreeMap::new();
+    for (valid, settled_at) in verified_outputs(catalogue, flow_uri, state, receipts, memo) {
+        let earliest = match first.remove(&valid.output) {
+            Some(seen) => earlier_of(seen, settled_at),
+            None => settled_at,
+        };
+        first.insert(valid.output, earliest);
+    }
+    first
+}
+
+/// The earlier of two settle times **by parsed instant**, never by string:
+/// they are client-asserted RFC 3339 and clients disagree on flavour, so
+/// string order diverges from instant order inside a second (#1000).
+///
+/// An unparseable settle time sorts **first** and therefore wins, which is the
+/// fail-closed direction and not an accident: `granted_at` runs through
+/// [`parse_link_timestamp`](super::time::parse_link_timestamp) in
+/// [`RoleGrantWindow::open_at`](super::roles::RoleGrantWindow::open_at), where
+/// a value that cannot be placed in time means the window never opens. So one
+/// undatable receipt among several closes the grant rather than letting a
+/// datable sibling carry it — the same rule
+/// [`RoleGrantWindow::revoked_at`](super::roles::RoleGrantWindow::revoked_at)
+/// applies to tombstones. The string tiebreaker keeps two equally unparseable
+/// values resolving identically on every replica.
+fn earlier_of(a: String, b: String) -> String {
+    use super::time::parse_link_timestamp;
+    let key = |s: &String| (parse_link_timestamp(s), s.clone());
+    if key(&b) < key(&a) {
+        b
+    } else {
+        a
+    }
+}
+
+/// Is a committed output named as the class a `model_query` asks about?
+///
+/// An output is committed *as an instance of a class* (#1104): the same node
+/// read through another class is other content, and not what the quorum
+/// signed. So the `producedByFlow` filter admits an output only into queries
+/// for that class — matched against either spelling a flow's DNA may have
+/// used, the query-side class name or the shape's target class.
+///
+/// This is defense in depth on top of shape conformance (a node that is not
+/// an instance of the queried class never matches its SPARQL patterns), and
+/// it is the half conformance cannot do: one node can conform to two classes
+/// with different content, and a quorum that committed to it as one has said
+/// nothing about it as the other.
+pub fn output_matches_class(output: &OutputRef, queried_name: &str, target_class: &str) -> bool {
+    output.class_name == queried_name || output.class_name == target_class
+}
+
+/// `flow --> receipt`: the per-flow index [`mint_flow_receipt`] writes, so a
+/// question about flow F reads only F's receipts. Discovery only, like every
+/// receipt link: anyone may write one, and what it points at still has to
+/// verify.
+pub const FLOW_RECEIPT_INDEX_PREDICATE: &str = "ad4m://flow/flow_receipt";
+
+/// The receipts filed under `flow_uri`'s index, parsed — every candidate a
+/// question about that flow has to consider. Each is a *claim* to be about
+/// the flow; verification comes later and is the caller's job.
+///
+/// **Candidates are content-addressed, and there is no count cap** (#1177).
+/// An index entry is a candidate only if
+///
+/// 1. its target is a canonical receipt URI
+///    ([`is_canonical_receipt_uri`]: the prefix plus exactly 64 lowercase
+///    hex characters — one spelling, so two index links cannot alias one
+///    receipt, and a non-hash target is dismissed before any store read);
+/// 2. a body under it parses as a [`FlowReceipt`] that serialises to at
+///    most [`MAX_RECEIPT_BYTES`] — the same measure
+///    [`mint`](FlowReceipt::mint) refuses over, so no genuine receipt is
+///    over it, and the reader owes an oversize body nothing. Not a
+///    tidiness check: a copy of an honest receipt with `outputs` swapped
+///    for a huge list keeps the real signatures, hashes to its own URI and
+///    names F, so it passes every other check, costs a full fold per read,
+///    and comes back as `OutputsNotCommitted { claimed: <the list> }`
+///    (Marvin on #1201);
+/// 3. that receipt's own [`uri()`](FlowReceipt::uri) **is** the target —
+///    the body is the material the URI names, not something hung under a
+///    name it borrowed;
+/// 4. that receipt names `flow_uri` — a receipt of another flow may
+///    verify, and must still not be a candidate for this one.
+///
+/// Everything else is skipped with a warning at parse cost, never an error:
+/// junk proves nothing for this flow, and failing on it would hand every
+/// writer a veto. And nothing genuine is ever dropped — a receipt is
+/// excluded only by its own content, so no number of junk entries can hide
+/// or refuse the one honest receipt beside them. The former budget
+/// (`MAX_FLOW_RECEIPTS`, `ReceiptBudgetExceeded`) refused on count instead,
+/// and since the index is keyed by the flow *definition*, the 257th honest
+/// completion of any flow tripped it for good.
+///
+/// Deterministic: entries and bodies are read in sorted order. Under one
+/// entry the first body that satisfies (2) to (4) is the receipt; any other
+/// body that satisfied them would be the same content.
+pub async fn load_flow_receipts(
+    perspective: &PerspectiveInstance,
+    flow_uri: &str,
+) -> anyhow::Result<Vec<FlowReceipt>> {
+    let mut uris: Vec<String> = perspective
+        .get_links(&LinkQuery {
+            source: Some(flow_uri.to_string()),
+            predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
+            ..Default::default()
+        })
+        .await?
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect();
+    uris.sort();
+    uris.dedup();
+
+    let mut receipts = Vec::new();
+    for uri in uris {
+        if !is_canonical_receipt_uri(&uri) {
+            log::warn!(
+                "load_flow_receipts: `{uri}` is filed under flow `{flow_uri}` but is not a \
+                 canonical receipt URI ({RECEIPT_URI_PREFIX} + 64 lowercase hex); skipped"
+            );
+            continue;
+        }
+        let mut bodies: Vec<String> = perspective
+            .get_links(&LinkQuery {
+                source: Some(uri.clone()),
+                predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        bodies.sort();
+        bodies.dedup();
+
+        let mut found = None;
+        for body in bodies {
+            let receipt = match parse_receipt_body(body) {
+                Ok(receipt) => receipt,
+                Err(e) => {
+                    log::warn!(
+                        "load_flow_receipts: a body under `{uri}` does not read as a \
+                         FlowReceipt and proves nothing: {e:#}"
+                    );
+                    continue;
+                }
+            };
+            match receipt.body().map(|body| body.len()) {
+                Ok(size) if size <= MAX_RECEIPT_BYTES => {}
+                Ok(size) => {
+                    log::warn!(
+                        "load_flow_receipts: a body under `{uri}` serialises to {size} bytes, \
+                         over the {MAX_RECEIPT_BYTES} byte cap no receipt is minted over; skipped"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "load_flow_receipts: a body under `{uri}` does not serialise: {e:#}"
+                    );
+                    continue;
+                }
+            }
+            match receipt.uri() {
+                Ok(hashed) if hashed == uri => {}
+                Ok(hashed) => {
+                    log::warn!(
+                        "load_flow_receipts: a body under `{uri}` hashes to `{hashed}`, so it \
+                         is not the receipt that URI names; skipped"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!("load_flow_receipts: a body under `{uri}` does not hash: {e:#}");
+                    continue;
+                }
+            }
+            if receipt.flow_uri != flow_uri {
+                log::warn!(
+                    "load_flow_receipts: `{uri}` is filed under flow `{flow_uri}` but is a \
+                     receipt for `{}`; skipped",
+                    receipt.flow_uri
+                );
+                continue;
+            }
+            found = Some(receipt);
+            break;
+        }
+        match found {
+            Some(receipt) => receipts.push(receipt),
+            None => log::debug!(
+                "load_flow_receipts: no body under `{uri}` is the receipt it names; the \
+                 index entry under flow `{flow_uri}` is skipped"
+            ),
+        }
+    }
+    Ok(receipts)
+}
+
+/// A `receipt_content` link's target, as a receipt.
+fn parse_receipt_body(body: String) -> anyhow::Result<FlowReceipt> {
+    match Literal::from_url(body)?.get()? {
+        LiteralValue::Json(json) => Ok(serde_json::from_value::<FlowReceipt>(json)?),
+        other => Err(anyhow::anyhow!("not a JSON literal: {other:?}")),
+    }
+}
+
+/// The instances that are, **as they stand**, valid outputs of `flow_uri`
+/// \[in `state`\] on this perspective.
+///
+/// [`valid_outputs`] over the perspective's own catalogue and carried
+/// receipts, plus the live-content check the module header describes: each
+/// candidate is re-read through its class and kept only while its content
+/// still equals what the quorum committed to. An output that cannot be
+/// loaded, is no longer an instance of its class, or has been edited since
+/// completion is excluded — every failure direction excludes.
+///
+/// A `flow_uri` this perspective's catalogue does not hold is an **error**,
+/// not an empty list: "no such flow here" and "no valid outputs" must not
+/// be the same answer (the same three-kind argument
+/// [`VerdictKind`](super::verify::verdict::VerdictKind) makes).
+pub async fn flow_valid_outputs(
+    perspective: &PerspectiveInstance,
+    flow_uri: &str,
+    state: Option<&str>,
+) -> anyhow::Result<Vec<ValidOutput>> {
+    let catalogue = load_shacl_flows(perspective).await?;
+    if !catalogue.contains_key(flow_uri) {
+        anyhow::bail!(
+            "flow_valid_outputs: flow `{flow_uri}` is not on this perspective — nothing about \
+             its outputs can be decided here"
+        );
+    }
+    let receipts = load_flow_receipts(perspective, flow_uri).await?;
+    let candidates = valid_outputs(
+        &catalogue,
+        flow_uri,
+        state,
+        &receipts,
+        Some(&perspective.receipt_verdict_memo),
+    );
+
+    let refs: Vec<OutputRef> = candidates.iter().map(|c| c.output.clone()).collect();
+    let live = super::accept::load_outputs(perspective, &refs).await?;
+    Ok(candidates
+        .into_iter()
+        .filter(|c| match live.get(&c.output) {
+            Some(now) => {
+                let intact = now.content == c.content;
+                if !intact {
+                    log::debug!(
+                        "flow_valid_outputs: `{}` was edited since flow `{flow_uri}` completed; \
+                         its live content no longer matches the quorum's commitment, so it is \
+                         not returned",
+                        c.output.id
+                    );
+                }
+                intact
+            }
+            None => {
+                log::debug!(
+                    "flow_valid_outputs: `{}` is not readable as a `{}` any more, so it is not \
+                     returned",
+                    c.output.id,
+                    c.output.class_name
+                );
+                false
+            }
+        })
+        .collect())
+}
+
+/// Re-decide `receipt` under this perspective's own catalogue. The verdict
+/// is [`verify_receipt`]'s, three-kinded and all; [`verdict_wire`] is the
+/// serialisation the API hands out.
+pub async fn verify_flow_receipt(
+    perspective: &PerspectiveInstance,
+    receipt: &FlowReceipt,
+) -> anyhow::Result<ReceiptVerdict> {
+    let catalogue = load_shacl_flows(perspective).await?;
+    Ok(verify_receipt(&catalogue, receipt))
+}
+
+/// The verdict as the API reports it: the three-kind `outcome` a caller must
+/// branch on, the human-readable `detail`, and — only when verified — what
+/// was verified. The kind travels explicitly so a client cannot reach
+/// "reject" through a boolean (the trap [`VerdictKind`](super::verify::verdict::VerdictKind)
+/// exists to close).
+pub fn verdict_wire(verdict: &ReceiptVerdict) -> serde_json::Value {
+    use super::verify::verdict::VerdictKind;
+    let outcome = match verdict.outcome() {
+        VerdictKind::Verified => "verified",
+        VerdictKind::Rejected => "rejected",
+        VerdictKind::Undecidable => "undecidable",
+    };
+    let mut wire = serde_json::json!({
+        "outcome": outcome,
+        "detail": verdict.to_string(),
+    });
+    if let ReceiptVerdict::Verified {
+        terminal_state,
+        outputs,
+        voters,
+        ..
+    } = verdict
+    {
+        wire["terminalState"] = serde_json::json!(terminal_state);
+        wire["outputs"] = serde_json::json!(outputs);
+        wire["voters"] = serde_json::json!(voters);
+    }
+    wire
+}
+
+/// Mint the receipt for a completed run and write it to the perspective:
+/// the content-addressed receipt node with its body, plus the discovery
+/// edges (`instance → receipt`, `output → receipt`, and the flow's own
+/// index `flow → receipt` that [`load_flow_receipts`] reads — indexes,
+/// never inputs; see [`receipt`](super::receipt)).
+///
+/// Everything a receipt claims is derived here the way [`FlowReceipt::mint`]
+/// demands: the read-set is collected live, the outputs are the ones the
+/// final edge's counted atoms name, their content is what `model_query`
+/// returns for them **now** — so a run whose outputs were edited since
+/// completion refuses to mint, which is #1104's rule, not a limitation.
+/// Preimages are collected best-effort: a guard whose evidence no longer
+/// reproduces its seal is skipped with a warning (verification requires
+/// none), never invented.
+///
+/// Anyone may mint (the receipt's authority is its contents), and duplicate
+/// mints converge on one node by URI.
+pub async fn mint_flow_receipt(
+    perspective: &mut PerspectiveInstance,
+    instance_uri: &str,
+    context: &AgentContext,
+) -> anyhow::Result<FlowReceipt> {
+    use super::receipt::EvidencePreimage;
+    use crate::perspectives::flow_evaluator::{recompute_evidence_seal, EvidenceSeal};
+
+    let catalogue = load_shacl_flows(perspective).await?;
+    let records = load_all_flow_instances(perspective).await?;
+    let record = records
+        .iter()
+        .find(|r| r.instance_uri == instance_uri)
+        .ok_or_else(|| anyhow::anyhow!("no FlowInstance at {instance_uri}"))?;
+    let flow = catalogue
+        .get(&record.flow_uri)
+        .ok_or_else(|| anyhow::anyhow!("flow `{}` is not in the catalogue", record.flow_uri))?;
+    let instance = FlowInstance::from_record(record, flow);
+    let read_set = instance.read_set(perspective).await?;
+
+    // The outputs the run committed to, read off the counted atoms of the
+    // final settled edge. `mint` re-derives the fold and re-checks the hash,
+    // so this is a collection step, not a trust step.
+    let ingested = read_set.reverified();
+    let derived = super::fold_read_set(flow, &ingested)?;
+    let final_edge = derived.settled.last().ok_or_else(|| {
+        anyhow::anyhow!("{instance_uri} has no settled edge, so there is no completion to mint")
+    })?;
+    let refs: Vec<OutputRef> = {
+        let mut refs: Vec<OutputRef> = ingested
+            .atoms()
+            .into_iter()
+            .filter(|a| final_edge.atom_uris.contains(&a.uri))
+            .flat_map(|a| a.outputs)
+            .collect();
+        refs.sort();
+        refs.dedup();
+        refs
+    };
+    let loaded = super::accept::load_outputs(perspective, &refs).await?;
+    let outputs: Vec<EvidenceItem> = refs.iter().filter_map(|r| loaded.get(r).cloned()).collect();
+
+    let mut preimages: Vec<EvidencePreimage> = Vec::new();
+    for counted in FlowReceipt::counted_seals(flow, &read_set)? {
+        let record_now = crate::perspectives::flow_context::FlowInstanceRecord {
+            current_state: derived.state.clone(),
+            ..record.clone()
+        };
+        let sealed = recompute_evidence_seal(
+            perspective,
+            flow,
+            &record_now,
+            &counted.to_state,
+            &counted.proposer,
+        )
+        .await?;
+        match sealed.seal.hash() {
+            Some(hash) if hash == counted.seal => preimages.push(EvidencePreimage {
+                seal: counted.seal,
+                class_names: sealed.class_names,
+                items: sealed.evidence,
+            }),
+            _ => log::warn!(
+                "mint_flow_receipt: {instance_uri}: the evidence for `{}`'s seal no longer \
+                 reproduces it; the receipt is minted without that preimage (verification \
+                 requires none)",
+                counted.to_state
+            ),
+        }
+        debug_assert!(matches!(
+            sealed.seal,
+            EvidenceSeal::Sealed(_) | EvidenceSeal::NoGuard | EvidenceSeal::Unmet
+        ));
+    }
+
+    let receipt = FlowReceipt::mint(flow, read_set, outputs, preimages)?;
+    let uri = receipt.uri()?;
+    let body = Literal::from_json(serde_json::to_value(&receipt)?).to_url()?;
+
+    let mut links = vec![
+        Link {
+            source: uri.clone(),
+            predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+            target: body,
+        },
+        Link {
+            source: instance_uri.to_string(),
+            predicate: Some(FLOW_RECEIPT_PREDICATE.to_string()),
+            target: uri.clone(),
+        },
+        Link {
+            source: receipt.flow_uri.clone(),
+            predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
+            target: uri.clone(),
+        },
+    ];
+    for output in &receipt.outputs {
+        links.push(Link {
+            source: output.id.clone(),
+            predicate: Some(FLOW_GRANTED_BY_PREDICATE.to_string()),
+            target: uri.clone(),
+        });
+    }
+    perspective
+        .add_links(links, LinkStatus::Shared, None, context)
+        .await?;
+
+    debug_assert!(is_terminal_state(flow, &receipt.terminal_state));
+    Ok(receipt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::flow_instance::test_support::{
+        hash_of, out_item, out_items, out_ref, signed_terminal_proposal, T1,
+    };
+    use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
+
+    const INSTANCE: &str = "ad4m://flow/instance/i1";
+    const BASE: &str = "ad4m://task/t1";
+    const ALICE: &str = "alice";
+    const OUTPUT: &str = "ad4m://deliverable/d1";
+    const ATTACKER: &str = "ad4m://attacker/node";
+    const FLOW: &str = "coasys://DeliveryFlow";
+
+    /// `open → done`, `done` terminal and unguarded, default `{ n: 1 }`.
+    fn flow_named(name: &str) -> SHACLFlow {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "namespace": "coasys://",
+            "states": [
+                { "name": "open", "value": 0.0 },
+                { "name": "done", "value": 1.0 },
+            ],
+            "transitions": [
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+            ],
+        }))
+        .expect("fixture flow parses")
+    }
+
+    fn catalogue(flows: Vec<SHACLFlow>) -> HashMap<String, SHACLFlow> {
+        flows.into_iter().map(|f| (f.flow_uri(), f)).collect()
+    }
+
+    /// A completed run of `flow` whose final proposal names `ids`, honestly
+    /// committed and signed for real, under the content-addressed URI the
+    /// fixture computes from those same fields (#1108).
+    fn completed(ids: &[&str]) -> ReadSet {
+        let (uri, links) = signed_terminal_proposal(
+            "p1",
+            ALICE,
+            "open",
+            "done",
+            &crate::perspectives::flow_evaluator::evidence_hash(&[], &[]),
+            ids,
+            &hash_of(ids),
+            T1,
+        );
+        ReadSet {
+            instance_uri: INSTANCE.to_string(),
+            subject: BASE.to_string(),
+            genesis: "open".to_string(),
+            proposals: vec![ProposalLinks { uri, links }],
+            role_grants: Vec::new(),
+        }
+    }
+
+    fn mint(flow: &SHACLFlow, ids: &[&str]) -> FlowReceipt {
+        FlowReceipt::mint(flow, completed(ids), out_items(ids), Vec::new())
+            .expect("the fixture read-set mints")
+    }
+
+    fn honest() -> FlowReceipt {
+        mint(&flow_named("Delivery"), &[OUTPUT])
+    }
+
+    // ---- the contract, positively ----------------------------------------
+
+    /// The control: a verified receipt's committed outputs are the flow's
+    /// valid outputs, with the state the verifier re-derived and the
+    /// receipt's own content-derived URI.
+    ///
+    /// Red if `valid_outputs` reads `terminal_state` off the receipt rather
+    /// than off the verdict, or reports a URI not derived from the content.
+    #[test]
+    fn a_verified_receipts_outputs_are_the_flows_valid_outputs() {
+        let receipt = honest();
+        let cat = catalogue(vec![flow_named("Delivery")]);
+
+        let outputs = valid_outputs(&cat, FLOW, None, std::slice::from_ref(&receipt), None);
+        assert_eq!(
+            outputs,
+            vec![ValidOutput {
+                output: OutputRef::of(&out_item(OUTPUT)),
+                content: out_item(OUTPUT).content,
+                terminal_state: "done".into(),
+                receipt_uri: receipt.uri().expect("uri"),
+            }]
+        );
+        assert!(produced_by_flow(
+            &cat,
+            &out_ref(OUTPUT),
+            FLOW,
+            None,
+            std::slice::from_ref(&receipt),
+            None
+        ));
+        assert!(produced_by_flow(
+            &cat,
+            &out_ref(OUTPUT),
+            FLOW,
+            Some("done"),
+            std::slice::from_ref(&receipt),
+            None
+        ));
+        // The same node named through another class is not what the quorum
+        // committed to (#1108): membership is by `(class, id)`, never by id.
+        assert!(!produced_by_flow(
+            &cat,
+            &OutputRef {
+                class_name: "coasys://Role".into(),
+                id: OUTPUT.into(),
+            },
+            FLOW,
+            None,
+            std::slice::from_ref(&receipt),
+            None
+        ));
+    }
+
+    /// The run's subject, and any stranger node, are not outputs: only what
+    /// the proposer named and the quorum committed to is.
+    #[test]
+    fn a_node_the_quorum_did_not_commit_to_is_not_an_output() {
+        let receipt = honest();
+        let cat = catalogue(vec![flow_named("Delivery")]);
+        for not_an_output in [BASE, ATTACKER, INSTANCE] {
+            assert!(
+                !produced_by_flow(
+                    &cat,
+                    &out_ref(not_an_output),
+                    FLOW,
+                    None,
+                    std::slice::from_ref(&receipt),
+                    None
+                ),
+                "`{not_an_output}` must not read as an output"
+            );
+        }
+    }
+
+    // ---- fail closed, per receipt ----------------------------------------
+
+    /// The #1104 re-mint against the enumeration: the honest receipt with
+    /// its outputs swapped for the attacker's node. It fails verification
+    /// (`OutputsNotCommitted`) and contributes nothing — while the honest
+    /// receipt sitting right beside it still answers. Fail-closed is per
+    /// receipt, never per set.
+    ///
+    /// Red if `valid_outputs` reads `receipt.outputs` without verifying, or
+    /// drops every receipt once one is bad.
+    #[test]
+    fn a_forged_re_mint_naming_another_node_contributes_nothing() {
+        let honest = honest();
+        let mut forged = honest.clone();
+        forged.outputs = out_items(&[ATTACKER]);
+        let cat = catalogue(vec![flow_named("Delivery")]);
+
+        let receipts = [forged, honest];
+        let outputs = valid_outputs(&cat, FLOW, None, &receipts, None);
+        assert!(
+            outputs.iter().all(|v| v.output.id != ATTACKER),
+            "a forged receipt's outputs must not be listed: {outputs:?}"
+        );
+        assert!(
+            outputs.iter().any(|v| v.output.id == OUTPUT),
+            "the honest receipt beside the forgery must still answer: {outputs:?}"
+        );
+        assert!(!produced_by_flow(
+            &cat,
+            &out_ref(ATTACKER),
+            FLOW,
+            None,
+            &receipts,
+            None
+        ));
+    }
+
+    /// A receipt carrying an output's content other than what the quorum
+    /// committed to — the edited-then-re-minted shape — is refused whole.
+    ///
+    /// Red if the enumeration compares refs instead of content.
+    #[test]
+    fn a_receipt_carrying_edited_content_contributes_nothing() {
+        let mut edited = honest();
+        edited.outputs[0].content =
+            serde_json::json!({ "id": OUTPUT, "title": "edited" }).to_string();
+        let cat = catalogue(vec![flow_named("Delivery")]);
+
+        assert!(
+            valid_outputs(&cat, FLOW, None, std::slice::from_ref(&edited), None).is_empty(),
+            "content the quorum did not sign must not be listed"
+        );
+    }
+
+    /// `Undecidable` excludes exactly as `Rejected` does. The receipt may
+    /// well be fine — an un-synced catalogue is the reader's gap — but a
+    /// query a payout system acts on must not return an instance on a
+    /// receipt nobody could check.
+    ///
+    /// Red if the filter is written `!is_rejected()` — the boolean trap
+    /// [`VerdictKind`] documents.
+    #[test]
+    fn an_undecidable_receipt_excludes_its_outputs_rather_than_vouching_for_them() {
+        let receipt = honest();
+
+        // FlowUnknown: the reader holds no definition at all.
+        assert!(
+            valid_outputs(
+                &catalogue(Vec::new()),
+                FLOW,
+                None,
+                std::slice::from_ref(&receipt),
+                None
+            )
+            .is_empty(),
+            "no catalogue, no answer — and no output"
+        );
+
+        // DnaChanged: the reader holds a different definition under the URI.
+        let mut other_dna = flow_named("Delivery");
+        other_dna.states.push(
+            serde_json::from_value(serde_json::json!({ "name": "extra", "value": 2.0 }))
+                .expect("state parses"),
+        );
+        assert!(
+            valid_outputs(
+                &catalogue(vec![other_dna]),
+                FLOW,
+                None,
+                std::slice::from_ref(&receipt),
+                None
+            )
+            .is_empty(),
+            "a receipt minted under other DNA answers nothing here"
+        );
+    }
+
+    // ---- the flow and state dimensions ------------------------------------
+
+    /// A receipt for another flow — even one that verifies — does not answer
+    /// a question about this one; and a state filter admits only runs that
+    /// settled into that state.
+    ///
+    /// Red if the `flow_uri` pre-check or the state comparison is dropped.
+    #[test]
+    fn a_receipt_answers_only_for_its_own_flow_and_state() {
+        let delivery = flow_named("Delivery");
+        let other = flow_named("Onboarding");
+        let other_uri = other.flow_uri();
+        let foreign = mint(&other, &[OUTPUT]);
+        let cat = catalogue(vec![delivery, other]);
+
+        assert!(
+            valid_outputs(&cat, FLOW, None, std::slice::from_ref(&foreign), None).is_empty(),
+            "completing Onboarding must not produce Delivery outputs"
+        );
+        assert_eq!(
+            valid_outputs(&cat, &other_uri, None, std::slice::from_ref(&foreign), None).len(),
+            1,
+            "the same receipt answers for its own flow"
+        );
+        assert!(
+            valid_outputs(
+                &cat,
+                &other_uri,
+                Some("open"),
+                std::slice::from_ref(&foreign),
+                None
+            )
+            .is_empty(),
+            "a state the run did not settle into admits nothing"
+        );
+    }
+
+    // ---- the class dimension ----------------------------------------------
+
+    /// The `producedByFlow` model-query filter admits an output only into
+    /// queries for the class it was committed as — by either spelling — and
+    /// a quorum that committed to a node as one class has said nothing about
+    /// it as another. Conformance cannot carry this alone: one node can
+    /// conform to two classes with different content.
+    ///
+    /// Red if `output_matches_class` returns true for a foreign class, or
+    /// matches only one of the two spellings.
+    #[test]
+    fn an_output_counts_only_for_the_class_it_was_committed_as() {
+        let committed = OutputRef {
+            class_name: "coasys://Deliverable".into(),
+            id: OUTPUT.into(),
+        };
+        assert!(output_matches_class(
+            &committed,
+            "coasys://Deliverable",
+            "coasys://Deliverable"
+        ));
+        assert!(
+            output_matches_class(&committed, "Deliverable", "coasys://Deliverable"),
+            "the DNA may name the target class where the query names the shape"
+        );
+        assert!(
+            output_matches_class(&committed, "coasys://Deliverable", "we://deliverable"),
+            "or the query-side name where the shape's target differs"
+        );
+        assert!(
+            !output_matches_class(&committed, "coasys://Task", "we://task"),
+            "a query for another class must not inherit the commitment"
+        );
+    }
+
+    // ---- the API verdict ---------------------------------------------------
+
+    /// `perspective.verifyFlowReceipt` hands out `verdict_wire`, and a client
+    /// branches on its `outcome` string — so each of the three kinds must
+    /// reach the wire as itself. A `Rejected` spelled `"verified"` is a
+    /// forged receipt vouched for; an `Undecidable` spelled `"rejected"` is
+    /// the boolean trap [`VerdictKind`](super::super::verify::verdict::VerdictKind)
+    /// exists to close, slandering a receipt this replica merely could not
+    /// check. What was verified travels only with a verified verdict.
+    ///
+    /// Red if any arm of the `outcome` mapping names another kind, or if the
+    /// verified details leak onto a non-verified verdict.
+    #[test]
+    fn the_wire_verdict_names_each_kind_as_itself() {
+        let cat = catalogue(vec![flow_named("Delivery")]);
+        let honest = honest();
+        let mut forged = honest.clone();
+        forged.outputs = out_items(&[ATTACKER]);
+
+        let verified = verdict_wire(&verify_receipt(&cat, &honest));
+        assert_eq!(verified["outcome"], "verified", "{verified}");
+        assert_eq!(verified["terminalState"], "done", "{verified}");
+        assert!(
+            verified["outputs"].as_array().is_some_and(|o| o.len() == 1),
+            "{verified}"
+        );
+
+        let rejected = verdict_wire(&verify_receipt(&cat, &forged));
+        assert_eq!(rejected["outcome"], "rejected", "{rejected}");
+        assert!(
+            rejected.get("outputs").is_none() && rejected.get("terminalState").is_none(),
+            "a rejected verdict carries nothing a client could act on: {rejected}"
+        );
+
+        let undecidable = verdict_wire(&verify_receipt(&catalogue(Vec::new()), &honest));
+        assert_eq!(undecidable["outcome"], "undecidable", "{undecidable}");
+        assert!(
+            undecidable.get("outputs").is_none(),
+            "an undecidable verdict vouches for nothing either: {undecidable}"
+        );
+    }
+
+    // ---- the verdict memo (#1177) ------------------------------------------
+
+    /// The memo can only save work, never change an answer. The receipt
+    /// verifies under the DNA it was minted under and the memo holds that
+    /// verdict; then the reader's definition changes. The same receipt must
+    /// now read `DnaChanged` — through the memo — not the cached `Verified`,
+    /// and the enumeration must stop listing its outputs.
+    ///
+    /// Red if the memo key drops the flow DNA hash: the second lookup hits
+    /// the first verdict and a receipt minted under old DNA keeps vouching.
+    #[test]
+    fn a_verdict_memo_never_changes_an_answer() {
+        let receipt = honest();
+        let memo = VerdictMemo::default();
+        let same_dna = catalogue(vec![flow_named("Delivery")]);
+        let mut edited = flow_named("Delivery");
+        edited.states.push(
+            serde_json::from_value(serde_json::json!({ "name": "extra", "value": 2.0 }))
+                .expect("state parses"),
+        );
+        let other_dna = catalogue(vec![edited]);
+
+        assert!(memo.settled(&same_dna, &receipt).is_some());
+        assert_eq!(
+            valid_outputs(
+                &same_dna,
+                FLOW,
+                None,
+                std::slice::from_ref(&receipt),
+                Some(&memo)
+            )
+            .len(),
+            1,
+            "precondition: the receipt answers under its own DNA"
+        );
+
+        assert_eq!(
+            memo.settled(&other_dna, &receipt),
+            None,
+            "after the DNA changed the same receipt is not verified through the memo either"
+        );
+        let verdict = verify_receipt(&other_dna, &receipt);
+        assert!(
+            matches!(verdict, ReceiptVerdict::DnaChanged { .. }),
+            "and a fresh verify names why: DnaChanged, got: {verdict}"
+        );
+        assert!(
+            valid_outputs(
+                &other_dna,
+                FLOW,
+                None,
+                std::slice::from_ref(&receipt),
+                Some(&memo)
+            )
+            .is_empty(),
+            "a receipt minted under other DNA answers nothing, memo or not"
+        );
+        // And back under the original DNA the memo is still exact — the
+        // first verdict, not the second.
+        assert!(memo.settled(&same_dna, &receipt).is_some());
+    }
+
+    /// A second read of an unchanged set re-verifies nothing: three receipts
+    /// cost three verifications on the first enumeration and zero on the
+    /// next, whichever surface asks. A forgery beside them is memoised as
+    /// what it is — excluded on the first read and on every later one.
+    ///
+    /// Red if the memo does not store, does not look up, or keys on
+    /// something a repeat read does not reproduce.
+    #[test]
+    fn a_second_read_of_an_unchanged_set_does_zero_re_verifies() {
+        let flow = flow_named("Delivery");
+        let cat = catalogue(vec![flow_named("Delivery")]);
+        let mut forged = honest();
+        forged.outputs = out_items(&[ATTACKER]);
+        let receipts = [
+            mint(&flow, &[OUTPUT]),
+            mint(&flow, &["ad4m://deliverable/d2"]),
+            mint(&flow, &["ad4m://deliverable/d3"]),
+            forged,
+        ];
+        let memo = VerdictMemo::default();
+
+        let first = valid_outputs(&cat, FLOW, None, &receipts, Some(&memo));
+        assert_eq!(first.len(), 3, "{first:?}");
+        assert_eq!(
+            memo.verifications(),
+            4,
+            "the first read verifies every candidate once, the forgery included"
+        );
+
+        let second = valid_outputs(&cat, FLOW, None, &receipts, Some(&memo));
+        assert_eq!(second, first, "the memo changes nothing about the answer");
+        assert!(produced_by_flow(
+            &cat,
+            &out_ref(OUTPUT),
+            FLOW,
+            Some("done"),
+            &receipts,
+            Some(&memo)
+        ));
+        assert_eq!(
+            first_produced_at(&cat, FLOW, None, &receipts, Some(&memo)).len(),
+            3
+        );
+        assert_eq!(
+            memo.verifications(),
+            4,
+            "an unchanged set is answered from the memo: zero re-verifies across three surfaces"
+        );
+    }
+
+    /// The memo key has to cover every input `verify_receipt` reads from the
+    /// catalogue, and the DNA hash alone does not. `flow_dna_hash` sorts
+    /// `states` by name on purpose (link order is a store artefact), but
+    /// `initial_state_of` is `states.first()`, and the fold refuses a
+    /// genesis other than it. The parser keeps equal-`value` states in link
+    /// order, so one DNA can load as `[open, done]` on one read and
+    /// `[done, open]` on the next: same DNA hash, different verdict. Keyed on
+    /// the DNA hash alone, the memo serves the first read's `Verified` on
+    /// the second, where a fresh verify says `Unfoldable`. (CodeRabbit on
+    /// #1201.)
+    ///
+    /// Red with the memo keyed on `flow_dna_hash`.
+    #[test]
+    fn a_memo_hit_equals_a_fresh_verify_when_the_states_reload_in_another_order() {
+        use crate::perspectives::flow_instance::receipt::flow_dna_hash;
+
+        let equal_value_states = |order: [&str; 2]| -> SHACLFlow {
+            let mut flow = flow_named("Delivery");
+            flow.states = order
+                .iter()
+                .map(|name| {
+                    serde_json::from_value(serde_json::json!({ "name": name, "value": 0.0 }))
+                        .expect("state parses")
+                })
+                .collect();
+            flow
+        };
+        let first_load = catalogue(vec![equal_value_states(["open", "done"])]);
+        let second_load = catalogue(vec![equal_value_states(["done", "open"])]);
+        assert_eq!(
+            flow_dna_hash(&first_load[FLOW]).expect("hash"),
+            flow_dna_hash(&second_load[FLOW]).expect("hash"),
+            "precondition: state order is not part of the DNA"
+        );
+        let receipt = mint(&first_load[FLOW], &[OUTPUT]);
+        let memo = VerdictMemo::default();
+        assert!(memo.settled(&first_load, &receipt).is_some());
+
+        let fresh = verify_receipt(&second_load, &receipt);
+        let hit = memo.settled(&second_load, &receipt);
+        assert_eq!(
+            hit,
+            SettledRun::of(&fresh),
+            "a memo hit must equal a fresh verify — fresh: {fresh}; memo: {hit:?}"
+        );
+    }
+
+    /// The memo holds a projection, never a verdict. A rejected verdict
+    /// carries data the receipt's writer sized — `OutputsNotCommitted.claimed`
+    /// is the whole outputs list — and memoising it bounded the memo by
+    /// 4096 × body size (Marvin on #1201). Every surface answers the same
+    /// with the memo as without, on the first read and on the hits, while a
+    /// forgery naming a thousand outputs leaves nothing of its list behind:
+    /// the memo weighs its keys plus one small `Verified` projection.
+    ///
+    /// Red if the projection drops `terminal_state` or `settled_at`, or if a
+    /// hit is answered with anything but the stored projection.
+    #[test]
+    fn the_memo_answers_like_a_fresh_verify_and_keeps_nothing_of_a_rejection() {
+        use super::super::verify::memo::MEMO_ENTRY_MAX_BYTES;
+
+        let flow = flow_named("Delivery");
+        let cat = catalogue(vec![flow_named("Delivery")]);
+        let thousand: Vec<String> = (0..1000)
+            .map(|i| format!("ad4m://attacker/node-{i:04}"))
+            .collect();
+        let mut forged = mint(&flow, &[OUTPUT]);
+        forged.outputs = out_items(&thousand.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut edited = mint(&flow, &["ad4m://deliverable/d2"]);
+        edited.outputs[0].content = serde_json::json!({ "title": "edited" }).to_string();
+        let receipts = [mint(&flow, &[OUTPUT]), forged, edited];
+        let memo = VerdictMemo::default();
+
+        let plain = valid_outputs(&cat, FLOW, None, &receipts, None);
+        let plain_at = first_produced_at(&cat, FLOW, None, &receipts, None);
+        assert_eq!(
+            plain.len(),
+            1,
+            "precondition: only the honest receipt verifies"
+        );
+        assert_eq!(
+            plain_at.get(&out_ref(OUTPUT)).map(String::as_str),
+            Some(T1),
+            "precondition: the quorum time reaches the role gate through the projection"
+        );
+        for read in ["first read", "second read"] {
+            assert_eq!(
+                valid_outputs(&cat, FLOW, None, &receipts, Some(&memo)),
+                plain,
+                "{read}"
+            );
+            assert_eq!(
+                first_produced_at(&cat, FLOW, None, &receipts, Some(&memo)),
+                plain_at,
+                "{read}"
+            );
+        }
+        assert_eq!(
+            memo.verifications(),
+            3,
+            "each receipt is verified once, then every surface answers from the memo"
+        );
+
+        let keys: usize = receipts
+            .iter()
+            .map(|r| r.uri().expect("uri").len() + 64)
+            .sum();
+        let held = memo.bytes_held();
+        assert!(
+            held <= keys + MEMO_ENTRY_MAX_BYTES,
+            "the memo holds three keys and one small projection, not the forgery's \
+             thousand-output list: {held} bytes held, {keys} of them keys"
+        );
+    }
+
+    /// Even a `Verified` projection can be writer-sized. A link signature
+    /// covers the parsed instant, not the timestamp string
+    /// (`agent::signatures::verify` re-parses it), chrono reads the first
+    /// nine fractional digits and skips the rest, and the fold carries the
+    /// string verbatim into `settled_at`. So a self-quorate proposer
+    /// (`{ n: 1 }`) can stamp the vote that settles the run with a kilobyte
+    /// of fractional zeros and still sign it validly. Over
+    /// [`MEMO_ENTRY_MAX_BYTES`] the projection is answered but not stored,
+    /// so the next read re-verifies — the same answer, as without a memo.
+    ///
+    /// Red without the weight check before `put`.
+    #[test]
+    fn a_verified_run_with_a_padded_timestamp_is_answered_but_not_memoised() {
+        use super::super::verify::memo::MEMO_ENTRY_MAX_BYTES;
+
+        // The same instant as `T1`, spelled with `MEMO_ENTRY_MAX_BYTES`
+        // fractional zeros, so the fixture's real signatures still verify.
+        let padded = format!("2026-01-01T00:00:00.{}Z", "0".repeat(MEMO_ENTRY_MAX_BYTES));
+        let mut read_set = completed(&[OUTPUT]);
+        for link in read_set
+            .proposals
+            .iter_mut()
+            .flat_map(|p| p.links.iter_mut())
+        {
+            link.timestamp = padded.clone();
+        }
+        let flow = flow_named("Delivery");
+        let receipt = FlowReceipt::mint(&flow, read_set, out_items(&[OUTPUT]), Vec::new())
+            .expect("the re-spelled timestamps parse to the signed instant, so the run mints");
+        let cat = catalogue(vec![flow]);
+        let memo = VerdictMemo::default();
+
+        let fresh = settle(&cat, &receipt);
+        assert!(
+            fresh.as_ref().is_some_and(|s| s.settled_at == padded),
+            "precondition: the padded timestamp is the quorum time, got {fresh:?}"
+        );
+        assert_eq!(memo.settled(&cat, &receipt), fresh);
+        assert_eq!(memo.settled(&cat, &receipt), fresh);
+        assert_eq!(
+            memo.verifications(),
+            2,
+            "a projection over the entry cap is not stored, so the second read re-verifies"
+        );
+        assert_eq!(memo.bytes_held(), 0, "and nothing of it is held");
+    }
+
+    // ---- determinism -------------------------------------------------------
+
+    /// Two mints of the same completion collapse to one entry, and the list
+    /// is sorted — two replicas enumerating the same receipts agree.
+    #[test]
+    fn the_enumeration_is_sorted_and_deduplicated() {
+        let flow = flow_named("Delivery");
+        let cat = catalogue(vec![flow_named("Delivery")]);
+        let twin_a = mint(&flow, &[OUTPUT, "ad4m://deliverable/d2"]);
+        let twin_b = twin_a.clone();
+
+        let outputs = valid_outputs(&cat, FLOW, None, &[twin_a, twin_b], None);
+        let ids: Vec<&str> = outputs.iter().map(|v| v.output.id.as_str()).collect();
+        assert_eq!(ids, vec![OUTPUT, "ad4m://deliverable/d2"]);
+    }
+}

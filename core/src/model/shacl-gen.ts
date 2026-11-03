@@ -52,6 +52,8 @@ export function buildSHACL(
      * an `ad4m://interpretation_hint` link by `SHACLShape.toLinks()`.
      */
     interpretationHint?: string,
+    /** `@Model({ abstract: true })`: emitted as one `ad4m://abstract` link. */
+    isAbstract?: boolean,
 ): { shape: SHACLShape; name: string } {
     const obj = target.prototype;
 
@@ -86,6 +88,9 @@ export function buildSHACL(
     if (interpretationHint) {
         shape.interpretationHint = interpretationHint;
     }
+    if (isAbstract) {
+        shape.isAbstract = true;
+    }
 
     // ── Seed the memoisation cache while we keep building ──────────────
     // Any subsequent `target.generateSHACL()` call from inside this
@@ -118,11 +123,31 @@ export function buildSHACL(
 
     let destructorActions: any[] = [];
 
+    // Class-field initialisers (`count = 0`) run in the constructor, not on the
+    // prototype, so read them from one instance built without a perspective.
+    let instance: any;
+    try { instance = new target(); } catch {}
+    const fieldValue = (propName: string): unknown => {
+        try { return obj[propName] ?? instance?.[propName]; } catch { return undefined; }
+    };
+
     // ── Convert properties to SHACL property shapes ────────────────────
     for (const propName in properties) {
         const propMeta = properties[propName];
 
         if (!propMeta.through) continue; // Skip properties without predicates
+
+        // `@BelongsToOne`/`@BelongsToMany` register in both maps: the relation
+        // registry describes the edge, and `applyPropertyMetadata` marks the
+        // accessor read-only so the non-owning side gets no setter. Both loops
+        // then emitted a shape for it, so an inverse relation appeared twice in
+        // the generated SHACL — once thinly, from here, and once with its target
+        // class, polymorphism and ordering, from the relation loop below.
+        //
+        // The relation loop is the complete description, so this one stands
+        // aside. Skipping by presence in the relation map rather than by kind
+        // keeps it right for any future decorator that registers in both.
+        if (allRelationsMeta[propName]) continue;
 
         const propShape: SHACLPropertyShape = {
             name: propName,
@@ -151,9 +176,10 @@ export function buildSHACL(
             const isLiteral =
                 propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
             if ((propMeta.initial !== undefined || isLiteral) && !propMeta.getter) {
-                const initialType = typeof obj[propName];
+                const initialType = typeof fieldValue(propName);
                 if (initialType === "number") {
-                    propShape.datatype = "xsd://integer";
+                    // decimal, not integer: a `= 0` default must not make 0.5 invalid.
+                    propShape.datatype = "xsd://decimal";
                 } else if (initialType === "boolean") {
                     propShape.datatype = "xsd://boolean";
                 } else if (initialType === "string" || isLiteral) {
@@ -215,6 +241,11 @@ export function buildSHACL(
         // (emitted as `ad4m://identity` by SHACLShape.toLinks()).
         if (propMeta.identity) {
             propShape.identity = true;
+        }
+
+        // Names for abstract classes (emitted as `ad4m://alias`).
+        if (propMeta.alias) {
+            propShape.alias = propMeta.alias;
         }
 
         // ── Setter actions ──────────────────────────────────────────────
@@ -329,10 +360,17 @@ export function buildSHACL(
         if (relMeta.interpretationHint) {
             relShape.interpretationHint = relMeta.interpretationHint;
         }
+        if (relMeta.alias) {
+            relShape.alias = relMeta.alias;
+        }
 
         // Adder / Remover actions — only meaningful for relations backed
-        // by a real link predicate.  Getter-only relations are read-only.
-        if (relMeta.predicate) {
+        // by a real link predicate.  Getter-only relations are read-only,
+        // and so is one declared `readOnly`, which keeps its predicate as
+        // the shape's path but must offer no way to write it.
+        if (relMeta.readOnly) {
+            relShape.writable = false;
+        } else if (relMeta.predicate) {
             relShape.adder = [{
                 action: "addLink",
                 source: "this",
@@ -491,11 +529,8 @@ export function buildSHACL(
         });
     }
 
-    // Always set constructor and destructor actions on the shape, even
-    // when empty.  An empty array serialises to `literal:string:[]`
-    // which the Rust executor parses as a valid (no-op) command list,
-    // avoiding "No SHACL constructor found" errors for models whose
-    // properties are all optional and have no @Flag.
+    // Empty lists are valid: the executor stores them as `literal:string:[]`,
+    // so `createSubject` works for all-optional models without a @Flag.
     shape.setConstructorActions(constructorActions);
     shape.setDestructorActions(destructorActions);
 
