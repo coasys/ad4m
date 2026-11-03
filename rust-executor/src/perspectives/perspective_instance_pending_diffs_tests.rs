@@ -106,6 +106,31 @@ fn enqueue(perspective: &PerspectiveInstance, diff: &PerspectiveDiff) {
     Ad4mDb::with_global_instance(|db| db.add_pending_diff(&perspective.uuid, diff)).unwrap();
 }
 
+/// Store `target`'s link as Shared, as a write through `commit` leaves it.
+fn store_shared(perspective: &PerspectiveInstance, target: &str) {
+    perspective
+        .sparql_store
+        .add_link(&LinkExpression {
+            status: Some(LinkStatus::Shared),
+            ..link("did:key:alice", target)
+        })
+        .unwrap();
+}
+
+/// `fake`'s commit, with a render that answers `remote`.
+fn rendering_language(fake: &Arc<FakeLanguage>, remote: Vec<LinkExpression>) -> Language {
+    let fake = fake.clone();
+    Language::with_test_commit(
+        "fake-link-language".to_string(),
+        Arc::new(move |diff| fake.commit(diff)),
+    )
+    .with_test_render(Arc::new(move || {
+        Ok(Some(Perspective {
+            links: remote.clone(),
+        }))
+    }))
+}
+
 /// Diffs still waiting to be committed.
 fn pending(perspective: &PerspectiveInstance) -> usize {
     Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&perspective.uuid, None))
@@ -314,32 +339,30 @@ async fn a_refused_diff_does_not_block_the_diffs_behind_it() {
 
 /// The fallback sync sends the Shared links the remote lacks, but never the
 /// links of a parked diff: they stay Shared in the store, and sending them
-/// would put them behind the diffs that went through after them.
+/// would put them behind the diffs that went through after them. The parked
+/// diff failed only transiently, so the language would take it again.
 #[tokio::test(start_paused = true)]
 async fn the_fallback_sync_does_not_send_a_parked_diff_again() {
     let fake = Arc::new(FakeLanguage::default());
+    fake.fail_next.store(2, Ordering::SeqCst);
     let perspective = neighbourhood_perspective(&fake).await;
-    enqueue(&perspective, &add(REFUSED));
-    enqueue(&perspective, &add("after"));
+    enqueue(&perspective, &add("a"));
+    enqueue(&perspective, &add("b"));
     let task = start_loop(&perspective);
-    run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    run_until(Duration::from_secs(60), || pending(&perspective) == 0)
+        .await
+        .expect("the queue drains");
     task.abort();
+    assert_eq!(parked_targets(&perspective), vec!["a"]);
 
-    let parked =
-        Ad4mDb::with_global_instance(|db| db.get_parked_additions(&perspective.uuid)).unwrap();
-    assert_eq!(parked, vec![link("did:key:alice", REFUSED)]);
+    for target in ["a", "b", "missing"] {
+        store_shared(&perspective, target);
+    }
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, vec![link("did:key:alice", "b")]));
 
-    let local = [
-        (link("did:key:alice", REFUSED), LinkStatus::Shared),
-        (link("did:key:alice", "after"), LinkStatus::Shared),
-        (link("did:key:alice", "missing"), LinkStatus::Shared),
-    ];
-    let remote = [link("did:key:alice", "after")];
-    let to_send: Vec<String> = links_missing_remotely(&local, &remote, &parked)
-        .into_iter()
-        .map(|l| l.data.target)
-        .collect();
-    assert_eq!(to_send, vec!["missing"]);
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(fake.committed(), vec!["+b", "+missing"]);
 }
 
 /// Two healthy diffs; the batch and the oldest alone fail on a transient
