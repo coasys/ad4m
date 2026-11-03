@@ -23,9 +23,10 @@ use super::model_query::types::{ModelShape, Scope};
 use super::perspective_instance::{PerspectiveInstance, SdnaType, SubjectClassOption};
 use super::shacl_parser::parse_shacl_to_links;
 use super::sparql_store::SparqlStore;
+use crate::agent::signatures::TestSigner;
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use crate::types::{Link, LinkExpression};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Once;
 
@@ -183,21 +184,13 @@ pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
         },
     ];
     links.extend(parse_shacl_to_links(sdna, class).unwrap());
+    let signer = TestSigner::generate();
     for l in links {
-        store
-            .add_link(&DecoratedLinkExpression {
-                author: "did:key:test".into(),
-                timestamp: "1700000000000".into(),
-                data: l,
-                proof: DecoratedExpressionProof {
-                    key: "k".into(),
-                    signature: "s".into(),
-                    valid: Some(true),
-                    invalid: Some(false),
-                },
-                status: None,
-            })
-            .unwrap();
+        let signed = signer.sign(l);
+        let mut le = LinkExpression::from(signed);
+        // The store refuses status-less inserts.
+        le.status = Some(crate::types::LinkStatus::Shared);
+        store.add_link(&le).unwrap();
     }
     load_shape(&store, class).unwrap()
 }
@@ -296,10 +289,14 @@ pub(crate) async fn setup_interpretation_e2e(
             local: None,
             api: Some(ModelApiInput {
                 base_url,
-                api_key: std::env::var("INTERPRETATION_E2E_API_KEY")
-                    .unwrap_or_else(|_| "ollama".into()),
+                api_key: Some(
+                    std::env::var("INTERPRETATION_E2E_API_KEY")
+                        .unwrap_or_else(|_| "ollama".into())
+                        .into(),
+                ),
                 model,
                 api_type: crate::types::ModelApiType::OpenAi.to_string(),
+                max_num_ctx: None,
             }),
         })
         .await

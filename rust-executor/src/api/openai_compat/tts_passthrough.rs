@@ -15,7 +15,7 @@
 //!
 //! No new dependencies: we reuse the existing `reqwest` client.
 
-use crate::api::auth::AuthContext;
+use crate::db::Ad4mDb;
 use crate::types::{ModelApiType, ModelType};
 
 use super::types::SpeechRequest;
@@ -30,10 +30,7 @@ pub enum TtsPassthroughError {
 /// Forward a `/v1/audio/speech` request to a configured upstream and
 /// return the raw audio bytes.  Returns [`TtsPassthroughError::NotConfigured`]
 /// when no upstream is registered.
-pub async fn synthesize(
-    _auth: &AuthContext,
-    req: &SpeechRequest,
-) -> Result<Vec<u8>, TtsPassthroughError> {
+pub async fn synthesize(req: &SpeechRequest) -> Result<Vec<u8>, TtsPassthroughError> {
     let upstream = find_tts_upstream(&req.model)?;
 
     let body = serde_json::json!({
@@ -52,7 +49,8 @@ pub async fn synthesize(
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{base}/v1/audio/speech"))
-        .bearer_auth(&upstream.api_key)
+        // The upstream provider is the key's one receiver.
+        .bearer_auth(upstream.api_key.expose_once())
         .json(&body)
         .send()
         .await
@@ -75,7 +73,7 @@ pub async fn synthesize(
 
 struct TtsUpstream {
     base_url: String,
-    api_key: String,
+    api_key: crate::secret::Secret,
     upstream_model: String,
 }
 
@@ -89,8 +87,7 @@ struct TtsUpstream {
 /// `ModelType::TextToSpeech` enum lands, swap the filter to that type
 /// and remove this comment.
 fn find_tts_upstream(requested_model: &str) -> Result<TtsUpstream, TtsPassthroughError> {
-    let models = crate::db_backend::db_backend()
-        .get_models()
+    let models = Ad4mDb::with_global_instance(|db| db.get_models())
         .map_err(|_| TtsPassthroughError::NotConfigured)?;
 
     // Prefer an exact name match (callers send the upstream model

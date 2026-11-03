@@ -12,6 +12,31 @@ export function generateRandomPassphrase(length: number = 32): string {
   return result;
 }
 
+/**
+ * Whether a URL points at this machine's loopback interface.
+ *
+ * Two callers need the same answer for different reasons: the credential guard
+ * treats loopback as safe for plaintext http, and setup treats a non-loopback
+ * endpoint that did not answer as a mistake worth warning about. An unparseable
+ * URL is not loopback — callers report that separately.
+ */
+export function isLoopbackEndpoint(endpoint: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "::1" ||
+    host === "0:0:0:0:0:0:0:1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Waker subscription persistence via stateDir
 // ---------------------------------------------------------------------------

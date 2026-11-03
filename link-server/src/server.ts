@@ -3,6 +3,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import websocketPlugin from "@fastify/websocket";
 import { AuthManager, ChallengeStore } from "./auth.js";
 import { LinkServerDB } from "./db.js";
+import { LogTail, teeDestination } from "./log-tail.js";
+import { buildOperatorApp, type OperatorOptions } from "./operator.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 import { registerRoutes, type RouteContext } from "./routes.js";
 import { TelepresenceManager } from "./telepresence.js";
@@ -17,6 +19,11 @@ export interface ServerOptions {
   telepresenceGraceMs?: number;
   /** Enable Fastify's pino logger. Default false (quiet, e.g. for tests). */
   logger?: boolean;
+  /**
+   * Where the log lines go when `logger` is on. Default stdout. Each line is
+   * also kept in `logTail` for the operator's live log view.
+   */
+  logDestination?: { write(line: string): unknown };
   /**
    * When true, any DID that passes the challenge-response flow gets
    * auto-admitted to any room's ACL on first contact. Designed for
@@ -42,11 +49,20 @@ export interface ServerOptions {
   sessionSweepIntervalMs?: number;
   /** WebSocket rate-limit and auth-timeout overrides. */
   wsOptions?: WsManagerOptions;
+  /**
+   * Builds the operator admission app (operator.ts) next to the public one.
+   * The caller listens on it separately, on loopback only. Off by default.
+   */
+  operator?: OperatorOptions;
 }
 
 export interface BuiltServer {
   app: FastifyInstance;
+  /** Present when `operator` was given; not listening until the caller says so. */
+  operatorApp?: FastifyInstance;
   db: LinkServerDB;
+  /** The recent log lines of both apps; present when `logger` is on. */
+  logTail?: LogTail;
   close: () => Promise<void>;
 }
 
@@ -60,8 +76,15 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   const dbPath = opts.dataDir === ":memory:" ? ":memory:" : path.join(opts.dataDir, "data.sqlite");
   const db = new LinkServerDB(dbPath, { maxDiffsPerRoom: opts.maxDiffsPerRoom });
 
+  // One destination for both apps, so the operator's log view shows the
+  // public app's lines and its own.
+  const logTail = opts.logger ? new LogTail() : undefined;
+  const logger = logTail
+    ? { stream: teeDestination(opts.logDestination ?? process.stdout, logTail) }
+    : false;
+
   const app = Fastify({
-    logger: opts.logger ?? false,
+    logger,
     bodyLimit: opts.bodyLimit ?? 10 * 1024 * 1024, // 10 MiB
   });
   await app.register(websocketPlugin, {
@@ -101,6 +124,16 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   registerRoutes(app, ctx);
   ws.register(app);
 
+  const operatorApp = opts.operator
+    ? await buildOperatorApp(
+        { db, auth, ws, telepresence, logTail, autoAdmit: opts.autoAdmit ?? false },
+        { logger, ...opts.operator }
+      )
+    : undefined;
+
+  const admission = opts.autoAdmit ? "auto" : "allowlist";
+  app.log.info({ admission }, `admission mode: ${admission}`);
+
   // Periodic sweep of expired JWT sessions from the DB.
   const sweepInterval = setInterval(() => {
     db.sweepExpiredSessions();
@@ -120,8 +153,12 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
 
   return {
     app,
+    operatorApp,
     db,
+    logTail,
     close: async () => {
+      // The operator app shares the DB the public app's onClose closes.
+      await operatorApp?.close();
       await app.close();
     },
   };

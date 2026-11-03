@@ -2,7 +2,8 @@
  * Shared query helpers used by both the Prolog and SPARQL query pipelines.
  */
 
-import type { Scope } from "./types";
+import type { Scope, TraverseScope } from "./types";
+import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./types";
 import { getRelationsMetadata } from "./decorators";
 
 /**
@@ -14,12 +15,39 @@ import { getRelationsMetadata } from "./decorators";
  *   - With `field`: direct key lookup
  *   - Without `field`: scan for a relation whose `target()` matches `childCtor`
  */
+/**
+ * Narrow a scope to the one-parent forms, for the paths that write a link.
+ *
+ * A traversal describes a read outward from several anchors. Creating a record
+ * "under" one would have to pick which, and nothing in the scope says — so this
+ * refuses rather than guessing at the first of the list. The executor's write
+ * scopes refuse it for the same reason.
+ */
+export function requireSingleParent(parent: Scope): Exclude<Scope, TraverseScope> {
+  if (isTraverseScope(parent)) {
+    throw new Error(
+      'parent(): a traverse scope describes a read and names no single parent to write under. ' +
+        'Use { id, predicate } or { model, id } when creating a record under a parent.',
+    );
+  }
+  return parent;
+}
+
 export function resolveParentPredicate(
   parent: Scope,
   childCtor: Function,
 ): string {
   // Raw form — explicit predicate
   if ('predicate' in parent) return parent.predicate;
+
+  // Containment form — one predicate per containment edge, resolved by the
+  // executor from the installed classes. There is no single one to return.
+  if (isContainedScope(parent) || isContainmentTraversal(parent)) {
+    throw new Error(
+      'parent(): a containment scope { id } names no single predicate; the executor resolves ' +
+        'it. Use the model query path (findAll / query / subscribe) to read it.',
+    );
+  }
 
   // Model form — resolve from relation metadata
   const { model } = parent;

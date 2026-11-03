@@ -9,7 +9,7 @@ configurable (`Ad4mConfig.prolog_mode` / `AD4M_PROLOG_MODE`).
 
 | Mode | Behaviour |
 |---|---|
-| `Disabled` | no engines; regular/context queries return empty matches, subscription queries return `False`; facts updates no-op |
+| `Disabled` | no engines; regular/context queries return empty matches; facts updates no-op |
 | `Simple` | one engine per perspective, lazy fact reload on query (`SimpleEngine` in `mod.rs`) |
 | `SdnaOnly` | engine with SDNA facts only, no link data (`sdna_pool.rs`) |
 | `Pooled` | `engine_pool.rs`: N engines round-robin + per-source filtered sub-pools (`filtered_pool.rs`, gated by `FILTERING_THRESHOLD`) + SDNA pool |
@@ -25,6 +25,11 @@ configurable (`Ad4mConfig.prolog_mode` / `AD4M_PROLOG_MODE`).
 | `sdna_pool.rs` | SDNA-only pool |
 | `pool_trait.rs` | `FilteredPool` trait + `PoolUtils` shared by all three pools |
 | `source_filtering.rs`, `assert_utils.rs`, `embedding_cache.rs`, `types.rs` | fact filtering, assert-query parsing, cache, `QueryResolution`/`QueryMatch` |
+
+Live queries (`perspective.subscribeQuery`) are SPARQL or model queries and do
+not use Prolog; a Prolog live query gets a 400. The filtered sub-pools were built
+for Prolog live queries and are now only reached through `run_query_smart`
+(`is_subscription = false` uses existing filtered pools, never creates one).
 
 Fact generators live in `perspectives/sdna.rs` (`get_data_facts`, `get_sdna_facts`,
 `get_static_infrastructure_facts`) and `perspectives/shacl_to_prolog.rs` (SHACL →

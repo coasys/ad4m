@@ -571,6 +571,7 @@
             "npm:svelte-preprocess@4",
             "npm:svelte@3",
             "npm:tslib@2",
+            "npm:tsx@4",
             "npm:typescript@^4.5.5"
           ]
         }
@@ -644,6 +645,7 @@
             "npm:cross-fetch@^3.1.4",
             "npm:honkit@4",
             "npm:jest@29",
+            "npm:n3@^2.7.12",
             "npm:pako@^2.1.0",
             "npm:patch-package@8",
             "npm:react-dom@*",

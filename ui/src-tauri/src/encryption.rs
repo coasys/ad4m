@@ -3,19 +3,32 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use base64::{engine::general_purpose, Engine as _};
+#[cfg(not(test))]
 use keyring::Entry;
+#[cfg(not(test))]
 use std::sync::Mutex;
 
 // Service name for keyring entry
+#[cfg(not(test))]
 const KEYRING_SERVICE: &str = "ad4m-launcher";
+#[cfg(not(test))]
 const KEYRING_USER: &str = "smtp-encryption-key";
 
 // Lazy static mutex to ensure thread-safe access to keyring
+#[cfg(not(test))]
 lazy_static::lazy_static! {
     static ref KEYRING_MUTEX: Mutex<()> = Mutex::new(());
 }
 
+/// Tests never read or create the OS keyring entry (on a developer's
+/// machine it holds the real launcher's key): a fixed key stands in.
+#[cfg(test)]
+fn get_encryption_key() -> Result<Key<Aes256Gcm>, Box<dyn std::error::Error>> {
+    Ok(*Key::<Aes256Gcm>::from_slice(&[7u8; 32]))
+}
+
 /// Get or create the encryption key from the system keyring
+#[cfg(not(test))]
 fn get_encryption_key() -> Result<Key<Aes256Gcm>, Box<dyn std::error::Error>> {
     let _lock = KEYRING_MUTEX.lock().unwrap();
 

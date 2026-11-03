@@ -14,6 +14,7 @@ import {
   Property,
   Flag,
   HasMany,
+  HasOne,
   Optional,
   buildConformanceFilter,
 } from "./decorators";
@@ -99,6 +100,13 @@ describe("buildConformanceFilter()", () => {
     expect(result!.getter).toContain("test://type");
     expect(result!.getter).toContain("test://flagged_type");
     expect(result!.getter).toContain("test://name");
+    // Exact form: the executor's `verify_relation_getter` (rust-executor
+    // model_query/getters.rs) matches this prefix to add the #1113 proof
+    // filter, and `verify_relation_getter_rewrites_the_sdk_conformance_getter`
+    // holds the same string. Change both together.
+    expect(result!.getter).toBe(
+      "SELECT ?target WHERE { <Base> <test://has_flagged> ?target . ?target <test://type> <test://flagged_type> . ?target <test://name> ?_v0 . }"
+    );
   });
 
   it("should return undefined for a target with no conformance conditions", () => {
@@ -634,6 +642,111 @@ describe("where clause validation", () => {
   });
 });
 
+describe("relation datatype vs target (#908)", () => {
+  const DATATYPE_TARGET = /datatype.*target.*mutually exclusive/i;
+
+  it("throws when an options object sets both datatype and target", () => {
+    expect(() => {
+      @Model({ name: "InvalidDatatypeTarget" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          through: "test://pred",
+          target: () => FlaggedTarget,
+          datatype: "xsd://string",
+        })
+        items: string[] = [];
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("throws when the target-thunk shorthand is given a datatype", () => {
+    expect(() => {
+      @Model({ name: "InvalidDatatypeTargetShorthand" })
+      class _Invalid extends Ad4mModel {
+        @HasMany(() => FlaggedTarget, {
+          through: "test://pred",
+          datatype: "xsd://string",
+        })
+        items: string[] = [];
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("throws on a getter relation that sets both", () => {
+    expect(() => {
+      @Model({ name: "InvalidGetterDatatypeTarget" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          getter: "SELECT ?target WHERE { ?target ?p <Base> . }",
+          target: () => FlaggedTarget,
+          datatype: "xsd://string",
+        })
+        items: string[] = [];
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("throws on a to-one relation that sets both", () => {
+    expect(() => {
+      @Model({ name: "InvalidHasOneDatatypeTarget" })
+      class _Invalid extends Ad4mModel {
+        @HasOne(() => FlaggedTarget, {
+          through: "test://pred",
+          datatype: "xsd://string",
+        })
+        item: string = "";
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("keeps datatype with through as a literal relation", () => {
+    @Model({ name: "ValidDatatypeThrough" })
+    class ValidDatatypeThrough extends Ad4mModel {
+      @HasMany({ through: "test://pred", datatype: "xsd://string" })
+      items: string[] = [];
+    }
+
+    const { shape } = (ValidDatatypeThrough as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.datatype).toBe("xsd://string");
+    expect(rel.nodeKind).toBe("Literal");
+    expect(rel.class).toBeUndefined();
+  });
+
+  it("keeps datatype with getter as a literal relation", () => {
+    @Model({ name: "ValidDatatypeGetter" })
+    class ValidDatatypeGetter extends Ad4mModel {
+      @HasMany({
+        getter: "SELECT ?target WHERE { <Base> <test://pred> ?target . }",
+        datatype: "xsd://string",
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (ValidDatatypeGetter as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.datatype).toBe("xsd://string");
+    expect(rel.nodeKind).toBe("Literal");
+  });
+
+  it("keeps target without datatype as an instance relation", () => {
+    @Model({ name: "ValidTargetOnly" })
+    class ValidTargetOnly extends Ad4mModel {
+      @HasMany(() => FlaggedTarget, { through: "test://pred" })
+      items: string[] = [];
+    }
+
+    const { shape } = (ValidTargetOnly as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.datatype).toBeUndefined();
+    expect(rel.nodeKind).toBe("IRI");
+    expect(rel.targetClassName).toBe("FlaggedTarget");
+  });
+});
+
 describe("where clause compilation", () => {
   // Under the source-of-truth refactor the SHACL writer no longer inlines
   // `where` conditions into the relation's SPARQL getter.  Instead it emits
@@ -856,5 +969,90 @@ describe("compileWhereClause()", () => {
     expect(conditions).toHaveLength(1);
     expect(conditions[0]).toContain("test://raw_pred");
     expect(conditions[0]).toContain("value");
+  });
+});
+
+// ============================================================================
+// readOnly relations
+// ============================================================================
+
+@Model({ name: "ReadOnlyRelations" })
+class ReadOnlyRelations extends Ad4mModel {
+  @HasMany({
+    through: "test://voted_by",
+    getter: "SELECT ?target WHERE { ?source <test://voted_by> ?target . }",
+    readOnly: true,
+  })
+  votedBy: string[] = [];
+
+  @HasMany({ through: "test://tags" })
+  tags: string[] = [];
+}
+
+describe("readOnly relations", () => {
+  const shape = () => (ReadOnlyRelations as any).generateSHACL().shape as SHACLShape;
+  const prop = (name: string) =>
+    shape().properties.find((p: SHACLPropertyShape) => p.name === name)!;
+
+  it("keep their predicate as the shape's path, so a subscription re-runs on it", () => {
+    expect(prop("votedBy").path).toBe("test://voted_by");
+    expect(prop("votedBy").getter).toContain("test://voted_by");
+  });
+
+  it("generate no adder or remover and are marked not writable", () => {
+    expect(prop("votedBy").adder).toBeUndefined();
+    expect(prop("votedBy").remover).toBeUndefined();
+    expect(prop("votedBy").writable).toBe(false);
+  });
+
+  it("get no add/remove/set methods", () => {
+    const instance = ReadOnlyRelations.prototype as any;
+    expect(instance.addVotedBy).toBeUndefined();
+    expect(instance.removeVotedBy).toBeUndefined();
+    expect(instance.setVotedBy).toBeUndefined();
+    expect(typeof instance.addTags).toBe("function");
+  });
+
+  it("leave an ordinary relation writable", () => {
+    expect(prop("tags").adder).toBeDefined();
+    expect(prop("tags").writable).not.toBe(false);
+  });
+});
+
+@Model({ name: "SavesReadOnly" })
+class SavesReadOnly extends Ad4mModel {
+  @HasMany({ through: "test://read_only", readOnly: true })
+  readOnlyLinks: string[] = ["test://a"];
+
+  @HasMany({ through: "test://writable" })
+  writableLinks: string[] = ["test://b"];
+}
+
+describe("readOnly relations when saving", () => {
+  it("are skipped by save() and create(), even without a getter", async () => {
+    const proto = SavesReadOnly.prototype as any;
+    const set = jest.spyOn(proto, "setRelationValues").mockResolvedValue(undefined);
+    const add = jest.spyOn(proto, "addRelationValue").mockResolvedValue(undefined);
+    try {
+      const instance = new SavesReadOnly({ uuid: "p" } as any, "test://instance");
+      await (instance as any).innerUpdate(true);
+
+      const touched = [...set.mock.calls, ...add.mock.calls].map((call) => call[0]);
+      expect(touched).toContain("writableLinks");
+      expect(touched).not.toContain("readOnlyLinks");
+    } finally {
+      set.mockRestore();
+      add.mockRestore();
+    }
+  });
+
+  it("refuse `through` with `getter` on @HasOne, where the getter would be dropped", () => {
+    expect(() => {
+      class Refused extends Ad4mModel {
+        @HasOne({ through: "test://one", getter: "SELECT ?target WHERE { ?source <test://one> ?target . }", readOnly: true })
+        one: string = "";
+      }
+      return Refused;
+    }).toThrow(/@HasOne.*through.*getter/);
   });
 });

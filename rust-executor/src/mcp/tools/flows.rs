@@ -1,18 +1,26 @@
 //! Flow (state machine) tools
 //!
 //! Tools for managing flows — finite state machines that track expression state transitions.
+//! `add_flow`, `get_flows`, `flow_proposal_accept`, `flow_proposal_reject` and
+//! `flow_valid_outputs` call the RPC method that does their job through the handler map, so
+//! its guard applies. `flow_state` and `flow_actions` have no RPC method: they read the
+//! perspective through [`Ad4mMcpHandler::get_readable_perspective`].
 
-use super::Ad4mMcpHandler;
+use super::instances::pretty;
+use super::{labelled, method_error, Ad4mMcpHandler};
+use crate::agent::AgentContext;
+use crate::api::ws_handler::WsRpcError;
 use crate::perspectives::flow_context::{
     load_flow_instances, load_shacl_flows, FlowInstanceRecord,
 };
-use crate::perspectives::perspective_instance::{PerspectiveInstance, SdnaType};
+use crate::perspectives::get_perspective;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
-use crate::types::LinkQuery;
+use crate::types::DecoratedLinkExpression;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 // ============================================================================
 // Parameter Types
@@ -47,6 +55,27 @@ pub struct FlowExprParams {
     pub expression_address: String,
 }
 
+/// Parameters for accepting or rejecting a FlowTransitionProposal
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FlowProposalParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// URI of the FlowTransitionProposal (e.g. "ad4m://flow/proposal/<id>")
+    pub proposal_uri: String,
+}
+
+/// Parameters for listing a flow's valid outputs
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FlowValidOutputsParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Flow name or canonical flow URI
+    pub flow_name: String,
+    /// Optional terminal state filter — only outputs of runs that settled
+    /// into this state
+    pub state: Option<String>,
+}
+
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -59,30 +88,21 @@ impl Ad4mMcpHandler {
     pub async fn add_flow(&self, params: Parameters<AddFlowParams>) -> String {
         let p = &params.0;
 
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((mut perspective, agent_context)) => {
-                match perspective
-                    .add_sdna(
-                        p.flow_name.clone(),
-                        String::new(),
-                        SdnaType::Flow,
-                        Some(p.shacl_json.clone()),
-                        &agent_context,
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        let result = json!({
-                            "success": true,
-                            "perspective_id": p.perspective_id,
-                            "flow_name": p.flow_name,
-                        });
-                        serde_json::to_string_pretty(&result)
-                            .unwrap_or_else(|e| format!("Error: {}", e))
-                    }
-                    Err(e) => format!("Error adding flow: {}", e),
-                }
-            }
+        let params = json!({
+            "uuid": p.perspective_id,
+            "name": p.flow_name,
+            "sdnaType": "flow",
+            "shaclJson": p.shacl_json,
+        });
+        let added = self
+            .call::<Value>("perspective.addSdna", params, labelled("Error adding flow"))
+            .await;
+        match added {
+            Ok(_) => pretty(&json!({
+                "success": true,
+                "perspective_id": p.perspective_id,
+                "flow_name": p.flow_name,
+            })),
             Err(e) => e,
         }
     }
@@ -92,27 +112,25 @@ impl Ad4mMcpHandler {
     pub async fn get_flows(&self, params: Parameters<GetFlowsParams>) -> String {
         let p = &params.0;
 
-        match self.get_readable_perspective(&p.perspective_id).await {
-            Ok(perspective) => {
-                match perspective
-                    .get_links(&LinkQuery {
-                        source: Some("ad4m://self".to_string()),
-                        predicate: Some("ad4m://has_flow".to_string()),
-                        ..Default::default()
-                    })
-                    .await
-                {
-                    Ok(links) => {
-                        let flow_names: Vec<String> =
-                            links.iter().map(|l| l.data.target.clone()).collect();
-                        serde_json::to_string_pretty(&json!({
-                            "flows": flow_names,
-                            "count": flow_names.len(),
-                        }))
-                        .unwrap_or_else(|e| format!("Error: {}", e))
-                    }
-                    Err(e) => format!("Error querying flows: {}", e),
-                }
+        let params = json!({
+            "uuid": p.perspective_id,
+            "source": "ad4m://self",
+            "predicate": "ad4m://has_flow",
+        });
+        let links = self
+            .call::<Vec<DecoratedLinkExpression>>(
+                "perspective.queryLinks",
+                params,
+                labelled("Error querying flows"),
+            )
+            .await;
+        match links {
+            Ok(links) => {
+                let flow_names: Vec<String> = links.into_iter().map(|l| l.data.target).collect();
+                pretty(&json!({
+                    "flows": flow_names,
+                    "count": flow_names.len(),
+                }))
             }
             Err(e) => e,
         }
@@ -125,8 +143,8 @@ impl Ad4mMcpHandler {
     /// was retired from `FlowState` when the model-level guard replaced it
     /// (design §4.1) — nothing emits that predicate any more, so this tool
     /// could only ever answer "not in any state" regardless of the actual
-    /// flow state. State now lives on `FlowInstance.currentState`, which is
-    /// what the engine's proposal and consensus passes read and write.
+    /// flow state. The state is the calling agent's recorded derivation
+    /// (`FlowReplicaState`, #1424), or a fresh fold where it has none.
     #[tool(
         description = "Get the current state of an expression within a flow (state machine). Returns the flow instance URI and its current state name."
     )]
@@ -143,7 +161,13 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error querying flow state: {:#}", e),
         };
 
-        match Self::flow_instance_for(&perspective, &p.expression_address, &flow_uri).await {
+        let context = match self.reading_agent().await {
+            Ok(context) => context,
+            Err(e) => return e,
+        };
+        match Self::flow_instance_for(&perspective, &context, &p.expression_address, &flow_uri)
+            .await
+        {
             Err(e) => format!("Error querying flow state: {:#}", e),
             Ok(None) => format!(
                 "Expression {} is not in any state of flow {}",
@@ -227,21 +251,72 @@ impl Ad4mMcpHandler {
             .collect()
     }
 
+    /// The agent a read tool answers for: the agent the caller's session acts
+    /// as (the operator acts as the main agent).
+    async fn reading_agent(&self) -> Result<AgentContext, String> {
+        self.session()
+            .await
+            .map(|session| session.acts_as())
+            .map_err(|e| json!({ "error": e }).to_string())
+    }
+
     /// Find the live `FlowInstance` binding `expression` to `flow_uri`, if any.
     ///
     /// Shared by [`Self::flow_state`] and [`Self::flow_actions`] so both read
     /// state from exactly one place. Scoped to the single expression URI, so
     /// the loader pushes the filter down to `model_query` instead of sweeping
     /// every instance on the perspective (Model C scope discipline).
+    ///
+    /// **Cache-first**: when `context`'s agent has a recorded state for the
+    /// instance (`FlowReplicaState`, #1424) it is returned directly — no fold,
+    /// no flow catalogue load. The table is the executor's own, so no peer or
+    /// co-owner can write it: it is exactly what this agent's pass last
+    /// derived. Without one the full derive path runs, which is the only path
+    /// on a never-derived instance.
+    ///
+    /// Freshness note: the sync-triggered pass (`trigger.rs`) re-derives on
+    /// every incoming flow link, so residual staleness is bounded by the
+    /// debounce window plus the role-change gap documented there.
     async fn flow_instance_for(
         perspective: &PerspectiveInstance,
+        context: &AgentContext,
         expression: &str,
         flow_uri: &str,
     ) -> anyhow::Result<Option<FlowInstanceRecord>> {
         let instances = load_flow_instances(perspective, &[expression.to_string()]).await?;
-        Ok(instances
+        let Some(record) = instances
             .into_iter()
-            .find(|record| record.flow_uri == flow_uri))
+            .find(|record| record.flow_uri == flow_uri)
+        else {
+            return Ok(None);
+        };
+        let agent_did = crate::agent::did_for_context(context)?;
+        if let Some(cached) =
+            crate::perspectives::flow_instance::replica_state::FlowReplicaState::current_state(
+                &perspective.uuid,
+                &agent_did,
+                &record.instance_uri,
+            )?
+        {
+            return Ok(Some(FlowInstanceRecord {
+                current_state: cached,
+                ..record
+            }));
+        }
+        let flows = load_shacl_flows(perspective).await?;
+        let derived = crate::perspectives::flow_instance::derive_states(
+            perspective,
+            std::slice::from_ref(&record),
+            &flows,
+        )
+        .await;
+        Ok(Some(
+            derived
+                .into_iter()
+                .next()
+                .map(|df| df.record)
+                .unwrap_or(record),
+        ))
     }
 
     /// Get available actions for an expression in a flow
@@ -273,8 +348,14 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error querying flow actions: {:#}", e),
         };
 
+        let context = match self.reading_agent().await {
+            Ok(context) => context,
+            Err(e) => return e,
+        };
         let instance =
-            match Self::flow_instance_for(&perspective, &p.expression_address, &flow_uri).await {
+            match Self::flow_instance_for(&perspective, &context, &p.expression_address, &flow_uri)
+                .await
+            {
                 Err(e) => return format!("Error querying flow actions: {:#}", e),
                 Ok(None) => {
                     return format!(
@@ -312,13 +393,98 @@ impl Ad4mMcpHandler {
         .unwrap_or_else(|e| format!("Error: {}", e))
     }
 
-    // Flow WRITE surfaces (start / run-action) deliberately do not exist on
-    // this endpoint. With the flow engine, external agents don't write state
-    // transitions directly — they propose them and consensus fires them,
-    // exactly like the internal LLM harness. That propose/accept surface
-    // ships with the firing-engine stack (flow_proposal_accept/reject, plus
-    // a propose tool as follow-up); offering direct-write tools here would
-    // bypass the consensus path.
+    #[tool(
+        description = "Accept a live FlowTransitionProposal on behalf of this agent: adds your DID to the proposal's acceptors (idempotent per DID) and immediately runs the flow consensus pass. When the flow's consensusRule threshold (distinct DIDs) is met, the transition fires and the fired outcomes are returned; otherwise 'fired' is empty and the proposal stays live for further acceptances. Errors on unknown proposal URIs, on proposals that are not engine-visible, on proposals that leave a state the flow is no longer standing in, and when the cited evidence does not recompute on this replica."
+    )]
+    pub async fn flow_proposal_accept(&self, params: Parameters<FlowProposalParams>) -> String {
+        let p = &params.0;
+
+        let params = json!({ "uuid": p.perspective_id, "proposalUri": p.proposal_uri });
+        let fired = self
+            .call::<Value>(
+                "perspective.acceptFlowProposal",
+                params,
+                labelled("Error accepting proposal"),
+            )
+            .await;
+        match fired {
+            Ok(fired) => pretty(&json!({
+                "success": true,
+                "proposal_uri": p.proposal_uri,
+                "fired": fired,
+            })),
+            Err(e) => e,
+        }
+    }
+
+    #[tool(
+        description = "Withdraw this agent's own contribution to a FlowTransitionProposal: retracts only the links this DID signed — your vote, or your whole proposal if you opened it — by writing one signed ad4m://retracted tombstone per link, which removes it on every replica. It never touches another agent's links, and it does not 'cancel' the proposal for anyone else. Because flow state is recomputed from the links present now, withdrawing a vote that had helped an edge settle moves the flow back to where it stood before that vote. Returns retracted_links: how many of your links were retracted — one for a withdrawn vote, more when you retract a proposal you opened. Errors on unknown proposal URIs and when this DID signed nothing on the proposal."
+    )]
+    pub async fn flow_proposal_reject(&self, params: Parameters<FlowProposalParams>) -> String {
+        let p = &params.0;
+
+        let params = json!({ "uuid": p.perspective_id, "proposalUri": p.proposal_uri });
+        let rejected = self
+            .call::<Value>(
+                "perspective.rejectFlowProposal",
+                params,
+                labelled("Error rejecting proposal"),
+            )
+            .await;
+        match rejected {
+            Ok(result) => pretty(&json!({
+                "success": true,
+                "proposal_uri": p.proposal_uri,
+                "retracted_links": result["retractedLinks"],
+            })),
+            Err(e) => e,
+        }
+    }
+
+    #[tool(
+        description = "List the instances that are, as they stand, valid outputs of a flow: instances named by a cryptographically verified receipt of a completed run (optionally filtered to runs that settled into a given terminal state), whose live content still matches what the run's quorum committed to. A forged or unverifiable receipt contributes nothing; an instance edited since the run completed is not listed. The same predicate is available in instance queries as where: { producedByFlow: { flow, state? } }. Errors when the flow is not on the perspective — 'no such flow here' and 'no valid outputs' are different answers."
+    )]
+    pub async fn flow_valid_outputs(&self, params: Parameters<FlowValidOutputsParams>) -> String {
+        let p = &params.0;
+
+        // The method takes the canonical flow URI. Resolving the name reads the perspective,
+        // so the method's guard runs first.
+        let params =
+            |flow: &str| json!({ "uuid": p.perspective_id, "flow": flow, "state": p.state });
+        if let Err(e) = self
+            .admit_method("perspective.flowValidOutputs", &params(&p.flow_name))
+            .await
+        {
+            return method_error(e);
+        }
+        // Removed after the guard: missing, as the guard would answer.
+        let Some(perspective) = get_perspective(&p.perspective_id) else {
+            return method_error(WsRpcError::not_found(format!(
+                "Perspective {} not found",
+                p.perspective_id
+            )));
+        };
+        let (flow_uri, _) = match Self::resolve_flow(&perspective, &p.flow_name).await {
+            Ok(resolved) => resolved,
+            Err(e) => return format!("Error listing valid outputs: {:#}", e),
+        };
+
+        let outputs = self
+            .call::<Value>(
+                "perspective.flowValidOutputs",
+                params(&flow_uri),
+                labelled("Error listing valid outputs"),
+            )
+            .await;
+        match outputs {
+            Ok(outputs) => pretty(&json!({
+                "flow": flow_uri,
+                "state": p.state,
+                "valid_outputs": outputs,
+            })),
+            Err(e) => e,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -485,17 +651,21 @@ mod tests {
         assert!(flow.is_none());
 
         // Instance lookup is keyed on (expression, flow URI).
-        let found =
-            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "delivery://DeliveryFlow")
-                .await
-                .expect("flow_instance_for");
+        let found = Ad4mMcpHandler::flow_instance_for(
+            &perspective,
+            &ctx,
+            base_uri,
+            "delivery://DeliveryFlow",
+        )
+        .await
+        .expect("flow_instance_for");
         let found = found.expect("the minted instance must be found");
         assert_eq!(found.instance_uri, inst_uri);
         assert_eq!(found.current_state, "identified");
         assert_eq!(found.subject, base_uri);
 
         assert!(
-            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "other://OtherFlow")
+            Ad4mMcpHandler::flow_instance_for(&perspective, &ctx, base_uri, "other://OtherFlow")
                 .await
                 .expect("flow_instance_for(other flow)")
                 .is_none(),
@@ -504,6 +674,7 @@ mod tests {
         assert!(
             Ad4mMcpHandler::flow_instance_for(
                 &perspective,
+                &ctx,
                 "ad4m://task/unrelated",
                 "delivery://DeliveryFlow"
             )
@@ -511,6 +682,65 @@ mod tests {
             .expect("flow_instance_for(other subject)")
             .is_none(),
             "an unrelated expression must not match"
+        );
+    }
+
+    /// `flow_instance_for` must return the recorded state without running
+    /// the fold. Observable: record "scoped" with no proposals in the graph —
+    /// the fold would return "identified" (genesis); only a cache-first path
+    /// produces "scoped".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flow_instance_for_recorded_state_hit_skips_derive() {
+        use crate::perspectives::flow_instance::replica_state::FlowReplicaState;
+
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        for link in
+            parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition)");
+        }
+
+        let base_uri = "ad4m://task/cache-mcp-test";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "delivery://DeliveryFlow",
+            base_uri,
+            "identified",
+            "cache-mcp-inst-1",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        // Record "scoped" WITHOUT any proposals.
+        // Without cache-first, derive would return "identified" (no quorum).
+        let did = crate::agent::did_for_context(&ctx).expect("did");
+        FlowReplicaState::set_current_state(
+            &perspective.uuid,
+            &did,
+            &inst_uri,
+            "scoped",
+            &perspective.is_teardown,
+        )
+        .expect("set_current_state");
+
+        let record = Ad4mMcpHandler::flow_instance_for(
+            &perspective,
+            &ctx,
+            base_uri,
+            "delivery://DeliveryFlow",
+        )
+        .await
+        .expect("flow_instance_for")
+        .expect("instance must be found");
+        assert_eq!(
+            record.current_state, "scoped",
+            "recorded 'scoped' must win over fold-derived 'identified' (no proposals in graph)"
         );
     }
 }

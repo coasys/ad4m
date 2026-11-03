@@ -1,5 +1,6 @@
 import { buildSPARQLQuery, buildPaginationSubquery, hasJsOnlyWhereFilters, looksLikeUri, valueToLiteralIri } from './query-sparql';
 import { Literal } from '../Literal';
+import { buildWhereCondition } from './query-utils';
 
 // Minimal stubs for ModelMetadata
 const emptyMetadata: any = { properties: {}, relations: {} };
@@ -621,5 +622,119 @@ describe('looksLikeUri', () => {
     expect(looksLikeUri('42')).toBe(false);
     expect(looksLikeUri(':no-scheme')).toBe(false);
     expect(looksLikeUri('1abc:foo')).toBe(false);
+  });
+});
+
+describe('buildSPARQLQuery — traverse scope', () => {
+  const modelClass: any = {};
+
+  it('binds every anchor and emits a path for transitive', () => {
+    const query = {
+      parent: {
+        ids: ['flux://a', 'flux://b'],
+        predicate: 'flux://has_message',
+        transitive: true,
+      },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('VALUES ?_anchor { <flux://a> <flux://b> }');
+    expect(sparql).toContain('?_anchor <flux://has_message>+ ?source');
+  });
+
+  it('refuses limitPerAnchor, which only the executor can apply', () => {
+    const query = {
+      parent: {
+        ids: 'flux://a',
+        predicate: 'flux://has_message',
+        limitPerAnchor: 5,
+      },
+    };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('limitPerAnchor');
+  });
+
+  it('refuses levels, which only the executor can walk', () => {
+    const query = {
+      parent: {
+        ids: 'flux://a',
+        predicate: 'flux://has_message',
+        levels: [10, 5],
+      },
+    };
+    // Silently ignoring `levels` would return one unbounded level where a
+    // bounded walk was asked for — a wrong answer that looks like a right one.
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('levels');
+  });
+});
+
+describe('where `eq` and per-link `author` (#1114)', () => {
+  const modelClass: any = {};
+  const roleMetadata: any = {
+    properties: {
+      agent: { name: 'agent', predicate: 'test://agent', required: false },
+      computed: { name: 'computed', predicate: '', getter: 'SELECT ?t WHERE { ?t ?p ?o }' },
+    },
+    relations: {
+      reviews: { name: 'reviews', predicate: 'test://review' },
+      derived: { name: 'derived', predicate: '', getter: 'SELECT ?t WHERE { ?t ?p ?o }' },
+    },
+  };
+
+  it('treats `{ eq: X }` as the bare value', () => {
+    const bare = buildSPARQLQuery(richMetadata, emptyRelations, { where: { name: 'Alice' } }, modelClass);
+    const eq = buildSPARQLQuery(richMetadata, emptyRelations, { where: { name: { eq: 'Alice' } } }, modelClass);
+    expect(eq).toBe(bare);
+    const bareIn = buildSPARQLQuery(richMetadata, emptyRelations, { where: { name: ['Alice', 'Bob'] } }, modelClass);
+    const eqIn = buildSPARQLQuery(richMetadata, emptyRelations, { where: { name: { eq: ['Alice', 'Bob'] } } }, modelClass);
+    expect(eqIn).toBe(bareIn);
+  });
+
+  it('refuses `eq` beside another operator', () => {
+    expect(() =>
+      buildSPARQLQuery(richMetadata, emptyRelations, { where: { name: { eq: 'a', not: 'b' } } as any }, modelClass),
+    ).toThrow(/`eq` cannot be combined/);
+  });
+
+  it('refuses a nested author, at any depth', () => {
+    for (const where of [
+      { agent: { eq: 'did:a', author: 'did:admin' } },
+      { agent: { author: ['did:admin', 'did:lead'] } },
+      { OR: [{ agent: { eq: 'did:a', author: { not: 'did:m' } } }] },
+      { NOT: { agent: { eq: 'did:a', author: 'did:admin' } } },
+    ]) {
+      expect(() => buildSPARQLQuery(roleMetadata, emptyRelations, { where } as any, modelClass)).toThrow(
+        /per-link `author`/,
+      );
+    }
+  });
+
+  it('refuses a side-by-side author beside a link-backed property', () => {
+    expect(() =>
+      buildSPARQLQuery(roleMetadata, emptyRelations, { where: { agent: 'did:a', author: 'did:admin' } }, modelClass),
+    ).toThrow(/`author` beside `agent`/);
+  });
+
+  it('refuses a side-by-side author beside a relation, which is link-backed too', () => {
+    expect(() =>
+      buildSPARQLQuery(roleMetadata, emptyRelations, { where: { reviews: 'test://r1', author: 'did:admin' } } as any, modelClass),
+    ).toThrow(/`author` beside `reviews`/);
+  });
+
+  it('keeps a bare author, including beside a getter or timestamp', () => {
+    for (const where of [
+      { author: 'did:admin' },
+      { author: { not: ['did:m'] } },
+      { computed: 'x', author: 'did:admin' },
+      { derived: 'x', author: 'did:admin' },
+      { timestamp: { gt: 0 }, author: 'did:admin' },
+    ]) {
+      expect(() => buildSPARQLQuery(roleMetadata, emptyRelations, { where } as any, modelClass)).not.toThrow();
+    }
+  });
+
+  it('getter where compilation unwraps `eq` and refuses a nested author', () => {
+    expect(buildWhereCondition('test://p', { eq: 'x' } as any)).toBe(buildWhereCondition('test://p', 'x'));
+    expect(() => buildWhereCondition('test://p', { eq: 'x', author: 'did:a' } as any)).toThrow(/per-link/);
   });
 });

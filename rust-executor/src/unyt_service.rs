@@ -15,8 +15,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::sync::RwLock;
 
+use crate::db::Ad4mDb;
 use crate::holochain_service::holochain_service_extension::msgpack_value_to_json;
-use crate::holochain_service::interface::{get_holochain_service, maybe_get_holochain_service};
+use crate::holochain_service::interface::{
+    get_holochain_service, maybe_get_holochain_service, HolochainServiceInterface,
+};
 use crate::pubsub::mark_credits_dirty;
 
 // ---------------------------------------------------------------------------
@@ -39,6 +42,24 @@ lazy_static! {
     static ref ALLIANCE_DNA_HASH: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
     static ref INSTALL_ONCE: Arc<tokio::sync::Mutex<bool>> =
         Arc::new(tokio::sync::Mutex::new(false));
+    /// Held across every alliance zome call (`call_alliance_zome`). Unyt reaches the
+    /// dispatcher from Rust, not through a language runtime, so nothing else serializes it,
+    /// and since #1133 the dispatcher runs zome calls concurrently. Unyt's writes race each
+    /// other on one source chain: the per-signal `handle_signal` tasks and the poll loop
+    /// (`check_pending_payments` / `check_pending_sends`) both commit and accept.
+    static ref ALLIANCE_CALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
+    /// Why the last install of the alliance DNA failed. Cleared by a successful
+    /// install and by a new membrane proof. Read by `runtime.unytVersionInfo`.
+    static ref INSTALL_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+}
+
+/// Why the last install of the alliance DNA failed, if it did.
+pub fn install_error() -> Option<String> {
+    INSTALL_ERROR.lock().unwrap().clone()
+}
+
+fn set_install_error(error: Option<String>) {
+    *INSTALL_ERROR.lock().unwrap() = error;
 }
 
 /// Check if a cell_id_key (hex dna_hash:hex agent_key) belongs to the alliance DNA.
@@ -129,6 +150,12 @@ pub async fn ensure_installed() -> Result<(), AnyError> {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     }
 
+    let result = install_with_retries(&mut installed).await;
+    set_install_error(result.as_ref().err().map(|e| e.to_string()));
+    result
+}
+
+async fn install_with_retries(installed: &mut bool) -> Result<(), AnyError> {
     // Resolve data path from Ad4mConfig
     let data_path = {
         let config = crate::config::get_global_config();
@@ -184,9 +211,8 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
 
     // Check if already installed with correct version
     if let Ok(Some(app_info)) = hc.get_app_info(UNYT_APP_ID.to_string()).await {
-        let installed_version = crate::db_backend::db_backend()
-            .get_setting("unyt_dna_version")
-            .unwrap_or(None);
+        let installed_version =
+            Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_version")).unwrap_or(None);
 
         // Check if the app is disabled (e.g. due to network join failure) and try to re-enable
         use holochain_types::app::AppStatus;
@@ -201,8 +227,9 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
                     // Backfill agent key for setup_bootstrap_auth
                     let agent_key = base64::engine::general_purpose::STANDARD
                         .encode(app_info.agent_pub_key.get_raw_39());
-                    let _ =
-                        crate::db_backend::db_backend().set_setting("unyt_agent_key", &agent_key);
+                    let _ = Ad4mDb::with_global_instance(|db| {
+                        db.set_setting("unyt_agent_key", &agent_key)
+                    });
                     capture_dna_hash().await;
                     return Ok(());
                 }
@@ -223,7 +250,7 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
             // Backfill agent key for setup_bootstrap_auth
             let agent_key = base64::engine::general_purpose::STANDARD
                 .encode(app_info.agent_pub_key.get_raw_39());
-            let _ = crate::db_backend::db_backend().set_setting("unyt_agent_key", &agent_key);
+            let _ = Ad4mDb::with_global_instance(|db| db.set_setting("unyt_agent_key", &agent_key));
             capture_dna_hash().await;
             return Ok(());
         }
@@ -236,7 +263,7 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
         // Backfill agent key for setup_bootstrap_auth
         let agent_key =
             base64::engine::general_purpose::STANDARD.encode(app_info.agent_pub_key.get_raw_39());
-        let _ = crate::db_backend::db_backend().set_setting("unyt_agent_key", &agent_key);
+        let _ = Ad4mDb::with_global_instance(|db| db.set_setting("unyt_agent_key", &agent_key));
         capture_dna_hash().await;
         return Ok(());
     }
@@ -245,10 +272,10 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
     // (DB has version marker) — if so, the app may be in a disabled/broken state.
     // Try to enable it rather than reinstalling, to preserve the source chain
     // (which holds transaction history and balances).
-    let previously_installed = crate::db_backend::db_backend()
-        .get_setting("unyt_dna_version")
-        .unwrap_or(None)
-        .is_some();
+    let previously_installed =
+        Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_version"))
+            .unwrap_or(None)
+            .is_some();
 
     if previously_installed {
         info!("Unyt DNA was previously installed but not found by conductor — attempting to enable existing app");
@@ -365,28 +392,26 @@ roles:
     };
 
     // Use the pre-generated agent key if stored (in Holochain "uhCAk..." format)
-    let agent_key = match crate::db_backend::db_backend()
-        .get_setting("unyt_agent_key")
-        .unwrap_or(None)
-    {
-        Some(key_str) => match holochain::prelude::AgentPubKey::try_from(key_str.as_str()) {
-            Ok(key) => {
-                info!("Using pre-generated Unyt agent key: {}", key_str);
-                Some(key)
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to parse stored Unyt agent key '{}': {}. Will generate new.",
-                    key_str, e
-                );
+    let agent_key =
+        match Ad4mDb::with_global_instance(|db| db.get_setting("unyt_agent_key")).unwrap_or(None) {
+            Some(key_str) => match holochain::prelude::AgentPubKey::try_from(key_str.as_str()) {
+                Ok(key) => {
+                    info!("Using pre-generated Unyt agent key: {}", key_str);
+                    Some(key)
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to parse stored Unyt agent key '{}': {}. Will generate new.",
+                        key_str, e
+                    );
+                    None
+                }
+            },
+            None => {
+                info!("No pre-generated Unyt agent key — Holochain will create one");
                 None
             }
-        },
-        None => {
-            info!("No pre-generated Unyt agent key — Holochain will create one");
-            None
-        }
-    };
+        };
 
     let payload = InstallAppPayload {
         source: AppBundleSource::Path(PathBuf::from(&happ_file)),
@@ -409,9 +434,9 @@ roles:
             );
             // Store the actual installed agent key so hc-auth uses the correct key
             let installed_key_str = app_info.agent_pub_key.to_string();
-            if let Err(e) =
-                crate::db_backend::db_backend().set_setting("unyt_agent_key", &installed_key_str)
-            {
+            if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                db.set_setting("unyt_agent_key", &installed_key_str)
+            }) {
                 warn!("Failed to store installed agent key: {}", e);
             } else {
                 info!("Stored installed Unyt agent key: {}", installed_key_str);
@@ -425,7 +450,7 @@ roles:
 
     // Store installed version
     if let Err(e) =
-        crate::db_backend::db_backend().set_setting("unyt_dna_version", ALLIANCE_DNA_VERSION)
+        Ad4mDb::with_global_instance(|db| db.set_setting("unyt_dna_version", ALLIANCE_DNA_VERSION))
     {
         warn!("Failed to store Unyt DNA version in DB: {}", e);
     }
@@ -438,7 +463,7 @@ roles:
 
 /// Reinstall the alliance DNA (uninstall old, install new).
 pub async fn reinstall() -> Result<(), AnyError> {
-    let hc = match maybe_get_holochain_service().await {
+    let hc = match crate::holochain_service::holochain_service_once_started().await {
         Some(hc) => hc,
         None => {
             return Err(deno_core::anyhow::anyhow!(
@@ -481,9 +506,8 @@ pub async fn reinstall() -> Result<(), AnyError> {
 
 /// Get installed vs bundled version info.
 pub fn version_info() -> (Option<String>, String) {
-    let installed = crate::db_backend::db_backend()
-        .get_setting("unyt_dna_version")
-        .unwrap_or(None);
+    let installed =
+        Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_version")).unwrap_or(None);
     (installed, ALLIANCE_DNA_VERSION.to_string())
 }
 
@@ -495,7 +519,9 @@ pub fn version_info() -> (Option<String>, String) {
 /// This should be called before `ensure_installed()` with auth material obtained
 /// from the hosting API / joining server.
 pub fn set_membrane_proof(proof_base64: &str) -> Result<(), AnyError> {
-    crate::db_backend::db_backend().set_setting("unyt_membrane_proof", proof_base64)?;
+    Ad4mDb::with_global_instance(|db| db.set_setting("unyt_membrane_proof", proof_base64))?;
+    // The next install uses this proof; an earlier failure no longer applies.
+    set_install_error(None);
     info!(
         "Stored Unyt membrane proof ({} bytes encoded)",
         proof_base64.len()
@@ -505,9 +531,7 @@ pub fn set_membrane_proof(proof_base64: &str) -> Result<(), AnyError> {
 
 /// Retrieve the stored membrane proof, if any.
 pub fn get_membrane_proof() -> Option<String> {
-    crate::db_backend::db_backend()
-        .get_setting("unyt_membrane_proof")
-        .unwrap_or(None)
+    Ad4mDb::with_global_instance(|db| db.get_setting("unyt_membrane_proof")).unwrap_or(None)
 }
 
 /// Pre-generate a Holochain agent key for the Unyt DNA and store it.
@@ -515,9 +539,8 @@ pub fn get_membrane_proof() -> Option<String> {
 /// If a key was already generated, returns the stored one.
 pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
     // Check if we already have one stored (and it's valid)
-    if let Some(existing) = crate::db_backend::db_backend()
-        .get_setting("unyt_agent_key")
-        .unwrap_or(None)
+    if let Some(existing) =
+        Ad4mDb::with_global_instance(|db| db.get_setting("unyt_agent_key")).unwrap_or(None)
     {
         // Validate it's in the correct format
         if holochain::prelude::AgentPubKey::try_from(existing.as_str()).is_ok() {
@@ -526,7 +549,7 @@ pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
         warn!("Stored Unyt agent key is in invalid format, regenerating...");
     }
 
-    let hc = match maybe_get_holochain_service().await {
+    let hc = match crate::holochain_service::holochain_service_once_started().await {
         Some(hc) => hc,
         None => {
             return Err(deno_core::anyhow::anyhow!(
@@ -539,7 +562,7 @@ pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
     // Use Holochain's native Display format: "u" + base64url_no_pad(39 bytes)
     let key_str = agent_key.to_string();
 
-    crate::db_backend::db_backend().set_setting("unyt_agent_key", &key_str)?;
+    Ad4mDb::with_global_instance(|db| db.set_setting("unyt_agent_key", &key_str))?;
 
     info!("Generated and stored Unyt agent key: {}", key_str);
     Ok(key_str)
@@ -561,16 +584,15 @@ pub const UNYT_RELAY_URL: &str = "https://use1-1.relay.n0.iroh-canary.iroh.link.
 /// The resulting string is suitable for `base64_auth_material` in the
 /// conductor config's space override.
 pub async fn get_or_create_auth_material() -> Result<String, AnyError> {
-    if let Some(existing) = crate::db_backend::db_backend()
-        .get_setting("unyt_auth_material")
-        .unwrap_or(None)
+    if let Some(existing) =
+        Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material")).unwrap_or(None)
     {
         return Ok(existing);
     }
 
     let auth_material = create_auth_material().await?;
 
-    crate::db_backend::db_backend().set_setting("unyt_auth_material", &auth_material)?;
+    Ad4mDb::with_global_instance(|db| db.set_setting("unyt_auth_material", &auth_material))?;
     info!("Stored unyt bootstrap auth material");
 
     Ok(auth_material)
@@ -656,12 +678,10 @@ async fn create_auth_material() -> Result<String, AnyError> {
 /// (at which point the auth material will be retried).
 async fn setup_bootstrap_auth() {
     // Skip if auth material is already stored (previous run already set it up)
-    let has_auth = crate::db_backend::db_backend()
-        .get_setting("unyt_auth_material")
+    let has_auth = Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
         .unwrap_or(None)
         .is_some();
-    let has_dna_hash = crate::db_backend::db_backend()
-        .get_setting("unyt_dna_hash")
+    let has_dna_hash = Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_hash"))
         .unwrap_or(None)
         .is_some();
 
@@ -678,9 +698,9 @@ async fn setup_bootstrap_auth() {
         for attempt in 1..=3 {
             match create_auth_material().await {
                 Ok(auth_material) => {
-                    if let Err(e) = crate::db_backend::db_backend()
-                        .set_setting("unyt_auth_material", &auth_material)
-                    {
+                    if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                        db.set_setting("unyt_auth_material", &auth_material)
+                    }) {
                         error!("Failed to store auth material: {}", e);
                         return;
                     }
@@ -709,8 +729,7 @@ async fn setup_bootstrap_auth() {
         // Capture the DNA hash now (it should be available since we just installed)
         capture_dna_hash().await;
         // Verify it was stored
-        if crate::db_backend::db_backend()
-            .get_setting("unyt_dna_hash")
+        if Ad4mDb::with_global_instance(|db| db.get_setting("unyt_dna_hash"))
             .unwrap_or(None)
             .is_none()
         {
@@ -785,9 +804,9 @@ async fn capture_dna_hash() {
                     // Persist the DNA hash in Holochain string format for the
                     // conductor config space_overrides key.
                     let dna_hash_str = cell.cell_id.dna_hash().to_string();
-                    if let Err(e) =
-                        crate::db_backend::db_backend().set_setting("unyt_dna_hash", &dna_hash_str)
-                    {
+                    if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                        db.set_setting("unyt_dna_hash", &dna_hash_str)
+                    }) {
                         warn!("Failed to persist unyt DNA hash: {}", e);
                     } else {
                         info!(
@@ -813,15 +832,7 @@ async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue
     ensure_installed().await?;
     let hc = get_holochain_service().await;
 
-    let response = hc
-        .call_zome_function(
-            UNYT_APP_ID.to_string(),
-            UNYT_CELL_NAME.to_string(),
-            UNYT_ZOME.to_string(),
-            fn_name.to_string(),
-            payload,
-        )
-        .await?;
+    let response = call_alliance_zome(&hc, fn_name, payload).await?;
 
     match response {
         ZomeCallResponse::Ok(extern_io) => {
@@ -854,6 +865,25 @@ async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue
             fn_name
         )),
     }
+}
+
+/// Runs one zome call on the alliance cell, after any other Unyt call has finished
+/// (`ALLIANCE_CALL_LOCK`).
+async fn call_alliance_zome(
+    hc: &HolochainServiceInterface,
+    fn_name: &str,
+    payload: Option<ExternIO>,
+) -> Result<ZomeCallResponse, AnyError> {
+    let _one_at_a_time = ALLIANCE_CALL_LOCK.lock().await;
+    hc.call_zome_function(
+        UNYT_APP_ID.to_string(),
+        UNYT_CELL_NAME.to_string(),
+        UNYT_ZOME.to_string(),
+        fn_name.to_string(),
+        payload,
+        None,
+    )
+    .await
 }
 
 fn encode_payload<T: Serialize + std::fmt::Debug>(val: &T) -> Result<ExternIO, AnyError> {
@@ -981,9 +1011,10 @@ pub async fn send_hot(
     let proposal_hash = create_proposal(&neg_amount, recipient_agent_key, note).await?;
 
     // Track in DB so the poller can auto-accept when commitment arrives
-    crate::db_backend::db_backend()
-        .create_pending_send(recipient_agent_key, amount_hot, &proposal_hash)
-        .map_err(|e| anyhow::anyhow!("Failed to track pending send in DB: {}", e))?;
+    Ad4mDb::with_global_instance(|db| {
+        db.create_pending_send(recipient_agent_key, amount_hot, &proposal_hash)
+    })
+    .map_err(|e| anyhow::anyhow!("Failed to track pending send in DB: {}", e))?;
 
     info!(
         "Created outgoing proposal {} to send {} HOT to {}",
@@ -1028,16 +1059,20 @@ fn credit_and_complete(request: &crate::db::PaymentRequest) {
         }
     };
 
-    if let Err(e) = crate::db_backend::db_backend().add_user_credits(&request.user_email, amount) {
-        error!("Failed to credit user {}: {}", request.user_email, e);
-        return;
-    }
+    let email =
+        match Ad4mDb::with_global_instance(|db| db.add_agent_credits(&request.agent_did, amount)) {
+            Ok(email) => email,
+            Err(e) => {
+                error!("Failed to credit agent {}: {}", request.agent_did, e);
+                return;
+            }
+        };
 
-    mark_credits_dirty(&request.user_email);
-    info!("Credited user {} with {} HOT", request.user_email, amount);
+    mark_credits_dirty(&email);
+    info!("Credited user {} with {} HOT", email, amount);
 
     if let Some(ref action_hash) = request.proposal_action_hash {
-        let _ = crate::db_backend::db_backend().complete_payment_request(action_hash);
+        let _ = Ad4mDb::with_global_instance(|db| db.complete_payment_request(action_hash));
     }
 }
 
@@ -1082,10 +1117,10 @@ pub async fn handle_signal(payload_json: &JsonValue) {
         if let Some(ref proposal_hash) = tx_id {
             // Verify this proposal is tracked (either as a payment_request or pending_send)
             let is_tracked = matches!(
-                crate::db_backend::db_backend().get_payment_request_by_hash(proposal_hash),
+                Ad4mDb::with_global_instance(|db| db.get_payment_request_by_hash(proposal_hash)),
                 Ok(Some(_))
             ) || matches!(
-                crate::db_backend::db_backend().get_pending_send_by_hash(proposal_hash),
+                Ad4mDb::with_global_instance(|db| db.get_pending_send_by_hash(proposal_hash)),
                 Ok(Some(_))
             );
             if !is_tracked {
@@ -1149,10 +1184,10 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                 .or_else(|| tx.get("related_proposal").and_then(|v| v.as_str()));
             let is_tracked = related_proposal.map_or(false, |hash| {
                 matches!(
-                    crate::db_backend::db_backend().get_pending_send_by_hash(hash),
+                    Ad4mDb::with_global_instance(|db| db.get_pending_send_by_hash(hash)),
                     Ok(Some(_))
                 ) || matches!(
-                    crate::db_backend::db_backend().get_payment_request_by_hash(hash),
+                    Ad4mDb::with_global_instance(|db| db.get_payment_request_by_hash(hash)),
                     Ok(Some(_))
                 )
             });
@@ -1194,8 +1229,8 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                 "Unyt signal: transaction {} rejected/declined, cleaning up",
                 hash
             );
-            let _ = crate::db_backend::db_backend().reject_pending_send(hash);
-            let _ = crate::db_backend::db_backend().reject_payment_request(hash);
+            let _ = Ad4mDb::with_global_instance(|db| db.reject_pending_send(hash));
+            let _ = Ad4mDb::with_global_instance(|db| db.reject_payment_request(hash));
         }
         return;
     }
@@ -1217,7 +1252,7 @@ pub async fn handle_signal(payload_json: &JsonValue) {
 
     // Idempotency: if we have a proposal hash, check whether this payment was already completed
     if let Some(hash) = proposal_hash {
-        match crate::db_backend::db_backend().get_payment_request_by_hash(hash) {
+        match Ad4mDb::with_global_instance(|db| db.get_payment_request_by_hash(hash)) {
             Ok(Some(ref req)) if req.status == "completed" => {
                 info!(
                     "Unyt signal: payment for proposal {} already completed, ignoring duplicate",
@@ -1265,19 +1300,19 @@ pub async fn handle_signal(payload_json: &JsonValue) {
     };
 
     // Look up user by their mHOT wallet address (= agent pubkey)
-    let user_email = crate::db_backend::db_backend().get_user_by_hot_wallet_address(counterparty);
+    let user = Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(counterparty));
 
-    match user_email {
-        Ok(Some(email)) => match hot_amount.parse::<f64>() {
+    match user {
+        Ok(Some((email, agent_did))) => match hot_amount.parse::<f64>() {
             Ok(amount_f64) => {
                 // Verify pending request matches if we have a proposal hash
                 if let Some(hash) = proposal_hash {
-                    match crate::db_backend::db_backend().get_payment_request_by_hash(hash) {
+                    match Ad4mDb::with_global_instance(|db| db.get_payment_request_by_hash(hash)) {
                         Ok(Some(ref req)) => {
-                            if req.user_email != email {
+                            if req.agent_did != agent_did {
                                 warn!(
                                     "Unyt signal: payment request payer mismatch for {}: expected {}, got {}",
-                                    hash, req.user_email, email
+                                    hash, req.agent_did, agent_did
                                 );
                                 return;
                             }
@@ -1293,7 +1328,8 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                 }
 
                 // Credit user first, then mark completed only on success
-                if let Err(e) = crate::db_backend::db_backend().add_user_credits(&email, amount_f64)
+                if let Err(e) =
+                    Ad4mDb::with_global_instance(|db| db.add_user_credits(&email, amount_f64))
                 {
                     error!(
                         "Failed to credit user {} with {} HOT: {}",
@@ -1306,7 +1342,8 @@ pub async fn handle_signal(payload_json: &JsonValue) {
                         email, amount_f64
                     );
                     if let Some(hash) = proposal_hash {
-                        let _ = crate::db_backend::db_backend().complete_payment_request(hash);
+                        let _ =
+                            Ad4mDb::with_global_instance(|db| db.complete_payment_request(hash));
                     }
                 }
             }
@@ -1333,7 +1370,7 @@ pub async fn handle_signal(payload_json: &JsonValue) {
 /// Check pending payment requests and credit users for completed ones.
 /// Called periodically as a fallback for missed signals.
 pub async fn check_pending_payments() {
-    let pending = match crate::db_backend::db_backend().get_pending_payment_requests() {
+    let pending = match Ad4mDb::with_global_instance(|db| db.get_pending_payment_requests()) {
         Ok(requests) => requests,
         Err(e) => {
             warn!("Failed to get pending payment requests: {}", e);
@@ -1364,7 +1401,7 @@ pub async fn check_pending_payments() {
                     if is_completed {
                         info!(
                             "Payment request {} completed for user {}",
-                            action_hash, request.user_email
+                            action_hash, request.agent_did
                         );
                         credit_and_complete(&request);
                         continue;
@@ -1423,7 +1460,7 @@ pub async fn check_pending_payments() {
 /// Check pending outgoing sends and auto-accept commitments.
 /// Called periodically as a fallback for missed signals.
 pub async fn check_pending_sends() {
-    let pending = match crate::db_backend::db_backend().get_pending_sends() {
+    let pending = match Ad4mDb::with_global_instance(|db| db.get_pending_sends()) {
         Ok(sends) => sends,
         Err(e) => {
             warn!("Failed to get pending sends: {}", e);
@@ -1450,7 +1487,8 @@ pub async fn check_pending_sends() {
 
                 if is_completed {
                     info!("Outgoing send {} completed", proposal_hash);
-                    let _ = crate::db_backend::db_backend().complete_pending_send(&proposal_hash);
+                    let _ =
+                        Ad4mDb::with_global_instance(|db| db.complete_pending_send(&proposal_hash));
                     continue;
                 }
 
@@ -1469,7 +1507,8 @@ pub async fn check_pending_sends() {
 
                 if is_rejected {
                     info!("Outgoing send {} was rejected", proposal_hash);
-                    let _ = crate::db_backend::db_backend().reject_pending_send(&proposal_hash);
+                    let _ =
+                        Ad4mDb::with_global_instance(|db| db.reject_pending_send(&proposal_hash));
                     continue;
                 }
 
@@ -1507,8 +1546,9 @@ pub async fn check_pending_sends() {
                                 || err_str.contains("not found")
                             {
                                 info!("Outgoing send {} was rejected (link removed), marking as rejected", proposal_hash);
-                                let _ = crate::db_backend::db_backend()
-                                    .reject_pending_send(&proposal_hash);
+                                let _ = Ad4mDb::with_global_instance(|db| {
+                                    db.reject_pending_send(&proposal_hash)
+                                });
                             } else {
                                 warn!(
                                     "Failed to auto-accept commitment {}: {}",
@@ -1526,7 +1566,8 @@ pub async fn check_pending_sends() {
                         "Outgoing send {} was rejected (get_status failed), marking as rejected",
                         proposal_hash
                     );
-                    match crate::db_backend::db_backend().reject_pending_send(&proposal_hash) {
+                    match Ad4mDb::with_global_instance(|db| db.reject_pending_send(&proposal_hash))
+                    {
                         Ok(_) => info!(
                             "Successfully marked send {} as rejected in DB",
                             proposal_hash
@@ -1541,5 +1582,71 @@ pub async fn check_pending_sends() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::holochain_service::interface::{
+        Envelope, HolochainServiceRequest, HolochainServiceResponse,
+    };
+    use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
+    use tokio::sync::{mpsc, Mutex};
+
+    /// Two Unyt writes started together must reach the alliance cell one after the other,
+    /// even though the dispatch loop runs zome calls concurrently since #1133: overlapping
+    /// writes to one source chain fail with `HeadMoved` under `Strict` ordering, and the
+    /// signal handler and the poll loop could accept the same commitment twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn alliance_zome_calls_run_one_at_a_time() {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Envelope>();
+        let (_signals, signal_rx) = mpsc::unbounded_channel();
+        let hc = HolochainServiceInterface {
+            sender,
+            stream_receiver: Arc::new(Mutex::new(signal_rx)),
+        };
+
+        // A dispatcher that, like the real loop, runs every zome call concurrently.
+        let events = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let recorded = events.clone();
+        tokio::spawn(async move {
+            while let Some(envelope) = receiver.recv().await {
+                let HolochainServiceRequest::CallZomeFunction {
+                    fn_name, response, ..
+                } = envelope.request
+                else {
+                    panic!("unexpected request {}", envelope.request.name());
+                };
+                let recorded = recorded.clone();
+                tokio::spawn(async move {
+                    recorded.lock().unwrap().push(format!("start:{fn_name}"));
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    recorded.lock().unwrap().push(format!("done:{fn_name}"));
+                    let _ = response.send(HolochainServiceResponse::CallZomeFunction(Ok(
+                        ZomeCallResponse::Ok(ExternIO::encode(()).unwrap()),
+                    )));
+                });
+            }
+        });
+
+        let (commit, accept) = tokio::join!(
+            call_alliance_zome(&hc, "create_commitment", None),
+            call_alliance_zome(&hc, "create_accept", None),
+        );
+        commit.unwrap();
+        accept.unwrap();
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "start:create_commitment",
+                "done:create_commitment",
+                "start:create_accept",
+                "done:create_accept",
+            ],
+            "the second Unyt call must start only after the first one finished"
+        );
     }
 }

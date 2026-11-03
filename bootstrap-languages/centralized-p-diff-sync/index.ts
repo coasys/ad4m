@@ -6,12 +6,16 @@
  */
 
 import { io } from "https://esm.sh/v135/socket.io-client@4.7.2";
-import { Mutex, withTimeout } from "https://esm.sh/v135/async-mutex@0.4.0";
+import { Mutex, withTimeout } from "./vendor/async-mutex@0.4.0.mjs";
 import axiod from "https://deno.land/x/axiod/mod.ts";
 import { defineLanguage, agentDid } from "@coasys/ad4m-ldk";
 
 //!@ad4m-template-variable
 const uid = "centralized-perspective-diff-sync-uuid";
+
+// Central sync server. One constant rather than five literals so the next
+// move is a one-line change.
+const SERVER_URL = "https://mock.ad4m.dev";
 
 let myDid: string = "";
 let socketClient: any = null;
@@ -62,7 +66,7 @@ const language = defineLanguage({
     async init() {
         myDid = agentDid();
 
-        socketClient = io("https://socket.ad4m.dev", {
+        socketClient = io(SERVER_URL, {
             transports: ["websocket", "polling"],
             autoConnect: true,
             query: { did: myDid, linkLanguageUUID: uid },
@@ -184,7 +188,7 @@ const language = defineLanguage({
         async currentRevision() {
             let result;
             try {
-                result = await axiod.post("https://socket.ad4m.dev/currentRevision", {
+                result = await axiod.post(`${SERVER_URL}/currentRevision`, {
                     linkLanguageUUID: uid,
                     did: myDid,
                 });
@@ -247,7 +251,7 @@ const language = defineLanguage({
 
     peers: {
         async remote() {
-            const others = await axiod.get("https://socket.ad4m.dev/getOthers", {
+            const others = await axiod.get(`${SERVER_URL}/getOthers`, {
                 params: { linkLanguageUUID: uid },
             });
             if (others.status === 200) {
@@ -269,7 +273,7 @@ const language = defineLanguage({
 
     telepresence: {
         async setOnlineStatus(status: any) {
-            const res = await axiod.post("https://socket.ad4m.dev/setAgentStatus", {
+            const res = await axiod.post(`${SERVER_URL}/setAgentStatus`, {
                 did: myDid,
                 status: status,
                 linkLanguageUUID: uid,
@@ -280,7 +284,7 @@ const language = defineLanguage({
         },
 
         async getOnlineAgents() {
-            const result = await axiod.get("https://socket.ad4m.dev/getOnlineAgents", {
+            const result = await axiod.get(`${SERVER_URL}/getOnlineAgents`, {
                 params: { did: myDid, linkLanguageUUID: uid },
             });
             if (result.status === 200) {

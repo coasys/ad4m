@@ -177,11 +177,14 @@ impl WsRpcClient {
         Ok(())
     }
 
-    /// Subscribe to server-push events.
-    /// Returns a broadcast receiver that yields raw event JSON values.
-    /// Each event has a `"type"` field indicating the event kind.
-    pub fn subscribe_events(&self) -> broadcast::Receiver<Value> {
-        self.events.subscribe()
+    /// Receive server-push events. The executor sends a socket only the
+    /// events it asked for: `events` maps each event type to the perspective
+    /// uuids wanted, or `null` for all (`events.watch`). Replaces the
+    /// connection's earlier interest. Each event has a `"type"` field.
+    pub async fn watch_events(&self, events: Value) -> Result<broadcast::Receiver<Value>> {
+        let rx = self.events.subscribe();
+        self.call_void("events.watch", events).await?;
+        Ok(rx)
     }
 }
 

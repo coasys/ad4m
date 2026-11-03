@@ -26,8 +26,7 @@ pub fn add_message_outbox(
             recipient: did,
             message,
         })
-    })
-    .map_err(|e| -> AnyhowWrapperError { anyhow::anyhow!(e).into() })?;
+    });
     Ok(was_sent)
 }
 

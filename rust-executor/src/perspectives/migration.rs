@@ -11,7 +11,8 @@
 /// 2. Remove `pub mod migration;` from mod.rs
 /// 3. Remove migration calls from perspective initialization
 /// 4. Optionally remove migration-tracking methods from db.rs
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression};
+use crate::db::Ad4mDb;
+use crate::types::LinkExpression;
 
 /// Result of a migration operation.
 #[derive(Debug, Clone)]
@@ -44,7 +45,7 @@ pub fn convert_literal_uri(uri: &str) -> (String, bool) {
 /// Convert all `literal://` URIs in a link's source, predicate, and target fields.
 ///
 /// Modifies the link in place and returns the number of fields converted.
-pub fn convert_link_literal_uris(link: &mut DecoratedLinkExpression) -> usize {
+pub fn convert_link_literal_uris(link: &mut LinkExpression) -> usize {
     let mut conversions = 0;
 
     let (new_source, changed) = convert_literal_uri(&link.data.source);
@@ -81,9 +82,10 @@ pub fn migrate_links_from_rusqlite_to_sparql(
     sparql_store: &crate::perspectives::sparql_store::SparqlStore,
 ) -> Result<MigrationResult, String> {
     // Check if already migrated
-    let already_migrated = crate::db_backend::db_backend()
-        .is_perspective_migrated(perspective_uuid)
-        .map_err(|e| e.to_string())?;
+    let already_migrated = Ad4mDb::with_global_instance(|db| {
+        db.is_perspective_migrated(perspective_uuid)
+            .map_err(|e| e.to_string())
+    })?;
 
     if already_migrated {
         log::debug!(
@@ -103,15 +105,17 @@ pub fn migrate_links_from_rusqlite_to_sparql(
     );
 
     // Get all links from Rusqlite
-    let links = crate::db_backend::db_backend()
-        .get_all_links(perspective_uuid)
-        .map_err(|e| e.to_string())?;
+    let links = Ad4mDb::with_global_instance(|db| {
+        db.get_all_links(perspective_uuid)
+            .map_err(|e| e.to_string())
+    })?;
 
     if links.is_empty() {
         log::debug!("No links to migrate for perspective {}", perspective_uuid);
-        crate::db_backend::db_backend()
-            .mark_perspective_as_migrated(perspective_uuid)
-            .map_err(|e| e.to_string())?;
+        Ad4mDb::with_global_instance(|db| {
+            db.mark_perspective_as_migrated(perspective_uuid)
+                .map_err(|e| e.to_string())
+        })?;
         return Ok(MigrationResult {
             migrated: 0,
             errors: 0,
@@ -130,23 +134,31 @@ pub fn migrate_links_from_rusqlite_to_sparql(
     let mut total_literal_conversions = 0;
 
     for (link_expr, status) in &links {
-        let mut decorated_link = DecoratedLinkExpression {
-            author: link_expr.author.clone(),
-            timestamp: link_expr.timestamp.clone(),
-            data: link_expr.data.clone(),
-            proof: DecoratedExpressionProof {
-                key: link_expr.proof.key.clone(),
-                signature: link_expr.proof.signature.clone(),
-                valid: None,
-                invalid: None,
-            },
-            status: Some(status.clone()),
-        };
+        let mut link_expr = link_expr.clone();
+        link_expr.status = Some(status.clone());
 
-        // Convert literal:// → literal: in all URI fields
-        total_literal_conversions += convert_link_literal_uris(&mut decorated_link);
+        // Convert literal:// → literal: in all URI fields. Operates on
+        // `LinkExpression` because that is what `add_link` takes; wrapping a
+        // decorated read-view just to convert URIs and convert back was a
+        // no-op besides the clone.
+        total_literal_conversions += convert_link_literal_uris(&mut link_expr);
 
-        match sparql_store.add_link(&decorated_link) {
+        // The store refuses a link in its own metadata vocabulary (#1564);
+        // skipping one is not a failed migration.
+        if crate::perspectives::sparql_store::is_link_metadata(
+            link_expr.data.predicate.as_deref().unwrap_or(""),
+        ) {
+            log::warn!(
+                "Not migrating a link in the metadata vocabulary for perspective {}: {} -[{}]-> {}",
+                perspective_uuid,
+                link_expr.data.source,
+                link_expr.data.predicate.as_deref().unwrap_or(""),
+                link_expr.data.target
+            );
+            continue;
+        }
+
+        match sparql_store.add_link(&link_expr) {
             Ok(_) => {
                 migrated_count += 1;
             }
@@ -179,14 +191,16 @@ pub fn migrate_links_from_rusqlite_to_sparql(
     }
 
     // Mark perspective as migrated
-    crate::db_backend::db_backend()
-        .mark_perspective_as_migrated(perspective_uuid)
-        .map_err(|e| e.to_string())?;
+    Ad4mDb::with_global_instance(|db| {
+        db.mark_perspective_as_migrated(perspective_uuid)
+            .map_err(|e| e.to_string())
+    })?;
 
     // Delete links from Rusqlite
-    let deleted_count = crate::db_backend::db_backend()
-        .delete_all_links_for_perspective(perspective_uuid)
-        .map_err(|e| e.to_string())?;
+    let deleted_count = Ad4mDb::with_global_instance(|db| {
+        db.delete_all_links_for_perspective(perspective_uuid)
+            .map_err(|e| e.to_string())
+    })?;
 
     log::info!(
         "Deleted {} links from Rusqlite for perspective {}",
@@ -204,7 +218,6 @@ pub fn migrate_links_from_rusqlite_to_sparql(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Ad4mDb;
     use crate::perspectives::sparql_store::SparqlStore;
     use crate::types::LinkStatus;
     use crate::types::{ExpressionProof, Link, LinkExpression};
@@ -217,7 +230,6 @@ mod tests {
     fn ensure_db() {
         INIT_DB.call_once(|| {
             Ad4mDb::init_global_instance(":memory:").unwrap();
-            crate::db_backend::init_db_backend(std::sync::Arc::new(crate::db_backend::LocalDb));
         });
     }
 
@@ -297,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_convert_link_literal_uris_source_and_target() {
-        let mut link = DecoratedLinkExpression {
+        let mut link = LinkExpression {
             author: "did:test:alice".to_string(),
             timestamp: Utc::now().to_rfc3339(),
             data: Link {
@@ -305,11 +317,9 @@ mod tests {
                 predicate: Some("ad4m://has_child".to_string()),
                 target: "literal://string:target_val".to_string(),
             },
-            proof: DecoratedExpressionProof {
+            proof: ExpressionProof {
                 key: "key".to_string(),
                 signature: "sig".to_string(),
-                valid: None,
-                invalid: None,
             },
             status: None,
         };
@@ -323,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_convert_link_literal_uris_all_three() {
-        let mut link = DecoratedLinkExpression {
+        let mut link = LinkExpression {
             author: "did:test:alice".to_string(),
             timestamp: Utc::now().to_rfc3339(),
             data: Link {
@@ -331,11 +341,9 @@ mod tests {
                 predicate: Some("literal://string:p".to_string()),
                 target: "literal://string:t".to_string(),
             },
-            proof: DecoratedExpressionProof {
+            proof: ExpressionProof {
                 key: "k".to_string(),
                 signature: "s".to_string(),
-                valid: None,
-                invalid: None,
             },
             status: None,
         };
@@ -349,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_convert_link_literal_uris_none_needed() {
-        let mut link = DecoratedLinkExpression {
+        let mut link = LinkExpression {
             author: "did:test:alice".to_string(),
             timestamp: Utc::now().to_rfc3339(),
             data: Link {
@@ -357,11 +365,9 @@ mod tests {
                 predicate: Some("flux://has_channel".to_string()),
                 target: "literal:string:already_canonical".to_string(),
             },
-            proof: DecoratedExpressionProof {
+            proof: ExpressionProof {
                 key: "k".to_string(),
                 signature: "s".to_string(),
-                valid: None,
-                invalid: None,
             },
             status: None,
         };
@@ -375,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_convert_link_literal_uris_none_predicate() {
-        let mut link = DecoratedLinkExpression {
+        let mut link = LinkExpression {
             author: "did:test:alice".to_string(),
             timestamp: Utc::now().to_rfc3339(),
             data: Link {
@@ -383,11 +389,9 @@ mod tests {
                 predicate: None,
                 target: "literal://json:%7B%7D".to_string(),
             },
-            proof: DecoratedExpressionProof {
+            proof: ExpressionProof {
                 key: "k".to_string(),
                 signature: "s".to_string(),
-                valid: None,
-                invalid: None,
             },
             status: None,
         };
@@ -407,24 +411,28 @@ mod tests {
 
         let uuid = "test-migration-tracking";
 
-        let is_migrated = crate::db_backend::db_backend()
-            .is_perspective_migrated(uuid)
-            .expect("Failed to check migration status");
+        let is_migrated = Ad4mDb::with_global_instance(|db| {
+            db.is_perspective_migrated(uuid)
+                .expect("Failed to check migration status")
+        });
         assert!(!is_migrated);
 
-        crate::db_backend::db_backend()
-            .mark_perspective_as_migrated(uuid)
-            .expect("Failed to mark as migrated");
+        Ad4mDb::with_global_instance(|db| {
+            db.mark_perspective_as_migrated(uuid)
+                .expect("Failed to mark as migrated")
+        });
 
-        let is_migrated = crate::db_backend::db_backend()
-            .is_perspective_migrated(uuid)
-            .expect("Failed to check migration status");
+        let is_migrated = Ad4mDb::with_global_instance(|db| {
+            db.is_perspective_migrated(uuid)
+                .expect("Failed to check migration status")
+        });
         assert!(is_migrated);
 
         // Idempotent
-        crate::db_backend::db_backend()
-            .mark_perspective_as_migrated(uuid)
-            .expect("Idempotent mark should not fail");
+        Ad4mDb::with_global_instance(|db| {
+            db.mark_perspective_as_migrated(uuid)
+                .expect("Idempotent mark should not fail")
+        });
     }
 
     #[test]
@@ -464,27 +472,22 @@ mod tests {
             status: Some(LinkStatus::Local),
         };
 
-        {
-            let _db = crate::db_backend::db_backend();
-            _db.add_link(&handle.uuid, &link1, &LinkStatus::Local)
+        Ad4mDb::with_global_instance(|db| {
+            db.add_link(&handle.uuid, &link1, &LinkStatus::Local)
                 .unwrap();
-            _db.add_link(&handle.uuid, &link2, &LinkStatus::Local)
+            db.add_link(&handle.uuid, &link2, &LinkStatus::Local)
                 .unwrap();
-        };
+        });
 
-        let before = crate::db_backend::db_backend()
-            .get_all_links(&handle.uuid)
-            .unwrap();
+        let before = Ad4mDb::with_global_instance(|db| db.get_all_links(&handle.uuid).unwrap());
         assert_eq!(before.len(), 2);
 
-        let deleted = crate::db_backend::db_backend()
-            .delete_all_links_for_perspective(&handle.uuid)
-            .unwrap();
+        let deleted = Ad4mDb::with_global_instance(|db| {
+            db.delete_all_links_for_perspective(&handle.uuid).unwrap()
+        });
         assert_eq!(deleted, 2);
 
-        let after = crate::db_backend::db_backend()
-            .get_all_links(&handle.uuid)
-            .unwrap();
+        let after = Ad4mDb::with_global_instance(|db| db.get_all_links(&handle.uuid).unwrap());
         assert_eq!(after.len(), 0);
     }
 
@@ -508,9 +511,8 @@ mod tests {
         assert_eq!(result.literal_conversions, 0);
 
         // Should be marked as migrated
-        let is_migrated = crate::db_backend::db_backend()
-            .is_perspective_migrated(&handle.uuid)
-            .unwrap();
+        let is_migrated =
+            Ad4mDb::with_global_instance(|db| db.is_perspective_migrated(&handle.uuid).unwrap());
         assert!(is_migrated);
     }
 
@@ -553,13 +555,12 @@ mod tests {
             status: Some(LinkStatus::Shared),
         };
 
-        {
-            let _db = crate::db_backend::db_backend();
-            _db.add_link(&handle.uuid, &link_with_old_literals, &LinkStatus::Shared)
+        Ad4mDb::with_global_instance(|db| {
+            db.add_link(&handle.uuid, &link_with_old_literals, &LinkStatus::Shared)
                 .unwrap();
-            _db.add_link(&handle.uuid, &link_already_canonical, &LinkStatus::Shared)
+            db.add_link(&handle.uuid, &link_already_canonical, &LinkStatus::Shared)
                 .unwrap();
-        };
+        });
 
         let sparql = SparqlStore::new(None).expect("Failed to create SparqlStore");
 
@@ -593,15 +594,12 @@ mod tests {
         assert_eq!(canonical.data.target, "literal:string:already_good");
 
         // Rusqlite should be empty
-        let remaining = crate::db_backend::db_backend()
-            .get_all_links(&handle.uuid)
-            .unwrap();
+        let remaining = Ad4mDb::with_global_instance(|db| db.get_all_links(&handle.uuid).unwrap());
         assert_eq!(remaining.len(), 0);
 
         // Should be marked as migrated
-        let is_migrated = crate::db_backend::db_backend()
-            .is_perspective_migrated(&handle.uuid)
-            .unwrap();
+        let is_migrated =
+            Ad4mDb::with_global_instance(|db| db.is_perspective_migrated(&handle.uuid).unwrap());
         assert!(is_migrated);
     }
 
@@ -627,9 +625,10 @@ mod tests {
             status: Some(LinkStatus::Local),
         };
 
-        crate::db_backend::db_backend()
-            .add_link(&handle.uuid, &link, &LinkStatus::Local)
-            .unwrap();
+        Ad4mDb::with_global_instance(|db| {
+            db.add_link(&handle.uuid, &link, &LinkStatus::Local)
+                .unwrap();
+        });
 
         let sparql = SparqlStore::new(None).expect("Failed to create SparqlStore");
 

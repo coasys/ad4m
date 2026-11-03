@@ -51,6 +51,18 @@ impl From<LanguageError> for JsValue {
     }
 }
 
+/// An error a host import threw: an `Error`'s message, or the value as text.
+impl From<JsValue> for LanguageError {
+    fn from(e: JsValue) -> Self {
+        let message = js_sys::Reflect::get(&e, &JsValue::from_str("message"))
+            .ok()
+            .and_then(|m| m.as_string())
+            .or_else(|| e.as_string())
+            .unwrap_or_else(|| format!("{e:?}"));
+        Self::internal(format!("host: {message}"))
+    }
+}
+
 impl From<serde_wasm_bindgen::Error> for LanguageError {
     fn from(e: serde_wasm_bindgen::Error) -> Self {
         Self::internal(format!("serde-wasm-bindgen: {e}"))
