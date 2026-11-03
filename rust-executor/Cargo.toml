@@ -215,6 +215,9 @@ x509-parser = "0.16"
 # Silero VAD (ONNX, embedded): the speech gate before a transcription request
 # (ai_service/transcription.rs), dev's crate and model, so dev's thresholds hold.
 voice_activity_detector = "0.1.1"
+# Its ort (=2.0.0-rc.4) builds only against ort-sys rc.4; a newer pre-release matches
+# ort's requirement and does not compile (size_t is gone from it).
+ort-sys = "=2.0.0-rc.4"
 deflate = "1.0.0"
 tar = "0.4"
 flate2 = "1"
