@@ -1253,7 +1253,7 @@ fn remote_model(
 /// llama-server renders them with the model's chat template (`--jinja`), parses the calls
 /// and honours `parallel_tool_calls: false`; a call `tool_choice` forces (`"required"`, a
 /// named function), which it does not enforce, `/v1` makes by a schema it does enforce
-/// (`api::openai_compat::forced_call`).
+/// (`api::openai_compat::chat::constrained_tool_calls`).
 fn native_tools(model: &SelectedModel) -> Option<bool> {
     (model.provider == Provider::LlamaServer && model.service == Service::Llm).then_some(true)
 }
