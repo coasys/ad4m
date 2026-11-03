@@ -27,7 +27,7 @@ export interface ExpressionProof {
      * answers a `did:scid` agent's profile as the record stores it, plus this field and
      * nothing else, so a reader can check the record itself at its anchor: removing
      * `proof.record` gives back the record's `profile` exactly, and `sig` is the record
-     * signature over `{profile, version, anchor}` (`coasys:link`) by `proof.key`, the
+     * signature over `{profile, version, anchor}` (`coasys:agent-record`) by `proof.key`, the
      * record's `signedBy`. Absent on every other expression.
      */
     record?: AgentRecordProof;
@@ -147,7 +147,7 @@ export interface LogPage {
     pauses: PauseRecord[];
 }
 
-/** A proof of work on a new log with no note (section 9 of `docs-src/identity/did-scid-coasys-1.md`). */
+/** A proof of work on a new log with no note (section 14, host admission policy, of `docs-src/identity/did-scid-coasys-1.md`). */
 export interface Pow {
     /** base58btc, 16 bytes. */
     nonce: string;
@@ -234,10 +234,10 @@ export interface AgentRecord {
      * when the log lists signedBy and that key is valid at this seq (a key revoked at seq N signs
      * nothing valid anchored at or after N), and the seq is at or below the log's head. The
      * person is the record's did and the key id is read from the log, so the anchor carries
-     * neither; nor a hash, since a fork freezes the identity anyway.
+     * neither; nor a hash, since the store keeps one branch of a fork.
      */
     anchor: number | null;
-    /** `coasys:link` scheme over {profile, version, anchor}. */
+    /** `coasys:agent-record` scheme over {profile, version, anchor}. */
     sig: string;
 }
 

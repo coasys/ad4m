@@ -47,6 +47,12 @@ pub const SIGNING_DOMAINS: &[Domain] = &[
         scheme: Scheme::DomainField,
     },
     Domain {
+        name: "coasys:agent-record",
+        signs: "agent records (`{profile, version, anchor}`) at the store's `/v1/agents/{did}`",
+        owner: "identity",
+        scheme: Scheme::DomainField,
+    },
+    Domain {
         name: "coasys:store-request",
         signs: "signed requests to the shared store",
         owner: "identity",
@@ -195,8 +201,12 @@ pub fn verify_signed<T: Serialize>(domain: &str, value: &T, key: &str, signature
     key.verify_strict(&bytes, &signature).is_ok()
 }
 
-/// The signing domain of links and agent records whose author key sits in a log.
+/// The signing domain of links whose author key sits in a log.
 pub const LINK_DOMAIN: &str = "coasys:link";
+/// The signing domain of agent records: `{profile, version, anchor}` by the record's
+/// `signedBy`. Its own domain, so a record signature never verifies as a link and the reverse,
+/// whatever the two JSON shapes hold.
+pub const AGENT_RECORD_DOMAIN: &str = "coasys:agent-record";
 /// The signing domain of the store's signed heads.
 pub const HEAD_DOMAIN: &str = "coasys:head";
 /// The signing domain of signed requests to the store.

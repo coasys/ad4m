@@ -35,6 +35,41 @@ use types::IdentityForkEvent;
 
 static SERVICE: OnceLock<Arc<IdentityService>> = OnceLock::new();
 
+/// `identity.storeKeys` as the executor can use them: each a bare Ed25519 multikey (`z6Mk…`),
+/// which a signed head's `store` names as `did:key:<multikey>` and `verify_head` compares
+/// without the prefix. Any other form (a `did:key:` prefix, a space after the comma, an empty
+/// string) never matches a head, while `KelCache::trusts_a_store` would say the executor trusts
+/// one: `identity.publish` and `identity.claimOffer` would then commit at the store, the cache
+/// would accept no head, and the agent's key would be taken for a log it can never bind to. So
+/// the executor refuses to start with such an entry.
+pub fn check_store_keys(keys: &[String]) -> Result<(), String> {
+    match keys
+        .iter()
+        .find(|key| ad4m_hash_chain::decode_ed25519_multikey(key).is_none())
+    {
+        None => Ok(()),
+        Some(bad) => Err(format!(
+            "identity.storeKeys: {bad:?} is not an Ed25519 multikey; give the store's key as the \
+             bare multikey (z6Mk…), without did:key: and without spaces"
+        )),
+    }
+}
+
+/// `identity.storeUrl` as the executor can use it: unset (the language's default store) or a
+/// URL. The agent language reads an empty `storeUrl` as unset, so `""` would send every
+/// profile and identity call to the production store while the executor's resolver names no
+/// store: the executor refuses to start with it.
+pub fn check_store_url(url: Option<&str>) -> Result<(), String> {
+    match url {
+        Some(url) if url.trim().is_empty() => Err(
+            "identity.storeUrl is empty; give the store's base URL, or leave it out for the \
+             default store"
+                .into(),
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// The identity settings of the executor's config (`identity.storeUrl`, `identity.storeKeys`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IdentitySettings {
@@ -119,34 +154,45 @@ fn publish_fork(did: &str, fork: &ad4m_identity_core::ForkEvidence) {
     }
 }
 
-/// Fills the agent language's `storeUrl` setting from `identity.storeUrl` before the language
-/// loads (it reads `languages/<address>/settings.json` at load). Other settings stay.
+/// Writes the agent language's `storeUrl` and `storeKeys` settings from `identity.storeUrl`
+/// and `identity.storeKeys` before the language loads (it reads
+/// `languages/<address>/settings.json` at load). Called on every start: an unset
+/// `identity.storeUrl` removes `storeUrl` (the language's default store), and no
+/// `identity.storeKeys` removes `storeKeys` (the language then trusts no head), so nothing an
+/// earlier run wrote stays in force. Other settings stay.
 ///
 /// The file is replaced atomically (a temporary file in the same directory, then a rename), so
-/// a failure leaves the old file as it was. An error means the setting may not be in force: the
-/// caller must not load the agent language then (see
+/// a failure leaves the old file as it was. An error means the settings may not be in force:
+/// the caller must not load the agent language then (see
 /// `LanguageController::install_agent_language`).
 pub fn write_agent_language_settings(
     languages_dir: &Path,
     agent_language: &str,
     settings: &IdentitySettings,
 ) -> std::io::Result<()> {
-    let Some(url) = &settings.store_url else {
-        return Ok(());
-    };
     let dir = languages_dir.join(agent_language);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("settings.json");
-    let mut value = match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .filter(|v| v.is_object())
-            .unwrap_or_else(|| serde_json::json!({})),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+    let mut fields = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+            .unwrap_or_default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
         Err(e) => return Err(e),
     };
-    value["storeUrl"] = serde_json::Value::String(url.clone());
-    replace_file(&path, serde_json::to_string(&value)?.as_bytes())
+    match &settings.store_url {
+        Some(url) => {
+            fields.insert("storeUrl".into(), url.clone().into());
+        }
+        None => {
+            fields.remove("storeUrl");
+        }
+    }
+    if settings.store_keys.is_empty() {
+        fields.remove("storeKeys");
+    } else {
+        fields.insert("storeKeys".into(), settings.store_keys.clone().into());
+    }
+    replace_file(&path, serde_json::to_string(&fields)?.as_bytes())
 }
 
 /// Writes `bytes` to a new file beside `path`, syncs it and renames it over `path`; on any
@@ -213,9 +259,46 @@ mod tests {
         assert_eq!(read()["storeUrl"], "http://127.0.0.1:9");
         assert_eq!(read()["storagePath"], "/x");
 
-        // No storeUrl configured: the language keeps its own.
+        // No storeUrl configured: the earlier run's URL goes, so the language's default store
+        // answers; other settings stay.
         write_agent_language_settings(dir.path(), "QmAgent", &IdentitySettings::default()).unwrap();
+        assert!(read().get("storeUrl").is_none(), "{}", read());
+        assert_eq!(read()["storagePath"], "/x");
+    }
+
+    /// `identity.storeKeys` becomes the language's `storeKeys`, and goes when unset.
+    #[test]
+    fn the_store_keys_reach_the_agent_languages_settings_and_go_when_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("QmAgent").join("settings.json");
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+        };
+        let settings = IdentitySettings {
+            store_url: Some("http://127.0.0.1:9".into()),
+            store_keys: vec!["z6MkA".into(), "z6MkB".into()],
+            ..Default::default()
+        };
+        write_agent_language_settings(dir.path(), "QmAgent", &settings).unwrap();
+        assert_eq!(read()["storeKeys"], serde_json::json!(["z6MkA", "z6MkB"]));
+
+        let without_keys = IdentitySettings {
+            store_keys: vec![],
+            ..settings
+        };
+        write_agent_language_settings(dir.path(), "QmAgent", &without_keys).unwrap();
+        assert!(read().get("storeKeys").is_none(), "{}", read());
         assert_eq!(read()["storeUrl"], "http://127.0.0.1:9");
+    }
+
+    /// An empty `identity.storeUrl` is refused (the language would read it as the default
+    /// store); unset and a URL pass.
+    #[test]
+    fn an_empty_store_url_is_refused() {
+        assert!(check_store_url(Some("")).is_err());
+        assert!(check_store_url(Some("  ")).is_err());
+        assert!(check_store_url(None).is_ok());
+        assert!(check_store_url(Some("https://store.example")).is_ok());
     }
 
     fn store_url(url: &str) -> IdentitySettings {
@@ -285,6 +368,24 @@ mod tests {
             assert!(written.is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
             assert!(temp_files_in(&lang).is_empty());
+        }
+    }
+
+    /// A store key the executor cannot match against a head is refused before the executor
+    /// starts, named in the error: the cache must never say it trusts a store it cannot check.
+    #[test]
+    fn store_keys_must_be_bare_ed25519_multikeys() {
+        let key = crate::identity::head::test_store_key::TestStoreKey::new(1).multikey();
+        assert_eq!(check_store_keys(&[]), Ok(()));
+        assert_eq!(check_store_keys(&[key.clone()]), Ok(()));
+        for bad in [
+            format!(" {key}"),
+            format!("did:key:{key}"),
+            String::new(),
+            "z6MkA".to_string(),
+        ] {
+            let err = check_store_keys(&[key.clone(), bad.clone()]).unwrap_err();
+            assert!(err.contains(&format!("{bad:?}")), "{err}");
         }
     }
 }

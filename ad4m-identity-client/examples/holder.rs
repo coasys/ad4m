@@ -43,6 +43,7 @@ async fn create(executor: &ViaExecutor<WsRpcClient>, vault: &MemoryVault) -> Res
     else {
         return Err("the flow did not ask for the words".into());
     };
+    let words = words.expose();
     flow.confirm([&words[positions[0] - 1], &words[positions[1] - 1]])
         .map_err(|e| e.to_string())?;
     let created = flow

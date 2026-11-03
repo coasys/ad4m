@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use ad4m_hash_chain::store::{ChainStore, SqliteChainStore, StoredEntry};
@@ -38,8 +39,8 @@ const PAGE: u64 = 256;
 /// The most pages one read of a log takes from one source (the store's refresh here, the
 /// resolver's reads too): 64 × 256 events, far past any person's log.
 pub(super) const MAX_PAGES: usize = 64;
-/// The most logs whose refresh time the cache remembers; past it the times start over (every
-/// log stale once).
+/// The most logs whose refresh time the cache remembers; past it the oldest time goes (that
+/// log is stale once), never the others.
 const REFRESHED_BOUND: usize = 4096;
 
 /// Why the cache refused or could not answer.
@@ -93,14 +94,24 @@ pub enum Ingested {
 /// Called once for each fork the cache records for the first time: `(did, evidence)`.
 pub type ForkListener = Box<dyn Fn(&str, &ForkEvidence) + Send + Sync>;
 
+/// One identity's fetch gate: one fetch at a time, and which of them succeeded.
+#[derive(Default)]
+struct Gate {
+    one_fetch: Mutex<()>,
+    /// The fetches begun under this gate.
+    begun: AtomicU64,
+    /// The number (counted in `begun`) of the last fetch that succeeded.
+    succeeded: AtomicU64,
+}
+
 /// The verified key logs, by SCID.
 pub struct KelCache {
     store: SqliteChainStore,
     /// `identity_heads`: the last signed head accepted per log.
     meta: StdMutex<Connection>,
     chains: Mutex<HashMap<String, KelChain>>,
-    /// One fetch per identity at a time, so concurrent callers share one store round trip.
-    fetching: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One fetch per identity at a time, so concurrent callers share store round trips.
+    fetching: Mutex<HashMap<String, Arc<Gate>>>,
     /// When each log last refreshed from the configured store (unix seconds), in memory only:
     /// after a restart every log counts as stale ([`KelCache::refreshed_within`]).
     refreshed: StdMutex<HashMap<String, u64>>,
@@ -151,6 +162,18 @@ pub fn fold_log(scid: &str, events: &[Event]) -> Result<(KelChain, Vec<Event>), 
         }));
     }
     Ok((chain, sorted))
+}
+
+/// Checks that `rival`, an event at a seq `held` holds with another hash, is a valid event of
+/// `scid`'s log: the module's `import` compares hashes only and checks no proof of an event at a
+/// held seq, so a hash-only conflict is no evidence until the rival steps through the core's own
+/// rules on the held prefix below it (`fold` of `held[..rival.seq]` and the rival: seq, prev,
+/// chain id, every rule of `KelPolicy`, the proofs). Without it anybody could raise forks with
+/// no key. `Err` says why the rival does not hold.
+pub fn rival_holds(scid: &str, held: &[Event], rival: &Event) -> Result<(), CacheError> {
+    let mut prefix: Vec<Event> = held.iter().filter(|e| e.seq < rival.seq).cloned().collect();
+    prefix.push(rival.clone());
+    fold_log(scid, &prefix).map(|_| ())
 }
 
 impl KelCache {
@@ -385,18 +408,31 @@ impl KelCache {
                 first,
             }),
             ImportOutcome::Fork(fork) => {
-                let theirs = events
+                // A fork counts only when the competing event is one the log's own rules admit
+                // on the held prefix; an unsigned or otherwise invalid body is refused as an
+                // event that does not fold, records nothing and alerts nobody.
+                let rival = events
                     .iter()
-                    .find(|e| e.seq == fork.seq)
-                    .and_then(|e| e.to_canonical_json().ok())
-                    .unwrap_or_default();
+                    .find(|e| {
+                        e.seq == fork.seq
+                            && ad4m_identity_core::event_hash(e).is_ok_and(|h| h == fork.theirs)
+                    })
+                    .ok_or_else(|| {
+                        CacheError::Fold(ChainError::Malformed(format!(
+                            "no event at seq {} hashes to {}",
+                            fork.seq, fork.theirs
+                        )))
+                    })?;
+                let held = self.stored_events(scid, 0).await?;
+                rival_holds(scid, &held, rival)?;
+                let theirs = rival.to_canonical_json().unwrap_or_default();
                 self.record_fork(&fork, &theirs).await?;
                 Err(CacheError::Fork(fork))
             }
-            ImportOutcome::Appended { head, .. } => {
-                let mut fresh: Vec<&Event> = events.iter().filter(|e| e.seq > before.seq).collect();
-                fresh.sort_by_key(|e| e.seq);
-                fresh.dedup_by_key(|e| e.seq);
+            ImportOutcome::Appended { head, entries } => {
+                // Store the copies the import appended, never a pick of our own from the batch:
+                // a copy with its proofs stripped hashes the same as the signed one.
+                let fresh: Vec<&Event> = entries.iter().collect();
                 self.persist(scid, Some(&before), &fresh).await?;
                 chains.insert(scid.to_string(), next);
                 Ok(Ingested::Appended(head))
@@ -493,8 +529,11 @@ impl KelCache {
 
     /// Refreshes `did`'s log from the agent language: reads the pages from the cached head on
     /// (the head's own event included, so a different event there shows as a fork) and accepts
-    /// them with [`KelCache::accept`]. One fetch per identity at a time; the identity's gate is
-    /// dropped when no other fetch waits on it, so looking up many identities keeps no state.
+    /// them with [`KelCache::accept`]. One fetch per identity at a time; a caller that waited
+    /// on the gate takes the cached log when a fetch that began after it called succeeded
+    /// meanwhile (one that began earlier may predate what it asks for, such as an append it
+    /// just made). The identity's gate is dropped when no other fetch waits on it, so looking
+    /// up many identities keeps no state.
     pub async fn refresh(
         &self,
         backend: &dyn IdentityBackend,
@@ -505,12 +544,28 @@ impl KelCache {
             let mut fetching = self.fetching.lock().await;
             fetching
                 .entry(scid.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .or_insert_with(|| Arc::new(Gate::default()))
                 .clone()
         };
+        let asked = gate.begun.load(Ordering::SeqCst);
         let result = {
-            let _one_fetch = gate.lock().await;
-            self.fetch(backend, &scid).await
+            let _one_fetch = gate.one_fetch.lock().await;
+            let reused = if gate.succeeded.load(Ordering::SeqCst) > asked {
+                self.chain(&scid).await.ok().flatten()
+            } else {
+                None
+            };
+            match reused {
+                Some(chain) => Ok(chain),
+                None => {
+                    let number = gate.begun.fetch_add(1, Ordering::SeqCst) + 1;
+                    let fetched = self.fetch(backend, &scid).await;
+                    if fetched.is_ok() {
+                        gate.succeeded.store(number, Ordering::SeqCst);
+                    }
+                    fetched
+                }
+            }
         };
         if result.is_ok() {
             self.note_refreshed(&scid, now());
@@ -523,11 +578,19 @@ impl KelCache {
         result
     }
 
-    /// Marks `scid`'s log as read from the store (or tried) at `at`.
+    /// Marks `scid`'s log as read from the store (or tried) at `at`. At [`REFRESHED_BOUND`] logs
+    /// the one read longest ago is forgotten, so many SCIDs (each failing read notes one) cannot
+    /// make every log stale at once.
     pub(crate) fn note_refreshed(&self, scid: &str, at: u64) {
         if let Ok(mut refreshed) = self.refreshed.lock() {
             if refreshed.len() >= REFRESHED_BOUND && !refreshed.contains_key(scid) {
-                refreshed.clear();
+                let oldest = refreshed
+                    .iter()
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(scid, _)| scid.clone());
+                if let Some(oldest) = oldest {
+                    refreshed.remove(&oldest);
+                }
             }
             refreshed.insert(scid.to_string(), at);
         }
@@ -556,8 +619,13 @@ impl KelCache {
             let Some(page) = backend.log(&did, from).await? else {
                 return match cached {
                     // The store answers no log of one it signed a head of: the shortest log. A
-                    // log only another host served is no evidence against the store.
-                    Some(chain) if self.accepted_head(scid)?.is_some() => {
+                    // log only another host served is no evidence against the store, nor is a
+                    // head no key of `identity.storeKeys` verifies now (a former store's).
+                    Some(chain)
+                        if self
+                            .accepted_head(scid)?
+                            .is_some_and(|head| verify_head(&head, &self.store_keys)) =>
+                    {
                         let ours = chain.head();
                         let fork = ForkEvidence {
                             chain: scid.to_string(),
@@ -628,6 +696,51 @@ pub(crate) mod tests {
                 .unwrap();
         let meta = Connection::open_with_flags(&name, flags).unwrap();
         KelCache::with(store, meta, store_keys).unwrap()
+    }
+
+    /// `trusted` answers only while the cached event at the accepted head's seq has the head's
+    /// hash: a store-signed head over another event at that seq trusts nothing.
+    #[tokio::test]
+    async fn a_head_whose_hash_is_not_the_cached_events_trusts_nothing() {
+        let log = TestLog::new(94);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        let scid = log.scid();
+        assert_eq!(
+            cache.trusted(&scid).await.unwrap().map(|(_, seq)| seq),
+            Some(0)
+        );
+
+        let other = TestLog::new(95).chain().head().hash.clone();
+        assert_ne!(other, log.chain().head().hash);
+        let signed = store_key().sign_head(&scid, 0, &other, 2);
+        cache.accept_head(&signed).unwrap();
+        assert!(cache.trusted(&scid).await.unwrap().is_none());
+    }
+
+    /// At the bound the oldest refresh time goes and every other log stays fresh: many SCIDs
+    /// (failing reads note one each) never make every log stale at once.
+    #[test]
+    fn past_the_bound_only_the_oldest_refresh_time_goes() {
+        let cache = trusting();
+        let now = 1_000_000;
+        cache.note_refreshed("oldest", now - 50);
+        for i in 0..REFRESHED_BOUND - 2 {
+            cache.note_refreshed(&format!("junk{i}"), now - 10);
+        }
+        cache.note_refreshed("real", now);
+        cache.note_refreshed("another", now);
+        assert!(
+            !cache.refreshed_within("oldest", now, 60),
+            "the oldest went"
+        );
+        assert!(
+            cache.refreshed_within("real", now, 60),
+            "the others stay fresh"
+        );
+        assert!(cache.refreshed_within("junk0", now, 60));
+        assert!(cache.refreshed_within("another", now, 60));
+        assert_eq!(cache.refreshed.lock().unwrap().len(), REFRESHED_BOUND);
     }
 
     /// The store key [`FakeStore`] signs its heads with.
@@ -823,11 +936,29 @@ pub(crate) mod tests {
             if self.put_down.load(Ordering::SeqCst) {
                 return Err(IdentityError::Unavailable("down".into()));
             }
+            // As the store: only a greater version replaces the record.
+            if self
+                .agent_version(&record.did)
+                .await?
+                .is_some_and(|stored| record.version <= stored)
+            {
+                return Err(IdentityError::Invalid("version".into()));
+            }
             self.puts
                 .lock()
                 .unwrap()
                 .push((record.clone(), req.cloned()));
             Ok(())
+        }
+        async fn agent_version(&self, did: &str) -> Result<Option<u64>, IdentityError> {
+            Ok(self
+                .puts
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(r, _)| r.did == did)
+                .map(|(r, _)| r.version))
         }
         async fn open_offer(&self, _: &SignedOffer) -> Result<OfferOpened, IdentityError> {
             unimplemented_call("open_offer")
@@ -941,7 +1072,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_different_event_at_a_held_seq_raises_one_fork() {
+    async fn an_unsigned_event_at_a_held_seq_raises_no_fork() {
         let mut log = TestLog::new(1);
         log.revoke_d1();
         let store = FakeStore::new(log.events.clone());
@@ -949,13 +1080,55 @@ pub(crate) mod tests {
         let forks = counting_cache(&mut cache);
         cache.refresh(&store, &log.scid()).await.unwrap();
 
-        // Another event at the held seq 1. `import` compares the hash of an event at a held
-        // seq before any rule, so a changed body is enough to show the fork.
-        let mut other = log.events[1].clone();
-        other.proof.clear();
-        if let ad4m_identity_core::Op::Revoke { revoke } = &mut other.op {
-            revoke.push("d1".into());
+        // Another body at the held seq 1 that no key signed: `import` sees a hash-only
+        // conflict, but the rival does not step through the log's rules, so it is refused as
+        // an event that does not fold. A store with no key raises no fork, however many bodies.
+        for extra in ["d1", "d2"] {
+            let mut other = log.events[1].clone();
+            other.proof.clear();
+            if let ad4m_identity_core::Op::Revoke { revoke } = &mut other.op {
+                revoke.push(extra.into());
+            }
+            assert!(matches!(
+                cache.ingest(&log.scid(), &[other]).await,
+                Err(CacheError::Fold(_))
+            ));
         }
+        assert_eq!(forks.load(Ordering::SeqCst), 0);
+        assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
+        assert_eq!(
+            cache.chain(&log.scid()).await.unwrap().unwrap().head(),
+            log.chain().head()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_signed_competing_event_at_a_held_seq_raises_one_fork() {
+        let mut log = TestLog::new(1);
+        let at_incept = log.chain();
+        log.revoke_d1();
+        let store = FakeStore::new(log.events.clone());
+        let mut cache = in_memory(vec![store.key.multikey()]);
+        let forks = counting_cache(&mut cache);
+        cache.refresh(&store, &log.scid()).await.unwrap();
+
+        // The master signs another event at seq 1: an `add` instead of the revoke. It holds on
+        // the incept, so the conflict is a fork.
+        let other_device = SigningKey::from_bytes(&[42; 32]);
+        let mut other = ad4m_identity_core::build::add_unsigned(
+            &at_incept,
+            DeviceKey {
+                id: at_incept.state().next_device_id(),
+                sign: other_device.key(),
+                enc: ad4m_identity_core::encode_x25519_multikey(&[42; 32]),
+                life: KeyLife::Standing,
+            },
+            "offer",
+            "coSig",
+        )
+        .unwrap();
+        cosign(&mut other, "m0", &log.master).unwrap();
+        rival_holds(&log.scid(), &log.events, &other).unwrap();
         let theirs_hash = ad4m_identity_core::event_hash(&other).unwrap();
         for _ in 0..2 {
             match cache.ingest(&log.scid(), &[other.clone()]).await {
@@ -967,6 +1140,7 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(forks.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.forks(&log.scid()).await.unwrap().len(), 1);
         assert_eq!(
             cache.chain(&log.scid()).await.unwrap().unwrap().head(),
             log.chain().head()
@@ -1018,24 +1192,70 @@ pub(crate) mod tests {
         assert_eq!(store.log_calls.load(Ordering::SeqCst), calls);
     }
 
+    /// A batch whose first copy of a new event has its proofs stripped (it hashes the same as the
+    /// signed one) stores the signed copy: the cache keeps what `import` appended, so a restart
+    /// still folds the log.
     #[tokio::test]
-    async fn concurrent_refreshes_of_one_identity_fetch_once() {
+    async fn a_stripped_twin_ahead_of_the_signed_event_is_never_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        let mut log = TestLog::new(1);
+        log.revoke_d1();
+        let mut stripped = log.events[1].clone();
+        stripped.proof.clear();
+        {
+            let cache = KelCache::open(&path, vec![]).unwrap();
+            cache.ingest(&log.scid(), &log.events[..1]).await.unwrap();
+            let appended = cache
+                .ingest(&log.scid(), &[stripped, log.events[1].clone()])
+                .await
+                .unwrap();
+            assert!(matches!(appended, Ingested::Appended(_)), "{appended:?}");
+            assert_eq!(
+                cache.stored_events(&log.scid(), 1).await.unwrap(),
+                vec![log.events[1].clone()]
+            );
+        }
+        let cache = KelCache::open(&path, vec![]).unwrap();
+        let chain = cache.chain(&log.scid()).await.unwrap().unwrap();
+        assert_eq!(chain.head(), log.chain().head());
+    }
+
+    /// Callers that wait on one identity's gate share fetches: the first fetch began before
+    /// they called, so the next one runs, and every later waiter takes its answer.
+    #[tokio::test]
+    async fn concurrent_refreshes_of_one_identity_share_the_fetch_after_theirs_began() {
         let log = TestLog::new(1);
         let store = Arc::new(FakeStore::new(log.events.clone()));
         let cache = Arc::new(in_memory(vec![store.key.multikey()]));
-        let mut tasks = Vec::new();
-        for _ in 0..20 {
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let refresh = || {
             let (cache, store, did) = (cache.clone(), store.clone(), log.scid());
-            tasks.push(tokio::spawn(async move {
-                cache.refresh(store.as_ref(), &did).await.map(|c| c.head())
-            }));
+            tokio::spawn(async move { cache.refresh(store.as_ref(), &did).await.map(|c| c.head()) })
+        };
+        let mut tasks = vec![refresh()];
+        entered.notified().await;
+        for _ in 0..19 {
+            tasks.push(refresh());
         }
+        // Every caller holds the gate's handle, with the map's: all of them wait on it.
+        while cache
+            .fetching
+            .lock()
+            .await
+            .get(&log.scid())
+            .map(Arc::strong_count)
+            != Some(21)
+        {
+            tokio::task::yield_now().await;
+        }
+        release.notify_one();
         for task in tasks {
             assert_eq!(task.await.unwrap().unwrap(), log.chain().head());
         }
-        // The fetches ran one after another: each later one found the log current, so the
-        // log was stored once and no fetch saw another's half-written state.
-        assert_eq!(store.log_calls.load(Ordering::SeqCst), 20);
+        // The fetches ran one after another, so no fetch saw another's half-written state.
+        assert_eq!(store.log_calls.load(Ordering::SeqCst), 2);
         assert_eq!(cache.stored_events(&log.scid(), 0).await.unwrap().len(), 1);
         assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
         assert!(
@@ -1104,5 +1324,34 @@ pub(crate) mod tests {
         let cache = KelCache::open(&path, vec![TestStoreKey::new(3).multikey()]).unwrap();
         assert!(cache.accepted_head(&log.scid()).unwrap().is_some());
         assert!(cache.trusted(&log.scid()).await.unwrap().is_none());
+    }
+
+    /// A store that answers no log records a fork only against a head the configured store
+    /// keys verify: a former store's head is no evidence against this one.
+    #[tokio::test]
+    async fn no_log_from_a_new_store_records_no_fork_against_a_former_stores_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        let log = TestLog::new(1);
+        let former = FakeStore::new(log.events.clone());
+        {
+            let cache = KelCache::open(&path, vec![former.key.multikey()]).unwrap();
+            cache.refresh(&former, &log.scid()).await.unwrap();
+        }
+        let new = FakeStore::new(vec![]);
+        let cache = KelCache::open(&path, vec![TestStoreKey::new(3).multikey()]).unwrap();
+        assert!(matches!(
+            cache.refresh(&new, &log.scid()).await,
+            Err(CacheError::NotFound)
+        ));
+        assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
+
+        // Under the key that signed the held head, the same answer is a fork.
+        let cache = KelCache::open(&path, vec![former.key.multikey()]).unwrap();
+        assert!(matches!(
+            cache.refresh(&new, &log.scid()).await,
+            Err(CacheError::Fork(_))
+        ));
+        assert_eq!(cache.forks(&log.scid()).await.unwrap().len(), 1);
     }
 }

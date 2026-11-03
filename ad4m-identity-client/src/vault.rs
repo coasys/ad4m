@@ -1,7 +1,7 @@
 //! The vault holds master keys; [`MasterSigner`] signs with one without giving its bytes out
 //! Every use of a master key opens the vault once for a whole flow
 //! ([`Vault::unlock`]: one prompt per change to the identity) and the flow's [`Unlocked`]
-//! guard expires after [`UNLOCK_TTL_S`] and wipes the key when it drops.
+//! guard expires after [`MasterUse::ttl_s`] and wipes the key when it drops.
 //!
 //! Implementations: `DesktopVault` (the desktop shell), `PhoneVault` and `WebVault` (neither
 //! written yet), and [`MemoryVault`] for tests (feature `test-vault`, never in a release build).
@@ -11,7 +11,7 @@ use ad4m_identity_core::{Event, Multikey};
 
 use crate::secret::Secret;
 
-/// How long one unlock serves a flow: five minutes, then the surface asks again.
+/// How long one unlock serves a revocation: five minutes, then the surface asks again.
 pub const UNLOCK_TTL_S: u64 = 300;
 
 /// Why the surface asks for the unlock; shown in the OS prompt where the OS allows it. The
@@ -20,6 +20,21 @@ pub const UNLOCK_TTL_S: u64 = 300;
 pub enum MasterUse {
     Link,
     Revoke,
+}
+
+impl MasterUse {
+    /// How long an unlock for this use lasts. A link signs its `add` up to the end of the
+    /// store's confirm grace: the offer lives [`OFFER_TTL_S`](ad4m_identity_core::link::OFFER_TTL_S)
+    /// from the unlock and the store takes the `add` [`CONFIRM_GRACE_S`](ad4m_identity_core::link::CONFIRM_GRACE_S)
+    /// longer. A revocation lasts [`UNLOCK_TTL_S`].
+    pub fn ttl_s(self) -> u64 {
+        match self {
+            MasterUse::Link => {
+                ad4m_identity_core::link::OFFER_TTL_S + ad4m_identity_core::link::CONFIRM_GRACE_S
+            }
+            MasterUse::Revoke => UNLOCK_TTL_S,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -44,7 +59,7 @@ pub trait MasterSigner: Signer {
     fn index(&self) -> u32;
 }
 
-/// One unlocked master key for one flow. Expires [`UNLOCK_TTL_S`] after the unlock; the key
+/// One unlocked master key for one flow. Expires [`MasterUse::ttl_s`] after the unlock; the key
 /// is wiped when the guard drops.
 pub struct Unlocked {
     signer: Box<dyn MasterSigner + Send + Sync>,
@@ -52,10 +67,11 @@ pub struct Unlocked {
 }
 
 impl Unlocked {
-    pub fn new(signer: Box<dyn MasterSigner + Send + Sync>, now: u64) -> Self {
+    /// The unlock of `signer` at `now` for `why`; it lasts `why`'s [`MasterUse::ttl_s`].
+    pub fn new(signer: Box<dyn MasterSigner + Send + Sync>, why: MasterUse, now: u64) -> Self {
         Unlocked {
             signer,
-            expires_at: now.saturating_add(UNLOCK_TTL_S),
+            expires_at: now.saturating_add(why.ttl_s()),
         }
     }
 
@@ -83,7 +99,7 @@ pub trait Vault: Send + Sync {
         secret: Secret<[u8; 32]>,
     ) -> Result<(), VaultError>;
     /// One unlock (one prompt where the OS needs it) for a flow that uses the master key `why`.
-    /// `now` starts the unlock's [`UNLOCK_TTL_S`].
+    /// `now` starts the unlock's [`MasterUse::ttl_s`] (pass `why` to [`Unlocked::new`]).
     fn unlock(&self, scid: &str, why: MasterUse, now: u64) -> Result<Unlocked, VaultError>;
     /// Keeps the co-signed incept of a new identity (`incept.scid`), whose master #0 the vault
     /// holds, until [`Vault::incept_published`]; replaces a kept incept of the same identity.
@@ -179,6 +195,7 @@ mod memory {
             self.unlocks.lock().map_err(poisoned)?.push(why);
             Ok(Unlocked::new(
                 Box::new(KeySigner::new(secret.expose(), *index)),
+                why,
                 now,
             ))
         }
@@ -215,7 +232,7 @@ mod memory {
                 Err(VaultError::NotFound)
             ));
             vault.store_master("Qm", 0, Secret::new([3; 32])).unwrap();
-            let unlocked = vault.unlock("Qm", MasterUse::Link, 100).unwrap();
+            let unlocked = vault.unlock("Qm", MasterUse::Revoke, 100).unwrap();
             let signer = unlocked.signer(100 + UNLOCK_TTL_S - 1).unwrap();
             assert_eq!(signer.index(), 0);
             assert_eq!(
@@ -226,7 +243,21 @@ mod memory {
                 unlocked.signer(100 + UNLOCK_TTL_S),
                 Err(VaultError::Expired)
             ));
-            assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
+            assert_eq!(vault.unlocks(), vec![MasterUse::Revoke]);
+        }
+
+        /// A link's unlock lasts until the store's confirm grace ends, so the `add` can be
+        /// signed while the store still takes it.
+        #[test]
+        fn a_link_unlock_lasts_through_the_confirm_grace() {
+            use ad4m_identity_core::link::{CONFIRM_GRACE_S, OFFER_TTL_S};
+            let vault = MemoryVault::new();
+            vault.store_master("Qm", 0, Secret::new([3; 32])).unwrap();
+            let unlocked = vault.unlock("Qm", MasterUse::Link, 100).unwrap();
+            let end = 100 + OFFER_TTL_S + CONFIRM_GRACE_S;
+            assert!(unlocked.signer(100 + OFFER_TTL_S + 1).is_ok());
+            assert!(unlocked.signer(end - 1).is_ok());
+            assert!(matches!(unlocked.signer(end), Err(VaultError::Expired)));
         }
     }
 }

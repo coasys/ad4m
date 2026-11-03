@@ -204,6 +204,137 @@ fn a_revealed_key_already_in_the_log_fails() {
 }
 
 #[test]
+fn a_second_proof_by_the_same_key_is_refused() {
+    let log = Log::new();
+    let mut event = log.add_event(KeyLife::Standing);
+    event.proof.push(event.proof[0].clone());
+    assert_eq!(
+        log.try_push(&event),
+        Err(ChainError::Policy(FoldError::BadProof("m0".into())))
+    );
+    // The parser takes two equal proofs; the policy refuses them, so one event has one wire form.
+    let mut events = log.json();
+    events.push(json(&event));
+    assert_eq!(
+        ad4m_identity_core::fold_json(&events).unwrap_err(),
+        ChainError::Policy(FoldError::BadProof("m0".into()))
+    );
+}
+
+#[test]
+fn a_proof_with_another_purpose_type_or_suite_is_refused() {
+    type Edit = fn(&mut ad4m_identity_core::Proof);
+    let log = Log::new();
+    let edits: [(&str, Edit); 3] = [
+        ("purpose", |p| p.proof_purpose = "authentication".into()),
+        ("type", |p| p.r#type = "Ed25519Signature2020".into()),
+        ("cryptosuite", |p| p.cryptosuite = "eddsa-rdfc-2022".into()),
+    ];
+    for (what, edit) in edits {
+        // Signed over the edited config, so only the config check can refuse it.
+        let mut event = build::revoke_unsigned(&log.chain, &["d1".to_string()]).unwrap();
+        let mut proof = build::proof_config(&event, "m0");
+        edit(&mut proof);
+        let input = ad4m_hash_chain::signing_input(&event, &proof).unwrap();
+        proof.proof_value = ad4m_hash_chain::encode_proof_value(
+            &ed25519_dalek::Signer::sign(&master(0), &input).to_bytes(),
+        );
+        event.proof.push(proof);
+        assert_eq!(
+            log.try_push(&event),
+            Err(ChainError::Policy(FoldError::BadProof("m0".into()))),
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn a_retired_master_never_returns() {
+    // m0 -> m1, where m1 commits to m0 again.
+    let mut log = Log::new();
+    let back = ad4m_identity_core::commitment(&mk(&master(0)), &salt(7));
+    let rotate = build::rotate(&log.chain, &master(1), &salt(1), Some(back), &[]).unwrap();
+    log.push(rotate);
+    log.n = 1;
+    // The rotate that reveals m0 matches the commitment and is signed by m0 as m2.
+    let mut again =
+        build::rotate_unsigned(&log.chain, &mk(&master(0)), &salt(7), Some(next(3)), &[]).unwrap();
+    sign(&mut again, "m2", &master(0));
+    assert_eq!(
+        log.try_push(&again),
+        Err(ChainError::Policy(FoldError::DuplicateKey(mk(&master(0)))))
+    );
+    // Nor as a device key.
+    let key = ad4m_identity_core::DeviceKey {
+        id: "d2".into(),
+        sign: mk(&master(0)),
+        enc: enc("d2"),
+        life: KeyLife::Standing,
+    };
+    let mut add = build::add_unsigned(&log.chain, key, "o", "c").unwrap();
+    sign(&mut add, "m1", &master(1));
+    assert_eq!(
+        log.try_push(&add),
+        Err(ChainError::Policy(FoldError::DuplicateKey(mk(&master(0)))))
+    );
+}
+
+#[test]
+fn a_salt_of_any_other_length_is_refused_though_committed() {
+    // Each bad salt sits in #0's commitment, so only rule K13 can refuse the rotate.
+    let bad = [
+        bs58::encode([0xff; 15]).into_string(),
+        bs58::encode([0xff; 17]).into_string(),
+        "2".repeat(23),
+    ];
+    for salt in bad {
+        let mut incept = build::incept_unsigned(
+            &mk(&master(0)),
+            ad4m_identity_core::commitment(&mk(&master(1)), &salt),
+            vec![device(1, KeyLife::Standing)],
+        )
+        .unwrap();
+        sign(&mut incept, "m0", &master(0));
+        sign(&mut incept, "d1", &dev(1));
+        let chain = ad4m_identity_core::fold(std::slice::from_ref(&incept)).unwrap();
+        let mut rotate =
+            build::rotate_unsigned(&chain, &mk(&master(1)), &salt, Some(next(2)), &[]).unwrap();
+        sign(&mut rotate, "m1", &master(1));
+        let log = Log {
+            events: vec![incept],
+            chain,
+            n: 0,
+        };
+        assert_eq!(
+            log.try_push(&rotate),
+            Err(ChainError::Policy(FoldError::Format(
+                ad4m_identity_core::FormatError::BadSalt(salt.clone())
+            ))),
+            "{salt}"
+        );
+    }
+    // The longest 16-byte salt (22 characters) rotates.
+    let longest = bs58::encode([0xff; 16]).into_string();
+    assert_eq!(longest.len(), 22);
+    let mut incept = build::incept_unsigned(
+        &mk(&master(0)),
+        ad4m_identity_core::commitment(&mk(&master(1)), &longest),
+        vec![device(1, KeyLife::Standing)],
+    )
+    .unwrap();
+    sign(&mut incept, "m0", &master(0));
+    sign(&mut incept, "d1", &dev(1));
+    let chain = ad4m_identity_core::fold(std::slice::from_ref(&incept)).unwrap();
+    let rotate = build::rotate(&chain, &master(1), &longest, Some(next(2)), &[]).unwrap();
+    let log = Log {
+        events: vec![incept],
+        chain,
+        n: 0,
+    };
+    log.try_push(&rotate).unwrap();
+}
+
+#[test]
 fn signing_input_and_attach_match_the_signer_form() {
     let log = Log::new();
     let mut by_hand = build::revoke_unsigned(&log.chain, &["d1".to_string()]).unwrap();

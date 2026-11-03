@@ -178,7 +178,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `src` is read by the executor itself (`identity/src_fetch.rs`, public addresses only at
   connect). Both are kept after `fold` in `KelCache`; a head counts only under a key of the
   config's `identity.storeKeys`, authorship reads a log only up to that head, and
-  `identity.storeUrl` becomes the agent language's `storeUrl` setting at load. A different event
+  `identity.storeUrl` and `identity.storeKeys` become the agent language's `storeUrl` and
+  `storeKeys` settings at every start (unset removes them). A different event
   at a held seq or a shorter log records a fork, keeps the history and fires `identity-fork`.
   `ad4m-executor init --operator <did:scid>` records the operator (`operator_record`, never
   replaced by `init`); `identity.claimOffer` (operator only) claims with the main wallet key and

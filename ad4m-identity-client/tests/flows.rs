@@ -13,8 +13,8 @@ use ad4m_identity_client::flows::create::{resume, CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::LinkFlow;
 use ad4m_identity_client::flows::revoke::{key_id_of, revoke};
 use ad4m_identity_client::{
-    ClientError, ExecutorRpc, MasterUse, MemoryVault, OsRandom, Random, RpcError, SystemClock,
-    Vault, ViaExecutor,
+    ClientError, Clock, ExecutorRpc, MasterUse, MemoryVault, OsRandom, Random, RpcError,
+    SystemClock, Vault, ViaExecutor,
 };
 use ad4m_identity_core::build::{cosign, Signer};
 use ad4m_identity_core::link::{self, OfferKind, OfferString};
@@ -101,6 +101,12 @@ struct TestExecutor {
     lose_publish_answer: Cell<bool>,
     /// The next `identity.publish` fails before it reaches the store.
     refuse_publish: Cell<bool>,
+    /// Changes every claim view `identity.offers` answers (a store that swaps a field).
+    tamper_claim: Cell<Option<fn(&mut Value)>>,
+    /// `identity.cosignIncept` answers another valid incept (its own master) listing this key.
+    swap_incept: Cell<bool>,
+    /// `identity.openOffer` answers another offer id.
+    other_offer_id: Cell<bool>,
 }
 
 impl TestExecutor {
@@ -113,6 +119,9 @@ impl TestExecutor {
             publishes: Cell::new(0),
             lose_publish_answer: Cell::new(false),
             refuse_publish: Cell::new(false),
+            tamper_claim: Cell::new(None),
+            swap_incept: Cell::new(false),
+            other_offer_id: Cell::new(false),
         }
     }
 
@@ -216,6 +225,19 @@ impl ExecutorRpc for TestExecutor {
                         message: "not-listed".into(),
                     })?;
                 let id = listed.id.clone();
+                if self.swap_incept.get() {
+                    use ad4m_identity_core::{DeviceKey, KeyLife};
+                    let master = SigningKey::from_bytes(&[77; 32]);
+                    let next = ad4m_identity_core::commitment(&Signer::key(&master), "salt");
+                    let device = DeviceKey {
+                        id: id.clone(),
+                        sign: self.device_key(),
+                        enc: self.device_enc(),
+                        life: KeyLife::Standing,
+                    };
+                    event = ad4m_identity_core::build::incept_human(&master, next, vec![device])
+                        .unwrap();
+                }
                 cosign(&mut event, &id, &self.device).unwrap();
                 ad4m_identity_core::fold(std::slice::from_ref(&event)).unwrap();
                 Ok(serde_json::to_value(&event).unwrap())
@@ -297,6 +319,10 @@ impl ExecutorRpc for TestExecutor {
                 if code != 201 {
                     return Err(Self::refused(code, &body));
                 }
+                let mut body = body;
+                if self.other_offer_id.get() {
+                    body["offerId"] = json!("another-offer");
+                }
                 Ok(body)
             }
             "identity.offers" => {
@@ -317,6 +343,16 @@ impl ExecutorRpc for TestExecutor {
                     .await;
                 if code != 200 {
                     return Err(Self::refused(code, &body));
+                }
+                let mut body = body;
+                if let (Some(tamper), Some(listings)) =
+                    (self.tamper_claim.get(), body.as_array_mut())
+                {
+                    for listing in listings {
+                        if listing["state"]["state"] == "claimed" {
+                            tamper(&mut listing["state"]["claim"]);
+                        }
+                    }
                 }
                 Ok(body)
             }
@@ -416,7 +452,7 @@ impl Random for Counting {
 
 fn shown(screen: CreateScreen) -> Vec<String> {
     match screen {
-        CreateScreen::ShowWords(words) => words,
+        CreateScreen::ShowWords(words) => words.expose().clone(),
         other => panic!("expected the words, got {other:?}"),
     }
 }
@@ -751,6 +787,75 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 }
 
+/// The system clock moved ahead by a number of seconds: the holder's time runs on while the
+/// store's stays real (the store would still take the `add`).
+struct Ahead(Cell<u64>);
+
+impl Clock for Ahead {
+    fn now(&self) -> u64 {
+        SystemClock.now() + self.0.get()
+    }
+}
+
+/// The store takes the `add` until the offer's expiry plus `CONFIRM_GRACE_S`: a holder who
+/// confirms after the offer's expiry, within the grace, still signs it with the flow's one
+/// unlock.
+#[tokio::test]
+async fn confirm_after_the_offers_expiry_within_the_grace_signs_the_add() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 13).await;
+    let clock = Ahead(Cell::new(0));
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Node,
+        STORE_URL,
+        &clock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    claim(&b, &flow.link(), None).await.unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+
+    clock.0.set(link::OFFER_TTL_S + link::CONFIRM_GRACE_S - 60);
+    let head = flow.confirm(&claimed).await.unwrap();
+    assert_eq!(head.seq, 1);
+    assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
+}
+
+/// Past the offer's expiry `wait_for_claim` answers that the offer expired, even when the
+/// unlock has ended too: the offer's end is what the surface shows, not the vault's.
+#[tokio::test]
+async fn waiting_past_the_offers_expiry_answers_expired_not_the_vault() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 14).await;
+    let clock = Ahead(Cell::new(0));
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Node,
+        STORE_URL,
+        &clock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    clock.0.set(link::OFFER_TTL_S + link::CONFIRM_GRACE_S + 100);
+    let ended = flow.wait_for_claim().await;
+    assert!(
+        matches!(&ended, Err(ClientError::OfferEnded(why)) if why == "expired"),
+        "{ended:?}"
+    );
+}
+
 #[tokio::test]
 async fn revoke_ends_the_second_executors_key() {
     let store = TestStore::new();
@@ -811,6 +916,58 @@ async fn revoke_ends_the_second_executors_key() {
     assert_eq!(refused.code, 409, "{refused:?}");
 }
 
+/// A claim view the store changed after the device signed it: the holder refuses it in
+/// `wait_for_claim`, so the master signs nothing and the log stays at the incept.
+async fn a_swapped_claim_view_is_refused(entropy: u8, tamper: fn(&mut Value)) {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, entropy).await;
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Node,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    claim(&b, &flow.link(), None).await.unwrap();
+    let publishes = a.rpc().publishes.get();
+    a.rpc().tamper_claim.set(Some(tamper));
+
+    let refused = flow.wait_for_claim().await;
+    assert!(
+        matches!(refused, Err(ClientError::Link(link::LinkError::CoSig))),
+        "{refused:?}"
+    );
+    assert_eq!(a.rpc().publishes.get(), publishes);
+    let log = a.log(&did, 0, true).await.unwrap();
+    assert_eq!(log.events.len(), 1);
+}
+
+#[tokio::test]
+async fn a_claim_view_with_a_swapped_enc_key_is_never_signed() {
+    a_swapped_claim_view_is_refused(8, |claim| {
+        let other = SigningKey::from_bytes(&[9; 32])
+            .verifying_key()
+            .to_montgomery();
+        claim["encKey"] = json!(ad4m_identity_core::encode_x25519_multikey(other.as_bytes()));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_claim_view_with_a_swapped_can_keep_master_is_never_signed() {
+    a_swapped_claim_view_is_refused(9, |claim| {
+        claim["canKeepMaster"] = json!(true);
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_link_without_the_master_key_never_opens_an_offer() {
     let store = TestStore::new();
@@ -833,4 +990,87 @@ async fn a_link_without_the_master_key_never_opens_an_offer() {
             ad4m_identity_client::VaultError::NotFound
         ))
     ));
+}
+
+/// An executor that answers `cosignIncept` with another valid incept (its own master, the
+/// same device key) is refused: the vault keeps nothing and nothing is published.
+#[tokio::test]
+async fn a_swapped_co_signed_incept_is_never_kept_or_published() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    a.rpc().swap_incept.set(true);
+    let vault = MemoryVault::new();
+    let refused = confirmed(15).finish(&a, &vault).await;
+    assert!(
+        matches!(&refused, Err(ClientError::Protocol(_))),
+        "{refused:?}"
+    );
+    assert_eq!(a.rpc().publishes.get(), 0);
+    assert!(vault.pending_incepts().unwrap().is_empty());
+    assert_eq!(a.status().await.unwrap().did, None);
+}
+
+/// An `openOffer` answer for another offer id is refused: the flow never hands out a link
+/// whose offer the store did not take.
+#[tokio::test]
+async fn an_open_offer_answer_for_another_offer_is_refused() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 16).await;
+    a.rpc().other_offer_id.set(true);
+    let refused = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Node,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await;
+    assert!(
+        matches!(&refused, Err(ClientError::Protocol(m)) if m.contains("another offer id")),
+        "{:?}",
+        refused.err()
+    );
+}
+
+/// A vault whose key for the identity is not the log's current master opens no offer: the
+/// flow checks before it signs.
+#[tokio::test]
+async fn a_vault_key_that_is_not_the_current_master_opens_no_offer() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 17).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let wrong = MemoryVault::new();
+    wrong
+        .store_master(&scid, 0, ad4m_identity_client::Secret::new([42; 32]))
+        .unwrap();
+    let refused = LinkFlow::open(
+        &a,
+        &wrong,
+        &did,
+        OfferKind::Node,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await;
+    assert!(
+        matches!(&refused, Err(ClientError::Protocol(m)) if m.contains("current master")),
+        "{:?}",
+        refused.err()
+    );
+}
+
+/// A screen's `Debug` never shows the words: a surface that logs a screen, or a test that
+/// panics with one, must not put the 12 words in a log or a crash report.
+#[test]
+fn a_create_screen_never_shows_the_words_in_debug_output() {
+    let (_flow, screen) = CreateFlow::start(&OsRandom);
+    assert!(matches!(&screen, CreateScreen::ShowWords(words) if words.expose().len() == 12));
+    assert_eq!(format!("{screen:?}"), "ShowWords(<12 words>)");
 }
