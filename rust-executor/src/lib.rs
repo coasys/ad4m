@@ -518,6 +518,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             store_keys: config.identity_store_keys.clone().unwrap_or_default(),
             allow_private_src: config.identity_allow_private_src.unwrap_or(false),
         };
+        if let Err(e) = crate::identity::check_store_keys(&settings.store_keys) {
+            return failed_start(e);
+        }
         if let Err(e) = crate::identity::init(&db_path, &settings) {
             return failed_start(format!("Could not open the key-log cache: {e}"));
         }

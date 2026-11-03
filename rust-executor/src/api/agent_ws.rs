@@ -403,7 +403,8 @@ async fn generate_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
         agent_service.passphrase = Some(body.passphrase.clone());
 
         agent_service.dump().clone()
-    });
+    })
+    .with_identity();
 
     let mut init_errors: Vec<String> = Vec::new();
     let config = crate::config::get_global_config();
@@ -452,7 +453,8 @@ async fn lock_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, W
     let agent = AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.lock(body.passphrase.clone());
         agent_service.dump().clone()
-    });
+    })
+    .with_identity();
 
     get_global_pubsub()
         .await
@@ -538,7 +540,8 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
             .as_ref()
             .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
         agent_ref.dump().clone()
-    };
+    }
+    .with_identity();
 
     if !is_unlocked {
         agent.error = Some("Failed to unlock agent".to_string());
