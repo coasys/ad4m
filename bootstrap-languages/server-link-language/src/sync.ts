@@ -581,6 +581,9 @@ export function _resetBatchStateForTests(): void {
     _inflight = Promise.resolve();
     if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
     _retryDelay = 2_500;
+    _renderDueAt = 0;
+    _renderRetryDelay = RENDER_RETRY_BASE_MS;
+    _rendering = null;
 }
 
 /** Test-only: await the current in-flight flush without the drain loop.
@@ -594,6 +597,84 @@ export async function _awaitInflightForTests(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Cold-start bootstrap — full snapshot instead of replaying every diff
 // ---------------------------------------------------------------------------
+
+/** The wait before the first retry of a failed render; it doubles per failure. */
+export const RENDER_RETRY_BASE_MS = 10_000;
+/** The longest wait between render attempts. */
+const RENDER_RETRY_MAX_MS = 5 * 60 * 1000;
+
+/** `Date.now()` before which catch-up does not retry the render. */
+let _renderDueAt = 0;
+let _renderRetryDelay = RENDER_RETRY_BASE_MS;
+/** The render in flight (its pages, then the tail from `upto`), from `init`
+ *  or a retry: there is never a second one. */
+let _rendering: Promise<void> | null = null;
+
+/**
+ * Asks for a fresh render: stores the first page's cursor, unless a render's
+ * progress is stored already, which is then resumed. The stored progress is
+ * the "render needed" state: until the last page clears it, catch-up does
+ * not tail `/sync` and retries the render with backoff (`retryRenderIfDue`).
+ * `init` calls it before its startup sequence, so a render that never ran
+ * (authentication failed first) is run by catch-up too.
+ */
+export function needRender(): void {
+    if (_rendering || store.getRenderProgress()) return;
+    store.clearHeld();
+    store.setRenderProgress({ upto: null, next: null, page: 0 });
+}
+
+/** The render, one at a time: `bootstrap` and `retryRenderIfDue` share it. */
+function startRender(): Promise<void> {
+    if (!_rendering) {
+        const p = runRender().finally(() => {
+            if (_rendering === p) _rendering = null;
+        });
+        _rendering = p;
+    }
+    return _rendering;
+}
+
+/**
+ * The stored render's remaining pages, then the tail from `upto`. A failed
+ * page keeps its progress and sets the backoff, which doubles per failure up
+ * to `RENDER_RETRY_MAX_MS`; the last page resets it.
+ */
+async function runRender(): Promise<void> {
+    try {
+        await renderPages();
+    } catch (err) {
+        _renderDueAt = Date.now() + _renderRetryDelay;
+        _renderRetryDelay = Math.min(_renderRetryDelay * 2, RENDER_RETRY_MAX_MS);
+        throw err;
+    }
+    _renderDueAt = 0;
+    _renderRetryDelay = RENDER_RETRY_BASE_MS;
+    await catchUp();
+}
+
+/**
+ * While a render is stored and its backoff has elapsed, resumes it in the
+ * background and returns: catch-up does not wait for it. Its own tail
+ * brings the diffs after its `upto`.
+ */
+function retryRenderIfDue(): void {
+    if (_rendering || !store.getRenderProgress() || Date.now() < _renderDueAt) return;
+    console.log("[server-link-language] resuming the room render at its stored cursor");
+    startRender().then(
+        () => console.log("[server-link-language] room render finished on retry"),
+        (err) => console.error(
+            "[server-link-language] room render retry, or the catch-up after it, failed; " +
+            "catch-up resumes the render after a backoff:",
+            err,
+        ),
+    );
+}
+
+/** Test-only: await the render in flight, if any, ignoring its failure. */
+export async function _awaitRenderRetryForTests(): Promise<void> {
+    await _rendering?.catch(() => undefined);
+}
 
 /**
  * Loads the server's current link set as the authoritative state: a paged
@@ -609,13 +690,15 @@ export async function _awaitInflightForTests(): Promise<void> {
  * encrypted copy is held stays: the key ring not being loaded yet must not
  * delete links the executor holds. A link this agent commits during the
  * render stays too (`commit` records it).
+ *
+ * Starts a fresh render unless one is stored (`needRender`), and runs it now,
+ * whatever the backoff: `init` calls it once. Single-flight: a call while a
+ * render is out joins it. A failed page keeps its progress, and catch-up
+ * resumes it with backoff (`retryRenderIfDue`) until the last page.
  */
 export async function bootstrap(): Promise<void> {
-    if (!_rendering && !store.getRenderProgress()) {
-        store.clearHeld();
-        store.setRenderProgress({ upto: null, next: null, page: 0 });
-    }
-    await catchUp();
+    needRender();
+    await startRender();
 }
 
 /** Links per `/render` page, diffs per `/sync` page. A page of 500 encrypted
@@ -630,14 +713,6 @@ let _syncPageLimit = SYNC_PAGE_LIMIT;
 export function _setPageLimitsForTests(render = RENDER_PAGE_LIMIT, sync = SYNC_PAGE_LIMIT): void {
     _renderPageLimit = render;
     _syncPageLimit = sync;
-}
-
-let _rendering: Promise<void> | null = null;
-
-/** The render in progress, one at a time: `bootstrap` and `catchUp` share it. */
-function finishRender(): Promise<void> {
-    _rendering ??= renderPages().finally(() => { _rendering = null; });
-    return _rendering;
 }
 
 async function renderPages(): Promise<void> {
@@ -695,17 +770,21 @@ async function renderPages(): Promise<void> {
 
 /**
  * Fetches everything since our last known sequence and applies it, a page
- * at a time; first it finishes a paged render in progress (`bootstrap`).
- * Idempotent by construction: `since` only advances after a diff is
- * applied (or held), so a WebSocket that already delivered everything
+ * at a time. Idempotent by construction: `since` only advances after a diff
+ * is applied (or held), so a WebSocket that already delivered everything
  * live simply gets back an empty `diffs[]` here — there's no separate
  * "skip because WS is connected" branch to get wrong. While links are held
  * for a key, it re-reads the key ring; it then retries the held links
  * against whatever ring it has. Returns what it emitted.
+ *
+ * While a paged render is stored (`bootstrap`), it does not tail: the stored
+ * cursor predates the snapshot, and reading the log from it is the full
+ * replay the render replaces. It resumes the render instead, once its
+ * backoff has elapsed, without waiting for it (`retryRenderIfDue`); the
+ * render's last page is followed by the tail from its `upto`.
  */
 export async function catchUp(): Promise<PerspectiveDiff> {
     const { config } = deps();
-    if (store.getRenderProgress()) await finishRender();
 
     const emitted: PerspectiveDiff = { additions: [], removals: [] };
     const collect = (diff: PerspectiveDiff) => {
@@ -713,7 +792,7 @@ export async function catchUp(): Promise<PerspectiveDiff> {
         emitted.removals.push(...diff.removals);
     };
     let since = store.getSequence();
-    for (;;) {
+    while (!store.getRenderProgress()) {
         const res = await withToken((token) => api.fetchSync(config, token, since, _syncPageLimit));
         console.log(
             `[server-link-language] catchUp: since=${since}, received ${res.diffs.length} diff(s), ` +
@@ -742,6 +821,13 @@ export async function catchUp(): Promise<PerspectiveDiff> {
         }
     }
     collect(retryHeld());
+    if (store.getRenderProgress()) {
+        // Like the key ring above: until the render's last page, every
+        // catch-up resumes it, gated by its backoff.
+        retryRenderIfDue();
+        emitSyncStateSafe("LinkLanguageInstalledButNotSynced");
+        return emitted;
+    }
 
     emitSyncStateSafe("Synced");
     return emitted;

@@ -356,6 +356,10 @@ const language = defineLanguage({
             getMyDid: () => myDid,
         });
 
+        // Store a fresh render (or keep the one a previous run left unfinished)
+        // before anything can fail: until its last page, every catch-up
+        // resumes it with backoff, whichever step below fails first.
+        syncModule.needRender();
         try {
             await auth.authenticate();
 
@@ -384,7 +388,8 @@ const language = defineLanguage({
         } catch (err) {
             console.error(
                 "[server-link-language] initial startup sequence failed — will keep retrying via " +
-                "websocket reconnect backoff and the runtime's periodic sync():",
+                "websocket reconnect backoff and the runtime's periodic sync(), which also retries " +
+                "the room render with backoff until it succeeds:",
                 err,
             );
         }

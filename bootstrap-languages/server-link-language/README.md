@@ -199,13 +199,23 @@ costs that one link, not the rest of its batch or the other held links.
   README, "Paged snapshot, then tail") — far cheaper than replaying the
   room's entire diff history on every fresh instance. Each page (500 links)
   is applied and emitted as its own diff and the cursor is stored after it
-  (`render/progress`), so a restart resumes at the next page and a
-  `catchUp()` (the WebSocket's `onOpen`, the runtime's `sync()`) finishes a
-  render in progress before it tails. After the last page, stored links no
-  page brought are removed and emitted once; links that arrived after `upto`
-  meanwhile (own commits, pushes) and a stored link whose encrypted copy no
-  key opens yet are kept. Against a server that does not page, the first
-  answer is the whole set and the tail is empty.
+  (`render/progress`), so a restart resumes at the next page. After the last
+  page, stored links no page brought are removed and emitted once; links
+  that arrived after `upto` meanwhile (own commits, pushes) and a stored link
+  whose encrypted copy no key opens yet are kept. Against a server that does
+  not page, the first answer is the whole set and the tail is empty.
+- The stored `render/progress` is what says a render is still needed.
+  `init()` stores it before authenticating, so a render that timed out, or
+  never ran because authentication failed first, is resumed by catch-up (the
+  WebSocket's `onOpen`, the runtime's `sync()`), the way catch-up re-reads
+  `/keys` while links are held. The first retry waits 10 s, each failure
+  doubles the wait up to 5 min, and the last page ends the retries and resets
+  the wait. Catch-up does not wait for the render, and while one is pending
+  it does not tail either: its cursor predates the snapshot, so reading the
+  log from it is the full replay the render replaces. The render's last
+  page is followed by the tail from `upto`. Live pushes are applied
+  meanwhile. Catch-up alone cannot fill a hole behind the stored cursor; the
+  render can.
 - The WebSocket pushes live diffs. On every (re)connect, `ws-client.ts`'s
   `onOpen` handler also triggers an HTTP catch-up (`GET /sync?since=<cursor>`,
   100 diffs a page)

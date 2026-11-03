@@ -16,7 +16,7 @@
  *   - Two-agent sync through the same server
  */
 
-import { describe, it, afterEach } from "node:test";
+import { describe, it, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { ed25519 } from "@noble/curves/ed25519";
 
@@ -671,10 +671,10 @@ describe("integration: paged render, then tail", () => {
     assert.deepEqual(bStorage.listKeys("render/"), [], "the render's bookkeeping is gone");
   });
 
-  it("catchUp finishes a render in progress before it tails", async () => {
+  it("catchUp does not tail while a render is pending; after the backoff it resumes the render, which then tails", async () => {
     const server = await bootServer();
     const agentA = RealAgent.create();
-    const roomId = "catchup-finishes-render-room";
+    const roomId = "catchup-resumes-render-room";
     wireClient(server.url, roomId, agentA);
     await syncModule.commit({ additions: Array.from({ length: 15 }, (_, i) => linkOf(agentA, `r-${i}`)), removals: [] });
 
@@ -682,15 +682,31 @@ describe("integration: paged render, then tail", () => {
     const transport = new RecordingTransport();
     wireClient(server.url, roomId, agentB, new MemoryStorage(), transport);
     syncModule._setPageLimitsForTests(10, 2);
-    transport.failIf = (url) => url.includes("/render");
-    await assert.rejects(syncModule.bootstrap());
-    assert.equal(store.allLinks().links.length, 0);
+    mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    try {
+      transport.failIf = (url) => url.includes("/render");
+      await assert.rejects(syncModule.bootstrap());
+      assert.equal(store.allLinks().links.length, 0);
 
-    transport.failIf = null;
-    await syncModule.catchUp();
-    assert.equal(store.allLinks().links.length, 15);
-    assert.equal(store.getSequence(), 1);
-    assert.equal(store.getRenderProgress(), null);
+      transport.failIf = null;
+      transport.gets = [];
+      await syncModule.catchUp();
+      await syncModule._awaitRenderRetryForTests();
+      assert.deepEqual(transport.gets, [], "inside the backoff: no render, and no /sync from the stale cursor");
+
+      mock.timers.tick(syncModule.RENDER_RETRY_BASE_MS);
+      await syncModule.catchUp();
+      await syncModule._awaitRenderRetryForTests();
+      assert.equal(store.allLinks().links.length, 15);
+      assert.equal(store.getSequence(), 1);
+      assert.equal(store.getRenderProgress(), null);
+      const renders = transport.gets.filter((g) => g.startsWith("/render"));
+      assert.equal(renders.length, 2, "both pages, once each");
+      assert.deepEqual(transport.gets.filter((g) => g.startsWith("/sync")), ["/sync?since=1&limit=2"], "the tail starts at upto");
+      assert.ok(transport.gets.indexOf("/sync?since=1&limit=2") > transport.gets.indexOf(renders[1]), "after the last page");
+    } finally {
+      mock.timers.reset();
+    }
   });
 
   it("a link committed or pushed during the render is not removed by its removal step", async () => {

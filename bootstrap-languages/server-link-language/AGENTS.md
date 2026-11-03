@@ -94,6 +94,21 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   trigger or refresh cooldown. Never make delivery depend on a one-shot
   request succeeding (BUG-103: a single `/render` timeout after a key grant
   lost a member's history).
+- **The startup render is retried until its last page.** The stored
+  `render/progress` is the "render needed" state; there is no in-memory flag.
+  `init` calls `needRender()` before authenticating: it stores the first
+  page's cursor unless a previous run left a render unfinished, so a render
+  that never ran (authentication failed first) is retried too. While it is
+  stored, `catchUp` ends with `retryRenderIfDue()`, the same shape as the
+  `/keys` re-read above. It resumes the render in the background (one at a
+  time, `_rendering`, which `bootstrap` joins; catch-up does not wait for
+  it), after a 10 s backoff that doubles per failure up to 5 min and resets
+  on the last page; `bootstrap` itself ignores the backoff. This is not the
+  deleted key-ring re-bootstrap: it runs only while a render is stored, and
+  stops at the last page. Catch-up resumes from the stored cursor, so
+  without this a cursor past a hole never fills it (BUG-115). The host's
+  `httpFetch` deadline is a fixed 10 s for every call, and the language
+  cannot raise it for `/render`.
 - **A link the key it names does not open costs that link only.** Its
   ciphertext or payload is malformed, and a key version is fixed by its
   rotation's commitment, so no key ever opens it: `openWireLink` logs it and
@@ -110,9 +125,11 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   not fetch our own links back; otherwise another agent's diff is in
   between and the cursor stays.
 - **The startup snapshot is paged and resumable.** `bootstrap()` stores
-  `render/progress` before the first `/render` page and after each one;
-  `catchUp()` finishes a stored render first (single flight, `finishRender`),
-  so the tail never starts from a cursor the snapshot has not reached. The
+  `render/progress` before the first `/render` page and after each one.
+  While a render is stored, `catchUp()` does not tail `/sync`: the tail
+  never starts from a cursor the snapshot has not reached (that is the full
+  log replay the render replaces). The render's last page is followed by
+  the tail from `upto`, inside the same single flight. The
   removal step runs once, after the last page, against `render/seen/*`: the
   pages' hashes plus links that `commit` and `applyInboundWireDiff` stored
   during the render (after `upto`, so in no page). Drop either record and a
