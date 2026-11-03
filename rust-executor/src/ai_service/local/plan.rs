@@ -163,6 +163,12 @@ fn runtime_build<'a>(
     })
 }
 
+/// A recommendation and the measured class it comes from.
+type Candidate = (String, Recommendation);
+
+/// A service, its candidates largest first, and the one the plan is at.
+type Pick = (Service, Vec<Candidate>, usize);
+
 /// The plan for `hardware`. `installed(sha256)` says whether a file with that digest is
 /// in the store already.
 pub fn plan(data: &Data, hardware: &LocalHardware, installed: &dyn Fn(&str) -> bool) -> LocalPlan {
@@ -171,7 +177,7 @@ pub fn plan(data: &Data, hardware: &LocalHardware, installed: &dyn Fn(&str) -> b
     let mut unavailable = Vec::new();
 
     // Each service: its candidates, and which one the plan is at.
-    let mut picks: Vec<(Service, Vec<(String, Recommendation)>, usize)> = Vec::new();
+    let mut picks: Vec<Pick> = Vec::new();
     for service in PLANNED_SERVICES {
         let found = candidates(data, &chain, service);
         if found.is_empty() {
@@ -207,7 +213,7 @@ pub fn plan(data: &Data, hardware: &LocalHardware, installed: &dyn Fn(&str) -> b
         picks.push((service, found, 0));
     }
 
-    let memory_of = |picks: &[(Service, Vec<(String, Recommendation)>, usize)]| -> u64 {
+    let memory_of = |picks: &[Pick]| -> u64 {
         picks
             .iter()
             .map(|(_, found, at)| {
