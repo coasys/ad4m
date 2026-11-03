@@ -38,7 +38,7 @@ index.ts        CLI arg parsing, calls buildServer + app.listen
 
 ### Data model
 
-- `links` table = the current active OR-Set (add-wins insert by hash, remove deletes by hash). `diffs` table = append-only history, replay-only, never mutated.
+- `links` table = the current active OR-Set (add-wins insert by hash, remove deletes by hash). `diffs` table = append-only history, replay-only, never mutated and never pruned. `/sync?since=N` answers from it, so dropping old rows would silently cost every member whose cursor is behind them those diffs (BUG-118: a 10,000-entry cap did this until it was removed). Any future compaction must come with an answer that tells a client its cursor is too old (e.g. 410 with the oldest retained sequence), and a client that re-renders on it.
 - **Revision is a content hash, not a sequence number**: `sha256(sorted(linkHashes).join(","))`. Two rooms with the same active links converge to the same revision no matter what order or how many diffs got them there — this is load-bearing for tests that assert convergence.
 - **Removals resend the exact original `LinkExpression`** (same author/timestamp/data/proof as the addition), not a new tombstone. `linkHash()` of a removal entry is therefore identical to the hash of the link it removes, which is what makes "remove by hash" work. This also means only the *original author* can remove their own links via commit — there's no admin force-remove.
 - `linkHash()`/`canonicalLinkPayload()` (types.ts) are shared by hashing AND signature verification. For E2E-encrypted links, `ciphertext`+`nonce` stand in for `source`/`predicate`/`target` in that canonical payload — same code path, same function, so a client signs and the server verifies identically whether or not the room is encrypted.

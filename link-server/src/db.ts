@@ -147,14 +147,8 @@ export interface ServerIdentityRow {
  * shapes the rest of the server needs. Kept dependency-free of any other
  * module in this package so it can be imported everywhere without cycles.
  */
-export interface LinkServerDBOptions {
-  /** Maximum diffs to retain per room. Older diffs get pruned. Default 10000. 0 disables pruning. */
-  maxDiffsPerRoom?: number;
-}
-
 export class LinkServerDB {
   readonly raw: Database.Database;
-  readonly maxDiffsPerRoom: number;
 
   // Cached prepared statements — prepared once, reused for the lifetime of
   // the DB connection. Avoids re-parsing SQL on every call (particularly
@@ -162,7 +156,7 @@ export class LinkServerDB {
   // otherwise prepare the same INSERT 1500 times).
   private readonly stmts: ReturnType<LinkServerDB["prepareStatements"]>;
 
-  constructor(filePath: string, opts?: LinkServerDBOptions) {
+  constructor(filePath: string) {
     if (filePath !== ":memory:") {
       mkdirSync(dirname(filePath), { recursive: true });
     }
@@ -170,7 +164,6 @@ export class LinkServerDB {
     this.raw.pragma("journal_mode = WAL");
     this.raw.pragma("foreign_keys = ON");
     this.raw.exec(SCHEMA);
-    this.maxDiffsPerRoom = opts?.maxDiffsPerRoom ?? 10_000;
     this.stmts = this.prepareStatements();
   }
 
@@ -262,15 +255,6 @@ export class LinkServerDB {
       setIdentity: this.raw.prepare(
         `INSERT OR REPLACE INTO server_identity (key_type, public_key, private_key)
          VALUES (?, ?, ?)`
-      ),
-
-      // diff retention
-      countDiffs: this.raw.prepare("SELECT COUNT(*) AS cnt FROM diffs WHERE room_id = ?"),
-      getOldestRetainedSeq: this.raw.prepare(
-        "SELECT sequence FROM diffs WHERE room_id = ? ORDER BY sequence ASC LIMIT 1 OFFSET ?"
-      ),
-      deleteDiffsBefore: this.raw.prepare(
-        "DELETE FROM diffs WHERE room_id = ? AND sequence < ?"
       ),
 
       // session sweep
@@ -447,9 +431,6 @@ export class LinkServerDB {
       }
       this.appendDiff(roomId, sequence, JSON.stringify(diff), authorDid);
       this.stmts.updateRevision.run(revision, roomId);
-      if (this.maxDiffsPerRoom > 0) {
-        this.pruneOldDiffs(roomId, this.maxDiffsPerRoom);
-      }
       return { sequence, revision };
     });
     return run();
@@ -538,18 +519,6 @@ export class LinkServerDB {
 
   setIdentity(keyType: string, publicKey: string, privateKey: string): void {
     this.stmts.setIdentity.run(keyType, publicKey, privateKey);
-  }
-
-  // ---- diff retention ----
-
-  /** Prune the oldest diffs for a room, keeping at most `maxDiffs` entries. */
-  pruneOldDiffs(roomId: string, maxDiffs: number): void {
-    const row = this.stmts.countDiffs.get(roomId) as { cnt: number };
-    if (row.cnt <= maxDiffs) return;
-    const cutoff = this.stmts.getOldestRetainedSeq.get(roomId, maxDiffs) as { sequence: number } | undefined;
-    if (cutoff) {
-      this.stmts.deleteDiffsBefore.run(roomId, cutoff.sequence);
-    }
   }
 
   // ---- session sweep ----

@@ -61,7 +61,6 @@ Control the server through environment variables or CLI flags:
 | `PORT` | `--port` | `3456` | Listen port |
 | `DATA_DIR` | `--data` | `./data` | Storage directory (SQLite database) |
 | `AUTO_ADMIT` | `--auto-admit` | `false` | Admit every agent automatically when they authenticate |
-| `MAX_DIFFS_PER_ROOM` | `--max-diffs` | `10000` | Maximum diff entries retained per room (older entries pruned) |
 | `BODY_LIMIT` | `--body-limit` | `10485760` | Maximum HTTP request body size in bytes (10 MiB) |
 | `OPERATOR_PORT` | `--operator-port` | off | Also serve the [admission UI](#admission-ui-operator-listener) and its API on this port (1-65535; the proxy needs a fixed port) |
 | `OPERATOR_HOST` | `--operator-host` | `127.0.0.1` | Address of the operator listener; must be loopback |
@@ -237,7 +236,7 @@ The server cannot see inside a box, so a member could grant a key that opens but
 - **Rooms** are independent link-sync spaces, identified by an opaque `roomId` the client chooses. The first agent to authenticate against a room becomes its admin.
 - **Auth** is DID challenge-response: an agent proves control of its `did:key` ed25519 key by signing a server-issued nonce, and receives a JWT scoped to `(did, roomId)`.
 - **ACL** gates every room endpoint. Only the admin can add/remove DIDs.
-- **Links** are stored as an append-only diff log (`PerspectiveDiff` = additions/removals of signed `LinkExpression`s) plus a derived active-set table, so the room's state is always `replay(diffs)`. The **revision** is a content hash of the active set's link hashes — order-independent, so two servers with the same active links converge to the same revision regardless of how they got there.
+- **Links** are stored as an append-only diff log (`PerspectiveDiff` = additions/removals of signed `LinkExpression`s) plus a derived active-set table, so the room's state is always `replay(diffs)`. The diff log is never pruned: it is what `/sync?since=N` answers from, and a member whose cursor is N must get every diff after N. Compacting it would need an answer that tells a client its cursor is too old, so that client re-renders; the server has none. The **revision** is a content hash of the active set's link hashes — order-independent, so two servers with the same active links converge to the same revision regardless of how they got there.
 - **WebSocket** push delivers committed diffs and telepresence events in real time.
 - **E2E encryption** is opt-in per room: the entire `LinkExpression` (author, timestamp, proof, and data) becomes an opaque ciphertext blob. The server sees only `{ciphertext, nonce}` plus a client-computed `link_hash` for OR-Set dedup. Once enabled, the server rejects plaintext commits.
 
