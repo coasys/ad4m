@@ -567,6 +567,22 @@ describe("SFU path", () => {
         expect(session.getState()).toBe("active")
     })
 
+    it("a replaced call's manager no longer reaches the session's listeners", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        await session.join(fakeMediaStream())
+        const heard = jest.fn()
+        session.on("error", heard)
+        session.on("participant-left", heard)
+        const handlers = [...mockSfuManagerInstance.on.mock.calls]
+        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
+        for (const [name, handler] of handlers) if (name === "replaced") handler(event)
+
+        // A sendData or quality call made before the replacement rejects after it.
+        for (const [name, handler] of handlers) if (name === "error") handler(new Error("late"))
+        for (const [name, handler] of handlers) if (name === "participant-left") handler("did:other")
+        expect(heard).not.toHaveBeenCalled()
+    })
+
     it("a call replaced while it joins stays idle", async () => {
         const session = createSession(baseConfig({ topology: "sfu" }))
         const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }

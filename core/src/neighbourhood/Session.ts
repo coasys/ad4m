@@ -328,14 +328,19 @@ export function createSession(config: SessionImplConfig): Session {
     // ── SFU wiring helpers ──────────────────────────────────────────
 
     function wireSfuEvents(sfu: SfuManager): void {
+        // A manager the session let go of (replaced, or left) may still settle a call it
+        // made before: none of its events reach the session's listeners.
+        const current = () => sfuManager === sfu
         for (const event of ["topology-changed", "participant-joined", "participant-left", "active-speaker", "error"] as const) {
-            sfu.on(event, (...args: any[]) => emit(event, ...args))
+            sfu.on(event, (...args: any[]) => { if (current()) emit(event, ...args) })
         }
         sfu.on("stream-added", (stream: MediaStream, track: MediaStreamTrack) => {
+            if (!current()) return
             emit("stream-added", stream, track)
             for (const cb of trackListeners) cb(stream, track)
         })
         sfu.on("stream-removed", (stream: MediaStream, track: MediaStreamTrack) => {
+            if (!current()) return
             emit("stream-removed", stream, track)
         })
         // Another tab on this device took the call over. The manager has stopped
