@@ -188,9 +188,14 @@ async fn install_with_retries(installed: &mut bool) -> Result<(), AnyError> {
                 return Ok(());
             }
             Err(e) => {
+                let retry = if attempt < 5 {
+                    ". Retrying in 5s..."
+                } else {
+                    ""
+                };
                 warn!(
-                    "Unyt DNA install attempt {}/5 failed: {}. Retrying in 5s...",
-                    attempt, e
+                    "Unyt DNA install attempt {}/5 failed: {}{}",
+                    attempt, e, retry
                 );
                 last_err = Some(e);
                 if attempt < 5 {
@@ -1689,22 +1694,29 @@ mod tests {
         };
         let running = crate::holochain_service::interface::take_holochain_service().await;
         crate::holochain_service::interface::set_holochain_service(stopped).await;
-        let was_installed = std::mem::replace(&mut *INSTALL_ONCE.lock().await, false);
+        let was_installed = *INSTALL_ONCE.lock().await;
 
-        let ledger = tokio::time::timeout(Duration::from_secs(2), get_ledger()).await;
+        // Before the install (the install's own check) and after it (`call_zome`'s check).
+        let mut ledgers = Vec::new();
+        for installed in [false, true] {
+            *INSTALL_ONCE.lock().await = installed;
+            ledgers.push(tokio::time::timeout(Duration::from_secs(2), get_ledger()).await);
+        }
 
         *INSTALL_ONCE.lock().await = was_installed;
         crate::holochain_service::interface::take_holochain_service().await;
         if let Some(service) = running {
             crate::holochain_service::interface::set_holochain_service(service).await;
         }
-        let err = ledger
-            .expect("get_ledger must not retry against a stopped conductor")
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("Holochain is not running"),
-            "unexpected error: {err}"
-        );
+        for (installed, ledger) in [false, true].into_iter().zip(ledgers) {
+            let err = ledger
+                .expect("get_ledger must not retry against a stopped conductor")
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("Holochain is not running"),
+                "installed = {installed}: unexpected error: {err}"
+            );
+        }
     }
 
     /// The install a request starts must not wait for a conductor that is gone (stopped by
