@@ -1630,12 +1630,13 @@ mod tests {
             Ad4mDb::init_global_instance(":memory:").unwrap();
         }
         set_membrane_proof("cHJvb2Y=").unwrap();
-        assert!(maybe_get_holochain_service().await.is_none());
+        // An earlier test may have left a conductor running: set it aside, put it back after.
+        let running = crate::holochain_service::interface::take_holochain_service().await;
 
-        let ledger = tokio::time::timeout(Duration::from_secs(10), get_ledger())
+        let ledger = tokio::time::timeout(Duration::from_secs(2), get_ledger())
             .await
             .expect("get_ledger must not wait for a conductor that does not run");
-        let history = tokio::time::timeout(Duration::from_secs(10), get_history(None, 50))
+        let history = tokio::time::timeout(Duration::from_secs(2), get_history(None, 50))
             .await
             .expect("get_history must not wait for a conductor that does not run");
 
@@ -1644,6 +1645,9 @@ mod tests {
                 err.to_string().contains("Holochain is not running"),
                 "unexpected error: {err}"
             );
+        }
+        if let Some(service) = running {
+            crate::holochain_service::interface::set_holochain_service(service).await;
         }
     }
 

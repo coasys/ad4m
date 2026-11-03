@@ -296,7 +296,12 @@ impl HolochainServiceInterface {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(HolochainServiceRequest::Shutdown(response_tx), None)?;
         match response_rx.await? {
-            HolochainServiceResponse::Shutdown(result) => result,
+            HolochainServiceResponse::Shutdown(result) => {
+                result?;
+                // A stopped conductor is not running. A restart's `init` sets the new handle.
+                take_holochain_service().await;
+                Ok(())
+            }
             _ => unreachable!(),
         }
     }
@@ -503,11 +508,40 @@ pub async fn set_holochain_service(service: HolochainServiceInterface) {
     *lock = Some(service);
 }
 
+/// Removes the conductor's handle and returns it.
+pub(crate) async fn take_holochain_service() -> Option<HolochainServiceInterface> {
+    HOLOCHAIN_SERVICE.write().await.take()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
+
+    /// A stopped conductor is not running: after its shutdown the global holds no handle, so
+    /// callers get `None` ("not running") instead of a handle whose channel is closed.
+    #[tokio::test]
+    async fn a_shut_down_conductor_leaves_no_service_behind() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Envelope>();
+        let (_signal_tx, signal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let service = HolochainServiceInterface {
+            sender,
+            stream_receiver: Arc::new(Mutex::new(signal_rx)),
+        };
+        tokio::spawn(async move {
+            while let Some(envelope) = receiver.recv().await {
+                if let HolochainServiceRequest::Shutdown(tx) = envelope.request {
+                    let _ = tx.send(HolochainServiceResponse::Shutdown(Ok(())));
+                }
+            }
+        });
+        set_holochain_service(service.clone()).await;
+
+        service.shutdown().await.unwrap();
+
+        assert!(maybe_get_holochain_service().await.is_none());
+    }
 
     #[tokio::test]
     async fn wait_returns_none_at_once_when_nothing_is_starting() {

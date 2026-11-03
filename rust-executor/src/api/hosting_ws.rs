@@ -211,11 +211,13 @@ mod tests {
             Ad4mDb::init_global_instance(":memory:").unwrap();
         }
         crate::unyt_service::set_membrane_proof("cHJvb2Y=").unwrap();
+        // An earlier test may have left a conductor running: set it aside, put it back after.
+        let running = crate::holochain_service::interface::take_holochain_service().await;
 
         let mut map = HandlerMap::new();
         register_ws_handlers(&mut map);
         let err = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(2),
             map.dispatch(
                 "hosting.walletHistory",
                 json!({}),
@@ -231,6 +233,9 @@ mod tests {
             "{}",
             err.message
         );
+        if let Some(service) = running {
+            crate::holochain_service::interface::set_holochain_service(service).await;
+        }
     }
 
     // The guard admits every session that holds AGENT_UPDATE; only a user has a wallet
