@@ -429,10 +429,10 @@ impl KelCache {
                 self.record_fork(&fork, &theirs).await?;
                 Err(CacheError::Fork(fork))
             }
-            ImportOutcome::Appended { head, .. } => {
-                let mut fresh: Vec<&Event> = events.iter().filter(|e| e.seq > before.seq).collect();
-                fresh.sort_by_key(|e| e.seq);
-                fresh.dedup_by_key(|e| e.seq);
+            ImportOutcome::Appended { head, entries } => {
+                // Store the copies the import appended, never a pick of our own from the batch:
+                // a copy with its proofs stripped hashes the same as the signed one.
+                let fresh: Vec<&Event> = entries.iter().collect();
                 self.persist(scid, Some(&before), &fresh).await?;
                 chains.insert(scid.to_string(), next);
                 Ok(Ingested::Appended(head))
@@ -1190,6 +1190,35 @@ pub(crate) mod tests {
         assert_eq!(chain.head(), log.chain().head());
         assert_eq!(cache.accepted_head(&log.scid()).unwrap().unwrap().seq, 1);
         assert_eq!(store.log_calls.load(Ordering::SeqCst), calls);
+    }
+
+    /// A batch whose first copy of a new event has its proofs stripped (it hashes the same as the
+    /// signed one) stores the signed copy: the cache keeps what `import` appended, so a restart
+    /// still folds the log.
+    #[tokio::test]
+    async fn a_stripped_twin_ahead_of_the_signed_event_is_never_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        let mut log = TestLog::new(1);
+        log.revoke_d1();
+        let mut stripped = log.events[1].clone();
+        stripped.proof.clear();
+        {
+            let cache = KelCache::open(&path, vec![]).unwrap();
+            cache.ingest(&log.scid(), &log.events[..1]).await.unwrap();
+            let appended = cache
+                .ingest(&log.scid(), &[stripped, log.events[1].clone()])
+                .await
+                .unwrap();
+            assert!(matches!(appended, Ingested::Appended(_)), "{appended:?}");
+            assert_eq!(
+                cache.stored_events(&log.scid(), 1).await.unwrap(),
+                vec![log.events[1].clone()]
+            );
+        }
+        let cache = KelCache::open(&path, vec![]).unwrap();
+        let chain = cache.chain(&log.scid()).await.unwrap().unwrap();
+        assert_eq!(chain.head(), log.chain().head());
     }
 
     /// Callers that wait on one identity's gate share fetches: the first fetch began before
