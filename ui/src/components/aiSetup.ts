@@ -74,6 +74,33 @@ export function preselectedChat<S extends { baseUrl: string }>(
   return null;
 }
 
+/**
+ * The context-window ceiling typed into the form: `undefined` when empty (the endpoint
+ * keeps none, and Ollama's own window per model applies), the number when it is a whole
+ * number the executor's `u32` holds, `null` when it is neither.
+ */
+export function parseMaxNumCtx(typed: string): number | undefined | null {
+  if (typed.trim() === "") return undefined;
+  const cap = Number(typed);
+  return Number.isSafeInteger(cap) && cap > 0 && cap <= 0xffffffff ? cap : null;
+}
+
+/**
+ * `endpoint` as an update input with `maxNumCtx` as its ceiling and every other setting
+ * as it is (the key is left out, so the stored one stays).
+ */
+export function withMaxNumCtx(endpoint: AiEndpoint, maxNumCtx: number | undefined) {
+  return {
+    name: endpoint.name,
+    kind: endpoint.kind,
+    baseUrl: endpoint.baseUrl,
+    capabilities: endpoint.capabilities,
+    maxNumCtx,
+    requestTimeoutSecs: endpoint.requestTimeoutSecs ?? undefined,
+    maxConcurrent: endpoint.maxConcurrent ?? undefined,
+  };
+}
+
 function sameUrl(a: string, b: string): boolean {
   return a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
 }

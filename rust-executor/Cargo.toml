@@ -216,6 +216,9 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 x509-parser = "0.16"
 
+# Silero VAD (ONNX, embedded): the speech gate before a transcription request
+# (ai_service/transcription.rs), dev's crate and model, so dev's thresholds hold.
+voice_activity_detector = "0.1.1"
 deflate = "1.0.0"
 tar = "0.4"
 flate2 = "1"
@@ -264,6 +267,11 @@ sha2 = "0.10.8"
 # fails on MSVC. The prebuilt-nasm feature ships .obj files in the crate.
 aws-lc-sys = { version = "0.35", features = ["prebuilt-nasm"] }
 
+# The speech gate's ONNX Runtime (voice_activity_detector), as on dev. macOS ARM64: the
+# static lib is too large for ARM64 branch instructions (b(l) range ±128MB), so ort loads
+# it at run time; without it the gate passes every utterance, with a warning.
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "2.0.0-rc.4", features = ["load-dynamic"] }
 
 [patch.crates-io]
 rusqlite = { version = "0.40.0" }

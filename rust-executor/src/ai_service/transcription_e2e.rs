@@ -27,7 +27,9 @@ fn upstream() -> Option<(OpenAiTranscribe, String)> {
     Some((OpenAiTranscribe::new(&key, base_url), model))
 }
 
-// The passthrough's case: the client's own container (here m4a) goes up as it is.
+// The passthrough's case: the client's own file goes up as it is. A 16 kHz mono PCM WAV,
+// the one format every server here takes (nemo-speech: WAV, FLAC, MP3; dev's own route took
+// only this).
 #[tokio::test]
 async fn a_recording_is_transcribed_as_uploaded() {
     let Some((client, model)) = upstream() else {
@@ -36,12 +38,12 @@ async fn a_recording_is_transcribed_as_uploaded() {
     };
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../tests/transcription_test.m4a"
+        "/../tests/transcription_test.wav"
     );
     let audio = AudioFile {
         bytes: std::fs::read(path).expect("the test recording is in the repo"),
-        file_name: "transcription_test.m4a".into(),
-        mime: "audio/mp4".into(),
+        file_name: "transcription_test.wav".into(),
+        mime: "audio/wav".into(),
     };
 
     let reply = client.transcribe(&model, audio, vec![]).await.unwrap();
@@ -58,7 +60,8 @@ async fn a_recording_is_transcribed_as_uploaded() {
     );
 }
 
-// A stream's case: the executor's own WAV encoding is accepted, and the utterance is answered.
+// A stream's case: the speech gate passes the recording, the upstream takes the executor's
+// own WAV encoding, and the text (in pieces, when the server streams) is the recording's.
 #[tokio::test]
 async fn a_streamed_utterance_is_accepted_and_answered() {
     let Some((client, model)) = upstream() else {
@@ -67,6 +70,7 @@ async fn a_streamed_utterance_is_accepted_and_answered() {
     };
     let _ = Ad4mDb::init_global_instance(":memory:");
     let service = AIService::empty();
+    let operator = RequestContext::operator_for_test();
     let id = service
         .open_remote_stream(
             "e2e".into(),
@@ -77,13 +81,32 @@ async fn a_streamed_utterance_is_accepted_and_answered() {
             "did:key:e2e".into(),
         )
         .await;
-    // One second of a quiet tone: no speech, so any text is the model's own.
+    let mut text = service
+        .subscribe_transcription_text(&id, &operator)
+        .await
+        .unwrap();
+
+    // One second of a quiet tone: no speech, so the gate keeps it from the server.
     let tone: Vec<f32> = (0..SAMPLE_RATE)
         .map(|i| 0.05 * (i as f32 * 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32).sin())
         .collect();
+    service
+        .feed_transcription_stream(&id, tone, &operator)
+        .await
+        .unwrap();
+    assert!(text.try_recv().is_err(), "a tone was transcribed");
 
     service
-        .feed_transcription_stream(&id, tone, &RequestContext::operator_for_test())
+        .feed_transcription_stream(&id, super::transcription::speech_fixture(), &operator)
         .await
         .expect("the upstream takes the executor's WAV");
+    let pieces: Vec<String> = std::iter::from_fn(|| text.try_recv().ok()).collect();
+    eprintln!("pieces: {pieces:?}");
+    assert!(
+        pieces
+            .concat()
+            .to_lowercase()
+            .contains("transcription is working"),
+        "{pieces:?}"
+    );
 }

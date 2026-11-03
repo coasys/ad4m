@@ -278,16 +278,7 @@ stamp_bootstrap_language_authors() {
 }
 
 # ── AI endpoints from the environment ─────────────────────────────────────────
-# The executor runs no models itself: its AI goes to model servers. When the
-# variables below are set, register those servers as endpoints and their models,
-# and make each the default of its type when the type has none. Idempotent by
-# name, so a restart registers nothing twice. See docker/compose.ai.yml.
-#
-#   AD4M_AI_OLLAMA_URL               Ollama, for chat and embeddings (http://ollama:11434)
-#   AD4M_AI_LLM_MODEL                chat model on it, by its Ollama name
-#   AD4M_AI_EMBEDDING_MODEL          embedding model on it, by its Ollama name
-#   AD4M_AI_TRANSCRIPTION_URL        OpenAI-shaped transcription server (http://speaches:8000)
-#   AD4M_AI_TRANSCRIPTION_MODEL      model on it, by the id the server knows it by
+# setup_ai_models and the AD4M_AI_* variables it reads: docker/ai-env.sh.
 ws_rpc() {
     local msg_type="$1" params="$2" msg_id="${3:-1}"
     # Percent-encode the credential for the query string. Axum's Query
@@ -299,79 +290,8 @@ ws_rpc() {
         | websocat -n1 "ws://localhost:12000/api/v1/ws?token=${encoded_token}" 2>/dev/null
 }
 
-# Answers the id of the endpoint named $1, registering it (kind $2, URL $3) first
-# when there is none. Empty on failure.
-ensure_ai_endpoint() {
-    local name="$1" kind="$2" url="$3" id
-    id=$(ws_rpc "ai.endpoints" "{}" "list-endpoints" \
-        | jq -r --arg n "${name}" '.result[]? | select(.name == $n) | .id')
-    if [ -z "${id}" ]; then
-        id=$(ws_rpc "ai.addEndpoint" \
-            "$(jq -cn --arg n "${name}" --arg k "${kind}" --arg u "${url}" \
-                '{name: $n, kind: $k, baseUrl: $u}')" "add-endpoint" \
-            | jq -r '.result.id // empty')
-        [ -n "${id}" ] && echo "  Registered AI endpoint ${name} (${url})" >&2
-    fi
-    echo "${id}"
-}
-
-# Registers model $1 of type $2 as $4 on endpoint $3, unless a model has that
-# name, and makes it the default of its type when there is none.
-ensure_ai_model() {
-    local name="$1" type="$2" endpoint_id="$3" remote="$4" id
-    id=$(ws_rpc "ai.models" "{}" "list-models" \
-        | jq -r --arg n "${name}" '.result[]? | select(.name == $n) | .id')
-    if [ -z "${id}" ]; then
-        id=$(ws_rpc "ai.addModel" \
-            "$(jq -cn --arg n "${name}" --arg t "${type}" --arg e "${endpoint_id}" --arg r "${remote}" \
-                '{model: {name: $n, modelType: $t, endpointId: $e, remoteModel: $r}}')" "add-model" \
-            | jq -r '.result // empty')
-        if [ -z "${id}" ]; then
-            echo "  WARNING: failed to register AI model ${name}." >&2
-            return
-        fi
-        echo "  Registered ${type} model ${name} (${remote})"
-    fi
-    if ws_rpc "ai.getDefaultModel" "{\"modelType\":\"${type}\"}" "get-default" \
-        | jq -e '.result == null' >/dev/null 2>&1; then
-        ws_rpc "ai.setDefaultModel" "{\"id\":\"${id}\",\"modelType\":\"${type}\"}" "set-default" >/dev/null
-        echo "  ${name} is the default ${type} model."
-    fi
-}
-
-setup_ai_models() {
-    if [ -z "${AD4M_AI_OLLAMA_URL:-}" ] && [ -z "${AD4M_AI_TRANSCRIPTION_URL:-}" ]; then
-        return
-    fi
-    if ! command -v websocat >/dev/null 2>&1; then
-        echo "WARNING: websocat not found, skipping AI endpoint registration." >&2
-        return
-    fi
-
-    echo "Registering AI endpoints..."
-    if [ -n "${AD4M_AI_OLLAMA_URL:-}" ]; then
-        local ollama_id
-        ollama_id=$(ensure_ai_endpoint "ollama" "OLLAMA" "${AD4M_AI_OLLAMA_URL}")
-        if [ -z "${ollama_id}" ]; then
-            echo "  WARNING: failed to register the Ollama endpoint." >&2
-        else
-            [ -n "${AD4M_AI_LLM_MODEL:-}" ] \
-                && ensure_ai_model "${AD4M_AI_LLM_MODEL}" "LLM" "${ollama_id}" "${AD4M_AI_LLM_MODEL}"
-            [ -n "${AD4M_AI_EMBEDDING_MODEL:-}" ] \
-                && ensure_ai_model "${AD4M_AI_EMBEDDING_MODEL}" "EMBEDDING" "${ollama_id}" "${AD4M_AI_EMBEDDING_MODEL}"
-        fi
-    fi
-    if [ -n "${AD4M_AI_TRANSCRIPTION_URL:-}" ]; then
-        local stt_id
-        stt_id=$(ensure_ai_endpoint "transcription" "OPEN_AI_AUDIO" "${AD4M_AI_TRANSCRIPTION_URL}")
-        if [ -z "${stt_id}" ]; then
-            echo "  WARNING: failed to register the transcription endpoint." >&2
-        elif [ -n "${AD4M_AI_TRANSCRIPTION_MODEL:-}" ]; then
-            ensure_ai_model "${AD4M_AI_TRANSCRIPTION_MODEL}" "TRANSCRIPTION" "${stt_id}" "${AD4M_AI_TRANSCRIPTION_MODEL}"
-        fi
-    fi
-    return 0
-}
+# shellcheck source=docker/ai-env.sh
+. /usr/local/lib/ad4m/ai-env.sh
 
 # ── Global discovery space (create on first boot, inject URL into WE) ───
 setup_global_space() {

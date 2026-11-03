@@ -403,29 +403,50 @@ pub async fn resolve_already_present_semantic(
 }
 
 /// The strategy a pass runs: `strategy`, except a semantic one whose embedding model is not
-/// registered on this executor, which falls back to [`DedupStrategy::NormalizedString`]
-/// with a warning (a fresh executor has no models until the operator adds one).
-fn effective_strategy(strategy: &DedupStrategy) -> &DedupStrategy {
-    let DedupStrategy::Semantic { model, .. } = strategy else {
-        return strategy;
+/// registered on this executor, which embeds with the default EMBEDDING model instead, else
+/// with the first one registered (dev's default embedding model answered such a pass), and
+/// compares normalized strings only when the executor has no embedding model at all.
+fn effective_strategy(strategy: &DedupStrategy) -> std::borrow::Cow<'_, DedupStrategy> {
+    use std::borrow::Cow;
+    let DedupStrategy::Semantic { model, threshold } = strategy else {
+        return Cow::Borrowed(strategy);
     };
-    let registered = crate::db::Ad4mDb::with_global_instance(|db| db.get_models())
-        .map(|models| {
-            models.iter().any(|m| {
-                m.model_type == crate::types::ModelType::Embedding
-                    && (m.id == *model || m.name == *model)
+    let embedding_models: Vec<crate::types::Model> =
+        crate::db::Ad4mDb::with_global_instance(|db| db.get_models())
+            .map(|models| {
+                models
+                    .into_iter()
+                    .filter(|m| m.model_type == crate::types::ModelType::Embedding)
+                    .collect()
             })
-        })
-        .unwrap_or(false);
-    if registered {
-        return strategy;
+            .unwrap_or_default();
+    if embedding_models
+        .iter()
+        .any(|m| m.id == *model || m.name == *model)
+    {
+        return Cow::Borrowed(strategy);
+    }
+    let default = crate::db::Ad4mDb::with_global_instance(|db| {
+        db.get_default_model(crate::types::ModelType::Embedding)
+    })
+    .ok()
+    .flatten()
+    .filter(|id| embedding_models.iter().any(|m| m.id == *id));
+    if let Some(instead) = default.or_else(|| embedding_models.first().map(|m| m.id.clone())) {
+        log::info!(
+            "Semantic dedup: no EMBEDDING model '{model}' on this executor; embedding with \
+             '{instead}' instead"
+        );
+        return Cow::Owned(DedupStrategy::Semantic {
+            model: instead,
+            threshold: *threshold,
+        });
     }
     log::warn!(
-        "Semantic dedup: no EMBEDDING model '{model}' on this executor; comparing normalized \
-         strings instead"
+        "Semantic dedup: no EMBEDDING model on this executor; comparing normalized strings \
+         instead"
     );
-    static NORMALIZED_STRING: DedupStrategy = DedupStrategy::NormalizedString;
-    &NORMALIZED_STRING
+    Cow::Owned(DedupStrategy::NormalizedString)
 }
 
 /// Strategy dispatcher: pick the string or semantic dedup path based on
@@ -437,7 +458,7 @@ pub async fn filter_already_present_with_strategy(
     identity_props: &HashMap<String, String>,
     strategy: &DedupStrategy,
 ) -> anyhow::Result<Vec<ProposedInstance>> {
-    match effective_strategy(strategy) {
+    match effective_strategy(strategy).as_ref() {
         DedupStrategy::NormalizedString => {
             Ok(filter_already_present(instances, existing, identity_props))
         }
@@ -460,7 +481,7 @@ pub async fn resolve_already_present_with_strategy(
     identity_props: &HashMap<String, String>,
     strategy: &DedupStrategy,
 ) -> anyhow::Result<Vec<(ProposedInstance, Resolution)>> {
-    match effective_strategy(strategy) {
+    match effective_strategy(strategy).as_ref() {
         DedupStrategy::NormalizedString => {
             Ok(resolve_already_present(instances, existing, identity_props))
         }
@@ -842,6 +863,127 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(tagged.len(), 2);
+    }
+
+    /// An EMBEDDING model `name` on a mock endpoint that embeds every text to one vector,
+    /// loaded; and that mock, expecting `hits` batches.
+    async fn same_vector_embedder(
+        server: &mut mockito::ServerGuard,
+        name: &str,
+        hits: usize,
+    ) -> (String, mockito::Mock) {
+        let mock = server
+            .mock("POST", "/v1/embeddings")
+            .with_body_from_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let n = body["input"].as_array().map_or(1, Vec::len);
+                serde_json::json!({
+                    "data": (0..n)
+                        .map(|i| serde_json::json!({ "index": i, "embedding": [1.0, 0.0] }))
+                        .collect::<Vec<_>>(),
+                })
+                .to_string()
+                .into_bytes()
+            })
+            .expect(hits)
+            .create_async()
+            .await;
+        let endpoint = crate::types::Endpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: format!("{name}-server"),
+            kind: crate::types::EndpointKind::LlamaServer,
+            base_url: url::Url::parse(&server.url()).unwrap(),
+            api_key: crate::secret::Secret::new(""),
+            capabilities: vec![crate::types::AiCapability::Embeddings],
+            max_num_ctx: None,
+            request_timeout_secs: None,
+            max_concurrent: None,
+            managed: false,
+            health: Default::default(),
+        };
+        crate::db::Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let id = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.add_model(&crate::types::ModelInput {
+                name: name.into(),
+                model_type: crate::types::ModelType::Embedding,
+                endpoint_id: endpoint.id.clone(),
+                remote_model: "nomic-embed-text-v1.5".into(),
+                native_tools: None,
+            })
+        })
+        .unwrap();
+        crate::ai_service::AIService::global_instance()
+            .await
+            .unwrap()
+            .reload_model(id.clone())
+            .await
+            .unwrap();
+        (id, mock)
+    }
+
+    // dev's default embedding model answered a semantic pass whatever model the pass named.
+    // Here the default EMBEDDING model does (else the only one there is); strings are
+    // compared only when the executor has no embedding model at all (the test above).
+    #[tokio::test]
+    async fn a_semantic_pass_without_its_model_embeds_with_the_default_one() {
+        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+        crate::ai_service::AIService::init_global_instance()
+            .await
+            .unwrap();
+        let proposed = parse_interpretation_response(
+            r#"[
+              {"class":"Task","title":"  ship   the   mvp  "},
+              {"class":"Task","title":"Write the docs"}
+            ]"#,
+        )
+        .unwrap();
+        let existing = existing_by_identity(&[("Task", "ship the MVP")]);
+        let mut identity_props = HashMap::new();
+        identity_props.insert("Task".to_string(), "title".to_string());
+        let semantic = DedupStrategy::Semantic {
+            model: "interpretation-embed".into(),
+            threshold: 0.9,
+        };
+        let titles = |kept: &[ProposedInstance]| -> Vec<String> {
+            kept.iter()
+                .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
+                .map(str::to_string)
+                .collect()
+        };
+
+        // One embedding model, no default: it embeds. Every text has the same vector, so
+        // "Write the docs" is a duplicate too, which no string comparison would say.
+        let mut first_server = mockito::Server::new_async().await;
+        let (_first, first) = same_vector_embedder(&mut first_server, "first", 1).await;
+        let kept = filter_already_present_with_strategy(
+            proposed.clone(),
+            &existing,
+            &identity_props,
+            &semantic,
+        )
+        .await
+        .unwrap();
+        assert!(titles(&kept).is_empty(), "{:?}", titles(&kept));
+        first.assert_async().await;
+
+        // Two, one of them the default: the default embeds.
+        let mut second_server = mockito::Server::new_async().await;
+        let (second_id, second) = same_vector_embedder(&mut second_server, "second", 1).await;
+        crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_default_model(crate::types::ModelType::Embedding, &second_id)
+        })
+        .unwrap();
+        let tagged =
+            resolve_already_present_with_strategy(proposed, &existing, &identity_props, &semantic)
+                .await
+                .unwrap();
+        assert!(
+            tagged.iter().all(|(_, r)| *r != Resolution::Keep),
+            "{tagged:?}"
+        );
+        second.assert_async().await;
+        first.assert_async().await;
     }
 
     #[tokio::test]

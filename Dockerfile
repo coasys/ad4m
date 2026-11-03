@@ -419,6 +419,7 @@ COPY --from=local-ai-fetcher --chown=ad4m:ad4m /opt/ad4m/local-ai/ /opt/ad4m/loc
 COPY --from=local-ai-fetcher --chown=ad4m:ad4m /opt/ad4m/local-ai-state/ /opt/ad4m/local-ai-state/
 
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=644 docker/ai-env.sh /usr/local/lib/ad4m/ai-env.sh
 
 WORKDIR /data
 

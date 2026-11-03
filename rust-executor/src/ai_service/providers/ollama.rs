@@ -411,6 +411,11 @@ struct ChatRequestBody {
     /// Controls whether Ollama streams ndjson lines.
     stream: bool,
     options: ChatOptions,
+    /// A JSON schema the reply must match (`ChatRequest::json_schema`). Ollama's
+    /// `/api/chat` takes it as `format`: "Format can be `json` or a JSON schema"
+    /// (docs/api.md).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -575,6 +580,7 @@ impl RemoteChat for OllamaChat {
             tools: request.tools.iter().map(to_wire_tool).collect(),
             stream: false,
             options: ChatOptions { num_ctx },
+            format: request.json_schema,
         };
 
         let response = self
@@ -585,10 +591,12 @@ impl RemoteChat for OllamaChat {
             .await
             .map_err(|e| super::http::UpstreamUnreachable::new(&self.endpoint, &e, ""))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let err_body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Ollama API error {status}: {err_body}"));
+        if !response.status().is_success() {
+            return Err(
+                super::http::UpstreamStatus::read(response, &self.endpoint, "")
+                    .await
+                    .into(),
+            );
         }
 
         let parsed: ChatResponse = response
@@ -633,6 +641,7 @@ impl RemoteChat for OllamaChat {
             tools: request.tools.iter().map(to_wire_tool).collect(),
             stream: true,
             options: ChatOptions { num_ctx },
+            format: request.json_schema,
         };
 
         let response = self
@@ -643,10 +652,12 @@ impl RemoteChat for OllamaChat {
             .await
             .map_err(|e| super::http::UpstreamUnreachable::new(&self.endpoint, &e, ""))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let err_body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Ollama API error {status}: {err_body}"));
+        if !response.status().is_success() {
+            return Err(
+                super::http::UpstreamStatus::read(response, &self.endpoint, "")
+                    .await
+                    .into(),
+            );
         }
 
         let mut stream = response.bytes_stream();
@@ -870,6 +881,7 @@ mod tests {
             options: ChatOptions {
                 num_ctx: DEFAULT_MAX_NUM_CTX,
             },
+            format: None,
         };
 
         let json = serde_json::to_value(&body).expect("body serialises");
@@ -892,6 +904,7 @@ mod tests {
             options: ChatOptions {
                 num_ctx: FALLBACK_NUM_CTX,
             },
+            format: None,
         };
 
         let json = serde_json::to_value(&body).expect("body serialises");
@@ -970,6 +983,33 @@ mod wire_tests {
         assert_eq!(reply.text, "hi");
         assert_eq!(reply.usage.input_tokens, Some(10));
         assert_eq!(reply.usage.output_tokens, Some(2));
+    }
+
+    #[tokio::test]
+    async fn a_json_schema_goes_out_as_format() {
+        let schema = json!({ "type": "object", "required": ["tool_calls"] });
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 32768).await;
+        let mock = server
+            .mock("POST", "/api/chat")
+            .match_body(Matcher::PartialJson(json!({ "format": schema })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "message": {"role": "assistant", "content": "{\"tool_calls\":[]}"},
+                    "done": true,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
+        client
+            .chat(ChatRequest::new("qwen3:32b", turns()).with_json_schema(Some(schema.clone())))
+            .await
+            .expect("a constrained completion is not refused");
+        mock.assert_async().await;
     }
 
     #[tokio::test]

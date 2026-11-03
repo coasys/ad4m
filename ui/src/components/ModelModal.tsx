@@ -15,7 +15,9 @@ import {
   ENDPOINT_KINDS,
   endpointLabel,
   kindLabel,
+  parseMaxNumCtx,
   serves,
+  withMaxNumCtx,
 } from "./aiSetup";
 
 const MODEL_TYPES: ModelType[] = ["LLM", "EMBEDDING", "TRANSCRIPTION", "SPEECH"];
@@ -48,6 +50,9 @@ export default function ModelModal(props: { close: () => void; oldModel?: AIMode
   );
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
+  // The Ollama endpoint's context-window ceiling, as typed ("" for none).
+  const [maxNumCtx, setMaxNumCtx] = useState("");
+  const [maxNumCtxError, setMaxNumCtxError] = useState("");
 
   const [adding, setAdding] = useState(false);
   const [detected, setDetected] = useState<DetectedEndpoint[]>([]);
@@ -56,6 +61,12 @@ export default function ModelModal(props: { close: () => void; oldModel?: AIMode
   const [newKey, setNewKey] = useState("");
 
   const endpoint = endpoints.find((e) => e.id === endpointId);
+
+  // The ceiling the chosen endpoint holds, to edit.
+  useEffect(() => {
+    setMaxNumCtx(endpoint?.maxNumCtx ? String(endpoint.maxNumCtx) : "");
+    setMaxNumCtxError("");
+  }, [endpoint?.id, endpoint?.maxNumCtx]);
   const recommended = AI_RECOMMENDED_MODELS.find((m) => m.modelType === modelType)?.ollama;
 
   const loadEndpoints = useCallback(async () => {
@@ -132,10 +143,20 @@ export default function ModelModal(props: { close: () => void; oldModel?: AIMode
       setError("A name, an endpoint and a model are required");
       return;
     }
+    const editsCeiling = modelType === "LLM" && endpoint?.kind === "OLLAMA";
+    const cap = editsCeiling ? parseMaxNumCtx(maxNumCtx) : undefined;
+    if (cap === null) {
+      setMaxNumCtxError("Must be a whole number between 1 and 4294967295");
+      return;
+    }
     setBusy("save");
     setError("");
     const input = { name, modelType, endpointId, remoteModel, nativeTools };
     try {
+      // The ceiling belongs to the endpoint: Ollama sizes `num_ctx` for every model on it.
+      if (editsCeiling && endpoint && cap !== (endpoint.maxNumCtx ?? undefined)) {
+        await client!.ai.updateEndpoint(endpoint.id, withMaxNumCtx(endpoint, cap));
+      }
       if (oldModel) {
         await client!.ai.updateModel(oldModel.id, input);
       } else {
@@ -312,6 +333,28 @@ export default function ModelModal(props: { close: () => void; oldModel?: AIMode
                     Download {recommended}
                   </j-button>
                 )}
+            </j-flex>
+          )}
+
+          {modelType === "LLM" && endpoint?.kind === "OLLAMA" && (
+            <j-flex a="center" gap="400">
+              <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                Max context of {endpoint.name} (tokens):
+              </j-text>
+              <j-input
+                size="md"
+                type="number"
+                placeholder="131072"
+                value={maxNumCtx}
+                error={!!maxNumCtxError}
+                errortext={maxNumCtxError}
+                onInput={(e: any) => {
+                  setMaxNumCtx(e.target.value);
+                  setMaxNumCtxError("");
+                }}
+                style={{ width: "100%" }}
+              />
+              {maxNumCtxError && <j-icon name="x-circle" color="danger-500" />}
             </j-flex>
           )}
 

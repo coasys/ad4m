@@ -7,8 +7,11 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::Value;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
+use tokio::sync::mpsc;
 use url::Url;
 
 use super::http::{credentialed_http, is_transport_safe, versioned_endpoint};
@@ -43,6 +46,19 @@ pub trait RemoteTranscribe: Send + Sync {
         audio: AudioFile,
         fields: Vec<(String, String)>,
     ) -> Result<TranscribeReply>;
+
+    /// Transcribe one utterance, sending each piece of the transcript to `pieces` as the
+    /// upstream decodes it when it streams, and answer the whole transcript. The default
+    /// is one [`Self::transcribe`] call and no pieces: an upstream that does not stream.
+    async fn transcribe_pieces(
+        &self,
+        model: &str,
+        audio: AudioFile,
+        pieces: &mpsc::UnboundedSender<String>,
+    ) -> Result<String> {
+        let _ = pieces;
+        Ok(self.transcribe(model, audio, vec![]).await?.text)
+    }
 }
 
 pub struct OpenAiTranscribe {
@@ -50,6 +66,17 @@ pub struct OpenAiTranscribe {
     api_key: String,
     /// Fully resolved, e.g. `http://127.0.0.1:8000/v1/audio/transcriptions`.
     endpoint: String,
+    /// What the upstream did with `stream=true` ([`streaming`]), learned from its first
+    /// answer: an endpoint kind does not say (speaches and nemo-speech are both
+    /// `OPEN_AI_AUDIO`; OpenAI streams for gpt-4o-transcribe and not for whisper-1).
+    streaming: AtomicU8,
+}
+
+/// [`OpenAiTranscribe::streaming`]: not asked yet, it streams, it does not.
+mod streaming {
+    pub const UNKNOWN: u8 = 0;
+    pub const YES: u8 = 1;
+    pub const NO: u8 = 2;
 }
 
 impl OpenAiTranscribe {
@@ -61,6 +88,7 @@ impl OpenAiTranscribe {
                 .expect("the HTTP client builds"),
             api_key: api_key.to_string(),
             endpoint: versioned_endpoint(base_url, "audio/transcriptions"),
+            streaming: AtomicU8::new(streaming::UNKNOWN),
         }
     }
 
@@ -85,16 +113,14 @@ impl OpenAiTranscribe {
             endpoint.base_url.clone(),
         ))
     }
-}
 
-#[async_trait]
-impl RemoteTranscribe for OpenAiTranscribe {
-    async fn transcribe(
+    /// POST `audio` with `model` and `fields`; the response when its status is a success.
+    async fn send(
         &self,
         model: &str,
         audio: AudioFile,
         fields: Vec<(String, String)>,
-    ) -> Result<TranscribeReply> {
+    ) -> Result<reqwest::Response> {
         let file = reqwest::multipart::Part::bytes(audio.bytes)
             .file_name(audio.file_name)
             .mime_str(&audio.mime)
@@ -116,20 +142,19 @@ impl RemoteTranscribe for OpenAiTranscribe {
         let response = request.send().await.map_err(|e| {
             anyhow::Error::new(e).context(format!("Could not reach {}", self.endpoint))
         })?;
-        let status = response.status();
-        if !status.is_success() {
+        if !response.status().is_success() {
             return Err(
                 UpstreamStatus::read(response, &self.endpoint, &self.api_key)
                     .await
                     .into(),
             );
         }
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/json")
-            .to_string();
+        Ok(response)
+    }
+
+    /// The answer of a request that did not stream: its body, content type and transcript.
+    async fn reply(&self, response: reqwest::Response) -> Result<TranscribeReply> {
+        let content_type = content_type(&response);
         let body = response
             .bytes()
             .await
@@ -146,6 +171,160 @@ impl RemoteTranscribe for OpenAiTranscribe {
             content_type,
         })
     }
+
+    /// Read a `text/event-stream` answer, sending each piece to `pieces`; the transcript.
+    async fn read_stream(
+        &self,
+        response: reqwest::Response,
+        pieces: &mpsc::UnboundedSender<String>,
+    ) -> Result<String> {
+        let mut stream = response.bytes_stream();
+        // Bytes, not text: a chunk can end inside a multi-byte character.
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut sent = String::new();
+        let mut done: Option<String> = None;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                anyhow::Error::new(e).context(format!("The stream of {} broke off", self.endpoint))
+            })?;
+            buffer.extend_from_slice(&chunk);
+            while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=end).collect();
+                let line = String::from_utf8_lossy(&line);
+                match stream_event(line.trim())? {
+                    StreamEvent::Piece(piece) => {
+                        sent.push_str(&piece);
+                        let _ = pieces.send(piece);
+                    }
+                    StreamEvent::Done(text) => done = Some(text),
+                    StreamEvent::Nothing => {}
+                }
+            }
+        }
+        if let StreamEvent::Piece(piece) = stream_event(String::from_utf8_lossy(&buffer).trim())? {
+            sent.push_str(&piece);
+            let _ = pieces.send(piece);
+        }
+        Ok(done.unwrap_or(sent).trim().to_string())
+    }
+}
+
+#[async_trait]
+impl RemoteTranscribe for OpenAiTranscribe {
+    async fn transcribe(
+        &self,
+        model: &str,
+        audio: AudioFile,
+        fields: Vec<(String, String)>,
+    ) -> Result<TranscribeReply> {
+        let response = self.send(model, audio, fields).await?;
+        self.reply(response).await
+    }
+
+    /// Asks for `stream=true` until the upstream has shown what it does with it: an
+    /// `text/event-stream` answer streams (each delta is a piece); a JSON one does not (the
+    /// field is ignored: nemo-speech, whisper-1), and a 400 or 422 refuses the field, so the
+    /// utterance is asked again without it. Either way the stream does not ask again.
+    async fn transcribe_pieces(
+        &self,
+        model: &str,
+        audio: AudioFile,
+        pieces: &mpsc::UnboundedSender<String>,
+    ) -> Result<String> {
+        let state = self.streaming.load(Ordering::Relaxed);
+        if state == streaming::NO {
+            return Ok(self.transcribe(model, audio, vec![]).await?.text);
+        }
+        let again = AudioFile {
+            bytes: audio.bytes.clone(),
+            file_name: audio.file_name.clone(),
+            mime: audio.mime.clone(),
+        };
+        let response = match self
+            .send(model, audio, vec![("stream".into(), "true".into())])
+            .await
+        {
+            Ok(response) => response,
+            Err(e) if state == streaming::UNKNOWN && refuses_a_field(&e) => {
+                log::info!(
+                    "{} refused `stream` ({e}); transcribing per utterance",
+                    self.endpoint
+                );
+                self.streaming.store(streaming::NO, Ordering::Relaxed);
+                return Ok(self.transcribe(model, again, vec![]).await?.text);
+            }
+            Err(e) => return Err(e),
+        };
+        if content_type(&response).starts_with("text/event-stream") {
+            self.streaming.store(streaming::YES, Ordering::Relaxed);
+            return self.read_stream(response, pieces).await;
+        }
+        self.streaming.store(streaming::NO, Ordering::Relaxed);
+        Ok(self.reply(response).await?.text)
+    }
+}
+
+/// The answer's content type; JSON when it names none.
+fn content_type(response: &reqwest::Response) -> String {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string()
+}
+
+/// A 400 or 422: the upstream refused a field of the request.
+fn refuses_a_field(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<UpstreamStatus>()
+        .is_some_and(|s| matches!(s.status.as_u16(), 400 | 422))
+}
+
+/// One line of a streamed transcription.
+#[derive(Debug, PartialEq)]
+enum StreamEvent {
+    /// A piece of the transcript, spacing as sent.
+    Piece(String),
+    /// The whole transcript (`transcript.text.done`).
+    Done(String),
+    /// A blank line, a comment, `event:`, `[DONE]`, the role chunk.
+    Nothing,
+}
+
+/// The event of the SSE line `line`. The shapes: OpenAI's and speaches'
+/// `transcript.text.delta` / `transcript.text.done`, vLLM's `transcription.chunk`
+/// (`choices[0].delta.content`), and a bare `{"text": ...}` per segment (speaches before
+/// the OpenAI events). An `error` event fails the transcription.
+fn stream_event(line: &str) -> Result<StreamEvent> {
+    let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+        return Ok(StreamEvent::Nothing);
+    };
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(StreamEvent::Nothing);
+    }
+    let event: Value =
+        serde_json::from_str(data).map_err(|e| anyhow!("Unreadable transcription event: {e}"))?;
+    if let Some(error) = event.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| error.to_string());
+        return Err(anyhow!("The transcription stream failed: {message}"));
+    }
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_string);
+    let piece = match event.get("type").and_then(Value::as_str) {
+        Some("transcript.text.delta") => text(event.get("delta")),
+        Some("transcript.text.done") => {
+            return Ok(text(event.get("text")).map_or(StreamEvent::Nothing, StreamEvent::Done));
+        }
+        Some(_) => None,
+        None => text(event.pointer("/choices/0/delta/content")).or_else(|| text(event.get("text"))),
+    };
+    Ok(piece
+        .filter(|p| !p.is_empty())
+        .map_or(StreamEvent::Nothing, StreamEvent::Piece))
 }
 
 /// The transcript in an answer: `text` of a JSON answer (`json`, `verbose_json`), else the
@@ -296,6 +475,39 @@ mod tests {
         assert_eq!(reply.text, "hello world");
         assert_eq!(reply.content_type, "application/json");
         assert_eq!(reply.body, br#"{"text":" hello world "}"#);
+    }
+
+    #[test]
+    fn each_streamed_shape_reads_as_its_piece() {
+        let piece = |s: &str| Ok::<_, ()>(StreamEvent::Piece(s.into()));
+        let read = |line: &str| stream_event(line).map_err(|_| ());
+        assert_eq!(
+            read(r#"data: {"type":"transcript.text.delta","delta":" Hello"}"#),
+            piece(" Hello")
+        );
+        assert_eq!(
+            read(r#"data: {"type":"transcript.text.done","text":"Hello world"}"#),
+            Ok(StreamEvent::Done("Hello world".into()))
+        );
+        assert_eq!(
+            read(
+                r#"data: {"object":"transcription.chunk","choices":[{"delta":{"content":"Hi"}}]}"#
+            ),
+            piece("Hi")
+        );
+        assert_eq!(read(r#"data: {"text":" a segment"}"#), piece(" a segment"));
+        for nothing in [
+            "",
+            ": keep-alive",
+            "event: transcript.text.delta",
+            "data: [DONE]",
+            r#"data: {"choices":[{"delta":{"role":"assistant","content":""}}]}"#,
+            r#"data: {"type":"transcript.text.delta","delta":""}"#,
+        ] {
+            assert_eq!(read(nothing), Ok(StreamEvent::Nothing), "{nothing}");
+        }
+        let error = stream_event(r#"data: {"error":{"message":"engine failed"}}"#).unwrap_err();
+        assert!(error.to_string().contains("engine failed"), "{error}");
     }
 
     #[tokio::test]

@@ -9,11 +9,6 @@
 //! event it adds is not passed on to a client that did not ask for it. Where the upstream
 //! reports no usage, the request and the generated text are estimated.
 //!
-//! One exception: a chat for llama-server that forces a tool call (`tool_choice:
-//! "required"` or a named function) goes up as a schema of the call instead of `tools`,
-//! and comes back as the call ([`super::forced_call`]): llama-server enforces the schema,
-//! not the choice.
-//!
 //! When `/v1` forwards and when the executor answers itself: [`Upstream::for_chat`] and
 //! [`Upstream::of`]. Failures map per §5.4 ([`OpenAIError::from_upstream`]); one that says
 //! the endpoint is down or refuses the key re-checks its health, and a 404 marks the model
@@ -107,19 +102,21 @@ impl Upstream {
     }
 
     /// The upstream of a `/v1/chat/completions` `body` for `resolved`, by the rule of
-    /// [`Self::of`] plus one: a request with active tools (`tools` given, `tool_choice` not
+    /// [`Self::of`] plus two: a request with active tools (`tools` given, `tool_choice` not
     /// `"none"`) is forwarded only to a model that takes tools as definitions
-    /// (`Model::uses_native_tools`), or to llama-server when it forces a call
-    /// ([`super::forced_call`]: a grammar makes the call there). For any other, the executor
-    /// renders the tools into the prompt and reads the calls back out of the text.
+    /// (`Model::uses_native_tools`), and one that forces a call (`tool_choice: "required"`
+    /// or a named function) only to a server that enforces the choice
+    /// ([`enforces_tool_choice`]). For any other, the executor renders the tools into the
+    /// prompt and reads the calls back out of the text, a forced call under a schema the
+    /// server decodes against (`chat::constrained_tool_calls`).
     pub fn for_chat(resolved: &Resolved, body: &Value) -> Option<Upstream> {
         let upstream = Self::of(resolved)?;
-        let takes_tools = || resolved.model.uses_native_tools(&resolved.endpoint);
-        let forced_here = || {
-            resolved.endpoint.kind == EndpointKind::LlamaServer
-                && !matches!(super::forced_call::forced_call(body), Ok(None))
-        };
-        (!tools_active(body) || takes_tools() || forced_here()).then_some(upstream)
+        if !tools_active(body) {
+            return Some(upstream);
+        }
+        let takes_tools = resolved.model.uses_native_tools(&resolved.endpoint);
+        let held_to_it = !forces_a_call(body) || enforces_tool_choice(resolved.endpoint.kind);
+        (takes_tools && held_to_it).then_some(upstream)
     }
 }
 
@@ -129,6 +126,40 @@ fn tools_active(body: &Value) -> bool {
         .and_then(Value::as_array)
         .is_some_and(|tools| !tools.is_empty());
     has_tools && body.get("tool_choice").and_then(Value::as_str) != Some("none")
+}
+
+/// Whether `body` forces a tool call: `tool_choice` is `"required"` or names a function.
+pub(super) fn forces_a_call(body: &Value) -> bool {
+    match body.get("tool_choice") {
+        Some(Value::String(choice)) => choice == "required",
+        Some(choice @ Value::Object(_)) => choice.pointer("/function/name").is_some(),
+        _ => false,
+    }
+}
+
+/// Whether a server of `kind` holds the model to a forced `tool_choice` itself. OpenAI does;
+/// vLLM does by structured outputs, with or without `--enable-auto-tool-choice`
+/// (docs.vllm.ai, features/tool_calling: named function calling and `required`).
+/// llama-server does not: b11669 lets a model answer `required` in text, and refuses the
+/// named form as the wrong type and falls back to `auto`. Ollama's OpenAI API lists
+/// `tool_choice` as unsupported (docs/api/openai-compatibility). An OpenAI-compatible
+/// server is unknown, so it is not trusted to.
+pub(super) fn enforces_tool_choice(kind: EndpointKind) -> bool {
+    matches!(kind, EndpointKind::OpenAi | EndpointKind::Vllm)
+}
+
+/// `body` for llama-server when it says `tool_choice: "none"`: without `tools` and
+/// `tool_choice`. llama-server still offers the tools to the model then, and their call
+/// markup comes back as text; a request without tools is what `none` asks for.
+fn without_refused_tools(kind: EndpointKind, body: &mut Value) {
+    let refused = body.get("tool_choice").and_then(Value::as_str) == Some("none");
+    if kind == EndpointKind::LlamaServer && refused {
+        if let Some(object) = body.as_object_mut() {
+            object.remove("tools");
+            object.remove("tool_choice");
+            object.remove("parallel_tool_calls");
+        }
+    }
 }
 
 /// Map a failure of `upstream` for the client, and act on what it says about the endpoint:
@@ -331,20 +362,15 @@ pub async fn forward_completion(
     }
     let client_model = body.get("model").cloned().unwrap_or(Value::Null);
     body["model"] = Value::String(upstream.remote_model.clone());
+    if route == Route::ChatCompletions {
+        without_refused_tools(upstream.endpoint.kind, &mut body);
+    }
     let stream = body.get("stream").and_then(Value::as_bool) == Some(true);
     let client_wants_usage = body
         .pointer("/stream_options/include_usage")
         .and_then(Value::as_bool)
         == Some(true);
-    let forced =
-        if route == Route::ChatCompletions && upstream.endpoint.kind == EndpointKind::LlamaServer {
-            super::forced_call::forced_call(&body)?
-        } else {
-            None
-        };
-    if let Some(forced) = &forced {
-        forced.rewrite(&mut body);
-    } else if stream {
+    if stream {
         match body
             .get_mut("stream_options")
             .and_then(Value::as_object_mut)
@@ -368,18 +394,6 @@ pub async fn forward_completion(
         started: std::time::Instant::now(),
     };
 
-    if let Some(forced) = forced {
-        let answer = send(&upstream, route, &body, false).await?;
-        return forced_answer_back(
-            upstream,
-            answer,
-            client_model,
-            bill,
-            &forced,
-            stream.then_some(client_wants_usage),
-        )
-        .await;
-    }
     let answer = send(&upstream, route, &body, stream).await?;
     if stream {
         Ok(stream_back(
@@ -428,42 +442,6 @@ async fn answer_back(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(json.to_string()))
-        .map_err(|e| OpenAIError::internal(format!("Response build error: {e}")))
-}
-
-/// The answer to a request [`super::forced_call`] rewrote: the server's JSON as the
-/// client's tool calls, billed, as JSON or, when `stream` says whether the client wants
-/// the usage, as the SSE of a stream.
-async fn forced_answer_back(
-    upstream: Upstream,
-    answer: Answer,
-    client_model: Value,
-    bill: Bill,
-    forced: &super::forced_call::ForcedCall,
-    stream: Option<bool>,
-) -> Result<Response, OpenAIError> {
-    let bytes = read_body(&upstream, answer).await?;
-    let mut json: Value = serde_json::from_slice(&bytes).map_err(|_| {
-        upstream_failure(
-            &upstream.endpoint,
-            &upstream.remote_model,
-            anyhow::anyhow!("the endpoint answered a body that is not JSON"),
-        )
-    })?;
-    bill.settle(json.get("usage"), &generated_text(&json));
-    forced.answer(&mut json);
-    json["model"] = client_model;
-    let (content_type, body) = match stream {
-        Some(include_usage) => (
-            "text/event-stream",
-            super::forced_call::as_sse(&json, include_usage),
-        ),
-        None => ("application/json", json.to_string()),
-    };
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .body(Body::from(body))
         .map_err(|e| OpenAIError::internal(format!("Response build error: {e}")))
 }
 
