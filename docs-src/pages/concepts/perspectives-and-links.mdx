@@ -1,0 +1,112 @@
+---
+title: Perspectives and links
+description: Where data lives in AD4M, what a signed link is, what comes back when you read one, and the difference between local and shared data.
+---
+
+import { Callout } from "nextra/components";
+
+# Perspectives and links
+
+Where does my data live, and what is a link? A **perspective** is a graph database your executor keeps for you; a **link** is one signed triple in it. Everything else in AD4M, models, queries, neighbourhoods, flows, is built on perspectives full of links.
+
+## The idea
+
+The Semantic Web stores facts as triples and treats them as objective. AD4M keeps the triple and drops the objectivity: every link is a *claim made by an agent*. A perspective is one agent's collection of such claims, a subjective overlay on a world of shared content.
+
+Two kinds of data follow from that:
+
+| | Expressions | Links |
+|---|---|---|
+| What | A piece of content with an address, signed by its author | One agent's statement that two addresses are related |
+| Lives in | A [Language](./language-protocols.mdx) (a storage or network protocol) | A perspective, on the agent's own executor |
+| Example | the text `"Buy milk"` at `literal:string:Buy%20milk`, a DID, a file in a storage language | `task://17 --todo://title--> literal:string:Buy%20milk` |
+
+Every node in a perspective is a URI. It can point at an expression in some Language, at a DID, or at nothing in particular: a URI is a name until something resolves it. The literal language makes small values into URIs directly (`literal:string:…`, `literal:number:…`, `literal:boolean:…`, `literal:json:…`, percent-encoded as `Literal.from(value).toUrl()` writes them, `core/src/Literal.ts`).
+
+```text
+Alice's perspective                     Bob's perspective
+───────────────────                     ─────────────────
+post://1 ──likes──▶ post://2            post://1 ──disagrees-with──▶ post://2
+post://2 ──related-to──▶ post://3       post://2 ──authored-by──▶ did:key:carol
+
+each arrow: { data: (source, predicate, target), author, timestamp, proof }
+```
+
+## A link, and what you get back
+
+You write a bare `Link`: `source`, `predicate`, `target`. The executor signs it with your agent's key and stores a `LinkExpression`: the link as `data`, plus `author`, `timestamp` and `proof` (`core/src/links/Links.ts`). Reading returns the `LinkExpression`, never the bare link.
+
+```typescript
+import { LinkQuery, Literal } from "@coasys/ad4m";
+
+// ad4m: an Ad4mClient (see Build an app)
+
+const perspective = await ad4m.perspective.add("My notes");
+
+const added = await perspective.add({
+  source: "task://17",
+  predicate: "todo://title",
+  target: Literal.from("Buy milk").toUrl(),       // literal:string:Buy%20milk
+});
+
+const links = await perspective.get(new LinkQuery({ source: "task://17" }));
+links[0];
+// {
+//   author:    "did:key:z6Mk…",                    the agent that signed it
+//   timestamp: "2026-10-21T18:02:11.935Z",
+//   data:      { source: "task://17", predicate: "todo://title", target: "literal:string:Buy%20milk" },
+//   proof:     { key: "#z6Mk…", signature: "…", valid: true, invalid: false },
+//   status:    "SHARED"
+// }
+```
+
+`PerspectiveProxy.add(link, status?, batchId?)` returns the stored `LinkExpression`; `get(query)` returns `LinkExpression[]` (`core/src/perspectives/PerspectiveProxy.ts`, `add` and `get`). A `LinkQuery` filters by any of `source`, `predicate`, `target`, plus `fromDate`, `untilDate` and `limit`.
+
+The `proof` carries the signature and the key path in the author's DID document. `valid` and `invalid` are never taken from the writer: the executor computes the verdict from the signature when it stores the link, records it as `<ad4m://ontology/proofValid>`, and returns it on every read (`rust-executor/src/perspectives/sparql_store.rs`, `insert_link_triples`), so a link copied from another agent keeps the verdict its signature earns. Model queries exclude links that fail verification unless asked for them (`includeUnverified`); raw SPARQL does not filter and exposes the verdict as `<ad4m://ontology/proofValid>` (see [Query with SPARQL](../how-to/sparql.mdx#only-verified-links)).
+
+`get()` returns the `target` exactly as it was signed. The store indexes `literal:*` targets as typed values so a query finds a value however it was percent-encoded, but what comes back is the signed bytes, including a `literal:string:Hello world` written with a raw space. That keeps the `proof` valid when the link is handed on, for example when the perspective is published as a neighbourhood.
+
+## Local and shared links
+
+Every link has a status, `"shared"` (the default) or `"local"` (`add(link, "local")`). In a private perspective the two behave the same. Once the perspective is a [neighbourhood](./neighbourhoods.mdx), shared links are committed to the link language and reach every member; local links stay on your executor and are never sent (`rust-executor/src/perspectives/perspective_instance.rs` splits a diff into a shared and a local half before committing). Use local links for private annotations on shared data: a bookmark, a draft, a "read" marker.
+
+Links that arrive from the link language are stored as shared. Model queries take a `linkStatus` filter to read one half only (see [Model query reference](../reference/model-query.mdx)).
+
+## Changing links
+
+- `remove(link)` deletes a link. It accepts the `LinkExpression` you read back, or a bare `Link`; with a bare link the proxy looks up the stored expression first and throws if none matches.
+- `update(oldLink, newLink)` removes one and adds another; subscribers see a single `link-updated` event.
+- `addLinks(links)`, `removeLinks(links)` and `linkMutations({ additions, removals })` do several at once in one call.
+- A **batch** groups calls so they commit together: `const batchId = await perspective.createBatch()`, pass `batchId` to `add`, `remove`, `update` or `addLinks`, then `await perspective.commitBatch(batchId)`. The commit returns the `LinkExpressionMutations` that landed. [Batch writes](../how-to/batch-writes.mdx) covers when this matters.
+
+## Following changes
+
+`perspective.on(event, handler)` calls `handler` for events about this perspective and returns a function that removes the handler (`PerspectiveProxy.on`; the event names are the `ScopedEventName`s in `core/src/generated/api/Events.ts`):
+
+```typescript
+const release = perspective.on("link-added", ({ link }) => console.log("new:", link.data));
+perspective.on("link-removed", ({ link }) => {});
+perspective.on("link-updated", ({ oldLink, newLink }) => {});
+perspective.on("sync-state-change", ({ state }) => {});   // neighbourhood sync state
+release();
+```
+
+`perspective.dispose()` removes every handler this proxy registered. For a query that stays current rather than a stream of link events, use `subscribeQuery` (SPARQL) or a model subscription; see [Queries and live results](./queries.mdx).
+
+## Snapshots
+
+`await perspective.snapshot()` returns a `Perspective` object: `{ links: LinkExpression[] }`, every link with its signature. `await other.loadSnapshot(snapshot)` adds those links to another perspective through `addLinkExpression`, so the original authors and proofs are kept. A snapshot is a point-in-time copy for backup or hand-over; continuous sharing is a neighbourhood.
+
+## Querying
+
+Three query surfaces read the same links:
+
+- **Model queries** (`Ad4mModel.findAll`, `perspective.modelQuery`): instances of a class, with recognition, verified-link filtering, relations and pagination done on the executor. The default for application code. [Models and identity](./models-and-identity.mdx), [Queries and live results](./queries.mdx).
+- **SPARQL** (`perspective.querySparql`): the store is an Oxigraph graph; direct triples plus `rdf:reifies` metadata. For aggregates, traversals and link metadata. [Query with SPARQL](../how-to/sparql.mdx).
+- **Prolog** (`perspective.infer`): one-shot, kept for existing Social DNA rules.
+
+## How it is built
+
+A perspective is a `PerspectiveInstance` in `rust-executor/src/perspectives/perspective_instance.rs`, backed by one Oxigraph store per perspective (`rust-executor/src/perspectives/sparql_store.rs`). The SDK side is `PerspectiveProxy` in `core/src/perspectives/PerspectiveProxy.ts`; the link types are in `core/src/links/Links.ts`.
+
+Next: [Models and identity](./models-and-identity.mdx) to stop thinking in links; [Neighbourhoods](./neighbourhoods.mdx) to share a perspective.

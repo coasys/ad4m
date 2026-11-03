@@ -4,10 +4,14 @@
   "license": "CAL-1.0",
   "homepage": "./",
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/copy-generated.mjs && next dev",
     "start": "next start",
-    "build": "pnpm run typedoc && next build && rm -rf ../docs && mv out ../docs",
-    "typedoc": "typedoc --options typedoc.json ../core/src"
+    "generate": "node scripts/copy-generated.mjs",
+    "check:portability": "node scripts/copy-generated.mjs && node scripts/check-portability.mjs",
+    "typedoc": "typedoc --options typedoc.json ../core/src",
+    "build": "pnpm run check:portability && pnpm run typedoc && next build && node scripts/write-redirects.mjs",
+    "check:links": "node scripts/check-links.mjs",
+    "publish:pages": "pnpm run build && pnpm run check:links && rm -rf ../docs && mv out ../docs"
   },
   "dependencies": {
     "next": "^13.0.6",

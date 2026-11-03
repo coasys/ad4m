@@ -1,0 +1,94 @@
+---
+title: Paginate
+description: Read model instances one page at a time with paginate, findAllAndCount or limit and offset, get the total in the same call, and order by a relation's property without losing the order.
+---
+
+import { Callout } from "nextra/components";
+
+# Paginate
+
+A page is a model query with `limit` and `offset`; the executor returns the rows for the window and the total count of matches in one call. Concepts: [Order, limit and offset](../concepts/queries.mdx#order-limit-and-offset).
+
+## Steps
+
+1. **Choose an order.** Without `order`, a page is sorted by creation time, oldest first. For a feed, use `order: { createdAt: "DESC" }`.
+2. **Ask for a page.** `Model.paginate(perspective, pageSize, pageNumber, query?)` with a 1-based page number, or `findAllAndCount(perspective, { ...query, limit, offset })` if you count in offsets.
+3. **Read the total** from the same result (`totalCount`) to draw "page 2 of 7". For the total alone, `Model.count(perspective, query?)`.
+4. **Keep it live**, if the view needs it, with `query(...).paginateSubscribe(pageSize, pageNumber, cb)` ([Subscribe](./subscribe.mdx)).
+
+```typescript
+import { Ad4mModel, Model, Flag, Property, HasOne, HasManyMethods } from "@coasys/ad4m";
+
+@Model({ name: "Comment" })
+class Comment extends Ad4mModel {
+  @Flag({ through: "blog://kind", value: "blog://comment" })
+  kind = "blog://comment";
+
+  @Property({ through: "blog://body", required: true })
+  body: string = "";
+}
+
+@Model({ name: "Post" })
+class Post extends Ad4mModel {
+  @Flag({ through: "blog://kind", value: "blog://post" })
+  kind = "blog://post";
+
+  @Property({ through: "blog://title", required: true })
+  title: string = "";
+
+  @HasOne(() => Comment, { through: "blog://pinned" })
+  pinned: Comment | null = null;
+}
+interface Post extends HasManyMethods<"pinned"> {}
+
+await Ad4mModel.registerAll(perspective, [Comment, Post]);
+
+// 1. Page by number: page 2 of 20, newest first.
+const page = await Post.paginate(perspective, 20, 2, { order: { createdAt: "DESC" } });
+page.results;    // Post[] (at most 20)
+page.totalCount; // every match, ignoring the window
+page.pageNumber; // 2
+
+// 2. Same window with limit/offset, rows and total in one call.
+const { results, totalCount } = await Post.findAllAndCount(perspective, {
+  order: { createdAt: "DESC" },
+  limit: 20,
+  offset: 20,
+});
+
+// 3. Only the number.
+const n = await Post.count(perspective);
+
+// 4. The builder form.
+const p3 = await Post.query(perspective).order({ title: "ASC" }).paginate(20, 3);
+
+// 5. Order by a property of a to-one relation's target: needs limit (or offset).
+const byPinned = await Post.findAll(perspective, {
+  order: { "pinned.body": "ASC" } as any,
+  limit: 50,
+});
+```
+
+## What you get
+
+- `paginate` returns `{ results, totalCount, pageSize, pageNumber }`; it sends `limit: pageSize, offset: pageSize × (pageNumber − 1)` with the count.
+- `findAllAndCount` returns `{ results, totalCount }`; `totalCount` ignores `limit` and `offset`.
+- `count` sends `limit: 0` and returns only the total.
+
+## The dotted-order trap
+
+`order: { "pinned.body": "ASC" }` sorts by a scalar of a to-one relation's target. The executor only sorts by it inside the paged plan, where the order is compiled into SPARQL. **Without `limit` or `offset`, a dotted order is silently ignored:** the fallback sorts hydrated rows, and at that point `pinned` is still a bare id, so every row compares as empty. Always pair a dotted key with a `limit` (a large one is fine), and type it `as any`: the SDK's `TypedOrder` does not accept dotted keys yet.
+
+The same holds for ordering by a `$` projection count (`order: { $commentCount: "DESC" }` with `include: { $commentCount: { from: "comments", count: true } }`): pair it with `limit`.
+
+The paged plan also needs a `where` the store can evaluate whole. A condition that is checked after hydration (a bare `author`, `timestamp`, a getter property, an operator the store cannot express) sends the query to the fallback sort, and a dotted or `$` order key is ignored again even with a `limit`.
+
+<Callout type="warning">
+Use a dotted path as the only order key. With a second key the executor sorts the hydrated rows instead, where the relation is still an id, and the dotted key is ignored again.
+</Callout>
+
+## Next
+
+- Concepts: [Queries and live results](../concepts/queries.mdx).
+- Reference: [Order](../reference/model-query.mdx#order), [Query fields](../reference/model-query.mdx#query-fields).
+- How-to: [Subscribe](./subscribe.mdx), [Include relations](./include-relations.mdx).

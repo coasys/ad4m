@@ -1,0 +1,84 @@
+---
+title: What AD4M is
+description: Why an app talks to a local runtime instead of a server; the spanning layer, agent-centric data, languages, perspectives, neighbourhoods and social DNA in one page.
+---
+
+# What AD4M is
+
+Why does my app talk to a local runtime instead of a server? Because in AD4M the person, not the app, owns the runtime, the keys and the data. AD4M (Agent-centric Distributed Application Meta-ontology) is a spanning layer: one layer that sits across centralized platforms, federated protocols, peer-to-peer systems and the semantic web, and lets agents choose which of them they speak while keeping one graph of their own.
+
+## The problem it answers
+
+The internet is split into ecosystems that do not share: platforms that own their users' data, federated protocols that interoperate only with themselves, peer-to-peer systems with no common addressing, and a semantic web with a data model but little adoption. Each solves part of the problem. AD4M does not replace them; it attaches to them from above.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Apps: Flux, WE, your app         Agents: MCP clients    │
+├─────────────────────────────────────────────────────────┤
+│  One executor per agent                                  │
+│  DID + keys · perspectives (signed links) · models        │
+│  neighbourhoods (shared perspectives) · flows            │
+├─────────────────────────────────────────────────────────┤
+│  Languages: literal · p2p link sync (Holochain) · HTTP ·  │
+│  IPFS · your protocol        <language_hash>://<address> │
+├─────────────────────────────────────────────────────────┤
+│  Transport (TCP/IP, QUIC)                                 │
+└─────────────────────────────────────────────────────────┘
+```
+
+## Agent-centric
+
+Every piece of data is a claim made by an agent. An **agent** is a person (or a bot) identified by a DID such as `did:key:z6Mk...`, with keys the executor holds. The **executor** runs once per agent, on their device or on a host they trust, and signs every link they write. Apps and AI agents connect to the executor and act on the agent's behalf within the capabilities the agent granted them. There is no app-owned server holding the social graph; see [Agent, executor and capabilities](./agent-executor-capabilities.mdx).
+
+## Languages: protocols with one address scheme
+
+A **language** wraps a protocol or storage system and defines how to create and fetch **expressions**, data objects with cryptographic provenance. Every language is identified by the hash of its code, and that hash is the scheme of an address: `<language_hash>://<address>`. An HTTP document, an IPFS object, a Holochain entry and a literal string all get an address in one scheme, so one graph can point at any of them. Languages run in the executor's embedded JavaScript runtime (Deno). A few are bundled as system languages (`rust-executor/src/mainnet_seed.json`): the agent language that serves profiles under `did:key:...`, the perspective and neighbourhood languages, the language that publishes languages, and the default link languages. Protocol authoring is a topic of its own: [Language protocols](./language-protocols.mdx).
+
+## Perspectives: signed graphs
+
+A **perspective** is the agent's own graph: a set of **links**, each a triple `source → predicate → target`, each signed by its author with a timestamp. A link's ends are addresses, so a perspective mixes a DID, an `ipfs://` object, a literal and a record from your app in one graph. Perspectives are private by default and live in the executor's database. The chat-app example: a chat UI connects to the executor at `http://localhost:12000`, opens the user's perspective and reads the links under a channel:
+
+```typescript
+import { Ad4mClient, LinkQuery } from "@coasys/ad4m";
+
+const client = new Ad4mClient("http://localhost:12000", token);
+const [perspective] = await client.perspective.all();
+const links = await perspective.get(new LinkQuery({ source: channelId }));
+for (const link of links) {
+  // link is a LinkExpression: the triple plus who signed it and when
+  console.log(link.data.predicate, link.data.target, link.author, link.timestamp);
+}
+```
+
+`get()` returns `LinkExpression`s, not bare triples: `data` holds the triple, `author` the DID, `timestamp` and `proof` the signature. See [Perspectives and links](./perspectives-and-links.mdx).
+
+## Models: typed records over links
+
+Nobody wants to think in links. A **model** is a TypeScript class whose decorators the SDK turns into a SHACL shape and registers in the perspective. Records are then saved, recognized and queried by that shape; underneath they are still signed links. The same shape, serialized as SHACL JSON, is what an AI agent reads back from the executor's `describe_perspective` tool, so an agent can work with your records without knowing your app. See [Models and identity](./models-and-identity.mdx) and [Queries and live results](./queries.mdx).
+
+## Neighbourhoods: shared perspectives
+
+A perspective becomes a **neighbourhood** when it is published with a link language, the protocol that syncs links between executors (the bundled one runs on Holochain). Members join by URL and each holds a local replica; every member's writes are signed by them. A neighbourhood is app-independent: two apps that know the same classes are two views over one shared graph. See [Neighbourhoods and trust](./neighbourhoods.mdx).
+
+## Social DNA: what classes and flows actually do
+
+A neighbourhood's classes and flows are its **social DNA**. Two things need to be said precisely. Classes **recognize**: a record is an instance of `Task` when its links match the shape, and only recognized records show up in a `Task` query or in the agent's `instance_query`; a write through an `instance_*` tool is validated against the shape before it is stored, and a model writes the links its class declares. Flows **gate**: a flow is a state machine whose transitions a group agrees on, and an action outside the flow's rules does not fire. What social DNA does not do is reject incoming links: a member can write any link into a shared perspective, and the executor stores it; a link that no class recognizes is simply not a record. See [Social DNA and flows](./social-dna-and-flows.mdx).
+
+## Why build on it
+
+- No cold start: your app joins existing agents and their groups instead of onboarding users.
+- No authentication to build: identity and capability tokens are the executor's job.
+- Private by default: each neighbourhood is its own network.
+- No database to run: the data lives with the agents.
+- No lock-in to a storage technology: a language wraps the next one.
+- Group rules without fees: classes and flows are declarative and run on every member's executor.
+
+## How it is built
+
+The executor is the Rust crate `rust-executor/` (RPC server, graph store, language runtime, MCP server); the SDK is `core/` (`@coasys/ad4m`); the browser connection helper is `connect/`. Start reading at `rust-executor/AGENTS.md`.
+
+## Next
+
+- [Agent, executor and capabilities](./agent-executor-capabilities.mdx)
+- [Perspectives and links](./perspectives-and-links.mdx)
+- [Build an app](../start/build-an-app.mdx), [Connect an agent](../start/connect-an-agent.mdx)

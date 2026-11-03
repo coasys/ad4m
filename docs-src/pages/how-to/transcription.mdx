@@ -1,0 +1,70 @@
+---
+title: Transcription
+description: Open a Whisper transcription stream in the executor, feed it 16 kHz audio and receive text; the model ids, and what the stream does on its own.
+---
+
+import { Callout } from "nextra/components";
+
+# Transcription
+
+The executor transcribes speech with Whisper models it downloads on first use. A stream is opened with a model id, fed audio from the client, and emits text as segments are finalized.
+
+## 1. Open a stream
+
+```typescript
+const streamId = await client.ai.openTranscriptionStream("whisper_small", (text) => {
+  console.log("Transcribed:", text);
+});
+```
+
+The first argument is a Whisper model id or the id of a `TRANSCRIPTION` model added with `addModel` (whose `local.fileName` must be one of the ids below). The callback receives each finalized segment; the SDK subscribes to the `transcription-text` event for you.
+
+| Model id | Notes |
+|---|---|
+| `whisper_tiny`, `whisper_tiny_quantized`, `whisper_tiny_en`, `whisper_tiny_en_quantized` | fastest, least accurate |
+| `whisper_base`, `whisper_base_en` | |
+| `whisper_small`, `whisper_small_en` | |
+| `whisper_medium`, `whisper_medium_en`, `whisper_medium_en_quantized_distil` | |
+| `whisper_large`, `whisper_large_v2` | |
+| `whisper_distil_medium_en`, `whisper_distil_large_v2`, `whisper_distil_large_v3`, `whisper_distil_large_v3_quantized` | distilled |
+| `whisper_large_v3_turbo_quantized` | |
+
+`_en` models are English-only. An id that is none of these and not a model in the executor's database falls back, without an error, to the first `TRANSCRIPTION` model in the database, or to `whisper_tiny` when there is none: check the id when results look too poor.
+
+<Callout type="warning">
+`openTranscriptionStream` accepts a third parameter of voice-activity-detection thresholds (`startThreshold`, `endWindow`, …). The executor ignores it: speech detection is a built-in Silero VAD with fixed thresholds. Do not tune these parameters expecting a change.
+</Callout>
+
+## 2. Feed audio
+
+Audio is mono `Float32Array` samples at 16 kHz:
+
+```typescript
+await client.ai.feedTranscriptionStream(streamId, samples);
+```
+
+The same chunk can go to several streams in one call, for example a fast preview and an accurate pass:
+
+```typescript
+const fast = await client.ai.openTranscriptionStream("whisper_tiny", (t) => preview(t));
+const accurate = await client.ai.openTranscriptionStream("whisper_small", (t) => final(t));
+await client.ai.feedTranscriptionStream([fast, accurate], samples);
+```
+
+One Whisper model of each size is loaded once in the executor and shared by all streams that use it.
+
+## 3. Close it
+
+```typescript
+await client.ai.closeTranscriptionStream(streamId);
+```
+
+A stream that receives no audio for 30 seconds is closed by the executor, so an abandoned stream does not leak a model.
+
+## Capability
+
+Transcription needs `TRANSCRIBE` on the `artificial intelligence` domain; a hosted user's default capabilities include it.
+
+## Next
+
+- [Configure AI models](./ai-models.mdx)

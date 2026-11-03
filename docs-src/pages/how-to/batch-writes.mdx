@@ -1,0 +1,92 @@
+---
+title: Batch writes and transactions
+description: Group link and model writes into one commit with Ad4mModel.transaction or createBatch and commitBatch, what a thrown transaction leaves behind, and the traps of reading and removing inside a batch.
+---
+
+import { Callout } from "nextra/components";
+
+# Batch writes and transactions
+
+A batch collects writes on the executor and applies them in one commit: the store, the query indexes and live subscriptions see one change, and in a neighbourhood the link language gets one commit. Use it when several writes only make sense together (a record and the link that files it), and when you write many links at once. Concepts: [Changing links](../concepts/perspectives-and-links.mdx#changing-links).
+
+```
+  createBatch() ──▶ batch id
+  add / remove / update / save / addX  (…, batchId)   ──▶ held in the executor's memory, invisible to reads
+  commitBatch(batchId) ──▶ store + indexes + subscriptions + link language, once ──▶ { additions, removals }
+```
+
+## Steps
+
+1. **Wrap model writes in `Ad4mModel.transaction(perspective, fn)`.** It creates a batch, calls `fn({ batchId })`, commits, and returns what `fn` returned.
+2. **Pass `tx.batchId` to every write inside**: `Model.create(perspective, data, { batchId })`, `instance.save(batchId)`, `instance.delete(batchId)`, and the generated relation methods `addX(value, batchId)`, `removeX(value, batchId)`, `setX(values, batchId)`. A write without the id is applied at once, outside the batch.
+3. **Do not read your own writes inside `fn`.** Queries see the store, and the batch is not in it until the commit.
+4. **Throw to abandon.** If `fn` throws, nothing is committed and `transaction` re-throws the same error.
+
+```typescript
+import { Ad4mModel } from "@coasys/ad4m";
+// Post (with a `comments` relation) and Comment as in Include relations.
+
+const post = await Ad4mModel.transaction(perspective, async (tx) => {
+  const post = await Post.create(perspective, { title: "Release notes" }, { batchId: tx.batchId });
+
+  const comment = new Comment(perspective);
+  comment.body = "First";
+  await comment.save(tx.batchId);          // comment.id is set; the record is not readable yet
+
+  await post.addComments(comment, tx.batchId);
+
+  if (!(await mayPublish())) throw new Error("not allowed"); // nothing above is written
+  return post;
+});
+
+// After the commit everything is readable.
+await Post.findAll(perspective, { where: { id: post.id }, include: { comments: true } });
+```
+
+## Raw links in a batch
+
+`createBatch` and `commitBatch` are the calls under `transaction`. Use them directly to mix link writes with model writes:
+
+```typescript
+import { Link } from "@coasys/ad4m";
+
+const batchId = await perspective.createBatch();
+
+await perspective.add(new Link({ source: boardId, predicate: "board://task", target: taskId }), "shared", batchId);
+await perspective.addLinks([linkA, linkB], "shared", batchId);
+await perspective.remove(oldLinkExpression, batchId);
+await perspective.update(currentLinkExpression, new Link({ source, predicate, target: "board://done" }), batchId);
+await task.save(batchId);
+
+const { additions, removals } = await perspective.commitBatch(batchId); // LinkExpressionMutations
+```
+
+| Call | Batched form |
+|---|---|
+| `add(link, status?, batchId)` | `status` is `"shared"` (default) or `"local"` |
+| `addLinks(links, status?, batchId)` | |
+| `addLinkExpression(linkExpression, status?, batchId)` | |
+| `remove(link, batchId)`, `removeLinks(links, batchId)` | |
+| `update(oldLink, newLink, batchId)` | one removal and one addition at commit |
+| `createSubject(class, id, values, batchId)`, `updateSubject(class, id, values, batchId)`, `removeSubject(class, id, batchId)` | the subject API under the models |
+| `linkMutations({ additions, removals })` | takes no batch id; it is already one call |
+
+`commitBatch` returns `{ additions, removals }`, the links as committed. A second commit of the same id fails with `No batch found with given UUID`; a link write with an unknown id fails with `Batch not found`. A batch id belongs to the perspective that created it.
+
+## When a transaction throws
+
+`transaction` never calls `commitBatch` after a throw, so nothing is written. It also does not tell the executor to drop the batch. The abandoned batch stays in the executor's memory until a later `createBatch` on the same perspective finds it older than five minutes and removes it. That is harmless for correctness, since nobody holds the id any more. The RPC method `perspective.discardBatch` drops a batch at once and returns `true` if it was still open; the SDK has no wrapper for it yet.
+
+## Traps
+
+- **A batched write is invisible until the commit**, to you as well: `findAll` inside `transaction` does not return the records you just saved there. `save(batchId)` sets `instance.id` but does not re-read the instance.
+- **You cannot remove or update a link you added in the same open batch.** `remove(link, batchId)` and `update(oldLink, newLink, batchId)` look the old link up in the store, where it is not yet, and fail with `Link not found`. Leave it out of the batch instead.
+- **Links are signed at commit time.** The `LinkExpression` that `add(..., batchId)` returns is not the stored one: the commit signs each added link again, with the commit's timestamp, as the agent committing. Use the `additions` from `commitBatch` when you need the stored expressions. For the same reason a link from another agent added with `addLinkExpression(..., batchId)` is stored under your signature, not theirs; add such links without a batch to keep their author and proof.
+- **Static `Model.update` and `Model.delete` take no batch id.** Load the instance and call `save(batchId)` or `delete(batchId)` on it.
+- **Some writes batch themselves.** `save()` on a new instance without a batch id, and `create(..., { parent })` without one, open their own batch so the record (and its parent link) land in one commit.
+
+## Next
+
+- Concepts: [Perspectives and links](../concepts/perspectives-and-links.mdx), [Models and identity](../concepts/models-and-identity.mdx).
+- Reference: [Transactions](../reference/model-query.mdx#transactions).
+- How-to: [Define a model](./define-a-model.mdx), [Subscribe](./subscribe.mdx).
