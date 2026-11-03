@@ -148,7 +148,7 @@ function wireClient(
   transport: Transport = new FetchTransport(),
 ): { emittedDiffs: PerspectiveDiff[]; syncStates: string[] } {
   resetAdapters();
-  syncModule._resetBatchStateForTests();
+  syncModule._resetRenderStateForTests();
   auth.resetAuth();
 
   const emittedDiffs: PerspectiveDiff[] = [];
@@ -180,7 +180,7 @@ afterEach(async () => {
   for (const fn of _cleanups.splice(0)) fn();
   syncModule._setPageLimitsForTests();
   resetAdapters();
-  syncModule._resetBatchStateForTests();
+  syncModule._resetRenderStateForTests();
   auth.resetAuth();
   if (_server) {
     await _server.close();

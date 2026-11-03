@@ -407,15 +407,6 @@ const language = defineLanguage({
 
     async teardown() {
         lifecycleGen++;
-        try {
-            await syncModule.drainCommitBatch();
-        } catch (err) {
-            console.error(
-                "[server-link-language] teardown: draining batched commits failed; " +
-                "some writes may not have reached the server:",
-                err,
-            );
-        }
         if (wsClient) {
             wsClient.close();
             wsClient = null;

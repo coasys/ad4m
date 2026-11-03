@@ -301,6 +301,12 @@ impl HolochainServiceInterface {
         }
     }
 
+    /// Whether this conductor has stopped: its dispatch loop ends after a shutdown, which
+    /// closes the channel. The global keeps the handle until an `init` replaces it.
+    pub fn is_stopped(&self) -> bool {
+        self.sender.is_closed()
+    }
+
     pub async fn get_agent_key(&self) -> Result<HoloHash<Agent>, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(HolochainServiceRequest::GetAgentKey(response_tx), None)?;
@@ -503,11 +509,44 @@ pub async fn set_holochain_service(service: HolochainServiceInterface) {
     *lock = Some(service);
 }
 
+/// Removes the conductor's handle and returns it, so a test can run without the conductor
+/// an earlier test left and put it back after.
+#[cfg(test)]
+pub(crate) async fn take_holochain_service() -> Option<HolochainServiceInterface> {
+    HOLOCHAIN_SERVICE.write().await.take()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
+
+    /// A shut-down conductor reports itself stopped: like the real dispatch loop, the fake
+    /// one ends after the shutdown, which closes the channel.
+    #[tokio::test]
+    async fn a_shut_down_conductor_reports_itself_stopped() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Envelope>();
+        let (_signal_tx, signal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let service = HolochainServiceInterface {
+            sender,
+            stream_receiver: Arc::new(Mutex::new(signal_rx)),
+        };
+        tokio::spawn(async move {
+            while let Some(envelope) = receiver.recv().await {
+                if let HolochainServiceRequest::Shutdown(tx) = envelope.request {
+                    let _ = tx.send(HolochainServiceResponse::Shutdown(Ok(())));
+                    break;
+                }
+            }
+        });
+        assert!(!service.is_stopped());
+
+        service.shutdown().await.unwrap();
+        tokio::task::yield_now().await;
+
+        assert!(service.is_stopped());
+    }
 
     #[tokio::test]
     async fn wait_returns_none_at_once_when_nothing_is_starting() {
