@@ -57,10 +57,10 @@ export const SERVICE_RULES: Record<Service, ServiceRule> = {
   stt: {
     floor: [{ metric: "rtf", atMost: 0.5 }],
     order: [
-      { metric: "wer", dir: "asc", round: 0.02 },
+      { metric: "werMean", dir: "asc", round: 0.02 },
       { metric: "rtf", dir: "asc" },
     ],
-    report: ["wer", "rtf", "latencyMs", "streamLatencyMs", "firstRequestMs", "peakRssBytes"],
+    report: ["werMean", "rtf", "latencyMs", "streamLatencyMs", "firstRequestMs", "peakRssBytes"],
   },
   tts: {
     // Faster than playback: speech can start before the sentence is synthesised.

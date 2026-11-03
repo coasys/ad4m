@@ -17,6 +17,7 @@ import { deriveRecommendations, parseParams } from "../helpers/ai-wind-tunnel/re
 import { medianOf, quantile, summarize } from "../helpers/ai-wind-tunnel/stats.js";
 import { PROVIDERS, SERVICES, type CellResult, type Evidence, type Fingerprint } from "../helpers/ai-wind-tunnel/types.js";
 import {
+  addNoise,
   checkOffload,
   checkToolCall,
   consistentDimension,
@@ -255,6 +256,16 @@ describe("AI wind tunnel (unit)", () => {
       expect(checkOffload("rocm", null, 8e8)).to.equal(null);
       expect(checkOffload(undefined, 0, 8e8)).to.equal(null);
     });
+    it("adds seeded noise at the asked level, the same on every run", () => {
+      const tone = new Float32Array(16000).map((_, i) => 0.3 * Math.sin((2 * Math.PI * 300 * i) / 16000));
+      const a = addNoise(tone, 0, 7);
+      expect(addNoise(tone, 0, 7)).to.deep.equal(a);
+      expect(addNoise(tone, 0, 8)).to.not.deep.equal(a);
+      const noise = a.map((x, i) => x - tone[i]);
+      expect(rms(noise) / rms(tone)).to.be.closeTo(1, 0.05);
+      const quiet = addNoise(tone, 20, 7).map((x, i) => x - tone[i]);
+      expect(rms(quiet) / rms(tone)).to.be.closeTo(0.1, 0.01);
+    });
     it("bounds a plausible speech duration", () => {
       const r = speechDurationRange(10);
       expect(r.min).to.equal(1.5);
@@ -403,7 +414,7 @@ describe("AI wind tunnel (unit)", () => {
       expect(r.classes["cpu-16gb"].llm).to.deep.include({ metrics: { decodeTps: 30, ttftMs: 500 }, evidence: ["a.json", "b.json"] });
     });
     it("orders STT by word error rate, then real-time factor", () => {
-      const stt = (id: string, w: number, rtf: number) => cell({ service: "stt", provider: "whisper-server", model: { modelId: id, remoteModel: id }, metrics: { wer: stat(w), rtf: stat(rtf) } });
+      const stt = (id: string, w: number, rtf: number) => cell({ service: "stt", provider: "whisper-server", model: { modelId: id, remoteModel: id }, metrics: { werMean: w, rtf: stat(rtf) } });
       const r = deriveRecommendations([{ path: "e.json", evidence: evidence("cpu-16gb", [stt("fast-sloppy", 0.2, 0.05), stt("accurate", 0.0, 0.3), stt("accurate-faster", 0.01, 0.1), stt("too-slow", 0, 0.9)]) }], "t");
       expect(r.classes["cpu-16gb"].stt!.modelId).to.equal("accurate-faster");
     });

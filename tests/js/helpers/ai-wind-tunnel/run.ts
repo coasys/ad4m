@@ -99,7 +99,7 @@ function table(cells: CellResult[]): string {
       case "embeddings":
         return [f("textsPerSec"), f("dimension")].filter(Boolean).join(" ");
       case "stt":
-        return [f("wer"), f("rtf")].filter(Boolean).join(" ");
+        return [f("werMean"), f("rtf")].filter(Boolean).join(" ");
       case "tts":
         return [f("rtf"), f("ttfbMs"), f("roundTripWer")].filter(Boolean).join(" ");
     }

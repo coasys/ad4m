@@ -21,6 +21,14 @@
       "transcript": "The forecast says light rain in the morning, clearing to sunshine by the evening.",
       "maxWer": 0.2,
       "source": "Generated with Kokoro-82M (voice bf_emma) through speaches, resampled to 16 kHz mono. The TTS cells use another voice."
+    },
+    {
+      "name": "weather-noisy",
+      "file": "ai-wind-tunnel/fixtures/audio/weather-bf-emma.wav",
+      "transcript": "The forecast says light rain in the morning, clearing to sunshine by the evening.",
+      "maxWer": 0.5,
+      "noise": { "snrDb": -5, "seed": 7 },
+      "source": "The weather clip with seeded white noise 5 dB above the clip's RMS level, added at load time. Clean clips do not separate the models (all score 0); this one does."
     }
   ],
   "ttsTexts": [

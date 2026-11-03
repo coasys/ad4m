@@ -312,6 +312,8 @@ export async function sttCell(env: CellEnv): Promise<CellOutcome> {
     }
   }
   metrics.wer = summarize(wers);
+  // The mean over clips: the median of mostly clean clips is 0 for every model, the mean is not.
+  metrics.werMean = wers.length ? Math.round((wers.reduce((a, b) => a + b, 0) / wers.length) * 1000) / 1000 : null;
   metrics.rtf = summarize(rtf);
   metrics.latencyMs = summarize(lat);
   metrics.streamLatencyMs = summarize(streamLat);

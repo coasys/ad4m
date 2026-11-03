@@ -221,6 +221,30 @@ export function resample(samples: Float32Array, from: number, to: number): Float
   return out;
 }
 
+/**
+ * `samples` with white Gaussian noise at `snrDb` below the signal's power, from a seeded
+ * generator (mulberry32 + Box-Muller): the same seed gives the same clip on every machine.
+ */
+export function addNoise(samples: Float32Array, snrDb: number, seed: number): Float32Array {
+  let s = seed >>> 0;
+  const rand = () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const signal = rms(samples);
+  const sigma = signal / Math.pow(10, snrDb / 20);
+  const out = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const u = Math.max(rand(), 1e-12);
+    const g = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rand());
+    out[i] = Math.max(-1, Math.min(1, samples[i] + sigma * g));
+  }
+  return out;
+}
+
 /** Root-mean-square level: near 0 is silence. */
 export function rms(samples: Float32Array): number {
   let s = 0;

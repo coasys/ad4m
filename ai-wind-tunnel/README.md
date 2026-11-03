@@ -62,6 +62,9 @@ difference of the medians. Each measurement is repeated (`--repeat`, default 3) 
 as median, p95, min, max and mean.
 
 WER normalises case, punctuation, hyphens and whole numbers ("9" and "nine" are one word).
+The clean clips do not separate STT models (every one scores 0), so one clip is also played
+with seeded white noise above its level (`noise` in `fixtures/audio.json`, added at load
+time); STT models rank on the mean WER over all clips (`werMean`).
 
 ## Running it on a new machine
 
@@ -170,7 +173,8 @@ How a recommendation is chosen (`SERVICE_RULES` in `recommend.ts`, also written 
 memory are candidates; a candidate's metrics are the median of its medians across evidence
 files; those over the service's floor (LLM: ≥ 15 decode tokens/s and ≤ 2 s to first token;
 embeddings: ≥ 10 texts/s; STT: real-time factor ≤ 0.5; TTS: ≤ 1) are ranked (LLM: the most
-parameters, then decode rate; STT: WER in 0.02 buckets, then real-time factor; TTS: round-trip
+parameters, then decode rate; STT: the mean WER over the clips in 0.02 buckets, then
+real-time factor; TTS: round-trip
 WER, then real-time factor; embeddings: throughput). The first wins and cites every evidence
 file that measured it. A class with no evidence, or no candidate over the floor, has no
 recommendation; the executor's local setup then falls back to the nearest smaller measured

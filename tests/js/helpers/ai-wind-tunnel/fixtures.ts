@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { FIXTURES_DIR, REPO_ROOT } from "./paths.js";
-import { decodeWav, encodeWav, resample } from "./verify.js";
+import { addNoise, decodeWav, encodeWav, resample } from "./verify.js";
 
 export interface RetrievalFixture {
   queryPrefix: string;
@@ -22,6 +22,8 @@ export interface AudioFixture {
   transcript: string;
   maxWer: number;
   source: string;
+  /** Add seeded white noise this many dB below the signal (a harder variant of a clip). */
+  noise?: { snrDb: number; seed: number };
 }
 
 export interface LoadedAudio extends AudioFixture {
@@ -55,7 +57,8 @@ export function decodeTo16k(file: string): Float32Array {
 }
 
 export function loadAudio(f: AudioFixture): LoadedAudio {
-  const samples = decodeTo16k(path.join(REPO_ROOT, f.file));
+  const clean = decodeTo16k(path.join(REPO_ROOT, f.file));
+  const samples = f.noise ? addNoise(clean, f.noise.snrDb, f.noise.seed) : clean;
   return { ...f, samples, wav16k: encodeWav(samples, 16000), durationSec: samples.length / 16000 };
 }
 
