@@ -21,6 +21,9 @@ use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 /// Refuses a request whose user has no compute credits left. A caller without a user
 /// (the operator, an app) pays nothing. `agent_did` is the managed agent the request acts as.
 fn check_compute_credits_ws(agent_did: Option<&str>) -> Result<(), WsRpcError> {
+    if agent_did.is_none() {
+        return Ok(());
+    }
     let global_free = crate::db_backend::db_backend()
         .get_free_hosting_enabled()
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -922,5 +925,9 @@ mod compute_credit_tests {
     fn a_closed_database_is_not_free_hosting() {
         let _closed = crate::test_utils::DbClosed::now();
         assert!(check_compute_credits_ws(Some("did:key:z6MkClosedDbUser")).is_err());
+        assert!(
+            check_compute_credits_ws(None).is_ok(),
+            "a caller without a user pays nothing and reads no setting"
+        );
     }
 }

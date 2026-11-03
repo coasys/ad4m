@@ -233,8 +233,7 @@ pub fn ensure_test_db() {
 
 /// Closes the global database (takes it out of its slot) and puts it back when dropped, even
 /// if the test panics: every domain method then returns the "database is not open" error, as
-/// it does before the database opens or after its lock is poisoned. Opens an in-memory
-/// database first when none is open.
+/// it does before the database opens. Opens an in-memory database first when none is open.
 pub struct DbClosed(Option<crate::db::Ad4mDb>);
 
 impl DbClosed {

@@ -133,6 +133,9 @@ pub(crate) async fn get_perspective_with_access(
 /// Refuses a write whose managed agent's account has no credits left. `agent_did` is the
 /// managed agent the request acts as; the main agent pays nothing.
 pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
+    if agent_did.is_none() {
+        return Ok(());
+    }
     let global_free = crate::db_backend::db_backend()
         .get_free_hosting_enabled()
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -156,6 +159,9 @@ pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
 }
 
 fn reserve_credits(agent_did: Option<&str>, amount: f64) -> Result<(), WsRpcError> {
+    if agent_did.is_none() {
+        return Ok(());
+    }
     let global_free = crate::db_backend::db_backend()
         .get_free_hosting_enabled()
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -3190,5 +3196,8 @@ mod credit_check_tests {
             reserve_credits(did, DEFAULT_LINK_WRITE).is_err(),
             "reserve_credits"
         );
+        // The main agent pays nothing and reads no setting.
+        assert!(check_credits(None).is_ok());
+        assert!(reserve_credits(None, DEFAULT_LINK_WRITE).is_ok());
     }
 }
