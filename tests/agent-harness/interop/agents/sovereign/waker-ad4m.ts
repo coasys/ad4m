@@ -1,5 +1,5 @@
 /**
- * A4/A5 (Sovereign) ad4m helper — the node-side link operations for the
+ * A4/A5 (Sovereign) ad4m helper — the executor-side link operations for the
  * Sovereign native-waker tests, over MCP with a user JWT.
  *
  * Exposes reusable link-writing helpers (imported by the A5 mock-A/V fixture)

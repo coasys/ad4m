@@ -4,7 +4,7 @@
 #
 # The driver (a4-waker-driver.ts) runs core's WakerSubscriptionManager (the class
 # the @coasys/openclaw-ad4m plugin re-exports) on a live channel subscription
-# against a containerised node, and delivers each detected change to Hermes's REAL
+# against a containerised executor, and delivers each detected change to Hermes's REAL
 # webhook wake ingress (`hermes gateway run` + a `/webhooks/wake` route,
 # HMAC-SHA256 signed via GitHub's X-Hub-Signature-256 scheme). Each wake fires a
 # Hermes agent turn (against the mock model) — the harness acts.
@@ -34,8 +34,8 @@ need_image "$HER_IMG"
 echo "[a4h] clean slate"; pod_init "$EXE" "$OC" "$MOCK"
 build_mock
 
-echo "[a4h] start multi-user node (MCP + WS, Holochain off, hardened)"
-start_node "$EXE" "$MCP_PORT" "$WS_PORT"
+echo "[a4h] start multi-user executor (MCP + WS, Holochain off, hardened)"
+start_executor "$EXE" "$MCP_PORT" "$WS_PORT"
 
 echo "[a4h] start mock LLM + Hermes gateway (webhook ingress)"
 docker run -d --name "$MOCK" --network "$NET" -e MOCK_LLM_LOG=1 "$MOCK_IMG" >/dev/null

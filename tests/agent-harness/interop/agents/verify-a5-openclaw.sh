@@ -5,7 +5,7 @@
 # perspective links / Messages.
 #
 # The driver (a5-av-driver.ts) runs core's WakerSubscriptionManager on the
-# executor's mention subscription against a containerised node, seeds a
+# executor's mention subscription against a containerised executor, seeds a
 # call-presence entry + a caller's transcript naming the agent in free speech
 # (mock-av fixture), and delivers the wake to OpenClaw's REAL /hooks/wake
 # ingress (Bearer wake token, action=agent).
@@ -47,8 +47,8 @@ need_image "$OC_IMG"
 echo "[a5oc] clean slate"; pod_init "$EXE" "$OC" "$MOCK"
 build_mock
 
-echo "[a5oc] start multi-user node (MCP + WS, Holochain off, hardened)"
-start_node "$EXE" "$MCP_PORT" "$WS_PORT" 4g
+echo "[a5oc] start multi-user executor (MCP + WS, Holochain off, hardened)"
+start_executor "$EXE" "$MCP_PORT" "$WS_PORT" 4g
 
 echo "[a5oc] mint a channel perspective"
 UUID=$("$TSX" "$AGENTS/sovereign/waker-ad4m.ts" mint "http://127.0.0.1:${MCP_PORT}" "$ADMIN" "a5oc-channel" | grep '^UUID=' | cut -d= -f2- || true)

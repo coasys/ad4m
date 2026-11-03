@@ -93,9 +93,9 @@ build_plugin() {
   rm -f "$out"
 }
 
-# start_node <name> <host MCP port> [<host WS port>] [<memory>]: a hardened
+# start_executor <name> <host MCP port> [<host WS port>] [<memory>]: a hardened
 # multi-user executor (MCP on, Holochain off) on $NET; waits until MCP answers.
-start_node() {
+start_executor() {
   local name="$1" mcp="$2" ws="${3:-}" mem="${4:-2g}"
   local ports=(-p "127.0.0.1:${mcp}:3001")
   [ -n "$ws" ] && ports+=(-p "127.0.0.1:${ws}:12000")
@@ -111,7 +111,7 @@ start_node() {
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST "http://127.0.0.1:${mcp}/mcp" \
       -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "Authorization: Bearer $ADMIN" \
       -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"w","version":"1"}}}' 2>/dev/null || true)
-    if [ "$code" = "200" ]; then echo "[$TAG] node MCP ready"; return 0; fi
+    if [ "$code" = "200" ]; then echo "[$TAG] executor MCP ready"; return 0; fi
     [ "$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null)" = exited ] && break
     sleep 2
   done

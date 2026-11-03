@@ -37,8 +37,8 @@ build_mock
 echo "[a4] build ad4m plugin (postWake) from $PLUGIN_DIR"
 build_plugin
 
-echo "[a4] start multi-user node (MCP + WS, Holochain off, hardened)"
-start_node "$EXE" "$MCP_PORT" "$WS_PORT"
+echo "[a4] start multi-user executor (MCP + WS, Holochain off, hardened)"
+start_executor "$EXE" "$MCP_PORT" "$WS_PORT"
 
 echo "[a4] start mock LLM (for the wake-triggered agent turn)"
 docker run -d --name "$MOCK" --network "$NET" -e MOCK_LLM_LOG=1 -e MOCK_LLM_SCRIPT='[{"text":"ack"}]' "$MOCK_IMG" >/dev/null

@@ -2,18 +2,18 @@
 #
 # A2 (Hermes) — provision & connect via the real Hermes agent
 # (nousresearch/hermes-agent). A user instructs Hermes to onboard to a
-# pre-existing multi-user ADAM node and create a working agent identity.
+# pre-existing multi-user ADAM executor and create a working agent identity.
 #
-# Hermes connects to the node's MCP server (streamable HTTP + Bearer JWT, its
+# Hermes connects to the executor's MCP server (streamable HTTP + Bearer JWT, its
 # `mcp_servers.ad4m` config), runs ONE headless turn (`hermes -z`) against a mock
 # OpenAI-compatible model that drives `mcp__ad4m__get_my_did` + `add_perspective`,
 # and we verify — independently, over MCP — that the provisioned user's DID and
-# the created perspective both exist on the node. So it proves init/connect + a
+# the created perspective both exist on the executor. So it proves init/connect + a
 # real MCP action round-trip through the actual harness.
 #
 # `tools.tool_search: off` keeps MCP tools directly callable (Hermes otherwise
 # hides them behind a tool_search bridge). Hardened + host-isolated: private
-# network, no host mounts (config goes in via `docker cp`), loopback-only node
+# network, no host mounts (config goes in via `docker cp`), loopback-only executor
 # port, resource limits, Holochain off. Full teardown.
 #
 # Env: see lib.sh. KEEP=1 leaves the pod up for debugging.
@@ -34,8 +34,8 @@ need_image "$HER_IMG"
 echo "[a2h] clean slate"; pod_init "$EXE" "$OC" "$MOCK"
 build_mock
 
-echo "[a2h] start multi-user node (MCP, Holochain off, hardened)"
-start_node "$EXE" "$MCP_PORT"
+echo "[a2h] start multi-user executor (MCP, Holochain off, hardened)"
+start_executor "$EXE" "$MCP_PORT"
 
 echo "[a2h] provision Hermes's own user identity (signup + login)"
 PROV=$(A2_ADMIN="$ADMIN" "$TSX" "$AGENTS/ad4m-user.ts" provision "http://127.0.0.1:${MCP_PORT}" "$EMAIL" "$UPASS")
@@ -77,7 +77,7 @@ docker cp "$CFG" "$OC":/opt/data/config.yaml >/dev/null; rm -f "$CFG"
 OUT=$(timeout 220 docker start -a "$OC" 2>&1 || true)
 echo "$OUT" | grep -iE 'created channel|error|ad4m' | tail -6 | sed 's/^/    /' || true
 
-echo "[a2h] verify the identity + created perspective on the node"
+echo "[a2h] verify the identity + created perspective on the executor"
 CHK=$("$TSX" "$AGENTS/ad4m-user.ts" check "http://127.0.0.1:${MCP_PORT}" "$JWT" "$PNAME")
 echo "$CHK" | sed 's/^/    /'
 if ! echo "$CHK" | grep -q 'PERSP=found'; then echo "[a2h] FAIL — Hermes turn did not create the perspective via MCP"; exit 1; fi

@@ -6,7 +6,7 @@ Loop**) across AI agent harnesses — OpenClaw, Hermes, and Sovereign — agains
 AD4M executor built from this checkout. Migrated from `coasys/ad4m-wind-tunnel`.
 
 Each route is a verify script under `interop/agents/` that stands up its own
-Docker pod (AD4M node + deterministic mock LLM + the real harness), runs the
+Docker pod (AD4M executor + deterministic mock LLM + the real harness), runs the
 flow, asserts, and tears the pod down. Ports are published on loopback only;
 containers run with cap-drop, no-new-privileges, and resource limits. The
 drivers run this checkout's `@coasys/ad4m` (`core/`), including the
@@ -18,8 +18,8 @@ routes install this checkout's `plugins/ad4m`.
 | Scenario/route | Harness | Proves |
 | --- | --- | --- |
 | `a2/external-native` | OpenClaw | its native MCP client signs up, logs in and reads its DID |
-| `a2/external-plugin` | OpenClaw + `plugins/ad4m` | `openclaw ad4m-setup` provisions a user on an external node |
-| `a2/managed` | OpenClaw + `plugins/ad4m` | managed mode starts its own node and generates an agent, with no network |
+| `a2/external-plugin` | OpenClaw + `plugins/ad4m` | `openclaw ad4m-setup` provisions a user on an external executor |
+| `a2/managed` | OpenClaw + `plugins/ad4m` | managed mode starts its own executor and generates an agent, with no network |
 | `a2/hermes` | Hermes | `mcp_servers.ad4m` with a user JWT: a turn reads the DID and creates a perspective |
 | `a2/sovereign` | Sovereign | its injected ad4m MCP: a turn creates a perspective |
 | `a4/openclaw` | OpenClaw | channel subscription (`generate_waker_query`) → 1 wake per message, debounce, liveness → `/hooks/wake` → a turn |

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# A2 — Provision & connect (managed / download+install a fresh node), OpenClaw.
+# A2 — Provision & connect (managed / download+install a fresh executor), OpenClaw.
 #
 # The "download & install" onboarding path: a real OpenClaw runtime, with the
-# ad4m plugin in managed mode, stands up its OWN fresh ADAM node and generates
+# ad4m plugin in managed mode, stands up its OWN fresh ADAM executor and generates
 # its own agent — all inside one hardened, fully-isolated container
 # (`--network none`, so zero egress; managed mode is self-contained). We then
-# verify the fresh agent + node persisted, and tear the container down.
+# verify the fresh agent + executor persisted, and tear the container down.
 #
 # Env: see lib.sh. KEEP=1 leaves the container up for debugging.
 #
@@ -48,14 +48,14 @@ docker exec "$OC" sh -c 'cat >/tmp/mc.json5 <<JSON
 JSON
 openclaw config patch --file /tmp/mc.json5 >/dev/null 2>&1'
 
-echo "[a2m] run managed onboarding (ad4m-setup: start fresh node + generate agent)"
+echo "[a2m] run managed onboarding (ad4m-setup: start fresh executor + generate agent)"
 OUT=$(timeout 240 docker exec "$OC" openclaw ad4m-setup 2>&1 || true)
 DID=$(echo "$OUT" | grep -oE 'Agent ready\. DID: did:key:[A-Za-z0-9]+' | grep -oE 'did:key:[A-Za-z0-9]+' | head -1 || true)
 docker exec "$OC" sh -c 'test -f "$HOME/.ad4m/ad4m_db.sqlite"' && DB=yes || DB=no
-echo "[a2m] generated DID: ${DID:-NONE} | node DB persisted: $DB"
+echo "[a2m] generated DID: ${DID:-NONE} | executor DB persisted: $DB"
 
 if [ -n "$DID" ] && [ "$DB" = yes ]; then
-  echo "[a2m] PASS — OpenClaw assistant installed a fresh node and generated agent did=$DID"
+  echo "[a2m] PASS — OpenClaw assistant installed a fresh executor and generated agent did=$DID"
 else
   echo "[a2m] FAIL — DID=${DID:-none} DB=$DB"
   echo "$OUT" | tail -25 | sed 's/^/    /'

@@ -6,7 +6,7 @@
 # Drives Sovereign's OWN in-server native waker (packages/ad4m): the scenario
 # stands it up (ad4m.host + user token + agentName Aria), pins a perspective via
 # POST /api/ad4m/watch/perspectives, then injects a real @mention message on the
-# node (a has_child + message_body link whose body names the agent). The waker's
+# executor (a has_child + message_body link whose body names the agent). The waker's
 # SPARQL mention query detects it, resolves the parent channel, and emits an
 # ad4m.thread.message wake into Sovereign's presence-internal thread. The presence
 # agent then runs a turn and calls presence_reply_ad4m, which posts a child
@@ -49,8 +49,8 @@ fi
 echo "[a4sv] clean slate"; pod_init "$EXE" "$SV" "$MOCK"
 build_mock
 
-echo "[a4sv] start multi-user node (MCP + WS, Holochain off, hardened)"
-start_node "$EXE" "$MCP_PORT"
+echo "[a4sv] start multi-user executor (MCP + WS, Holochain off, hardened)"
+start_executor "$EXE" "$MCP_PORT"
 
 echo "[a4sv] provision a user + mint a channel perspective"
 PROV=$(A2_ADMIN="$ADMIN" "$TSX" "$AGENTS/ad4m-user.ts" provision "http://127.0.0.1:${MCP_PORT}" "$EMAIL" "$UPASS")
@@ -133,7 +133,7 @@ for i in $(seq 1 15); do
   sleep 2
 done
 
-echo "[a4sv] inject a mention message ('Hey Aria …') on the node"
+echo "[a4sv] inject a mention message ('Hey Aria …') on the executor"
 "$TSX" "$AGENTS/sovereign/waker-ad4m.ts" mention "http://127.0.0.1:${MCP_PORT}" "$JWT" "$UUID" "$CHAN" "$CHAN/msg/1" "Hey Aria, please acknowledge this" | sed 's/^/    /'
 
 echo "[a4sv] wait for native waker -> presence agent turn (act-capable)"

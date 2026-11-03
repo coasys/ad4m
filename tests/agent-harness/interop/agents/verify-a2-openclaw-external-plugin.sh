@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# A2 — Provision & connect (external / pre-existing multi-user node) via the REAL
+# A2 — Provision & connect (external / pre-existing multi-user executor) via the REAL
 # @coasys/openclaw-ad4m plugin.
 #
 # Complements verify-a2-openclaw.sh (which drives OpenClaw's *native* MCP client):
@@ -9,7 +9,7 @@
 # regression-guards the plugin.
 #
 # A real OpenClaw runtime + the installed plugin (packed from this repo's
-# plugins/ad4m) connect to a pre-running multi-user node, provision the
+# plugins/ad4m) connect to a pre-running multi-user executor, provision the
 # assistant's own user identity (signup + login), and we verify that identity
 # independently. Hardened + host-isolated; full teardown.
 #
@@ -33,8 +33,8 @@ build_plugin
 TGZ_NAME=$(cd "$PLUGIN_DIR" && NODE_ENV=development npm pack 2>/dev/null | tail -1)
 PLUGIN_TGZ="$PLUGIN_DIR/$TGZ_NAME"
 
-echo "[a2xp] start multi-user node (MCP, Holochain off, hardened)"
-start_node "$EXE" "$MCP_PORT"
+echo "[a2xp] start multi-user executor (MCP, Holochain off, hardened)"
+start_executor "$EXE" "$MCP_PORT"
 
 echo "[a2xp] start OpenClaw + install plugin + configure external multi-user"
 docker run -d --name "$OC" --network "$NET" --entrypoint sleep \
@@ -56,7 +56,7 @@ if ! echo "$SETUP" | grep -qE 'Logged in as|own user identity ready'; then
   echo "[a2xp] FAIL — plugin setup did not provision an identity"; echo "$SETUP" | tail -15 | sed 's/^/    /'; exit 1
 fi
 
-echo "[a2xp] verify the created identity on the node"
+echo "[a2xp] verify the created identity on the executor"
 "$TSX" "$AGENTS/openclaw/verify-user.ts" "$EMAIL" "$UPASS" "http://127.0.0.1:$MCP_PORT"
 
 echo "[a2xp] PASS — OpenClaw plugin (ad4m-setup external) provisioned + verified a distinct multi-user identity"

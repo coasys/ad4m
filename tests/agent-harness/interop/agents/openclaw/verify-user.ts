@@ -1,5 +1,5 @@
 /**
- * A2 assertion helper: confirm an agent identity exists on the node.
+ * A2 assertion helper: confirm an agent identity exists on the executor.
  *
  * Logs in as the given user (login_email is auth-exempt on the MCP surface),
  * then acting as that user checks get_my_did + auth_status. Exits 0 on a verified
@@ -40,5 +40,5 @@ if (!ok) {
   console.error("  FAIL: identity not verified");
   process.exit(1);
 }
-console.log("  PASS: OpenClaw-created ADAM agent verified on the node");
+console.log("  PASS: OpenClaw-created ADAM agent verified on the executor");
 process.exit(0);

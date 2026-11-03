@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# A2 — Provision & connect (external / pre-existing multi-user node), OpenClaw.
+# A2 — Provision & connect (external / pre-existing multi-user executor), OpenClaw.
 #
 # Self-contained, reproducible from a clean slate: it stands up a hardened,
-# Docker-isolated pod (multi-user AD4M node + deterministic mock LLM + real
-# OpenClaw), points OpenClaw at the node's MCP server and the mock model, then
+# Docker-isolated pod (multi-user AD4M executor + deterministic mock LLM + real
+# OpenClaw), points OpenClaw at the executor's MCP server and the mock model, then
 # runs one OpenClaw agent turn where the assistant — instructed in natural
 # language — creates its own ADAM agent identity (signup -> login -> report DID).
-# We then independently verify that identity exists on the node, and tear the
+# We then independently verify that identity exists on the executor, and tear the
 # whole pod down. Nothing touches the host OS: private bridge network, no host
 # mounts, loopback-only ports, cap-drop + no-new-privileges + resource limits,
 # Holochain off.
@@ -29,8 +29,8 @@ need_image "$OC_IMG"
 echo "[a2] clean slate"; pod_init "$EXE" "$MOCK" "$OC"
 build_mock
 
-echo "[a2] start AD4M node (multi-user, MCP, Holochain off, hardened)"
-start_node "$EXE" "$MCP_PORT"
+echo "[a2] start AD4M executor (multi-user, MCP, Holochain off, hardened)"
+start_executor "$EXE" "$MCP_PORT"
 
 echo "[a2] start mock LLM (scripts the onboarding tool sequence)"
 SCRIPT='[{"tool_calls":[{"name":"ad4m__signup","arguments":{"email":"'"$EMAIL"'","password":"'"$UPASS"'"}}]},{"tool_calls":[{"name":"ad4m__login_email","arguments":{"email":"'"$EMAIL"'","password":"'"$UPASS"'"}}]},{"tool_calls":[{"name":"ad4m__get_my_did","arguments":{}}]},{"text":"ADAM identity created and verified."}]'
@@ -40,7 +40,7 @@ echo "[a2] start OpenClaw (idle, hardened) + configure"
 docker run -d --name "$OC" --network "$NET" --entrypoint sleep \
   --cap-drop ALL --security-opt no-new-privileges:true --memory 2g --cpus 2 --pids-limit 1024 \
   "$OC_IMG" infinity >/dev/null
-# point OpenClaw at the node's MCP server (probes before saving)
+# point OpenClaw at the executor's MCP server (probes before saving)
 docker exec "$OC" openclaw mcp add ad4m --url "http://$EXE:3001/mcp" --transport streamable-http \
   --header "Authorization=Bearer $ADMIN" --connect-timeout 10 --timeout 30 >/dev/null
 # point OpenClaw's model at the mock
@@ -57,7 +57,7 @@ TURN=$(docker exec "$OC" openclaw agent --local --json --timeout 150 --session-k
   --message "Create my ADAM identity: sign up, log in, and report my DID." 2>/dev/null || true)
 echo "[a2] tools executed: $(echo "$TURN" | grep -oE '"ad4m__(signup|login_email|get_my_did)"' | sort -u | tr '\n' ' ')"
 
-echo "[a2] verify the created identity exists on the node"
+echo "[a2] verify the created identity exists on the executor"
 "$TSX" "$AGENTS/openclaw/verify-user.ts" "$EMAIL" "$UPASS" "http://127.0.0.1:$MCP_PORT"
 
-echo "[a2] PASS — OpenClaw assistant provisioned + verified an ADAM agent on a pre-existing multi-user node"
+echo "[a2] PASS — OpenClaw assistant provisioned + verified an ADAM agent on a pre-existing multi-user executor"

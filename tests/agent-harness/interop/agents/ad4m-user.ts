@@ -1,12 +1,12 @@
 /**
- * Shared A2 helper — provision an AD4M user identity on a multi-user node and
+ * Shared A2 helper — provision an AD4M user identity on a multi-user executor and
  * verify what a harness created, over the executor's MCP surface. Used by the
  * Hermes and Sovereign A2 verify scripts.
  *
  *   provision <base> <email> <pass>   -> prints  JWT=<jwt>  and  DID=<did>
  *   check     <base> <userJwt> <name> -> prints  PERSP=found|missing  and  DID=<did>
  *
- * `base` is the node's MCP URL (e.g. http://127.0.0.1:14420). Admin credential
+ * `base` is the executor's MCP URL (e.g. http://127.0.0.1:14420). Admin credential
  * from A2_ADMIN / A2H_ADMIN (default windtunnel-admin). Uses the harness's real
  * MCP client.
  */

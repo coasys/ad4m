@@ -2,13 +2,13 @@
 #
 # A2 (Sovereign) — provision & connect via the real Sovereign server, headless.
 #
-# Sovereign runs on the Claude Agent SDK and injects the node's MCP directly into
+# Sovereign runs on the Claude Agent SDK and injects the executor's MCP directly into
 # every session (config `ad4m.mcpUrl` + a Bearer token file), giving the agent
 # mcp__ad4m__* tools. This stands up a headless test-Sovereign image (never the
-# live host service), points it at a containerised multi-user node with a
+# live host service), points it at a containerised multi-user executor with a
 # provisioned user's JWT, drives one chat turn against a mock Anthropic endpoint
 # that calls `mcp__ad4m__add_perspective`, and verifies — over MCP — that the
-# perspective landed on the node under the provisioned identity. So it proves
+# perspective landed on the executor under the provisioned identity. So it proves
 # init/connect + a real MCP action round-trip through the actual harness.
 #
 # Hardened + host-isolated: private network, no host mounts (config + token go in
@@ -39,8 +39,8 @@ fi
 echo "[a2sv] clean slate"; pod_init "$EXE" "$SV" "$MOCK"
 build_mock
 
-echo "[a2sv] start multi-user node (MCP, Holochain off, hardened)"
-start_node "$EXE" "$MCP_PORT"
+echo "[a2sv] start multi-user executor (MCP, Holochain off, hardened)"
+start_executor "$EXE" "$MCP_PORT"
 
 echo "[a2sv] provision Sovereign's own user identity (signup + login)"
 PROV=$(A2_ADMIN="$ADMIN" "$TSX" "$AGENTS/ad4m-user.ts" provision "http://127.0.0.1:${MCP_PORT}" "$EMAIL" "$UPASS")
@@ -100,7 +100,7 @@ curl -s --max-time 10 -X POST "http://127.0.0.1:${SV_PORT}/api/chat/send" \
   -H 'Content-Type: application/json' \
   -d "{\"threadId\":\"$TID\",\"message\":\"Create an ad4m channel perspective named $PNAME using your ad4m tools.\"}" >/dev/null || true
 
-echo "[a2sv] wait for the ad4m round-trip to land on the node"
+echo "[a2sv] wait for the ad4m round-trip to land on the executor"
 FOUND=""
 for i in $(seq 1 30); do
   CHK=$("$TSX" "$AGENTS/ad4m-user.ts" check "http://127.0.0.1:${MCP_PORT}" "$JWT" "$PNAME" 2>/dev/null || true)

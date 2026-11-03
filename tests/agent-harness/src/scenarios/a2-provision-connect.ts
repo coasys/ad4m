@@ -5,12 +5,12 @@
  * working, verified agent. Routes:
  *   - external-native  OpenClaw's native MCP client (signup + login)
  *   - external-plugin  OpenClaw via the @coasys/openclaw-ad4m plugin (ad4m-setup)
- *   - managed          OpenClaw managed mode (fresh node + agent.generate, no network)
+ *   - managed          OpenClaw managed mode (fresh executor + agent.generate, no network)
  *   - hermes           Hermes's native MCP client (mcp_servers.ad4m, Bearer JWT)
  *   - sovereign        Sovereign's Claude-Agent-SDK ad4m MCP injection
  *
  * Each route's verify script under `interop/agents/` stands up its hardened
- * Docker pod (AD4M node + mock LLM + the real harness), runs the onboarding
+ * Docker pod (AD4M executor + mock LLM + the real harness), runs the onboarding
  * turn, verifies the created identity over MCP, and tears the pod down.
  */
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";

@@ -5,7 +5,7 @@
 # presence + transcript + reply are all real AD4M perspective links / Messages.
 #
 # The driver (a5-av-driver.ts) runs core's WakerSubscriptionManager on the
-# executor's mention subscription against a containerised node, seeds a
+# executor's mention subscription against a containerised executor, seeds a
 # call-presence entry + a caller's transcript naming the agent in free speech
 # (mock-av fixture), and delivers the wake to Hermes's REAL signed webhook
 # ingress (X-Hub-Signature-256). The woken Hermes turn — mock model +
@@ -50,8 +50,8 @@ need_image "$HER_IMG"
 echo "[a5h] clean slate"; pod_init "$EXE" "$OC" "$MOCK"
 build_mock
 
-echo "[a5h] start multi-user node (MCP + WS, Holochain off, hardened)"
-start_node "$EXE" "$MCP_PORT" "$WS_PORT" 4g
+echo "[a5h] start multi-user executor (MCP + WS, Holochain off, hardened)"
+start_executor "$EXE" "$MCP_PORT" "$WS_PORT" 4g
 
 echo "[a5h] mint a channel perspective (shared by mock, driver, assertions)"
 UUID=$("$TSX" "$AGENTS/sovereign/waker-ad4m.ts" mint "http://127.0.0.1:${MCP_PORT}" "$ADMIN" "a5h-channel" | grep '^UUID=' | cut -d= -f2- || true)

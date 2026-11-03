@@ -68,8 +68,8 @@ fi
 echo "[a5sv] clean slate"; pod_init "$EXE" "$SV" "$MOCK"
 build_mock
 
-echo "[a5sv] start multi-user node (MCP + WS, Holochain off, hardened)"
-start_node "$EXE" "$MCP_PORT" "$WS_PORT" 4g
+echo "[a5sv] start multi-user executor (MCP + WS, Holochain off, hardened)"
+start_executor "$EXE" "$MCP_PORT" "$WS_PORT" 4g
 
 echo "[a5sv] provision a user + mint a channel perspective"
 PROV=$(A2_ADMIN="$ADMIN" "$TSX" "$AGENTS/ad4m-user.ts" provision "http://127.0.0.1:${MCP_PORT}" "$EMAIL" "$UPASS")
