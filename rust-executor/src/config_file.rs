@@ -237,6 +237,13 @@ pub struct ExecutorConfigFile {
     /// The default model per type (`llm`, `embedding`, `transcription`), by name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ai_defaults: Option<AiDefaultsSetting>,
+    /// The per-user store of local AI runtimes and models (`ai.localInstall`).
+    /// Unset: the user's data directory, `ad4m/local-ai`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_ai_dir: Option<String>,
+    /// Start the installed local AI runtimes with the executor. Unset: true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_ai_autostart: Option<bool>,
 }
 
 /// Secret keys someone may paste into the config file, as JSON pointers,
@@ -538,6 +545,8 @@ impl ExecutorConfigFile {
                 models: self.ai_models.clone().unwrap_or_default(),
                 defaults: self.ai_defaults.clone().unwrap_or_default(),
             }),
+            local_ai_dir: self.local_ai_dir.clone(),
+            local_ai_autostart: self.local_ai_autostart,
             admin_credential: secrets.admin_credential.clone(),
             ..Ad4mConfig::unprepared()
         })

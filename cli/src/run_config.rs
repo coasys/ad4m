@@ -309,6 +309,19 @@ pub struct RunArgs {
         value_parser = non_empty(StringValueParser::new())
     )]
     pub sfu_preferred_node: Option<String>,
+    /// The per-user store of local AI runtimes and models. Default:
+    /// `~/.local/share/ad4m/local-ai` (Linux), `~/Library/Application
+    /// Support/ad4m/local-ai` (macOS), `%LOCALAPPDATA%\ad4m\local-ai` (Windows).
+    #[arg(long, env = "AD4M_LOCAL_AI_DIR", value_parser = non_empty(StringValueParser::new()))]
+    pub local_ai_dir: Option<String>,
+    /// Start the installed local AI runtimes with the executor. Default: true.
+    #[arg(
+        long,
+        action,
+        env = "AD4M_LOCAL_AI_AUTOSTART",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
+    pub local_ai_autostart: Option<bool>,
 }
 
 /// Only the literal `true` enables the insecure mode; the usual "off"
@@ -356,6 +369,8 @@ impl RunArgs {
         overlay(&mut file.sfu_udp_port, &self.sfu_udp_port);
         overlay(&mut file.sfu_public_addr, &self.sfu_public_addr);
         overlay(&mut file.sfu_stun_server, &self.sfu_stun_server);
+        overlay(&mut file.local_ai_dir, &self.local_ai_dir);
+        overlay(&mut file.local_ai_autostart, &self.local_ai_autostart);
         overlay(
             &mut file.auto_permit_cap_requests,
             &self.auto_permit_cap_requests,
@@ -702,6 +717,20 @@ pub(crate) mod tests {
             "stun.b.example:3478",
             "stun.c.example:3478",
         ),
+        (
+            "/local_ai_dir",
+            "AD4M_LOCAL_AI_DIR",
+            "--local-ai-dir",
+            "/store-b",
+            "/store-c",
+        ),
+        (
+            "/local_ai_autostart",
+            "AD4M_LOCAL_AI_AUTOSTART",
+            "--local-ai-autostart",
+            "false",
+            "true",
+        ),
     ];
 
     /// For every row of [`OVERRIDABLE`]: the variable alone, the flag alone,
@@ -738,6 +767,8 @@ pub(crate) mod tests {
             sfu_udp_port: Some(40000),
             sfu_public_addr: Some("203.0.113.10".into()),
             sfu_stun_server: Some("stun.a.example:3478".into()),
+            local_ai_dir: Some("/store-a".into()),
+            local_ai_autostart: Some(true),
             // File-only keys with no variable or flag, so unset here.
             ai_endpoints: None,
             ai_models: None,
@@ -1020,7 +1051,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 39, "every flag of run has a variable");
+        assert_eq!(checked, 41, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

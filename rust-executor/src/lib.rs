@@ -324,6 +324,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 }
             }
 
+            // The local AI runtimes are this executor's children: stop them with it.
+            ai_service::local::stop_on_exit().await;
+
             // 2. Remove PID file if it was configured
             let shutdown_config = crate::config::get_global_config();
             if let Some(ref pid_file) = shutdown_config.pid_file {
@@ -545,6 +548,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     });
     // After the agent loads: health events go to the sessions acting as the main agent.
     ai_service::endpoints::spawn_health_loop();
+    // The installed local AI runtimes, in the background.
+    ai_service::local::autostart();
 
     // Notifications of older executors name their owner by email; move them to DIDs.
     if let Some(main_agent_did) = AgentService::with_global_instance(|a| a.did.clone()) {

@@ -13,6 +13,7 @@ use tokio::time::sleep;
 pub mod endpoints;
 mod error;
 pub mod harness;
+pub mod local;
 pub mod providers;
 pub(crate) mod transcription;
 #[cfg(test)]
