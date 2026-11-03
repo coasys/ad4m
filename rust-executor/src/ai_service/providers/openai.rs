@@ -58,10 +58,7 @@ impl OpenAiChat {
             request = request.bearer_auth(&self.api_key);
         }
         let response = request.send().await.map_err(|e| {
-            anyhow!(
-                "Error connecting to remote LLM API: {}",
-                super::http::scrub(&e.to_string(), &self.api_key)
-            )
+            super::http::UpstreamUnreachable::new(&self.endpoint, &e, &self.api_key)
         })?;
         if !response.status().is_success() {
             return Err(
@@ -597,7 +594,15 @@ mod wire_tests {
             .chat(ChatRequest::new("m", vec![]))
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("Error connecting"), "{error}");
+        // Typed, so `/v1` answers a 503 for it (`OpenAIError::from_upstream`).
+        assert!(
+            error
+                .downcast_ref::<super::super::http::UpstreamUnreachable>()
+                .is_some(),
+            "{error}"
+        );
+        assert!(error.to_string().contains("Could not reach"), "{error}");
+        assert!(!error.to_string().contains("sk-test"), "{error}");
 
         let error = OpenAiChat::new("sk-test", url(&server.url()))
             .chat(ChatRequest::new("m", vec![]))

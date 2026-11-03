@@ -29,6 +29,20 @@ impl Resolved {
     pub fn remote_model(&self) -> Option<&str> {
         self.model.api.as_ref().map(|api| api.model.as_str())
     }
+
+    /// The client's view of a failed call to this model: an upstream answer keeps its
+    /// status (plan §5.4, as on the passthrough), and an endpoint that failed is checked
+    /// again. A failure that did not come from an upstream is a 500.
+    pub fn failure(&self, error: anyhow::Error) -> OpenAIError {
+        match &self.endpoint {
+            Some(endpoint) => super::passthrough::upstream_failure(
+                endpoint,
+                self.remote_model().unwrap_or_default(),
+                error,
+            ),
+            None => OpenAIError::from_upstream(&error),
+        }
+    }
 }
 
 fn db_error(e: impl std::fmt::Display) -> OpenAIError {

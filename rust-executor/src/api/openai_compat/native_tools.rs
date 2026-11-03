@@ -35,6 +35,7 @@ use uuid::Uuid;
 use super::chat::epoch_seconds;
 use super::errors::OpenAIError;
 use super::harness_bridge::structured_turns;
+use super::model_selector::Resolved;
 use super::types::{
     ChatChoice, ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionResponse,
     ChatMessage, ChatMessageContent, ChatResponseMessage, FunctionCall, FunctionCallDelta, Role,
@@ -49,7 +50,7 @@ use crate::types::RequestContext;
 pub async fn chat_with_native_tools(
     auth: RequestContext,
     requested_model: String,
-    model_id: String,
+    resolved: &Resolved,
     messages: &[ChatMessage],
     tools: &[ToolDef],
     stream: bool,
@@ -73,9 +74,14 @@ pub async fn chat_with_native_tools(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     // Billing happens inside prompt_with_tools, on success only.
     let reply = service
-        .prompt_with_tools(model_id, turns, specs, auth.user_did().map(str::to_string))
+        .prompt_with_tools(
+            resolved.model.id.clone(),
+            turns,
+            specs,
+            auth.user_did().map(str::to_string),
+        )
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(|e| resolved.failure(e))?;
 
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = epoch_seconds();
