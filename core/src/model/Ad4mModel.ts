@@ -525,6 +525,10 @@ export class Ad4mModel {
   private _baseExpression: string;
   private _perspective: PerspectiveProxy;
   private _snapshot: Record<string, any> | null = null;
+  /** True when the constructor minted the id: no record can hold links yet. */
+  private _idMinted: boolean = false;
+  /** Predicates this instance has already written relation links under (`add*`/`set*`), so they may hold links. */
+  private _relationsWritten = new Set<string>();
   author: string;
   createdAt: any;
   updatedAt: any;
@@ -765,6 +769,7 @@ export class Ad4mModel {
     // IRIs, so relation links like `<post> --has_comment--> <comment-id>`
     // round-trip correctly through the SPARQL store.
     this._baseExpression = baseExpression ? baseExpression : `ad4m://obj/${makeRandomId(24)}`;
+    this._idMinted = !baseExpression;
     this._perspective = perspective;
   }
 
@@ -1768,6 +1773,8 @@ export class Ad4mModel {
    *  {@link relationThroughAbstract}); otherwise its writes go out in as few
    *  `executeAction` calls as {@link sendWrites} allows. */
   private async writeRelation(key: string, kind: 'setter' | 'adder' | 'remover', value: any, batchId?: string) {
+    const predicate = this.getRelationOptions(key)?.predicate;
+    if (predicate && kind !== 'remover') this._relationsWritten.add(predicate);
     const abstractName = this.abstractName();
     if (!abstractName) {
       await this.sendWrites(this.planRelation(key, kind, value), batchId);
@@ -2020,7 +2027,12 @@ export class Ad4mModel {
               break;
           }
         } else if (Array.isArray(value)) {
-          // Handle all arrays as relations, including empty ones (which clears the relation)
+          // Handle all arrays as relations, including empty ones (which clears the relation).
+          // A record being created under an id minted here has no links to
+          // clear, so an empty relation there costs a round trip and writes nothing.
+          const predicate = this.getRelationOptions(key)?.predicate ?? key;
+          if (value.length === 0 && !this._snapshot && this._idMinted && !this._relationsWritten.has(predicate)) continue;
+          this._relationsWritten.add(predicate);
           writes.push(...this.planRelation(key, 'setter', value));
         } else if (value !== undefined && value !== null && value !== "") {
           // A scalar handed to a relation field is a single-member relation.
