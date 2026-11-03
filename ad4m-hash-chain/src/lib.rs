@@ -256,7 +256,8 @@ impl<P: ChainPolicy> Chain<P> {
 }
 
 /// The entry's hash, after checking that its JSON is an object whose `seq` and `prev`
-/// members agree with the `Entry` accessors and whose `prev` is a sha2-256 multihash.
+/// members agree with the `Entry` accessors, whose `prev` is a sha2-256 multihash and whose
+/// `proof` list (none when left out) is canonically the list `Entry::proofs` returns.
 fn checked_hash<E: Entry, X>(entry: &E) -> Result<Hash, ChainError<X>> {
     let value = jcs::to_value(entry)?;
     let map = value
@@ -278,9 +279,20 @@ fn checked_hash<E: Entry, X>(entry: &E) -> Result<Hash, ChainError<X>> {
             ))
         }
     }
-    if !matches!(map.get("proof"), None | Some(Value::Array(_))) {
+    let listed = match map.get("proof") {
+        None => Value::Array(Vec::new()),
+        Some(list @ Value::Array(_)) => list.clone(),
+        Some(_) => {
+            return Err(ChainError::Malformed(
+                "the entry's `proof` member must be an array".into(),
+            ))
+        }
+    };
+    // What is stored is the JSON; what is checked is `proofs()`. They must be the same list,
+    // or an entry that passes here fails to load again.
+    if canonical_json(&listed)? != canonical_json(&jcs::to_value(entry.proofs())?)? {
         return Err(ChainError::Malformed(
-            "the entry's `proof` member must be an array".into(),
+            "the entry's `proof` member differs from Entry::proofs".into(),
         ));
     }
     Ok(entry_hash_json(&value)?)

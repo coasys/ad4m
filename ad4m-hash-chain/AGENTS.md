@@ -47,7 +47,9 @@ identity core, not here).
   `proof`) and appends the first copy that passes; it fails only when none does.
 - The SQLite store answers as the memory store does (`range` past `i64::MAX` is empty)
   and reads a negative stored integer as an error. Its expect check is a compare-and-set
-  in the head-row write itself.
+  in the head-row write itself. A deferred transaction whose snapshot another connection
+  passed (`SQLITE_BUSY_SNAPSHOT`) gets `Conflict` with the head read on a fresh read-only
+  connection, or `Backend` when that head is still the expected one.
 - `Chain::append` and `import` change nothing when a check fails. Order of checks:
   canonical form, `seq`, `prev`, chain id, then the policy.
 - **Fork detection only.** Two entries at one seq give `ForkEvidence`; nothing appends;

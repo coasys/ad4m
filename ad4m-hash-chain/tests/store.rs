@@ -421,9 +421,12 @@ mod sqlite {
             .append(TY, &chain, Some(&seen), &rows[2..])
             .await
             .unwrap();
-        // The stale writer is refused (SQLite will not let a stale snapshot write).
-        let refused = SqliteChainStore::append_in(&tx, TY, &chain, Some(&seen), &branch);
-        assert!(refused.is_err(), "{refused:?}");
+        // The stale writer is refused: SQLite will not let a stale snapshot write
+        // (BUSY_SNAPSHOT), and the store answers the conflict with the head a fresh read sees.
+        assert_eq!(
+            SqliteChainStore::append_in(&tx, TY, &chain, Some(&seen), &branch).unwrap_err(),
+            StoreError::Conflict(Some(head_of(&rows[2])))
+        );
         drop(tx);
         // A fresh transaction with the stale expect: a conflict naming the new head.
         let tx = conn.transaction().unwrap();
@@ -436,6 +439,38 @@ mod sqlite {
             other.head(TY, &chain).await.unwrap(),
             Some(head_of(&rows[2]))
         );
+        assert_eq!(other.range(TY, &chain, 0, 10).await.unwrap(), rows);
+    }
+
+    #[tokio::test]
+    async fn a_deferred_writer_passed_by_a_commit_to_another_chain_is_no_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred-other.db");
+        let (chain, elsewhere) = ("c".to_string(), "d".to_string());
+        let rows = stored(&make_chain("c", 1, 2));
+        let rows_d = stored(&make_chain("d", 2, 1));
+        let mut conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        let other = SqliteChainStore::open(&path).unwrap();
+        other.append(TY, &chain, None, &rows[..1]).await.unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let seen = SqliteChainStore::head_in(&tx, TY, &chain).unwrap().unwrap();
+        other.append(TY, &elsewhere, None, &rows_d).await.unwrap();
+        // The snapshot cannot write, but the head of `c` is still the one expected: not a
+        // conflict on `c`, so a backend error a new transaction may retry.
+        let refused = SqliteChainStore::append_in(&tx, TY, &chain, Some(&seen), &rows[1..]);
+        assert!(
+            matches!(refused, Err(StoreError::Backend(_))),
+            "{refused:?}"
+        );
+        drop(tx);
+        let tx = conn.transaction().unwrap();
+        assert_eq!(
+            SqliteChainStore::append_in(&tx, TY, &chain, Some(&seen), &rows[1..]).unwrap(),
+            head_of(&rows[1])
+        );
+        tx.commit().unwrap();
         assert_eq!(other.range(TY, &chain, 0, 10).await.unwrap(), rows);
     }
 

@@ -235,6 +235,8 @@ struct Liar {
     seq: u64,
     #[serde(skip)]
     prev: Option<String>,
+    #[serde(skip)]
+    proofs: Vec<ad4m_hash_chain::Proof>,
 }
 
 impl ad4m_hash_chain::Entry for Liar {
@@ -245,7 +247,7 @@ impl ad4m_hash_chain::Entry for Liar {
         self.prev.as_ref()
     }
     fn proofs(&self) -> &[ad4m_hash_chain::Proof] {
-        &[]
+        &self.proofs
     }
 }
 
@@ -274,6 +276,7 @@ fn liar(json: serde_json::Value, seq: u64, prev: Option<&str>) -> Liar {
         json: json.as_object().unwrap().clone(),
         seq,
         prev: prev.map(str::to_string),
+        proofs: Vec::new(),
     }
 }
 
@@ -324,6 +327,50 @@ fn an_entry_whose_json_disagrees_with_its_accessors_is_malformed() {
         let reason = malformed_reason(Chain::genesis(&AnyPolicy, &entry).unwrap_err());
         assert!(reason.contains("`proof`"), "{reason}");
     }
+    // The `proof` member against Entry::proofs: a signature the JSON leaves out (with or
+    // without an empty list), one it adds, or another value of one field.
+    let signature = ad4m_hash_chain::Proof {
+        r#type: ad4m_hash_chain::PROOF_TYPE.into(),
+        cryptosuite: ad4m_hash_chain::CRYPTOSUITE.into(),
+        verification_method: "did:key:z#z".into(),
+        proof_purpose: "assertionMethod".into(),
+        domain: "test:any".into(),
+        proof_value: "zSig".into(),
+    };
+    let listed = serde_json::to_value(&signature).unwrap();
+    let mut altered = signature.clone();
+    altered.proof_value = "zOther".into();
+    let cases = [
+        (json!({"seq": 0, "prev": null}), vec![signature.clone()]),
+        (
+            json!({"seq": 0, "prev": null, "proof": []}),
+            vec![signature.clone()],
+        ),
+        (json!({"seq": 0, "prev": null, "proof": [listed]}), vec![]),
+        (
+            json!({"seq": 0, "prev": null, "proof": [listed]}),
+            vec![altered],
+        ),
+    ];
+    for (json, proofs) in cases {
+        let mut entry = liar(json, 0, None);
+        entry.proofs = proofs;
+        let reason = malformed_reason(Chain::genesis(&AnyPolicy, &entry).unwrap_err());
+        assert!(reason.contains("`proof`"), "{reason}");
+        let mut next = chain.clone();
+        let mut appended = entry.clone();
+        appended.json.insert("seq".into(), json!(1));
+        appended.json.insert("prev".into(), json!(h0));
+        appended.seq = 1;
+        appended.prev = Some(h0.clone());
+        let reason = malformed_reason(next.append(&AnyPolicy, &appended).unwrap_err());
+        assert!(reason.contains("`proof`"), "{reason}");
+        assert_eq!(next.head(), chain.head());
+    }
+    // The JSON and Entry::proofs listing the same signature agree.
+    let mut signed = liar(json!({"seq": 0, "prev": null, "proof": [listed]}), 0, None);
+    signed.proofs = vec![signature];
+    assert_eq!(Chain::genesis(&AnyPolicy, &signed).unwrap().head().hash, h0);
     // The honest entry with an empty proof array is fine.
     let with_proofs = liar(json!({"seq": 0, "prev": null, "proof": []}), 0, None);
     assert_eq!(
