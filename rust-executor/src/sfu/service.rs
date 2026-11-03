@@ -959,7 +959,7 @@ impl SfuService {
         sdp_offer_json: &str,
         accept_redirect: bool,
     ) -> Result<CallSessionInfo, String> {
-        if device_id.is_empty() || device_id.len() > MAX_DEVICE_ID_LEN {
+        if device_id.is_empty() || device_id.chars().count() > MAX_DEVICE_ID_LEN {
             return Err(format!(
                 "deviceId must be 1 to {} characters",
                 MAX_DEVICE_ID_LEN
@@ -1955,6 +1955,17 @@ mod tests {
             assert!(refused.contains("deviceId"), "{refused}");
         }
         assert!(sessions(&svc, "neighbourhood://device").await.is_empty());
+        // The limit counts characters: 128 four-byte characters are 512 bytes and allowed.
+        svc.call_join(
+            "neighbourhood://device",
+            "r",
+            "did:a",
+            &"🎧".repeat(MAX_DEVICE_ID_LEN),
+            &offer(),
+            false,
+        )
+        .await
+        .unwrap();
     }
 
     fn config(mode: &str) -> SfuConfig {

@@ -34,8 +34,15 @@ import type { Scenario } from "../helpers/sfu/scenario.js";
 
 /** `E2E_ONLY=e19,e21` runs only those scenarios; unset, all of them. */
 const only = process.env.E2E_ONLY?.split(",").map((id) => id.trim()).filter(Boolean);
+const registered: string[] = [];
 const scenario = (s: Scenario, timeoutMs: number) => {
+  registered.push(s.id);
   if (!only?.length || only.includes(s.id)) sfuScenario(s, timeoutMs);
+};
+/** An `E2E_ONLY` id that names no scenario would run none and pass: refuse it. */
+const checkOnly = () => {
+  const unknown = only?.filter((id) => !registered.includes(id)) ?? [];
+  if (unknown.length) throw new Error(`E2E_ONLY names no scenario: ${unknown.join(", ")} (known: ${registered.join(", ")})`);
 };
 
 /**
@@ -195,4 +202,5 @@ describe("SFU: end to end through the SDK", function () {
   scenario(e20TabTakesOver, 600_000);
   scenario(e21TabGivesUp, 600_000);
   scenario(e22TwoDevices, 600_000);
+  checkOnly();
 });

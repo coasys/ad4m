@@ -39,7 +39,10 @@ export type SessionEventCallback = (...args: any[]) => void
 
 /** Unified WebRTC media session wrapping both mesh and SFU topologies. */
 export interface Session {
-    /** Connect to the room with local media. Resolves when the session becomes active. */
+    /**
+     * Connect to the room with local media. Resolves when the session becomes active, or
+     * idle if another tab on this device replaced the call while it joined (`replaced`).
+     */
     join(localStream: MediaStream): Promise<void>
     /** Disconnect from the room. The session returns to idle and can rejoin. */
     leave(): Promise<void>
@@ -341,8 +344,9 @@ export function createSession(config: SessionImplConfig): Session {
             if (sfuManager !== sfu) return
             if (dataUnsubscribe) { dataUnsubscribe(); dataUnsubscribe = null }
             sfuManager = null
-            emit("replaced", event)
+            // Idle before listeners hear it: one may join again at once.
             setState("idle")
+            emit("replaced", event)
         })
     }
 

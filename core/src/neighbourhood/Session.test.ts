@@ -549,6 +549,24 @@ describe("SFU path", () => {
         expect(SfuManager).toHaveBeenCalledTimes(2)
     })
 
+    it("a replaced call is idle by the time its listeners hear it, so a listener may join again", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        await session.join(fakeMediaStream())
+        let rejoin: Promise<unknown> = Promise.resolve()
+        let stateHeard: string | null = null
+        session.on("replaced", () => {
+            stateHeard = session.getState()
+            rejoin = session.join(fakeMediaStream()).then(() => "joined", (e: Error) => e.message)
+        })
+
+        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
+        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "replaced") handler(event)
+
+        expect(await rejoin).toBe("joined")
+        expect(stateHeard).toBe("idle")
+        expect(session.getState()).toBe("active")
+    })
+
     it("a call replaced while it joins stays idle", async () => {
         const session = createSession(baseConfig({ topology: "sfu" }))
         const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
