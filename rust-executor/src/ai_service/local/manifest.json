@@ -144,7 +144,7 @@
     "qwen3.5-0.8b-q8_0": {
       "service": "llm",
       "provider": "llama-server",
-      "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-Q8_0.gguf",
       "sha256": "0ad885ffd4bb022fc4f0d33a3308fa108ef8613159d3b3a67e23abca056b7a6c",
       "sizeBytes": 811843840,
       "license": "Apache-2.0",
@@ -154,7 +154,7 @@
     "qwen3.5-2b-q4_k_m": {
       "service": "llm",
       "provider": "llama-server",
-      "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf",
       "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
       "sizeBytes": 1280835840,
       "license": "Apache-2.0",
@@ -164,7 +164,7 @@
     "qwen3.5-4b-q4_k_m": {
       "service": "llm",
       "provider": "llama-server",
-      "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
       "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
       "sizeBytes": 2740937888,
       "license": "Apache-2.0",
@@ -174,7 +174,7 @@
     "nomic-embed-text-v1.5-q8_0": {
       "service": "embeddings",
       "provider": "llama-server",
-      "url": "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf",
+      "url": "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/0188c9bf409793f810680a5a431e7b899c46104c/nomic-embed-text-v1.5.Q8_0.gguf",
       "sha256": "3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7",
       "sizeBytes": 146146432,
       "license": "Apache-2.0",
@@ -184,7 +184,7 @@
     "whisper-small-q5_1": {
       "service": "stt",
       "provider": "whisper-server",
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small-q5_1.bin",
       "sha256": "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
       "sizeBytes": 190085487,
       "license": "MIT",
@@ -194,7 +194,7 @@
     "whisper-base.en-q5_1": {
       "service": "stt",
       "provider": "whisper-server",
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en-q5_1.bin",
       "sha256": "4baf70dd0d7c4247ba2b81fafd9c01005ac77c2f9ef064e00dcf195d0e2fdd2f",
       "sizeBytes": 59721011,
       "license": "MIT",
