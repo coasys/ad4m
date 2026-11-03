@@ -156,7 +156,13 @@ pub async fn start_reply(
     let task_perspective = perspective.clone();
     let task_container = container.to_string();
     let task_reply = reply.clone();
+    // The task waits until its abort handle is in the slot. Otherwise a runner that answers at
+    // once releases the slot first, and the check below reads the empty slot as a cancel.
+    let (registered, until_registered) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move {
+        if until_registered.await.is_err() {
+            return;
+        }
         let outcome = match tokio::time::timeout(REPLY_TIMEOUT, run(messages)).await {
             Ok(outcome) => outcome,
             Err(_) => Err(AgentSessionError::Failed(anyhow::anyhow!(
@@ -189,9 +195,12 @@ pub async fn start_reply(
             _ => true,
         }
     };
-    if cancelled_meanwhile {
-        // A cancel took the slot before the task existed, so it could not stop it or mark the
-        // reply: both are done here.
+    if !cancelled_meanwhile {
+        let _ = registered.send(());
+    } else {
+        // A cancel took the slot before the task was registered, so it could not stop it or
+        // mark the reply: both are done here. Dropping `registered` ends the task unrun.
+        drop(registered);
         handle.abort();
         if let Err(e) = set_reply(
             perspective,
