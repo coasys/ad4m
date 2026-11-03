@@ -465,6 +465,7 @@ mod tests {
             .unwrap();
         let initial: Value = serde_json::from_str(&initial).unwrap();
         assert_eq!(initial["instances"], json!([]));
+        assert!(initial.get("totalCount").is_none(), "{initial}");
 
         add(&mut p, "test://t1", "rdf://type", "test://Todo").await;
         add(&mut p, "test://t1", "test://title", "literal://string:one").await;
