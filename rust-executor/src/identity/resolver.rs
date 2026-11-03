@@ -1137,12 +1137,7 @@ impl Resolver {
                 Err(why) => return Err(ForeignMiss::Failed(why)),
             };
             budget = budget.saturating_sub(bytes);
-            let events = page
-                .events
-                .iter()
-                .map(Event::from_json)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| failed(CacheError::Fold(ad4m_identity_core::ChainError::Policy(e))))?;
+            let events = page.events;
             let count = events.len();
             let head = match chain.as_mut() {
                 _ if events.is_empty() => break,
@@ -2557,6 +2552,33 @@ mod tests {
             "the cache's log, with the revoke"
         );
         assert!(resolver.cache.forks(&held.scid()).await.unwrap().is_empty());
+    }
+
+    /// A foreign `src` whose event names a member twice is skipped, though a `Value` of it keeps
+    /// only the last of the two (here the event's own `seq`) and would fold.
+    #[tokio::test]
+    async fn a_src_event_that_names_a_member_twice_is_skipped() {
+        let log = TestLog::new(87);
+        let mut page =
+            serde_json::to_value(FakeStore::new(log.events.clone()).page(0).unwrap()).unwrap();
+        let held = page["events"][0].clone();
+        page["events"][0] = Value::from("EVENT");
+        let twice = format!("{{\"seq\":9,{}", &held.to_string()[1..]);
+        let body = page.to_string().replace("\"EVENT\"", &twice).into_bytes();
+        let read: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(read["events"][0], held);
+        let host = TestHost::start(move |_| response("200 OK", &[], &body)).await;
+        let resolver = local_resolver(trusting(), Arc::new(FakeStore::new(vec![])));
+        let did = did_of(&log.scid());
+        let src = format!("log.example:{}", host.port);
+        let result = resolver.resolve(&format!("{did}?src={src}"), false).await;
+        let skipped = &result.did_resolution_metadata.skipped;
+        assert!(
+            skipped
+                .iter()
+                .any(|s| s.src == src && s.reason.contains("twice")),
+            "{result:?}"
+        );
     }
 
     /// One resolution reads at most `MAX_SRC_LOG_BYTES` from a foreign host, whatever the page

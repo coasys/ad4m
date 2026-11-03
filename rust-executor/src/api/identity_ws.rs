@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use ad4m_identity_core::{Event, FoldError, FormatError};
+use serde_json::value::RawValue;
 use serde_json::Value;
 
 use super::guards::Guard;
@@ -27,6 +29,42 @@ fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, WsRpcError>
 
 fn answer<T: serde::Serialize>(value: T) -> Result<Value, WsRpcError> {
     Ok(serde_json::to_value(value)?)
+}
+
+/// The refusal of an `identity.publish` or `identity.cosignIncept` frame whose event (in
+/// `params.events`, `params.event`) names a member twice: `invalid: DuplicateMember (…)`, the
+/// rule's name as the store gives it. The socket reads a frame into a `Value`, which keeps only the
+/// last of the two, so the frame's own text is read here; every other rule of the event format
+/// the handler applies to the values. `None` for another method, or a frame this does not read
+/// (its params outside the contract, which dispatch refuses).
+pub(crate) fn duplicate_member_refusal(method: &str, frame: &str) -> Option<WsRpcError> {
+    #[derive(serde::Deserialize)]
+    struct Frame<'a> {
+        #[serde(borrow, default)]
+        params: Option<Params<'a>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Params<'a> {
+        #[serde(borrow, default)]
+        events: Option<Vec<&'a RawValue>>,
+        #[serde(borrow, default)]
+        event: Option<&'a RawValue>,
+    }
+    if !matches!(method, "identity.publish" | "identity.cosignIncept") {
+        return None;
+    }
+    let params = serde_json::from_str::<Frame>(frame).ok()?.params?;
+    let texts = match method {
+        "identity.publish" => params.events.unwrap_or_default(),
+        _ => params.event.into_iter().collect(),
+    };
+    texts
+        .iter()
+        .find_map(|text| match Event::from_json_text(text.get()) {
+            Err(FoldError::Format(e @ FormatError::DuplicateMember(_))) => Some(e),
+            _ => None,
+        })
+        .map(|e| WsRpcError::bad_request(format!("invalid: {} ({e})", e.name())))
 }
 
 async fn status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -163,6 +201,44 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 mod tests {
     use super::*;
     use crate::agent::capabilities::Capability;
+
+    /// Only an event's duplicate member is refused from the frame; anything else is the
+    /// handler's (and dispatch's) to refuse.
+    #[test]
+    fn a_frame_event_that_names_a_member_twice_is_refused() {
+        let twice = r#"{"seq":0,"op":"add","seq":1}"#;
+        let publish = |events: &str| {
+            duplicate_member_refusal(
+                "identity.publish",
+                &format!(
+                    r#"{{"id":"1","type":"identity.publish","params":{{"events":{events}}}}}"#
+                ),
+            )
+        };
+        let refused = publish(&format!("[{{\"seq\":0}},{twice}]")).expect("refused");
+        assert_eq!(refused.code, 400);
+        assert!(
+            refused.message.starts_with("invalid: DuplicateMember")
+                && refused.message.contains("\"seq\""),
+            "{}",
+            refused.message
+        );
+        let cosign = duplicate_member_refusal(
+            "identity.cosignIncept",
+            &format!(r#"{{"type":"identity.cosignIncept","params":{{"event":{twice}}}}}"#),
+        );
+        assert!(cosign.is_some());
+        // A nested object counts too.
+        assert!(publish(r#"[{"proof":[{"a":1,"a":2}]}]"#).is_some());
+        // Another format error, params outside the contract, another method: not refused here.
+        assert!(publish(r#"[{"seq":0}]"#).is_none());
+        assert!(publish(r#""not a list""#).is_none());
+        assert!(duplicate_member_refusal(
+            "identity.log",
+            &format!(r#"{{"params":{{"events":[{twice}]}}}}"#)
+        )
+        .is_none());
+    }
 
     /// Each call carries its guard: reads the agent read capability; co-signing and publishing
     /// the agent sign and update capabilities, and for the main agent the operator; other writes

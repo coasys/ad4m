@@ -10,7 +10,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `resolver.rs` | The one place that decides what a log says. `key_speaks_for`, `key_valid_at_anchor` and `verify_expression` (all up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author, for `LanguageController::verify_expression_proof`; `proof.record` anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Later checks (link anchors, verdicts, key login) belong here |
 | `src_fetch.rs` | `SrcFetch`: the executor's reader of a foreign `src` over the did:scid host profile (`GET /v1/logs/{scid}?from=`), for `Resolver` only. `PublicOnly` (the client's DNS resolver: public addresses only), `refuse_private_host` (IP literals, `localhost`), no redirects, no proxy, HTTPS only, timeouts, body cap |
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
-| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh` (at most `MAX_PAGES` pages), `ingest`, `accept`, `trusted` (the log and its accepted head's seq), forks, `reset` (`identity.resetLog`), `refreshed_within` (the in-memory time of each log's last refresh) |
+| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh` (at most `MAX_PAGES` pages; one fetch per log at a time, and a waiter takes the answer of a fetch that began after it called), `ingest`, `accept`, `trusted` (the log and its accepted head's seq), forks, `reset` (`identity.resetLog`), `refreshed_within` (the in-memory time of each log's last refresh) |
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner` |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
@@ -32,8 +32,10 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
 - The cache only extends a log. A different event at a held seq, or a signed head below the
   cached one (a shorter log never truncates a held one), records a fork, appends nothing and fires
   `identity-fork` once per fork, to the sessions of the identity's local agents. A store that
-  answers no log records a fork only when the cache holds a head that store signed; a log only
-  a foreign `src` served is no evidence against the store.
+  answers no log (`null`) records a fork only when the cache holds a head a key of the current
+  `identity.storeKeys` verifies; a log only a foreign `src` served, or a former store's head, is
+  no evidence against the store. `identityLog` answering `undefined` is refused
+  (`backend::Undefined::Refused`), never read as no log.
 - **A different event counts only when it is valid.** `import` compares hashes at a held seq
   and checks no proof there, so before a fork is recorded (or a `src` conflict reported as
   `coasys:fork`) the competing event goes through `cache::rival_holds`: the core's `fold` of the
@@ -41,6 +43,13 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   nothing and alerts nobody: `ingest` refuses it as `CacheError::Fold`, and a foreign `src`
   serving it is skipped (`coasys:skipped`, "does not hold"). Without this a store or host with
   no key could raise a persistent fork alert per body it makes up.
+- **An event that names a member twice is refused where its text is.** A `Value` keeps only
+  the last of the two, so `Event::from_json` cannot see it. A foreign `src` page is read as
+  `Vec<Event>` by `Event`'s `Deserialize` (`src_fetch::HostPage`); the events of an
+  `identity.publish` or `identity.cosignIncept` frame are read from the frame's text before
+  dispatch (`identity_ws::duplicate_member_refusal`, `invalid: DuplicateMember`); a store's
+  page reaches the executor as values through the language runtime, so the agent language's
+  `identityLog` refuses it (`invalid`, `DuplicateMember`).
 - **A signed head proves authenticity, not freshness.** `verify_head` checks the store's
   signature and never reads `time` (the head's append time, not the read's): a store, or
   anyone replaying its answer, can serve an older signed head, and no signed statement proves
@@ -64,7 +73,7 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   speaks for that person. The state counts at that seq: a key added past it does not speak yet, a revocation past it does not
   count yet. The readers: `key_speaks_for` and `key_valid_at_anchor` (so `verify_expression`,
   with and without `proof.record`), the `did:key` confirmation in `resolve_key`,
-  `record_agent_if_listed` (binding a local agent to an identity) and `main_is_linked`
+  `record_agent_if_listed` (binding a local agent to an identity; a bot key binds none) and `main_is_linked`
   (`already-linked`). Events past the trusted seq, and every event a foreign `src` served, are
   for resolution display only (`identity.resolve` shows them, `coasys:headTrusted: false`).
   `identity.status`, `identity.log` and `identity.devices` show the cached log as it is.
@@ -76,7 +85,9 @@ Rows in `db/identity.rs`: `operator_record`, `identity_agents` (agent `did:key` 
   the trusted seq, `no-operator` without a record, `first-link` for another identity.
 - With an operator record the main key may speak only for the operator's identity:
   `cosignIncept` for the main agent runs `main_incept_check` and refuses (`first-link`) an
-  incept of any other identity. Managed users are not bound by the record.
+  incept of any other identity, and `publish` of an incept by the main agent runs it again
+  before the store commits (an incept co-signed before the record existed). Managed users are
+  not bound by the record.
 - `cosignIncept` and `publish` bind the caller's agent for good, and every app holds
   `agent:SIGN` and `agent:UPDATE` by default, so their guard is `Guard::UserOrOperator`: for
   the main agent only the operator (the admin credential the custody service holds), never an

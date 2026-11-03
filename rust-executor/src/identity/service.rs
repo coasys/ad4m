@@ -317,10 +317,10 @@ impl IdentityService {
         Ok(serde_json::to_value(&event)?)
     }
 
-    /// Records that `agent` speaks for the log `scid` when its device key is valid at the log's
-    /// trusted seq (the accepted, store-signed head); the key's id when listed up to there. On
-    /// the first binding, publishes the person's profile (a failure is logged; the next profile
-    /// publish tries again).
+    /// Records that `agent` speaks for the log `scid` when its device key is valid, without the
+    /// bot mark, at the log's trusted seq (the accepted, store-signed head); the key's id when
+    /// listed up to there. On the first binding, publishes the person's profile (a failure is
+    /// logged; the next profile publish tries again).
     pub(super) async fn record_agent_if_listed(
         &self,
         agent: &AgentContext,
@@ -340,7 +340,11 @@ impl IdentityService {
         else {
             return Ok(None);
         };
-        if state.key_valid_at_time(&id, trusted, now()) {
+        // A bot key acts for the person within its scope only; it never speaks for them, so it
+        // binds no agent (as `key_speaks_for` and the person's profile read it).
+        if state.bot_scope_at(&id, trusted).is_none()
+            && state.key_valid_at_time(&id, trusted, now())
+        {
             let bound_before = db(|db| db.agent_identity(&agent_did))?.is_some();
             db(|db| db.set_agent_identity(&agent_did, scid, now()))
                 .map_err(|e| error(409, format!("identity-exists: {}", e.message)))?;
@@ -384,8 +388,11 @@ impl IdentityService {
 
     /// `identity.publish`: appends through the agent language, then takes the events into the
     /// cache and records the identity for `agent` when the log lists its key. A `409` whose log
-    /// already holds these events (the append happened elsewhere) answers the store's head.
-    /// Refused with `no-store-keys` while `identity.storeKeys` is empty, before the store commits.
+    /// already holds these events (the append happened elsewhere) answers the store's head, and
+    /// reads the rest of the log when that head lies past them.
+    /// Refused with `no-store-keys` while `identity.storeKeys` is empty, and for the main agent
+    /// an incept of another identity than the recorded operator's (`first-link`), before the
+    /// store commits.
     pub async fn publish(
         &self,
         agent: &AgentContext,
@@ -407,6 +414,12 @@ impl IdentityService {
             return Err(WsRpcError::bad_request("invalid: the events name two logs"));
         }
         let did = did_of(&scid);
+        // The rule `cosignIncept` runs, again before the store commits: an incept co-signed
+        // before the operator record existed must not bind the main key to another identity.
+        if agent.is_main_agent() && events.iter().any(|e| matches!(e.op, Op::Incept { .. })) {
+            let record = db(|db| db.operator_record())?;
+            main_incept_check(record.as_ref(), &did).map_err(first_link_error)?;
+        }
         let request = ad4m_ldk::identity::AppendRequest {
             events: params.events.clone(),
             vouch: None,
@@ -420,6 +433,14 @@ impl IdentityService {
             Err(e) => return Err(backend_error(e)),
         };
         match self.cache.accept(&scid, &head, &events).await {
+            // The store's head lies past these events (a `409` replay of a log that moved on):
+            // read the rest of the log, so the head is accepted.
+            Ok(Some(ours)) if ours.seq < head.seq => {
+                self.cache
+                    .refresh(self.backend.as_ref(), &scid)
+                    .await
+                    .map_err(cache_error)?;
+            }
             Ok(_) => {}
             // The cache lacks the log's earlier events: read the whole log.
             Err(CacheError::Gap { .. }) => {
@@ -794,6 +815,48 @@ mod tests {
         assert_eq!(db(|db| db.agent_identity(&agent_did)).unwrap(), Some(scid));
     }
 
+    /// A bot key acts for its person within its scope, never as them: a log that lists the
+    /// agent's key as a bot, even unexpired and store-signed, binds no agent.
+    #[tokio::test]
+    async fn a_bot_key_binds_no_agent() {
+        use crate::identity::cache::tests::accept_signed;
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{BotScope, KeyLife};
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let service = test_service();
+        let user = crate::test_utils::create_test_user(&format!(
+            "bot-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let agent = AgentContext::managed(user);
+        let (agent_did, key) = device_key(&agent).unwrap();
+
+        let mut log = TestLog::new(63);
+        let chain = log.chain();
+        let device = ad4m_identity_core::DeviceKey {
+            id: chain.state().next_device_id(),
+            enc: enc_key_of(&key).unwrap(),
+            sign: key,
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 4_000_000_000,
+            }),
+        };
+        let mut add = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut add, "m0", &log.master).unwrap();
+        log.events.push(add);
+        let scid = log.scid();
+        accept_signed(&service.cache, &log.events).await;
+
+        assert_eq!(
+            service.record_agent_if_listed(&agent, &scid).await.unwrap(),
+            Some("d2".to_string()),
+            "the key is listed"
+        );
+        assert_eq!(db(|db| db.agent_identity(&agent_did)).unwrap(), None);
+    }
+
     /// After a fork the cache keeps its branch; `resetLog` drops this executor's copy, and the
     /// next read takes the store's branch: a key revoked on the store's branch speaks no more.
     #[tokio::test]
@@ -880,6 +943,35 @@ mod tests {
     struct RecordingStore {
         inner: crate::identity::cache::tests::FakeStore,
         appends: std::sync::atomic::AtomicUsize,
+        /// Answers every append `409` with the head of the log it holds, appending nothing.
+        conflict: bool,
+    }
+
+    impl RecordingStore {
+        fn new(events: Vec<Event>, conflict: bool) -> Self {
+            RecordingStore {
+                inner: crate::identity::cache::tests::FakeStore::new(events),
+                appends: std::sync::atomic::AtomicUsize::new(0),
+                conflict,
+            }
+        }
+    }
+
+    /// A service on `backend` whose cache trusts the test store key.
+    fn service_on(backend: Arc<RecordingStore>) -> IdentityService {
+        let cache = Arc::new(crate::identity::cache::tests::trusting());
+        let as_backend: Arc<dyn IdentityBackend> = backend;
+        IdentityService {
+            resolver: Arc::new(crate::identity::resolver::Resolver::new(
+                cache.clone(),
+                as_backend.clone(),
+                None,
+                false,
+            )),
+            backend: as_backend,
+            cache,
+            store_url: None,
+        }
     }
 
     #[async_trait::async_trait]
@@ -905,6 +997,17 @@ mod tests {
         ) -> Result<ad4m_ldk::identity::SignedHead, IdentityError> {
             self.appends
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.conflict {
+                let held = self.inner.events.lock().unwrap().clone();
+                let chain = ad4m_identity_core::fold(&held).unwrap();
+                let head = chain.head();
+                return Err(IdentityError::Conflict(self.inner.key.sign_head(
+                    chain.id(),
+                    head.seq,
+                    &head.hash,
+                    1,
+                )));
+            }
             let events: Vec<Event> = req
                 .events
                 .iter()
@@ -975,10 +1078,7 @@ mod tests {
         ));
         let agent = AgentContext::managed(user);
         let (agent_did, _) = device_key(&agent).unwrap();
-        let backend = Arc::new(RecordingStore {
-            inner: crate::identity::cache::tests::FakeStore::new(vec![]),
-            appends: std::sync::atomic::AtomicUsize::new(0),
-        });
+        let backend = Arc::new(RecordingStore::new(vec![], false));
         let cache = Arc::new(crate::identity::cache::tests::in_memory(vec![]));
         let service = IdentityService {
             resolver: Arc::new(crate::identity::resolver::Resolver::new(
@@ -1032,6 +1132,97 @@ mod tests {
             refused.message.starts_with("no-store-keys"),
             "{}",
             refused.message
+        );
+    }
+
+    /// An incept the main agent co-signed before the operator record existed is refused
+    /// `first-link` at `publish`, before the store commits it.
+    #[tokio::test]
+    async fn publish_runs_the_first_link_rule_for_the_main_agents_incept() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = AgentContext::main_agent();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        let cosigned = service
+            .cosign_incept(&main, &incept_listing(&main, 54))
+            .await
+            .unwrap();
+
+        let operator = did_of(&TestLog::new(4).scid());
+        let _record = OperatorRecord::set(&operator);
+        let refused = service
+            .publish(
+                &main,
+                &PublishParams {
+                    events: vec![cosigned],
+                },
+            )
+            .await
+            .expect_err("refused");
+        assert_eq!(refused.code, 403, "{refused:?}");
+        assert!(
+            refused.message.starts_with("first-link"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(
+            backend.appends.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the store was not asked"
+        );
+    }
+
+    /// A `409` replay whose store head lies past the submitted events (the log moved on since)
+    /// reads the rest of the log, so the head is accepted and the agent bound.
+    #[tokio::test]
+    async fn a_replayed_publish_behind_the_stores_head_reads_the_rest_and_binds() {
+        use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let user = crate::test_utils::create_test_user(&format!(
+            "replay-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let agent = AgentContext::managed(user);
+        let (agent_did, _) = device_key(&agent).unwrap();
+        let service = test_service();
+        let incept = service
+            .cosign_incept(&agent, &incept_listing(&agent, 55))
+            .await
+            .unwrap();
+        let incept = Event::from_json(&incept).unwrap();
+        // The store holds the incept and, since, an `add` of a second device.
+        let master = ed25519_dalek::SigningKey::from_bytes(&[55; 32]);
+        let chain = ad4m_identity_core::fold(std::slice::from_ref(&incept)).unwrap();
+        let other = ed25519_dalek::SigningKey::from_bytes(&[56; 32]);
+        let device = ad4m_identity_core::DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: other.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[56; 32]),
+            life: ad4m_identity_core::KeyLife::Standing,
+        };
+        let mut add = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut add, "m0", &master).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![incept.clone(), add], true));
+        let service = service_on(backend);
+
+        let head = service
+            .publish(
+                &agent,
+                &PublishParams {
+                    events: vec![serde_json::to_value(&incept).unwrap()],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(head.seq, 1);
+        let (_, trusted) = service.cache.trusted(&incept.scid).await.unwrap().unwrap();
+        assert_eq!(trusted, 1, "the store's head is accepted");
+        assert_eq!(
+            db(|db| db.agent_identity(&agent_did)).unwrap(),
+            Some(incept.scid.clone())
         );
     }
 }

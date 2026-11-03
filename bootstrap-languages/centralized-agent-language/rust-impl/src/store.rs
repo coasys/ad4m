@@ -12,6 +12,7 @@
 use std::future::Future;
 
 use ad4m_hash_chain::canonical_json;
+use ad4m_identity_core::{Event, FoldError, FormatError};
 use ad4m_ldk::identity::{
     AgentRecord, AppendRequest, Claim, ClaimReceipt, ForbiddenReason, IdentityErrorCode,
     KeyIndexEntry, LogPage, OfferListing, OfferOpened, OfferProgress, PowParams, RateLimitScope,
@@ -20,6 +21,7 @@ use ad4m_ldk::identity::{
 use ad4m_ldk::prelude::LanguageResult;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde_json::value::RawValue;
 use serde_json::Value;
 
 /// The production store, used when the settings name none.
@@ -360,9 +362,28 @@ impl<H: Http> Store<H> {
 
     /// One page of `did`'s log from `from`, from the configured store. A reply larger than
     /// [`MAX_REPLY_BYTES`] or a page of more than [`LOG_PAGE_EVENTS`] events is refused as
-    /// `invalid` (`too-large`).
+    /// `invalid` (`too-large`). An event whose text names a member twice is refused as `invalid`
+    /// (`DuplicateMember`): the page leaves here as values, which keep only the last of the two,
+    /// so the executor could not see it.
     pub async fn log(&self, did: &str, from: u64) -> LanguageResult<Option<LogPage>> {
-        Ok(self.log_with_text(did, from).await?.map(|(page, _)| page))
+        #[derive(serde::Deserialize)]
+        struct EventTexts<'a> {
+            #[serde(borrow)]
+            events: Vec<&'a RawValue>,
+        }
+        let Some((page, text)) = self.log_with_text(did, from).await? else {
+            return Ok(None);
+        };
+        let texts: EventTexts = serde_json::from_str(&text).map_err(|_| unavailable())?;
+        for event in texts.events {
+            // Every other format rule the executor applies to the values.
+            if let Err(FoldError::Format(FormatError::DuplicateMember(_))) =
+                Event::from_json_text(event.get())
+            {
+                return Err(invalid("DuplicateMember"));
+            }
+        }
+        Ok(Some(page))
     }
 
     /// [`Store::log`] with the reply body, for a reader that bounds the bytes it reads in total

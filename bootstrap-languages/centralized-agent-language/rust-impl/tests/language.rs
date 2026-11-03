@@ -1522,6 +1522,34 @@ fn a_log_page_over_the_stores_limits_is_refused() {
     );
 }
 
+/// An event whose text names a member twice is refused, though the values the page leaves as
+/// keep only the last of the two (here the event's own `seq`, so the values fold).
+#[test]
+fn a_log_page_whose_event_names_a_member_twice_is_refused() {
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (host, store) = Host::of(&server);
+    let p = person(&mut apps, &store, "pia twice");
+    let did = p["did"].as_str().unwrap();
+    let page = block_on(store.log(did, 0)).unwrap().unwrap();
+    let event = page.events[0].to_string();
+    let twice = format!("{{\"seq\":7,{}", &event[1..]);
+    let mut body = serde_json::to_value(&page).unwrap();
+    body["events"] = json!(["EVENT"]);
+    let body = body.to_string().replace("\"EVENT\"", &twice);
+    let read: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(read["events"][0], page.events[0]);
+
+    host.serve("https://twice.example", HttpReply { status: 200, body });
+    *host.url.borrow_mut() = "https://twice.example".into();
+    assert_eq!(
+        refusal(block_on(store.log(did, 0))),
+        IdentityErrorCode::Invalid {
+            reason: "DuplicateMember".into()
+        }
+    );
+}
+
 #[test]
 fn expression_create_retries_once_above_the_stores_version_and_never_past_u64_max() {
     let agent = TestAgentKey::new("agent ivy");

@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use ad4m_hash_chain::store::{ChainStore, SqliteChainStore, StoredEntry};
@@ -93,14 +94,24 @@ pub enum Ingested {
 /// Called once for each fork the cache records for the first time: `(did, evidence)`.
 pub type ForkListener = Box<dyn Fn(&str, &ForkEvidence) + Send + Sync>;
 
+/// One identity's fetch gate: one fetch at a time, and which of them succeeded.
+#[derive(Default)]
+struct Gate {
+    one_fetch: Mutex<()>,
+    /// The fetches begun under this gate.
+    begun: AtomicU64,
+    /// The number (counted in `begun`) of the last fetch that succeeded.
+    succeeded: AtomicU64,
+}
+
 /// The verified key logs, by SCID.
 pub struct KelCache {
     store: SqliteChainStore,
     /// `identity_heads`: the last signed head accepted per log.
     meta: StdMutex<Connection>,
     chains: Mutex<HashMap<String, KelChain>>,
-    /// One fetch per identity at a time, so concurrent callers share one store round trip.
-    fetching: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One fetch per identity at a time, so concurrent callers share store round trips.
+    fetching: Mutex<HashMap<String, Arc<Gate>>>,
     /// When each log last refreshed from the configured store (unix seconds), in memory only:
     /// after a restart every log counts as stale ([`KelCache::refreshed_within`]).
     refreshed: StdMutex<HashMap<String, u64>>,
@@ -518,8 +529,11 @@ impl KelCache {
 
     /// Refreshes `did`'s log from the agent language: reads the pages from the cached head on
     /// (the head's own event included, so a different event there shows as a fork) and accepts
-    /// them with [`KelCache::accept`]. One fetch per identity at a time; the identity's gate is
-    /// dropped when no other fetch waits on it, so looking up many identities keeps no state.
+    /// them with [`KelCache::accept`]. One fetch per identity at a time; a caller that waited
+    /// on the gate takes the cached log when a fetch that began after it called succeeded
+    /// meanwhile (one that began earlier may predate what it asks for, such as an append it
+    /// just made). The identity's gate is dropped when no other fetch waits on it, so looking
+    /// up many identities keeps no state.
     pub async fn refresh(
         &self,
         backend: &dyn IdentityBackend,
@@ -530,12 +544,28 @@ impl KelCache {
             let mut fetching = self.fetching.lock().await;
             fetching
                 .entry(scid.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .or_insert_with(|| Arc::new(Gate::default()))
                 .clone()
         };
+        let asked = gate.begun.load(Ordering::SeqCst);
         let result = {
-            let _one_fetch = gate.lock().await;
-            self.fetch(backend, &scid).await
+            let _one_fetch = gate.one_fetch.lock().await;
+            let reused = if gate.succeeded.load(Ordering::SeqCst) > asked {
+                self.chain(&scid).await.ok().flatten()
+            } else {
+                None
+            };
+            match reused {
+                Some(chain) => Ok(chain),
+                None => {
+                    let number = gate.begun.fetch_add(1, Ordering::SeqCst) + 1;
+                    let fetched = self.fetch(backend, &scid).await;
+                    if fetched.is_ok() {
+                        gate.succeeded.store(number, Ordering::SeqCst);
+                    }
+                    fetched
+                }
+            }
         };
         if result.is_ok() {
             self.note_refreshed(&scid, now());
@@ -589,8 +619,13 @@ impl KelCache {
             let Some(page) = backend.log(&did, from).await? else {
                 return match cached {
                     // The store answers no log of one it signed a head of: the shortest log. A
-                    // log only another host served is no evidence against the store.
-                    Some(chain) if self.accepted_head(scid)?.is_some() => {
+                    // log only another host served is no evidence against the store, nor is a
+                    // head no key of `identity.storeKeys` verifies now (a former store's).
+                    Some(chain)
+                        if self
+                            .accepted_head(scid)?
+                            .is_some_and(|head| verify_head(&head, &self.store_keys)) =>
+                    {
                         let ours = chain.head();
                         let fork = ForkEvidence {
                             chain: scid.to_string(),
@@ -1157,24 +1192,41 @@ pub(crate) mod tests {
         assert_eq!(store.log_calls.load(Ordering::SeqCst), calls);
     }
 
+    /// Callers that wait on one identity's gate share fetches: the first fetch began before
+    /// they called, so the next one runs, and every later waiter takes its answer.
     #[tokio::test]
-    async fn concurrent_refreshes_of_one_identity_fetch_once() {
+    async fn concurrent_refreshes_of_one_identity_share_the_fetch_after_theirs_began() {
         let log = TestLog::new(1);
         let store = Arc::new(FakeStore::new(log.events.clone()));
         let cache = Arc::new(in_memory(vec![store.key.multikey()]));
-        let mut tasks = Vec::new();
-        for _ in 0..20 {
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let refresh = || {
             let (cache, store, did) = (cache.clone(), store.clone(), log.scid());
-            tasks.push(tokio::spawn(async move {
-                cache.refresh(store.as_ref(), &did).await.map(|c| c.head())
-            }));
+            tokio::spawn(async move { cache.refresh(store.as_ref(), &did).await.map(|c| c.head()) })
+        };
+        let mut tasks = vec![refresh()];
+        entered.notified().await;
+        for _ in 0..19 {
+            tasks.push(refresh());
         }
+        // Every caller holds the gate's handle, with the map's: all of them wait on it.
+        while cache
+            .fetching
+            .lock()
+            .await
+            .get(&log.scid())
+            .map(Arc::strong_count)
+            != Some(21)
+        {
+            tokio::task::yield_now().await;
+        }
+        release.notify_one();
         for task in tasks {
             assert_eq!(task.await.unwrap().unwrap(), log.chain().head());
         }
-        // The fetches ran one after another: each later one found the log current, so the
-        // log was stored once and no fetch saw another's half-written state.
-        assert_eq!(store.log_calls.load(Ordering::SeqCst), 20);
+        // The fetches ran one after another, so no fetch saw another's half-written state.
+        assert_eq!(store.log_calls.load(Ordering::SeqCst), 2);
         assert_eq!(cache.stored_events(&log.scid(), 0).await.unwrap().len(), 1);
         assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
         assert!(
@@ -1243,5 +1295,34 @@ pub(crate) mod tests {
         let cache = KelCache::open(&path, vec![TestStoreKey::new(3).multikey()]).unwrap();
         assert!(cache.accepted_head(&log.scid()).unwrap().is_some());
         assert!(cache.trusted(&log.scid()).await.unwrap().is_none());
+    }
+
+    /// A store that answers no log records a fork only against a head the configured store
+    /// keys verify: a former store's head is no evidence against this one.
+    #[tokio::test]
+    async fn no_log_from_a_new_store_records_no_fork_against_a_former_stores_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        let log = TestLog::new(1);
+        let former = FakeStore::new(log.events.clone());
+        {
+            let cache = KelCache::open(&path, vec![former.key.multikey()]).unwrap();
+            cache.refresh(&former, &log.scid()).await.unwrap();
+        }
+        let new = FakeStore::new(vec![]);
+        let cache = KelCache::open(&path, vec![TestStoreKey::new(3).multikey()]).unwrap();
+        assert!(matches!(
+            cache.refresh(&new, &log.scid()).await,
+            Err(CacheError::NotFound)
+        ));
+        assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
+
+        // Under the key that signed the held head, the same answer is a fork.
+        let cache = KelCache::open(&path, vec![former.key.multikey()]).unwrap();
+        assert!(matches!(
+            cache.refresh(&new, &log.scid()).await,
+            Err(CacheError::Fork(_))
+        ));
+        assert_eq!(cache.forks(&log.scid()).await.unwrap().len(), 1);
     }
 }

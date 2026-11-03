@@ -449,7 +449,10 @@ Rules for an implementation:
   be replayed to a second store holding the same log. The signer takes it from
   `identity.storeKeys`, or from the `store` of a head it checked against them. Events are
   opaque JSON objects, so a new event format needs no new language: the language never reads
-  one; the executor and the store check each with the identity core.
+  one; the executor and the store check each with the identity core. One check needs the
+  store's text, which the executor never sees (the page reaches it as values, which keep only
+  the last of two members of one name): `identityLog` refuses a page with an event whose text
+  names a member twice as `invalid` (`DuplicateMember`).
 - **Refusals map one to one** onto `IdentityErrorCode` (`conflict` with the store's head,
   `key-taken`, `forbidden` with a reason (`vouch`, `pow`, `claim`, `signer`, `secret`,
   `bound`, `cosig`, `writer`, `store`), `invalid`, `rate-limited`, `gone` with the offer's
