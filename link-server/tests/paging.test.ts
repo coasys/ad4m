@@ -1,7 +1,7 @@
 /**
  * Paged /render (a snapshot pinned at `upto`, keyset-paged on
- * (sequence, link_hash)), paged /sync, and compressed answers. Requests
- * without `limit` must keep the answer old language builds read.
+ * (sequence, link_hash)), paged /sync, and compressed answers. A request
+ * without `limit` gets a page of DEFAULT_PAGE_LIMIT.
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -18,6 +18,7 @@ import {
   type TestAgent,
   type TestServerHandle,
 } from "./helpers.js";
+import { DEFAULT_PAGE_LIMIT } from "../src/routes.js";
 import type { LinkExpression, PerspectiveDiff } from "../src/types.js";
 
 interface RenderPage {
@@ -75,6 +76,13 @@ async function renderAll(server: TestServerHandle, roomId: string, token: string
   return pages;
 }
 
+/** The hashes of the room's active links, read straight from the DB. */
+function activeHashes(server: TestServerHandle, roomId: string): string[] {
+  return server.built.db
+    .getActiveLinkPage(roomId, Number.MAX_SAFE_INTEGER, { sequence: 0, hash: "" }, Number.MAX_SAFE_INTEGER)
+    .map((row) => row.link_hash);
+}
+
 /** A raw GET, so the test decides the Accept-Encoding header (fetch always sends one). */
 function rawGet(url: string, headers: Record<string, string>): Promise<{ headers: Record<string, unknown>; body: Buffer }> {
   return new Promise((resolve, reject) => {
@@ -87,25 +95,28 @@ function rawGet(url: string, headers: Record<string, string>): Promise<{ headers
   });
 }
 
-test("render and sync without limit answer exactly as before paging", async () => {
+test("render and sync without limit answer one page of DEFAULT_PAGE_LIMIT, in the paged shape", async () => {
   await withRoom(async ({ server, roomId, agent, token }) => {
-    const [a, b] = await makeLinks(agent, 2, "old");
-    commit(server, roomId, agent.did, { additions: [a], removals: [] });
-    commit(server, roomId, agent.did, { additions: [b], removals: [] });
+    const links = await makeLinks(agent, DEFAULT_PAGE_LIMIT + 1, "default");
+    for (const link of links) commit(server, roomId, agent.did, { additions: [link], removals: [] });
 
-    const render = await getJson<Record<string, unknown>>(`${server.url}/rooms/${roomId}/render`, token);
+    const render = await getJson<RenderPage>(`${server.url}/rooms/${roomId}/render`, token);
     assert.equal(render.status, 200);
-    assert.deepEqual(Object.keys(render.body).sort(), ["links", "revision", "sequence"]);
-    assert.equal((render.body.links as unknown[]).length, 2);
-    assert.equal(render.body.sequence, 2);
+    assert.deepEqual(Object.keys(render.body).sort(), ["links", "next", "revision", "sequence", "upto"]);
+    assert.equal(render.body.links.length, DEFAULT_PAGE_LIMIT);
+    assert.equal(render.body.upto, DEFAULT_PAGE_LIMIT + 1);
+    assert.equal(typeof render.body.next, "string");
+    const rest = await getJson<RenderPage>(
+      `${server.url}/rooms/${roomId}/render?next=${encodeURIComponent(render.body.next!)}`, token);
+    assert.equal(rest.body.links.length, 1);
+    assert.equal(rest.body.next, null);
 
-    const sync = await getJson<Record<string, unknown>>(`${server.url}/rooms/${roomId}/sync?since=0`, token);
+    const sync = await getJson<SyncPage>(`${server.url}/rooms/${roomId}/sync?since=0`, token);
     assert.equal(sync.status, 200);
-    assert.deepEqual(Object.keys(sync.body).sort(), ["diffs", "revision", "sequence"]);
-    assert.deepEqual(sync.body.diffs, [
-      { additions: [a], removals: [] },
-      { additions: [b], removals: [] },
-    ]);
+    assert.deepEqual(Object.keys(sync.body).sort(), ["diffs", "next", "revision", "sequence"]);
+    assert.equal(sync.body.diffs.length, DEFAULT_PAGE_LIMIT);
+    assert.equal(sync.body.next, DEFAULT_PAGE_LIMIT);
+    assert.deepEqual(sync.body.diffs[0], { additions: [links[0]], removals: [], sequence: 1 });
   });
 });
 
@@ -167,8 +178,7 @@ test("a paged render stays a snapshot under concurrent writes, and the tail from
       for (const l of d.additions) state.set(linkHashOf(l), l);
       for (const l of d.removals) state.delete(linkHashOf(l));
     }
-    const active = server.built.db.getActiveLinks(roomId).map(linkHashOf);
-    assert.deepEqual(new Set(state.keys()), new Set(active));
+    assert.deepEqual(new Set(state.keys()), new Set(activeHashes(server, roomId)));
     assert.equal(tail.body.next, null);
     assert.equal(tail.body.revision, server.built.db.getRoomRevision(roomId));
   });
@@ -192,10 +202,9 @@ test("paged sync returns at most limit diffs, each with its sequence, and next u
     assert.deepEqual(seen.map((p) => p.diffs.map((d) => d.sequence)), [[1, 2, 3], [4, 5, 6], [7]]);
     assert.deepEqual(seen.map((p) => p.next), [3, 6, null]);
 
-    const unpaged = await getJson<{ diffs: PerspectiveDiff[] }>(`${server.url}/rooms/${roomId}/sync?since=0`, token);
     assert.deepEqual(
       seen.flatMap((p) => p.diffs.map(({ additions, removals }) => ({ additions, removals }))),
-      unpaged.body.diffs,
+      links.map((link) => ({ additions: [link], removals: [] })),
     );
 
     const empty = await getJson<SyncPage>(`${server.url}/rooms/${roomId}/sync?since=7&limit=3`, token);

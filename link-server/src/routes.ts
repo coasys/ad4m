@@ -119,9 +119,12 @@ function jwtRateLimit(limiter: SlidingWindowLimiter) {
 /** The most links (`/render`) or diffs (`/sync`) one page may carry. */
 export const MAX_PAGE_LIMIT = 5000;
 
-/** undefined: no `limit`, the unpaged answer. null: not a usable limit. */
-function parsePageLimit(raw: string | undefined): number | undefined | null {
-  if (raw === undefined) return undefined;
+/** The page size of a `/render` or `/sync` request that names no `limit`. */
+export const DEFAULT_PAGE_LIMIT = 500;
+
+/** The page size a request asks for; null when `limit` is not an integer from 1 to MAX_PAGE_LIMIT. */
+function parsePageLimit(raw: string | undefined): number | null {
+  if (raw === undefined) return DEFAULT_PAGE_LIMIT;
   if (!/^\d+$/.test(raw)) return null;
   const limit = Number(raw);
   return limit >= 1 && limit <= MAX_PAGE_LIMIT ? limit : null;
@@ -306,9 +309,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
   // ---- sync / render / revision / peers ----
 
-  // Without `limit` both routes answer as they always have: language builds
-  // published before paging keep sending unpaged requests. See README,
-  // "Paged snapshot, then tail".
+  // Both routes are paged; see README, "Paged snapshot, then tail".
   app.get(
     "/rooms/:roomId/sync",
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
@@ -321,10 +322,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       if (limit === null) return reply.code(400).send({ error: `limit must be an integer from 1 to ${MAX_PAGE_LIMIT}` });
       const revision = ctx.db.getRoomRevision(claims.roomId);
       const sequence = ctx.db.getMaxSequence(claims.roomId);
-      if (limit === undefined) {
-        const rows = ctx.db.getDiffsSinceParsed(claims.roomId, since);
-        return reply.send({ diffs: rows.map((r) => r.diff), revision, sequence });
-      }
       // One row past the page tells whether another page follows.
       const rows = ctx.db.getDiffPageSince(claims.roomId, since, limit + 1);
       const page = rows.slice(0, limit);
@@ -345,10 +342,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       if (limit === null) return reply.code(400).send({ error: `limit must be an integer from 1 to ${MAX_PAGE_LIMIT}` });
       const revision = ctx.db.getRoomRevision(claims.roomId);
       const sequence = ctx.db.getMaxSequence(claims.roomId);
-      if (limit === undefined) {
-        const links = ctx.db.getActiveLinks(claims.roomId);
-        return reply.send({ links, revision, sequence });
-      }
       // The first page pins the snapshot at the room's current sequence; the
       // cursor carries it to every later page.
       let cursor: RenderCursor = { upto: sequence, sequence: 0, hash: "" };

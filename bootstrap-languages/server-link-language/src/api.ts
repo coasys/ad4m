@@ -117,39 +117,43 @@ export async function commitDiff(config: RoomConfig, token: string, diff: WirePe
     };
 }
 
-/** The diff log after `since`. With `limit`, one page of at most `limit`
- *  diffs; a server that does not page ignores it and sends the rest of the log. */
-export async function fetchSync(config: RoomConfig, token: string, since: number, limit?: number): Promise<SyncResponse> {
-    const query = `since=${encodeURIComponent(String(since))}` + (limit !== undefined ? `&limit=${limit}` : "");
-    const res = await request<Partial<SyncResponse>>(roomUrl(config, `/sync?${query}`), "GET", jsonHeaders(token));
-    return {
-        diffs: res.diffs ?? [],
-        revision: res.revision ?? "",
-        sequence: typeof res.sequence === "number" ? res.sequence : since,
-        next: typeof res.next === "number" && res.next > since ? res.next : null,
-    };
+/** Throws unless `ok`: an answer without the paged fields cannot be read as a page. */
+function expectPage(ok: boolean, path: string): void {
+    if (!ok) throw new Error(`link server answered GET ${path} without a paged body`);
 }
 
-/** The room's active links. With `page`, one page of the snapshot (`next`
- *  absent for the first); a server that does not page sends them all. */
+/** One page of the diff log after `since`: at most `limit` diffs, each with its sequence. */
+export async function fetchSync(config: RoomConfig, token: string, since: number, limit: number): Promise<SyncResponse> {
+    const path = `/sync?since=${encodeURIComponent(String(since))}&limit=${limit}`;
+    const res = await request<SyncResponse>(roomUrl(config, path), "GET", jsonHeaders(token));
+    expectPage(
+        Array.isArray(res?.diffs) &&
+            res.diffs.every((d) => typeof d?.sequence === "number") &&
+            typeof res.revision === "string" &&
+            typeof res.sequence === "number" &&
+            (res.next === null || (typeof res.next === "number" && res.next > since)),
+        path,
+    );
+    return res;
+}
+
+/** One page of the room's snapshot: the first when `next` is null. */
 export async function fetchRender(
     config: RoomConfig,
     token: string,
-    page?: { limit: number; next: string | null },
+    page: { limit: number; next: string | null },
 ): Promise<RenderResponse> {
-    let path = "/render";
-    if (page) {
-        path += `?limit=${page.limit}` + (page.next !== null ? `&next=${encodeURIComponent(page.next)}` : "");
-    }
-    const res = await request<Partial<RenderResponse>>(roomUrl(config, path), "GET", jsonHeaders(token));
-    const sequence = typeof res.sequence === "number" ? res.sequence : 0;
-    return {
-        links: res.links ?? [],
-        revision: res.revision ?? "",
-        sequence,
-        upto: typeof res.upto === "number" ? res.upto : sequence,
-        next: typeof res.next === "string" && res.next.length > 0 ? res.next : null,
-    };
+    const path = `/render?limit=${page.limit}` + (page.next !== null ? `&next=${encodeURIComponent(page.next)}` : "");
+    const res = await request<RenderResponse>(roomUrl(config, path), "GET", jsonHeaders(token));
+    expectPage(
+        Array.isArray(res?.links) &&
+            typeof res.revision === "string" &&
+            typeof res.sequence === "number" &&
+            typeof res.upto === "number" &&
+            (res.next === null || (typeof res.next === "string" && res.next.length > 0)),
+        path,
+    );
+    return res;
 }
 
 // ---------------------------------------------------------------------------

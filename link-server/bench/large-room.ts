@@ -1,15 +1,15 @@
 /**
- * Large-room benchmark for /render and /sync: response bytes with and
- * without compression, hex vs base64 ciphertext, and the largest page and
- * slowest request when paged.
+ * Large-room benchmark for the paged /render and /sync: bytes and time for
+ * the whole room and for its largest and slowest page, with and without
+ * compression.
  *
  *   npm run bench                 # 30 000 links, one link per diff
  *   LINKS=10000 npm run bench
  *
  * Each link is a real AES-256-GCM encryption of a ~575-byte link JSON (the
- * mean size of a team-room link), written as the language writes it: hex
- * before PERF-48, base64 after. Requests go over loopback HTTP, so times
- * are the server's work plus local transfer, not a WAN round trip.
+ * mean size of a team-room link), in base64 as the language writes it.
+ * Requests go over loopback HTTP, so times are the server's work plus local
+ * transfer, not a WAN round trip.
  */
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { request } from "node:http";
@@ -22,8 +22,6 @@ const RENDER_PAGE = Number(process.env.RENDER_PAGE ?? 500);
 const SYNC_PAGE = Number(process.env.SYNC_PAGE ?? 100);
 /** Mean decrypted link size in the team room (DEFECTS PERF-48). */
 const PLAINTEXT_BYTES = 575;
-
-type Encoding = "hex" | "base64";
 
 function plaintextLink(i: number): string {
   const did = "did:key:z6Mk" + createHash("sha256").update(`agent-${i % 7}`).digest("base64url").slice(0, 44);
@@ -42,12 +40,12 @@ function plaintextLink(i: number): string {
   return JSON.stringify(link);
 }
 
-function encryptedWireLink(i: number, key: Buffer, encoding: Encoding) {
+function encryptedWireLink(i: number, key: Buffer) {
   const nonce = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, nonce);
   const ct = Buffer.concat([cipher.update(plaintextLink(i), "utf8"), cipher.final(), cipher.getAuthTag()]);
   return {
-    data: { ciphertext: ct.toString(encoding), nonce: nonce.toString(encoding) },
+    data: { ciphertext: ct.toString("base64"), nonce: nonce.toString("base64") },
     link_hash: createHash("sha256").update(`link-${i}`).digest("hex"),
     key_version: 1,
   };
@@ -84,15 +82,15 @@ const mb = (n: number) => `${(n / 1e6).toFixed(2)} MB`;
 const kb = (n: number) => `${(n / 1e3).toFixed(0)} kB`;
 const ms = (n: number) => `${n.toFixed(0)} ms`;
 
-async function seedRoom(server: TestServerHandle, encoding: Encoding): Promise<{ roomId: string; token: string }> {
-  const roomId = `bench-${encoding}`;
+async function seedRoom(server: TestServerHandle): Promise<{ roomId: string; token: string }> {
+  const roomId = "bench";
   const agent = await createTestAgent();
   const token = await authenticateAgent(server.url, roomId, agent);
   const key = randomBytes(32);
   const db = server.built.db;
   const seed = db.raw.transaction(() => {
     for (let i = 0; i < LINKS; i++) {
-      db.applyDiffAndAppend(roomId, { additions: [encryptedWireLink(i, key, encoding)], removals: [] }, agent.did);
+      db.applyDiffAndAppend(roomId, { additions: [encryptedWireLink(i, key)], removals: [] }, agent.did);
     }
   });
   seed();
@@ -153,29 +151,20 @@ async function main(): Promise<void> {
       `render page ${RENDER_PAGE} links, sync page ${SYNC_PAGE} diffs\n`,
     );
     const rows: string[][] = [];
-    for (const encoding of ["hex", "base64"] as const) {
-      const { roomId, token } = await seedRoom(server, encoding);
-      for (const accept of [undefined, "gzip", "br"]) {
-        const label = accept ?? "none";
-        const render = await get(`${server.url}/rooms/${roomId}/render`, token, accept);
-        const sync = await get(`${server.url}/rooms/${roomId}/sync?since=0`, token, accept);
-        const pr = await pagedRender(server, roomId, token, accept);
-        const ps = await pagedSync(server, roomId, token, accept);
-        rows.push([
-          encoding, label,
-          mb(render.bytes), ms(render.ms),
-          mb(sync.bytes), ms(sync.ms),
-          `${pr.pages}`, kb(pr.maxBytes), ms(pr.maxMs), ms(pr.totalMs),
-          `${ps.pages}`, kb(ps.maxBytes), ms(ps.maxMs),
-        ]);
-      }
+    const { roomId, token } = await seedRoom(server);
+    for (const accept of [undefined, "gzip", "br"]) {
+      const pr = await pagedRender(server, roomId, token, accept);
+      const ps = await pagedSync(server, roomId, token, accept);
+      rows.push([
+        accept ?? "none",
+        `${pr.pages}`, mb(pr.totalBytes), ms(pr.totalMs), kb(pr.maxBytes), ms(pr.maxMs),
+        `${ps.pages}`, mb(ps.totalBytes), ms(ps.totalMs), kb(ps.maxBytes), ms(ps.maxMs),
+      ]);
     }
     const header = [
-      "ciphertext", "accept-encoding",
-      "/render bytes", "/render time",
-      "/sync?since=0 bytes", "/sync time",
-      "render pages", "max page bytes", "max page time", "all pages time",
-      "sync pages", "max sync page bytes", "max sync page time",
+      "accept-encoding",
+      "render pages", "render bytes", "render time", "max render page", "max render page time",
+      "sync pages", "sync bytes", "sync time", "max sync page", "max sync page time",
     ];
     console.log(`| ${header.join(" | ")} |`);
     console.log(`|${header.map(() => "---").join("|")}|`);

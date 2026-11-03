@@ -25,8 +25,7 @@ export interface LinkData {
 
 /**
  * Opaque, encrypted link payload used when a room has E2E enabled.
- * `ciphertext`/`nonce` are base64 (hex from clients built before base64)
- * AES-256-GCM output over the
+ * `ciphertext`/`nonce` are base64-encoded AES-256-GCM output over the
  * plaintext LinkData (see encryption.ts). The server never sees the
  * plaintext source/predicate/target for these links.
  */

@@ -589,7 +589,10 @@ function sourcesOf(diffs: PerspectiveDiff[], kind: "additions" | "removals"): st
 }
 
 function activeSources(server: TestServerHandle, roomId: string): string[] {
-  return server.built.db.getActiveLinks(roomId).map((l) => (l.data as { source: string }).source).sort();
+  return server.built.db
+    .getActiveLinkPage(roomId, Number.MAX_SAFE_INTEGER, { sequence: 0, hash: "" }, Number.MAX_SAFE_INTEGER)
+    .map((row) => ((JSON.parse(row.link_data) as LinkExpression).data as { source: string }).source)
+    .sort();
 }
 
 describe("integration: paged render, then tail", () => {
@@ -629,12 +632,10 @@ describe("integration: paged render, then tail", () => {
     const initial = Array.from({ length: 25 }, (_, i) => linkOf(agentA, `init-${i}`));
     await syncModule.commit({ additions: initial, removals: [] });
 
-    // B starts with a link the server no longer has: the render must remove it.
     const agentB = RealAgent.create();
     const bStorage = new MemoryStorage();
     const transport = new RecordingTransport();
     wireClient(server.url, roomId, agentB, bStorage, transport);
-    store.putLink(linkOf(agentB, "stale"));
     syncModule._setPageLimitsForTests(10, 2);
     transport.failIf = (url) => url.includes("/render") && url.includes("next=");
     await assert.rejects(syncModule.bootstrap(), /timed out/);
@@ -663,8 +664,8 @@ describe("integration: paged render, then tail", () => {
 
     const local = store.allLinks().links.map((l) => (l.data as { source: string }).source).sort();
     assert.deepEqual(local, activeSources(server, roomId), "B ends with the server's link set");
-    assert.deepEqual(sourcesOf(emittedDiffs, "removals").sort(), [seenGone.data.source, "stale"].sort(),
-      "the stale link and the one removed after B had it are removed; the other never reached B");
+    assert.deepEqual(sourcesOf(emittedDiffs, "removals"), [seenGone.data.source],
+      "the tail removes the link B had; the other never reached B");
     assert.ok(!sourcesOf(emittedDiffs, "additions").includes(unseenGone.data.source));
     assert.equal(store.getSequence(), 3);
     assert.equal(store.getRenderProgress(), null);
@@ -692,7 +693,7 @@ describe("integration: paged render, then tail", () => {
       transport.gets = [];
       await syncModule.catchUp();
       await syncModule._awaitRenderRetryForTests();
-      assert.deepEqual(transport.gets, [], "inside the backoff: no render, and no /sync from the stale cursor");
+      assert.deepEqual(transport.gets, [], "inside the backoff: no render, and no /sync from cursor 0");
 
       mock.timers.tick(syncModule.RENDER_RETRY_BASE_MS);
       await syncModule.catchUp();
@@ -709,7 +710,7 @@ describe("integration: paged render, then tail", () => {
     }
   });
 
-  it("a link committed or pushed during the render is not removed by its removal step", async () => {
+  it("a link committed or pushed during the render ends in the store, and nothing is removed", async () => {
     const server = await bootServer();
     const agentA = RealAgent.create();
     const roomId = "commit-during-render-room";
@@ -736,9 +737,47 @@ describe("integration: paged render, then tail", () => {
     await syncModule.bootstrap();
 
     assert.deepEqual(sourcesOf(emittedDiffs, "removals"), [], "nothing is removed and re-added");
+    assert.equal(sourcesOf(emittedDiffs, "additions").filter((s) => s === "pushed").length, 1,
+      "the push, left to the render, arrives once with its tail");
+    assert.ok(!sourcesOf(emittedDiffs, "additions").includes("own"), "B's own commit is not emitted back");
     const local = store.allLinks().links.map((l) => (l.data as { source: string }).source).sort();
     assert.deepEqual(local, activeSources(server, roomId));
     assert.ok(local.includes("own") && local.includes("pushed"));
+  });
+
+  it("a restart with a cursor above 0 sends no /render: it tails /sync from its cursor", async () => {
+    const server = await bootServer();
+    const agentA = RealAgent.create();
+    const roomId = "restart-tails-room";
+    wireClient(server.url, roomId, agentA);
+    const first = Array.from({ length: 12 }, (_, i) => linkOf(agentA, `first-${i}`));
+    await syncModule.commit({ additions: first, removals: [] });
+
+    const agentB = RealAgent.create();
+    const bStorage = new MemoryStorage();
+    wireClient(server.url, roomId, agentB, bStorage, new RecordingTransport());
+    syncModule._setPageLimitsForTests(10, 2);
+    await syncModule.bootstrap();
+    assert.equal(store.getSequence(), 1);
+
+    // While B is down, A adds three diffs and removes a link B holds.
+    wireClient(server.url, roomId, agentA);
+    for (let i = 0; i < 3; i++) await syncModule.commit({ additions: [linkOf(agentA, `later-${i}`)], removals: [] });
+    await syncModule.commit({ additions: [], removals: [first[0]] });
+
+    const restarted = new RecordingTransport();
+    const { emittedDiffs } = wireClient(server.url, roomId, agentB, bStorage, restarted);
+    syncModule._setPageLimitsForTests(10, 2);
+    syncModule.needRender();
+    await syncModule.bootstrap();
+
+    assert.deepEqual(restarted.gets.filter((g) => g.startsWith("/render")), [], "no render");
+    assert.deepEqual(restarted.gets.filter((g) => g.startsWith("/sync")), ["/sync?since=1&limit=2", "/sync?since=3&limit=2"]);
+    assert.deepEqual(sourcesOf(emittedDiffs, "additions"), ["later-0", "later-1", "later-2"]);
+    assert.deepEqual(sourcesOf(emittedDiffs, "removals"), [first[0].data.source]);
+    const local = store.allLinks().links.map((l) => (l.data as { source: string }).source).sort();
+    assert.deepEqual(local, activeSources(server, roomId));
+    assert.equal(store.getSequence(), 5);
   });
 
   it("catchUp reads a long diff log a page at a time", async () => {

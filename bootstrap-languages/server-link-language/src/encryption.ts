@@ -89,20 +89,6 @@ export function base64ToBytes(b64: string): Uint8Array {
     return out;
 }
 
-/** A 12-byte nonce in hex: what every link written before base64 carries. */
-const HEX_NONCE = new RegExp(`^[0-9a-fA-F]{${AES_NONCE_BYTES * 2}}$`);
-
-/**
- * The bytes of an encrypted link's `{ciphertext, nonce}`. Links are written
- * in base64; links written by older builds are hex, and rooms keep them. The
- * nonce tells which: 12 bytes are 24 characters in hex and 16 in base64, so
- * the two never look alike.
- */
-export function decodeWireCiphertext(data: { ciphertext: string; nonce: string }): { ciphertext: Uint8Array; nonce: Uint8Array } {
-    const decode = HEX_NONCE.test(data.nonce.trim()) ? hexToBytes : base64ToBytes;
-    return { ciphertext: decode(data.ciphertext), nonce: decode(data.nonce) };
-}
-
 function utf8ToBytes(str: string): Uint8Array {
     return new TextEncoder().encode(str);
 }
@@ -393,7 +379,8 @@ export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKeyOrRing:
     } else {
         roomKey = roomKeyOrRing;
     }
-    const { ciphertext, nonce } = decodeWireCiphertext(wireLink.data);
+    const nonce = base64ToBytes(wireLink.data.nonce);
+    const ciphertext = base64ToBytes(wireLink.data.ciphertext);
     const plaintext = gcm(roomKey, nonce).decrypt(ciphertext);
     const parsed = JSON.parse(bytesToUtf8(plaintext));
 

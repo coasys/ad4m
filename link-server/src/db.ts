@@ -5,7 +5,6 @@ import {
   EMPTY_REVISION,
   linkHash,
   xorHex,
-  type LinkExpression,
   type PerspectiveDiff,
 } from "./types.js";
 
@@ -210,7 +209,6 @@ export class LinkServerDB {
          VALUES (?, ?, ?, ?)`
       ),
       removeLink: this.raw.prepare("DELETE FROM links WHERE room_id = ? AND link_hash = ?"),
-      getActiveLinkRows: this.raw.prepare("SELECT * FROM links WHERE room_id = ?"),
       getActiveLinkPage: this.raw.prepare(
         `SELECT * FROM links
          WHERE room_id = ? AND sequence <= ? AND (sequence > ? OR (sequence = ? AND link_hash > ?))
@@ -226,9 +224,6 @@ export class LinkServerDB {
       appendDiff: this.raw.prepare(
         `INSERT INTO diffs (room_id, sequence, diff_data, timestamp, author_did)
          VALUES (?, ?, ?, ?, ?)`
-      ),
-      getDiffsSince: this.raw.prepare(
-        "SELECT * FROM diffs WHERE room_id = ? AND sequence > ? ORDER BY sequence ASC"
       ),
       getDiffPageSince: this.raw.prepare(
         "SELECT * FROM diffs WHERE room_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?"
@@ -381,16 +376,6 @@ export class LinkServerDB {
     return info.changes > 0;
   }
 
-  getActiveLinkRows(roomId: string): LinkRow[] {
-    return this.stmts.getActiveLinkRows.all(roomId) as LinkRow[];
-  }
-
-  getActiveLinks(roomId: string): LinkExpression[] {
-    return this.getActiveLinkRows(roomId).map(
-      (row) => JSON.parse(row.link_data) as LinkExpression
-    );
-  }
-
   /**
    * One page of the active links that were added at or before `upto`, in
    * `(sequence, link_hash)` order, strictly after the cursor `after`
@@ -431,25 +416,9 @@ export class LinkServerDB {
     this.stmts.appendDiff.run(roomId, sequence, diffData, new Date().toISOString(), authorDid);
   }
 
-  getDiffsSince(roomId: string, since: number): DiffRow[] {
-    return this.stmts.getDiffsSince.all(roomId, since) as DiffRow[];
-  }
-
   /** At most `limit` diffs after `since`, in sequence order. */
   getDiffPageSince(roomId: string, since: number, limit: number): DiffRow[] {
     return this.stmts.getDiffPageSince.all(roomId, since, limit) as DiffRow[];
-  }
-
-  getDiffsSinceParsed(
-    roomId: string,
-    since: number
-  ): { sequence: number; diff: PerspectiveDiff; timestamp: string; authorDid: string }[] {
-    return this.getDiffsSince(roomId, since).map((row) => ({
-      sequence: row.sequence,
-      diff: JSON.parse(row.diff_data) as PerspectiveDiff,
-      timestamp: row.timestamp,
-      authorDid: row.author_did,
-    }));
   }
 
   /**

@@ -155,22 +155,6 @@ function toWireDiff(diff: PerspectiveDiff): WirePerspectiveDiff {
     };
 }
 
-function normalizeSyncEntry(
-    entry: SyncDiffEntry,
-    fallbackRevision: string,
-    fallbackSequence: number,
-): { diff: WirePerspectiveDiff; revision: string; sequence: number } {
-    const diff: WirePerspectiveDiff = entry.diff ?? {
-        additions: entry.additions ?? [],
-        removals: entry.removals ?? [],
-    };
-    return {
-        diff,
-        revision: entry.revision ?? fallbackRevision,
-        sequence: typeof entry.sequence === "number" ? entry.sequence : fallbackSequence,
-    };
-}
-
 // ---------------------------------------------------------------------------
 // Inbound — the single path (see module doc)
 // ---------------------------------------------------------------------------
@@ -240,17 +224,17 @@ function openOrHoldDiff(wire: WirePerspectiveDiff): PerspectiveDiff {
 }
 
 /** One inbound diff (a catch-up entry or a WebSocket push) at `sequence`.
- *  Returns what it changed, which is what was emitted. */
+ *  Returns what it changed, which is what was emitted.
+ *
+ *  While a render is stored it applies nothing and leaves the cursor: catch-up
+ *  does not tail then, so only a WebSocket push gets here, and the render
+ *  brings its links anyway. A push before the first page is inside the
+ *  snapshot; one after it is after `upto`, in the tail that follows the last
+ *  page. Applying it early would let a lost later push leave a link the
+ *  snapshot no longer has. */
 export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: number, revision: string): PerspectiveDiff {
-    const opened = openOrHoldDiff(wireDiff);
-    const emitted = applyAndEmit(opened);
-    // A diff pushed during a paged render is after its `upto`: no page carries
-    // its links, so the render's removal step must keep them.
-    if (store.getRenderProgress() && (wireDiff.additions?.length ?? 0) > 0) {
-        const kept = opened.additions.map(store.hashLink);
-        for (const wireLink of wireDiff.additions ?? []) if (wireLink.link_hash) kept.push(wireLink.link_hash);
-        store.addRenderSeen(`diff-${sequence}`, kept);
-    }
+    if (store.getRenderProgress()) return { additions: [], removals: [] };
+    const emitted = applyAndEmit(openOrHoldDiff(wireDiff));
     if (revision) store.setRevision(revision);
     if (Number.isFinite(sequence)) store.setSequence(sequence);
     return emitted;
@@ -309,10 +293,6 @@ export async function commit(diff: PerspectiveDiff): Promise<void> {
     const wire = toWireDiff(diff);
     const res = await withToken((token) => api.commitDiff(config, token, wire));
     store.applyDiff(diff);
-    // A render in progress would remove these links: no page it reads carries them.
-    if (store.getRenderProgress() && diff.additions.length > 0) {
-        store.addRenderSeen(`commit-${res.sequence ?? Date.now()}`, diff.additions.map(store.hashLink));
-    }
     if (typeof res.sequence === "number" && res.sequence === store.getSequence() + 1) {
         store.setSequence(res.sequence);
         if (res.revision) store.setRevision(res.revision);
@@ -611,15 +591,18 @@ let _renderRetryDelay = RENDER_RETRY_BASE_MS;
 let _rendering: Promise<void> | null = null;
 
 /**
- * Asks for a fresh render: stores the first page's cursor, unless a render's
- * progress is stored already, which is then resumed. The stored progress is
- * the "render needed" state: until the last page clears it, catch-up does
- * not tail `/sync` and retries the render with backoff (`retryRenderIfDue`).
- * `init` calls it before its startup sequence, so a render that never ran
- * (authentication failed first) is run by catch-up too.
+ * Stores a render for a fresh member: one whose cursor is 0 and that has no
+ * render stored. A stored render (a first render cut off by a failure or a
+ * restart) is kept and resumed. A member whose cursor is above 0 never
+ * renders: the server keeps the whole diff log, so `/sync` from its cursor
+ * brings every change. The stored progress is the "render needed" state:
+ * until the last page clears it, catch-up does not tail `/sync` and retries
+ * the render with backoff (`retryRenderIfDue`). `init` calls it before its
+ * startup sequence, so a render that never ran (authentication failed
+ * first) is run by catch-up too.
  */
 export function needRender(): void {
-    if (_rendering || store.getRenderProgress()) return;
+    if (_rendering || store.getRenderProgress() || store.getSequence() > 0) return;
     store.clearHeld();
     store.setRenderProgress({ upto: null, next: null, page: 0 });
 }
@@ -677,27 +660,26 @@ export async function _awaitRenderRetryForTests(): Promise<void> {
 }
 
 /**
- * Loads the server's current link set as the authoritative state: a paged
- * `/render` snapshot pinned at `upto`, then the diff log after `upto`
- * (`catchUp`). Each page is applied and emitted as its own diff, and the
- * cursor is stored after it, so a restart (or a retry) resumes at the next
- * page. After the last page, stored links no page brought are removed and
- * emitted once: the snapshot is the room's state at `upto`, and the log
- * after it carries every later add and remove.
+ * Brings the store up to the room's state on startup. A member with a cursor
+ * above 0 catches up from it. A fresh member loads a paged `/render`
+ * snapshot pinned at `upto`, then the diff log after `upto` (`catchUp`).
+ * Each page is applied and emitted as its own diff, and the cursor is stored
+ * after it, so a restart (or a retry) resumes at the next page. The snapshot
+ * is the room's state at `upto` and the log after it carries every later add
+ * and remove, so a fresh store needs nothing removed: what it holds besides
+ * the pages are its own commits, which are on the server and in the snapshot
+ * or the tail. Snapshot links no key opens yet are held.
  *
- * Held links from before are dropped (the snapshot supersedes them); the
- * snapshot's own links that no key opens yet are held. A stored link whose
- * encrypted copy is held stays: the key ring not being loaded yet must not
- * delete links the executor holds. A link this agent commits during the
- * render stays too (`commit` records it).
- *
- * Starts a fresh render unless one is stored (`needRender`), and runs it now,
- * whatever the backoff: `init` calls it once. Single-flight: a call while a
- * render is out joins it. A failed page keeps its progress, and catch-up
- * resumes it with backoff (`retryRenderIfDue`) until the last page.
+ * Single-flight: a call while a render is out joins it. A failed page keeps
+ * its progress, and catch-up resumes it with backoff (`retryRenderIfDue`)
+ * until the last page.
  */
 export async function bootstrap(): Promise<void> {
     needRender();
+    if (!store.getRenderProgress()) {
+        await catchUp();
+        return;
+    }
     await startRender();
 }
 
@@ -727,28 +709,16 @@ async function renderPages(): Promise<void> {
         upto ??= page.upto;
 
         const additions: LinkExpression[] = [];
-        const seen: string[] = [];
         for (const wireLink of page.links) {
             const link = openOrHold(wireLink, "add");
-            if (link) {
-                additions.push(link);
-                seen.push(store.hashLink(link));
-            } else {
-                seen.push(heldId(wireLink));
-            }
+            if (link) additions.push(link);
         }
         applyAndEmit({ additions, removals: [] });
-        store.addRenderSeen(`page-${progress.page}`, seen);
         progress = { upto, next: page.next, page: progress.page + 1 };
         store.setRenderProgress(progress);
         if (page.next === null) break;
     }
 
-    const seen = store.renderSeen();
-    const removals = store
-        .allLinks()
-        .links.filter((link) => !seen.has(store.hashLink(link)) && !seen.has(wireLinkHash(link)));
-    applyAndEmit({ additions: [], removals });
     const held = store.heldLinks().length;
     if (held > 0) {
         console.warn(
@@ -757,8 +727,7 @@ async function renderPages(): Promise<void> {
         );
     }
     console.log(
-        `[server-link-language] bootstrap: snapshot at sequence ${upto} loaded in ${progress.page} page(s), ` +
-        `${removals.length} stale link(s) removed`,
+        `[server-link-language] bootstrap: snapshot at sequence ${upto} loaded in ${progress.page} page(s)`,
     );
     store.setSequence(upto ?? 0);
     store.clearRender();
@@ -777,9 +746,9 @@ async function renderPages(): Promise<void> {
  * for a key, it re-reads the key ring; it then retries the held links
  * against whatever ring it has. Returns what it emitted.
  *
- * While a paged render is stored (`bootstrap`), it does not tail: the stored
- * cursor predates the snapshot, and reading the log from it is the full
- * replay the render replaces. It resumes the render instead, once its
+ * While a paged render is stored (`bootstrap`), it does not tail: a render
+ * is stored only at cursor 0, and reading the log from 0 is the full replay
+ * the render replaces. It resumes the render instead, once its
  * backoff has elapsed, without waiting for it (`retryRenderIfDue`); the
  * render's last page is followed by the tail from its `upto`.
  */
@@ -800,9 +769,8 @@ export async function catchUp(): Promise<PerspectiveDiff> {
         );
         // The room's revision belongs to its latest sequence: only the last page sets it.
         const last = res.next === null;
-        for (const rawEntry of res.diffs) {
-            const entry = normalizeSyncEntry(rawEntry, last ? res.revision : "", res.next ?? res.sequence);
-            collect(applyInboundWireDiff(entry.diff, entry.sequence, entry.revision));
+        for (const { additions, removals, sequence } of res.diffs) {
+            collect(applyInboundWireDiff({ additions, removals }, sequence, last ? res.revision : ""));
         }
         if (res.diffs.length === 0 && res.revision) {
             store.setRevision(res.revision);

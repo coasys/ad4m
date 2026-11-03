@@ -133,30 +133,18 @@ export interface CommitResponse {
     sequence?: number;
 }
 
-/**
- * One entry in the `/sync` response's `diffs[]` array. The exact shape
- * link-server uses for per-entry framing isn't nailed down by the
- * spec this language was built against, so both reasonable shapes are
- * accepted and normalized in src/sync.ts:
- *   - nested:  { diff: { additions, removals }, revision?, sequence? }
- *   - flat:    { additions, removals, revision?, sequence? }
- * Missing per-entry `revision`/`sequence` fall back to the response's
- * top-level values.
- */
+/** One entry in the `/sync` page's `diffs[]`: a diff and its sequence in the room's log. */
 export interface SyncDiffEntry {
-    diff?: WirePerspectiveDiff;
-    additions?: WireLinkExpression[];
-    removals?: WireLinkExpression[];
-    revision?: string;
-    sequence?: number;
+    additions: WireLinkExpression[];
+    removals: WireLinkExpression[];
+    sequence: number;
 }
 
 export interface SyncResponse {
     diffs: SyncDiffEntry[];
     revision: string;
     sequence: number;
-    /** Paged answer only: the `since` of the next page; null on the last
-     *  page and from a server that does not page (it sends the whole log). */
+    /** The `since` of the next page; null on the last page. */
     next: number | null;
 }
 
@@ -164,8 +152,7 @@ export interface RenderResponse {
     links: WireLinkExpression[];
     revision: string;
     sequence: number;
-    /** The sequence the snapshot is pinned at: tail `/sync` from here. A
-     *  server that does not page sends the whole set at `sequence`. */
+    /** The sequence the snapshot is pinned at: tail `/sync` from here. */
     upto: number;
     /** Cursor of the next page; null on the last page. */
     next: string | null;
