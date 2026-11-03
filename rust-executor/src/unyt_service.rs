@@ -826,11 +826,37 @@ async fn capture_dna_hash() {
 // Zome call helpers
 // ---------------------------------------------------------------------------
 
+/// A Unyt call found no running Holochain conductor. The WS handlers answer it with 503.
+#[derive(Debug)]
+pub struct HolochainNotRunning;
+
+impl std::fmt::Display for HolochainNotRunning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Holochain is not running")
+    }
+}
+
+impl std::error::Error for HolochainNotRunning {}
+
+/// The running Holochain service, or [`HolochainNotRunning`] at once when no conductor
+/// runs or starts.
+async fn running_holochain_service() -> Result<HolochainServiceInterface, AnyError> {
+    crate::holochain_service::holochain_service_once_started()
+        .await
+        .ok_or_else(|| HolochainNotRunning.into())
+}
+
 /// Call a zome function on the alliance DNA and return decoded JSON.
 /// Automatically ensures the DNA is installed first.
+///
+/// A request does not wait for a conductor that does not run (Holochain disabled, agent
+/// locked, conductor down): it fails at once with [`HolochainNotRunning`]. It waits only
+/// for a conductor start in progress (`holochain_service_once_started`). The unbounded
+/// wait in `ensure_installed` is for the background install at start-up.
 async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue, AnyError> {
+    running_holochain_service().await?;
     ensure_installed().await?;
-    let hc = get_holochain_service().await;
+    let hc = running_holochain_service().await?;
 
     let response = call_alliance_zome(&hc, fn_name, payload).await?;
 
@@ -1594,6 +1620,32 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
     use tokio::sync::{mpsc, Mutex};
+
+    /// A wallet read must answer at once when the Holochain conductor does not run
+    /// (Holochain disabled, agent still locked, conductor down), even with a membrane
+    /// proof stored. Only the background install at start-up waits for the conductor.
+    #[tokio::test]
+    async fn wallet_read_without_conductor_fails_at_once() {
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        set_membrane_proof("cHJvb2Y=").unwrap();
+        assert!(maybe_get_holochain_service().await.is_none());
+
+        let ledger = tokio::time::timeout(Duration::from_secs(10), get_ledger())
+            .await
+            .expect("get_ledger must not wait for a conductor that does not run");
+        let history = tokio::time::timeout(Duration::from_secs(10), get_history(None, 50))
+            .await
+            .expect("get_history must not wait for a conductor that does not run");
+
+        for err in [ledger.unwrap_err(), history.unwrap_err()] {
+            assert!(
+                err.to_string().contains("Holochain is not running"),
+                "unexpected error: {err}"
+            );
+        }
+    }
 
     /// Two Unyt writes started together must reach the alliance cell one after the other,
     /// even though the dispatch loop runs zome calls concurrently since #1133: overlapping

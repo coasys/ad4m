@@ -82,7 +82,16 @@ async fn get_hosting_wallet_history(
 ) -> Result<Value, WsRpcError> {
     let history = crate::unyt_service::get_history(None, 50)
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| {
+            if e.is::<crate::unyt_service::HolochainNotRunning>() {
+                WsRpcError {
+                    code: 503,
+                    message: e.to_string(),
+                }
+            } else {
+                WsRpcError::internal(e.to_string())
+            }
+        })?;
 
     Ok(history)
 }
@@ -193,6 +202,36 @@ pub struct HostingRequestPaymentResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // A wallet read answers 503 at once when the Holochain conductor does not run, even
+    // with a membrane proof stored: the request does not wait for the conductor.
+    #[tokio::test]
+    async fn wallet_history_without_conductor_answers_503() {
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        crate::unyt_service::set_membrane_proof("cHJvb2Y=").unwrap();
+
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            map.dispatch(
+                "hosting.walletHistory",
+                json!({}),
+                Arc::new(RequestContext::operator_for_test()),
+            ),
+        )
+        .await
+        .expect("hosting.walletHistory must not wait for a conductor that does not run")
+        .unwrap_err();
+        assert_eq!(err.code, 503, "{}", err.message);
+        assert!(
+            err.message.contains("Holochain is not running"),
+            "{}",
+            err.message
+        );
+    }
 
     // The guard admits every session that holds AGENT_UPDATE; only a user has a wallet
     // address to set, so the handler refuses the rest before it writes anything.
