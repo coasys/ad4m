@@ -193,7 +193,9 @@ async fn install_with_retries(installed: &mut bool) -> Result<(), AnyError> {
                     attempt, e
                 );
                 last_err = Some(e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                if attempt < 5 {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
             }
         }
     }

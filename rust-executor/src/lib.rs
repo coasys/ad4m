@@ -699,9 +699,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 return;
             }
             // Wait for the conductor without a limit: the agent unlock may take a while.
-            while crate::holochain_service::maybe_get_holochain_service()
+            while !crate::holochain_service::maybe_get_holochain_service()
                 .await
-                .is_none()
+                .is_some_and(|service| !service.is_stopped())
             {
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             }
