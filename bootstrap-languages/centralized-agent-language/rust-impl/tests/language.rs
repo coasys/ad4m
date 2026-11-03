@@ -1736,6 +1736,44 @@ fn a_record_verifies_only_on_a_log_that_ends_at_a_head_a_configured_store_key_si
 }
 
 #[test]
+fn a_log_page_whose_event_names_a_member_twice_gives_no_log() {
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (host, store) = Host::of(&server);
+    let (did, scid, _) = scid_person_with_record(&mut apps, &server, &store, "wes twice");
+    let page = block_on(store.log(&did, 0)).unwrap().unwrap();
+    let text = serde_json::to_string(&page).unwrap();
+    // Event #0 with a second `next` before the signed one: a parser that keeps the last member
+    // reads the genuine event, one that keeps the first reads another.
+    let other = json!(ad4m_hash_chain::entry_hash_json(&page.events[1]).unwrap()).to_string();
+    let doubled = text.replacen("\"next\":", &format!("\"next\":{other},\"next\":"), 1);
+    assert_ne!(doubled, text);
+    let log_path = format!("{}/v1/logs/{scid}", server.url);
+    let serve_log = |body: &str| {
+        host.remotes.borrow_mut().clear();
+        host.serve(
+            &log_path,
+            HttpReply {
+                status: 200,
+                body: body.to_string(),
+            },
+        );
+    };
+    // The genuine page, served by the stand-in: a log, and the record verifies.
+    serve_log(&text);
+    assert!(block_on(agents::read_log(&store, &did)).unwrap().is_some());
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_some());
+    // The same page with the doubled member: no log, so no record.
+    serve_log(&doubled);
+    assert!(block_on(agents::read_log(&store, &did)).unwrap().is_none());
+    assert!(block_on(agents::get(&store, &did, now_s()))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn a_log_read_is_bounded_whatever_head_the_store_names() {
     let server = StoreProcess::start();
     let mut apps = Apps::start();

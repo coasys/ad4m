@@ -362,16 +362,17 @@ impl<H: Http> Store<H> {
     /// [`MAX_REPLY_BYTES`] or a page of more than [`LOG_PAGE_EVENTS`] events is refused as
     /// `invalid` (`too-large`).
     pub async fn log(&self, did: &str, from: u64) -> LanguageResult<Option<LogPage>> {
-        Ok(self.log_sized(did, from).await?.map(|(page, _)| page))
+        Ok(self.log_with_text(did, from).await?.map(|(page, _)| page))
     }
 
-    /// [`Store::log`] with the size of the reply body in bytes, for a reader that bounds what
-    /// it reads in total.
-    pub async fn log_sized(
+    /// [`Store::log`] with the reply body, for a reader that bounds the bytes it reads in total
+    /// and parses the events from their own text: a `Value` in `LogPage::events` has kept only
+    /// the last of two members of one name, which the event's text still shows.
+    pub async fn log_with_text(
         &self,
         did: &str,
         from: u64,
-    ) -> LanguageResult<Option<(LogPage, usize)>> {
+    ) -> LanguageResult<Option<(LogPage, String)>> {
         let path = format!("/v1/logs/{}", segment(scid_of(did)?));
         let query = Send {
             query: vec![("from", from.to_string())],
@@ -388,7 +389,7 @@ impl<H: Http> Store<H> {
         if page.events.len() > LOG_PAGE_EVENTS as usize {
             return Err(invalid("too-large"));
         }
-        Ok(Some((page, reply.body.len())))
+        Ok(Some((page, reply.body)))
     }
 
     pub async fn head(&self, did: &str) -> LanguageResult<Option<SignedHead>> {

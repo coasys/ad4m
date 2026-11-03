@@ -796,6 +796,32 @@ async fn a_malformed_event_or_a_wrong_scid_is_400_and_an_unknown_log_is_404() {
 }
 
 #[tokio::test]
+async fn an_event_that_names_a_member_twice_is_400_duplicate_member_and_appends_nothing() {
+    let t = TestStore::new();
+    let alice = Person::new("alice");
+    // Alice's signed #0 with a second `next` before the signed one: a parser keeping the last
+    // member reads a valid event, one keeping the first reads another.
+    let text = serde_json::to_string(&alice.json(0)).unwrap();
+    let other = serde_json::to_string(&Person::new("bob").json(0)["next"]).unwrap();
+    let doubled = text.replacen("\"next\":", &format!("\"next\":{other},\"next\":"), 1);
+    assert_ne!(doubled, text);
+    let body = format!(r#"{{"events":[{doubled}]}}"#);
+    let path = format!("/v1/logs/{}/events", alice.scid());
+    let reply = t.send("POST", &path, Some(body.into_bytes()), None).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "DuplicateMember");
+    assert_eq!(
+        t.get(&format!("/v1/logs/{}", alice.scid())).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(t.count("chain_entries"), 0);
+    // The same event once: stored.
+    let body = format!(r#"{{"events":[{text}]}}"#);
+    let reply = t.send("POST", &path, Some(body.into_bytes()), None).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
+#[tokio::test]
 async fn a_did_key_record_signed_by_its_key_is_stored_and_one_signed_by_another_key_is_403() {
     let t = TestStore::new();
     let guest = key("guest");

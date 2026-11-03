@@ -34,6 +34,32 @@ fn chain_error(e: &ChainError<FoldError>) -> ApiError {
     ApiError::invalid(&name, e.to_string())
 }
 
+/// The events of an append body, each parsed from its own text with `Event::from_json_text`.
+/// A refused event is `400` with the format rule's name (`DuplicateMember`, `UnknownField`, …),
+/// or the `FoldError` name for any other refusal.
+fn events_of(body: &[u8]) -> Result<Vec<Event>, ApiError> {
+    #[derive(serde::Deserialize)]
+    struct Texts<'a> {
+        #[serde(borrow)]
+        events: Vec<&'a serde_json::value::RawValue>,
+    }
+    let texts: Texts =
+        serde_json::from_slice(body).map_err(|e| ApiError::invalid("malformed", e.to_string()))?;
+    texts
+        .events
+        .iter()
+        .map(|text| {
+            Event::from_json_text(text.get()).map_err(|e| {
+                let name = match &e {
+                    FoldError::Format(format) => format.name(),
+                    other => other.name(),
+                };
+                ApiError::invalid(name, e.to_string())
+            })
+        })
+        .collect()
+}
+
 /// How a new log with no vouching note is admitted (section 14, host admission policy, of
 /// `docs-src/identity/did-scid-coasys-1.md`). There is no brake yet: no
 /// bucket per address, no store-wide ceiling and no required proof of work. A proof that is
@@ -143,7 +169,15 @@ fn current_head(conn: &Connection, scid: &str) -> Result<SignedHead, ApiError> {
 
 impl Store {
     /// `POST /v1/logs/{scid}/events`.
-    pub fn append(&self, scid: &str, req: &AppendRequest) -> Result<SignedHead, ApiError> {
+    /// `body` is the text `req` was parsed from: the events are parsed again from their own
+    /// text there, so an event that names a member twice is refused (`DuplicateMember`), which
+    /// `req.events` (each a `Value`, holding only the last of the two) cannot show.
+    pub fn append(
+        &self,
+        scid: &str,
+        req: &AppendRequest,
+        body: &[u8],
+    ) -> Result<SignedHead, ApiError> {
         if req.events.is_empty() {
             return Err(ApiError::invalid(
                 "malformed",
@@ -162,11 +196,7 @@ impl Store {
                 "a new log carries a vouching token or a proof of work, not both",
             ));
         }
-        let events = req
-            .events
-            .iter()
-            .map(|v| Event::from_json(v).map_err(|e| ApiError::invalid(e.name(), e.to_string())))
-            .collect::<Result<Vec<_>, _>>()?;
+        let events = events_of(body)?;
         let now = self.now();
 
         let mut conn = self.db.lock()?;

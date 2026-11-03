@@ -45,7 +45,8 @@ log and keeps it only when the last page's head is signed (`coasys:head`) by one
 names that log, and is exactly the head the replayed events end at; without `storeKeys` no
 `did:scid` record verifies. A signed head carries no freshness: the store can still serve an
 older head with its prefix. A log read stops at 64 pages and two pages' worth of bytes
-(`invalid` `too-large`), whatever head the store names.
+(`invalid` `too-large`), whatever head the store names. Each event is parsed from the page's
+text, so an event that names a member twice (I-JSON, RFC 7493) gives no log.
 
 Record signatures use their own domain, `coasys:agent-record`, and a record's `version` is
 unix milliseconds: the store refuses one more than 5 minutes past its clock, so no write can
