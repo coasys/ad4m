@@ -22,10 +22,37 @@
  */
 
 import { Ad4mModel } from "../model/Ad4mModel";
-import { Model, Property } from "../model/decorators";
+import { HasMany, Model, Property } from "../model/decorators";
 
 /** Where a reply is. Only `running` changes. */
 export type AgentReplyStatus = "running" | "done" | "failed" | "cancelled" | "interrupted";
+
+/** How a step went. A step left `running` under a reply that is no longer running was cut off. */
+export type AgentStepOutcome = "running" | "ok" | "error";
+
+/**
+ * One tool call an agent made while writing a reply, written as it made it: the tool, the
+ * record it acted on, and how it went. Never the call's arguments or result. Mirrors
+ * `hardwired_sdna/agent_step.json`.
+ */
+@Model({ name: "AgentStep" })
+export class AgentStepRecord extends Ad4mModel {
+  /** The tool the agent called (`template_read`, `instance_update`, …). First-declared, for the namespace. */
+  @Property({ through: "ad4m://agent_step/tool", required: true })
+  tool: string = "";
+
+  /** The record it acted on, by id, when the call names one. */
+  @Property({ through: "ad4m://agent_step/target" })
+  target: string = "";
+
+  /** `running` until the call returns, then `ok` or `error`. */
+  @Property({ through: "ad4m://agent_step/outcome" })
+  outcome: string = "";
+
+  /** The tool's message when it failed, capped. */
+  @Property({ through: "ad4m://agent_step/error" })
+  error: string = "";
+}
 
 @Model({ name: "AgentReply" })
 export class AgentReplyRecord extends Ad4mModel {
@@ -46,4 +73,11 @@ export class AgentReplyRecord extends Ad4mModel {
   /** Why it `failed`. */
   @Property({ through: "ad4m://agent_reply/error" })
   error: string = "";
+
+  /**
+   * Its tool calls, as they happen. Read them with `include: { steps: true }` (oldest first by
+   * `createdAt`); a subscription with that include follows new steps and their outcomes.
+   */
+  @HasMany(() => AgentStepRecord, { through: "ad4m://agent_step" })
+  steps: AgentStepRecord[] = [];
 }

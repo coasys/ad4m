@@ -98,8 +98,11 @@ describe("perspective.agentReply", function () {
     );
     builder.dispose();
 
-    const [reply] = (await AgentReplyRecord.findAll(p)).filter((r) => r.id === second);
+    const [reply] = (await AgentReplyRecord.findAll(p, { include: { steps: true } })).filter(
+      (r) => r.id === second,
+    );
     expect(reply.error, "the reply says why it failed").to.not.equal("");
+    expect(reply.steps, "no tool was called, so no steps").to.deep.equal([]);
 
     // The reply is a message of the conversation, a child of the container.
     const children = await p.get(new LinkQuery({ source: CHAT, predicate: "ad4m://has_child" }));
