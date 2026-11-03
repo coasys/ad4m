@@ -66,7 +66,7 @@ impl PerspectiveInstance {
     /// perspective's archive is downloaded and extracted first. A failed download, a store
     /// that does not open, or failed start-up checks leave the perspective deferred, so the
     /// next access tries again; it never serves (or backs up) an empty store in place of
-    /// one it could not fetch.
+    /// one it could not fetch. A removed perspective does not open.
     pub async fn hydrate(&self) -> Result<(), String> {
         if self.is_hydrated() {
             return Ok(());
@@ -74,6 +74,15 @@ impl PerspectiveInstance {
         let _hydrating = self.hydration_lock.lock().await;
         if self.is_hydrated() {
             return Ok(());
+        }
+        // Removed (`remove_perspective` tears it down first): a caller that fetched it
+        // before the removal must not download its archive, open its store or start its
+        // background tasks again.
+        if self.is_teardown.load(Ordering::Acquire) {
+            return Err(format!(
+                "Not opening perspective {}: it was removed",
+                self.uuid
+            ));
         }
 
         let uuid = self.uuid.clone();

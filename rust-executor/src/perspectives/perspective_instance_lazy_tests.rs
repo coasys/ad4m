@@ -115,3 +115,61 @@ async fn hydrating_a_hydrated_perspective_keeps_its_store() {
     p.hydrate().await.unwrap();
     assert!(Arc::ptr_eq(&before, &p.store()));
 }
+
+/// A removed perspective (torn down first, as `remove_perspective` does) does not open: a
+/// caller that fetched it before the removal gets an error, not a store and background
+/// tasks for a perspective that is gone.
+#[tokio::test]
+async fn a_removed_perspective_does_not_hydrate() {
+    let p = PerspectiveInstance::new_deferred(handle("removed"));
+    p.teardown_background_tasks().await;
+    assert!(p.hydrate().await.is_err());
+    assert!(!p.is_hydrated());
+}
+
+/// A diff its link language delivers for a deferred perspective opens the perspective
+/// first, so the diff lands in the persistent store, not in the empty in-memory one the
+/// opening replaces.
+#[tokio::test]
+async fn a_link_language_diff_opens_a_deferred_perspective_first() {
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+
+    setup_perspective_no_llm(&[]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let previous_path = crate::perspectives::get_app_data_path();
+    crate::perspectives::set_app_data_path(dir.path().to_str().unwrap().to_string());
+
+    let language = format!("lazy-diff-language-{}", uuid::Uuid::new_v4());
+    let mut h = handle("diff while deferred");
+    h.neighbourhood = Some(crate::types::DecoratedNeighbourhoodExpression {
+        data: crate::types::domain::Neighbourhood {
+            link_language: language.clone(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    Ad4mDb::with_global_instance(|db| db.add_perspective(&h)).unwrap();
+    let p = PerspectiveInstance::new_deferred(h.clone());
+    crate::perspectives::register_perspective(h.uuid.clone(), p.clone());
+
+    let signer = TestSigner::generate();
+    crate::perspectives::handle_perspective_diff_from_link_language_impl(
+        PerspectiveDiff {
+            additions: vec![link(&signer, "ad4m://t/from-peer")],
+            removals: vec![],
+        },
+        language,
+    )
+    .await;
+
+    let hydrated = p.is_hydrated();
+    let persistent = std::path::Path::new(&store_data_path(&h.uuid).unwrap()).exists();
+    let links = link_count(&p);
+    p.teardown_background_tasks().await;
+    crate::perspectives::unregister_perspective(&h.uuid);
+    crate::perspectives::restore_app_data_path(previous_path);
+
+    assert!(hydrated, "the diff opens the perspective");
+    assert!(persistent, "the open store is the persistent one");
+    assert_eq!(links, 1, "the diff is in the open store");
+}

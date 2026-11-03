@@ -56,12 +56,18 @@ impl CallPolicy {
 /// Predicate of the config link. Its source is the neighbourhood URL.
 pub const SFU_CONFIG_PREDICATE: &str = "ad4m://sfu_config";
 
-/// This node's perspective for `neighbourhood_url`, if it has joined it.
+/// This node's perspective for `neighbourhood_url`, if it has joined it, opened: the call
+/// config lives in its store, and a deferred perspective's store is empty until it opens
+/// ([`PerspectiveInstance::hydrate`]). `None` too when it does not open, as if not joined.
 pub(crate) async fn neighbourhood_perspective(
     neighbourhood_url: &str,
 ) -> Option<PerspectiveInstance> {
     for perspective in all_perspectives() {
         if perspective.persisted.lock().await.shared_url.as_deref() == Some(neighbourhood_url) {
+            if let Err(e) = perspective.hydrate().await {
+                log::error!("SFU config: {}", e);
+                return None;
+            }
             return Some(perspective);
         }
     }
@@ -349,5 +355,69 @@ mod tests {
         assert_eq!(links.len(), 1, "the earlier config link was not removed");
 
         crate::perspectives::unregister_perspective(&uuid);
+    }
+
+    /// A deferred neighbourhood perspective (multi-tenant start-up) has an empty store until
+    /// it opens. Reading its policy opens it, so the read gets the creator's stored policy,
+    /// not the default.
+    #[tokio::test]
+    async fn a_deferred_neighbourhood_reads_its_stored_policy() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+        use crate::perspectives::sparql_store::SparqlStore;
+        use crate::types::{DecoratedNeighbourhoodExpression, PerspectiveHandle};
+
+        setup_perspective_no_llm(&[]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let previous_path = crate::perspectives::get_app_data_path();
+        crate::perspectives::set_app_data_path(dir.path().to_str().unwrap().to_string());
+
+        let creator = TestSigner::generate();
+        let url = format!(
+            "neighbourhood://sfu-config-deferred/{}",
+            uuid::Uuid::new_v4()
+        );
+        let handle = PerspectiveHandle {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            shared_url: Some(url.clone()),
+            neighbourhood: Some(DecoratedNeighbourhoodExpression {
+                author: creator.did.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        {
+            let path =
+                crate::perspectives::perspective_instance::store_data_path(&handle.uuid).unwrap();
+            let store = SparqlStore::new(Some(&path)).unwrap();
+            let signed = creator.sign(
+                Link {
+                    source: url.clone(),
+                    predicate: Some(SFU_CONFIG_PREDICATE.to_string()),
+                    target: to_literal(&policy("cascaded", 6)).unwrap(),
+                }
+                .normalize(),
+            );
+            store
+                .add_link(&LinkExpression {
+                    author: signed.author,
+                    timestamp: signed.timestamp,
+                    data: signed.data,
+                    proof: signed.proof,
+                    status: Some(LinkStatus::Shared),
+                })
+                .unwrap();
+        }
+        let deferred = PerspectiveInstance::new_deferred(handle.clone());
+        crate::perspectives::register_perspective(handle.uuid.clone(), deferred.clone());
+
+        let read = stored_policy(&url).await;
+        let hydrated = deferred.is_hydrated();
+        deferred.teardown_background_tasks().await;
+        crate::perspectives::unregister_perspective(&handle.uuid);
+        crate::perspectives::restore_app_data_path(previous_path);
+
+        assert!(hydrated, "reading the policy opens the perspective");
+        assert_eq!(read, Some(policy("cascaded", 6)));
     }
 }

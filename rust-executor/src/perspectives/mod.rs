@@ -210,6 +210,12 @@ pub(crate) fn get_app_data_path() -> Option<String> {
     APP_DATA_PATH.read().unwrap().clone()
 }
 
+/// Test seam: put back an app data path read with [`get_app_data_path`], `None` included.
+#[cfg(test)]
+pub(crate) fn restore_app_data_path(path: Option<String>) {
+    *APP_DATA_PATH.write().unwrap() = path;
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SerializedPerspective {
     #[serde(flatten)]
@@ -616,6 +622,16 @@ pub async fn handle_perspective_diff_from_link_language_impl(
     language_address: String,
 ) {
     if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
+        // A diff for a deferred perspective goes to its persistent store: written to the
+        // empty in-memory one, it would be lost when the perspective opens.
+        if let Err(e) = perspective.hydrate().await {
+            log::error!(
+                "Dropping diff from link language ({}): {}",
+                language_address,
+                e
+            );
+            return;
+        }
         if let Err(e) = perspective.diff_from_link_language(diff).await {
             log::error!(
                 "Failed to persist diff from link language ({}): {:?}",
