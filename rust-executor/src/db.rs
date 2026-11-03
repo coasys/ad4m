@@ -164,31 +164,26 @@ lazy_static! {
 /// A receiver applies a diff's removals, then its additions, and a removal matches
 /// one exact link expression ([`link_identity`]). Concatenating the rows would lose
 /// their order: `+x` then `-x` would arrive as "remove x, add x" and leave x with
-/// every peer. So the last operation on each expression wins, in queue order and,
-/// within a row, removals before additions as the receiver reads a single row: an
-/// addition is dropped when a later operation removes it, and a removal (kept
-/// otherwise: peers may hold the link from before) when a later one adds it back.
-/// The links that remain keep their order.
+/// every peer. So only the last operation on each expression stays, in queue order
+/// and, within a row, removals before additions as the receiver reads a single row:
+/// an addition is dropped when a later operation adds or removes it, and a removal
+/// (kept otherwise: peers may hold the link from before) when a later one adds or
+/// removes it. The links that remain keep their order.
 pub fn merge_pending_diffs(diffs: Vec<PerspectiveDiff>) -> PerspectiveDiff {
-    let mut added_later = HashSet::new();
-    let mut removed_later = HashSet::new();
+    let mut seen_later = HashSet::new();
     let mut additions = Vec::new();
     let mut removals = Vec::new();
     // Newest operation first, so each one knows what follows it.
     for diff in diffs.into_iter().rev() {
         for addition in diff.additions.into_iter().rev() {
-            let identity = link_identity(&addition);
-            if !removed_later.contains(&identity) {
+            if seen_later.insert(link_identity(&addition)) {
                 additions.push(addition);
             }
-            added_later.insert(identity);
         }
         for removal in diff.removals.into_iter().rev() {
-            let identity = link_identity(&removal);
-            if !added_later.contains(&identity) {
+            if seen_later.insert(link_identity(&removal)) {
                 removals.push(removal);
             }
-            removed_later.insert(identity);
         }
     }
     additions.reverse();
@@ -200,6 +195,8 @@ pub fn merge_pending_diffs(diffs: Vec<PerspectiveDiff>) -> PerspectiveDiff {
 }
 
 /// What a removal matches a link by: author, timestamp, source, predicate, target.
+/// The predicate is normalised as the store keeps it: `Some("")` and `None` are
+/// one link (`remove_link` matches both against `""`).
 pub(crate) fn link_identity(
     link: &LinkExpression,
 ) -> (String, String, String, Option<String>, String) {
@@ -207,7 +204,7 @@ pub(crate) fn link_identity(
         link.author.clone(),
         link.timestamp.clone(),
         link.data.source.clone(),
-        link.data.predicate.clone(),
+        Ad4mDb::normalize_predicate(link.data.predicate.clone()),
         link.data.target.clone(),
     )
 }
@@ -2097,12 +2094,19 @@ impl Ad4mDb {
         perspective_uuid: &str,
         ids: &[u64],
     ) -> Ad4mDbResult<PerspectiveDiff> {
-        let diffs = self
-            .pending_diff_rows(perspective_uuid, None)?
-            .into_iter()
-            .filter(|(_, id)| ids.contains(id))
-            .map(|(diff, _)| diff)
-            .collect();
+        if ids.is_empty() {
+            return Ok(merge_pending_diffs(Vec::new()));
+        }
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ? AND is_pending = ? AND id IN ({placeholders}) ORDER BY id"
+        ))?;
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&perspective_uuid, &true];
+        values.extend(ids.iter().map(|id| id as &dyn rusqlite::ToSql));
+        let diffs = stmt
+            .query_map(values.as_slice(), Self::pending_diff_row)?
+            .map(|row| row.map(|(diff, _)| diff))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(merge_pending_diffs(diffs))
     }
 
@@ -2115,20 +2119,7 @@ impl Ad4mDb {
         let mut stmt = self.conn.prepare(
             "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2 ORDER BY id",
         )?;
-        let diffs_iter = stmt.query_map(params![perspective_uuid, true], |row| {
-            let additions: Vec<LinkExpression> =
-                serde_json::from_str(&row.get::<_, String>(0).unwrap()).unwrap();
-            let removals: Vec<LinkExpression> =
-                serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
-            let id = row.get::<_, u64>(2).unwrap();
-            Ok((
-                PerspectiveDiff {
-                    additions,
-                    removals,
-                },
-                id,
-            ))
-        })?;
+        let diffs_iter = stmt.query_map(params![perspective_uuid, true], Self::pending_diff_row)?;
         let mut rows = Vec::new();
         for (count, diff_result) in diffs_iter.enumerate() {
             rows.push(diff_result?);
@@ -2137,6 +2128,22 @@ impl Ad4mDb {
             }
         }
         Ok(rows)
+    }
+
+    /// One `perspective_diff` row selected as `additions, removals, id`.
+    fn pending_diff_row(row: &rusqlite::Row) -> rusqlite::Result<(PerspectiveDiff, u64)> {
+        let additions: Vec<LinkExpression> =
+            serde_json::from_str(&row.get::<_, String>(0).unwrap()).unwrap();
+        let removals: Vec<LinkExpression> =
+            serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
+        let id = row.get::<_, u64>(2).unwrap();
+        Ok((
+            PerspectiveDiff {
+                additions,
+                removals,
+            },
+            id,
+        ))
     }
 
     pub fn get_pending_diffs_by_size(
@@ -5187,6 +5194,65 @@ mod tests {
         assert_eq!(
             merge_pending_diffs(vec![diff(vec![&x], vec![&x])]),
             diff(vec![&x], vec![])
+        );
+    }
+
+    /// A repeated operation on one expression (a failed batch stored as one row
+    /// with `remove_link` called twice, or duplicates across rows) is sent once:
+    /// only the last operation on each expression stays.
+    #[test]
+    fn repeated_operations_on_a_link_merge_to_the_last_one() {
+        let x = construct_dummy_link_expression(LinkStatus::Shared);
+        let add = || PerspectiveDiff {
+            additions: vec![x.clone()],
+            removals: vec![],
+        };
+        let remove = || PerspectiveDiff {
+            additions: vec![],
+            removals: vec![x.clone()],
+        };
+
+        assert_eq!(merge_pending_diffs(vec![add(), add()]), add());
+        assert_eq!(merge_pending_diffs(vec![remove(), remove()]), remove());
+        assert_eq!(
+            merge_pending_diffs(vec![add(), remove(), remove()]),
+            remove()
+        );
+        // Within one row, too.
+        assert_eq!(
+            merge_pending_diffs(vec![PerspectiveDiff {
+                additions: vec![],
+                removals: vec![x.clone(), x.clone()],
+            }]),
+            remove()
+        );
+    }
+
+    /// The store keeps no predicate as `""` and reads it back as `None`, and
+    /// `remove_link` matches either: an addition with `Some("")` and a removal
+    /// with `None` are one link, so the removal cancels the addition.
+    #[test]
+    fn an_empty_predicate_and_no_predicate_are_one_link_in_the_merge() {
+        let mut added = construct_dummy_link_expression(LinkStatus::Shared);
+        added.data.predicate = Some(String::new());
+        let mut removed = added.clone();
+        removed.data.predicate = None;
+
+        assert_eq!(
+            merge_pending_diffs(vec![
+                PerspectiveDiff {
+                    additions: vec![added],
+                    removals: vec![],
+                },
+                PerspectiveDiff {
+                    additions: vec![],
+                    removals: vec![removed.clone()],
+                },
+            ]),
+            PerspectiveDiff {
+                additions: vec![],
+                removals: vec![removed],
+            }
         );
     }
 

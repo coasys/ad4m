@@ -46,9 +46,11 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - `pending_diffs_loop`: a failed `commit_pending_diffs` is logged at warn and retried after
   100 ms doubling to 30 s, reset on success (tests: `perspective_instance_pending_diffs_tests.rs`).
   A batch is one diff, and a receiver applies its removals before its additions, so the rows are
-  never concatenated: `merge_pending_diffs` (db.rs) keeps the last operation on each link
-  expression (`link_identity`) in queue order, a row's removals before its additions. A later
-  removal drops the earlier addition and stays; a later addition drops the earlier removal.
+  never concatenated: `merge_pending_diffs` (db.rs) keeps only the last operation on each link
+  expression (`link_identity`: author, timestamp, source, target, and the predicate normalised
+  as the store keeps it, `Some("")` = `None`) in queue order, a row's removals before its
+  additions. A later removal drops the earlier addition and stays; a later addition drops the
+  earlier removal; a repeated `+x` or `-x` is sent once.
   One commit per batch still.
   When a batch of several diffs fails, the oldest diff is sent alone, then the rest, merged from
   the rest's own rows (`get_pending_diffs_among`). A diff that

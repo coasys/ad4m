@@ -423,6 +423,66 @@ async fn a_link_added_then_removed_is_removed_from_a_peer_that_held_it() {
     assert_eq!(fake.held_targets(), Vec::<String>::new());
 }
 
+/// A removal matches the exact expression, author and timestamp included: a
+/// removal of the same triple by another author, or with another timestamp,
+/// does not cancel the earlier addition, and both reach peers.
+#[tokio::test(start_paused = true)]
+async fn a_removal_of_another_expression_of_the_triple_keeps_the_addition() {
+    let other_author = PerspectiveDiff {
+        additions: vec![],
+        removals: vec![link("did:key:bob", "x")],
+    };
+    let mut later = link("did:key:alice", "x");
+    later.timestamp = "2026-10-16T00:00:01.000Z".to_string();
+    let other_timestamp = PerspectiveDiff {
+        additions: vec![],
+        removals: vec![later],
+    };
+    for removal in [other_author, other_timestamp] {
+        let fake = commit_burst(&[add("x"), removal.clone()], &[]).await;
+
+        assert_eq!(
+            fake.committed(),
+            vec!["+x", "-x"],
+            "removal {:?}",
+            removal.removals
+        );
+        assert_eq!(fake.held_targets(), vec!["x"]);
+    }
+}
+
+/// `add_link_expression` keeps an empty predicate as `Some("")`; the removal
+/// of that link, read back from the store, has `None`. They are one link, so
+/// the burst does not add it.
+#[tokio::test(start_paused = true)]
+async fn a_link_added_with_an_empty_predicate_and_removed_does_not_reach_peers() {
+    let mut added = link("did:key:alice", "x");
+    added.data.predicate = Some(String::new());
+    let mut removed = added.clone();
+    removed.data.predicate = None;
+    let fake = commit_burst(
+        &[
+            PerspectiveDiff {
+                additions: vec![added],
+                removals: vec![],
+            },
+            PerspectiveDiff {
+                additions: vec![],
+                removals: vec![removed],
+            },
+        ],
+        &[],
+    )
+    .await;
+
+    assert!(
+        !fake.committed().contains(&"+x".to_string()),
+        "the batch adds x: {:?}",
+        fake.committed()
+    );
+    assert_eq!(fake.held_targets(), Vec::<String>::new());
+}
+
 /// A link removed and then added again in one burst stays with peers, whether
 /// they held it before or not.
 #[tokio::test(start_paused = true)]
