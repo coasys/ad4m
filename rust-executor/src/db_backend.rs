@@ -370,7 +370,7 @@ macro_rules! ad4m_db_methods {
             ) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)>;
             fn clear_pending_diffs(&self, perspective_uuid: &str, ids: Vec<u64>) -> Ad4mDbResult<()>;
             fn park_pending_diffs(&self, perspective_uuid: &str, ids: Vec<u64>) -> Ad4mDbResult<()>;
-            fn get_parked_additions(&self, perspective_uuid: &str) -> Ad4mDbResult<Vec<LinkExpression>>;
+            fn get_unsent_additions(&self, perspective_uuid: &str) -> Ad4mDbResult<Vec<LinkExpression>>;
 
             // Expression cache
             fn _add_expression(&self, url: &str, expression: &Expression<Value>) -> Ad4mDbResult<()>;

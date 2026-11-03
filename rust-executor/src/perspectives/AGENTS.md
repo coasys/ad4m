@@ -50,6 +50,15 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `is_pending = 0` (`Ad4mDb::park_pending_diffs`; the export lists it), logged at
   error level by row id (its links stay local). The failure may have been transient, so the row
   is kept, but it is never sent again after its successors: that would reorder it behind newer diffs.
+  The fallback sync (`ensure_public_links_are_shared`) skips every unsent addition, queued or
+  parked: the queue owns them. The commit loop
+  holds `share_links_mutex` from its first send of a batch until the clear or the park, so a
+  fallback sync runs either before the batch is sent or after it is cleared or parked. The lock
+  spans up to three `link_language.commit` calls, and a language commit has no timeout on this
+  path: a language whose commit hangs also holds up a neighbourhood publish's
+  `ensure_public_links_are_shared` and the fallback pass. Immediate sends from `commit` are
+  outside this lock, so a fallback sync can run while an immediate send is in flight and submit
+  the same link again.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
