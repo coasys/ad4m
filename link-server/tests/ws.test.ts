@@ -365,7 +365,7 @@ test("commit rejects links missing required structural fields", async () => {
     );
     assert.equal(res1.status, 400);
 
-    // Missing timestamp
+    // Plaintext data: refused in every room
     const res2 = await postJson(
       `${server.url}/rooms/${roomId}/commit`,
       { additions: [{ author: agent.did, data: { source: "a", target: "b" } }], removals: [] },
