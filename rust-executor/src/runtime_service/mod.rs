@@ -23,7 +23,9 @@ pub struct BootstrapSeed {
     #[serde(rename = "languageLanguageBundle")]
     pub language_language_bundle: String,
     /// The network's identity store (`did:scid:coasys:1` key logs), used when the config names
-    /// none (`identity::IdentitySettings::from_config`). Absent: the network has no store.
+    /// none (`identity::IdentitySettings::from_config`). Absent: the store of the network this
+    /// executor was built for, the compiled-in seed's (`RuntimeService::identity_store`), so a
+    /// seed file written before the field existed keeps its store on upgrade without `init`.
     #[serde(
         rename = "identityStore",
         default,
@@ -33,9 +35,11 @@ pub struct BootstrapSeed {
 }
 
 /// A seed's `identityStore`: the store's base URL and the keys (bare Ed25519 multikeys, `z6Mk…`)
-/// its signed heads must carry. A list, so the store's key can rotate.
+/// its signed heads must carry. A list, so the store's key can rotate. Both are required; a
+/// field this build does not know (one a newer seed adds) is ignored, so a newer seed stays
+/// readable to an older executor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct IdentityStoreSeed {
     pub url: String,
     pub keys: Vec<String>,
@@ -50,6 +54,12 @@ use crate::{agent::did, types::SentMessage};
 
 lazy_static! {
     static ref RUNTIME_INSTANCE: Arc<Mutex<Option<RuntimeService>>> = Arc::new(Mutex::new(None));
+    /// The identity store of the seed compiled in (`mainnet_seed.json`): the network this
+    /// executor was built for. Parsed once; the seed is tested to parse.
+    static ref EMBEDDED_IDENTITY_STORE: Option<IdentityStoreSeed> =
+        serde_json::from_str::<BootstrapSeed>(crate::globals::MAINNET_JSON)
+            .expect("the compiled-in mainnet_seed.json parses")
+            .identity_store;
 }
 
 pub struct RuntimeService {
@@ -98,13 +108,19 @@ impl RuntimeService {
         func(runtime_ref)
     }
 
-    /// The seed's identity store; `None` when the network has none.
+    /// The seed's identity store. A seed without `identityStore` (a seed file written before the
+    /// field existed, which an upgrade without `init` keeps) means the store of the network this
+    /// executor was built for: the compiled-in seed's. A seed for another network names its own
+    /// store. `None` only when neither names one.
     pub fn identity_store(&self) -> Option<IdentityStoreSeed> {
-        self.seed.identity_store.clone()
+        self.seed
+            .identity_store
+            .clone()
+            .or_else(|| EMBEDDED_IDENTITY_STORE.clone())
     }
 
-    /// The loaded seed's identity store; `None` when the network has none or no seed is
-    /// loaded (the service did not start).
+    /// The loaded seed's identity store ([`RuntimeService::identity_store`]); `None` when no
+    /// seed names one or no seed is loaded (the service did not start).
     pub fn seed_identity_store() -> Option<IdentityStoreSeed> {
         RUNTIME_INSTANCE
             .lock()
@@ -274,12 +290,19 @@ mod tests {
                 keys: vec!["z6MkhPbF9K34GSKpCo9n7XVdAoCctP2Kw7SNJeRWLx7bu9Fj".into()],
             }
         );
-        assert_eq!(crate::identity::check_store_keys(&store.keys), Ok(()));
-        assert_eq!(crate::identity::check_store_url(Some(&store.url)), Ok(()));
+        let seed_source = crate::identity::StoreSource::Seed;
+        assert_eq!(
+            crate::identity::check_store_keys(&store.keys, seed_source),
+            Ok(())
+        );
+        assert_eq!(
+            crate::identity::check_store_url(Some(&store.url), seed_source),
+            Ok(())
+        );
     }
 
-    /// A seed without `identityStore` (every seed written before the field, or a network
-    /// without a store) parses, has no store, and writes no `identityStore` back.
+    /// A seed without `identityStore` (every seed written before the field) parses, names no
+    /// store itself, and writes no `identityStore` back.
     #[test]
     fn a_seed_without_an_identity_store_parses_and_round_trips() {
         let json = serde_json::json!({
@@ -292,8 +315,8 @@ mod tests {
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
     }
 
-    /// An `identityStore` without its keys, or with a field it does not know, is refused: a
-    /// seed must name the keys of the store it names.
+    /// An `identityStore` without its URL or its keys is refused: a seed must name the keys of
+    /// the store it names. A field this build does not know (a newer seed's) is ignored.
     #[test]
     fn an_identity_store_needs_its_url_and_keys() {
         let seed = |store: serde_json::Value| {
@@ -305,7 +328,15 @@ mod tests {
         };
         assert!(seed(serde_json::json!({ "url": "https://s" })).is_err());
         assert!(seed(serde_json::json!({ "keys": [] })).is_err());
-        assert!(seed(serde_json::json!({ "url": "https://s", "keys": [], "key": "z" })).is_err());
+        assert_eq!(
+            seed(serde_json::json!({ "url": "https://s", "keys": ["z6MkA"], "since": 3 }))
+                .expect("a newer seed's identityStore parses")
+                .identity_store,
+            Some(IdentityStoreSeed {
+                url: "https://s".into(),
+                keys: vec!["z6MkA".into()],
+            })
+        );
         assert_eq!(
             seed(serde_json::json!({ "url": "https://s", "keys": ["z6MkA"] }))
                 .unwrap()
@@ -313,6 +344,41 @@ mod tests {
             Some(IdentityStoreSeed {
                 url: "https://s".into(),
                 keys: vec!["z6MkA".into()],
+            })
+        );
+    }
+
+    /// A seed file without `identityStore` (written by an `init` before the field existed and
+    /// kept on upgrade) gets the store of the network this executor was built for, the
+    /// compiled-in seed's; a seed that names its own store keeps it.
+    #[test]
+    fn a_seed_file_without_an_identity_store_gets_the_compiled_in_seeds() {
+        let embedded: BootstrapSeed = serde_json::from_str(crate::globals::MAINNET_JSON).unwrap();
+        let embedded = embedded
+            .identity_store
+            .expect("the compiled-in seed names a store");
+        let dir = tempfile::tempdir().unwrap();
+        let load = |name: &str, seed: serde_json::Value| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, seed.to_string()).unwrap();
+            RuntimeService::new(path.to_str().unwrap()).unwrap()
+        };
+        let mut seed = serde_json::json!({
+            "trustedAgents": [], "knownLinkLanguages": [], "directMessageLanguage": "",
+            "agentLanguage": "", "perspectiveLanguage": "", "neighbourhoodLanguage": "",
+            "languageLanguageBundle": "",
+        });
+        assert_eq!(
+            load("old.seed", seed.clone()).identity_store(),
+            Some(embedded)
+        );
+
+        seed["identityStore"] = serde_json::json!({ "url": "https://other", "keys": ["z6MkO"] });
+        assert_eq!(
+            load("other.seed", seed).identity_store(),
+            Some(IdentityStoreSeed {
+                url: "https://other".into(),
+                keys: vec!["z6MkO".into()],
             })
         );
     }

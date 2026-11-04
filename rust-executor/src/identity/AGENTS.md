@@ -122,8 +122,9 @@ the offer's state).
   for resolution display only (`identity.resolve` shows them, `coasys:headTrusted: false`).
   `identity.status`, `identity.log` and `identity.devices` show the cached log as it is.
   Without a store key no `did:scid` author verifies, and `identity.publish` and
-  `identity.claimOffer` refuse with `no-store-keys` (naming the cause: the network has no
-  store, or a store URL is configured without its keys) before the store commits anything: a
+  `identity.claimOffer` refuse with `no-store-keys` (naming the cause, `no_store_keys_cause`:
+  no store, a store URL configured without its keys, or a seed's store without keys) before
+  the store commits anything: a
   log the executor can never accept would still take the agent's key for every identity.
 - **The store is the network's.** A network is its bootstrap seed (`<data>/mainnet_seed.seed`,
   which `init` writes from the seed compiled in, `mainnet_seed.json`, or from
@@ -131,16 +132,28 @@ the offer's state).
   `runtime_service::IdentityStoreSeed`, carried from `cli/seed_proto.json` by
   `dev generate-bootstrap`) names its store. The compiled-in seed names
   `https://store.ad4m.dev`, the store of today's (staging) network; another network is
-  another seed. There is no built-in default store in code (here or in the agent language).
+  another seed. A seed with no `identityStore` means the store of the network this executor
+  was built for, the compiled-in seed's (`RuntimeService::identity_store`, parsed once): a
+  seed file written before the field existed keeps working on upgrade without re-running
+  `init` (which can wipe agent keys); a seed for another network names its own store. The
+  `identityStore` object ignores fields it does not know, so a newer seed stays readable;
+  `url` and `keys` are required. There is no built-in default store in code beyond the
+  compiled-in seed (none in the agent language).
   `IdentitySettings::from_config(config, seed_store)` is the one place that picks the store
   and keys, the config winning: URL → `identity.storeUrl`, else the seed's, else none; keys →
   `identity.storeKeys` when set (exactly those, `[]` too), else none when `identity.storeUrl`
-  is set (the seed's keys never apply to a configured URL), else the seed's, else none.
+  is set (the seed's keys never apply to a configured URL), else the seed's, else none. Each
+  value records where it came from (`StoreSource`: `store_url_source`, `store_keys_source`),
+  so the start-up checks (`IdentitySettings::check`: `check_store_keys`, `check_store_url`),
+  the warning and the `no-store-keys` refusal name `identity.storeUrl`/`identity.storeKeys`
+  or the seed's `identityStore`, whichever the operator has to fix.
   `lib.rs` loads the seed (`RuntimeService`) before `identity::init`, and
   `settings_from_config()` reads it for the agent language's settings. Without a key `init`
-  logs `missing_store_keys_warning` at start: "this network has no identity store" without a
-  URL, else the store's URL and `identity.storeKeys`. `identity.status.store` (`StoreInfo
-  { url, trusted }`, `null` without a store) tells apps which store this executor uses and
+  logs `missing_store_keys_warning` at start: "this executor has no identity store" without a
+  URL (only when no seed is loaded, or the compiled-in seed names none), else the store's URL
+  and where its keys were missing (`identity.storeKeys` or the seed's `identityStore.keys`).
+  `identity.status.store` (`StoreInfo { url, trusted }`, `null` without a store; typed in
+  `ad4m-identity-client` as `IdentityStatus::store`) tells apps which store this executor uses and
   whether it trusts a key for it. Without a store the agent language answers every identity
   call `invalid` (`store-url`), which reaches callers as an error, never a panic.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
@@ -160,8 +173,8 @@ the offer's state).
   `write_agent_language_settings` (atomic: temp file + rename), as its `storeUrl` and
   `storeKeys` settings, on every start: no store or no keys removes the setting, so an earlier
   run's store never stays in force. The language keeps a `did:scid` log only under a head
-  signed by a key of `storeKeys`. `"storeUrl": ""` stops startup (`check_store_url`: the
-  language would read it as unset). When the write fails,
+  signed by a key of `storeKeys`. An empty store URL, configured or from the seed, stops
+  startup (`check_store_url`: the language would read it as unset). When the write fails,
   `LanguageController::install_agent_language` does not load the agent language, so no
   profile or identity call goes to an older store; identity calls answer `unavailable`.
 - **A `did:scid` author counts only on the agent language's profile.** An expression's author
