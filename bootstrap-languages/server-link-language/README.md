@@ -210,9 +210,10 @@ costs that one link, not the rest of its batch or the other held links.
   still needed. `init()` stores it before authenticating, so a render that timed out, or
   never ran because authentication failed first, is resumed by catch-up (the
   WebSocket's `onOpen`, the runtime's `sync()`), the way catch-up re-reads
-  `/keys` while links are held. The first retry waits 10 s, each failure
-  doubles the wait up to 5 min, and the last page ends the retries and resets
-  the wait. Catch-up does not wait for the render, and while one is pending
+  `/keys` while links are held. A render that never ran starts at the next
+  catch-up. After a failed page the next attempt waits 10 s, each further
+  failure doubles the wait up to 5 min, and the last page ends the retries
+  and resets the wait. Catch-up does not wait for the render, and while one is pending
   it does not tail either: its cursor is 0, so reading the log from it is
   the full replay the render replaces. WebSocket pushes are left to the
   render meanwhile. The render's last page is followed by the tail from
