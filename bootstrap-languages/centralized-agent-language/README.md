@@ -35,7 +35,8 @@ serves the identity interface, both on the shared identity store (`identity-stor
 - No token interface: the executor answers `disabled`.
 
 The store's base URL is the `storeUrl` language setting (`{"storeUrl": "https://…"}`), read on
-every call; without it, `https://store.coasys.org`. It must be `https`, or plain `http` to a
+every call; without it, `https://store.ad4m.dev` (the staging network's store; a build for another
+network sets `storeUrl`). It must be `https`, or plain `http` to a
 loopback address (a store on the same machine); any other URL is `invalid` (`store-url`) and
 nothing is sent.
 

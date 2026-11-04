@@ -124,7 +124,7 @@ the offer's state).
   Without `identity.storeKeys` no `did:scid` author verifies, and `identity.publish` and
   `identity.claimOffer` refuse with `no-store-keys` before the store commits anything: a log
   the executor can never accept would still take the agent's key for every identity. No
-  production store key ships with the executor, so the default config (no `identity.storeUrl`:
+  store key ships with the executor, so the default config (no `identity.storeUrl`:
   the language's default store) is in this state; `init` logs
   `missing_store_keys_warning` at start, naming the store and the consequence.
 - Every claim for the main agent goes through `ClaimService::claim_for_main`, which runs the
@@ -145,7 +145,7 @@ the offer's state).
   `storeKeys` settings, on every start: an unset key removes the setting, so an earlier run's
   store never stays in force. The language keeps a `did:scid` log only under a head signed by
   a key of `storeKeys`. `"storeUrl": ""` stops startup (`check_store_url`: the language would
-  read it as the production store). When the write fails, `LanguageController::install_agent_language`
+  read it as its default store, `https://store.ad4m.dev`). When the write fails, `LanguageController::install_agent_language`
   does not load the agent language, so no profile or identity call goes to an older or the
   default store; identity calls answer `unavailable`.
 - **A `did:scid` author counts only on the agent language's profile.** An expression's author

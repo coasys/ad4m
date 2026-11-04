@@ -334,7 +334,7 @@ pub struct RunArgs {
     )]
     pub sfu_preferred_node: Option<String>,
     /// The identity store's base URL (`identity.storeUrl`), given to the agent language.
-    /// Default: the agent language's own (the production store).
+    /// Default: the agent language's own, `https://store.ad4m.dev` (the staging network).
     #[arg(
         long,
         env = "AD4M_IDENTITY_STORE_URL",
