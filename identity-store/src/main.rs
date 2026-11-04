@@ -11,7 +11,7 @@
 //! | `POW_BITS` | `22` | the proof-of-work cost `GET /v1/pow` publishes |
 //! | `CORS_ORIGINS` | none | comma-separated origins allowed from a browser |
 //! | `FEED_TOKEN` | none | the mirror token of `GET /v1/feed` |
-//! | `IDENTITY_BURST` | `5` | writes per identity at once (the identity bucket) |
+//! | `IDENTITY_BURST` | `10` | writes per identity at once (the identity bucket) |
 //! | `IDENTITY_REFILL_S` | `60` | seconds per write the identity bucket refills |
 //! | `HELD_LOG_EVENTS` | `1048576` | the most events the logs held folded in memory cover together |
 //!

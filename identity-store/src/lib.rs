@@ -77,7 +77,7 @@ impl Default for Settings {
             pow_bits: 22,
             feed_token: None,
             cors_origins: Vec::new(),
-            identity_burst: 5,
+            identity_burst: 10,
             identity_refill_s: 60,
             held_log_events: DEFAULT_HELD_LOG_EVENTS,
         }

@@ -929,14 +929,14 @@ async fn a_request_of_each_kind_lives_seven_days() {
 // ----- the identity bucket -----
 
 #[tokio::test]
-async fn the_identity_bucket_passes_five_writes_then_one_a_minute_and_never_counts_reads() {
+async fn the_identity_bucket_passes_ten_writes_then_one_a_minute_and_never_counts_reads() {
     let t = TestStore::new();
     let alice = Person::new("alice");
     t.publish(&alice).await;
     let path = format!("/v1/private/{}", alice.scid());
     let d1 = ("d1", &alice.device_key(1));
     let write = |v: u64| serde_json::to_value(alice.sealed_record(v, None)).unwrap();
-    for v in 1..=5 {
+    for v in 1..=10 {
         assert_eq!(
             signed_body(&t, &alice, "PUT", &path, &write(v), d1)
                 .await
@@ -944,7 +944,7 @@ async fn the_identity_bucket_passes_five_writes_then_one_a_minute_and_never_coun
             StatusCode::OK
         );
     }
-    let reply = signed_body(&t, &alice, "PUT", &path, &write(6), d1).await;
+    let reply = signed_body(&t, &alice, "PUT", &path, &write(11), d1).await;
     assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(reply.body["scope"], "identity");
     assert_eq!(reply.headers["retry-after"], "60");
@@ -964,13 +964,13 @@ async fn the_identity_bucket_passes_five_writes_then_one_a_minute_and_never_coun
     // One write more a minute later; the bucket refills one at a time.
     t.set_now(T0 + 60);
     assert_eq!(
-        signed_body(&t, &alice, "PUT", &path, &write(6), d1)
+        signed_body(&t, &alice, "PUT", &path, &write(11), d1)
             .await
             .status,
         StatusCode::OK
     );
     assert_eq!(
-        signed_body(&t, &alice, "PUT", &path, &write(7), d1)
+        signed_body(&t, &alice, "PUT", &path, &write(12), d1)
             .await
             .status,
         StatusCode::TOO_MANY_REQUESTS

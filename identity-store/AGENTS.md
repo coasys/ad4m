@@ -271,7 +271,10 @@ tests name them by these names.
   request, so a reader checks the poster without trusting the store.
 - **The identity bucket** (`limits.rs`, `IDENTITY_BURST` and `IDENTITY_REFILL_S`): offer opens,
   inbox writes, record writes and request posts take one token, last, inside their
-  transaction, so a refused write costs nothing. Reads and waits never count. Tests of another
+  transaction, so a refused write costs nothing. Reads and waits never count. The default
+  burst of 10 lets a person link two devices that keep the master key back to back (one such
+  link takes 5 writes: offer, ticket, master push, record, and the device's record update).
+  Tests of another
   limit use `TestStore::with_identity_burst(n)`; the agent language suite starts its store with
   `IDENTITY_BURST=1000`.
 - **Expiry.** Reads never answer an expired inbox message or request; `Store::sweep` deletes
@@ -288,7 +291,7 @@ tests name them by these names.
 | `POW_BITS` | `22` | what `GET /v1/pow` publishes and a sent proof must meet |
 | `CORS_ORIGINS` | none | comma-separated browser origins (all routes but the public host profile's, which allow any origin) |
 | `FEED_TOKEN` | none | the mirror token; without one the feed answers `401` |
-| `IDENTITY_BURST` | `5` | writes per identity at once (the identity bucket) |
+| `IDENTITY_BURST` | `10` | writes per identity at once (the identity bucket) |
 | `IDENTITY_REFILL_S` | `60` | seconds per write the identity bucket refills |
 | `HELD_LOG_EVENTS` | `1048576` | the most events the logs held folded in memory cover together |
 
