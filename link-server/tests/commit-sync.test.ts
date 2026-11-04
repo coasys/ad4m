@@ -7,6 +7,7 @@ import {
   createTestAgent,
   getJson,
   linkHashOf,
+  openLink,
   postJson,
   startTestServer,
   type TestServerHandle,
@@ -344,7 +345,7 @@ test("render still returns the whole active set for a room whose early diffs wer
     );
     assert.equal(render.status, 200);
     assert.deepEqual(
-      render.body.links.map((l) => l.data.source).sort(),
+      render.body.links.map((l) => openLink(l).data.source).sort(),
       ["s0", "s1", "s2", "s3"],
       "render answers from the active set, so it repairs a member behind the gap",
     );
