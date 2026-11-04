@@ -199,7 +199,8 @@ pub struct Ad4mConfig {
     /// `storeUrl` setting. Unset: the language's default store.
     pub identity_store_url: Option<String>,
     /// `identity.storeKeys`: the store keys (Ed25519 multikeys) a head from the store must be
-    /// signed by. A list, so the store's key can rotate.
+    /// signed by. A list, so the store's key can rotate. Unset: the default store's key when
+    /// `identity_store_url` is unset too, else none (`IdentitySettings::from_config`).
     pub identity_store_keys: Option<Vec<String>>,
     /// `identity.allowPrivateSrc`: let the `src` of a DID URL that `identity.resolve` reads
     /// reach loopback and private addresses. Off by default; for tests and local development.
