@@ -789,4 +789,95 @@ mod tests {
             "fresh perspective must return empty FlowInstance list"
         );
     }
+
+    /// Read the flows back through the loader the engine uses and check the
+    /// Delivery fixture survived: name, both states, the one transition, and
+    /// the input type.
+    async fn assert_delivery_flow_loaded(perspective: &PerspectiveInstance) {
+        let flows = crate::perspectives::flow_context::load_shacl_flows(perspective)
+            .await
+            .expect("load_shacl_flows");
+        let flow = flows
+            .get("delivery://DeliveryFlow")
+            .unwrap_or_else(|| panic!("Delivery flow not loaded, got {:?}", flows.keys()));
+        assert_eq!(flow.name, "Delivery");
+        let states: Vec<&str> = flow.states.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(states, vec!["identified", "scoped"]);
+        let transitions: Vec<(&str, &str, &str)> = flow
+            .transitions
+            .iter()
+            .map(|t| {
+                (
+                    t.action_name.as_str(),
+                    t.from_state.as_str(),
+                    t.to_state.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(transitions, vec![("Scope", "identified", "scoped")]);
+        assert_eq!(flow.input_types, vec!["Task".to_string()]);
+    }
+
+    /// #1650: `add_sdna(Flow, Some(flow_json))` — the path `addSdna` with
+    /// `sdnaType: "flow"` and the MCP `add_flow` tool take — must parse the
+    /// JSON as a flow. It used to go through the class-shape parser and fail
+    /// with "missing field `target_class`".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_sdna_registers_a_flow_definition() {
+        use crate::perspectives::interpretation_test_support::delivery_flow_json_for;
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        perspective
+            .add_sdna(
+                "Delivery".to_string(),
+                String::new(),
+                SdnaType::Flow,
+                Some(delivery_flow_json_for("Task")),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna(Flow, flow JSON) must succeed");
+
+        assert_delivery_flow_loaded(&perspective).await;
+    }
+
+    /// #1650, batch variant: `add_sdna_batch` parses each entry by its own
+    /// type, so a flow next to a subject class registers both.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_sdna_batch_registers_a_flow_definition() {
+        use crate::perspectives::interpretation_test_support::delivery_flow_json_for;
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        perspective
+            .add_sdna_batch(
+                vec![
+                    (
+                        "Note".to_string(),
+                        String::new(),
+                        SdnaType::SubjectClass,
+                        Some(
+                            r#"{"target_class": "ns://Note", "properties": [
+                                {"path": "ns://title", "name": "title", "datatype": "xsd://string"}
+                            ]}"#
+                            .to_string(),
+                        ),
+                    ),
+                    (
+                        "Delivery".to_string(),
+                        String::new(),
+                        SdnaType::Flow,
+                        Some(delivery_flow_json_for("Task")),
+                    ),
+                ],
+                &ctx,
+            )
+            .await
+            .expect("add_sdna_batch with a flow entry must succeed");
+
+        assert_delivery_flow_loaded(&perspective).await;
+        assert!(
+            perspective.get_shape("Note").is_ok(),
+            "the subject-class entry of the batch must still register"
+        );
+    }
 }
