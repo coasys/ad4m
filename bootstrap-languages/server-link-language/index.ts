@@ -371,6 +371,11 @@ const language = defineLanguage({
             getMyDid: () => myDid,
         });
 
+        // A fresh member (cursor 0) stores its render, or keeps the one a
+        // previous run left unfinished, before anything can fail: until its
+        // last page, every catch-up resumes it with backoff, whichever step
+        // below fails first. A member with a cursor above 0 only catches up.
+        syncModule.needRender();
         try {
             await auth.authenticate();
 
@@ -384,8 +389,9 @@ const language = defineLanguage({
             // every ACL member.
             await rotateIfAdminWithoutKey();
 
-            // The room's current links, emitted to the executor; those no
-            // key opens yet are held until one does.
+            // The room's current links (a fresh member's snapshot, or the
+            // diffs after the cursor), emitted to the executor; those no key
+            // opens yet are held until one does.
             await syncModule.bootstrap();
 
             // With a key ring, grant the versions we hold to any member
@@ -396,7 +402,8 @@ const language = defineLanguage({
         } catch (err) {
             console.error(
                 "[server-link-language] initial startup sequence failed — will keep retrying via " +
-                "websocket reconnect backoff and the runtime's periodic sync():",
+                "websocket reconnect backoff and the runtime's periodic sync(), which also retries " +
+                "the room render with backoff until it succeeds:",
                 err,
             );
         }
