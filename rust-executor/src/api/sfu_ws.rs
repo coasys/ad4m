@@ -33,7 +33,6 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::{NEIGHBOURHOOD_READ_CAPABILITY, NEIGHBOURHOOD_UPDATE_CAPABILITY};
-use crate::db::Ad4mDb;
 use crate::sfu::{get_sfu_service, CallSessionInfo, SfuConfig, SfuRoomInfo};
 use crate::types::RequestContext;
 
@@ -77,7 +76,8 @@ fn caller_did(ctx: &RequestContext) -> Result<String, WsRpcError> {
 
 /// This node's members of `neighbourhood_url`, first member first.
 fn neighbourhood_members(neighbourhood_url: &str) -> Vec<String> {
-    Ad4mDb::with_global_instance(|db| db.get_neighbourhood_owners(neighbourhood_url))
+    crate::db_backend::db_backend()
+        .get_neighbourhood_owners(neighbourhood_url)
         .unwrap_or_default()
 }
 
@@ -356,7 +356,8 @@ async fn serves_all_members(params: Value, ctx: Arc<RequestContext>) -> Result<V
         .others()
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    let mut hosted: Vec<String> = Ad4mDb::with_global_instance(|db| db.list_users())
+    let mut hosted: Vec<String> = crate::db_backend::db_backend()
+        .list_users()
         .unwrap_or_default()
         .into_iter()
         .map(|user| user.did)
@@ -424,7 +425,8 @@ async fn ensure_membership(params: Value, _ctx: Arc<RequestContext>) -> Result<V
     // and bridge deployments.  Regular users get membership through the neighbourhood
     // join flow, not this RPC.
     let p: SfuEnsureMembershipParams = parse(params)?;
-    Ad4mDb::with_global_instance(|db| db.ensure_neighbourhood_member(&p.neighbourhood_url, &p.did))
+    crate::db_backend::db_backend()
+        .ensure_neighbourhood_member(&p.neighbourhood_url, &p.did)
         .map_err(|e| WsRpcError::internal(format!("Failed to register membership: {}", e)))?;
     Ok(Value::Bool(true))
 }

@@ -258,3 +258,71 @@ fn the_json_ld_form_has_a_fixed_member_order() {
         r#"{"versionId":"1","nextVersionId":"2","deactivated":false}"#
     );
 }
+
+/// The context file the identity site serves at `COASYS_CONTEXT`.
+const CONTEXT_FILE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../docs-src/identity/did-scid-coasys-v1.jsonld"
+));
+/// The format spec, which prints the context.
+const SPEC: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../docs-src/identity/did-scid-coasys-1.md"
+));
+
+#[test]
+fn the_context_file_defines_every_extension_term_under_the_context_url() {
+    assert_eq!(
+        COASYS_CONTEXT,
+        "https://id.coasys.org/ns/did-scid-coasys/v1"
+    );
+    let file: Value = serde_json::from_str(CONTEXT_FILE).unwrap();
+    let context = &file["@context"];
+    assert_eq!(context["@version"], json!(1.1));
+    assert_eq!(context["@protected"], json!(true));
+    assert_eq!(context["coasys"], json!(format!("{COASYS_CONTEXT}#")));
+
+    // Every member a method carries beyond the DID Core and Multikey contexts is defined,
+    // and so is every member of its value.
+    let bot = BotScope {
+        can: vec!["read".into()],
+        expires: 1_900_000_000,
+    };
+    let term = &context["coasys:bot"];
+    assert_eq!(term["@id"], json!("coasys:bot"));
+    let scoped = &term["@context"];
+    assert_eq!(scoped["@protected"], json!(true));
+    let members = serde_json::to_value(&bot).unwrap();
+    let members = members.as_object().unwrap();
+    assert_eq!(members.len(), 2);
+    for name in members.keys() {
+        assert_eq!(
+            scoped[name]["@id"],
+            json!(format!("coasys:{name}")),
+            "{name}"
+        );
+    }
+    assert_eq!(scoped["can"]["@container"], json!("@set"));
+    assert_eq!(
+        scoped["expires"]["@type"],
+        json!("http://www.w3.org/2001/XMLSchema#integer")
+    );
+}
+
+#[test]
+fn the_spec_prints_the_context_file_as_it_is() {
+    let after = SPEC
+        .split_once(&format!("The context `{COASYS_CONTEXT}` defines"))
+        .expect("the spec names the context URL")
+        .1;
+    let block = after
+        .split_once("```json\n")
+        .unwrap()
+        .1
+        .split_once("```")
+        .unwrap()
+        .0;
+    let printed: Value = serde_json::from_str(block).unwrap();
+    let file: Value = serde_json::from_str(CONTEXT_FILE).unwrap();
+    assert_eq!(printed, file);
+}
