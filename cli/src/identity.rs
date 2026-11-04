@@ -375,7 +375,9 @@ mod tests {
         let far = follow_join(
             &claimed(u64::MAX),
             || async { Ok(join("spent", Some("d2"))) },
-            || 100,
+            // Past the confirm grace: a deadline that wrapped (a release build does not check
+            // overflow) would lie behind this and end the claim.
+            || CONFIRM_GRACE_S + 1,
             Duration::ZERO,
         )
         .await;
