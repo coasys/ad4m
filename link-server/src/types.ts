@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
  * separate tombstone type.
  */
 
-/** Plaintext link payload, used when a room does not have E2E enabled. */
+/** Plaintext link payload. The commit route refuses it: every room is end-to-end encrypted. */
 export interface LinkData {
   source: string;
   predicate: string | null;
@@ -24,7 +24,7 @@ export interface LinkData {
 }
 
 /**
- * Opaque, encrypted link payload used when a room has E2E enabled.
+ * Opaque, encrypted link payload: the only kind the commit route accepts.
  * `ciphertext`/`nonce` are base64-encoded AES-256-GCM output over the
  * plaintext LinkData (see encryption.ts). The server never sees the
  * plaintext source/predicate/target for these links.

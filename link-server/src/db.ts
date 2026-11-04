@@ -13,7 +13,6 @@ CREATE TABLE IF NOT EXISTS rooms (
   id TEXT PRIMARY KEY,
   admin_did TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  e2e_enabled INTEGER DEFAULT 0,
   revision TEXT
 );
 CREATE TABLE IF NOT EXISTS acl (
@@ -85,7 +84,6 @@ export interface RoomRow {
   id: string;
   admin_did: string;
   created_at: string;
-  e2e_enabled: number;
   revision: string | null;
 }
 
@@ -183,9 +181,8 @@ export class LinkServerDB {
          FROM rooms r ORDER BY r.created_at DESC`
       ),
       createRoom: this.raw.prepare(
-        "INSERT INTO rooms (id, admin_did, created_at, e2e_enabled, revision) VALUES (?, ?, ?, 0, ?)"
+        "INSERT INTO rooms (id, admin_did, created_at, revision) VALUES (?, ?, ?, ?)"
       ),
-      setE2e: this.raw.prepare("UPDATE rooms SET e2e_enabled = ? WHERE id = ?"),
       updateRevision: this.raw.prepare("UPDATE rooms SET revision = ? WHERE id = ?"),
 
       getAcl: this.raw.prepare("SELECT * FROM acl WHERE room_id = ? ORDER BY added_at ASC"),
@@ -301,20 +298,17 @@ export class LinkServerDB {
     return this.stmts.listRooms.all() as Array<RoomRow & { member_count: number }>;
   }
 
+  /** Every room is end-to-end encrypted: the commit route refuses plaintext links from creation. */
   createRoom(roomId: string, adminDid: string): RoomRow {
     const createdAt = new Date().toISOString();
     this.stmts.createRoom.run(roomId, adminDid, createdAt, EMPTY_REVISION);
-    return { id: roomId, admin_did: adminDid, created_at: createdAt, e2e_enabled: 0, revision: EMPTY_REVISION };
+    return { id: roomId, admin_did: adminDid, created_at: createdAt, revision: EMPTY_REVISION };
   }
 
   /** Returns the revision for a room. Always present — set at creation and updated on every commit. */
   getRoomRevision(roomId: string): string {
     const room = this.getRoom(roomId);
     return room?.revision ?? EMPTY_REVISION;
-  }
-
-  setE2eEnabled(roomId: string, enabled: boolean): void {
-    this.stmts.setE2e.run(enabled ? 1 : 0, roomId);
   }
 
   // ---- acl ----

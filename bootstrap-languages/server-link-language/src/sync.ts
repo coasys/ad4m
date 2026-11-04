@@ -21,7 +21,6 @@ import * as store from "./store.js";
 import * as api from "./api.js";
 import type { RoomConfig } from "./adapters.js";
 import type {
-    Link,
     LinkExpression,
     PerspectiveDiff,
     RenderResponse,
@@ -34,7 +33,6 @@ import {
     decryptLinkFromWire,
     encryptLinkForWire,
     latestKeyVersion,
-    statusField,
     wireLinkHash,
     type KeyRing,
 } from "./encryption.js";
@@ -49,7 +47,7 @@ export interface SyncDeps {
     /** MUST be called for every inbound diff — see module doc above. */
     emitDiff: (diff: PerspectiveDiff) => void;
     emitSyncState?: (state: string) => void;
-    /** Returns the current key ring, or null for a plaintext (non-E2E) room. */
+    /** Returns the current key ring, or null while this agent holds no room key. */
     getKeyRing: () => KeyRing | null;
     /** Re-reads the key ring from the server. Catch-up calls it while links
      *  wait for a key, then retries them (`retryHeld`) whatever it found. */
@@ -91,19 +89,14 @@ async function withToken<T>(fn: (token: string) => Promise<T>): Promise<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Wire <-> local translation (encryption is a no-op for plaintext rooms)
+// Wire <-> local translation: every link on the wire is encrypted
 // ---------------------------------------------------------------------------
 
 function toWireLink(link: LinkExpression): WireLinkExpression {
     const keyRing = deps().getKeyRing();
     if (!keyRing) {
-        return {
-            author: link.author,
-            timestamp: link.timestamp,
-            proof: link.proof,
-            ...statusField(link.status),
-            data: link.data,
-        };
+        // There is no plaintext mode: a link without a key does not leave.
+        throw new Error("toWireLink: no room key to encrypt with yet");
     }
     const version = latestKeyVersion(keyRing);
     const key = keyRing.get(version);
@@ -118,8 +111,9 @@ const UNOPENABLE = Symbol("unopenable");
 
 /**
  * The link a wire link carries, or null when it is encrypted with a key
- * version this agent does not hold (yet). A link the key it names does not
- * open (malformed ciphertext or payload) is logged and `UNOPENABLE`: a key
+ * version this agent does not hold (yet). A plaintext link is `UNOPENABLE`:
+ * the link server refuses plaintext in every room, so no member committed it. A link the key it names
+ * does not open (malformed ciphertext or payload) is logged and `UNOPENABLE`: a key
  * version is fixed by its rotation's commitment, so no later key opens it
  * either, and it costs that one link, not the diff, the catch-up batch or
  * the held links around it.
@@ -139,13 +133,9 @@ function openWireLink(wireLink: WireLinkExpression): LinkExpression | null | typ
             return UNOPENABLE;
         }
     }
-    return {
-        author: wireLink.author ?? "",
-        timestamp: wireLink.timestamp ?? "",
-        proof: wireLink.proof ?? { signature: "", key: "" },
-        ...statusField(wireLink.status),
-        data: (wireLink.data as Link) ?? { source: "", target: "" },
-    };
+    // Rooms refuse plaintext from creation, so no member sent this: skip it.
+    console.error(`[server-link-language] skipping link ${heldId(wireLink)}: it is not encrypted`);
+    return UNOPENABLE;
 }
 
 function toWireDiff(diff: PerspectiveDiff): WirePerspectiveDiff {

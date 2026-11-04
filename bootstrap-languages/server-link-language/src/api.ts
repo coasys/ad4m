@@ -79,7 +79,9 @@ export async function requestChallenge(config: RoomConfig, did: string): Promise
 }
 
 /**
- * Step 2: POST {did, challenge, signature} -> {token}
+ * Step 2: POST {did, challenge, signature} -> {token}. The call that creates
+ * the room makes this agent its admin; every room refuses plaintext from
+ * creation.
  */
 export async function verifyChallenge(
     config: RoomConfig,
@@ -100,8 +102,8 @@ export async function verifyChallenge(
 // Perspective sync / commit
 // ---------------------------------------------------------------------------
 
-/** Where the server put an accepted commit in the room's diff log. Fields
- *  are absent when the server's answer carries none (older servers). */
+/** Where the server put an accepted commit in the room's diff log. A field
+ *  the answer does not carry is absent. */
 export interface CommitResult {
     sequence?: number;
     revision?: string;
@@ -206,26 +208,15 @@ export async function deleteRoomKey(config: RoomConfig, token: string, version: 
 }
 
 /**
- * Fetches the room's E2E keys for this agent.
- *
- * Returns null when the room has no E2E at all (server responds 404).
- * Returns `{ keys: [], e2e_enabled: true }` when the room HAS E2E but
- * this agent has no keys yet (freshly added member awaiting grant).
+ * Fetches the room key versions sealed to this agent. The server answers 200
+ * with an empty list when it holds none: the agent waits for one. Any error
+ * status, 404 included, throws.
  */
-export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<KeysResponse | null> {
-    try {
-        const res = await request<Partial<KeysResponse>>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
-        if (!res) return null;
-        return {
-            keys: res.keys ?? [],
-            e2e_enabled: res.e2e_enabled ?? (!!res.keys && res.keys.length > 0),
-        };
-    } catch (err) {
-        if (err instanceof ApiError && (err.status === 404 || err.status === 204)) {
-            return null; // Room has no E2E — 404
-        }
-        throw err;
-    }
+export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<KeysResponse> {
+    const res = await request<Partial<KeysResponse> | undefined>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
+    // A body without a list is a broken answer, not "no keys": throwing keeps a loaded ring (`afterFailedKeyRead`).
+    if (!Array.isArray(res?.keys)) throw new Error("server-link-language: /keys answered without a keys list");
+    return { keys: res.keys };
 }
 
 // ---------------------------------------------------------------------------

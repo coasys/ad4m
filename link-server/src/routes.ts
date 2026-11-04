@@ -255,19 +255,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return reply.code(400).send({ error: "commit must contain at least one addition or removal" });
       }
 
-      // Enforce E2E: once a room has been rotated to E2E, reject plaintext
-      // links.
-      const room = ctx.db.getRoom(claims.roomId);
-      if (room && room.e2e_enabled) {
-        for (const link of [...additions, ...removals]) {
-          if (link && typeof link === "object" && link.data && !isEncryptedLinkData(link.data)) {
-            return reply.code(400).send({
-              error: "this room requires end-to-end encryption; plaintext links are not accepted",
-            });
-          }
-        }
-      }
-
+      // Every room is end-to-end encrypted from creation: refuse plaintext links.
       for (const link of [...additions, ...removals]) {
         if (!link || typeof link !== "object") {
           return reply.code(400).send({ error: "each link must be an object" });
@@ -275,19 +263,17 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         if (!link.data || typeof link.data !== "object") {
           return reply.code(400).send({ error: "each link must have a data object" });
         }
-        if (isEncryptedLinkData(link.data)) {
-          if (!link.link_hash || typeof link.link_hash !== "string") {
-            return reply.code(400).send({ error: "encrypted links must include a link_hash" });
-          }
-        } else {
-          if (link.author !== claims.did) {
-            return reply
-              .code(400)
-              .send({ error: "every link's author must match the authenticated DID" });
-          }
-          if (typeof link.timestamp !== "string") {
-            return reply.code(400).send({ error: "each link must have a string timestamp" });
-          }
+        // Only ciphertext and nonce: a plaintext key beside them would be stored and served in the clear.
+        if (!isEncryptedLinkData(link.data) || Object.keys(link.data).length !== 2) {
+          return reply.code(400).send({
+            error: "this room requires end-to-end encryption; link data must be exactly {ciphertext, nonce}",
+          });
+        }
+        if (!link.link_hash || typeof link.link_hash !== "string") {
+          return reply.code(400).send({ error: "encrypted links must include a link_hash" });
+        }
+        if (link.key_version !== undefined && !(Number.isSafeInteger(link.key_version) && link.key_version > 0)) {
+          return reply.code(400).send({ error: "key_version must be a positive integer" });
         }
       }
 
@@ -433,23 +419,15 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const room = ctx.db.getRoom(claims.roomId);
-      const e2eEnabled = !!(room && room.e2e_enabled);
+      // An empty list: the admin has not rotated a key in yet, or no holder
+      // has granted this agent one.
       const rows = ctx.db.getAllRoomKeys(claims.roomId, claims.did);
-      if (rows.length === 0 && !e2eEnabled) {
-        // Room has never had E2E enabled — genuinely no keys.
-        return reply.code(404).send({ error: "no room key available for this agent yet" });
-      }
-      // Room has E2E (agent may or may not have keys yet). Return the
-      // e2e_enabled flag so the client can distinguish "no E2E" (404)
-      // from "E2E but keys pending" (200, empty keys array).
       return reply.send({
         keys: rows.map((r) => ({
           encryptedKey: JSON.parse(r.encrypted_key),
           version: r.version,
           commitment: r.commitment ?? undefined,
         })),
-        e2e_enabled: e2eEnabled,
       });
     }
   );
@@ -507,7 +485,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         );
         recipients.push(entry.did);
       }
-      ctx.db.setE2eEnabled(claims.roomId, true);
 
       return reply.send({ version, recipients, membersNeedingHistoricalKeys: membersMissingKeys(ctx, claims.roomId) });
     }

@@ -212,12 +212,14 @@ The page uses relative URLs, so it also works mounted under a path on a host tha
 
 The server handles storage and sync — it does not speak AD4M on its own. The companion [**server-link-language**](../bootstrap-languages/server-link-language/README.md) bridges the gap: AD4M agents load that language, which then connects to this server, authenticates, and syncs links automatically. See that package for instructions on publishing the language and creating neighbourhoods.
 
-### End-to-end encryption (optional)
+### End-to-end encryption
+
+Every room's links are end-to-end encrypted from creation: the server refuses plaintext links in every room, before any key exists. The admin's language rotates in key version 1 before its first commit, and members wait for a key before they commit anything. Presence and telepresence signals are relayed as sent, not encrypted.
 
 E2E encryption uses **true client-side key generation**: the admin's language client generates each room key locally, seals it to the DID of every ACL member (the X25519 form of the DID's Ed25519 key; ephemeral X25519 ECDH + HKDF-SHA256 + AES-256-GCM, the AD4M executor's sealed box), and uploads only the sealed boxes. The server never sees the plaintext key and stores no member keys: the ACL is DIDs.
 
 ```bash
-# Enable or rotate the room key (admin only).
+# Mint the first room key, or rotate it (admin only).
 # The client generates the key, seals it to each ACL member's DID,
 # and POSTs only sealed boxes:
 curl -X POST https://your-server:3456/rooms/YOUR_ROOM/keys/rotate \
@@ -226,7 +228,7 @@ curl -X POST https://your-server:3456/rooms/YOUR_ROOM/keys/rotate \
   -d '{"keys": [{"did": "did:key:z6Mk...", "encryptedKey": {"ephemeralPublicKey": "...", "nonce": "...", "ciphertext": "..."}}], "commitment": "<sha256 hex>"}'
 ```
 
-A rotation seals the new version to every ACL member, including members that never connected; each reads it the next time it connects or refreshes its key ring. Once a room has E2E enabled, the server rejects plaintext commits — a client without keys cannot write until it receives them.
+A rotation seals the new version to every ACL member, including members that never connected; each reads it the next time it connects or refreshes its key ring. Every room rejects plaintext commits, so a client without keys cannot write until it receives them.
 
 A member added after a rotation gets the versions it lacks from any member holding them: every member's language reads `GET /keys/missing` and seals the versions it holds to the members lacking them (`POST /keys/grant`, see `src/room-keys.ts` in server-link-language). The server accepts a grant only of versions the granter holds, and keeps the first box stored per member and version.
 
@@ -239,7 +241,7 @@ The server cannot see inside a box, so a member could grant a key that opens but
 - **ACL** gates every room endpoint. Only the admin can add/remove DIDs.
 - **Links** are stored as an append-only diff log (`PerspectiveDiff` = additions/removals of signed `LinkExpression`s) plus a derived active-set table, so the room's state is always `replay(diffs)`. The **revision** is a content hash of the active set's link hashes — order-independent, so two servers with the same active links converge to the same revision regardless of how they got there.
 - **WebSocket** push delivers committed diffs and telepresence events in real time.
-- **E2E encryption** is opt-in per room: the entire `LinkExpression` (author, timestamp, proof, and data) becomes an opaque ciphertext blob. The server sees only `{ciphertext, nonce}` plus a client-computed `link_hash` for OR-Set dedup, and stores and sends them as the client wrote them (base64). Once enabled, the server rejects plaintext commits.
+- **E2E encryption** is on from creation in every room: the entire `LinkExpression` (author, timestamp, proof, and data) becomes an opaque ciphertext blob. The server sees only `{ciphertext, nonce}` (base64) plus a client-computed `link_hash` for OR-Set dedup, stores and sends them as the client wrote them, and rejects plaintext commits.
 
 See [`AGENTS.md`](./AGENTS.md) for architecture, file layout, and implementation decisions made where the spec was ambiguous.
 
@@ -251,13 +253,14 @@ All endpoints except `/rooms/:roomId/auth` require `Authorization: Bearer <jwt>`
 POST /rooms/:roomId/auth      { did } -> { challenge }
                                { did, challenge, signature } -> { token, expiresAt }
 POST /rooms/:roomId/commit    { additions: LinkExpression[], removals: LinkExpression[] } -> { sequence, revision }
+                               (every link encrypted: data { ciphertext, nonce } in base64 and a link_hash; key_version, when sent, a positive integer; 400 otherwise)
 GET  /rooms/:roomId/sync      ?since=<sequence>[&limit=<n>] -> { diffs: (PerspectiveDiff & {sequence})[], revision, sequence, next }
 GET  /rooms/:roomId/render    ?[limit=<n>][&next=<cursor>] -> { links: LinkExpression[], revision, sequence, upto, next }
 GET  /rooms/:roomId/revision  -> { revision, sequence }
 GET  /rooms/:roomId/peers     -> { peers: string[] }               (currently online agents)
 POST /rooms/:roomId/acl       { action: "add"|"remove", did } (admin only)
 GET  /rooms/:roomId/acl       -> { admin, members: [{did}] }
-GET  /rooms/:roomId/keys       -> { keys: [{encryptedKey, version, commitment}], e2e_enabled } | 404 (no E2E)
+GET  /rooms/:roomId/keys       -> { keys: [{encryptedKey, version, commitment}] }   (empty before the caller holds a key)
 DELETE /rooms/:roomId/keys/:version -> { deleted }      (the caller's own box only)
 GET  /rooms/:roomId/keys/missing  -> { membersNeedingHistoricalKeys: [{did, missingVersions}] }
 POST /rooms/:roomId/keys/grant    { targetDid, keys: [{version, encryptedKey}] } -> { granted }
@@ -271,8 +274,8 @@ Operator listener (only with `--operator-port`; all `/api/*` need the operator t
 ```
 GET  /                          admission page (+ /admin.js, /admin.css; CSP default-src 'self', no inline styles or scripts)
 GET  /api/whoami                -> { operator, instance, admission: "allowlist" | "auto" }   (X-Forwarded-User, --operator-label)
-GET  /api/rooms                 -> { rooms: [{ id, admin, e2e, createdAt, memberCount }] }
-GET  /api/rooms/:roomId         -> { id, admin, e2e, createdAt,
+GET  /api/rooms                 -> { rooms: [{ id, admin, createdAt, memberCount }] }
+GET  /api/rooms/:roomId         -> { id, admin, createdAt,
                                      members: [{ did, addedAt, online, addedBy: { actor, source, at } | null }],
                                      history: [{ did, action, actor, source, at }] }   (newest first, last 100)
 POST /api/rooms/:roomId/acl     { action: "add"|"remove", did } -> same as GET /api/rooms/:roomId
