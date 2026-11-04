@@ -563,7 +563,10 @@ Coasys identity store adds these checks:
   frozen the store takes no signed request and one kind of append only: a `rotate`, which the
   committed next key signs (a holder of the current master alone cannot). Once it is appended
   the competing event's signer is no longer current, so the freeze ends by the same rule. The
-  store derives the freeze from the recorded fork and the held log; it stores no flag.
+  store derives the freeze from the recorded fork and the held log; it stores no flag. Against
+  someone who holds the 12 words (the recovery secret, and so the committed next key) a freeze
+  lasts only until they append that `rotate` themselves; this is inherent to pre-rotation, where
+  whoever holds the next key is the owner as far as the log can tell.
 - **Proof of work for a log with no vouching note**, below.
 
 ### Proof of work for a log with no vouching note

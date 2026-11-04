@@ -30,11 +30,44 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
 
+/// Where `build` puts the store: `IDENTITY_STORE_TARGET`, else the `CARGO_TARGET_DIR` that the
+/// `cargo build` in `build` inherits (relative to the repo root, where that build runs), else
+/// the repo root's `target`.
+fn target_dir(store_target: Option<String>, cargo_target: Option<String>) -> PathBuf {
+    let set = |v: Option<String>| v.filter(|v| !v.is_empty()).map(PathBuf::from);
+    match set(store_target).or_else(|| set(cargo_target)) {
+        Some(dir) if dir.is_absolute() => dir,
+        Some(dir) => root().join(dir),
+        None => root().join("target"),
+    }
+}
+
 fn bin(name: &str) -> PathBuf {
-    let target = std::env::var("IDENTITY_STORE_TARGET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| root().join("target"));
-    target.join("debug").join(name)
+    target_dir(
+        std::env::var("IDENTITY_STORE_TARGET").ok(),
+        std::env::var("CARGO_TARGET_DIR").ok(),
+    )
+    .join("debug")
+    .join(name)
+}
+
+#[test]
+fn the_store_binary_is_looked_for_where_cargo_builds_it() {
+    let root = root();
+    assert_eq!(target_dir(None, None), root.join("target"));
+    assert_eq!(target_dir(None, Some(String::new())), root.join("target"));
+    assert_eq!(
+        target_dir(None, Some("/elsewhere/target".into())),
+        PathBuf::from("/elsewhere/target")
+    );
+    assert_eq!(
+        target_dir(None, Some("build/target".into())),
+        root.join("build/target")
+    );
+    assert_eq!(
+        target_dir(Some("/store".into()), Some("/elsewhere".into())),
+        PathBuf::from("/store")
+    );
 }
 
 /// Builds the store and the helper once per test binary (a no-op when up to date).
@@ -1871,21 +1904,36 @@ fn a_log_read_is_bounded_whatever_head_the_store_names() {
         .filter(|c| c.url.starts_with(&log_path))
         .count();
     assert_eq!(pages - reads_before, agents::MAX_LOG_READ_PAGES);
-    // Pages each within the page limit, together past the byte limit.
+    // Pages each within the page limit, together past the byte limit: the read stops on the
+    // page that crosses the byte limit, long before the page limit.
     let mut padded = endless;
     padded["pad"] = json!("x".repeat(MAX_LOG_PAGE_BYTES - 4096));
+    let padded = padded.to_string();
+    assert!(padded.len() <= MAX_LOG_PAGE_BYTES);
+    let crossing = agents::MAX_LOG_READ_BYTES / padded.len() + 1;
+    assert!(crossing < agents::MAX_LOG_READ_PAGES);
     host.remotes.borrow_mut().clear();
     host.serve(
         &log_path,
         HttpReply {
             status: 200,
-            body: padded.to_string(),
+            body: padded,
         },
     );
-    assert_eq!(
-        refusal(block_on(agents::get(&store, &did, now_s()))),
-        too_large
-    );
+    let reads_before = host
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.url.starts_with(&log_path))
+        .count();
+    assert_eq!(refusal(block_on(agents::read_log(&store, &did))), too_large);
+    let pages = host
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.url.starts_with(&log_path))
+        .count();
+    assert_eq!(pages - reads_before, crossing);
 }
 
 #[test]

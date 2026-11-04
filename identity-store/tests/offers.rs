@@ -594,6 +594,86 @@ async fn a_listing_with_wait_answers_when_a_claim_arrives() {
     );
 }
 
+/// `GET uri` (with `header` as the signed request) on its own task: when it answered, and what.
+fn spawn_get(
+    t: &TestStore,
+    uri: String,
+    header: Option<String>,
+) -> tokio::task::JoinHandle<(Instant, Value)> {
+    let router = t.router.clone();
+    tokio::spawn(async move {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let mut request = axum::http::Request::get(uri);
+        if let Some(header) = header {
+            request = request.header(identity_store::request::REQUEST_HEADER, header);
+        }
+        let response = router
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            Instant::now(),
+            serde_json::from_slice::<Value>(&body).unwrap(),
+        )
+    })
+}
+
+#[tokio::test]
+async fn squatting_state_polls_stop_neither_the_claimants_poll_nor_the_owners_list() {
+    let t = TestStore::new();
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let (offer, s) = alice.offer(OfferKind::Device, None, None, t.now() + 300);
+    assert_eq!(t.open_offer(&offer).await.status, StatusCode::CREATED);
+    let phone = Device::new("alice phone");
+    let claim = phone.claim(&alice.scid(), &offer.offer.offer_id, s, false);
+    assert_eq!(
+        t.claim(&alice.scid(), &claim).await.status,
+        StatusCode::CREATED
+    );
+    let poll = format!(
+        "/v1/offers/{}/{}/state?key={}&wait=8",
+        alice.scid(),
+        offer.offer.offer_id,
+        phone.sign_key()
+    );
+
+    // Squatters who know the offer and the claiming key fill every place of the state poll.
+    let squatters: Vec<_> = (0..identity_store::MAX_WAITERS_PER_TOPIC)
+        .map(|_| spawn_get(&t, poll.clone(), None))
+        .collect();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The claimant's poll and the owner's list still wait.
+    let started = Instant::now();
+    let claimant = spawn_get(&t, poll.clone(), None);
+    let path = format!("/v1/offers/{}", alice.scid());
+    let header = alice.master_request("GET", &path, b"", t.now() + 60);
+    let owner = spawn_get(&t, format!("{path}?wait=8"), Some(header));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !claimant.is_finished(),
+        "the claimant's poll answered early"
+    );
+    assert!(!owner.is_finished(), "the owner's list answered early");
+
+    // The add lands: both answer with it at once.
+    let add = alice.add_claimed(&offer.offer, &phone.view(&claim, t.now()));
+    assert_eq!(t.append_push(&mut alice, add).await.status, StatusCode::OK);
+    let landed = Instant::now();
+    let (answered, body) = claimant.await.unwrap();
+    assert_eq!(body, json!({ "state": "spent", "seq": 1 }));
+    assert!(answered.duration_since(landed) < Duration::from_secs(1));
+    let (answered, body) = owner.await.unwrap();
+    assert_eq!(body, json!([]));
+    assert!(answered.duration_since(landed) < Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(8));
+    for squatter in squatters {
+        squatter.await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn no_row_and_no_response_holds_the_offer_secret() {
     let t = TestStore::new();

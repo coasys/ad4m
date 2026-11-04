@@ -39,10 +39,17 @@ fn settings() -> Result<Settings, String> {
         })
         .unwrap_or_default();
     let feed_token = std::env::var("FEED_TOKEN").ok().filter(|t| !t.is_empty());
+    let held_log_events = match std::env::var("HELD_LOG_EVENTS") {
+        Ok(v) => v
+            .parse::<usize>()
+            .map_err(|_| format!("HELD_LOG_EVENTS={v} is not a number of events"))?,
+        Err(_) => Settings::default().held_log_events,
+    };
     Ok(Settings {
         pow_bits,
         feed_token,
         cors_origins,
+        held_log_events,
     })
 }
 
