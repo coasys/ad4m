@@ -1027,9 +1027,9 @@ describe("sync: a failed startup render is retried", () => {
         mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
         const early = makeLink({ source: "early" });
         const late = makeLink({ source: "late" });
-        const server = renderServer([timeout(), { links: [early, late], revision: "rev-9", sequence: 9 }], 9);
+        const server = renderServer([timeout(), { links: [wire(early), wire(late)], revision: "rev-9", sequence: 9 }], 9);
         // The cursor already sits past the hole: catch-up alone never fetches `early`.
-        syncModule.applyInboundWireDiff({ additions: [late], removals: [] }, 9, "rev-9");
+        syncModule.applyInboundWireDiff({ additions: [wire(late)], removals: [] }, 9, "rev-9");
 
         await assert.rejects(syncModule.bootstrap(), /timed out/);
         await syncModule.catchUp();
@@ -1055,7 +1055,7 @@ describe("sync: a failed startup render is retried", () => {
 
     it("a successful first render is not retried", async () => {
         mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
-        const server = renderServer([{ links: [makeLink({ source: "a" })], revision: "rev-1", sequence: 1 }], 1);
+        const server = renderServer([{ links: [wire(makeLink({ source: "a" }))], revision: "rev-1", sequence: 1 }], 1);
         syncModule.needRender();
 
         await syncModule.bootstrap();
@@ -1089,7 +1089,7 @@ describe("sync: a failed startup render is retried", () => {
 
     it("a render that never ran at startup (authentication failed first) is run by catch-up", async () => {
         const a = makeLink({ source: "a" });
-        const server = renderServer([{ links: [a], revision: "rev-1", sequence: 1 }], 1);
+        const server = renderServer([{ links: [wire(a)], revision: "rev-1", sequence: 1 }], 1);
 
         syncModule.needRender();
         await syncModule.catchUp();
@@ -1111,7 +1111,7 @@ describe("sync: a failed startup render is retried", () => {
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(server.renderCalls(), 1);
 
-        answerRender(jsonResponse({ links: [makeLink({ source: "a" })], revision: "rev-1", sequence: 1 }));
+        answerRender(jsonResponse({ links: [wire(makeLink({ source: "a" }))], revision: "rev-1", sequence: 1 }));
         await startup;
         await syncModule.catchUp();
         await syncModule._awaitRenderRetryForTests();
@@ -1137,7 +1137,7 @@ describe("sync: a failed startup render is retried", () => {
         const fresh = makeLink({ source: "fresh" });
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync?since=0"),
-            () => jsonResponse({ diffs: [{ additions: [fresh], removals: [], sequence: 1 }], revision: "rev-1", sequence: 1 }),
+            () => jsonResponse({ diffs: [{ additions: [wire(fresh)], removals: [], sequence: 1 }], revision: "rev-1", sequence: 1 }),
         );
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync"),
@@ -1159,7 +1159,7 @@ describe("sync: a failed startup render is retried", () => {
         assert.equal(renderCalls, 2);
 
         const old = makeLink({ source: "old" });
-        answerRender(jsonResponse({ links: [old, fresh], revision: "rev-1", sequence: 1 }));
+        answerRender(jsonResponse({ links: [wire(old), wire(fresh)], revision: "rev-1", sequence: 1 }));
         await syncModule._awaitRenderRetryForTests();
         assert.equal(emitCounts("additions").get("old"), 1);
         assert.equal(emitCounts("additions").get("fresh"), 1);
