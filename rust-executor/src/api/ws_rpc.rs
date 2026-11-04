@@ -603,7 +603,12 @@ impl Connection {
                         None => None,
                     };
                     match refused {
-                        Some(e) => Err(e),
+                        // The access answer first: a caller the guard refuses learns nothing
+                        // of its frame.
+                        Some(e) => handler_map
+                            .admit(&msg_type, &params, &req_ctx)
+                            .await
+                            .and(Err(e)),
                         None => handler_map.dispatch(&msg_type, params, req_ctx).await,
                     }
                 } => {
@@ -979,6 +984,34 @@ mod socket_tests {
             let message = reply["error"]["message"].as_str().unwrap();
             assert!(message.starts_with("invalid: DuplicateMember"), "{reply}");
         }
+    }
+
+    /// The guard runs before the duplicate-member refusal: an app on the main agent, which
+    /// `identity.publish`'s guard refuses, gets the access answer for such a frame.
+    #[tokio::test]
+    async fn a_caller_the_guard_refuses_gets_403_for_a_duplicate_member_frame() {
+        let addr = start_server().await;
+        let mut ws = connect(addr, &app_token("duplicate-member-app")).await;
+        ws.send(WsMessage::Text(
+            r#"{"id":"p","type":"identity.publish","params":{"events":[{"seq":0,"seq":1}]}}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let reply = loop {
+            let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
+                .await
+                .expect("a reply")
+                .expect("an open socket")
+                .unwrap();
+            if let WsMessage::Text(text) = frame {
+                let reply: Value = serde_json::from_str(&text).unwrap();
+                if reply["id"] == "p" {
+                    break reply;
+                }
+            }
+        };
+        assert_eq!(reply["error"]["code"], 403, "{reply}");
     }
 
     #[tokio::test]

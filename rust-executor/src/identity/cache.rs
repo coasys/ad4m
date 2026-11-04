@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use ad4m_hash_chain::store::{ChainStore, SqliteChainStore, StoredEntry};
 use ad4m_hash_chain::ChainType;
 use ad4m_identity_core::{
-    ChainError, Event, FoldError, ForkEvidence, Head, ImportOutcome, KelChain,
+    ChainError, Event, FoldError, ForkEvidence, Head, ImportOutcome, KelChain, Op,
 };
 use ad4m_ldk::identity::SignedHead;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -33,6 +33,7 @@ use tokio::sync::Mutex;
 
 use super::backend::{IdentityBackend, IdentityError};
 use super::head::verify_head;
+use super::types::StoreBehind;
 
 /// The chain type of key logs in the hash-chain tables.
 pub const KEL_TYPE: ChainType = "coasys:kel";
@@ -136,6 +137,9 @@ pub struct KelCache {
     /// When each log last refreshed from the configured store (unix seconds), in memory only:
     /// after a restart every log counts as stale ([`KelCache::refreshed_within`]).
     refreshed: StdMutex<HashMap<String, u64>>,
+    /// The logs the configured store answers behind the cache ([`CacheError::Behind`]), in
+    /// memory only, until a refresh succeeds ([`KelCache::store_behind`]).
+    behind: StdMutex<HashMap<String, StoreBehind>>,
     store_keys: Vec<String>,
     on_fork: Option<ForkListener>,
 }
@@ -144,7 +148,14 @@ const META_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS identity_heads (
     scid TEXT PRIMARY KEY,
     head TEXT NOT NULL,
     accepted_at INTEGER NOT NULL
-)";
+);
+CREATE TABLE IF NOT EXISTS identity_fork_signers (
+    scid TEXT NOT NULL,
+    signer TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    theirs TEXT NOT NULL,
+    PRIMARY KEY (scid, signer)
+);";
 
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -162,6 +173,8 @@ pub fn scid_from(did: &str) -> &str {
 /// The log that `events` start (from seq 0, in any order, repeats dropped), checked to be
 /// `scid`'s; with the events in seq order.
 pub fn fold_log(scid: &str, events: &[Event]) -> Result<(KelChain, Vec<Event>), CacheError> {
+    #[cfg(test)]
+    tests::FOLDS.with(|folds| folds.set(folds.get() + 1));
     let mut sorted: Vec<Event> = events.to_vec();
     sorted.sort_by_key(|e| e.seq);
     sorted.dedup_by(|a, b| a.seq == b.seq && a == b);
@@ -192,9 +205,104 @@ pub fn fold_log(scid: &str, events: &[Event]) -> Result<(KelChain, Vec<Event>), 
 /// chain id, every rule of `KelPolicy`, the proofs). Without it anybody could raise forks with
 /// no key. `Err` says why the rival does not hold.
 pub fn rival_holds(scid: &str, held: &[Event], rival: &Event) -> Result<(), CacheError> {
-    let mut prefix: Vec<Event> = held.iter().filter(|e| e.seq < rival.seq).cloned().collect();
-    prefix.push(rival.clone());
-    fold_log(scid, &prefix).map(|_| ())
+    rival_steps(prefix_below(scid, held, rival.seq)?, rival)
+}
+
+/// The fold of `held`'s events below `seq`: the log a rival at `seq` steps on.
+fn prefix_below(scid: &str, held: &[Event], seq: u64) -> Result<KelChain, CacheError> {
+    let prefix: Vec<Event> = held.iter().filter(|e| e.seq < seq).cloned().collect();
+    fold_log(scid, &prefix).map(|(chain, _)| chain)
+}
+
+/// Whether `rival` steps on `below` (its seq, prev, chain id, every rule of `KelPolicy`, the
+/// proofs): what a fold of `below`'s events and the rival checks, without folding them again.
+fn rival_steps(below: KelChain, rival: &Event) -> Result<(), CacheError> {
+    below
+        .appended(&ad4m_identity_core::KelPolicy, rival)
+        .map(|_| ())
+        .map_err(CacheError::Fold)
+}
+
+/// The master of `chain` (a log holding `rival.seq`) that signed `rival`, as the identity store
+/// charges a fork: the master current before `rival.seq`, or for a `rotate` the key it names
+/// (the log's successor there, or the committed next key). `None` for an `incept`, or when no
+/// proof of `rival` verifies under that key. One proof check, no fold: a body no master of the
+/// log signed is refused before the prefix is read, and a fork is charged to one master.
+pub fn rival_signer(chain: &KelChain, rival: &Event) -> Option<String> {
+    let seq = rival.seq;
+    let masters = &chain.state().masters;
+    let at = masters
+        .iter()
+        .position(|m| m.added < seq && m.revoked.is_none_or(|r| r >= seq))?;
+    let signer = match &rival.op {
+        Op::Rotate { master, salt, .. } => match masters.get(at + 1) {
+            Some(successor) => (successor.sign == *master).then(|| master.clone())?,
+            None => (chain.state().next.as_ref()
+                == Some(&ad4m_identity_core::commitment(master, salt)))
+            .then(|| master.clone())?,
+        },
+        Op::Incept { .. } => return None,
+        _ => masters[at].sign.clone(),
+    };
+    rival
+        .proof
+        .iter()
+        .any(|p| {
+            ad4m_hash_chain::verify_proof(rival, p, &signer, ad4m_identity_core::KEL_DOMAIN).is_ok()
+        })
+        .then_some(signer)
+}
+
+/// The rival of `fork` among `served` that a master of `chain` signed and that holds on `held`
+/// ([`rival_signer`], [`rival_holds`]), with its signer. Every copy at the fork's seq with its
+/// hash is tried, as `import` tries every copy: one with its proofs stripped hashes the same as
+/// the signed one. Else why none holds.
+pub fn holding_rival<'a>(
+    scid: &str,
+    chain: &KelChain,
+    held: &[Event],
+    fork: &ForkEvidence,
+    served: &'a [Event],
+) -> Result<(&'a Event, String), CacheError> {
+    let rivals = signed_rivals(chain, fork, served);
+    if rivals.is_empty() {
+        return Err(unsigned_rival(fork));
+    }
+    // The prefix folds once and each copy steps on a copy of it: a host can serve a thousand
+    // copies of one event in one answer (each with another junk proof, the same hash), and a
+    // fold per copy would cost copies × prefix.
+    let below = prefix_below(scid, held, fork.seq)?;
+    let mut why = None;
+    for (rival, signer) in rivals {
+        match rival_steps(below.clone(), rival) {
+            Ok(()) => return Ok((rival, signer)),
+            Err(e) => why = why.or(Some(e)),
+        }
+    }
+    Err(why.unwrap_or_else(|| unsigned_rival(fork)))
+}
+
+/// The copies in `served` of the event at `fork.seq` with the hash `fork.theirs` that a master of
+/// `chain` signed, with that master.
+fn signed_rivals<'a>(
+    chain: &KelChain,
+    fork: &ForkEvidence,
+    served: &'a [Event],
+) -> Vec<(&'a Event, String)> {
+    served
+        .iter()
+        .filter(|e| {
+            e.seq == fork.seq && ad4m_identity_core::event_hash(e).is_ok_and(|h| h == fork.theirs)
+        })
+        .filter_map(|e| rival_signer(chain, e).map(|signer| (e, signer)))
+        .collect()
+}
+
+fn unsigned_rival(fork: &ForkEvidence) -> CacheError {
+    CacheError::Fold(ChainError::Malformed(format!(
+        "no event at seq {} with the hash {} is signed by a master of the log",
+        fork.seq, fork.theirs
+    )))
 }
 
 impl KelCache {
@@ -230,6 +338,7 @@ impl KelCache {
             chains: Mutex::new(HashMap::new()),
             fetching: Mutex::new(HashMap::new()),
             refreshed: StdMutex::new(HashMap::new()),
+            behind: StdMutex::new(HashMap::new()),
             store_keys,
             on_fork: None,
         })
@@ -365,29 +474,64 @@ impl KelCache {
                 )
                 .map_err(storage)?;
             }
-            tx.execute("DELETE FROM identity_heads WHERE scid = ?1", params![scid])
+            for table in ["identity_heads", "identity_fork_signers"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE scid = ?1"),
+                    params![scid],
+                )
                 .map_err(storage)?;
+            }
             tx.commit().map_err(storage)?;
         }
         chains.remove(scid);
         if let Ok(mut refreshed) = self.refreshed.lock() {
             refreshed.remove(scid);
         }
+        self.note_behind(scid, None);
         Ok(())
     }
 
-    /// Records `fork` unless the same fork is recorded already; calls the listener for a new one.
-    async fn record_fork(&self, fork: &ForkEvidence, theirs_json: &str) -> Result<(), CacheError> {
+    /// Whether a fork of `scid` whose rival `signer` signed is recorded.
+    fn signer_has_fork(&self, scid: &str, signer: &str) -> Result<bool, CacheError> {
+        let meta = self.meta.lock().map_err(storage)?;
+        meta.query_row(
+            "SELECT 1 FROM identity_fork_signers WHERE scid = ?1 AND signer = ?2",
+            params![scid, signer],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|found| found.is_some())
+        .map_err(storage)
+    }
+
+    /// Records `fork` (its rival signed by the master `signer`) unless the same fork, or a fork
+    /// by the same master, is recorded already; calls the listener for a new one.
+    async fn record_fork(
+        &self,
+        fork: &ForkEvidence,
+        theirs_json: &str,
+        signer: &str,
+    ) -> Result<(), CacheError> {
         let known = self.forks(&fork.chain).await?;
-        if known
-            .iter()
-            .any(|k| k.seq == fork.seq && k.theirs == fork.theirs)
+        if self.signer_has_fork(&fork.chain, signer)?
+            || known
+                .iter()
+                .any(|k| k.seq == fork.seq && k.theirs == fork.theirs)
         {
             return Ok(());
         }
         self.store
             .record_fork(KEL_TYPE, fork, theirs_json)
             .await
+            .map_err(storage)?;
+        self.meta
+            .lock()
+            .map_err(storage)?
+            .execute(
+                "INSERT OR IGNORE INTO identity_fork_signers (scid, signer, seq, theirs)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![fork.chain, signer, fork.seq as i64, fork.theirs],
+            )
             .map_err(storage)?;
         log::warn!(
             "identity: fork in the log of {} at seq {} (ours {}, theirs {}); the cache keeps its history",
@@ -440,23 +584,26 @@ impl KelCache {
             ImportOutcome::Fork(fork) => {
                 // A fork counts only when the competing event is one the log's own rules admit
                 // on the held prefix; an unsigned or otherwise invalid body is refused as an
-                // event that does not fold, records nothing and alerts nobody.
-                let rival = events
-                    .iter()
-                    .find(|e| {
-                        e.seq == fork.seq
-                            && ad4m_identity_core::event_hash(e).is_ok_and(|h| h == fork.theirs)
-                    })
-                    .ok_or_else(|| {
-                        CacheError::Fold(ChainError::Malformed(format!(
-                            "no event at seq {} hashes to {}",
-                            fork.seq, fork.theirs
-                        )))
-                    })?;
+                // event that does not fold, records nothing and alerts nobody. One fork is kept
+                // per signing master, as the identity store keeps: a further rival by a master
+                // with a recorded fork adds no row and no alert, and is neither read nor folded
+                // again (a body no master signed is refused by its proof alone).
+                let signers: Vec<String> = signed_rivals(&cached, &fork, events)
+                    .into_iter()
+                    .map(|(_, signer)| signer)
+                    .collect();
+                if signers.is_empty() {
+                    return Err(unsigned_rival(&fork));
+                }
+                for signer in &signers {
+                    if self.signer_has_fork(scid, signer)? {
+                        return Err(CacheError::Fork(fork));
+                    }
+                }
                 let held = self.stored_events(scid, 0).await?;
-                rival_holds(scid, &held, rival)?;
+                let (rival, signer) = holding_rival(scid, &cached, &held, &fork, events)?;
                 let theirs = rival.to_canonical_json().unwrap_or_default();
-                self.record_fork(&fork, &theirs).await?;
+                self.record_fork(&fork, &theirs, &signer).await?;
                 Err(CacheError::Fork(fork))
             }
             ImportOutcome::Appended { head, entries } => {
@@ -617,8 +764,13 @@ impl KelCache {
                 }
             }
         };
-        if result.is_ok() {
-            self.note_refreshed(&scid, now());
+        match &result {
+            Ok(_) => {
+                self.note_refreshed(&scid, now());
+                self.note_behind(&scid, None);
+            }
+            Err(CacheError::Behind { store, .. }) => self.note_behind(&scid, Some(*store)),
+            Err(_) => {}
         }
         let mut fetching = self.fetching.lock().await;
         // The map's handle and ours: nobody else waits on this gate.
@@ -656,6 +808,57 @@ impl KelCache {
             .is_some_and(|at| now.saturating_sub(at) < window)
     }
 
+    /// Notes the configured store's answer for `scid`: `Some(seq)` behind the cache (the first
+    /// time stays `since`), `None` caught up.
+    fn note_behind(&self, scid: &str, store: Option<Option<u64>>) {
+        let Ok(mut behind) = self.behind.lock() else {
+            return;
+        };
+        match store {
+            Some(seq) => {
+                behind
+                    .entry(scid.to_string())
+                    .and_modify(|b| b.seq = seq)
+                    .or_insert(StoreBehind { since: now(), seq });
+            }
+            None => {
+                behind.remove(scid);
+            }
+        }
+    }
+
+    /// Whether the configured store answered `scid`'s log behind the cache at the last refresh
+    /// (in this run of the executor), and since when; `None` once a refresh succeeds.
+    pub fn store_behind(&self, scid: &str) -> Option<StoreBehind> {
+        self.behind.lock().ok()?.get(scid).copied()
+    }
+
+    /// The store's events of `did` from seq 0 to `seq`, page after page (at most
+    /// [`MAX_PAGES`]): the events a head at `seq` names. Fewer when the store's pages end first.
+    async fn store_events_to(
+        backend: &dyn IdentityBackend,
+        did: &str,
+        seq: u64,
+    ) -> Result<Vec<Event>, CacheError> {
+        let mut events: Vec<Event> = Vec::new();
+        let mut from = 0;
+        for _ in 0..MAX_PAGES {
+            let Some(page) = backend.log(did, from).await? else {
+                return Err(CacheError::NotFound);
+            };
+            let page = Self::page_events(&page)?;
+            let Some(last) = page.iter().map(|e| e.seq).max() else {
+                break;
+            };
+            events.extend(page.into_iter().filter(|e| e.seq >= from && e.seq <= seq));
+            if last >= seq || last < from {
+                break;
+            }
+            from = last + 1;
+        }
+        Ok(events)
+    }
+
     /// The pages of [`KelCache::refresh`], under the identity's gate.
     async fn fetch(
         &self,
@@ -691,13 +894,11 @@ impl KelCache {
                 .await
             {
                 // The head disagrees with the cached log below this page: read the store's log
-                // from seq 0 once, so a rival event of its that holds is recorded as a fork.
+                // from seq 0 up to the head's seq once, so a rival event of its that holds is
+                // recorded as a fork wherever it sits.
                 Err(CacheError::Conflict(_)) if page.head.seq < from => {
-                    let Some(page) = backend.log(&did, 0).await? else {
-                        return Err(CacheError::NotFound);
-                    };
-                    self.accept(scid, &page.head, &Self::page_events(&page)?)
-                        .await?
+                    let events = Self::store_events_to(backend, &did, page.head.seq).await?;
+                    self.accept(scid, &page.head, &events).await?
                 }
                 other => other?,
             };
@@ -735,6 +936,15 @@ pub(crate) mod tests {
     use ed25519_dalek::SigningKey;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
+
+    thread_local! {
+        /// How many times [`fold_log`] ran on this thread: a test bounds the folds of one call.
+        pub(crate) static FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn folds() -> usize {
+        FOLDS.with(|folds| folds.get())
+    }
 
     /// A cache in memory, trusting heads signed by `store_keys`.
     pub(crate) fn in_memory(store_keys: Vec<String>) -> KelCache {
@@ -880,6 +1090,8 @@ pub(crate) mod tests {
         pub puts: StdMutex<Vec<(AgentRecord, Option<SignedRequest>)>>,
         /// A `put_agent` call fails as unavailable.
         pub put_down: AtomicBool,
+        /// The most events a page holds, when set (the head stays the log's).
+        pub page_limit: StdMutex<Option<usize>>,
     }
 
     impl FakeStore {
@@ -893,6 +1105,7 @@ pub(crate) mod tests {
                 store_down: AtomicBool::new(false),
                 puts: StdMutex::new(vec![]),
                 put_down: AtomicBool::new(false),
+                page_limit: StdMutex::new(None),
             }
         }
 
@@ -908,6 +1121,7 @@ pub(crate) mod tests {
             let page: Vec<serde_json::Value> = events
                 .iter()
                 .filter(|e| e.seq >= from)
+                .take(self.page_limit.lock().unwrap().unwrap_or(usize::MAX))
                 .map(|e| serde_json::to_value(e).unwrap())
                 .collect();
             Some(LogPage {
@@ -1118,6 +1332,10 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(forks.load(Ordering::SeqCst), 0, "no identity-fork");
+        let behind = cache
+            .store_behind(&log.scid())
+            .expect("the store shows as behind");
+        assert_eq!(behind.seq, Some(0));
         assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
         let kept = cache.chain(&log.scid()).await.unwrap().unwrap();
         assert_eq!(kept.head(), log.chain().head(), "the cached history stays");
@@ -1134,17 +1352,23 @@ pub(crate) mod tests {
         // The store catches up: the next refresh takes it, as ever.
         *store.events.lock().unwrap() = log.events.clone();
         cache.refresh(&store, &log.scid()).await.unwrap();
+        assert_eq!(cache.store_behind(&log.scid()), None, "caught up");
     }
 
     /// An `add` of a new device (seed `seed`) on `chain`, signed by `master` (m0).
     pub(crate) fn add_device(chain: &KelChain, master: &SigningKey, seed: u8) -> Event {
-        let device = SigningKey::from_bytes(&[seed; 32]);
+        add_device_from(chain, master, [seed; 32])
+    }
+
+    /// [`add_device`] with the device's whole 32-byte seed, for logs of more than 256 devices.
+    fn add_device_from(chain: &KelChain, master: &SigningKey, seed: [u8; 32]) -> Event {
+        let device = SigningKey::from_bytes(&seed);
         let mut event = ad4m_identity_core::build::add_unsigned(
             chain,
             DeviceKey {
                 id: chain.state().next_device_id(),
                 sign: device.key(),
-                enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
+                enc: ad4m_identity_core::encode_x25519_multikey(&seed),
                 life: KeyLife::Standing,
             },
             "offer",
@@ -1266,6 +1490,58 @@ pub(crate) mod tests {
         );
     }
 
+    /// The store's lower head names another branch that splits from ours past its first page:
+    /// the re-read pages from seq 0 up to the head's seq, so the store's rival there is found
+    /// and recorded as a fork (one page from seq 0 holds only the shared prefix).
+    #[tokio::test]
+    async fn a_split_past_the_first_page_is_found_by_the_re_read() {
+        let mut log = TestLog::new(1);
+        let mut chain = log.chain();
+        let device = |n: u32| {
+            let mut seed = [7u8; 32];
+            seed[..4].copy_from_slice(&n.to_be_bytes());
+            seed
+        };
+        // A shared prefix up to seq 299, then ours goes on to 302; the store's rival is at 300.
+        for n in 1..300u32 {
+            let event = add_device_from(&chain, &log.master, device(n));
+            chain
+                .append(&ad4m_identity_core::KelPolicy, &event)
+                .unwrap();
+            log.events.push(event);
+        }
+        let at_split = chain.clone();
+        let rival = add_device_from(&at_split, &log.master, device(1000));
+        let mut theirs_log = log.events.clone();
+        theirs_log.push(rival.clone());
+        for n in 300..303u32 {
+            let event = add_device_from(&chain, &log.master, device(n));
+            chain
+                .append(&ad4m_identity_core::KelPolicy, &event)
+                .unwrap();
+            log.events.push(event);
+        }
+        let store = FakeStore::new(theirs_log);
+        *store.page_limit.lock().unwrap() = Some(PAGE as usize);
+        let mut cache = trusting();
+        let forks = counting_cache(&mut cache);
+        accept_signed(&cache, &log.events).await;
+        let scid = log.scid();
+
+        match cache.refresh(&store, &scid).await {
+            Err(CacheError::Fork(fork)) => {
+                assert_eq!(fork.seq, 300);
+                assert_eq!(fork.theirs, ad4m_identity_core::event_hash(&rival).unwrap());
+            }
+            other => panic!("expected a fork, got {other:?}"),
+        }
+        assert_eq!(forks.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cache.chain(&scid).await.unwrap().unwrap().head(),
+            chain.head()
+        );
+    }
+
     #[tokio::test]
     async fn an_unsigned_event_at_a_held_seq_raises_no_fork() {
         let mut log = TestLog::new(1);
@@ -1340,6 +1616,86 @@ pub(crate) mod tests {
             cache.chain(&log.scid()).await.unwrap().unwrap().head(),
             log.chain().head()
         );
+    }
+
+    /// One fork per signing master, as the identity store keeps: a second rival body by the
+    /// same master adds no row and no alert. A copy with its proofs stripped ahead of the signed
+    /// copy in the same batch does not hide the fork: every copy is tried.
+    #[tokio::test]
+    async fn rivals_by_one_master_record_one_fork_and_every_copy_is_tried() {
+        let mut log = TestLog::new(1);
+        let at_incept = log.chain();
+        log.revoke_d1();
+        let store = FakeStore::new(log.events.clone());
+        let mut cache = in_memory(vec![store.key.multikey()]);
+        let forks = counting_cache(&mut cache);
+        cache.refresh(&store, &log.scid()).await.unwrap();
+
+        let first = add_device(&at_incept, &log.master, 42);
+        let mut stripped = first.clone();
+        stripped.proof.clear();
+        assert!(matches!(
+            cache.ingest(&log.scid(), &[stripped, first]).await,
+            Err(CacheError::Fork(_))
+        ));
+        let second = add_device(&at_incept, &log.master, 43);
+        assert!(matches!(
+            cache.ingest(&log.scid(), &[second]).await,
+            Err(CacheError::Fork(_))
+        ));
+        assert_eq!(forks.load(Ordering::SeqCst), 1, "one alert per master");
+        assert_eq!(cache.forks(&log.scid()).await.unwrap().len(), 1);
+
+        // A reset forgets the master's fork with the rest of the log.
+        cache.reset(&log.scid()).await.unwrap();
+        assert!(!cache
+            .signer_has_fork(&log.scid(), &log.master.key())
+            .unwrap());
+    }
+
+    /// Many signed copies of one rival, each with another junk proof (all hash the same): the
+    /// prefix below the rival folds once, not once per copy, and the copy that steps is found.
+    #[test]
+    fn every_copy_of_a_rival_steps_on_one_fold_of_the_prefix() {
+        let mut log = TestLog::new(1);
+        let at_incept = log.chain();
+        log.revoke_d1();
+        let rival = add_device(&at_incept, &log.master, 42);
+        let theirs = ad4m_identity_core::event_hash(&rival).unwrap();
+        let mut served: Vec<Event> = (0..200)
+            .map(|i| {
+                let mut copy = rival.clone();
+                let mut junk = copy.proof[0].clone();
+                junk.verification_method = format!("m{}", i + 7);
+                copy.proof.push(junk);
+                copy
+            })
+            .collect();
+        assert_eq!(ad4m_identity_core::event_hash(&served[0]).unwrap(), theirs);
+        assert!(rival_holds(&log.scid(), &log.events, &served[0]).is_err());
+        served.push(rival.clone());
+        let fork = ForkEvidence {
+            chain: log.scid(),
+            seq: 1,
+            ours: ad4m_identity_core::event_hash(&log.events[1]).unwrap(),
+            theirs,
+        };
+
+        let (scid, chain) = (log.scid(), log.chain());
+        let before = folds();
+        let (found, signer) = holding_rival(&scid, &chain, &log.events, &fork, &served).unwrap();
+        assert_eq!(folds() - before, 1, "one fold of the prefix for every copy");
+        assert!(std::ptr::eq(found, served.last().unwrap()));
+        assert_eq!(signer, log.master.key());
+
+        // No copy steps: still one fold, and why the first one failed.
+        served.pop();
+        let before = folds();
+        assert!(matches!(
+            holding_rival(&scid, &chain, &log.events, &fork, &served),
+            Err(CacheError::Fold(_))
+        ));
+        assert_eq!(folds() - before, 1);
     }
 
     #[tokio::test]

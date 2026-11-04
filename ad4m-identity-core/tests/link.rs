@@ -375,7 +375,7 @@ fn the_offer_string_round_trips_bare_and_as_a_link() {
     assert!(string.encode().starts_with("coasys:offer:1:"));
     assert!(string
         .link()
-        .starts_with("https://coasys.id/o#coasys:offer:1:"));
+        .starts_with("https://id.coasys.org/o#coasys:offer:1:"));
     assert_eq!(OfferString::parse(&string.encode()).unwrap(), string);
     assert_eq!(OfferString::parse_link(&string.link()).unwrap(), string);
     assert_eq!(OfferString::parse_link(&string.encode()).unwrap(), string);
@@ -404,9 +404,9 @@ fn the_offer_string_parser_refuses_other_prefixes_short_codes_and_extra_fields()
 #[test]
 fn an_offer_link_with_the_string_in_a_query_or_path_is_refused() {
     let string = offer_string().encode();
-    assert!(OfferString::parse_link(&format!("https://coasys.id/o?o={string}")).is_err());
-    assert!(OfferString::parse_link(&format!("https://coasys.id/o?x=1#{string}")).is_err());
-    assert!(OfferString::parse_link(&format!("https://coasys.id/{string}#{string}")).is_err());
+    assert!(OfferString::parse_link(&format!("https://id.coasys.org/o?o={string}")).is_err());
+    assert!(OfferString::parse_link(&format!("https://id.coasys.org/o?x=1#{string}")).is_err());
+    assert!(OfferString::parse_link(&format!("https://id.coasys.org/{string}#{string}")).is_err());
 }
 
 #[test]

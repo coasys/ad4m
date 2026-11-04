@@ -36,6 +36,18 @@ pub struct IdentityStatus {
     pub revoked: Option<u64>,
     pub head: Option<SignedHead>,
     pub fork: Option<ForkRecord>,
+    /// Set while the executor's configured store answers the log behind its cache.
+    #[serde(default)]
+    pub store_behind: Option<StoreBehind>,
+}
+
+/// The executor's configured store answering a log behind its cache, since `since` (unix
+/// seconds); `seq` is the store's head at its last answer, `None` when it answered no log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreBehind {
+    pub since: u64,
+    pub seq: Option<u64>,
 }
 
 /// A fork the executor's cache recorded.

@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 ad4m-hash-chain = { path = "../ad4m-hash-chain", features = ["sqlite"] }
-ad4m-identity-core = { path = "../ad4m-identity-core", features = ["build"] }
+ad4m-identity-core = { path = "../ad4m-identity-core", features = ["build", "stored-fold"] }
 # The wire types shared with the executor and the agent language (`ad4m_ldk::identity`).
 ad4m-ldk = { path = "../ad4m-ldk/rust" }
 axum = "0.8"

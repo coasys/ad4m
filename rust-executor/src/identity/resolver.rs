@@ -27,7 +27,7 @@ use ad4m_identity_core::{
 use serde_json::Value;
 
 use super::backend::{IdentityBackend, IdentityError};
-use super::cache::{fold_log, rival_holds, scid_from, CacheError, Ingested, KelCache, MAX_PAGES};
+use super::cache::{fold_log, holding_rival, scid_from, CacheError, Ingested, KelCache, MAX_PAGES};
 use super::src_fetch::{refuse_private_host, SrcFetch};
 use super::types::{
     convert, DidDocumentMetadata, DidResolutionMetadata, DidResolutionResult, ForkRecord,
@@ -1030,12 +1030,17 @@ impl Resolver {
                         Ok((merged, loaded))
                     }
                     Ok(ImportOutcome::Fork(fork)) => {
-                        match self.verified_conflict(scid, fork, &events).await {
+                        match self.verified_conflict(scid, &held, fork, &events).await {
                             Ok(fork) => loaded.conflict = Some(fork),
-                            Err(why) => loaded.skipped.push(SkippedSource {
-                                src: label,
-                                reason: why,
-                            }),
+                            // As a conflict found while fetching: the src is skipped for
+                            // `MISS_TTL`, so its rival is not folded again on every request.
+                            Err(why) => {
+                                self.note_miss(&label, scid);
+                                loaded.skipped.push(SkippedSource {
+                                    src: label,
+                                    reason: why,
+                                })
+                            }
                         }
                         Ok((held, loaded))
                     }
@@ -1069,28 +1074,24 @@ impl Resolver {
     }
 
     /// A hash-only conflict between the events a foreign `src` served (`served`) and the log the
-    /// cache holds: `coasys:fork` only when the rival event holds on the prefix below it
-    /// ([`rival_holds`], the core's own rules and proofs), since `import` checks no proof of an
-    /// event at a held seq. Else why it does not, for `coasys:skipped`: a host with no key
-    /// cannot make an answer report a fork.
+    /// cache holds: `coasys:fork` only when a copy of the rival event a master of `chain` signed
+    /// holds on the prefix below it ([`holding_rival`], the core's own rules and proofs), since
+    /// `import` checks no proof of an event at a held seq. Else why it does not, for
+    /// `coasys:skipped`: a host with no key cannot make an answer report a fork, nor make the
+    /// executor fold the prefix (an unsigned body is refused by its proof).
     async fn verified_conflict(
         &self,
         scid: &str,
+        chain: &KelChain,
         fork: ForkEvidence,
         served: &[Event],
     ) -> Result<ForkEvidence, String> {
-        let rival = served
-            .iter()
-            .find(|e| {
-                e.seq == fork.seq
-                    && ad4m_identity_core::event_hash(e).is_ok_and(|h| h == fork.theirs)
-            })
-            .ok_or_else(|| {
-                format!(
-                    "no event it served at seq {} hashes to {}",
-                    fork.seq, fork.theirs
-                )
-            })?;
+        let does_not_hold = |e: CacheError| {
+            format!(
+                "its event at seq {} conflicts with the log and does not hold: {e}",
+                fork.seq
+            )
+        };
         // The prefix: the cache's events, then what the src served past them (a later page
         // can conflict with the src's own earlier one).
         let mut prefix = self
@@ -1105,12 +1106,7 @@ impl Resolver {
                 .filter(|e| top.is_none_or(|top| e.seq > top))
                 .cloned(),
         );
-        rival_holds(scid, &prefix, rival).map_err(|e| {
-            format!(
-                "its event at seq {} conflicts with the log and does not hold: {e}",
-                fork.seq
-            )
-        })?;
+        holding_rival(scid, chain, &prefix, &fork, served).map_err(does_not_hold)?;
         Ok(fork)
     }
 
@@ -1162,7 +1158,10 @@ impl Resolver {
                         let mut served_so_far = served.clone();
                         served_so_far.extend(events.iter().cloned());
                         return Err(
-                            match self.verified_conflict(scid, fork, &served_so_far).await {
+                            match self
+                                .verified_conflict(scid, chain, fork, &served_so_far)
+                                .await
+                            {
                                 Ok(fork) => ForeignMiss::Conflict(fork),
                                 Err(why) => ForeignMiss::Failed(why),
                             },
@@ -1183,10 +1182,19 @@ impl Resolver {
 
     /// Reads `scid`'s log from the configured store page by page from the cached head and
     /// imports the events with no head: for a store whose head no key of `identity.storeKeys`
-    /// signed (the events count, the head does not).
+    /// signed (the events count, the head does not). A log past `MAX_PAGES` pages is
+    /// unavailable, as in [`KelCache::refresh`].
     async fn fetch_store_unsigned(&self, scid: &str) -> Result<(), CacheError> {
+        self.fetch_store_unsigned_within(scid, MAX_PAGES).await
+    }
+
+    async fn fetch_store_unsigned_within(
+        &self,
+        scid: &str,
+        pages: usize,
+    ) -> Result<(), CacheError> {
         let did = did_of(scid);
-        for _ in 0..MAX_PAGES {
+        for _ in 0..pages {
             let cached = self.cache.chain(scid).await?;
             let from = cached.as_ref().map_or(0, |c| c.head().seq);
             let Some(page) = self.backend.log(&did, from).await? else {
@@ -1213,7 +1221,11 @@ impl Resolver {
                 }
             }
         }
-        Ok(())
+        // Events left past the last page: the cache holds a prefix, which must not answer as
+        // the store's log.
+        Err(CacheError::Unavailable(format!(
+            "the store's log of {did} runs past {pages} pages"
+        )))
     }
 
     fn recent_miss(&self, host: &str, scid: &str) -> bool {
@@ -2601,6 +2613,37 @@ mod tests {
         assert!(resolver.cache.forks(&held.scid()).await.unwrap().is_empty());
     }
 
+    /// A foreign `src` that serves a copy of its rival with the proofs stripped before the signed
+    /// copy: every copy is tried, so the signed one reports the conflict as `coasys:fork`.
+    #[tokio::test]
+    async fn a_src_rival_behind_a_stripped_copy_is_still_reported() {
+        let mut held = TestLog::new(85);
+        let at_incept = held.chain();
+        held.revoke_d1();
+        let rival = add_device(&at_incept, &held.master, 86);
+        let mut stripped = rival.clone();
+        stripped.proof.clear();
+        let mut page =
+            serde_json::to_value(FakeStore::new(held.events.clone()).page(0).unwrap()).unwrap();
+        page["events"] = serde_json::to_value([&held.events[0], &stripped, &rival]).unwrap();
+        let body = serde_json::to_vec(&page).unwrap();
+        let host = TestHost::start(move |_| response("200 OK", &[], &body)).await;
+        let resolver = local_resolver(trusting(), Arc::new(FakeStore::new(held.events.clone())));
+        let did = did_of(&held.scid());
+        resolver.resolve(&did, false).await;
+
+        let src = format!("log.example:{}", host.port);
+        let result = resolver.resolve(&format!("{did}?src={src}"), true).await;
+        let fork = result
+            .did_resolution_metadata
+            .fork
+            .clone()
+            .unwrap_or_else(|| panic!("the conflict: {result:?}"));
+        assert_eq!(fork.seq, 1);
+        assert_eq!(fork.theirs, ad4m_identity_core::event_hash(&rival).unwrap());
+        assert!(resolver.cache.forks(&held.scid()).await.unwrap().is_empty());
+    }
+
     /// A foreign `src` whose event names a member twice is skipped, though a `Value` of it keeps
     /// only the last of the two (here the event's own `seq`) and would fold.
     #[tokio::test]
@@ -2805,6 +2848,50 @@ mod tests {
         for bad in [garbage, version, not_an_object] {
             assert!(!verifies(&cache, &bad).await, "{}", bad["proof"]["record"]);
         }
+    }
+
+    /// A store log with no trusted head that runs past the page bound is unavailable, as on the
+    /// signed path: the prefix the cache took must not answer as the store's log.
+    #[tokio::test]
+    async fn an_unsigned_store_log_past_the_page_bound_is_unavailable() {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{DeviceKey, KelPolicy, KeyLife};
+        let log = TestLog::new(65);
+        let mut events = log.events.clone();
+        let mut chain = log.chain();
+        // One full page, and two events past it.
+        for i in 0..PAGE_EVENTS as u16 + 1 {
+            let mut seed = [9u8; 32];
+            seed[..2].copy_from_slice(&i.to_be_bytes());
+            let device = DeviceKey {
+                id: chain.state().next_device_id(),
+                sign: ed25519_dalek::SigningKey::from_bytes(&seed).key(),
+                enc: ad4m_identity_core::encode_x25519_multikey(&seed),
+                life: KeyLife::Standing,
+            };
+            let mut add = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+            cosign(&mut add, "m0", &log.master).unwrap();
+            chain.append(&KelPolicy, &add).unwrap();
+            events.push(add);
+        }
+        let store = Arc::new(FakeStore::new(events));
+        *store.page_limit.lock().unwrap() = Some(PAGE_EVENTS);
+        // No store key: the head counts for nothing, the events go through `ingest`.
+        let (resolver, _) = resolver(in_memory(vec![]), store, Some("https://store.example"));
+        let scid = log.scid();
+
+        let past = resolver.fetch_store_unsigned_within(&scid, 1).await;
+        assert!(
+            matches!(&past, Err(CacheError::Unavailable(why)) if why.contains("runs past 1 pages")),
+            "{past:?}"
+        );
+        // The next page holds the rest.
+        resolver
+            .fetch_store_unsigned_within(&scid, 1)
+            .await
+            .unwrap();
+        let held = resolver.cache.chain(&scid).await.unwrap().unwrap();
+        assert_eq!(held.head().seq, PAGE_EVENTS as u64 + 1);
     }
 }
 

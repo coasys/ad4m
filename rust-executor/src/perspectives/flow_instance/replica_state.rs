@@ -12,7 +12,7 @@
 //!   per replica-agent.
 //!
 //! Both live in two executor SQLite tables (`flow_replica_state`,
-//! `flow_fired_mark` in [`Ad4mDb`]). They are not links, so they never sync,
+//! `flow_fired_mark` in [`Ad4mDb`](crate::db::Ad4mDb)). They are not links, so they never sync,
 //! no model query sees them, and no other agent on the same executor can read
 //! them through the graph. Rows are keyed by `(perspective, agent_did, …)`
 //! because the pass runs once per owner agent on a multi-user executor, and are
@@ -26,12 +26,12 @@
 //! Clients read this through `perspective.flowStates` / `perspective.flowFired`
 //! and the `flow-state-changed` event, all scoped to the caller's own agent.
 
-use crate::db::{Ad4mDb, FlowReplicaStateRow};
+use crate::db::FlowReplicaStateRow;
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 /// One row of this agent's bookkeeping, as `perspective.flowStates` returns
 /// it. An instance with no entry is one this agent has neither derived nor
@@ -150,7 +150,7 @@ pub struct PassRecord {
     pub newly_marked: Vec<String>,
 }
 
-/// Thin service over [`Ad4mDb`]'s two flow tables. Stateless: every call
+/// Thin service over [`Ad4mDb`](crate::db::Ad4mDb)'s two flow tables. Stateless: every call
 /// names the perspective and the agent.
 pub struct FlowReplicaState;
 
@@ -193,11 +193,10 @@ impl FlowReplicaState {
         agent_did: &str,
         instance: &str,
     ) -> anyhow::Result<PriorRow> {
-        Ad4mDb::with_global_instance(|db| {
-            db.get_flow_replica_state(perspective, agent_did, instance)
-        })
-        .map(PriorRow::from)
-        .map_err(|e| anyhow::anyhow!("reading the flow state of {instance}: {e}"))
+        crate::db_backend::db_backend()
+            .get_flow_replica_state(perspective, agent_did, instance)
+            .map(PriorRow::from)
+            .map_err(|e| anyhow::anyhow!("reading the flow state of {instance}: {e}"))
     }
 
     /// This agent's derived state for one instance, if it has one.
@@ -229,13 +228,9 @@ impl FlowReplicaState {
         instance: &str,
         torn_down: &AtomicBool,
     ) -> anyhow::Result<bool> {
-        Ad4mDb::with_global_instance(|db| {
-            if torn_down.load(Ordering::Acquire) {
-                return Ok(false);
-            }
-            db.seed_flow_replica_state(perspective, agent_did, instance)
-        })
-        .map_err(|e| anyhow::anyhow!("seeding flow state of {instance}: {e}"))
+        crate::db_backend::db_backend()
+            .seed_flow_replica_state_unless_torn_down(perspective, agent_did, instance, torn_down)
+            .map_err(|e| anyhow::anyhow!("seeding flow state of {instance}: {e}"))
     }
 
     /// Write `state` for the instance. Returns whether it changed; `false`
@@ -282,20 +277,23 @@ impl FlowReplicaState {
             ));
         }
         let at = chrono::Utc::now().to_rfc3339();
-        Ad4mDb::with_global_instance(|db| {
-            if torn_down.load(Ordering::Acquire) {
-                return Ok(None);
-            }
-            db.record_flow_replica_pass(perspective, agent_did, instance, state, fired, &at)
-                .map(Some)
-        })
-        .map(|recorded| {
-            recorded.map(|(before, newly_marked)| PassRecord {
-                prior: PriorRow::from(before),
-                newly_marked,
+        crate::db_backend::db_backend()
+            .record_flow_replica_pass_unless_torn_down(
+                perspective,
+                agent_did,
+                instance,
+                state,
+                fired,
+                &at,
+                torn_down,
+            )
+            .map(|recorded| {
+                recorded.map(|(before, newly_marked)| PassRecord {
+                    prior: PriorRow::from(before),
+                    newly_marked,
+                })
             })
-        })
-        .map_err(|e| anyhow::anyhow!("recording the flow pass over {instance}: {e}"))
+            .map_err(|e| anyhow::anyhow!("recording the flow pass over {instance}: {e}"))
     }
 
     pub fn is_fired(perspective: &str, agent_did: &str, proposal: &str) -> anyhow::Result<bool> {
@@ -308,10 +306,9 @@ impl FlowReplicaState {
         agent_did: &str,
         proposals: &[String],
     ) -> anyhow::Result<HashSet<String>> {
-        Ad4mDb::with_global_instance(|db| {
-            db.get_flow_fired_among(perspective, agent_did, proposals)
-        })
-        .map_err(|e| anyhow::anyhow!("reading fired marks: {e}"))
+        crate::db_backend::db_backend()
+            .get_flow_fired_among(perspective, agent_did, proposals)
+            .map_err(|e| anyhow::anyhow!("reading fired marks: {e}"))
     }
 
     /// Mark `proposals` (all of `instance`) fired without touching the state.
@@ -334,10 +331,9 @@ impl FlowReplicaState {
         agent_did: &str,
         instance: &str,
     ) -> anyhow::Result<Vec<String>> {
-        Ad4mDb::with_global_instance(|db| {
-            db.get_flow_fired_for_instance(perspective, agent_did, instance)
-        })
-        .map_err(|e| anyhow::anyhow!("reading fired marks of {instance}: {e}"))
+        crate::db_backend::db_backend()
+            .get_flow_fired_for_instance(perspective, agent_did, instance)
+            .map_err(|e| anyhow::anyhow!("reading fired marks of {instance}: {e}"))
     }
 
     /// Drop every row of the perspective, for every agent. Production removal
@@ -345,7 +341,8 @@ impl FlowReplicaState {
     /// same call that drops the perspective's links.
     #[cfg(test)]
     pub fn remove_perspective(perspective: &str) -> anyhow::Result<()> {
-        Ad4mDb::with_global_instance(|db| db.remove_flow_replica_rows(perspective))
+        crate::db_backend::db_backend()
+            .remove_flow_replica_rows(perspective)
             .map_err(|e| anyhow::anyhow!("removing flow bookkeeping of {perspective}: {e}"))
     }
 
@@ -367,10 +364,9 @@ impl FlowReplicaState {
         agent_did: &str,
         instances: Option<&[String]>,
     ) -> anyhow::Result<Vec<FlowReplicaStateRow>> {
-        Ad4mDb::with_global_instance(|db| {
-            db.get_flow_replica_states(perspective, agent_did, instances)
-        })
-        .map_err(|e| anyhow::anyhow!("reading flow states: {e}"))
+        crate::db_backend::db_backend()
+            .get_flow_replica_states(perspective, agent_did, instances)
+            .map_err(|e| anyhow::anyhow!("reading flow states: {e}"))
     }
 }
 
@@ -626,7 +622,9 @@ mod tests {
         let p = fresh();
         FlowReplicaState::set_current_state(&p, ALICE, "i", "done", &LIVE).unwrap();
         FlowReplicaState::mark_fired(&p, ALICE, "i", &["p1".into()]).unwrap();
-        Ad4mDb::with_global_instance(|db| db.remove_perspective(&p)).unwrap();
+        crate::db_backend::db_backend()
+            .remove_perspective(&p)
+            .unwrap();
         assert!(!FlowReplicaState::has_derived(&p, ALICE, "i").unwrap());
         assert!(!FlowReplicaState::is_fired(&p, ALICE, "p1").unwrap());
     }

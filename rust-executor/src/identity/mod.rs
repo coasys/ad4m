@@ -149,7 +149,8 @@ pub fn service() -> Result<Arc<IdentityService>, WsRpcError> {
 /// logs for one identity.
 fn publish_fork(did: &str, fork: &ad4m_identity_core::ForkEvidence) {
     let scid = cache::scid_from(did).to_string();
-    let agents = crate::db::Ad4mDb::with_global_instance(|db| db.agents_of_identity(&scid))
+    let agents = crate::db_backend::db_backend()
+        .agents_of_identity(&scid)
         .unwrap_or_else(|e| {
             log::error!("identity-fork: could not read the identity's agents: {e}");
             vec![]
