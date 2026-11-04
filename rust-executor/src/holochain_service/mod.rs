@@ -292,22 +292,18 @@ impl HolochainService {
         // field and keep bootstrap_url + relay_url + base64_auth_material.
         // UNYT_SIGNAL_URL is intentionally ignored (legacy WS signaller,
         // not part of the 0.7 topology).
-        let dna_hash_opt = crate::db::Ad4mDb::global_instance()
-            .lock()
+        let dna_hash_opt = crate::db_backend::db_backend()
+            .get_setting("unyt_dna_hash")
             .ok()
-            .and_then(|guard| {
-                guard
-                    .as_ref()
-                    .and_then(|db| db.get_setting("unyt_dna_hash").ok().flatten())
-            });
+            .flatten();
         if let Some(dna_hash) = dna_hash_opt {
             // Grab the auth material stashed by setup_bootstrap_auth().
             // Without this the authenticated Unyt bootstrap will refuse the
             // connection. CodeRabbit review PR #907 finding #5.
-            let auth_material =
-                crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
-                    .ok()
-                    .flatten();
+            let auth_material = crate::db_backend::db_backend()
+                .get_setting("unyt_auth_material")
+                .ok()
+                .flatten();
             if auth_material.is_none() {
                 info!(
                     "Applying unyt space override for DNA {} (no auth material \
