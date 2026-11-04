@@ -12,10 +12,12 @@ The **server link language** (`@coasys/server-link-language`) syncs a neighbourh
    A link server admits only DIDs on the link-server room's ACL, unless it runs with `--auto-admit`. The executor and the SDK have no call to add a DID to an ACL: the room's admin uses the link-server operator's page or the HTTP ACL route ([Link server](link-server.md)). The integration tests run the server with auto-admit.
 2. E2E setup (`setupKeyRing`): the link-server room's admin creates the first AES-256-GCM room key and seals it to the DID of every ACL member (`sealToDid`, a sealed box). Members fetch their sealed boxes with `/keys` and open them with the host call `agentOpenSealed`; the opened versions form the key ring. A commit waits until the key ring is `ready`. The admin's language rotates keys by itself (`performRotation`) while it holds no room key it can open (`adminRotates`, `adminRotationStep`): at `init()` and before a commit (`rotateKeys` in `src/api.ts` is the HTTP call). Any member holding a key version seals it to ACL members lacking it (`performKeyGrants`). A member re-reads `/keys` on a commit while its key ring is `pending` or `error`, on a `keys-granted` push, and on every catch-up while it has held links. A failed read keeps a key ring already loaded (`afterFailedKeyRead`).
 3. `perspectiveCommit`: encrypt each link at the wire boundary (`toWireLink`) and `POST /commit` once (`commit` in `src/sync.ts`). The local store changes only after the server accepts the diff. Nothing is emitted back. A failed commit throws, and the executor keeps the diff in its queue.
-4. `perspectiveSyncSync`: `GET /sync?since=<seq>`; the WebSocket also pushes `diff` messages. Both, and the startup `/render` (`bootstrap`), go through `openOrHold` and then `applyAndEmit`, which emits only what changes the language's store. A link no key opens yet is a held link; `retryHeld` opens it after every key ring load and every catch-up. A link that its named key does not open is skipped, and costs only that link.
-5. Telepresence: online roster, signals and broadcasts over the WebSocket.
+4. Catch-up (`catchUp`, run by `perspectiveSyncSync` and on every WebSocket open) reads `GET /sync?since=<cursor>` page by page. The WebSocket also pushes `diff` messages; a push moves the cursor only when it is the next diff, and a push at or below the cursor is ignored.
+5. Startup (`bootstrap`): a member whose cursor is above 0 only catches up. A fresh member (cursor 0) renders: it stores `render/progress` before it authenticates (`needRender`), reads the paged `/render` snapshot, applies and emits each page and stores progress after it, then catches up from the snapshot's `upto`. While a render is stored, pushes are ignored and catch-up does not tail: it resumes the render (`retryRenderIfDue`), 10 s after a failed page, the wait doubling per further failure up to 5 min.
+6. Catch-up pages, pushes and render pages all go through `openOrHold` and then `applyAndEmit`, which emits only what changes the language's store. A link no key opens yet is a held link; `retryHeld` opens it after every key ring load and every catch-up. A link that its named key does not open is skipped, and costs only that link.
+7. Telepresence: online roster, signals and broadcasts over the WebSocket.
 
-The local store in the language is always plaintext. Every link on the wire is ciphertext; an inbound link that is not encrypted is skipped.
+The local store in the language is always plaintext. Every link on the wire is ciphertext, with ciphertext and nonce in base64; an inbound link that is not encrypted is skipped.
 
 </details>
 
@@ -23,10 +25,10 @@ The local store in the language is always plaintext. Every link on the wire is c
 
 - [bootstrap-languages/server-link-language/AGENTS.md](../../../bootstrap-languages/server-link-language/AGENTS.md), [README.md](../../../bootstrap-languages/server-link-language/README.md): design notes.
 - [bootstrap-languages/server-link-language/index.ts](../../../bootstrap-languages/server-link-language/index.ts): `defineLanguage`, template variables, module state, `setupKeyRing`.
-- [src/sync.ts](../../../bootstrap-languages/server-link-language/src/sync.ts): commit, catch-up, `bootstrap`, `openOrHold`, `applyAndEmit`, `retryHeld`.
+- [src/sync.ts](../../../bootstrap-languages/server-link-language/src/sync.ts): commit, `catchUp`, `bootstrap`, `needRender`, `retryRenderIfDue`, `applyInboundWireDiff`, `openOrHold`, `applyAndEmit`, `retryHeld`.
 - [src/encryption.ts](../../../bootstrap-languages/server-link-language/src/encryption.ts): `sealToDid`, `buildKeyRing`, link encryption.
 - [src/room-keys.ts](../../../bootstrap-languages/server-link-language/src/room-keys.ts): `adminRotates`, `adminRotationStep`, `afterFailedKeyRead`, rotation and grants.
-- [src/store.ts](../../../bootstrap-languages/server-link-language/src/store.ts): the local store, the sync cursor, held links (`held/<link_hash>`).
+- [src/store.ts](../../../bootstrap-languages/server-link-language/src/store.ts): the local store, the sync cursor, held links (`held/<link_hash>`), render progress (`render/progress`).
 - [rust-executor/src/agent/sealed_box.rs](../../../rust-executor/src/agent/sealed_box.rs): the executor side of `agentOpenSealed`.
 - [src/api.ts](../../../bootstrap-languages/server-link-language/src/api.ts): `rotateKeys`.
 - [tests/js/utils/linkServer.ts](../../../tests/js/utils/linkServer.ts): the link server the integration tests start, with auto-admit.

@@ -12,7 +12,7 @@ The **link server** is a self-hosted Node.js process, separate from the executor
 |---|---|
 | `POST /rooms/:id/auth` | step 1: challenge; step 2: verify the Ed25519 signature over `sha256(challenge)`, issue a JWT |
 | `POST /rooms/:id/commit` | apply additions and removals in one transaction; push to WebSocket peers |
-| `GET /rooms/:id/sync`, `/render`, `/revision` | catch-up since a sequence number; full state; current revision |
+| `GET /rooms/:id/sync`, `/render`, `/revision` | one page of diffs since a sequence number, each with its sequence; one page of the active links, pinned at sequence `upto` by the first page; current revision |
 | `GET /rooms/:id/peers` | online agents |
 | `GET` / `POST /rooms/:id/acl` | room members and admin |
 | `/rooms/:id/keys`, `/keys/rotate`, `/keys/missing`, `/keys/grant`, `DELETE /keys/:version` | room keys as sealed boxes, one per member and version: the admin rotates; any member grants only versions it holds, the first box stored wins, and the grantee's sockets get `keys-granted`; a member drops its own box |
@@ -21,7 +21,8 @@ The **link server** is a self-hosted Node.js process, separate from the executor
 1. The first DID that authenticates to an unknown room id creates the room and becomes its admin.
 2. Other DIDs need an ACL entry (or `--auto-admit`). Removing a DID from the ACL deletes its sessions and closes its sockets.
 3. A removal resends the original `LinkExpression`, so its hash equals the addition's. The commit route refuses a link whose data is not exactly `{ciphertext, nonce}` or that has no `link_hash`; that client-supplied `link_hash` is the link's hash.
-4. `--operator-port` with `--operator-token-file` starts a second, loopback-only app for the **link-server operator** (list rooms, change ACLs, audit log, the admission mode, live server logs). `GET /api/logs` streams the last 1000 log lines of both apps (`LogTail`), then each new one, as Server-Sent Events. The link-server operator is the person who runs the server; in the rest of ADAM, "operator" is the executor's administrator.
+4. `/render` and `/sync` always answer one page (`limit` 1 to 5000, default 500); `next` names the following page, `null` on the last. JSON answers over 1 kB are compressed (br or gzip) when the request sends `Accept-Encoding`.
+5. `--operator-port` with `--operator-token-file` starts a second, loopback-only app for the **link-server operator** (list rooms, change ACLs, audit log, the admission mode, live server logs). `GET /api/logs` streams the last 1000 log lines of both apps (`LogTail`), then each new one, as Server-Sent Events. The link-server operator is the person who runs the server; in the rest of ADAM, "operator" is the executor's administrator.
 
 </details>
 
@@ -29,8 +30,8 @@ The **link server** is a self-hosted Node.js process, separate from the executor
 
 - [link-server/AGENTS.md](../../../link-server/AGENTS.md), [link-server/README.md](../../../link-server/README.md): design and invariants.
 - [link-server/src/server.ts](../../../link-server/src/server.ts): `buildServer`, wiring.
-- [link-server/src/routes.ts](../../../link-server/src/routes.ts): HTTP routes, `removeMember`.
-- [link-server/src/db.ts](../../../link-server/src/db.ts): schema, `applyDiffAndAppend`.
+- [link-server/src/routes.ts](../../../link-server/src/routes.ts): HTTP routes, `removeMember`, the render cursor.
+- [link-server/src/db.ts](../../../link-server/src/db.ts): schema, `applyDiffAndAppend`, `getActiveLinkPage`, `getDiffPageSince`.
 - [link-server/src/auth.ts](../../../link-server/src/auth.ts): `did:key` decoding, challenges, `hashMessageForVerify`, JWT sessions.
 - [link-server/src/encryption.ts](../../../link-server/src/encryption.ts), [ws.ts](../../../link-server/src/ws.ts), [telepresence.ts](../../../link-server/src/telepresence.ts), [operator.ts](../../../link-server/src/operator.ts), [operator-page.ts](../../../link-server/src/operator-page.ts).
 - [link-server/src/log-tail.ts](../../../link-server/src/log-tail.ts): `LogTail`, the in-memory buffer of recent log lines; `teeDestination`.
