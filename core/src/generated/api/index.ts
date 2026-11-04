@@ -114,6 +114,7 @@ export type { SignedOffer } from "./SignedOffer";
 export type { SignedRequest } from "./SignedRequest";
 export type { SkippedSource } from "./SkippedSource";
 export type { StoreBehind } from "./StoreBehind";
+export type { StoreInfo } from "./StoreInfo";
 export { READ_METHODS, LONG_METHODS } from "./RpcMethods";
 export type { RpcMethods, RpcMethod } from "./RpcMethods";
 export { SCOPED_EVENTS } from "./Events";

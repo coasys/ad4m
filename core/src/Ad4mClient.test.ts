@@ -39,7 +39,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm', identity: 'did:scid:coasys:1:QmTest' },
     'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true, identity: 'did:scid:coasys:1:QmTest' },
     // ── Identity ──
-    'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null },
+    'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true } },
     'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, echo: p }),
     'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, fork: null }),
     'identity.devices': [],
@@ -1286,6 +1286,7 @@ describe('IdentityClient', () => {
         expect(lastRpcCall!.type).toBe('identity.status');
         expect(status.did).toBe('did:scid:coasys:1:QmTest');
         expect(status.keyId).toBe('d1');
+        expect(status.store).toEqual({ url: 'https://store.ad4m.dev', trusted: true });
     });
 
     test('claimOffer() sends the offer and the hint', async () => {

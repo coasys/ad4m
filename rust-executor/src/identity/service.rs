@@ -16,7 +16,7 @@ use super::device::{device_key, enc_key_of, WalletSigner};
 use super::operator::{main_incept_check, FirstLinkRefusal};
 use super::types::{
     convert, BotView, DeviceView, ForkRecord, IdentityLog, IdentityStatus, OfferListing,
-    OfferOpened, PublishParams, SignedHead, SignedOffer, SignedRequest,
+    OfferOpened, PublishParams, SignedHead, SignedOffer, SignedRequest, StoreInfo,
 };
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
@@ -182,6 +182,14 @@ impl IdentityService {
         }
     }
 
+    /// The store this executor uses and whether it trusts a key for it; `None` without one.
+    pub fn store_info(&self) -> Option<StoreInfo> {
+        self.store_url.as_ref().map(|url| StoreInfo {
+            url: url.clone(),
+            trusted: self.cache.trusts_a_store(),
+        })
+    }
+
     /// `identity.status` for `agent`.
     pub async fn status(&self, agent: &AgentContext) -> Result<IdentityStatus, WsRpcError> {
         let (agent_did, key) = device_key(agent).map_err(WsRpcError::internal)?;
@@ -195,6 +203,7 @@ impl IdentityService {
             head: None,
             fork: None,
             store_behind: None,
+            store: self.store_info(),
         };
         let Some(scid) = db(|db| db.agent_identity(&agent_did))? else {
             return Ok(status);
@@ -377,17 +386,29 @@ impl IdentityService {
     }
 
     /// Refuses the calls that make the store commit something irreversible (`publish`, a claim)
-    /// while `identity.storeKeys` is empty: the cache then accepts no head, so the executor
-    /// could never bind the agent to the log, but the store would already hold the events and
-    /// the agent's key would be taken for every identity.
+    /// while the executor trusts no store key (its network has no store, or a store URL is
+    /// configured without its keys): the cache then accepts no head, so the executor could
+    /// never bind the agent to the log, but the store would already hold the events and the
+    /// agent's key would be taken for every identity.
     pub(super) fn refuse_without_store_keys(&self) -> Result<(), WsRpcError> {
         if self.cache.trusts_a_store() {
             return Ok(());
         }
+        let cause = match &self.store_url {
+            None => "this executor's network has no identity store (its bootstrap seed names \
+                     none and identity.storeUrl is unset)"
+                .to_string(),
+            Some(url) => format!(
+                "the identity store at {url} is configured without its keys (identity.storeKeys \
+                 is unset or empty)"
+            ),
+        };
         Err(error(
             503,
-            "no-store-keys: identity.storeKeys is not set, so this executor accepts no head from \
-             the identity store and cannot bind an agent to a log; set identity.storeKeys first",
+            format!(
+                "no-store-keys: {cause}, so this executor accepts no head from a store and \
+                 cannot bind an agent to a log"
+            ),
         ))
     }
 
@@ -739,6 +760,115 @@ mod tests {
 
         *store.events.lock().unwrap() = log.events.clone();
         assert_eq!(service.status(&agent).await.unwrap().store_behind, None);
+    }
+
+    /// `identity.status.store` names the store the executor uses and whether it trusts a key
+    /// for it: the seed's store with its keys (trusted), a store URL without keys (untrusted),
+    /// and `null` without a store. An agent with no identity gets it too.
+    #[tokio::test]
+    async fn status_names_the_store_and_whether_a_key_for_it_is_trusted() {
+        use crate::identity::cache::tests::{in_memory, trusting, FakeStore};
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let user = crate::test_utils::create_test_user(&format!(
+            "store-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let agent = AgentContext::managed(user);
+        let service = |cache: KelCache, store_url: Option<&str>| {
+            let backend: Arc<dyn IdentityBackend> = Arc::new(FakeStore::new(vec![]));
+            let cache = Arc::new(cache);
+            IdentityService {
+                resolver: Arc::new(crate::identity::resolver::Resolver::new(
+                    cache.clone(),
+                    backend.clone(),
+                    store_url,
+                    false,
+                )),
+                backend,
+                cache,
+                store_url: store_url.map(String::from),
+            }
+        };
+
+        let seeded = service(trusting(), Some("https://store.ad4m.dev"));
+        let status = seeded.status(&agent).await.unwrap();
+        assert_eq!(
+            status.store,
+            Some(StoreInfo {
+                url: "https://store.ad4m.dev".into(),
+                trusted: true,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["store"],
+            serde_json::json!({ "url": "https://store.ad4m.dev", "trusted": true })
+        );
+
+        let keyless = service(in_memory(vec![]), Some("http://127.0.0.1:9"));
+        assert_eq!(
+            keyless.status(&agent).await.unwrap().store,
+            Some(StoreInfo {
+                url: "http://127.0.0.1:9".into(),
+                trusted: false,
+            })
+        );
+
+        let none = service(in_memory(vec![]), None);
+        let status = none.status(&agent).await.unwrap();
+        assert_eq!(status.store, None);
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["store"],
+            serde_json::Value::Null
+        );
+    }
+
+    /// `no-store-keys` names its cause: a network without a store, or a store URL without its
+    /// keys.
+    #[test]
+    fn the_no_store_keys_refusal_names_its_cause() {
+        use crate::identity::cache::tests::{in_memory, FakeStore};
+        let refusal = |store_url: Option<&str>| {
+            let backend: Arc<dyn IdentityBackend> = Arc::new(FakeStore::new(vec![]));
+            let cache = Arc::new(in_memory(vec![]));
+            IdentityService {
+                resolver: Arc::new(crate::identity::resolver::Resolver::new(
+                    cache.clone(),
+                    backend.clone(),
+                    store_url,
+                    false,
+                )),
+                backend,
+                cache,
+                store_url: store_url.map(String::from),
+            }
+            .refuse_without_store_keys()
+            .unwrap_err()
+        };
+        let none = refusal(None);
+        assert_eq!(none.code, 503);
+        assert!(
+            none.message.starts_with("no-store-keys: "),
+            "{}",
+            none.message
+        );
+        assert!(
+            none.message.contains("network has no identity store"),
+            "{}",
+            none.message
+        );
+        let keyless = refusal(Some("http://127.0.0.1:9"));
+        assert!(
+            keyless.message.starts_with("no-store-keys: "),
+            "{}",
+            keyless.message
+        );
+        assert!(
+            keyless.message.contains("http://127.0.0.1:9")
+                && keyless.message.contains("without its keys"),
+            "{}",
+            keyless.message
+        );
     }
 
     /// The first-link rule runs inside `claim_for_main`: while the main key is in no log, an

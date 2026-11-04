@@ -714,7 +714,7 @@ pub fn is_public(ip: IpAddr) -> bool {
 enum Source {
     /// A `src` of the DID URL, checked.
     Foreign(HttpsBase),
-    /// The configured store (`identity.storeUrl`, or the agent language's default), through
+    /// The executor's store (`identity.storeUrl`, else the network seed's), through
     /// `KelCache::refresh` so that its signed head counts.
     Store,
     /// A source that was not used, with why.
